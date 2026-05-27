@@ -18,9 +18,13 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 reqwest = { workspace = true }
+semver = { workspace = true, features = ["serde"] }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 phoxal-utils-scenario-spec = { workspace = true }
 phoxal-utils-helpers = { workspace = true }
+phoxal-utils-robot = { workspace = true }
 phoxal-engine = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 phoxal-cli-core = { workspace = true }
@@ -31,4 +35,3 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 phoxal-utils-component = { workspace = true }
-phoxal-utils-robot = { workspace = true }

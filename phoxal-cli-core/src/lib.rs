@@ -3,6 +3,7 @@
 pub mod command;
 pub mod context;
 pub mod project;
+pub mod shell;
 pub mod ui;
 pub mod unit;
 pub mod utils;

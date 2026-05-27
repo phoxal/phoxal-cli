@@ -1,5 +1,3 @@
-mod commands;
-
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
@@ -8,7 +6,7 @@ use dotenvy::Error as DotenvError;
 use phoxal_utils_helpers::tracing_ansi_enabled;
 use tracing_subscriber::EnvFilter;
 
-use crate::commands::Cli;
+use phoxal_cli::commands::Cli;
 use phoxal_cli_core::AppContext;
 use phoxal_cli_core::Ui;
 
@@ -48,5 +46,5 @@ async fn run() -> Result<()> {
     })?;
     let app = AppContext::new(workspace_root)?;
 
-    crate::commands::dispatch(cli, &app).await
+    phoxal_cli::commands::dispatch(cli, &app).await
 }
