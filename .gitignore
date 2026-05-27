@@ -1,0 +1,8 @@
+target/
+.idea
+.env
+*.lock~
+.rerun/
+.claude/
+.aider*
+
