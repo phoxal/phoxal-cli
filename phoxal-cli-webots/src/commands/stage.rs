@@ -6,7 +6,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use phoxal_engine::RobotIdentity;
 use phoxal_engine::staged::Robot;
-use phoxal_utils_conventions::{COMPONENTS_DIR, DEFAULT_ROBOT_NAMESPACE, MESHES_DIR};
+use phoxal_engine::{COMPONENTS_DIR, DEFAULT_ROBOT_NAMESPACE, MESHES_DIR};
 use phoxal_utils_helpers::parse_trimmed_non_empty;
 use phoxal_utils_simulation::Simulation;
 use phoxal_utils_structure::Structure;

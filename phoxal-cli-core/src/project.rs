@@ -2,9 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use phoxal_utils_conventions::{
-    COMPONENT_FILE, DEFAULT_ROBOT_NAMESPACE, MESHES_DIR, STRUCTURE_FILE,
-};
+use phoxal_engine::{COMPONENT_FILE, DEFAULT_ROBOT_NAMESPACE, MESHES_DIR, STRUCTURE_FILE};
 
 const SIMULATION_FILE: &str = "simulation.yaml";
 

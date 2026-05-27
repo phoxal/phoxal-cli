@@ -6,18 +6,17 @@ use serde_json::Value;
 
 const ALLOWED_BASELINE: &[&str] = &[
     "phoxal-bus",
+    "phoxal-cli-core",
+    "phoxal-cli-webots",
     "phoxal-component-api",
+    "phoxal-engine",
     "phoxal-utils-component",
-    "phoxal-utils-conventions",
     "phoxal-utils-helpers",
     "phoxal-utils-robot",
-    "phoxal-engine",
     "phoxal-utils-scenario-spec",
     "phoxal-utils-simulation",
     "phoxal-utils-spatial",
     "phoxal-utils-structure",
-    "phoxal-cli-core",
-    "phoxal-cli-webots",
 ];
 
 #[test]

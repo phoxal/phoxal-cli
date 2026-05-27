@@ -10,8 +10,8 @@ use phoxal_cli_core::unit::Unit;
 use phoxal_cli_core::unit::compose::{ComposeMode, GenerateCompose};
 use phoxal_cli_core::unit::container::{plan_deploy_topology, plan_local_topology};
 use phoxal_cli_core::unit::robot::ValidatedRobot;
+use phoxal_engine::DEFAULT_ROBOT_NAMESPACE;
 use phoxal_engine::RobotIdentity;
-use phoxal_utils_conventions::DEFAULT_ROBOT_NAMESPACE;
 
 pub(crate) mod bundle;
 pub(crate) mod compose;

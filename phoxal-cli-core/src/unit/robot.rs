@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use phoxal_engine::staged::Robot;
-use phoxal_utils_conventions::{COMPONENT_FILE, COMPONENTS_DIR, MODEL_FILE};
+use phoxal_engine::{COMPONENT_FILE, COMPONENTS_DIR, MODEL_FILE};
 use phoxal_utils_robot::Model;
 use phoxal_utils_robot::v1::{self, SourceBundle, resolve_source_bundle};
 use phoxal_utils_structure::Structure;

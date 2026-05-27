@@ -19,7 +19,6 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 reqwest = { workspace = true }
 
-phoxal-utils-conventions = { workspace = true }
 phoxal-utils-scenario-spec = { workspace = true }
 phoxal-utils-helpers = { workspace = true }
 phoxal-engine = { workspace = true }

@@ -19,7 +19,6 @@ nalgebra = { workspace = true }
 pathdiff = "0.2.3"
 phoxal-bus = { workspace = true }
 phoxal-utils-component = { workspace = true }
-phoxal-utils-conventions = { workspace = true }
 phoxal-utils-helpers = { workspace = true }
 phoxal-engine = { workspace = true }
 phoxal-utils-scenario = { workspace = true }

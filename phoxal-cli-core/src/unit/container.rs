@@ -2,10 +2,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use phoxal_engine::{DEFAULT_ROBOT_NAMESPACE, component_package_name, runtime_package_name};
 use phoxal_engine::{ENV_COMPONENT_ID, ENV_ROBOT_CONFIG, ENV_ROBOT_SIMULATION, staged::Robot};
-use phoxal_utils_conventions::{
-    DEFAULT_ROBOT_NAMESPACE, component_package_name, runtime_package_name,
-};
 use phoxal_utils_robot::v1::{ConnectionConfig, LocalizeBackendKind, resolve_localize_backend};
 
 use crate::Project;

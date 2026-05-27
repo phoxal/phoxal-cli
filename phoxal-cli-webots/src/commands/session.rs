@@ -6,9 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use phoxal_engine::RobotIdentity;
-use phoxal_utils_conventions::{
-    DEFAULT_ROBOT_NAMESPACE, component_package_name, runtime_package_name,
-};
+use phoxal_engine::{DEFAULT_ROBOT_NAMESPACE, component_package_name, runtime_package_name};
 use phoxal_utils_helpers::parse_trimmed_non_empty;
 
 use phoxal_cli_core::AppContext;

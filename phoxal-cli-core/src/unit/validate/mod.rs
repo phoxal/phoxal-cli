@@ -3,7 +3,7 @@ pub mod component;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
-use phoxal_utils_conventions::{MESHES_DIR, MODEL_URI_PREFIX, PACKAGE_URI_PREFIX};
+use phoxal_engine::{MESHES_DIR, MODEL_URI_PREFIX, PACKAGE_URI_PREFIX};
 use phoxal_utils_structure::Structure;
 use urdf_rs::Geometry;
 
