@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
-use phoxal_component_api::{
+use phoxal_component_api::v1::{
     CameraStreamDemand, DepthStreamDemand, RuntimeStreamDemand,
     capability::profile::{CameraProfileEncoding, DepthProfileEncoding},
 };
-use phoxal_runtime_localize_api::LocalizeStreamDemands;
+use phoxal_runtime_localize_api::v1::LocalizeStreamDemands;
 use phoxal_utils_component::v1::CapabilityRef;
 use phoxal_utils_component::v1::capability::{Camera, Capability, Depth};
 use phoxal_utils_robot::Robot;

@@ -632,14 +632,14 @@ impl Reset {
         let bus = builder.connect().await?;
 
         use phoxal_bus::query::Retry;
-        use phoxal_simulator_api::reset::Request as ResetRequest;
+        use phoxal_simulator_api::v1::reset::Request as ResetRequest;
 
         let request = ResetRequest;
         let retry = Retry::new(1);
 
         let response = tokio::time::timeout(
             Duration::from_secs(10),
-            phoxal_simulator_api::reset::request(&bus, &request, &retry),
+            phoxal_simulator_api::v1::reset::request(&bus, &request, &retry),
         )
         .await
         .map_err(|_| anyhow!("timed out waiting for simulation reset response"))??;
@@ -647,7 +647,7 @@ impl Reset {
         let response = response.ok_or_else(|| {
             anyhow!(
                 "no simulation reset command responder available on '{}'",
-                phoxal_simulator_api::reset::topic(&bus)
+                phoxal_simulator_api::v1::reset::topic(&bus)
             )
         })?;
 

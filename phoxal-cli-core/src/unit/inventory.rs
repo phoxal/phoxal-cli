@@ -45,7 +45,7 @@ fn command_with_ack<Req: TypedSchema, Resp: TypedSchema>(
 }
 
 fn component_topics(entries: &mut Vec<InventoryEntry>) {
-    use phoxal_component_api::capability as cap;
+    use phoxal_component_api::v1::capability as cap;
 
     const COMPONENT_ID: &str = "{component-id}";
     const CAPABILITY_ID: &str = "{capability-id}";
@@ -80,19 +80,21 @@ fn component_topics(entries: &mut Vec<InventoryEntry>) {
 
 fn simulator_topics(entries: &mut Vec<InventoryEntry>) {
     entries.extend([
-        topic::<phoxal_simulator_api::clock::Clock>(phoxal_simulator_api::clock::TOPIC),
-        topic::<phoxal_simulator_api::status::Status>(phoxal_simulator_api::status::TOPIC),
-        topic::<phoxal_simulator_api::pose::Pose>(phoxal_simulator_api::pose::path("{robot-id}")),
-        topic::<phoxal_simulator_api::contact::Contact>(phoxal_simulator_api::contact::path(
+        topic::<phoxal_simulator_api::v1::clock::Clock>(phoxal_simulator_api::v1::clock::TOPIC),
+        topic::<phoxal_simulator_api::v1::status::Status>(phoxal_simulator_api::v1::status::TOPIC),
+        topic::<phoxal_simulator_api::v1::pose::Pose>(phoxal_simulator_api::v1::pose::path(
             "{robot-id}",
         )),
-        topic::<phoxal_simulator_api::collision::Collision>(phoxal_simulator_api::collision::path(
-            "{robot-id}",
-        )),
+        topic::<phoxal_simulator_api::v1::contact::Contact>(
+            phoxal_simulator_api::v1::contact::path("{robot-id}"),
+        ),
+        topic::<phoxal_simulator_api::v1::collision::Collision>(
+            phoxal_simulator_api::v1::collision::path("{robot-id}"),
+        ),
         command_with_ack::<
-            phoxal_simulator_api::reset::Request,
-            phoxal_simulator_api::reset::Response,
-        >(phoxal_simulator_api::reset::TOPIC),
+            phoxal_simulator_api::v1::reset::Request,
+            phoxal_simulator_api::v1::reset::Response,
+        >(phoxal_simulator_api::v1::reset::TOPIC),
     ]);
 }
 
@@ -108,12 +110,12 @@ mod tests {
         assert!(entries.iter().any(|entry| {
             entry.kind == InventoryKind::Topic
                 && entry.path == "component/{component-id}/{capability-id}/profile/default"
-                && entry.schema == phoxal_component_api::capability::camera::Frame::SCHEMA_NAME
+                && entry.schema == phoxal_component_api::v1::capability::camera::Frame::SCHEMA_NAME
         }));
         assert!(entries.iter().any(|entry| {
             entry.kind == InventoryKind::Topic
                 && entry.path == "component/{component-id}/{capability-id}/profile/default"
-                && entry.schema == phoxal_component_api::capability::depth::Depth::SCHEMA_NAME
+                && entry.schema == phoxal_component_api::v1::capability::depth::Depth::SCHEMA_NAME
         }));
     }
 
@@ -124,7 +126,7 @@ mod tests {
         assert!(entries.iter().any(|entry| {
             entry.kind == InventoryKind::Topic
                 && entry.path == "component/{component-id}/{capability-id}/profile/default"
-                && entry.schema == phoxal_component_api::capability::imu::Sample::SCHEMA_NAME
+                && entry.schema == phoxal_component_api::v1::capability::imu::Sample::SCHEMA_NAME
         }));
     }
 }
