@@ -8,10 +8,11 @@ use phoxal_component_api::{
 use phoxal_runtime_localize_api::LocalizeStreamDemands;
 use phoxal_utils_component::v1::CapabilityRef;
 use phoxal_utils_component::v1::capability::{Camera, Capability, Depth};
-use phoxal_utils_robot::v1::{LocalizeBackendKind, ModelV1, ResolvedCapabilityRole};
+use phoxal_utils_robot::Robot;
+use phoxal_utils_robot::v1::{LocalizeBackendKind, ResolvedCapabilityRole};
 
 pub fn validate_runtime_stream_demands(
-    model: &ModelV1,
+    model: &Robot,
     components_by_type: &BTreeMap<String, phoxal_utils_component::v1::Component>,
     framework_runtimes: &[&str],
     localize_backend: LocalizeBackendKind,
@@ -49,7 +50,7 @@ fn runtime_stream_demands(
 }
 
 fn components_by_instance(
-    model: &ModelV1,
+    model: &Robot,
     components_by_type: &BTreeMap<String, phoxal_utils_component::v1::Component>,
 ) -> Result<BTreeMap<CapabilityRef, Capability>> {
     let mut capabilities = BTreeMap::new();
@@ -300,7 +301,10 @@ mod tests {
         Camera, CameraMode, Capability, Depth, Imu, StructuralTarget,
     };
     use phoxal_utils_robot::v1::{
-        Component, Identity, KinematicConfig, Motion, MotionLimits, ResolvedCapabilityRole, Role,
+        Component, KinematicConfig, Motion, ResolvedCapabilityRole, Role,
+    };
+    use phoxal_utils_robot::{
+        ComponentSource, Components, Identity, Phoxal, PhoxalRuntimes, Sim, SourcePath, Version,
     };
 
     use super::*;
@@ -382,7 +386,7 @@ mod tests {
     fn fixture_robot_source(
         camera_rate_hz: f64,
     ) -> (
-        ModelV1,
+        Robot,
         BTreeMap<String, phoxal_utils_component::v1::Component>,
     ) {
         fixture_robot_source_with_rates(camera_rate_hz, 15.0)
@@ -392,13 +396,28 @@ mod tests {
         camera_rate_hz: f64,
         depth_rate_hz: f64,
     ) -> (
-        ModelV1,
+        Robot,
         BTreeMap<String, phoxal_utils_component::v1::Component>,
     ) {
-        let model = ModelV1 {
-            identity: Identity {
-                model: "stream-demand-fixture".to_string(),
+        let model = Robot {
+            version: Version::V1,
+            phoxal: Phoxal {
+                cli_min_version: "^0.6".to_string(),
             },
+            identity: Identity {
+                id: "stream-demand-fixture".to_string(),
+                namespace: "dev".to_string(),
+            },
+            structure: "structure.urdf".into(),
+            phoxal_runtimes: PhoxalRuntimes {
+                version: "^0.1".to_string(),
+                overrides: BTreeMap::new(),
+            },
+            user_runtimes: BTreeMap::new(),
+            sim: Sim {
+                world: "sim/worlds/test.wbt".into(),
+            },
+            tools: BTreeMap::new(),
             motion: Motion {
                 kinematic: KinematicConfig::Differential {
                     left_actuators: vec![CapabilityRef::new("left_motor", "motor")],
@@ -408,40 +427,48 @@ mod tests {
                     wheel_radius_m: 0.08,
                     wheel_base_m: 0.4,
                 },
-                limits: MotionLimits {
-                    max_linear_speed_mps: 1.0,
-                    max_angular_speed_radps: 1.0,
-                    max_linear_accel_mps2: 1.0,
-                    max_linear_decel_mps2: 1.0,
-                    max_angular_accel_radps2: 1.0,
-                },
-                calibration: None,
             },
-            components: BTreeMap::from([
-                (
-                    "front_camera".to_string(),
-                    Component {
-                        component: "camera_rgbd".to_string(),
-                        mount_link: "base_link".to_string(),
-                        roles: BTreeMap::from([
-                            ("rgb".to_string(), vec![Role::Localization]),
-                            ("depth".to_string(), vec![Role::Localization]),
-                        ]),
-                        parameters: BTreeMap::new(),
-                        driver: None,
-                    },
-                ),
-                (
-                    "imu".to_string(),
-                    Component {
-                        component: "imu".to_string(),
-                        mount_link: "base_link".to_string(),
-                        roles: BTreeMap::from([("imu".to_string(), vec![Role::Localization])]),
-                        parameters: BTreeMap::new(),
-                        driver: None,
-                    },
-                ),
-            ]),
+            components: Components {
+                sources: BTreeMap::from([
+                    (
+                        "camera_rgbd".to_string(),
+                        ComponentSource::Path(SourcePath {
+                            path: "./components/camera_rgbd".into(),
+                        }),
+                    ),
+                    (
+                        "imu".to_string(),
+                        ComponentSource::Path(SourcePath {
+                            path: "./components/imu".into(),
+                        }),
+                    ),
+                ]),
+                instances: BTreeMap::from([
+                    (
+                        "front_camera".to_string(),
+                        Component {
+                            component: "camera_rgbd".to_string(),
+                            mount_link: "base_link".to_string(),
+                            roles: BTreeMap::from([
+                                ("rgb".to_string(), vec![Role::Localization]),
+                                ("depth".to_string(), vec![Role::Localization]),
+                            ]),
+                            parameters: BTreeMap::new(),
+                            driver: None,
+                        },
+                    ),
+                    (
+                        "imu".to_string(),
+                        Component {
+                            component: "imu".to_string(),
+                            mount_link: "base_link".to_string(),
+                            roles: BTreeMap::from([("imu".to_string(), vec![Role::Localization])]),
+                            parameters: BTreeMap::new(),
+                            driver: None,
+                        },
+                    ),
+                ]),
+            },
         };
         let components = BTreeMap::from([
             (

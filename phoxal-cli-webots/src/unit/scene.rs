@@ -96,7 +96,7 @@ impl WebotsSceneDescription {
             );
 
         Ok(Self {
-            robot_name: configuration.model.identity.model.clone(),
+            robot_name: configuration.model.identity.id.clone(),
             root_link_id,
             links,
             contact_materials: BTreeMap::new(),

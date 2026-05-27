@@ -3,9 +3,9 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use phoxal_engine::staged::Robot;
-use phoxal_engine::{COMPONENT_FILE, COMPONENTS_DIR, MODEL_FILE};
-use phoxal_utils_robot::Model;
+use phoxal_engine::staged::Robot as StagedRobot;
+use phoxal_engine::{COMPONENT_FILE, COMPONENTS_DIR, ROBOT_FILE};
+use phoxal_utils_robot::Robot;
 use phoxal_utils_robot::v1::{self, SourceBundle, resolve_source_bundle};
 use phoxal_utils_structure::Structure;
 
@@ -20,7 +20,7 @@ use crate::unit::validate::validate_mesh_paths_exist;
 #[derive(Debug, Clone)]
 pub struct ValidatedRobot {
     pub robot_model: String,
-    pub model: v1::ModelV1,
+    pub model: Robot,
     pub resolved_facts: v1::ResolvedFacts,
     pub base_structure: Structure,
 }
@@ -28,11 +28,10 @@ pub struct ValidatedRobot {
 impl ValidatedRobot {
     pub fn load(app: &AppContext, robot_model: &str) -> Result<Self> {
         let model_dir = app.project.model_dir(robot_model);
-        let model = Model::read_from_dir(&model_dir)?;
-        let model = model
-            .as_v1()
-            .context("xtask only supports model.yaml version v1")?
-            .clone();
+        let model = Robot::read_from_dir(&model_dir)?;
+        model
+            .validate_with(PLATFORM_RUNTIME_NAMES)
+            .map_err(format_robot_validation_errors)?;
         let base_structure = Structure::read_from_dir(&model_dir)?;
         base_structure.validate()?;
 
@@ -76,7 +75,7 @@ impl ValidatedRobot {
         })
     }
 
-    pub fn stage_bundle(&self, app: &AppContext, output: Option<&Path>) -> Result<Robot> {
+    pub fn stage_bundle(&self, app: &AppContext, output: Option<&Path>) -> Result<StagedRobot> {
         app.ui.info(format!(
             "Creating bundle payload for '{}'",
             self.robot_model
@@ -131,14 +130,14 @@ impl ValidatedRobot {
         app.ui
             .success(format!("Bundle root: {}", bundle_root.display()));
 
-        Robot::read_from_dir(&bundle_root)
+        StagedRobot::read_from_dir(&bundle_root)
     }
 }
 
 fn load_used_components(
     app: &AppContext,
     robot_model: &str,
-    model: &v1::ModelV1,
+    model: &Robot,
 ) -> Result<BTreeMap<String, phoxal_utils_component::v1::Component>> {
     model
         .used_component_types()
@@ -159,7 +158,7 @@ fn load_used_components(
 fn validate_distinct_components_once(
     app: &AppContext,
     robot_model: &str,
-    model: &v1::ModelV1,
+    model: &Robot,
 ) -> Result<()> {
     let mut validated_component_types = BTreeSet::new();
     for (component_id, component_instance) in &model.components {
@@ -188,17 +187,17 @@ fn validate_distinct_components_once(
 
 fn copy_model_config(project: &Project, robot_model: &str, bundle_root: &Path) -> Result<()> {
     fs::copy(
-        project.model_dir(robot_model).join(MODEL_FILE),
-        bundle_root.join(MODEL_FILE),
+        project.model_dir(robot_model).join(ROBOT_FILE),
+        bundle_root.join(ROBOT_FILE),
     )
-    .with_context(|| format!("failed to copy {MODEL_FILE} for '{robot_model}'"))?;
+    .with_context(|| format!("failed to copy {ROBOT_FILE} for '{robot_model}'"))?;
     Ok(())
 }
 
 fn copy_component_configs(
     project: &Project,
     robot_model: &str,
-    model: &v1::ModelV1,
+    model: &Robot,
     bundle_root: &Path,
 ) -> Result<()> {
     let components_root = bundle_root.join(COMPONENTS_DIR);
@@ -222,4 +221,17 @@ fn copy_component_configs(
         })?;
     }
     Ok(())
+}
+
+fn format_robot_validation_errors(
+    errors: Vec<phoxal_utils_robot::ValidationError>,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Robot errors:\n{}",
+        errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }

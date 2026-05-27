@@ -137,7 +137,7 @@ mod fixture_bundle_tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    use phoxal_utils_robot::Model;
+    use phoxal_utils_robot::Robot;
     use phoxal_utils_robot::v1::{SourceBundle, resolve_source_bundle};
 
     const COMPONENT_TYPES: &[&str] = &["camera_rgbd_640x480", "drive_motor", "imu", "range_tof"];
@@ -160,13 +160,10 @@ mod fixture_bundle_tests {
             .join("robot")
             .join("rgbd-imu-diff-drive");
 
-        let model = match Model::read_from_dir(&bundle_root) {
-            Ok(model) => match model.as_v1() {
-                Some(model) => model.clone(),
-                None => panic!("fixture model.yaml is not version v1"),
-            },
+        let model = match Robot::read_from_dir(&bundle_root) {
+            Ok(model) => model,
             Err(error) => panic!(
-                "failed to read fixture model from {}: {error:#}",
+                "failed to read fixture robot from {}: {error:#}",
                 bundle_root.display()
             ),
         };

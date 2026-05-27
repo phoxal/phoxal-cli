@@ -1,12 +1,13 @@
 use anyhow::{Context, Result, bail};
 use phoxal_utils_component::v1::CapabilityRef;
 use phoxal_utils_component::v1::capability::{Capability, MotorCommand};
-use phoxal_utils_robot::v1::{self as model_v1, ModelV1};
+use phoxal_utils_robot::Robot;
+use phoxal_utils_robot::v1::{self as model_v1};
 use phoxal_utils_structure::Structure;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub fn validate_model_components<F>(
-    model: &ModelV1,
+    model: &Robot,
     structure: &Structure,
     mut load_component: F,
     component_has_driver: impl Fn(&str) -> bool,
@@ -294,7 +295,7 @@ fn is_velocity_motor_capability(capability: &Capability) -> bool {
 #[cfg(test)]
 mod tests {
     use super::validate_model_components;
-    use phoxal_utils_robot::Model;
+    use phoxal_utils_robot::Robot;
     use phoxal_utils_structure::Structure;
 
     #[test]
@@ -338,9 +339,9 @@ mod tests {
     fn component_with_driver_still_requires_driver_crate() -> anyhow::Result<()> {
         let model = model_with_driver_block(
             r#"
-    driver:
-      connection:
-        type: usb
+      driver:
+        connection:
+          type: usb
 "#,
         )?;
         let structure = structure_with_fixture_mount()?;
@@ -363,15 +364,23 @@ mod tests {
         Ok(())
     }
 
-    fn model_with_driver_block(
-        driver_block: &str,
-    ) -> anyhow::Result<phoxal_utils_robot::v1::ModelV1> {
-        let model = Model::read_from_string(&format!(
+    fn model_with_driver_block(driver_block: &str) -> anyhow::Result<Robot> {
+        Robot::read_from_string(&format!(
             r#"
 version: v1
 
+phoxal:
+  cli_min_version: "^0.6"
+
 identity:
-  model: fixture-validation
+  id: fixture-validation
+  namespace: dev
+
+phoxal_runtimes:
+  version: "^0.1"
+
+sim:
+  world: sim/worlds/test.wbt
 
 motion:
   kinematic:
@@ -383,27 +392,23 @@ motion:
     wheel_radius_m: 0.10
     wheel_base_m: 0.40
 
-  limits:
-    max_linear_speed_mps: 0.6
-    max_angular_speed_radps: 2.0
-    max_linear_accel_mps2: 8.0
-    max_linear_decel_mps2: 8.0
-    max_angular_accel_radps2: 20.0
-
 components:
-  fixture_drive:
-    component: drive_motor
-    mount_link: fixture_mount{driver_block}
-    parameters:
-      motor:
-        kind: motor
-        direction_sign: 1
-      encoder:
-        kind: encoder
-        direction_sign: 1
+  sources:
+    drive_motor:
+      path: ../../component/drive_motor
+  instances:
+    fixture_drive:
+      component: drive_motor
+      mount_link: fixture_mount{driver_block}
+      parameters:
+        motor:
+          kind: motor
+          direction_sign: 1
+        encoder:
+          kind: encoder
+          direction_sign: 1
 "#
-        ))?;
-        Ok(model.as_v1().expect("fixture model is v1").clone())
+        ))
     }
 
     fn structure_with_fixture_mount() -> anyhow::Result<Structure> {

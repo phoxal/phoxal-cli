@@ -196,7 +196,7 @@ impl ContainerServiceSelection {
                 .map(|driver| driver.component_id.clone())
                 .collect::<BTreeSet<_>>();
             if matches.is_empty() {
-                bail!("component driver type '{component_type}' is not configured in model.yaml");
+                bail!("component driver type '{component_type}' is not configured in robot.yaml");
             }
             enabled_component_ids.extend(matches);
         }
@@ -206,7 +206,7 @@ impl ContainerServiceSelection {
                 .iter()
                 .any(|driver| driver.component_id == *component_id)
             {
-                bail!("component driver '{component_id}' is not configured in model.yaml");
+                bail!("component driver '{component_id}' is not configured in robot.yaml");
             }
             enabled_component_ids.insert(component_id.clone());
         }
@@ -486,10 +486,10 @@ fn plan_topology(
             .components
             .get(component_id)
             .with_context(|| {
-                format!("selected component driver '{component_id}' is not defined in model.yaml")
+                format!("selected component driver '{component_id}' is not defined in robot.yaml")
             })?;
         let driver = component_instance.driver.as_ref().with_context(|| {
-            format!("selected component '{component_id}' has no driver config in model.yaml")
+            format!("selected component '{component_id}' has no driver config in robot.yaml")
         })?;
         let package_name = component_package_name(&component_instance.component);
         let crate_dir = project.component_dir(&component_instance.component);
@@ -766,16 +766,13 @@ mod tests {
                 workspace_root.display()
             )
         });
-        let model = phoxal_utils_robot::Model::read_from_dir(&bundle_root)
-            .unwrap_or_else(|error| {
+        let model =
+            phoxal_utils_robot::Robot::read_from_dir(&bundle_root).unwrap_or_else(|error| {
                 panic!(
                     "failed to read fixture model from {}: {error:#}",
                     bundle_root.display()
                 )
-            })
-            .as_v1()
-            .expect("fixture model must be v1")
-            .clone();
+            });
         let components = model
             .used_component_types()
             .into_iter()
