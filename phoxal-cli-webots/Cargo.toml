@@ -1,0 +1,37 @@
+[package]
+name = "phoxal-cli-webots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+ctrlc = "3.4.7"
+heck = { workspace = true }
+nalgebra = { workspace = true }
+pathdiff = "0.2.3"
+phoxal-bus = { workspace = true }
+phoxal-utils-component = { workspace = true }
+phoxal-utils-conventions = { workspace = true }
+phoxal-utils-helpers = { workspace = true }
+phoxal-engine = { workspace = true }
+phoxal-utils-scenario = { workspace = true }
+phoxal-utils-simulation = { workspace = true }
+phoxal-utils-structure = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+phoxal-simulator-api = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+phoxal-cli-core = { workspace = true }
+urdf-rs = { workspace = true }
+webots-proto = { workspace = true }
+
+[lints]
+workspace = true
