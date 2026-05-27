@@ -9,7 +9,7 @@ use semver::{Version, VersionReq};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::catalog::{DEFAULT_HOST_TOOLS, KNOWN_RUNTIME_SET_RELEASES, PlatformRuntimeCatalog};
+use crate::catalog::{DEFAULT_TOOL_VERSIONS, KNOWN_RUNTIME_SET_RELEASES, PlatformRuntimeCatalog};
 
 const ROBOT_FILE: &str = "robot.yaml";
 
@@ -293,7 +293,7 @@ fn resolve_components(
 }
 
 fn resolve_tools(robot: &Robot) -> Result<Vec<ResolvedTool>> {
-    let mut requested = DEFAULT_HOST_TOOLS
+    let mut requested = DEFAULT_TOOL_VERSIONS
         .iter()
         .map(|tool| (tool.name.to_string(), tool.version.to_string()))
         .collect::<BTreeMap<_, _>>();

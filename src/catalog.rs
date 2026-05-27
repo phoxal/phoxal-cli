@@ -17,22 +17,24 @@ pub struct PlatformRuntimeCatalog {
 
 pub const KNOWN_RUNTIME_SET_RELEASES: &[&str] = &["0.1.0", "0.1.1", "0.1.2"];
 
-pub const DEFAULT_HOST_TOOLS: &[HostToolEntry] = &[
-    HostToolEntry {
-        name: "simulator_webots_controller",
-        version: "0.1.2",
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolVersion {
+    pub name: &'static str,
+    pub version: &'static str,
+}
+
+pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
+    ToolVersion {
+        name: "simulator_webots",
+        version: "0.0.0-dev",
     },
-    HostToolEntry {
-        name: "simulator_webots_supervisor",
-        version: "0.1.2",
-    },
-    HostToolEntry {
+    ToolVersion {
         name: "rerun_proxy",
-        version: "0.1.2",
+        version: "0.0.0-dev",
     },
-    HostToolEntry {
+    ToolVersion {
         name: "joypad",
-        version: "0.1.2",
+        version: "0.0.0-dev",
     },
 ];
 
@@ -64,12 +66,6 @@ pub const CATALOG: PlatformRuntimeCatalog = PlatformRuntimeCatalog {
         entry("explore", "ghcr.io/phoxal/runtime-explore", false, true),
     ],
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HostToolEntry {
-    pub name: &'static str,
-    pub version: &'static str,
-}
 
 const fn entry(
     name: &'static str,
