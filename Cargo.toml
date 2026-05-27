@@ -1,3 +1,64 @@
+[workspace.package]
+version = "0.2.2"
+edition = "2024"
+rust-version = "1.85"
+license = "AGPL-3.0-only"
+publish = false
+description = "Phoxal robot framework — phoxal-cli."
+documentation = "https://github.com/phoxal/phoxal-cli#readme"
+homepage = "https://github.com/phoxal/phoxal-cli"
+repository = "https://github.com/phoxal/phoxal-cli"
+
+[workspace]
+resolver = "3"
+members = [
+    ".",
+    "phoxal-cli-core",
+    "phoxal-cli-webots"
+]
+
+[workspace.dependencies]
+anyhow = "1.0.102"
+async-trait = "0.1.89"
+clap = { version = "4.6.1", features = ["derive"] }
+derive-new = "0.7.0"
+derive_setters = "0.1.9"
+heck = "0.5.0"
+hex = "0.4.3"
+nalgebra = { version = "0.34.2", features = ["serde-serialize"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "json", "rustls"] }
+semver = "1.0.27"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+serde_yaml = "0.9"
+sha2 = "0.11.0"
+tempfile = "3.27.0"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "signal", "sync", "fs"] }
+tracing-subscriber = "0.3.23"
+urdf-rs = "0.9.0"
+webots-proto = "0.1.3"
+phoxal-bus = { git = "https://github.com/phoxal/engine", branch = "main" }
+phoxal-cli-core = { path = "phoxal-cli-core" }
+phoxal-cli-webots = { path = "phoxal-cli-webots" }
+phoxal-component-api = { git = "https://github.com/phoxal/engine", branch = "main" }
+phoxal-engine = { git = "https://github.com/phoxal/engine", branch = "main" }
+phoxal-runtime-localize-api = { git = "https://github.com/phoxal/runtimes", branch = "main" }
+phoxal-simulator-api = { git = "https://github.com/phoxal/simulator", branch = "main" }
+phoxal-utils-component = { git = "https://github.com/phoxal/engine", branch = "main" }
+phoxal-utils-helpers = { git = "https://github.com/phoxal/engine", branch = "main" }
+phoxal-utils-robot = { git = "https://github.com/phoxal/engine", branch = "main" }
+phoxal-utils-scenario = { git = "https://github.com/phoxal/runtimes", branch = "main" }
+phoxal-utils-scenario-spec = { git = "https://github.com/phoxal/engine", branch = "main" }
+phoxal-utils-simulation = { git = "https://github.com/phoxal/engine", branch = "main" }
+phoxal-utils-structure = { git = "https://github.com/phoxal/engine", branch = "main" }
+
+[workspace.lints.rust]
+unused = "warn"
+
+[profile.release]
+lto = false
+codegen-units = 16
+
 [package]
 name = "phoxal-cli"
 version.workspace = true
