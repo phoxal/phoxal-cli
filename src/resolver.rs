@@ -549,11 +549,10 @@ fn buildx_imagetools_manifest_digest(output: &str) -> Result<String> {
 fn docker_manifest_index_digest(output: &str) -> Result<String> {
     let value: Value =
         serde_json::from_str(output).context("docker manifest output was not JSON")?;
-    if !value
+    if value
         .as_object()
         .and_then(|object| object.get("manifests"))
-        .and_then(Value::as_array)
-        .is_some_and(|manifests| !manifests.is_empty())
+        .and_then(Value::as_array).is_none_or(|manifests| manifests.is_empty())
     {
         bail!("manifest output is not a multi-platform index");
     }

@@ -167,9 +167,7 @@ fn read_simulation_v1(
             component_dir.display()
         )
     })?;
-    let simulation = match simulation {
-        Simulation::V1(simulation) => simulation,
-    };
+    let Simulation::V1(simulation) = simulation;
     Ok(simulation)
 }
 

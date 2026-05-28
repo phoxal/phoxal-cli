@@ -175,37 +175,37 @@ mod tests {
         )?;
         let compose: Value = serde_yaml::from_str(&compose)?;
         let root = mapping(&compose, "compose")?;
-        assert_eq!(root.get(&key("name")), Some(&key("testbot")));
-        let services = mapping(root.get(&key("services")).expect("services"), "services")?;
+        assert_eq!(root.get(key("name")), Some(&key("testbot")));
+        let services = mapping(root.get(key("services")).expect("services"), "services")?;
         let router = mapping(service(services, "router")?, "router")?;
         let asset = mapping(service(services, "asset")?, "asset")?;
 
         assert_eq!(
-            router.get(&key("ports")),
+            router.get(key("ports")),
             Some(&Value::Sequence(vec![key("127.0.0.1:7447:7447")]))
         );
-        assert_eq!(router.get(&key("command")), None);
-        assert_eq!(router.get(&key("environment")), None);
+        assert_eq!(router.get(key("command")), None);
+        assert_eq!(router.get(key("environment")), None);
 
         assert_eq!(
-            asset.get(&key("command")),
+            asset.get(key("command")),
             Some(&Value::Sequence(vec![key("run")]))
         );
         assert_eq!(
-            asset.get(&key("depends_on")),
+            asset.get(key("depends_on")),
             Some(&Value::Sequence(vec![key("router")]))
         );
         let environment = mapping(
-            asset.get(&key("environment")).expect("asset environment"),
+            asset.get(key("environment")).expect("asset environment"),
             "asset environment",
         )?;
-        assert_eq!(environment.get(&key("ROBOT_CONFIG")), Some(&key("/robot")));
+        assert_eq!(environment.get(key("ROBOT_CONFIG")), Some(&key("/robot")));
         assert_eq!(
-            environment.get(&key("ROBOT_ROUTER_ENDPOINT")),
+            environment.get(key("ROBOT_ROUTER_ENDPOINT")),
             Some(&key("tcp/router:7447"))
         );
-        assert_eq!(environment.get(&key("ROBOT_ID")), Some(&key("testbot")));
-        assert_eq!(environment.get(&key("ROBOT_NAMESPACE")), Some(&key("test")));
+        assert_eq!(environment.get(key("ROBOT_ID")), Some(&key("testbot")));
+        assert_eq!(environment.get(key("ROBOT_NAMESPACE")), Some(&key("test")));
 
         Ok(())
     }
@@ -238,7 +238,7 @@ mod tests {
 
     fn service<'a>(services: &'a Mapping, name: &str) -> anyhow::Result<&'a Value> {
         services
-            .get(&key(name))
+            .get(key(name))
             .ok_or_else(|| anyhow::anyhow!("missing service {name}"))
     }
 

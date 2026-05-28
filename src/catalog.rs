@@ -38,17 +38,17 @@ pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
     },
     ToolVersion {
         name: "rerun_proxy",
-        version: "0.0.0-dev",
+        version: "0.1.0",
         repo: "phoxal/operator",
-        artifact_template: "rerun-proxy-{version}-{target}.tar.gz",
-        binary_template: "rerun-proxy-{target}",
+        artifact_template: "phoxal-rerun-proxy-{version}-{target}.tar.gz",
+        binary_template: "phoxal-rerun-proxy-{target}",
     },
     ToolVersion {
         name: "joypad",
-        version: "0.0.0-dev",
+        version: "0.1.0",
         repo: "phoxal/joypad",
-        artifact_template: "joypad-{version}-{target}.tar.gz",
-        binary_template: "joypad-{target}",
+        artifact_template: "phoxal-joypad-{version}-{target}.tar.gz",
+        binary_template: "phoxal-joypad-{target}",
     },
 ];
 
