@@ -3,9 +3,7 @@ use phoxal_robot::RobotV1 as Robot;
 
 #[test]
 fn plan_robot_validates_against_catalog() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(include_str!(
-        "../../framework/robot/tests/fixtures/plan_robot.yaml"
-    ))?;
+    let robot = Robot::parse_from_string(include_str!("fixtures/plan_robot.yaml"))?;
     robot
         .validate_with(&CATALOG.names().collect::<Vec<_>>())
         .expect("plan robot should validate against the platform catalog");

@@ -6,9 +6,7 @@ use phoxal_robot::RobotV1 as Robot;
 
 #[test]
 fn lockfile_roundtrips_through_yaml() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(include_str!(
-        "../../framework/robot/tests/fixtures/plan_robot.yaml"
-    ))?;
+    let robot = Robot::parse_from_string(include_str!("fixtures/plan_robot.yaml"))?;
     let snapshot = ReleasesSnapshot {
         fetched_at: std::time::SystemTime::UNIX_EPOCH,
         versions: vec!["0.1.2".into()],
