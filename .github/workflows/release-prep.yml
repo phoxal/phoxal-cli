@@ -31,6 +31,13 @@ jobs:
         run: |
           set -euo pipefail
           last_tag=$(git describe --tags --match 'v*.*.*' --abbrev=0 2>/dev/null || echo "v0.0.0")
+            current_version=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+            if ! git rev-parse "v${current_version}" >/dev/null 2>&1 && [ "${current_version}" != "${last_tag#v}" ]; then
+              echo "Cargo.toml is at ${current_version} which is not yet tagged; release.yml is likely in flight. Skipping."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            
           commits=$(git log --format="%s%n%n%b" "${last_tag}..HEAD" 2>/dev/null || git log --format="%s%n%n%b")
           if echo "$commits" | grep -qE "^[a-z]+(\([^)]+\))?!:" || echo "$commits" | grep -qE "^BREAKING CHANGE:"; then
             bump=major
