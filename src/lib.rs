@@ -11,8 +11,10 @@ pub mod releases;
 pub mod resolver;
 pub mod run_view;
 pub mod shell;
+pub mod simulator_staging;
 pub mod ui;
 pub mod utils;
+pub mod webots_staging;
 
 pub use context::AppContext;
 pub use project::Project;

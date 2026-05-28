@@ -44,7 +44,11 @@ pub enum LockedComponentSource {
 pub struct LockedTool {
     pub requested: String,
     pub resolved: String,
+    #[serde(default)]
+    pub repo: String,
     pub asset: String,
+    #[serde(default)]
+    pub binary_name: String,
     pub sha256: String,
 }
 
@@ -82,7 +86,9 @@ impl Lockfile {
                     LockedTool {
                         requested: tool.requested.clone(),
                         resolved: tool.resolved.clone(),
+                        repo: tool.repo.clone(),
                         asset: tool.asset.clone(),
+                        binary_name: tool.binary_name.clone(),
                         sha256: tool.sha256.clone(),
                     },
                 )

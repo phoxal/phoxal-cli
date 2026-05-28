@@ -1,15 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal_robot::{RobotV1 as Robot, v1::ComponentSource};
 use semver::{Version, VersionReq};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::catalog::{DEFAULT_TOOL_VERSIONS, PlatformRuntimeCatalog};
+use crate::catalog::{DEFAULT_TOOL_VERSIONS, PlatformRuntimeCatalog, lookup_tool_version};
 use crate::releases::{self, ReleasesSnapshot};
 use crate::shell;
 
@@ -99,7 +100,9 @@ pub struct ResolvedTool {
     pub name: String,
     pub requested: String,
     pub resolved: String,
+    pub repo: String,
     pub asset: String,
+    pub binary_name: String,
     pub sha256: String,
 }
 
@@ -225,7 +228,7 @@ pub fn resolve_with_releases(
     // tree. We always attempt it; the only thing the offline path skips is
     // image digest pinning.
     let components = resolve_components(robot)?;
-    let tools = resolve_tools(robot)?;
+    let tools = resolve_tools(robot, options.resolve_external_artifacts)?;
 
     Ok(ResolvedRobot {
         robot: robot.clone(),
@@ -241,18 +244,35 @@ pub fn resolve_with_releases(
 }
 
 pub fn resolve_image_digest(image_ref: &str) -> Result<String> {
-    let output = shell::run_stdout(
+    match shell::run_stdout(
         "docker",
-        ["manifest", "inspect", "--verbose", image_ref],
+        [
+            "buildx",
+            "imagetools",
+            "inspect",
+            image_ref,
+            "--format",
+            "{{json .Manifest}}",
+        ],
         None,
-    )
-    .with_context(|| {
-        format!(
-            "failed to inspect Docker manifest for {image_ref}; install Docker and ensure the daemon is running"
-        )
-    })?;
-    docker_manifest_digest(&output)
-        .with_context(|| format!("docker manifest inspect did not report a digest for {image_ref}"))
+    ) {
+        Ok(output) => buildx_imagetools_manifest_digest(&output).with_context(|| {
+            format!(
+                "docker buildx imagetools inspect did not report an index digest for {image_ref}"
+            )
+        }),
+        Err(buildx_error) => {
+            let output = shell::run_stdout("docker", ["manifest", "inspect", image_ref], None)
+                .with_context(|| {
+                    format!(
+                        "failed to inspect Docker manifest for {image_ref}; install Docker with buildx and ensure the daemon is running (buildx error: {buildx_error:#})"
+                    )
+                })?;
+            docker_manifest_index_digest(&output).with_context(|| {
+                format!("docker manifest inspect did not yield an index body for {image_ref}")
+            })
+        }
+    }
 }
 
 pub fn resolve_git_ref(url: &str, git_ref: &str) -> Result<String> {
@@ -326,7 +346,7 @@ fn resolve_components(robot: &Robot) -> Result<Vec<ResolvedComponent>> {
     Ok(components)
 }
 
-fn resolve_tools(robot: &Robot) -> Result<Vec<ResolvedTool>> {
+fn resolve_tools(robot: &Robot, resolve_external_artifacts: bool) -> Result<Vec<ResolvedTool>> {
     let mut requested = DEFAULT_TOOL_VERSIONS
         .iter()
         .map(|tool| (tool.name.to_string(), tool.version.to_string()))
@@ -335,20 +355,108 @@ fn resolve_tools(robot: &Robot) -> Result<Vec<ResolvedTool>> {
         requested.insert(name.clone(), tool.version.clone());
     }
     let target = host_target_triple();
-    Ok(requested
+    requested
         .into_iter()
         .map(|(name, version)| {
-            let asset = format!("{}-{}-{}.tar.gz", name.replace('_', "-"), version, target);
-            let sha256 = fake_sha(&format!("{name}:{version}:{asset}"));
-            ResolvedTool {
+            let catalog_tool = lookup_tool_version(&name)
+                .with_context(|| format!("unknown native tool '{name}'"))?;
+            let asset = render_tool_template(catalog_tool.artifact_template, &version, &target);
+            let binary_name = render_tool_template(catalog_tool.binary_template, &version, &target);
+            let sha256 = if resolve_external_artifacts {
+                resolve_release_asset_sha256(catalog_tool.repo, &version, &asset)?
+                    .unwrap_or_default()
+            } else {
+                fake_sha(&format!("{name}:{version}:{asset}"))
+            };
+            Ok(ResolvedTool {
                 name,
                 requested: version.clone(),
                 resolved: version,
+                repo: catalog_tool.repo.to_string(),
                 asset,
+                binary_name,
                 sha256,
-            }
+            })
         })
-        .collect())
+        .collect()
+}
+
+fn render_tool_template(template: &str, version: &str, target: &str) -> String {
+    template
+        .replace("{version}", version)
+        .replace("{target}", target)
+}
+
+fn resolve_release_asset_sha256(repo: &str, version: &str, asset: &str) -> Result<Option<String>> {
+    let url = format!("https://api.github.com/repos/{repo}/releases/tags/v{version}");
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("phoxal-cli")
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    let mut req = client.get(&url);
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        req = req.bearer_auth(token);
+    }
+    let response = req
+        .send()
+        .with_context(|| format!("failed to fetch GitHub release {repo} v{version}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        if is_unpublished_placeholder(version) {
+            return Ok(None);
+        }
+        if status.as_u16() == 403 {
+            bail!(
+                "GitHub releases API returned 403 while resolving {repo} v{version} \
+                 (likely anonymous rate limit of 60/hour from this network - wait an hour, \
+                 or set GITHUB_TOKEN env var for 5000/hour)"
+            );
+        }
+        bail!("GitHub release lookup for {repo} v{version} returned {status}");
+    }
+
+    #[derive(Deserialize)]
+    struct GhAsset {
+        name: String,
+        digest: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct GhRelease {
+        assets: Vec<GhAsset>,
+    }
+
+    let release: GhRelease = response
+        .json()
+        .with_context(|| format!("failed to parse GitHub release {repo} v{version}"))?;
+    let Some(release_asset) = release
+        .assets
+        .iter()
+        .find(|candidate| candidate.name == asset)
+    else {
+        if is_unpublished_placeholder(version) {
+            return Ok(None);
+        }
+        bail!("GitHub release {repo} v{version} does not contain asset {asset}");
+    };
+    let Some(digest) = release_asset.digest.as_deref() else {
+        if is_unpublished_placeholder(version) {
+            return Ok(None);
+        }
+        bail!("GitHub release asset {repo} v{version} {asset} does not expose a digest");
+    };
+    let sha256 = digest.strip_prefix("sha256:").unwrap_or(digest);
+    if sha256.len() == 64 && sha256.chars().all(|value| value.is_ascii_hexdigit()) {
+        Ok(Some(sha256.to_ascii_lowercase()))
+    } else if is_unpublished_placeholder(version) {
+        Ok(None)
+    } else {
+        bail!("GitHub release asset {repo} v{version} {asset} has invalid sha256 digest {digest}")
+    }
+}
+
+fn is_unpublished_placeholder(version: &str) -> bool {
+    version == "0.0.0-dev"
 }
 
 fn select_runtime_set_version(
@@ -426,27 +534,31 @@ fn supported_matches(cli_req: &str, supported: &VersionReq, version: &Version) -
     cli_req == "*" || supported.matches(version)
 }
 
-fn docker_manifest_digest(output: &str) -> Result<String> {
+fn buildx_imagetools_manifest_digest(output: &str) -> Result<String> {
     let value: Value =
-        serde_json::from_str(output).context("docker manifest output was not JSON")?;
-    find_digest(&value).ok_or_else(|| anyhow!("manifest digest not found"))
+        serde_json::from_str(output).context("docker buildx imagetools output was not JSON")?;
+    value
+        .as_object()
+        .and_then(|object| object.get("digest").or_else(|| object.get("Digest")))
+        .and_then(Value::as_str)
+        .filter(|digest| digest.starts_with("sha256:"))
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("manifest index digest not found"))
 }
 
-fn find_digest(value: &Value) -> Option<String> {
-    match value {
-        Value::Object(object) => {
-            for key in ["digest", "Digest"] {
-                if let Some(digest) = object.get(key).and_then(Value::as_str)
-                    && digest.starts_with("sha256:")
-                {
-                    return Some(digest.to_string());
-                }
-            }
-            object.values().find_map(find_digest)
-        }
-        Value::Array(values) => values.iter().find_map(find_digest),
-        _ => None,
+fn docker_manifest_index_digest(output: &str) -> Result<String> {
+    let value: Value =
+        serde_json::from_str(output).context("docker manifest output was not JSON")?;
+    if !value
+        .as_object()
+        .and_then(|object| object.get("manifests"))
+        .and_then(Value::as_array)
+        .is_some_and(|manifests| !manifests.is_empty())
+    {
+        bail!("manifest output is not a multi-platform index");
     }
+    let body = output.trim_end();
+    Ok(format!("sha256:{}", fake_sha(body)))
 }
 
 fn fake_digest(seed: &str) -> String {
@@ -469,4 +581,40 @@ fn join_errors(errors: Vec<phoxal_robot::ValidationError>) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buildx_imagetools_digest_uses_index_digest_not_platform_leaf() -> anyhow::Result<()> {
+        let output = r#"{
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "manifests": [
+    {
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux"
+      }
+    },
+    {
+      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "platform": {
+        "architecture": "arm64",
+        "os": "linux"
+      }
+    }
+  ]
+}"#;
+
+        assert_eq!(
+            buildx_imagetools_manifest_digest(output)?,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+
+        Ok(())
+    }
 }

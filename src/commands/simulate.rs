@@ -334,7 +334,13 @@ fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) -> Result<(
             bail!("lockfile tool {} does not match robot.yaml", tool.name);
         }
         tool.resolved = locked.resolved.clone();
+        if !locked.repo.is_empty() {
+            tool.repo = locked.repo.clone();
+        }
         tool.asset = locked.asset.clone();
+        if !locked.binary_name.is_empty() {
+            tool.binary_name = locked.binary_name.clone();
+        }
         tool.sha256 = locked.sha256.clone();
     }
     for name in lockfile.tools.keys() {
@@ -376,6 +382,11 @@ fn write_simulation_files(
 ) -> Result<SimulatePlan> {
     let run_dir = resolved.project_root.join(".phoxal").join("run");
     crate::run_view::assemble(&resolved.project_root, &resolved.resolved, &run_dir)?;
+    crate::simulator_staging::stage_webots_artifacts(
+        &resolved.project_root,
+        &resolved.resolved,
+        &run_dir,
+    )?;
     let native_tools = native_tool_labels(options);
     let compose_path = run_dir.join("docker-compose.yml");
     fs::write(
@@ -403,6 +414,10 @@ fn write_simulation_files(
     }
 
     let mut written_files = collect_files_under(&run_dir)?;
+    let webots_dir = resolved.project_root.join(".phoxal").join("webots");
+    if webots_dir.is_dir() {
+        written_files.extend(collect_files_under(&webots_dir)?);
+    }
     if mode == SimulateMode::DryRun {
         written_files.push(state_path.clone());
     }
@@ -437,7 +452,7 @@ fn write_dry_run_state(
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let world = resolve_project_path(&resolved.project_root, &resolved.resolved.sim_world);
+    let world = staged_webots_world_path(&resolved.project_root);
     let processes = native_tools
         .iter()
         .map(|label| DryRunProcess {
@@ -485,21 +500,16 @@ async fn execute_plan(plan: &SimulatePlan) -> Result<()> {
     wait_for_router().await?;
 
     let mut processes = crate::process::SpawnedProcesses::new();
-    spawn_cached_tool(
-        &plan.project_root,
-        "simulator_webots_controller",
-        &mut processes,
-    )?;
-    spawn_cached_tool(
-        &plan.project_root,
-        "simulator_webots_supervisor",
-        &mut processes,
-    )?;
     if plan.native_tools.iter().any(|tool| tool == "rerun_proxy") {
-        spawn_cached_tool(&plan.project_root, "rerun_proxy", &mut processes)?;
+        spawn_cached_tool(
+            &plan.project_root,
+            &plan.resolved,
+            "rerun_proxy",
+            &mut processes,
+        )?;
     }
     if plan.native_tools.iter().any(|tool| tool == "joypad") {
-        spawn_cached_tool(&plan.project_root, "joypad", &mut processes)?;
+        spawn_cached_tool(&plan.project_root, &plan.resolved, "joypad", &mut processes)?;
     }
     spawn_webots(&plan.project_root, &plan.resolved, &mut processes)?;
     processes.write_state(&plan.state_path)?;
@@ -595,6 +605,7 @@ async fn wait_for_router() -> Result<()> {
 
 fn spawn_cached_tool(
     project_root: &Path,
+    resolved: &ResolvedRobot,
     tool_name: &str,
     processes: &mut crate::process::SpawnedProcesses,
 ) -> Result<()> {
@@ -608,23 +619,34 @@ fn spawn_cached_tool(
     let binary = newest_cached_binary(&cache_dir, tool_name)
         .with_context(|| format!("failed to find cached binary for {tool_name}"))?;
     let mut command = ProcessCommand::new(binary);
-    command.env("PHOXAL_BUS_ROUTER", "tcp/127.0.0.1:7447");
+    command.env("ROBOT_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447");
+    command.env("ROBOT_ID", &resolved.robot.identity.id);
+    command.env("ROBOT_NAMESPACE", &resolved.robot.identity.namespace);
     processes.spawn(tool_name, &mut command)
 }
 
 fn spawn_webots(
     project_root: &Path,
-    resolved: &ResolvedRobot,
+    _resolved: &ResolvedRobot,
     processes: &mut crate::process::SpawnedProcesses,
 ) -> Result<()> {
-    let world = resolve_project_path(project_root, &resolved.sim_world);
+    let world = staged_webots_world_path(project_root);
     let mut command = ProcessCommand::new("webots");
     command.arg(world);
     processes.spawn("webots", &mut command)
 }
 
+fn staged_webots_world_path(project_root: &Path) -> PathBuf {
+    project_root
+        .join(".phoxal")
+        .join("webots")
+        .join("worlds")
+        .join("default.wbt")
+}
+
 fn newest_cached_binary(cache_dir: &Path, tool_name: &str) -> Result<PathBuf> {
     let mut candidates = Vec::new();
+    let normalized_tool_name = tool_name.replace('_', "-");
     for version in fs::read_dir(cache_dir)
         .with_context(|| format!("failed to read {}", cache_dir.display()))?
     {
@@ -641,7 +663,7 @@ fn newest_cached_binary(cache_dir: &Path, tool_name: &str) -> Result<PathBuf> {
             if path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.contains(tool_name))
+                .is_some_and(|name| name.replace('_', "-").contains(&normalized_tool_name))
             {
                 candidates.push(path);
             }
@@ -652,10 +674,10 @@ fn newest_cached_binary(cache_dir: &Path, tool_name: &str) -> Result<PathBuf> {
 }
 
 fn native_tool_labels(options: SimulateOptions) -> Vec<String> {
-    let mut labels = vec![
-        "simulator_webots_controller".to_string(),
-        "simulator_webots_supervisor".to_string(),
-    ];
+    // Webots owns simulator controller/supervisor processes via
+    // `.phoxal/webots/controllers/<name>/<name>`, so state.yaml only records
+    // processes phoxal-cli starts directly.
+    let mut labels = Vec::new();
     if options.rerun_proxy {
         labels.push("rerun_proxy".to_string());
     }

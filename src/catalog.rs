@@ -1,10 +1,7 @@
-use std::collections::BTreeMap;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlatformRuntimeEntry {
     pub name: &'static str,
     pub image_repo: &'static str,
-    pub default_env: &'static [(&'static str, &'static str)],
     pub uses_supervisor_api: bool,
     pub wires_to_router: bool,
 }
@@ -19,22 +16,45 @@ pub struct PlatformRuntimeCatalog {
 pub struct ToolVersion {
     pub name: &'static str,
     pub version: &'static str,
+    pub repo: &'static str,
+    pub artifact_template: &'static str,
+    pub binary_template: &'static str,
 }
 
 pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
     ToolVersion {
-        name: "simulator_webots",
-        version: "0.0.0-dev",
+        name: "simulator_webots_controller",
+        version: "0.1.0",
+        repo: "phoxal/simulator",
+        artifact_template: "phoxal-simulator-{version}-{target}.tar.gz",
+        binary_template: "phoxal-simulator-webots-controller-{target}",
+    },
+    ToolVersion {
+        name: "simulator_webots_supervisor",
+        version: "0.1.0",
+        repo: "phoxal/simulator",
+        artifact_template: "phoxal-simulator-{version}-{target}.tar.gz",
+        binary_template: "phoxal-simulator-webots-supervisor-{target}",
     },
     ToolVersion {
         name: "rerun_proxy",
         version: "0.0.0-dev",
+        repo: "phoxal/operator",
+        artifact_template: "rerun-proxy-{version}-{target}.tar.gz",
+        binary_template: "rerun-proxy-{target}",
     },
     ToolVersion {
         name: "joypad",
         version: "0.0.0-dev",
+        repo: "phoxal/joypad",
+        artifact_template: "joypad-{version}-{target}.tar.gz",
+        binary_template: "joypad-{target}",
     },
 ];
+
+pub fn lookup_tool_version(name: &str) -> Option<&'static ToolVersion> {
+    DEFAULT_TOOL_VERSIONS.iter().find(|tool| tool.name == name)
+}
 
 pub const CATALOG: PlatformRuntimeCatalog = PlatformRuntimeCatalog {
     supported_runtimes_version_req: "*",
@@ -74,7 +94,6 @@ const fn entry(
     PlatformRuntimeEntry {
         name,
         image_repo,
-        default_env: &[("PHOXAL_ROBOT_DIR", "/robot")],
         uses_supervisor_api,
         wires_to_router,
     }
@@ -91,14 +110,5 @@ impl PlatformRuntimeCatalog {
 
     pub fn names_vec(&self) -> Vec<&'static str> {
         self.names().collect()
-    }
-
-    pub fn env_by_runtime(
-        &self,
-    ) -> BTreeMap<&'static str, &'static [(&'static str, &'static str)]> {
-        self.entries
-            .iter()
-            .map(|entry| (entry.name, entry.default_env))
-            .collect()
     }
 }

@@ -1,5 +1,7 @@
 use std::fs;
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -8,7 +10,7 @@ use semver::{Version, VersionReq};
 use crate::AppContext;
 use crate::shell;
 
-use crate::lockfile::{LOCKFILE_NAME, Lockfile};
+use crate::lockfile::{LOCKFILE_NAME, LockedTool, Lockfile};
 
 #[derive(Debug, Args)]
 pub struct Doctor {
@@ -87,7 +89,8 @@ fn report_tool_cache(app: &AppContext) -> Result<()> {
     }
     let lockfile = Lockfile::read(&lock_path)?;
     for (name, tool) in lockfile.tools {
-        let path = tool_cache_path(app.project.root(), &name, &tool.resolved, &tool.asset);
+        let binary_name = tool_binary_name(&tool);
+        let path = tool_cache_path(app.project.root(), &name, &tool.resolved, binary_name);
         if path.is_file() {
             app.ui.success(format!("tool {name}: {}", path.display()));
         } else {
@@ -107,50 +110,147 @@ async fn download_tools(app: &AppContext) -> Result<()> {
         )
     })?;
     for (name, tool) in lockfile.tools {
-        let destination = tool_cache_path(app.project.root(), &name, &tool.resolved, &tool.asset);
+        let binary_name = tool_binary_name(&tool);
+        let destination = tool_cache_path(app.project.root(), &name, &tool.resolved, binary_name);
         if destination.is_file() {
             app.ui.success(format!("tool {name}: already cached"));
             continue;
         }
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+        if tool.sha256.is_empty() {
+            app.ui.warn(format!(
+                "tool {name}: {} is unpublished; skipping placeholder",
+                tool.asset
+            ));
+            continue;
+        }
+        if tool.repo.is_empty() || tool.binary_name.is_empty() {
+            app.ui.warn(format!(
+                "tool {name}: lockfile is missing repo/binary metadata; run update --pin-digests"
+            ));
+            continue;
         }
         let url = format!(
-            "https://github.com/phoxal/{name}/releases/download/v{}/{}",
-            tool.resolved, tool.asset
+            "https://github.com/{}/releases/download/v{}/{}",
+            tool.repo, tool.resolved, tool.asset
         );
-        app.ui.info(format!("downloading {url}"));
-        let bytes = reqwest::get(&url).await?.bytes().await?;
+        let download =
+            download_cache_path(app.project.root(), &tool.repo, &tool.resolved, &tool.asset);
+        let bytes = read_or_download(app, &download, &url).await?;
         let actual = sha256_hex(&bytes);
         if actual != tool.sha256 {
             bail!(
-                "downloaded tool {name} checksum mismatch: expected {}, got {}",
+                "downloaded tool {name} checksum mismatch for {}: expected {}, got {}",
+                tool.asset,
                 tool.sha256,
                 actual
             );
         }
-        fs::write(&destination, bytes)
-            .with_context(|| format!("failed to write {}", destination.display()))?;
+        extract_binary(&bytes, &tool.binary_name, &destination).with_context(|| {
+            format!("failed to extract {} from {}", tool.binary_name, tool.asset)
+        })?;
         app.ui
             .success(format!("tool {name}: {}", destination.display()));
     }
     Ok(())
 }
 
-fn tool_cache_path(
-    project_root: &Path,
-    name: &str,
-    version: &str,
-    asset: &str,
-) -> std::path::PathBuf {
+async fn read_or_download(app: &AppContext, path: &Path, url: &str) -> Result<Vec<u8>> {
+    if path.is_file() {
+        return fs::read(path).with_context(|| format!("failed to read {}", path.display()));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    app.ui.info(format!("downloading {url}"));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("phoxal-cli")
+        .build()?;
+    let mut req = client.get(url);
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        req = req.bearer_auth(token);
+    }
+    let response = req.send().await?;
+    if !response.status().is_success() {
+        bail!("tool download returned {}", response.status());
+    }
+    let bytes = response.bytes().await?.to_vec();
+    fs::write(path, &bytes).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(bytes)
+}
+
+fn extract_binary(bytes: &[u8], binary_name: &str, destination: &Path) -> Result<()> {
+    let decoder = flate2::read::GzDecoder::new(bytes);
+    let mut archive = tar::Archive::new(decoder);
+    for entry in archive.entries().context("failed to read tar archive")? {
+        let mut entry = entry.context("failed to read tar entry")?;
+        let path = entry.path().context("failed to read tar entry path")?;
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name != binary_name {
+            continue;
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let mut extracted = Vec::new();
+        entry
+            .read_to_end(&mut extracted)
+            .context("failed to read binary from tar entry")?;
+        fs::write(destination, extracted)
+            .with_context(|| format!("failed to write {}", destination.display()))?;
+        make_executable(destination)?;
+        return Ok(());
+    }
+    bail!("tar archive did not contain {binary_name}")
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)
+        .with_context(|| format!("failed to stat {}", path.display()))?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)
+        .with_context(|| format!("failed to chmod {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn tool_cache_path(project_root: &Path, name: &str, version: &str, binary_name: &str) -> PathBuf {
     project_root
         .join(".phoxal")
         .join("cache")
         .join("tools")
         .join(name)
         .join(version)
+        .join(binary_name)
+}
+
+fn download_cache_path(project_root: &Path, repo: &str, version: &str, asset: &str) -> PathBuf {
+    project_root
+        .join(".phoxal")
+        .join("cache")
+        .join("downloads")
+        .join(repo)
+        .join(format!("v{version}"))
         .join(asset)
+}
+
+fn tool_binary_name(tool: &LockedTool) -> &str {
+    if tool.binary_name.is_empty() {
+        &tool.asset
+    } else {
+        &tool.binary_name
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
