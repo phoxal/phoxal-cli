@@ -24,14 +24,14 @@ pub struct ToolVersion {
 pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
     ToolVersion {
         name: "simulator_webots_controller",
-        version: "0.1.0",
+        version: "0.2.0",
         repo: "phoxal/simulator",
         artifact_template: "phoxal-simulator-{version}-{target}.tar.gz",
         binary_template: "phoxal-simulator-webots-controller-{target}",
     },
     ToolVersion {
         name: "simulator_webots_supervisor",
-        version: "0.1.0",
+        version: "0.2.0",
         repo: "phoxal/simulator",
         artifact_template: "phoxal-simulator-{version}-{target}.tar.gz",
         binary_template: "phoxal-simulator-webots-supervisor-{target}",
