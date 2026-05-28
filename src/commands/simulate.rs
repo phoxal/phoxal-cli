@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -13,7 +13,11 @@ use tokio::time::sleep;
 use crate::AppContext;
 use crate::catalog::CATALOG;
 use crate::lockfile::{LOCKFILE_NAME, Lockfile};
-use crate::resolver::{ResolveOptions, ResolvedComponentSource, ResolvedRobot};
+use crate::releases::ReleasesSnapshot;
+use crate::resolver::{
+    ReleaseSource, ResolveOptions, ResolvedComponentSource, ResolvedRobot,
+    resolve_with_release_source, resolve_with_releases,
+};
 use crate::shell;
 
 #[derive(Debug, Args)]
@@ -115,12 +119,19 @@ pub async fn run(
 ) -> Result<SimulatePlan> {
     match mode {
         SimulateMode::DryRun => {
-            let plan = prepare(app.project.root(), options)?;
+            let project_root = app.project.root().to_path_buf();
+            let plan = tokio::task::spawn_blocking(move || prepare(&project_root, options))
+                .await
+                .context("simulate dry-run worker failed")??;
             report_plan_only(&plan);
             Ok(plan)
         }
         SimulateMode::Live => {
-            let resolved = resolve_project(app.project.root(), options)?;
+            let project_root = app.project.root().to_path_buf();
+            let resolved =
+                tokio::task::spawn_blocking(move || resolve_project(&project_root, options))
+                    .await
+                    .context("simulate resolver worker failed")??;
             pull_platform_images(app, &resolved.resolved)?;
             let user_images = build_user_runtimes(&resolved.project_root, &resolved.resolved)?;
             build_component_drivers(&resolved.project_root, &resolved.resolved)?;
@@ -136,7 +147,24 @@ pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<Simulat
     write_simulation_files(resolved, options, &BTreeMap::new(), SimulateMode::DryRun)
 }
 
+pub fn prepare_with_releases(
+    project_start: &Path,
+    options: SimulateOptions,
+    releases: &ReleasesSnapshot,
+) -> Result<SimulatePlan> {
+    let resolved = resolve_project_with_releases(project_start, options, Some(releases))?;
+    write_simulation_files(resolved, options, &BTreeMap::new(), SimulateMode::DryRun)
+}
+
 fn resolve_project(project_start: &Path, options: SimulateOptions) -> Result<ResolvedSimulation> {
+    resolve_project_with_releases(project_start, options, None)
+}
+
+fn resolve_project_with_releases(
+    project_start: &Path,
+    options: SimulateOptions,
+    releases: Option<&ReleasesSnapshot>,
+) -> Result<ResolvedSimulation> {
     let robot_path = crate::resolver::discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
     let project_root = robot_path
@@ -145,50 +173,84 @@ fn resolve_project(project_start: &Path, options: SimulateOptions) -> Result<Res
         .to_path_buf();
     let robot = crate::resolver::load_robot(&robot_path)?;
     let lock_path = project_root.join(LOCKFILE_NAME);
-    if lock_path.is_file() {
-        let lockfile = Lockfile::read(&lock_path)?;
-        let mut resolved = crate::resolver::resolve(
+    let lockfile = if lock_path.is_file() {
+        Some(Lockfile::read(&lock_path)?)
+    } else {
+        None
+    };
+    if options.locked {
+        let lockfile = lockfile
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("{} is required by --locked", lock_path.display()))?;
+        let snapshot = releases_snapshot_from_lockfile(lockfile)?;
+        let mut resolved = resolve_with_releases(
             &robot,
             &CATALOG,
             ResolveOptions {
-                locked: options.locked,
+                locked: true,
                 allow_floating: true,
                 resolve_external_artifacts: false,
             },
+            &snapshot,
         )?;
-        match apply_lockfile(&lockfile, &mut resolved) {
-            Ok(()) => {
-                return Ok(ResolvedSimulation {
-                    robot_path,
-                    project_root,
-                    resolved,
-                    lockfile_written: None,
-                });
-            }
-            Err(error) if options.locked => {
-                return Err(error).with_context(|| format!("{} is stale", lock_path.display()));
-            }
-            Err(_) => {}
-        }
-    } else if options.locked {
-        bail!("{} is required by --locked", lock_path.display());
+        apply_lockfile(lockfile, &mut resolved)
+            .with_context(|| format!("{} is stale", lock_path.display()))?;
+        return Ok(ResolvedSimulation {
+            robot_path,
+            project_root,
+            resolved,
+            lockfile_written: None,
+        });
     }
 
-    let resolved = crate::resolver::resolve(
-        &robot,
-        &CATALOG,
-        ResolveOptions {
-            locked: false,
-            allow_floating: true,
-            resolve_external_artifacts: options.resolve_external_artifacts,
-        },
-    )?;
+    let resolve_options = ResolveOptions {
+        locked: false,
+        allow_floating: true,
+        resolve_external_artifacts: options.resolve_external_artifacts,
+    };
+    let resolved = if let Some(releases) = releases {
+        resolve_with_releases(&robot, &CATALOG, resolve_options, releases)?
+    } else {
+        let cache_dir = project_root.join(".phoxal").join("cache");
+        resolve_with_release_source(
+            &robot,
+            &CATALOG,
+            resolve_options,
+            ReleaseSource::CacheDir(&cache_dir),
+        )?
+    };
+    if let Some(lockfile) = &lockfile {
+        let mut locked_resolved = resolved.clone();
+        if apply_lockfile(lockfile, &mut locked_resolved).is_ok() {
+            return Ok(ResolvedSimulation {
+                robot_path,
+                project_root,
+                resolved: locked_resolved,
+                lockfile_written: None,
+            });
+        }
+    }
     let lockfile_written = reconcile_lockfile(&project_root, &resolved, false)?;
     Ok(ResolvedSimulation {
         robot_path,
         project_root,
         resolved,
         lockfile_written,
+    })
+}
+
+fn releases_snapshot_from_lockfile(lockfile: &Lockfile) -> Result<ReleasesSnapshot> {
+    let resolved_version = lockfile
+        .phoxal_runtimes
+        .resolved
+        .parse::<semver::Version>()?;
+    Ok(ReleasesSnapshot {
+        fetched_at: lockfile
+            .phoxal_runtimes
+            .releases_fetched_at
+            .map(SystemTime::from)
+            .unwrap_or(SystemTime::UNIX_EPOCH),
+        versions: vec![resolved_version.to_string()],
     })
 }
 
@@ -399,6 +461,20 @@ fn write_dry_run_state(
 fn report_plan_only(plan: &SimulatePlan) {
     for path in &plan.written_files {
         println!("wrote {}", path.display());
+    }
+    println!(
+        "runtime set: {} (requested {})",
+        plan.resolved.runtime_set_version, plan.resolved.requested_runtime_set
+    );
+    println!(
+        "platform runtimes ({}):",
+        plan.resolved.platform_runtimes.len()
+    );
+    for runtime in &plan.resolved.platform_runtimes {
+        println!(
+            "  - {} -> {}:{}",
+            runtime.name, runtime.image_repo, runtime.version
+        );
     }
     println!("compose file: {}", plan.compose_path.display());
     println!("dry-run — no containers or processes started");

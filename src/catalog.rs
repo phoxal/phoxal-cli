@@ -15,8 +15,6 @@ pub struct PlatformRuntimeCatalog {
     pub entries: &'static [PlatformRuntimeEntry],
 }
 
-pub const KNOWN_RUNTIME_SET_RELEASES: &[&str] = &["0.1.0", "0.1.1", "0.1.2"];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolVersion {
     pub name: &'static str,
@@ -39,7 +37,7 @@ pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
 ];
 
 pub const CATALOG: PlatformRuntimeCatalog = PlatformRuntimeCatalog {
-    supported_runtimes_version_req: "^0.1",
+    supported_runtimes_version_req: "*",
     entries: &[
         entry("router", "ghcr.io/phoxal/runtime-router", false, false),
         entry("asset", "ghcr.io/phoxal/runtime-asset", false, true),

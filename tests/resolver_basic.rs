@@ -1,13 +1,15 @@
 use phoxal_cli::catalog::CATALOG;
-use phoxal_cli::resolver::{ResolveOptions, resolve};
+use phoxal_cli::releases::ReleasesSnapshot;
+use phoxal_cli::resolver::{ResolveOptions, resolve_with_releases};
 use phoxal_utils_robot::Robot;
 
 #[test]
 fn resolves_minimal_robot_to_full_platform_set() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
-    let resolved = resolve(&robot, &CATALOG, offline_options())?;
+    let snapshot = releases_snapshot();
+    let resolved = resolve_with_releases(&robot, &CATALOG, offline_options(), &snapshot)?;
 
-    assert_eq!(resolved.runtime_set_version.to_string(), "0.1.2");
+    assert_eq!(resolved.runtime_set_version.to_string(), "0.0.0-dev");
     assert_eq!(
         resolved
             .platform_runtimes
@@ -29,11 +31,13 @@ fn resolves_minimal_robot_to_full_platform_set() -> anyhow::Result<()> {
 #[test]
 fn unknown_platform_override_fails() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
-        "phoxal_runtimes:\n  version: \"^0.1\"",
-        "phoxal_runtimes:\n  version: \"^0.1\"\n  overrides:\n    nope:\n      version: \"0.1.0\"",
+        "phoxal_runtimes:\n  version: \"latest\"",
+        "phoxal_runtimes:\n  version: \"latest\"\n  overrides:\n    nope:\n      version: \"0.0.0-dev\"",
     ))?;
 
-    let error = resolve(&robot, &CATALOG, offline_options()).expect_err("override should fail");
+    let snapshot = releases_snapshot();
+    let error = resolve_with_releases(&robot, &CATALOG, offline_options(), &snapshot)
+        .expect_err("override should fail");
     assert!(error.to_string().contains("not a platform runtime"));
 
     Ok(())
@@ -46,7 +50,9 @@ fn user_runtime_shadowing_platform_fails() -> anyhow::Result<()> {
         "user_runtimes:\n  drive:\n    path: ./runtimes/drive\n\nsim:\n  world: sim/worlds/test.wbt",
     ))?;
 
-    let error = resolve(&robot, &CATALOG, offline_options()).expect_err("shadowing should fail");
+    let snapshot = releases_snapshot();
+    let error = resolve_with_releases(&robot, &CATALOG, offline_options(), &snapshot)
+        .expect_err("shadowing should fail");
     assert!(error.to_string().contains("shadows a platform runtime"));
 
     Ok(())
@@ -59,8 +65,9 @@ fn missing_instance_source_fails() -> anyhow::Result<()> {
         "  sources: {}",
     ))?;
 
-    let error =
-        resolve(&robot, &CATALOG, offline_options()).expect_err("missing source should fail");
+    let snapshot = releases_snapshot();
+    let error = resolve_with_releases(&robot, &CATALOG, offline_options(), &snapshot)
+        .expect_err("missing source should fail");
     assert!(error.to_string().contains("references missing source"));
 
     Ok(())
@@ -86,7 +93,7 @@ identity:
 structure: structure.urdf
 
 phoxal_runtimes:
-  version: "^0.1"
+  version: "latest"
 
 sim:
   world: sim/worlds/test.wbt
@@ -114,4 +121,11 @@ components:
       mount_link: right_wheel_mount
 "#
     .to_string()
+}
+
+fn releases_snapshot() -> ReleasesSnapshot {
+    ReleasesSnapshot {
+        fetched_at: std::time::SystemTime::UNIX_EPOCH,
+        versions: vec!["0.0.0-dev".into()],
+    }
 }

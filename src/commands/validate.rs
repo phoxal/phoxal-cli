@@ -1,10 +1,11 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use clap::{Args, ValueEnum};
+use phoxal_utils_robot::Robot;
+use semver::{Version, VersionReq};
 
 use crate::AppContext;
 
 use crate::catalog::CATALOG;
-use crate::resolver::{ResolveOptions, resolve};
 
 #[derive(Debug, Args)]
 pub struct Validate {
@@ -28,79 +29,90 @@ impl Validate {
         robot
             .validate_with(&platform_names)
             .map_err(|errors| anyhow!("Robot errors:\n{}", join_errors(errors)))?;
-        let resolved = resolve(
-            &robot,
-            &CATALOG,
-            ResolveOptions {
-                resolve_external_artifacts: false,
-                ..ResolveOptions::default()
-            },
-        )?;
+        validate_runtime_selector(&robot.phoxal_runtimes.version)?;
         app.ui.success(format!(
             "validated {} with {} platform runtimes",
             robot_path.display(),
-            resolved.platform_runtimes.len()
+            CATALOG.entries.len()
         ));
         if self.report {
             match self.report_format {
-                ReportFormat::Text => print_text_report(&resolved),
-                ReportFormat::Json => print_json_report(&resolved)?,
+                ReportFormat::Text => print_text_report(&robot),
+                ReportFormat::Json => print_json_report(&robot)?,
             }
         }
         Ok(())
     }
 }
 
-fn print_text_report(resolved: &crate::resolver::ResolvedRobot) {
-    println!("robot: {}", resolved.robot.identity.id);
-    println!("runtime_set: {}", resolved.runtime_set_version);
+fn validate_runtime_selector(selector: &str) -> Result<()> {
+    if selector == "latest" || Version::parse(selector).is_ok() {
+        return Ok(());
+    }
+    VersionReq::parse(selector)
+        .map(|_| ())
+        .with_context(|| format!("invalid phoxal_runtimes.version selector '{selector}'"))
+}
+
+fn print_text_report(robot: &Robot) {
+    println!("robot: {}", robot.identity.id);
+    println!("runtime_set: {}", robot.phoxal_runtimes.version);
     println!("platform_runtimes:");
-    for runtime in &resolved.platform_runtimes {
-        println!(
-            "  - {} -> {}:{}",
-            runtime.name, runtime.image_repo, runtime.version
-        );
+    for runtime in CATALOG.entries {
+        let version = robot
+            .phoxal_runtimes
+            .overrides
+            .get(runtime.name)
+            .and_then(|runtime| runtime.version.as_deref())
+            .unwrap_or(&robot.phoxal_runtimes.version);
+        println!("  - {} -> {}:{}", runtime.name, runtime.image_repo, version);
     }
     println!("user_runtimes:");
-    for runtime in &resolved.user_runtimes {
-        println!("  - {} -> {}", runtime.name, runtime.path.display());
+    for (name, runtime) in &robot.user_runtimes {
+        println!("  - {} -> {}", name, runtime.path.display());
     }
     println!("components:");
-    for component in &resolved.components {
-        let driver = if component.has_driver {
+    for (instance_name, instance) in &robot.components.instances {
+        let driver = if instance.driver.is_some() {
             "driver"
         } else {
             "no-driver"
         };
         println!(
             "  - {} ({}) from {}",
-            component.instance, driver, component.source_name
+            instance_name, driver, instance.component
         );
     }
 }
 
-fn print_json_report(resolved: &crate::resolver::ResolvedRobot) -> Result<()> {
+fn print_json_report(robot: &Robot) -> Result<()> {
     let report = serde_json::json!({
-        "robot": resolved.robot.identity.id,
-        "runtime_set": resolved.runtime_set_version.to_string(),
-        "platform_runtimes": resolved.platform_runtimes.iter().map(|runtime| {
+        "robot": robot.identity.id,
+        "runtime_set": robot.phoxal_runtimes.version,
+        "platform_runtimes": CATALOG.entries.iter().map(|runtime| {
+            let version = robot
+                .phoxal_runtimes
+                .overrides
+                .get(runtime.name)
+                .and_then(|runtime| runtime.version.as_deref())
+                .unwrap_or(&robot.phoxal_runtimes.version);
             serde_json::json!({
                 "name": runtime.name,
                 "image_repo": runtime.image_repo,
-                "version": runtime.version.to_string(),
+                "version": version,
             })
         }).collect::<Vec<_>>(),
-        "user_runtimes": resolved.user_runtimes.iter().map(|runtime| {
+        "user_runtimes": robot.user_runtimes.iter().map(|(name, runtime)| {
             serde_json::json!({
-                "name": runtime.name,
+                "name": name,
                 "path": runtime.path,
             })
         }).collect::<Vec<_>>(),
-        "components": resolved.components.iter().map(|component| {
+        "components": robot.components.instances.iter().map(|(instance_name, instance)| {
             serde_json::json!({
-                "instance": component.instance,
-                "source": component.source_name,
-                "has_driver": component.has_driver,
+                "instance": instance_name,
+                "source": instance.component,
+                "has_driver": instance.driver.is_some(),
             })
         }).collect::<Vec<_>>(),
     });

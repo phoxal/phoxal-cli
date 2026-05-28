@@ -1,19 +1,23 @@
 use std::fs;
 
 use phoxal_cli::catalog::{CATALOG, DEFAULT_TOOL_VERSIONS};
-use phoxal_cli::commands::update::{UpdateOptions, run};
+use phoxal_cli::commands::update::{UpdateOptions, run_with_releases};
 use phoxal_cli::lockfile::{LOCKFILE_NAME, Lockfile};
+use phoxal_cli::releases::ReleasesSnapshot;
 
 #[test]
 fn update_creates_idempotent_lockfile() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     write_robot_project(temp.path())?;
 
-    let summary = run(
+    let snapshot = releases_snapshot();
+    let summary = run_with_releases(
         temp.path(),
         UpdateOptions {
             resolve_external_artifacts: false,
+            refresh_releases: false,
         },
+        &snapshot,
     )?;
     let lock_path = temp.path().join(LOCKFILE_NAME);
     assert_eq!(summary.lockfile_path, lock_path);
@@ -21,18 +25,21 @@ fn update_creates_idempotent_lockfile() -> anyhow::Result<()> {
 
     let lockfile = Lockfile::read(&lock_path)?;
     assert_eq!(lockfile.schema_version, 1);
-    assert_eq!(lockfile.phoxal_runtimes.requested, "^0.1");
-    assert_eq!(lockfile.phoxal_runtimes.resolved, "0.1.2");
+    assert_eq!(lockfile.phoxal_runtimes.requested, "latest");
+    assert_eq!(lockfile.phoxal_runtimes.resolved, "0.0.0-dev");
+    assert!(lockfile.phoxal_runtimes.releases_fetched_at.is_some());
     assert_eq!(lockfile.phoxal_runtimes.images.len(), CATALOG.entries.len());
     assert!(lockfile.components.is_empty());
     assert_eq!(lockfile.tools.len(), DEFAULT_TOOL_VERSIONS.len());
 
     let first = fs::read_to_string(&lock_path)?;
-    run(
+    run_with_releases(
         temp.path(),
         UpdateOptions {
             resolve_external_artifacts: false,
+            refresh_releases: false,
         },
+        &snapshot,
     )?;
     let second = fs::read_to_string(&lock_path)?;
     assert_eq!(second, first);
@@ -62,7 +69,7 @@ identity:
 structure: structure.urdf
 
 phoxal_runtimes:
-  version: "^0.1"
+  version: "latest"
 
 sim:
   world: sim/worlds/test.wbt
@@ -81,4 +88,11 @@ components:
   sources: {}
   instances: {}
 "#
+}
+
+fn releases_snapshot() -> ReleasesSnapshot {
+    ReleasesSnapshot {
+        fetched_at: std::time::SystemTime::UNIX_EPOCH,
+        versions: vec!["0.0.0-dev".into()],
+    }
 }

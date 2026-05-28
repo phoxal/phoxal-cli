@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::resolver::{ResolvedComponentSource, ResolvedRobot};
@@ -23,6 +24,7 @@ pub struct Lockfile {
 pub struct LockedPhoxalRuntimes {
     pub requested: String,
     pub resolved: String,
+    pub releases_fetched_at: Option<DateTime<Utc>>,
     pub images: BTreeMap<String, String>,
 }
 
@@ -92,6 +94,7 @@ impl Lockfile {
             phoxal_runtimes: LockedPhoxalRuntimes {
                 requested: resolved.requested_runtime_set.clone(),
                 resolved: resolved.runtime_set_version.to_string(),
+                releases_fetched_at: resolved.releases_fetched_at.map(DateTime::<Utc>::from),
                 images,
             },
             components,

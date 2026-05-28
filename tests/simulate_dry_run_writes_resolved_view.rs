@@ -1,13 +1,15 @@
 use std::fs;
 
-use phoxal_cli::commands::simulate::{SimulateOptions, prepare};
+use phoxal_cli::commands::simulate::{SimulateOptions, prepare_with_releases};
+use phoxal_cli::releases::ReleasesSnapshot;
 
 #[test]
 fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     write_robot_project(temp.path())?;
 
-    let plan = prepare(
+    let snapshot = releases_snapshot();
+    let plan = prepare_with_releases(
         temp.path(),
         SimulateOptions {
             rerun_proxy: true,
@@ -15,6 +17,7 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
             resolve_external_artifacts: false,
             ..SimulateOptions::default()
         },
+        &snapshot,
     )?;
 
     assert!(temp.path().join(".phoxal/run/robot.yaml").is_file());
@@ -65,7 +68,7 @@ identity:
 structure: structure.urdf
 
 phoxal_runtimes:
-  version: "^0.1"
+  version: "latest"
 
 sim:
   world: sim/worlds/test.wbt
@@ -84,4 +87,11 @@ components:
   sources: {}
   instances: {}
 "#
+}
+
+fn releases_snapshot() -> ReleasesSnapshot {
+    ReleasesSnapshot {
+        fetched_at: std::time::SystemTime::UNIX_EPOCH,
+        versions: vec!["0.0.0-dev".into()],
+    }
 }

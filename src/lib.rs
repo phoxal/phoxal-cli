@@ -7,6 +7,7 @@ pub mod context;
 pub mod lockfile;
 pub mod process;
 pub mod project;
+pub mod releases;
 pub mod resolver;
 pub mod run_view;
 pub mod shell;

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal_utils_robot::{ComponentSource, Robot};
@@ -8,7 +9,8 @@ use semver::{Version, VersionReq};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::catalog::{DEFAULT_TOOL_VERSIONS, KNOWN_RUNTIME_SET_RELEASES, PlatformRuntimeCatalog};
+use crate::catalog::{DEFAULT_TOOL_VERSIONS, PlatformRuntimeCatalog};
+use crate::releases::{self, ReleasesSnapshot};
 use crate::shell;
 
 const ROBOT_FILE: &str = "robot.yaml";
@@ -35,11 +37,19 @@ pub struct ResolvedRobot {
     pub robot: Robot,
     pub runtime_set_version: Version,
     pub requested_runtime_set: String,
+    pub releases_fetched_at: Option<SystemTime>,
     pub platform_runtimes: Vec<ResolvedPlatformRuntime>,
     pub user_runtimes: Vec<ResolvedUserRuntime>,
     pub components: Vec<ResolvedComponent>,
     pub tools: Vec<ResolvedTool>,
     pub sim_world: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ReleaseSource<'a> {
+    Snapshot(&'a ReleasesSnapshot),
+    CacheDir(&'a Path),
+    RefreshCache(&'a Path),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,11 +130,27 @@ pub fn load_robot(path: &Path) -> Result<Robot> {
     Robot::read_from_string(&contents)
 }
 
-pub fn resolve(
+pub fn resolve_with_release_source(
     robot: &Robot,
     catalog: &PlatformRuntimeCatalog,
     options: ResolveOptions,
+    release_source: ReleaseSource<'_>,
 ) -> Result<ResolvedRobot> {
+    let snapshot = match release_source {
+        ReleaseSource::Snapshot(snapshot) => snapshot.clone(),
+        ReleaseSource::CacheDir(cache_dir) => releases::known_releases_snapshot(cache_dir)?,
+        ReleaseSource::RefreshCache(cache_dir) => releases::refresh(cache_dir)?,
+    };
+    resolve_with_releases(robot, catalog, options, &snapshot)
+}
+
+pub fn resolve_with_releases(
+    robot: &Robot,
+    catalog: &PlatformRuntimeCatalog,
+    options: ResolveOptions,
+    releases: &ReleasesSnapshot,
+) -> Result<ResolvedRobot> {
+    let release_versions = releases.versions_semver()?;
     if !options.allow_floating && is_floating_selector(&robot.phoxal_runtimes.version) {
         bail!(
             "phoxal_runtimes.version '{}' is floating but floating resolution is disabled",
@@ -140,6 +166,7 @@ pub fn resolve(
     let runtime_set_version = select_runtime_set_version(
         &robot.phoxal_runtimes.version,
         catalog.supported_runtimes_version_req,
+        &release_versions,
     )?;
 
     let mut override_names = BTreeSet::new();
@@ -155,7 +182,9 @@ pub fn resolve(
         let version = match runtime_override
             .and_then(|runtime_override| runtime_override.version.as_deref())
         {
-            Some(version) => select_override_version(version, &runtime_set_version)?,
+            Some(version) => {
+                select_override_version(version, &runtime_set_version, &release_versions)?
+            }
             None => runtime_set_version.clone(),
         };
         let image_ref = format!("{image_repo}:{version}");
@@ -202,6 +231,7 @@ pub fn resolve(
         robot: robot.clone(),
         runtime_set_version,
         requested_runtime_set: robot.phoxal_runtimes.version.clone(),
+        releases_fetched_at: Some(releases.fetched_at),
         platform_runtimes,
         user_runtimes,
         components,
@@ -321,17 +351,22 @@ fn resolve_tools(robot: &Robot) -> Result<Vec<ResolvedTool>> {
         .collect())
 }
 
-fn select_runtime_set_version(requested: &str, cli_req: &str) -> Result<Version> {
+fn select_runtime_set_version(
+    requested: &str,
+    cli_req: &str,
+    releases: &[Version],
+) -> Result<Version> {
     let supported = VersionReq::parse(cli_req)
         .with_context(|| format!("invalid CLI supported runtime requirement {cli_req}"))?;
-    let releases = known_releases()?;
     if requested == "latest" {
-        return newest_matching(&releases, |version| supported.matches(version))
-            .with_context(|| format!("no known runtime releases match CLI support {cli_req}"));
+        return newest_matching(releases, |version| {
+            supported_matches(cli_req, &supported, version)
+        })
+        .with_context(|| format!("no known runtime releases match CLI support {cli_req}"));
     }
 
     if let Ok(exact) = Version::parse(requested) {
-        if supported.matches(&exact) && releases.contains(&exact) {
+        if supported_matches(cli_req, &supported, &exact) && releases.contains(&exact) {
             return Ok(exact);
         }
         bail!(
@@ -341,8 +376,8 @@ fn select_runtime_set_version(requested: &str, cli_req: &str) -> Result<Version>
 
     let user_req = VersionReq::parse(requested)
         .with_context(|| format!("invalid phoxal_runtimes.version selector '{requested}'"))?;
-    newest_matching(&releases, |version| {
-        supported.matches(version) && user_req.matches(version)
+    newest_matching(releases, |version| {
+        supported_matches(cli_req, &supported, version) && user_req.matches(version)
     })
     .with_context(|| {
         format!(
@@ -351,19 +386,24 @@ fn select_runtime_set_version(requested: &str, cli_req: &str) -> Result<Version>
     })
 }
 
-fn select_override_version(requested: &str, default_version: &Version) -> Result<Version> {
+fn select_override_version(
+    requested: &str,
+    default_version: &Version,
+    releases: &[Version],
+) -> Result<Version> {
     if requested == "latest" {
-        return known_releases()?
-            .into_iter()
+        return releases
+            .iter()
             .max()
-            .ok_or_else(|| anyhow!("no known runtime releases are embedded in phoxal-cli"));
+            .cloned()
+            .ok_or_else(|| anyhow!("no known runtime releases are available"));
     }
     if let Ok(version) = Version::parse(requested) {
         return Ok(version);
     }
     let req = VersionReq::parse(requested)
         .with_context(|| format!("invalid platform runtime override version '{requested}'"))?;
-    newest_matching(&known_releases()?, |version| req.matches(version))
+    newest_matching(releases, |version| req.matches(version))
         .or_else(|| {
             if req.matches(default_version) {
                 Some(default_version.clone())
@@ -374,21 +414,16 @@ fn select_override_version(requested: &str, default_version: &Version) -> Result
         .with_context(|| format!("no known runtime releases match override version {requested}"))
 }
 
-fn known_releases() -> Result<Vec<Version>> {
-    KNOWN_RUNTIME_SET_RELEASES
-        .iter()
-        .map(|release| {
-            Version::parse(release).with_context(|| format!("invalid embedded release {release}"))
-        })
-        .collect()
-}
-
 fn newest_matching(releases: &[Version], predicate: impl Fn(&Version) -> bool) -> Option<Version> {
     releases
         .iter()
         .filter(|version| predicate(version))
         .max()
         .cloned()
+}
+
+fn supported_matches(cli_req: &str, supported: &VersionReq, version: &Version) -> bool {
+    cli_req == "*" || supported.matches(version)
 }
 
 fn docker_manifest_digest(output: &str) -> Result<String> {
