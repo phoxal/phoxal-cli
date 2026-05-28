@@ -1,7 +1,7 @@
 [workspace]
 publish = false
 release = true
-git_release_enable = true
+git_release_enable = false
 git_tag_enable = true
 release_always = true
 changelog_update = true
