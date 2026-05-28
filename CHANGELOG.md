@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.0-dev](https://github.com/phoxal/phoxal-cli/releases/tag/v0.0.0-dev) - 2026-05-28
+
+### Added
+
+- *(phoxal-cli)* fetch framework releases over HTTP; cache 1h; drop hardcoded list
+- *(cli)* offline by default; --pin-digests opts into Docker resolution
+- *(phoxal-cli)* add `update` subcommand and `simulate --dry-run` flag
+- *(phoxal-cli)* resolver + v1 commands (validate, simulate, doctor, create)
+- *(utils-robot)* single Robot struct + new robot.yaml schema
+- integrate ORB-SLAM3 backend with robot-localize runtime
+
+### Other
+
+- *(release)* allow release-plz to track the binary as publishable
+- *(release)* explicit per-package release tracking for the binary-only repo
+- *(release)* set release = true so release-plz tracks the publish=false workspace
+- inline plan_robot.yaml fixture so CI doesn't need sibling framework checkout
+- *(version)* workspace → 0.0.0-dev (align with framework)
+- wire release-plz + cargo-dist binary release
+- *(deps)* track framework renames (drop utils- prefix)
+- *(phoxal-cli)* delete orphan command modules + phoxal-cli-webots
+- *(deps)* rewire engine/runtimes git deps to phoxal/framework
+- ignore target/ and editor cruft
+- bootstrap phoxal-cli workspace
+- *(release)* configure release-plz + cargo-dist + publish flags (dry-run)
+- *(api)* introduce pub mod v1 in every phoxal-*-api crate
+- *(engine)* fold phoxal-utils-conventions into phoxal-engine
+- *(workspace)* carve members into future-repo subdirs
+- *(license)* switch workspace to AGPL-3.0-only
+- Add MIT license
+
 ## [0.1.0](https://github.com/phoxal/engine/releases/tag/v0.1.0) - 2026-03-14
 
 ### Added
