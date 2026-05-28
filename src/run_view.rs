@@ -2,10 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use phoxal_cli_core::shell;
-use phoxal_cli_core::utils::copy_dir_recursive;
 
 use crate::resolver::{ResolvedComponentSource, ResolvedRobot};
+use crate::shell;
+use crate::utils::copy_dir_recursive;
 
 const COMPONENT_FILE: &str = "component.yaml";
 const STRUCTURE_FILE: &str = "structure.urdf";

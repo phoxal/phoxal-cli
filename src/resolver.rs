@@ -3,13 +3,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use phoxal_cli_core::shell;
 use phoxal_utils_robot::{ComponentSource, Robot};
 use semver::{Version, VersionReq};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::catalog::{DEFAULT_TOOL_VERSIONS, KNOWN_RUNTIME_SET_RELEASES, PlatformRuntimeCatalog};
+use crate::shell;
 
 const ROBOT_FILE: &str = "robot.yaml";
 

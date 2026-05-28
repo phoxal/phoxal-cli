@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use clap::{Args, ValueEnum};
-use phoxal_cli_core::AppContext;
+
+use crate::AppContext;
 
 use crate::catalog::CATALOG;
 use crate::resolver::{ResolveOptions, resolve};

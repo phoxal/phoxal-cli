@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use phoxal_cli_core::AppContext;
+
+use crate::AppContext;
 
 pub mod create;
 pub mod doctor;

@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Args;
-use phoxal_cli_core::AppContext;
 
+use crate::AppContext;
 use crate::catalog::CATALOG;
 use crate::lockfile::{LOCKFILE_NAME, Lockfile};
 use crate::resolver::{ResolveOptions, discover_robot_yaml, load_robot, resolve};
@@ -18,17 +18,9 @@ pub struct Update {
     pub pin_digests: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UpdateOptions {
     pub resolve_external_artifacts: bool,
-}
-
-impl Default for UpdateOptions {
-    fn default() -> Self {
-        Self {
-            resolve_external_artifacts: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

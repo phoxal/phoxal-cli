@@ -12,20 +12,14 @@ repository = "https://github.com/phoxal/phoxal-cli"
 [workspace]
 resolver = "3"
 members = [
-    ".",
-    "phoxal-cli-core",
-    "phoxal-cli-webots"
+    "."
 ]
 
 [workspace.dependencies]
 anyhow = "1.0.102"
-async-trait = "0.1.89"
 clap = { version = "4.6.1", features = ["derive"] }
-derive-new = "0.7.0"
-derive_setters = "0.1.9"
-heck = "0.5.0"
+console = "0.15.11"
 hex = "0.4.3"
-nalgebra = { version = "0.34.2", features = ["serde-serialize"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "json", "rustls"] }
 semver = "1.0.27"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -35,22 +29,9 @@ sha2 = "0.11.0"
 tempfile = "3.27.0"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "signal", "sync", "fs"] }
 tracing-subscriber = "0.3.23"
-urdf-rs = "0.9.0"
-webots-proto = "0.1.3"
-phoxal-bus = { git = "https://github.com/phoxal/framework", branch = "main" }
-phoxal-cli-core = { path = "phoxal-cli-core" }
-phoxal-cli-webots = { path = "phoxal-cli-webots" }
-phoxal-component-api = { git = "https://github.com/phoxal/framework", branch = "main" }
 phoxal-engine = { git = "https://github.com/phoxal/framework", branch = "main" }
-phoxal-runtime-localize-api = { git = "https://github.com/phoxal/framework", branch = "main" }
-phoxal-simulator-api = { git = "https://github.com/phoxal/simulator", branch = "main" }
-phoxal-utils-component = { git = "https://github.com/phoxal/framework", branch = "main" }
 phoxal-utils-helpers = { git = "https://github.com/phoxal/framework", branch = "main" }
 phoxal-utils-robot = { git = "https://github.com/phoxal/framework", branch = "main" }
-phoxal-utils-scenario = { git = "https://github.com/phoxal/framework", branch = "main" }
-phoxal-utils-scenario-spec = { git = "https://github.com/phoxal/framework", branch = "main" }
-phoxal-utils-simulation = { git = "https://github.com/phoxal/framework", branch = "main" }
-phoxal-utils-structure = { git = "https://github.com/phoxal/framework", branch = "main" }
 
 [workspace.lints.rust]
 unused = "warn"
@@ -75,8 +56,8 @@ dist = true
 
 [dependencies]
 anyhow = { workspace = true }
-async-trait = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
+console = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -86,16 +67,9 @@ semver = { workspace = true, features = ["serde"] }
 sha2 = { workspace = true }
 hex = { workspace = true }
 
-phoxal-utils-scenario-spec = { workspace = true }
 phoxal-utils-helpers = { workspace = true }
 phoxal-utils-robot = { workspace = true }
 phoxal-engine = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-phoxal-cli-core = { workspace = true }
-phoxal-cli-webots = { workspace = true }
 dotenvy = "0.15.7"
 tempfile = { workspace = true }
-
-
-[dev-dependencies]
-phoxal-utils-component = { workspace = true }

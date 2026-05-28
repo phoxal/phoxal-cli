@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
-use phoxal_cli_core::AppContext;
+
+use crate::AppContext;
 
 #[derive(Debug, Subcommand)]
 pub enum Create {

@@ -6,15 +6,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use phoxal_cli_core::AppContext;
-use phoxal_cli_core::shell;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::time::sleep;
 
+use crate::AppContext;
 use crate::catalog::CATALOG;
 use crate::lockfile::{LOCKFILE_NAME, Lockfile};
 use crate::resolver::{ResolveOptions, ResolvedComponentSource, ResolvedRobot};
+use crate::shell;
 
 #[derive(Debug, Args)]
 pub struct Simulate {
@@ -48,23 +48,12 @@ pub enum SimulateMode {
     DryRun,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SimulateOptions {
     pub locked: bool,
     pub rerun_proxy: bool,
     pub joypad: bool,
     pub resolve_external_artifacts: bool,
-}
-
-impl Default for SimulateOptions {
-    fn default() -> Self {
-        Self {
-            locked: false,
-            rerun_proxy: false,
-            joypad: false,
-            resolve_external_artifacts: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

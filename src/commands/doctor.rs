@@ -3,9 +3,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use phoxal_cli_core::AppContext;
-use phoxal_cli_core::shell;
 use semver::{Version, VersionReq};
+
+use crate::AppContext;
+use crate::shell;
 
 use crate::lockfile::{LOCKFILE_NAME, Lockfile};
 
