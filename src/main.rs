@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 use dotenvy::Error as DotenvError;
-use phoxal_utils_helpers::tracing_ansi_enabled;
+use phoxal_helpers::tracing_ansi_enabled;
 use tracing_subscriber::EnvFilter;
 
 use phoxal_cli::AppContext;

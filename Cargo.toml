@@ -32,8 +32,8 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", 
 toml = "0.9.8"
 tracing-subscriber = "0.3.23"
 phoxal-engine = { git = "https://github.com/phoxal/framework", branch = "main" }
-phoxal-utils-helpers = { git = "https://github.com/phoxal/framework", branch = "main" }
-phoxal-utils-robot = { git = "https://github.com/phoxal/framework", branch = "main" }
+phoxal-helpers = { git = "https://github.com/phoxal/framework", branch = "main" }
+phoxal-robot = { git = "https://github.com/phoxal/framework", branch = "main" }
 
 [workspace.lints.rust]
 unused = "warn"
@@ -70,8 +70,8 @@ semver = { workspace = true, features = ["serde"] }
 sha2 = { workspace = true }
 hex = { workspace = true }
 
-phoxal-utils-helpers = { workspace = true }
-phoxal-utils-robot = { workspace = true }
+phoxal-helpers = { workspace = true }
+phoxal-robot = { workspace = true }
 phoxal-engine = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 dotenvy = "0.15.7"

@@ -2,12 +2,12 @@ use phoxal_cli::catalog::CATALOG;
 use phoxal_cli::lockfile::Lockfile;
 use phoxal_cli::releases::ReleasesSnapshot;
 use phoxal_cli::resolver::{ResolveOptions, resolve_with_releases};
-use phoxal_utils_robot::Robot;
+use phoxal_robot::RobotV1 as Robot;
 
 #[test]
 fn lockfile_roundtrips_through_yaml() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(include_str!(
-        "../../framework/utils-robot/tests/fixtures/plan_robot.yaml"
+        "../../framework/robot/tests/fixtures/plan_robot.yaml"
     ))?;
     let snapshot = ReleasesSnapshot {
         fetched_at: std::time::SystemTime::UNIX_EPOCH,

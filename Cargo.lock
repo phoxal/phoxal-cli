@@ -822,17 +822,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
-name = "erased-serde"
-version = "0.4.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2add8a07dd6a8d93ff627029c51de145e12686fbc36ecb298ac22e74cf02dec"
-dependencies = [
- "serde",
- "serde_core",
- "typeid",
-]
-
-[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2268,8 +2257,8 @@ dependencies = [
 
 [[package]]
 name = "phoxal-bus"
-version = "0.2.2"
-source = "git+https://github.com/phoxal/framework?branch=main#c76c1c48e8656375b841237d737cb944f38549b1"
+version = "0.0.0-dev"
+source = "git+https://github.com/phoxal/framework?branch=main#38648950654343e6e1636efcca049e65231825c7"
 dependencies = [
  "derive-new",
  "derive_setters",
@@ -2293,8 +2282,8 @@ dependencies = [
  "dotenvy",
  "hex",
  "phoxal-engine",
- "phoxal-utils-helpers",
- "phoxal-utils-robot",
+ "phoxal-helpers",
+ "phoxal-robot",
  "reqwest",
  "semver",
  "serde",
@@ -2308,9 +2297,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "phoxal-component"
+version = "0.0.0-dev"
+source = "git+https://github.com/phoxal/framework?branch=main#38648950654343e6e1636efcca049e65231825c7"
+dependencies = [
+ "anyhow",
+ "derive-new",
+ "serde",
+ "serde_yaml",
+]
+
+[[package]]
 name = "phoxal-component-api"
-version = "0.2.2"
-source = "git+https://github.com/phoxal/framework?branch=main#c76c1c48e8656375b841237d737cb944f38549b1"
+version = "0.0.0-dev"
+source = "git+https://github.com/phoxal/framework?branch=main#38648950654343e6e1636efcca049e65231825c7"
 dependencies = [
  "derive-new",
  "phoxal-bus",
@@ -2320,22 +2320,20 @@ dependencies = [
 
 [[package]]
 name = "phoxal-engine"
-version = "0.2.2"
-source = "git+https://github.com/phoxal/framework?branch=main#c76c1c48e8656375b841237d737cb944f38549b1"
+version = "0.0.0-dev"
+source = "git+https://github.com/phoxal/framework?branch=main#38648950654343e6e1636efcca049e65231825c7"
 dependencies = [
  "anyhow",
  "async-trait",
  "clap",
  "dotenvy",
- "erased-serde",
  "phoxal-bus",
+ "phoxal-component",
  "phoxal-component-api",
- "phoxal-simulator-api",
- "phoxal-utils-component",
- "phoxal-utils-helpers",
- "phoxal-utils-robot",
- "phoxal-utils-spatial",
- "phoxal-utils-structure",
+ "phoxal-helpers",
+ "phoxal-robot",
+ "phoxal-spatial",
+ "phoxal-structure",
  "serde",
  "serde_json",
  "tokio",
@@ -2344,67 +2342,46 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoxal-simulator-api"
-version = "0.2.2"
-source = "git+https://github.com/phoxal/simulator?branch=main#c7e91d24beb2859898fc1e1efa60a8cf45da7c4d"
-dependencies = [
- "phoxal-bus",
- "serde",
-]
-
-[[package]]
-name = "phoxal-utils-component"
-version = "0.2.2"
-source = "git+https://github.com/phoxal/framework?branch=main#c76c1c48e8656375b841237d737cb944f38549b1"
-dependencies = [
- "anyhow",
- "derive-new",
- "serde",
- "serde_yaml",
-]
-
-[[package]]
-name = "phoxal-utils-helpers"
-version = "0.2.2"
-source = "git+https://github.com/phoxal/framework?branch=main#c76c1c48e8656375b841237d737cb944f38549b1"
+name = "phoxal-helpers"
+version = "0.0.0-dev"
+source = "git+https://github.com/phoxal/framework?branch=main#38648950654343e6e1636efcca049e65231825c7"
 dependencies = [
  "anyhow",
  "tracing-subscriber",
 ]
 
 [[package]]
-name = "phoxal-utils-robot"
-version = "0.2.2"
-source = "git+https://github.com/phoxal/framework?branch=main#c76c1c48e8656375b841237d737cb944f38549b1"
+name = "phoxal-robot"
+version = "0.0.0-dev"
+source = "git+https://github.com/phoxal/framework?branch=main#38648950654343e6e1636efcca049e65231825c7"
 dependencies = [
  "anyhow",
  "nalgebra",
- "phoxal-utils-component",
+ "phoxal-component",
  "serde",
  "serde_yaml",
  "urdf-rs",
 ]
 
 [[package]]
-name = "phoxal-utils-spatial"
-version = "0.2.2"
-source = "git+https://github.com/phoxal/framework?branch=main#c76c1c48e8656375b841237d737cb944f38549b1"
+name = "phoxal-spatial"
+version = "0.0.0-dev"
+source = "git+https://github.com/phoxal/framework?branch=main#38648950654343e6e1636efcca049e65231825c7"
 dependencies = [
  "anyhow",
  "nalgebra",
- "phoxal-bus",
+ "phoxal-component",
  "phoxal-component-api",
- "phoxal-utils-component",
- "phoxal-utils-robot",
- "phoxal-utils-structure",
+ "phoxal-robot",
+ "phoxal-structure",
  "serde",
  "urdf-rs",
 ]
 
 [[package]]
-name = "phoxal-utils-structure"
-version = "0.2.2"
-source = "git+https://github.com/phoxal/framework?branch=main#c76c1c48e8656375b841237d737cb944f38549b1"
+name = "phoxal-structure"
+version = "0.0.0-dev"
+source = "git+https://github.com/phoxal/framework?branch=main#38648950654343e6e1636efcca049e65231825c7"
 dependencies = [
  "anyhow",
  "derive-new",
