@@ -747,7 +747,7 @@ mod tests {
 
     fn fixture_robot() -> Robot {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir
+        let cli_workspace_root = manifest_dir
             .parent()
             .unwrap_or_else(|| {
                 panic!(
@@ -755,12 +755,17 @@ mod tests {
                     manifest_dir.display()
                 )
             });
+        let workspace_root = cli_workspace_root
+            .parent()
+            .map(|phoxal_root| phoxal_root.join("framework"))
+            .filter(|framework_root| framework_root.join("fixture").is_dir())
+            .unwrap_or_else(|| cli_workspace_root.to_path_buf());
         let bundle_root = workspace_root
             .join("fixture")
             .join("robot")
             .join("rgbd-imu-diff-drive");
 
-        let project = Project::new(workspace_root).unwrap_or_else(|error| {
+        let project = Project::new(&workspace_root).unwrap_or_else(|error| {
             panic!(
                 "failed to create project from {}: {error:#}",
                 workspace_root.display()

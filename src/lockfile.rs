@@ -115,4 +115,9 @@ impl Lockfile {
         fs::write(path, contents)
             .with_context(|| format!("failed to write lockfile {}", path.display()))
     }
+
+    #[must_use]
+    pub fn is_drift_free(&self, resolved: &ResolvedRobot) -> bool {
+        self == &Self::from_resolved(resolved)
+    }
 }

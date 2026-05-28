@@ -734,9 +734,14 @@ mod tests {
     #[test]
     fn actual_localize_docker_context_fingerprint_dirs_hash() -> Result<()> {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir
+        let cli_workspace_root = manifest_dir
             .parent()
             .context("phoxal-cli-core manifest directory must be under workspace root")?;
+        let workspace_root = cli_workspace_root
+            .parent()
+            .map(|phoxal_root| phoxal_root.join("framework"))
+            .filter(|framework_root| framework_root.join("runtimes/localize").is_dir())
+            .unwrap_or_else(|| cli_workspace_root.to_path_buf());
         let fingerprint_paths = [
             workspace_root.join("runtimes/localize/orb-slam3-sys"),
             workspace_root.join("runtimes/localize/src"),

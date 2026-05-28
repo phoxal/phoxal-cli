@@ -7,6 +7,7 @@ use phoxal_cli_core::AppContext;
 pub mod create;
 pub mod doctor;
 pub mod simulate;
+pub mod update;
 pub mod validate;
 
 #[derive(Debug, Parser)]
@@ -30,6 +31,8 @@ pub struct Cli {
 pub enum RootCommand {
     #[command(about = "Validate the robot project discovered from robot.yaml.")]
     Validate(validate::Validate),
+    #[command(about = "Resolve robot.yaml and refresh phoxal.lock.")]
+    Update(update::Update),
     #[command(about = "Resolve and launch the local Webots simulation stack.")]
     Simulate(simulate::Simulate),
     #[command(about = "Check host prerequisites and pinned Phoxal tool binaries.")]
@@ -42,6 +45,7 @@ impl RootCommand {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match self {
             Self::Validate(command) => command.run(app).await,
+            Self::Update(command) => command.run(app).await,
             Self::Simulate(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
             Self::Create(command) => command.run(app).await,

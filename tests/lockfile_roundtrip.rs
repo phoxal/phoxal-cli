@@ -6,7 +6,7 @@ use phoxal_utils_robot::Robot;
 #[test]
 fn lockfile_roundtrips_through_yaml() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(include_str!(
-        "../../engine/utils-robot/tests/fixtures/plan_robot.yaml"
+        "../../framework/utils-robot/tests/fixtures/plan_robot.yaml"
     ))?;
     let resolved = resolve(
         &robot,

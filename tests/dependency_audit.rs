@@ -28,9 +28,8 @@ fn phoxal_cli_path_dependencies_do_not_grow_past_the_snapshot() {
         .as_str()
         .expect("cargo metadata did not include workspace_root");
     let current_deps = phoxal_cli_path_dependencies(&metadata);
-    let snapshot = read_snapshot(
-        Path::new(workspace_root).join("phoxal-cli/tests/dependency_audit_snapshot.txt"),
-    );
+    let snapshot =
+        read_snapshot(Path::new(workspace_root).join("tests/dependency_audit_snapshot.txt"));
     let allowed_baseline = ALLOWED_BASELINE
         .iter()
         .map(|name| (*name).to_owned())

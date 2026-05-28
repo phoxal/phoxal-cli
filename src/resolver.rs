@@ -221,18 +221,25 @@ pub fn resolve_image_digest(image_ref: &str) -> Result<String> {
         .with_context(|| format!("docker manifest inspect did not report a digest for {image_ref}"))
 }
 
-pub fn resolve_git_tag(url: &str, tag: &str) -> Result<String> {
-    let peeled = format!("refs/tags/{tag}^{{}}");
-    let direct = format!("refs/tags/{tag}");
-    let output = shell::run_stdout("git", ["ls-remote", url, peeled.as_str()], None)
-        .or_else(|_| shell::run_stdout("git", ["ls-remote", url, direct.as_str()], None))
-        .with_context(|| format!("failed to resolve git tag {tag} from {url}"))?;
-    output
-        .split_whitespace()
-        .next()
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("git tag {tag} does not exist in {url}"))
+pub fn resolve_git_ref(url: &str, git_ref: &str) -> Result<String> {
+    let candidates = [
+        format!("refs/tags/{git_ref}^{{}}"),
+        format!("refs/tags/{git_ref}"),
+        format!("refs/heads/{git_ref}"),
+        git_ref.to_string(),
+    ];
+    for candidate in candidates {
+        let output = shell::run_stdout("git", ["ls-remote", url, candidate.as_str()], None)
+            .with_context(|| format!("failed to resolve git ref {git_ref} from {url}"))?;
+        if let Some(commit) = output
+            .split_whitespace()
+            .next()
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(commit.to_string());
+        }
+    }
+    Err(anyhow!("git ref {git_ref} does not exist in {url}"))
 }
 
 pub fn host_target_triple() -> String {
@@ -268,7 +275,7 @@ fn resolve_components(
         let source = match source {
             ComponentSource::Git(source) => {
                 let commit = if resolve_external_artifacts {
-                    resolve_git_tag(&source.git, &source.tag)?
+                    resolve_git_ref(&source.git, &source.tag)?
                 } else {
                     fake_sha(&format!("{}:{}", source.git, source.tag))
                 };
@@ -331,7 +338,7 @@ fn select_runtime_set_version(requested: &str, cli_req: &str) -> Result<Version>
             return Ok(exact);
         }
         bail!(
-            "requested runtime set version {requested} is outside CLI supported range {cli_req}; upgrade phoxal-cli or choose a supported runtime set"
+            "your CLI doesn't know how to compose runtime-set version {requested}; supported runtime-set requirement is {cli_req}"
         );
     }
 
@@ -342,7 +349,7 @@ fn select_runtime_set_version(requested: &str, cli_req: &str) -> Result<Version>
     })
     .with_context(|| {
         format!(
-            "no known runtime releases match phoxal_runtimes.version {requested} within CLI support {cli_req}"
+            "your CLI doesn't know how to compose runtime-set version selector {requested}; supported runtime-set requirement is {cli_req}"
         )
     })
 }

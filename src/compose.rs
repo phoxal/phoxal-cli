@@ -13,6 +13,11 @@ const ROUTER_PORT: &str = "127.0.0.1:7447:7447";
 #[derive(Debug, Clone, Serialize)]
 struct ComposeFile {
     services: BTreeMap<String, ComposeService>,
+    #[serde(
+        rename = "x-phoxal-native-tools",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    native_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -36,6 +41,7 @@ pub fn generate(
     catalog: &PlatformRuntimeCatalog,
     run_dir: &Path,
     user_runtime_images: &BTreeMap<String, String>,
+    native_tools: &[String],
 ) -> Result<String> {
     let run_mount = format!("{}:{ROBOT_MOUNT}:ro", run_dir.display());
     let mut services = BTreeMap::new();
@@ -98,7 +104,10 @@ pub fn generate(
         );
     }
 
-    Ok(serde_yaml::to_string(&ComposeFile { services })?)
+    Ok(serde_yaml::to_string(&ComposeFile {
+        services,
+        native_tools: native_tools.to_vec(),
+    })?)
 }
 
 fn is_false(value: &bool) -> bool {

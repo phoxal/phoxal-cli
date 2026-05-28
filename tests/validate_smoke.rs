@@ -5,7 +5,7 @@ use phoxal_utils_robot::Robot;
 #[test]
 fn plan_robot_validates_against_catalog() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(include_str!(
-        "../../engine/utils-robot/tests/fixtures/plan_robot.yaml"
+        "../../framework/utils-robot/tests/fixtures/plan_robot.yaml"
     ))?;
     robot
         .validate_with(&CATALOG.names().collect::<Vec<_>>())
