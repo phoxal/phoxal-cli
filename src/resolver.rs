@@ -191,7 +191,11 @@ pub fn resolve(
         })
         .collect();
 
-    let components = resolve_components(robot, options.resolve_external_artifacts)?;
+    // Git ref → commit SHA resolution is cheap (no Docker, just network) and
+    // is required for `simulate --dry-run` to assemble a usable .phoxal/run/
+    // tree. We always attempt it; the only thing the offline path skips is
+    // image digest pinning.
+    let components = resolve_components(robot)?;
     let tools = resolve_tools(robot)?;
 
     Ok(ResolvedRobot {
@@ -255,10 +259,7 @@ pub fn host_target_triple() -> String {
     })
 }
 
-fn resolve_components(
-    robot: &Robot,
-    resolve_external_artifacts: bool,
-) -> Result<Vec<ResolvedComponent>> {
+fn resolve_components(robot: &Robot) -> Result<Vec<ResolvedComponent>> {
     let mut components = Vec::new();
     for (instance_name, instance) in &robot.components.instances {
         let source = robot
@@ -274,11 +275,7 @@ fn resolve_components(
             })?;
         let source = match source {
             ComponentSource::Git(source) => {
-                let commit = if resolve_external_artifacts {
-                    resolve_git_ref(&source.git, &source.tag)?
-                } else {
-                    fake_sha(&format!("{}:{}", source.git, source.tag))
-                };
+                let commit = resolve_git_ref(&source.git, &source.tag)?;
                 ResolvedComponentSource::Git {
                     git: source.git.clone(),
                     tag: source.tag.clone(),

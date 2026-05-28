@@ -35,6 +35,11 @@ pub struct Simulate {
     pub rerun_proxy: bool,
     #[arg(long, help = "Launch joypad from the cached Phoxal tool binaries.")]
     pub joypad: bool,
+    #[arg(
+        long,
+        help = "Resolve image digests, component git commits, and tool asset hashes from upstream (requires Docker + network). Off by default during the pre-publish recovery period."
+    )]
+    pub pin_digests: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +62,7 @@ impl Default for SimulateOptions {
             locked: false,
             rerun_proxy: false,
             joypad: false,
-            resolve_external_artifacts: true,
+            resolve_external_artifacts: false,
         }
     }
 }
@@ -103,7 +108,7 @@ impl Simulate {
             locked: self.locked,
             rerun_proxy: self.rerun_proxy,
             joypad: self.joypad,
-            resolve_external_artifacts: true,
+            resolve_external_artifacts: self.pin_digests,
         };
         let mode = if self.dry_run {
             SimulateMode::DryRun

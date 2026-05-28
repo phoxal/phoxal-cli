@@ -9,7 +9,14 @@ use crate::lockfile::{LOCKFILE_NAME, Lockfile};
 use crate::resolver::{ResolveOptions, discover_robot_yaml, load_robot, resolve};
 
 #[derive(Debug, Args)]
-pub struct Update;
+pub struct Update {
+    /// Resolve image digests, component git commits, and tool asset hashes
+    /// from their upstream sources (requires Docker + network). Off by
+    /// default during the pre-publish recovery period — see
+    /// `.plans/framework-restructure-installable-cli/` for the rollout.
+    #[arg(long)]
+    pub pin_digests: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UpdateOptions {
@@ -19,7 +26,7 @@ pub struct UpdateOptions {
 impl Default for UpdateOptions {
     fn default() -> Self {
         Self {
-            resolve_external_artifacts: true,
+            resolve_external_artifacts: false,
         }
     }
 }
@@ -34,7 +41,12 @@ pub struct UpdateSummary {
 
 impl Update {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let summary = run(app.project.root(), UpdateOptions::default())?;
+        let summary = run(
+            app.project.root(),
+            UpdateOptions {
+                resolve_external_artifacts: self.pin_digests,
+            },
+        )?;
         println!(
             "locked {} platform runtimes, {} components, {} tools in {}",
             summary.platform_runtime_count,
