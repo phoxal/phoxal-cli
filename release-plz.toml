@@ -3,7 +3,7 @@ publish = false
 release = true
 git_release_enable = true
 git_tag_enable = true
-release_always = false
+release_always = true
 changelog_update = true
 
 [changelog]
@@ -13,3 +13,7 @@ header = """\
 All notable changes to this project are documented here.
 
 """
+
+[[package]]
+name = "phoxal-cli"
+release = true
