@@ -4,6 +4,13 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.1.2) - 2026-05-28
+
+
+### Fixed
+
+- *(catalog)* Bump simulator_webots tools to v0.2.0
+
 ## [0.1.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.1.1) - 2026-05-28
 
 
