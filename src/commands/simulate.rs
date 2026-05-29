@@ -2,13 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tokio::time::sleep;
 
 use crate::AppContext;
 use crate::catalog::CATALOG;
@@ -21,6 +20,9 @@ use crate::resolver::{
 use crate::shell;
 
 #[derive(Debug, Args)]
+#[command(
+    after_help = "Lifecycle note:\n  phoxal simulate starts the singleton phoxal-local-zenoh container and joins it to the phoxal-link network.\n  Running two simulations concurrently is unsupported: whichever run tears down first will stop that shared container.\n  A future phoxal local up/down command will provide explicit lifecycle control."
+)]
 pub struct Simulate {
     #[arg(
         long,
@@ -504,8 +506,7 @@ fn report_plan_only(plan: &SimulatePlan) {
 }
 
 async fn execute_plan(plan: &SimulatePlan) -> Result<()> {
-    compose_up(&plan.compose_path)?;
-    wait_for_router().await?;
+    bring_up_stack(&plan.compose_path)?;
 
     let mut processes = crate::process::SpawnedProcesses::new();
     if plan.native_tools.iter().any(|tool| tool == "rerun_proxy") {
@@ -526,7 +527,7 @@ async fn execute_plan(plan: &SimulatePlan) -> Result<()> {
         .await
         .context("failed to listen for Ctrl-C")?;
     drop(processes);
-    compose_down(&plan.compose_path)?;
+    tear_down_stack(&plan.compose_path)?;
     Ok(())
 }
 
@@ -582,11 +583,67 @@ fn build_component_drivers(project_root: &Path, resolved: &ResolvedRobot) -> Res
     Ok(())
 }
 
+fn bring_up_stack(compose_path: &Path) -> Result<()> {
+    ensure_link_network()?;
+    // phoxal-local-zenoh is a singleton; concurrent `phoxal simulate` runs are
+    // unsupported because either teardown can stop the shared container. A
+    // future `phoxal local up/down` command will expose explicit lifecycle.
+    crate::local_zenoh::start_if_absent()?;
+    compose_up(compose_path)
+}
+
+fn tear_down_stack(compose_path: &Path) -> Result<()> {
+    compose_down(compose_path)?;
+    crate::local_zenoh::stop()?;
+    remove_link_network_best_effort();
+    Ok(())
+}
+
+fn ensure_link_network() -> Result<()> {
+    let network = crate::local_zenoh::LOCAL_ZENOH_NETWORK;
+    let output = shell::run_output("docker", ["network", "inspect", network], None)
+        .context("failed to inspect phoxal link network")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    shell::run_status(
+        "docker",
+        ["network", "create", "--driver", "bridge", network],
+        None,
+    )
+    .context("failed to create phoxal link network")
+}
+
+fn remove_link_network_best_effort() {
+    let network = crate::local_zenoh::LOCAL_ZENOH_NETWORK;
+    let Ok(output) = shell::run_output("docker", ["network", "rm", network], None) else {
+        tracing::debug!("failed to run docker network rm {network}");
+        return;
+    };
+    if output.status.success() {
+        return;
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("has active endpoints") || stderr.contains("No such network") {
+        tracing::debug!("leaving docker network {network}: {}", stderr.trim());
+        return;
+    }
+
+    tracing::debug!(
+        "`docker network rm {}` failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        network,
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        stderr
+    );
+}
+
 fn compose_up(compose_path: &Path) -> Result<()> {
     let compose_arg = compose_path.to_string_lossy().to_string();
     shell::run_status(
         "docker",
-        ["compose", "-f", compose_arg.as_str(), "up", "-d"],
+        ["compose", "-f", compose_arg.as_str(), "up", "-d", "--wait"],
         None,
     )
 }
@@ -598,17 +655,6 @@ fn compose_down(compose_path: &Path) -> Result<()> {
         ["compose", "-f", compose_arg.as_str(), "down"],
         None,
     )
-}
-
-async fn wait_for_router() -> Result<()> {
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(30) {
-        if shell::run_status("nc", ["-z", "127.0.0.1", "7447"], None).is_ok() {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(250)).await;
-    }
-    bail!("router did not become ready on 127.0.0.1:7447 within 30s")
 }
 
 fn spawn_cached_tool(
