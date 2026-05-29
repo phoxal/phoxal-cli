@@ -3,9 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use phoxal_engine::staged::Robot;
-use phoxal_simulation::Simulation;
-use phoxal_structure::Structure;
+use phoxal_core_engine::staged::Robot;
+use phoxal_core_simulation::Simulation;
+use phoxal_core_structure::Structure;
 use webots_proto::FieldValue;
 use webots_proto::ast::proto::ast::{
     ArrayElement, ArrayValue, AstNode, AstNodeKind, NodeBodyElement, NodeField,
@@ -161,7 +161,7 @@ pub fn stage_webots_artifacts(
 fn read_simulation_v1(
     component_dir: &Path,
     component_type: &str,
-) -> Result<phoxal_simulation::v1::Simulation> {
+) -> Result<phoxal_core_simulation::v1::Simulation> {
     let simulation = Simulation::read_from_dir(component_dir).with_context(|| {
         format!(
             "failed to read simulation.yaml for component '{}' from {}",

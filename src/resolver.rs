@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
-use phoxal_robot::{RobotV1 as Robot, v1::ComponentSource};
+use phoxal_core_robot::{RobotV1 as Robot, v1::ComponentSource};
 use semver::{Version, VersionReq};
 use serde::Deserialize;
 use serde_json::Value;
@@ -573,7 +573,7 @@ fn is_floating_selector(selector: &str) -> bool {
     selector == "latest" || Version::parse(selector).is_err()
 }
 
-fn join_errors(errors: Vec<phoxal_robot::ValidationError>) -> String {
+fn join_errors(errors: Vec<phoxal_core_robot::ValidationError>) -> String {
     errors
         .iter()
         .map(ToString::to_string)

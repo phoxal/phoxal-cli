@@ -129,7 +129,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-phoxal-engine = "0.1"
+	phoxal-core-engine = "0.2"
 "#,
             command.name
         ),

@@ -66,7 +66,7 @@ All notable changes documented here. The format follows
 ### Refactored
 
 - *(workspace)* Carve members into future-repo subdirs
-- *(engine)* Fold phoxal-utils-conventions into phoxal-engine
+- *(engine)* Fold phoxal-utils-conventions into phoxal-core-engine
 - *(api)* Introduce pub mod v1 in every phoxal-*-api crate
 - *(phoxal-cli)* Delete orphan command modules + phoxal-cli-webots
 

@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use phoxal_component::v1::capability::{Capability as PhysicalCapability, StructuralTarget};
-use phoxal_engine::staged::Robot;
-use phoxal_simulation::capability::Capability as SimulationCapability;
-use phoxal_simulation::v1::Simulation;
-use phoxal_structure::Structure;
+use phoxal_core_component::v1::capability::{Capability as PhysicalCapability, StructuralTarget};
+use phoxal_core_engine::staged::Robot;
+use phoxal_core_simulation::capability::Capability as SimulationCapability;
+use phoxal_core_simulation::v1::Simulation;
+use phoxal_core_structure::Structure;
 
 use crate::webots_staging::support::urdf::convert_joint_type;
 use crate::webots_staging::{metadata, proto_name_for_robot};
@@ -111,7 +111,7 @@ impl WebotsSceneDescription {
     pub fn from_component(
         component_type: &str,
         structure: &Structure,
-        component: &phoxal_component::v1::Component,
+        component: &phoxal_core_component::v1::Component,
         simulation: &Simulation,
     ) -> Result<Self> {
         let root_link_id = structure.root_link_name()?.to_string();
@@ -270,7 +270,7 @@ impl WebotsSceneDescription {
 #[derive(Debug, Clone)]
 pub struct RuntimeComponentBinding {
     pub capability_id: String,
-    pub physical: phoxal_component::v1::capability::Capability,
+    pub physical: phoxal_core_component::v1::capability::Capability,
     pub simulation: Option<SimulationCapability>,
 }
 
