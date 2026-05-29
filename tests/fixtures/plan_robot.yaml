@@ -16,9 +16,6 @@ phoxal_runtimes:
       version: "latest"
     localize:
       version: "0.1.4"
-    router:
-      image: "ghcr.io/phoxal/runtime-router"
-      version: "^0.1"
 
 user_runtimes:
   mission_behavior:

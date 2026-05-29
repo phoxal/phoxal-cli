@@ -12,7 +12,7 @@ use tokio::time::sleep;
 
 use crate::AppContext;
 use crate::catalog::CATALOG;
-use crate::lockfile::{LOCKFILE_NAME, Lockfile};
+use crate::lockfile::{LOCKFILE_NAME, LOCKFILE_SCHEMA_VERSION, Lockfile};
 use crate::releases::ReleasesSnapshot;
 use crate::resolver::{
     ReleaseSource, ResolveOptions, ResolvedComponentSource, ResolvedRobot,
@@ -255,6 +255,14 @@ fn releases_snapshot_from_lockfile(lockfile: &Lockfile) -> Result<ReleasesSnapsh
 }
 
 fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) -> Result<()> {
+    if !lockfile.has_current_schema() {
+        bail!(
+            "lockfile schema_version {} is stale; regenerate {} with schema_version {}",
+            lockfile.schema_version,
+            LOCKFILE_NAME,
+            LOCKFILE_SCHEMA_VERSION
+        );
+    }
     if lockfile.phoxal_runtimes.requested != resolved.requested_runtime_set {
         bail!(
             "lockfile requested runtime-set selector '{}' does not match robot.yaml selector '{}'",
@@ -689,10 +697,13 @@ fn native_tool_labels(options: SimulateOptions) -> Vec<String> {
 }
 
 fn compose_service_names(resolved: &ResolvedRobot) -> Vec<String> {
-    let mut services = resolved
-        .platform_runtimes
-        .iter()
-        .map(|runtime| runtime.name.clone())
+    let mut services = std::iter::once("router".to_string())
+        .chain(
+            resolved
+                .platform_runtimes
+                .iter()
+                .map(|runtime| runtime.name.clone()),
+        )
         .chain(
             resolved
                 .user_runtimes

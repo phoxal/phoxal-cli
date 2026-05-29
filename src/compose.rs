@@ -5,15 +5,18 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::catalog::PlatformRuntimeCatalog;
+use crate::local_zenoh::{LOCAL_ZENOH_NETWORK, LOCAL_ZENOH_PORT, ZENOH_IMAGE};
 use crate::resolver::ResolvedRobot;
 
 const ROBOT_MOUNT: &str = "/robot";
-const ROUTER_PORT: &str = "127.0.0.1:7447:7447";
+const ROUTER_SERVICE: &str = "router";
 
 #[derive(Debug, Clone, Serialize)]
 struct ComposeFile {
     name: String,
     services: BTreeMap<String, ComposeService>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    networks: BTreeMap<String, NetworkSpec>,
     #[serde(
         rename = "x-phoxal-native-tools",
         skip_serializing_if = "Vec::is_empty"
@@ -30,13 +33,51 @@ struct ComposeService {
     volumes: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     environment: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    depends_on: Vec<String>,
+    #[serde(skip_serializing_if = "DependsOn::is_empty")]
+    depends_on: DependsOn,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ports: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    networks: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    healthcheck: Option<Healthcheck>,
     #[serde(skip_serializing_if = "is_false")]
     init: bool,
     restart: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct Healthcheck {
+    test: Vec<String>,
+    interval: String,
+    timeout: String,
+    retries: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+enum DependsOn {
+    Services(Vec<String>),
+    Conditions(BTreeMap<String, DependsOnCondition>),
+}
+
+impl DependsOn {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Services(services) => services.is_empty(),
+            Self::Conditions(conditions) => conditions.is_empty(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DependsOnCondition {
+    condition: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NetworkSpec {
+    external: bool,
 }
 
 pub fn generate(
@@ -70,7 +111,7 @@ pub fn generate(
         let Some(entry) = catalog.lookup(&runtime.name) else {
             continue;
         };
-        let mut service = ComposeService {
+        let service = ComposeService {
             image: runtime.pinned_image(),
             command: if entry.wires_to_router {
                 vec!["run".to_string()]
@@ -84,19 +125,20 @@ pub fn generate(
                 BTreeMap::new()
             },
             depends_on: if entry.wires_to_router {
-                vec!["router".to_string()]
+                router_healthy_depends_on()
             } else {
-                Vec::new()
+                DependsOn::Services(Vec::new())
             },
             ports: Vec::new(),
+            networks: Vec::new(),
+            healthcheck: None,
             init: true,
             restart: "unless-stopped".to_string(),
         };
-        if !entry.wires_to_router {
-            service.ports.push(ROUTER_PORT.to_string());
-        }
         services.insert(runtime.name.clone(), service);
     }
+
+    services.insert(ROUTER_SERVICE.to_string(), router_service());
 
     for runtime in &resolved.user_runtimes {
         let image = user_runtime_images
@@ -110,8 +152,10 @@ pub fn generate(
                 command: vec!["run".to_string()],
                 volumes: vec![run_mount.clone()],
                 environment: runtime_environment(),
-                depends_on: vec!["router".to_string()],
+                depends_on: router_healthy_depends_on(),
                 ports: Vec::new(),
+                networks: Vec::new(),
+                healthcheck: None,
                 init: true,
                 restart: "unless-stopped".to_string(),
             },
@@ -121,8 +165,55 @@ pub fn generate(
     Ok(serde_yaml::to_string(&ComposeFile {
         name: resolved.robot.identity.id.clone(),
         services,
+        networks: BTreeMap::from([(
+            LOCAL_ZENOH_NETWORK.to_string(),
+            NetworkSpec { external: true },
+        )]),
         native_tools: native_tools.to_vec(),
     })?)
+}
+
+fn router_service() -> ComposeService {
+    ComposeService {
+        image: ZENOH_IMAGE.to_string(),
+        command: vec![
+            "-l".to_string(),
+            format!("tcp/0.0.0.0:{LOCAL_ZENOH_PORT}"),
+            "-e".to_string(),
+            format!(
+                "tcp/{}:{LOCAL_ZENOH_PORT}",
+                crate::local_zenoh::LOCAL_ZENOH_CONTAINER
+            ),
+            "--no-multicast-scouting".to_string(),
+            "--cfg".to_string(),
+            "mode:\"router\"".to_string(),
+        ],
+        volumes: Vec::new(),
+        environment: BTreeMap::new(),
+        depends_on: DependsOn::Services(Vec::new()),
+        ports: Vec::new(),
+        networks: vec!["default".to_string(), LOCAL_ZENOH_NETWORK.to_string()],
+        healthcheck: Some(Healthcheck {
+            test: vec![
+                "CMD-SHELL".to_string(),
+                "grep -q ':1D17 .* 0A' /proc/net/tcp".to_string(),
+            ],
+            interval: "1s".to_string(),
+            timeout: "2s".to_string(),
+            retries: 60,
+        }),
+        init: true,
+        restart: "unless-stopped".to_string(),
+    }
+}
+
+fn router_healthy_depends_on() -> DependsOn {
+    DependsOn::Conditions(BTreeMap::from([(
+        ROUTER_SERVICE.to_string(),
+        DependsOnCondition {
+            condition: "service_healthy".to_string(),
+        },
+    )]))
 }
 
 fn is_false(value: &bool) -> bool {
@@ -141,22 +232,15 @@ mod tests {
 
     use super::*;
     use crate::catalog::{PlatformRuntimeCatalog, PlatformRuntimeEntry};
+    use crate::local_zenoh;
     use crate::resolver::{ResolvedPlatformRuntime, ResolvedRobot};
 
-    static TEST_CATALOG_ENTRIES: &[PlatformRuntimeEntry] = &[
-        PlatformRuntimeEntry {
-            name: "router",
-            image_repo: "ghcr.io/phoxal/runtime-router",
-            uses_supervisor_api: false,
-            wires_to_router: false,
-        },
-        PlatformRuntimeEntry {
-            name: "asset",
-            image_repo: "ghcr.io/phoxal/runtime-asset",
-            uses_supervisor_api: false,
-            wires_to_router: true,
-        },
-    ];
+    static TEST_CATALOG_ENTRIES: &[PlatformRuntimeEntry] = &[PlatformRuntimeEntry {
+        name: "asset",
+        image_repo: "ghcr.io/phoxal/runtime-asset",
+        uses_supervisor_api: false,
+        wires_to_router: true,
+    }];
 
     static TEST_CATALOG: PlatformRuntimeCatalog = PlatformRuntimeCatalog {
         supported_runtimes_version_req: "*",
@@ -181,19 +265,54 @@ mod tests {
         let asset = mapping(service(services, "asset")?, "asset")?;
 
         assert_eq!(
-            router.get(key("ports")),
-            Some(&Value::Sequence(vec![key("127.0.0.1:7447:7447")]))
+            router.get(key("image")),
+            Some(&key(local_zenoh::ZENOH_IMAGE))
         );
-        assert_eq!(router.get(key("command")), None);
+        assert_eq!(router.get(key("ports")), None);
+        assert_eq!(
+            router.get(key("networks")),
+            Some(&Value::Sequence(vec![key("default"), key("phoxal-link")]))
+        );
+        assert_eq!(
+            router.get(key("command")),
+            Some(&Value::Sequence(vec![
+                key("-l"),
+                key("tcp/0.0.0.0:7447"),
+                key("-e"),
+                key("tcp/phoxal-local-zenoh:7447"),
+                key("--no-multicast-scouting"),
+                key("--cfg"),
+                key("mode:\"router\""),
+            ]))
+        );
         assert_eq!(router.get(key("environment")), None);
+        let healthcheck = mapping(
+            router.get(key("healthcheck")).expect("router healthcheck"),
+            "router healthcheck",
+        )?;
+        assert_eq!(
+            healthcheck.get(key("test")),
+            Some(&Value::Sequence(vec![
+                key("CMD-SHELL"),
+                key("grep -q ':1D17 .* 0A' /proc/net/tcp"),
+            ]))
+        );
 
         assert_eq!(
             asset.get(key("command")),
             Some(&Value::Sequence(vec![key("run")]))
         );
+        let depends_on = mapping(
+            asset.get(key("depends_on")).expect("asset depends_on"),
+            "asset depends_on",
+        )?;
+        let router_depends_on = mapping(
+            depends_on.get(key("router")).expect("router dependency"),
+            "router dependency",
+        )?;
         assert_eq!(
-            asset.get(key("depends_on")),
-            Some(&Value::Sequence(vec![key("router")]))
+            router_depends_on.get(key("condition")),
+            Some(&key("service_healthy"))
         );
         let environment = mapping(
             asset.get(key("environment")).expect("asset environment"),
@@ -206,6 +325,14 @@ mod tests {
         );
         assert_eq!(environment.get(key("ROBOT_ID")), Some(&key("testbot")));
         assert_eq!(environment.get(key("ROBOT_NAMESPACE")), Some(&key("test")));
+        let networks = mapping(root.get(key("networks")).expect("networks"), "networks")?;
+        let link_network = mapping(
+            networks
+                .get(key("phoxal-link"))
+                .expect("phoxal-link network"),
+            "phoxal-link network",
+        )?;
+        assert_eq!(link_network.get(key("external")), Some(&Value::Bool(true)));
 
         Ok(())
     }
@@ -216,10 +343,10 @@ mod tests {
             runtime_set_version: Version::parse("0.0.0-dev")?,
             requested_runtime_set: "0.0.0-dev".to_string(),
             releases_fetched_at: Some(SystemTime::UNIX_EPOCH),
-            platform_runtimes: vec![
-                resolved_platform_runtime("router", "ghcr.io/phoxal/runtime-router"),
-                resolved_platform_runtime("asset", "ghcr.io/phoxal/runtime-asset"),
-            ],
+            platform_runtimes: vec![resolved_platform_runtime(
+                "asset",
+                "ghcr.io/phoxal/runtime-asset",
+            )],
             user_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),

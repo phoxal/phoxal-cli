@@ -552,7 +552,8 @@ fn docker_manifest_index_digest(output: &str) -> Result<String> {
     if value
         .as_object()
         .and_then(|object| object.get("manifests"))
-        .and_then(Value::as_array).is_none_or(|manifests| manifests.is_empty())
+        .and_then(Value::as_array)
+        .is_none_or(|manifests| manifests.is_empty())
     {
         bail!("manifest output is not a multi-platform index");
     }

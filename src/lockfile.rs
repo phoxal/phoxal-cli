@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::resolver::{ResolvedComponentSource, ResolvedRobot};
 
 pub const LOCKFILE_NAME: &str = "phoxal.lock";
+pub const LOCKFILE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lockfile {
@@ -96,7 +97,7 @@ impl Lockfile {
             .collect();
 
         Self {
-            schema_version: 1,
+            schema_version: LOCKFILE_SCHEMA_VERSION,
             phoxal_runtimes: LockedPhoxalRuntimes {
                 requested: resolved.requested_runtime_set.clone(),
                 resolved: resolved.runtime_set_version.to_string(),
@@ -128,5 +129,10 @@ impl Lockfile {
     #[must_use]
     pub fn is_drift_free(&self, resolved: &ResolvedRobot) -> bool {
         self == &Self::from_resolved(resolved)
+    }
+
+    #[must_use]
+    pub fn has_current_schema(&self) -> bool {
+        self.schema_version == LOCKFILE_SCHEMA_VERSION
     }
 }

@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod commands;
 pub mod compose;
 pub mod context;
+pub mod local_zenoh;
 pub mod lockfile;
 pub mod process;
 pub mod project;

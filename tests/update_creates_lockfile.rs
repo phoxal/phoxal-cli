@@ -2,7 +2,7 @@ use std::fs;
 
 use phoxal_cli::catalog::{CATALOG, DEFAULT_TOOL_VERSIONS};
 use phoxal_cli::commands::update::{UpdateOptions, run_with_releases};
-use phoxal_cli::lockfile::{LOCKFILE_NAME, Lockfile};
+use phoxal_cli::lockfile::{LOCKFILE_NAME, LOCKFILE_SCHEMA_VERSION, Lockfile};
 use phoxal_cli::releases::ReleasesSnapshot;
 
 #[test]
@@ -24,7 +24,7 @@ fn update_creates_idempotent_lockfile() -> anyhow::Result<()> {
     assert!(lock_path.is_file());
 
     let lockfile = Lockfile::read(&lock_path)?;
-    assert_eq!(lockfile.schema_version, 1);
+    assert_eq!(lockfile.schema_version, LOCKFILE_SCHEMA_VERSION);
     assert_eq!(lockfile.phoxal_runtimes.requested, "latest");
     assert_eq!(lockfile.phoxal_runtimes.resolved, "0.0.0-dev");
     assert!(lockfile.phoxal_runtimes.releases_fetched_at.is_some());

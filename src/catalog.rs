@@ -59,7 +59,6 @@ pub fn lookup_tool_version(name: &str) -> Option<&'static ToolVersion> {
 pub const CATALOG: PlatformRuntimeCatalog = PlatformRuntimeCatalog {
     supported_runtimes_version_req: "*",
     entries: &[
-        entry("router", "ghcr.io/phoxal/runtime-router", false, false),
         entry("asset", "ghcr.io/phoxal/runtime-asset", false, true),
         entry("presence", "ghcr.io/phoxal/runtime-presence", false, true),
         entry("frame", "ghcr.io/phoxal/runtime-frame", false, true),
