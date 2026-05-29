@@ -2697,7 +2697,7 @@ dependencies = [
 [[package]]
 name = "phoxal-api-component"
 version = "0.2.0"
-source = "git+https://github.com/phoxal/framework?branch=chore%2Fworkspace-restructure#2782a05602a9e56bf49d8f94eee02c4d2a0f8944"
+source = "git+https://github.com/phoxal/framework?branch=main#29a715f1dbc4a0f463d0b14a8257b98ca951bc11"
 dependencies = [
  "derive-new",
  "phoxal-infra-bus",
@@ -2745,7 +2745,7 @@ dependencies = [
 [[package]]
 name = "phoxal-core-component"
 version = "0.2.0"
-source = "git+https://github.com/phoxal/framework?branch=chore%2Fworkspace-restructure#2782a05602a9e56bf49d8f94eee02c4d2a0f8944"
+source = "git+https://github.com/phoxal/framework?branch=main#29a715f1dbc4a0f463d0b14a8257b98ca951bc11"
 dependencies = [
  "anyhow",
  "derive-new",
@@ -2756,7 +2756,7 @@ dependencies = [
 [[package]]
 name = "phoxal-core-engine"
 version = "0.2.0"
-source = "git+https://github.com/phoxal/framework?branch=chore%2Fworkspace-restructure#2782a05602a9e56bf49d8f94eee02c4d2a0f8944"
+source = "git+https://github.com/phoxal/framework?branch=main#29a715f1dbc4a0f463d0b14a8257b98ca951bc11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2779,7 +2779,7 @@ dependencies = [
 [[package]]
 name = "phoxal-core-robot"
 version = "0.2.0"
-source = "git+https://github.com/phoxal/framework?branch=chore%2Fworkspace-restructure#2782a05602a9e56bf49d8f94eee02c4d2a0f8944"
+source = "git+https://github.com/phoxal/framework?branch=main#29a715f1dbc4a0f463d0b14a8257b98ca951bc11"
 dependencies = [
  "anyhow",
  "nalgebra",
@@ -2792,7 +2792,7 @@ dependencies = [
 [[package]]
 name = "phoxal-core-simulation"
 version = "0.2.0"
-source = "git+https://github.com/phoxal/framework?branch=chore%2Fworkspace-restructure#2782a05602a9e56bf49d8f94eee02c4d2a0f8944"
+source = "git+https://github.com/phoxal/framework?branch=main#29a715f1dbc4a0f463d0b14a8257b98ca951bc11"
 dependencies = [
  "anyhow",
  "derive-new",
@@ -2804,7 +2804,7 @@ dependencies = [
 [[package]]
 name = "phoxal-core-spatial"
 version = "0.2.0"
-source = "git+https://github.com/phoxal/framework?branch=chore%2Fworkspace-restructure#2782a05602a9e56bf49d8f94eee02c4d2a0f8944"
+source = "git+https://github.com/phoxal/framework?branch=main#29a715f1dbc4a0f463d0b14a8257b98ca951bc11"
 dependencies = [
  "anyhow",
  "nalgebra",
@@ -2819,7 +2819,7 @@ dependencies = [
 [[package]]
 name = "phoxal-core-structure"
 version = "0.2.0"
-source = "git+https://github.com/phoxal/framework?branch=chore%2Fworkspace-restructure#2782a05602a9e56bf49d8f94eee02c4d2a0f8944"
+source = "git+https://github.com/phoxal/framework?branch=main#29a715f1dbc4a0f463d0b14a8257b98ca951bc11"
 dependencies = [
  "anyhow",
  "derive-new",
@@ -2830,7 +2830,7 @@ dependencies = [
 [[package]]
 name = "phoxal-infra-bus"
 version = "0.2.0"
-source = "git+https://github.com/phoxal/framework?branch=chore%2Fworkspace-restructure#2782a05602a9e56bf49d8f94eee02c4d2a0f8944"
+source = "git+https://github.com/phoxal/framework?branch=main#29a715f1dbc4a0f463d0b14a8257b98ca951bc11"
 dependencies = [
  "derive-new",
  "derive_setters",
@@ -2846,7 +2846,7 @@ dependencies = [
 [[package]]
 name = "phoxal-infra-helpers"
 version = "0.2.0"
-source = "git+https://github.com/phoxal/framework?branch=chore%2Fworkspace-restructure#2782a05602a9e56bf49d8f94eee02c4d2a0f8944"
+source = "git+https://github.com/phoxal/framework?branch=main#29a715f1dbc4a0f463d0b14a8257b98ca951bc11"
 dependencies = [
  "anyhow",
  "tracing-subscriber",
@@ -6047,18 +6047,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.49"
+version = "0.8.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bce33a6288fa3f072a8c2c7d0f2fdbb90e28298f0135c1f99b96c3db2efcc60b"
+checksum = "3b065d4f0e55f82fae73202e189638116a87c55ab6b8e6c2721e13dd9d854ad1"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.49"
+version = "0.8.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fd425244944f4ab65ccff928e7323354c5a018c75838362fdce749dfad2ee1e"
+checksum = "0b631b19d36a892ab55420c92dbc83ccd79274f25be714855d3074aa71cab639"
 dependencies = [
  "proc-macro2",
  "quote",
