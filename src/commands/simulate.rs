@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::AppContext;
 use crate::catalog::CATALOG;
+use crate::host_paths;
 use crate::lockfile::{LOCKFILE_NAME, LOCKFILE_SCHEMA_VERSION, Lockfile};
 use crate::releases::ReleasesSnapshot;
 use crate::resolver::{
@@ -18,12 +19,18 @@ use crate::resolver::{
     resolve_with_release_source, resolve_with_releases,
 };
 use crate::shell;
+use crate::world;
 
 #[derive(Debug, Args)]
 #[command(
     after_help = "Lifecycle note:\n  phoxal simulate starts the singleton phoxal-local-zenoh container and joins it to the phoxal-link network.\n  Running two simulations concurrently is unsupported: whichever run tears down first will stop that shared container.\n  A future phoxal local up/down command will provide explicit lifecycle control."
 )]
 pub struct Simulate {
+    #[arg(
+        value_name = "WORLD",
+        help = "World file or bare name (e.g. `default`, or `worlds/foo.wbt`). Resolved against <project>/worlds/<world>.wbt, then <project>/<world>, then ~/.phoxal/worlds/<world>.wbt."
+    )]
+    pub world: String,
     #[arg(
         long,
         help = "Require phoxal.lock to exist and match recomputed resolution."
@@ -54,8 +61,9 @@ pub enum SimulateMode {
     DryRun,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimulateOptions {
+    pub world: String,
     pub locked: bool,
     pub rerun_proxy: bool,
     pub joypad: bool,
@@ -79,6 +87,7 @@ pub struct SimulatePlan {
 struct ResolvedSimulation {
     robot_path: PathBuf,
     project_root: PathBuf,
+    world_path: PathBuf,
     resolved: ResolvedRobot,
     lockfile_written: Option<PathBuf>,
 }
@@ -100,6 +109,7 @@ struct DryRunProcess {
 impl Simulate {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let options = SimulateOptions {
+            world: self.world.clone(),
             locked: self.locked,
             rerun_proxy: self.rerun_proxy,
             joypad: self.joypad,
@@ -130,10 +140,12 @@ pub async fn run(
         }
         SimulateMode::Live => {
             let project_root = app.project.root().to_path_buf();
-            let resolved =
-                tokio::task::spawn_blocking(move || resolve_project(&project_root, options))
-                    .await
-                    .context("simulate resolver worker failed")??;
+            let resolve_options = options.clone();
+            let resolved = tokio::task::spawn_blocking(move || {
+                resolve_project(&project_root, resolve_options)
+            })
+            .await
+            .context("simulate resolver worker failed")??;
             pull_platform_images(app, &resolved.resolved)?;
             let user_images = build_user_runtimes(&resolved.project_root, &resolved.resolved)?;
             build_component_drivers(&resolved.project_root, &resolved.resolved)?;
@@ -145,7 +157,7 @@ pub async fn run(
 }
 
 pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<SimulatePlan> {
-    let resolved = resolve_project(project_start, options)?;
+    let resolved = resolve_project(project_start, options.clone())?;
     write_simulation_files(resolved, options, &BTreeMap::new(), SimulateMode::DryRun)
 }
 
@@ -154,7 +166,7 @@ pub fn prepare_with_releases(
     options: SimulateOptions,
     releases: &ReleasesSnapshot,
 ) -> Result<SimulatePlan> {
-    let resolved = resolve_project_with_releases(project_start, options, Some(releases))?;
+    let resolved = resolve_project_with_releases(project_start, options.clone(), Some(releases))?;
     write_simulation_files(resolved, options, &BTreeMap::new(), SimulateMode::DryRun)
 }
 
@@ -173,6 +185,7 @@ fn resolve_project_with_releases(
         .parent()
         .context("robot.yaml did not have a parent directory")?
         .to_path_buf();
+    let world_path = world::resolve_world(&project_root, &options.world)?;
     let robot = crate::resolver::load_robot(&robot_path)?;
     let lock_path = project_root.join(LOCKFILE_NAME);
     let lockfile = if lock_path.is_file() {
@@ -200,6 +213,7 @@ fn resolve_project_with_releases(
         return Ok(ResolvedSimulation {
             robot_path,
             project_root,
+            world_path,
             resolved,
             lockfile_written: None,
         });
@@ -213,7 +227,7 @@ fn resolve_project_with_releases(
     let resolved = if let Some(releases) = releases {
         resolve_with_releases(&robot, &CATALOG, resolve_options, releases)?
     } else {
-        let cache_dir = project_root.join(".phoxal").join("cache");
+        let cache_dir = host_paths::cache_dir()?;
         resolve_with_release_source(
             &robot,
             &CATALOG,
@@ -227,6 +241,7 @@ fn resolve_project_with_releases(
             return Ok(ResolvedSimulation {
                 robot_path,
                 project_root,
+                world_path,
                 resolved: locked_resolved,
                 lockfile_written: None,
             });
@@ -236,6 +251,7 @@ fn resolve_project_with_releases(
     Ok(ResolvedSimulation {
         robot_path,
         project_root,
+        world_path,
         resolved,
         lockfile_written,
     })
@@ -396,6 +412,7 @@ fn write_simulation_files(
         &resolved.project_root,
         &resolved.resolved,
         &run_dir,
+        &resolved.world_path,
     )?;
     let native_tools = native_tool_labels(options);
     let compose_path = run_dir.join("docker-compose.yml");
@@ -411,7 +428,11 @@ fn write_simulation_files(
     )
     .with_context(|| format!("failed to write {}", compose_path.display()))?;
 
-    let state_path = resolved.project_root.join(".phoxal/cache/state.yaml");
+    let state_path = resolved
+        .project_root
+        .join(".phoxal")
+        .join("cache")
+        .join("state.yaml");
     let compose_services = compose_service_names(&resolved.resolved);
     if mode == SimulateMode::DryRun {
         write_dry_run_state(
@@ -510,15 +531,10 @@ async fn execute_plan(plan: &SimulatePlan) -> Result<()> {
 
     let mut processes = crate::process::SpawnedProcesses::new();
     if plan.native_tools.iter().any(|tool| tool == "rerun_proxy") {
-        spawn_cached_tool(
-            &plan.project_root,
-            &plan.resolved,
-            "rerun_proxy",
-            &mut processes,
-        )?;
+        spawn_cached_tool(&plan.resolved, "rerun_proxy", &mut processes)?;
     }
     if plan.native_tools.iter().any(|tool| tool == "joypad") {
-        spawn_cached_tool(&plan.project_root, &plan.resolved, "joypad", &mut processes)?;
+        spawn_cached_tool(&plan.resolved, "joypad", &mut processes)?;
     }
     spawn_webots(&plan.project_root, &plan.resolved, &mut processes)?;
     processes.write_state(&plan.state_path)?;
@@ -563,6 +579,7 @@ fn build_user_runtimes(
 }
 
 fn build_component_drivers(project_root: &Path, resolved: &ResolvedRobot) -> Result<()> {
+    let host_cache_dir = host_paths::cache_dir()?;
     for component in &resolved.components {
         if !component.has_driver {
             continue;
@@ -571,8 +588,8 @@ fn build_component_drivers(project_root: &Path, resolved: &ResolvedRobot) -> Res
             ResolvedComponentSource::Path { path } => {
                 resolve_project_path(project_root, path).join("driver")
             }
-            ResolvedComponentSource::Git { commit, .. } => project_root
-                .join(".phoxal/cache/components")
+            ResolvedComponentSource::Git { commit, .. } => host_cache_dir
+                .join("components")
                 .join(format!("{}-{commit}", component.source_name))
                 .join("driver"),
         };
@@ -658,12 +675,11 @@ fn compose_down(compose_path: &Path) -> Result<()> {
 }
 
 fn spawn_cached_tool(
-    project_root: &Path,
     resolved: &ResolvedRobot,
     tool_name: &str,
     processes: &mut crate::process::SpawnedProcesses,
 ) -> Result<()> {
-    let cache_dir = project_root.join(".phoxal/cache/tools").join(tool_name);
+    let cache_dir = host_paths::cache_dir()?.join("tools").join(tool_name);
     if !cache_dir.is_dir() {
         bail!(
             "cached tool {tool_name} is missing under {}; run doctor --fix",

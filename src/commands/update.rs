@@ -5,6 +5,7 @@ use clap::Args;
 
 use crate::AppContext;
 use crate::catalog::CATALOG;
+use crate::host_paths;
 use crate::lockfile::{LOCKFILE_NAME, Lockfile};
 use crate::releases::ReleasesSnapshot;
 use crate::resolver::{
@@ -90,7 +91,7 @@ fn run_with_release_source(
     let resolved = if let Some(releases) = releases {
         resolve_with_releases(&robot, &CATALOG, resolve_options, releases)?
     } else {
-        let cache_dir = project_root.join(".phoxal").join("cache");
+        let cache_dir = host_paths::cache_dir()?;
         let source = if options.refresh_releases {
             ReleaseSource::RefreshCache(&cache_dir)
         } else {

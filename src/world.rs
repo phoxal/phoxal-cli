@@ -1,0 +1,83 @@
+use std::path::{Path, PathBuf};
+
+use anyhow::{Result, bail};
+
+use crate::host_paths;
+
+pub fn resolve_world(project_root: &Path, world_arg: &str) -> Result<PathBuf> {
+    resolve_world_with_host_worlds(project_root, world_arg, &host_paths::worlds_dir()?)
+}
+
+fn resolve_world_with_host_worlds(
+    project_root: &Path,
+    world_arg: &str,
+    host_worlds_dir: &Path,
+) -> Result<PathBuf> {
+    let candidates = [
+        project_root.join("worlds").join(format!("{world_arg}.wbt")),
+        project_root.join(world_arg),
+        host_worlds_dir.join(format!("{world_arg}.wbt")),
+    ];
+    for candidate in &candidates {
+        if candidate.is_file() {
+            return Ok(candidate.clone());
+        }
+    }
+    bail!(
+        "failed to resolve world '{world_arg}'; tried:\n{}\n{}\n{}\nplace a .wbt file at one of these paths",
+        candidates[0].display(),
+        candidates[1].display(),
+        candidates[2].display()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn resolves_project_world_by_bare_name() -> anyhow::Result<()> {
+        let project = tempfile::tempdir()?;
+        let host = tempfile::tempdir()?;
+        let world = project.path().join("worlds/default.wbt");
+        fs::create_dir_all(world.parent().expect("world parent"))?;
+        fs::write(&world, "#VRML_SIM R2025a utf8\n")?;
+
+        assert_eq!(
+            resolve_world_with_host_worlds(project.path(), "default", host.path())?,
+            world
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_project_path_as_given() -> anyhow::Result<()> {
+        let project = tempfile::tempdir()?;
+        let host = tempfile::tempdir()?;
+        let world = project.path().join("worlds/foo.wbt");
+        fs::create_dir_all(world.parent().expect("world parent"))?;
+        fs::write(&world, "#VRML_SIM R2025a utf8\n")?;
+
+        assert_eq!(
+            resolve_world_with_host_worlds(project.path(), "worlds/foo.wbt", host.path())?,
+            world
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_host_world_by_bare_name() -> anyhow::Result<()> {
+        let project = tempfile::tempdir()?;
+        let host = tempfile::tempdir()?;
+        let world = host.path().join("shared.wbt");
+        fs::write(&world, "#VRML_SIM R2025a utf8\n")?;
+
+        assert_eq!(
+            resolve_world_with_host_worlds(project.path(), "shared", host.path())?,
+            world
+        );
+        Ok(())
+    }
+}

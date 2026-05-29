@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -47,7 +48,8 @@ pub fn write_cache(cache_dir: &Path, snapshot: &ReleasesSnapshot) -> Result<()> 
         .with_context(|| format!("failed to create {}", cache_dir.display()))?;
     let contents =
         serde_json::to_string_pretty(snapshot).context("failed to serialize releases cache")?;
-    fs::write(cache_path(cache_dir), contents)
+    let path = cache_path(cache_dir);
+    atomic_write(&path, contents.as_bytes())
         .with_context(|| format!("failed to write releases cache in {}", cache_dir.display()))
 }
 
@@ -167,6 +169,19 @@ pub fn refresh(cache_dir: &Path) -> Result<ReleasesSnapshot> {
 
 fn cache_path(cache_dir: &Path) -> PathBuf {
     cache_dir.join(CACHE_FILE)
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("releases cache path did not have a parent directory")?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("failed to create temp file in {}", parent.display()))?;
+    tmp.write_all(bytes)
+        .with_context(|| format!("failed to write temp file in {}", parent.display()))?;
+    tmp.persist(path)
+        .map(|_| ())
+        .with_context(|| format!("failed to persist {}", path.display()))
 }
 
 mod system_time_rfc3339 {

@@ -43,7 +43,6 @@ pub struct ResolvedRobot {
     pub user_runtimes: Vec<ResolvedUserRuntime>,
     pub components: Vec<ResolvedComponent>,
     pub tools: Vec<ResolvedTool>,
-    pub sim_world: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -239,7 +238,6 @@ pub fn resolve_with_releases(
         user_runtimes,
         components,
         tools,
-        sim_world: robot.sim.world.clone(),
     })
 }
 

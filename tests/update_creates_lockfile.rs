@@ -71,9 +71,6 @@ structure: structure.urdf
 phoxal_runtimes:
   version: "latest"
 
-sim:
-  world: sim/worlds/test.wbt
-
 motion:
   kinematic:
     kind: differential

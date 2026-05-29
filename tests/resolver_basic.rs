@@ -46,8 +46,8 @@ fn unknown_platform_override_fails() -> anyhow::Result<()> {
 #[test]
 fn user_runtime_shadowing_platform_fails() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
-        "sim:\n  world: sim/worlds/test.wbt",
-        "user_runtimes:\n  drive:\n    path: ./runtimes/drive\n\nsim:\n  world: sim/worlds/test.wbt",
+        "phoxal_runtimes:\n  version: \"latest\"",
+        "phoxal_runtimes:\n  version: \"latest\"\n\nuser_runtimes:\n  drive:\n    path: ./runtimes/drive",
     ))?;
 
     let snapshot = releases_snapshot();
@@ -94,9 +94,6 @@ structure: structure.urdf
 
 phoxal_runtimes:
   version: "latest"
-
-sim:
-  world: sim/worlds/test.wbt
 
 motion:
   kinematic:

@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::catalog::PlatformRuntimeCatalog;
-use crate::local_zenoh::{LOCAL_ZENOH_NETWORK, LOCAL_ZENOH_PORT, ZENOH_IMAGE};
+use crate::local_zenoh::{LOCAL_ZENOH_NETWORK, LOCAL_ZENOH_PORT};
 use crate::resolver::ResolvedRobot;
 
 const ROBOT_MOUNT: &str = "/robot";
@@ -175,7 +175,7 @@ pub fn generate(
 
 fn router_service() -> ComposeService {
     ComposeService {
-        image: ZENOH_IMAGE.to_string(),
+        image: crate::local_zenoh::zenoh_image(),
         command: vec![
             "-l".to_string(),
             format!("tcp/0.0.0.0:{LOCAL_ZENOH_PORT}"),
@@ -266,7 +266,7 @@ mod tests {
 
         assert_eq!(
             router.get(key("image")),
-            Some(&key(local_zenoh::ZENOH_IMAGE))
+            Some(&key(local_zenoh::DEFAULT_ZENOH_IMAGE))
         );
         assert_eq!(router.get(key("ports")), None);
         assert_eq!(
@@ -350,7 +350,6 @@ mod tests {
             user_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
-            sim_world: PathBuf::from("sim/worlds/test.wbt"),
         })
     }
 
@@ -392,9 +391,6 @@ structure: structure.urdf
 
 phoxal_runtimes:
   version: "latest"
-
-sim:
-  world: sim/worlds/test.wbt
 
 motion:
   kinematic:

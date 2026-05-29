@@ -12,6 +12,7 @@ use webots_proto::ast::proto::ast::{
 };
 use webots_proto::ast::proto::span::Span;
 
+use crate::host_paths;
 use crate::resolver::{ResolvedComponentSource, ResolvedRobot};
 use crate::utils::copy_dir_recursive;
 use crate::webots_staging::{RobotInstance, WebotsController};
@@ -23,6 +24,7 @@ pub fn stage_webots_artifacts(
     project_root: &Path,
     resolved: &ResolvedRobot,
     run_dir: &Path,
+    world_path: &Path,
 ) -> Result<()> {
     let webots_dir = project_root.join(".phoxal").join("webots");
     if webots_dir.exists() {
@@ -32,11 +34,11 @@ pub fn stage_webots_artifacts(
     fs::create_dir_all(&webots_dir)
         .with_context(|| format!("failed to create {}", webots_dir.display()))?;
 
-    let source_world_path = project_root.join(&resolved.robot.sim.world);
+    let source_world_path = world_path.to_path_buf();
     let source_world = fs::read_to_string(&source_world_path).with_context(|| {
         format!(
-            "sim.world source missing at {} — copy a world template (e.g. phoxal/framework/fixture/world/ArenaWorld.wbt) to that path",
-            resolved.robot.sim.world.display()
+            "world source missing at {} — copy a world template (e.g. phoxal/framework/fixture/world/ArenaWorld.wbt) to that path",
+            world_path.display()
         )
     })?;
 
@@ -151,7 +153,7 @@ pub fn stage_webots_artifacts(
     fs::write(&world_path, staged_world)
         .with_context(|| format!("failed to write staged world {}", world_path.display()))?;
     stage_world_sidecar_directories(&source_world_path, &worlds_dir)?;
-    stage_controller_binaries(project_root, resolved, &controllers_dir)?;
+    stage_controller_binaries(resolved, &controllers_dir)?;
 
     Ok(())
 }
@@ -173,8 +175,9 @@ fn read_simulation_v1(
 
 fn stage_meshes(project_root: &Path, resolved: &ResolvedRobot, mesh_dir: &Path) -> Result<()> {
     copy_dir_if_present_and_empty(&project_root.join("meshes"), mesh_dir)?;
+    let host_cache_dir = host_paths::cache_dir()?;
     for component in &resolved.components {
-        let source_dir = component_source_dir(project_root, component);
+        let source_dir = component_source_dir(project_root, &host_cache_dir, component);
         let source_meshes = source_dir.join("meshes");
         let destination = mesh_dir.join(component.source_name.as_str());
         copy_dir_if_present_and_empty(&source_meshes, &destination)?;
@@ -184,6 +187,7 @@ fn stage_meshes(project_root: &Path, resolved: &ResolvedRobot, mesh_dir: &Path) 
 
 fn component_source_dir(
     project_root: &Path,
+    host_cache_dir: &Path,
     component: &crate::resolver::ResolvedComponent,
 ) -> PathBuf {
     match &component.source {
@@ -194,9 +198,7 @@ fn component_source_dir(
                 project_root.join(path)
             }
         }
-        ResolvedComponentSource::Git { commit, .. } => project_root
-            .join(".phoxal")
-            .join("cache")
+        ResolvedComponentSource::Git { commit, .. } => host_cache_dir
             .join("components")
             .join(format!("{}-{commit}", component.source_name)),
     }
@@ -271,11 +273,7 @@ fn controller_args(resolved: &ResolvedRobot) -> Vec<String> {
     ]
 }
 
-fn stage_controller_binaries(
-    project_root: &Path,
-    resolved: &ResolvedRobot,
-    controllers_dir: &Path,
-) -> Result<()> {
+fn stage_controller_binaries(resolved: &ResolvedRobot, controllers_dir: &Path) -> Result<()> {
     for tool_name in [SIMULATOR_WEBOTS_CONTROLLER, SIMULATOR_WEBOTS_SUPERVISOR] {
         let Some(tool) = resolved.tools.iter().find(|tool| tool.name == tool_name) else {
             tracing::warn!(
@@ -283,7 +281,7 @@ fn stage_controller_binaries(
             );
             continue;
         };
-        let source = cached_tool_path(project_root, &tool.name, &tool.resolved, &tool.binary_name);
+        let source = cached_tool_path(&tool.name, &tool.resolved, &tool.binary_name)?;
         if !source.is_file() {
             tracing::warn!(
                 "cached simulator binaries not found at {}; Webots will fail to spawn controllers — run `phoxal-cli doctor --fix`",
@@ -308,14 +306,12 @@ fn stage_controller_binaries(
     Ok(())
 }
 
-fn cached_tool_path(project_root: &Path, name: &str, version: &str, binary_name: &str) -> PathBuf {
-    project_root
-        .join(".phoxal")
-        .join("cache")
+fn cached_tool_path(name: &str, version: &str, binary_name: &str) -> Result<PathBuf> {
+    Ok(host_paths::cache_dir()?
         .join("tools")
         .join(name)
         .join(version)
-        .join(binary_name)
+        .join(binary_name))
 }
 
 fn webots_controller_name(binary_name: &str) -> Result<String> {

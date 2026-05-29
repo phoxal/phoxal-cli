@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::host_paths;
 use crate::resolver::{ResolvedComponentSource, ResolvedRobot};
 use crate::shell;
 use crate::utils::copy_dir_recursive;
@@ -37,7 +38,7 @@ pub fn assemble(project_root: &Path, resolved: &ResolvedRobot, out_dir: &Path) -
     for component in &resolved.components {
         let source_dir = match &component.source {
             ResolvedComponentSource::Git { git, commit, .. } => {
-                ensure_component_cache(project_root, &component.source_name, git, commit)?
+                ensure_component_cache(&component.source_name, git, commit)?
             }
             ResolvedComponentSource::Path { path } => resolve_project_path(project_root, path),
         };
@@ -48,15 +49,8 @@ pub fn assemble(project_root: &Path, resolved: &ResolvedRobot, out_dir: &Path) -
     Ok(())
 }
 
-fn ensure_component_cache(
-    project_root: &Path,
-    source_name: &str,
-    git: &str,
-    commit: &str,
-) -> Result<PathBuf> {
-    let cache_dir = project_root
-        .join(".phoxal")
-        .join("cache")
+fn ensure_component_cache(source_name: &str, git: &str, commit: &str) -> Result<PathBuf> {
+    let cache_dir = host_paths::cache_dir()?
         .join("components")
         .join(format!("{source_name}-{commit}"));
     if cache_dir.join(COMPONENT_FILE).is_file() {
@@ -66,17 +60,39 @@ fn ensure_component_cache(
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create component cache {}", parent.display()))?;
     }
-    if cache_dir.exists() {
-        fs::remove_dir_all(&cache_dir)
-            .with_context(|| format!("failed to clear {}", cache_dir.display()))?;
-    }
-    let cache_arg = cache_dir.to_string_lossy().to_string();
+    let parent = cache_dir
+        .parent()
+        .context("component cache path did not have a parent directory")?;
+    let staging = tempfile::TempDir::new_in(parent)
+        .with_context(|| format!("failed to create staging cache in {}", parent.display()))?;
+    let cache_arg = staging.path().to_string_lossy().to_string();
     shell::run_status(
         "git",
         ["clone", "--depth", "1", git, cache_arg.as_str()],
         None,
     )?;
-    shell::run_status("git", ["checkout", commit], Some(&cache_dir))?;
+    shell::run_status("git", ["checkout", commit], Some(staging.path()))?;
+    if !staging.path().join(COMPONENT_FILE).is_file() {
+        bail!(
+            "component source {} is missing required {}",
+            staging.path().display(),
+            COMPONENT_FILE
+        );
+    }
+    match fs::rename(staging.path(), &cache_dir) {
+        Ok(()) => {}
+        Err(error) if cache_dir.join(COMPONENT_FILE).is_file() => {
+            tracing::debug!(
+                "component cache {} appeared during clone; keeping existing destination ({error})",
+                cache_dir.display()
+            );
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to move component cache to {}", cache_dir.display())
+            });
+        }
+    }
     Ok(cache_dir)
 }
 

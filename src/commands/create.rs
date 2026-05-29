@@ -77,9 +77,6 @@ structure: structure.urdf
 phoxal_runtimes:
   version: "^0.1"
 
-sim:
-  world: sim/worlds/default.wbt
-
 motion:
   kinematic:
     kind: differential
@@ -109,9 +106,9 @@ components:
             command.id
         ),
     )?;
-    fs::create_dir_all(root.join("sim/worlds"))?;
+    fs::create_dir_all(root.join("worlds"))?;
     write_new(
-        root.join("sim/worlds/default.wbt"),
+        root.join("worlds/default.wbt"),
         "#VRML_SIM R2025a utf8\n".to_string(),
     )?;
     app.ui.success(format!("created robot {}", root.display()));

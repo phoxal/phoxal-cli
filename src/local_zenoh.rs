@@ -1,13 +1,22 @@
 use anyhow::{Context, Result, bail};
 
+use crate::host_config;
 use crate::shell;
 
-pub const ZENOH_IMAGE: &str =
+pub(crate) const DEFAULT_ZENOH_IMAGE: &str =
     "eclipse/zenoh:1.9.0@sha256:157965d71e0bfd0a044d76a985ff0e5c306ad3968929168fb9678cd2a7fec23f";
 
 pub const LOCAL_ZENOH_NETWORK: &str = "phoxal-link";
 pub const LOCAL_ZENOH_CONTAINER: &str = "phoxal-local-zenoh";
 pub const LOCAL_ZENOH_PORT: u16 = 7447;
+
+#[must_use]
+pub fn zenoh_image() -> String {
+    host_config::load()
+        .ok()
+        .and_then(|config| config.zenoh_image)
+        .unwrap_or_else(|| DEFAULT_ZENOH_IMAGE.into())
+}
 
 #[must_use]
 pub fn build_run_args() -> Vec<String> {
@@ -22,7 +31,7 @@ pub fn build_run_args() -> Vec<String> {
         "--publish".to_string(),
         format!("127.0.0.1:{LOCAL_ZENOH_PORT}:{LOCAL_ZENOH_PORT}"),
         "--init".to_string(),
-        ZENOH_IMAGE.to_string(),
+        zenoh_image(),
         "-l".to_string(),
         format!("tcp/0.0.0.0:{LOCAL_ZENOH_PORT}"),
         "--no-multicast-scouting".to_string(),
@@ -91,7 +100,7 @@ mod tests {
                 "--publish".to_string(),
                 "127.0.0.1:7447:7447".to_string(),
                 "--init".to_string(),
-                ZENOH_IMAGE.to_string(),
+                DEFAULT_ZENOH_IMAGE.to_string(),
                 "-l".to_string(),
                 "tcp/0.0.0.0:7447".to_string(),
                 "--no-multicast-scouting".to_string(),
@@ -103,7 +112,7 @@ mod tests {
 
     #[test]
     fn zenoh_image_uses_pinned_1_9_0_digest() {
-        assert!(ZENOH_IMAGE.starts_with("eclipse/zenoh:1.9.0@sha256:"));
-        assert_eq!(ZENOH_IMAGE.len(), 91);
+        assert!(DEFAULT_ZENOH_IMAGE.starts_with("eclipse/zenoh:1.9.0@sha256:"));
+        assert_eq!(DEFAULT_ZENOH_IMAGE.len(), 91);
     }
 }

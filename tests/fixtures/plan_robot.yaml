@@ -23,9 +23,6 @@ user_runtimes:
   inspection_policy:
     path: ./runtimes/inspection_policy
 
-sim:
-  world: sim/worlds/training.wbt
-
 motion:
   kinematic:
     kind: differential

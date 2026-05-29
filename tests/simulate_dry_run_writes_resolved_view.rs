@@ -12,6 +12,7 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
     let plan = prepare_with_releases(
         temp.path(),
         SimulateOptions {
+            world: "test".to_string(),
             rerun_proxy: true,
             joypad: true,
             resolve_external_artifacts: false,
@@ -84,9 +85,9 @@ fn write_robot_project(root: &std::path::Path) -> anyhow::Result<()> {
         root.join("structure.urdf"),
         r#"<robot name="testbot"><link name="base_link"/></robot>"#,
     )?;
-    fs::create_dir_all(root.join("sim/worlds"))?;
+    fs::create_dir_all(root.join("worlds"))?;
     fs::write(
-        root.join("sim/worlds/test.wbt"),
+        root.join("worlds/test.wbt"),
         "#VRML_SIM R2023b utf8\n\nWorldInfo {\n}\n",
     )?;
     Ok(())
@@ -106,9 +107,6 @@ structure: structure.urdf
 
 phoxal_runtimes:
   version: "latest"
-
-sim:
-  world: sim/worlds/test.wbt
 
 motion:
   kinematic:

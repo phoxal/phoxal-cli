@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -8,6 +8,7 @@ use clap::Args;
 use semver::{Version, VersionReq};
 
 use crate::AppContext;
+use crate::host_paths;
 use crate::shell;
 
 use crate::lockfile::{LOCKFILE_NAME, LockedTool, Lockfile};
@@ -90,7 +91,7 @@ fn report_tool_cache(app: &AppContext) -> Result<()> {
     let lockfile = Lockfile::read(&lock_path)?;
     for (name, tool) in lockfile.tools {
         let binary_name = tool_binary_name(&tool);
-        let path = tool_cache_path(app.project.root(), &name, &tool.resolved, binary_name);
+        let path = tool_cache_path(&name, &tool.resolved, binary_name)?;
         if path.is_file() {
             app.ui.success(format!("tool {name}: {}", path.display()));
         } else {
@@ -111,7 +112,7 @@ async fn download_tools(app: &AppContext) -> Result<()> {
     })?;
     for (name, tool) in lockfile.tools {
         let binary_name = tool_binary_name(&tool);
-        let destination = tool_cache_path(app.project.root(), &name, &tool.resolved, binary_name);
+        let destination = tool_cache_path(&name, &tool.resolved, binary_name)?;
         if destination.is_file() {
             app.ui.success(format!("tool {name}: already cached"));
             continue;
@@ -133,8 +134,7 @@ async fn download_tools(app: &AppContext) -> Result<()> {
             "https://github.com/{}/releases/download/v{}/{}",
             tool.repo, tool.resolved, tool.asset
         );
-        let download =
-            download_cache_path(app.project.root(), &tool.repo, &tool.resolved, &tool.asset);
+        let download = download_cache_path(&tool.repo, &tool.resolved, &tool.asset)?;
         let bytes = read_or_download(app, &download, &url).await?;
         let actual = sha256_hex(&bytes);
         if actual != tool.sha256 {
@@ -176,7 +176,7 @@ async fn read_or_download(app: &AppContext, path: &Path, url: &str) -> Result<Ve
         bail!("tool download returned {}", response.status());
     }
     let bytes = response.bytes().await?.to_vec();
-    fs::write(path, &bytes).with_context(|| format!("failed to write {}", path.display()))?;
+    atomic_write(path, &bytes).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(bytes)
 }
 
@@ -200,7 +200,7 @@ fn extract_binary(bytes: &[u8], binary_name: &str, destination: &Path) -> Result
         entry
             .read_to_end(&mut extracted)
             .context("failed to read binary from tar entry")?;
-        fs::write(destination, extracted)
+        atomic_write(destination, &extracted)
             .with_context(|| format!("failed to write {}", destination.display()))?;
         make_executable(destination)?;
         return Ok(());
@@ -225,24 +225,20 @@ fn make_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn tool_cache_path(project_root: &Path, name: &str, version: &str, binary_name: &str) -> PathBuf {
-    project_root
-        .join(".phoxal")
-        .join("cache")
+fn tool_cache_path(name: &str, version: &str, binary_name: &str) -> Result<PathBuf> {
+    Ok(host_paths::cache_dir()?
         .join("tools")
         .join(name)
         .join(version)
-        .join(binary_name)
+        .join(binary_name))
 }
 
-fn download_cache_path(project_root: &Path, repo: &str, version: &str, asset: &str) -> PathBuf {
-    project_root
-        .join(".phoxal")
-        .join("cache")
+fn download_cache_path(repo: &str, version: &str, asset: &str) -> Result<PathBuf> {
+    Ok(host_paths::cache_dir()?
         .join("downloads")
         .join(repo)
         .join(format!("v{version}"))
-        .join(asset)
+        .join(asset))
 }
 
 fn tool_binary_name(tool: &LockedTool) -> &str {
@@ -259,4 +255,18 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("cache path did not have a parent directory")?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("failed to create temp file in {}", parent.display()))?;
+    tmp.write_all(bytes)
+        .with_context(|| format!("failed to write temp file in {}", parent.display()))?;
+    tmp.persist(path)
+        .map(|_| ())
+        .with_context(|| format!("failed to persist {}", path.display()))
 }
