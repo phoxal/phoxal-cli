@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, ValueEnum};
-use phoxal_robot::RobotV1 as Robot;
+use phoxal_core_robot::RobotV1 as Robot;
 use semver::{Version, VersionReq};
 
 use crate::AppContext;
@@ -120,7 +120,7 @@ fn print_json_report(robot: &Robot) -> Result<()> {
     Ok(())
 }
 
-fn join_errors(errors: Vec<phoxal_robot::ValidationError>) -> String {
+fn join_errors(errors: Vec<phoxal_core_robot::ValidationError>) -> String {
     errors
         .iter()
         .map(ToString::to_string)

@@ -3,8 +3,8 @@ use webots_proto::types::ProtoField as WebotsField;
 
 use crate::webots_staging::native_fields::{NativeValue, native_webots_fields_for_capability};
 use crate::webots_staging::scene::WebotsSceneDescription;
-use phoxal_component::v1::capability::Capability as PhysicalCapability;
-use phoxal_simulation::capability::Capability as SimulationCapability;
+use phoxal_core_component::v1::capability::Capability as PhysicalCapability;
+use phoxal_core_simulation::capability::Capability as SimulationCapability;
 
 impl WebotsSceneDescription {
     pub fn render_imu_family_capability(
