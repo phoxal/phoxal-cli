@@ -1,6 +1,6 @@
 FROM debian:bookworm-slim
 
-LABEL org.opencontainers.image.source=https://github.com/jbernavaprah/robot-framework
+LABEL org.opencontainers.image.source=https://github.com/phoxal/phoxal-cli
 
 COPY bundle/ /seed/
 
