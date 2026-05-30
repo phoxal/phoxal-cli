@@ -34,6 +34,32 @@ phoxal simulate <world>
 
 Example: `phoxal simulate default` finds `worlds/default.wbt` in the project.
 
+## Live split-recovery gate
+
+`scripts/live-simulate-gate.sh` is the documented gate that proves the
+separated repos run together end to end — `robot.yaml` → `phoxal-cli` → a real
+`phoxal.lock` (real GHCR digests) → generated `.phoxal/run/` → router → Webots
+→ the mandatory runtime set. It is the live counterpart to recovery Gates 8–9
+in `phoxal/organization`'s `REPOSITORIES.md`, and depends on real image digests
+(#10) and a published runtime image set (`phoxal/framework#31`).
+
+```sh
+# from the phoxal-cli checkout; ROBOT_DIR defaults to ../robot-v1
+scripts/live-simulate-gate.sh            # smoke: real-digest lock + locked compose (CI-safe)
+scripts/live-simulate-gate.sh --live     # full live run (needs Docker daemon + Webots)
+```
+
+The smoke phase runs `update --pin-digests`, asserts every runtime image in
+`phoxal.lock` is pinned to a real `repo@sha256:…` digest (never a tag ref), and
+runs `simulate default --locked --dry-run` to verify locked resolution and that
+the generated compose references those digest pins. It needs only
+`docker buildx` (no daemon). The `--live` phase additionally requires a running
+Docker daemon and Webots on `PATH`, then runs `simulate default --locked` so you
+can confirm the router, the GHCR runtime services, Webots, and bus connectivity
+(`tcp/router:7447`, host tools via `tcp/127.0.0.1:7447`). Failures are reported
+with the actionable cause (missing image/digest, Docker not running, Webots
+missing, runtime startup, or bus connection).
+
 ## Host layout
 
 ```text
