@@ -1,6 +1,6 @@
 FROM alpine:3.20
 
-LABEL org.opencontainers.image.source=https://github.com/jbernavaprah/robot-framework
+LABEL org.opencontainers.image.source=https://github.com/phoxal/phoxal-cli
 
 RUN apk add --no-cache curl ca-certificates
 

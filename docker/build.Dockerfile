@@ -3,7 +3,7 @@ FROM debian:bookworm-slim
 ARG BINARY_NAME
 ARG BINARY_SOURCE
 
-LABEL org.opencontainers.image.source=https://github.com/jbernavaprah/robot-framework
+LABEL org.opencontainers.image.source=https://github.com/phoxal/phoxal-cli
 LABEL org.opencontainers.image.description="${BINARY_NAME}"
 LABEL org.opencontainers.image.licenses=MIT
 
