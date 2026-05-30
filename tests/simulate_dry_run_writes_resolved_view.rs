@@ -62,6 +62,19 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
     assert!(compose.contains("x-phoxal-native-tools"));
     assert!(compose.contains("rerun_proxy"));
     assert!(compose.contains("joypad"));
+    // Offline dry-run must not embed a fabricated runtime image digest: every
+    // platform runtime image is a `repo:version` tag ref, so a later live
+    // `simulate` can never try to `docker pull repo@sha256:<fake>`. (The zenoh
+    // router image is a real, published digest pin and is intentionally exempt.)
+    assert!(compose.contains("ghcr.io/phoxal/runtime-"));
+    for line in compose.lines() {
+        if line.contains("ghcr.io/phoxal/runtime-") {
+            assert!(
+                !line.contains("@sha256:"),
+                "platform runtime image must be a tag ref during offline dry-run, got: {line}"
+            );
+        }
+    }
 
     let state = fs::read_to_string(&plan.state_path)?;
     assert!(state.contains("mode: dry-run"));

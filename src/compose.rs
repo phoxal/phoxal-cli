@@ -112,7 +112,7 @@ pub fn generate(
             continue;
         };
         let service = ComposeService {
-            image: runtime.pinned_image(),
+            image: runtime.deploy_ref(),
             command: if entry.wires_to_router {
                 vec!["run".to_string()]
             } else {
@@ -233,7 +233,7 @@ mod tests {
     use super::*;
     use crate::catalog::{PlatformRuntimeCatalog, PlatformRuntimeEntry};
     use crate::local_zenoh;
-    use crate::resolver::{ResolvedPlatformRuntime, ResolvedRobot};
+    use crate::resolver::{ImagePin, ResolvedPlatformRuntime, ResolvedRobot};
 
     static TEST_CATALOG_ENTRIES: &[PlatformRuntimeEntry] = &[PlatformRuntimeEntry {
         name: "asset",
@@ -358,7 +358,7 @@ mod tests {
             name: name.to_string(),
             image_repo: image_repo.to_string(),
             version: Version::parse("0.0.0-dev").expect("valid test version"),
-            image_digest: format!("sha256:{name}"),
+            pin: ImagePin::Digest(format!("sha256:{name}")),
         }
     }
 

@@ -26,6 +26,10 @@ pub struct LockedPhoxalRuntimes {
     pub requested: String,
     pub resolved: String,
     pub releases_fetched_at: Option<DateTime<Utc>>,
+    /// Per-runtime image deploy ref. Either a content pin
+    /// (`repo@sha256:…`, reproducible) or a tag ref (`repo:version`,
+    /// recovery / not yet pinned). The lockfile never stores a fabricated
+    /// digest.
     pub images: BTreeMap<String, String>,
 }
 
@@ -56,10 +60,13 @@ pub struct LockedTool {
 impl Lockfile {
     #[must_use]
     pub fn from_resolved(resolved: &ResolvedRobot) -> Self {
+        // Store the deploy ref: a real `repo@sha256:…` pin when resolved, or a
+        // `repo:version` tag ref during recovery. Never a fabricated digest, so
+        // phoxal.lock never presents a fake runtime pin as reproducible.
         let images = resolved
             .platform_runtimes
             .iter()
-            .map(|runtime| (runtime.name.clone(), runtime.pinned_image()))
+            .map(|runtime| (runtime.name.clone(), runtime.deploy_ref()))
             .collect();
         let components = resolved
             .components
