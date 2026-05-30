@@ -15,7 +15,7 @@ use crate::host_paths;
 use crate::lockfile::{LOCKFILE_NAME, LOCKFILE_SCHEMA_VERSION, Lockfile};
 use crate::releases::ReleasesSnapshot;
 use crate::resolver::{
-    ReleaseSource, ResolveOptions, ResolvedComponentSource, ResolvedRobot,
+    ImagePin, ReleaseSource, ResolveOptions, ResolvedComponentSource, ResolvedRobot,
     resolve_with_release_source, resolve_with_releases,
 };
 use crate::shell;
@@ -304,11 +304,29 @@ fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) -> Result<(
             .images
             .get(&runtime.name)
             .with_context(|| format!("lockfile is missing image for runtime {}", runtime.name))?;
-        let (image_repo, image_digest) = image.split_once('@').with_context(|| {
-            format!("lockfile image for runtime {} is not pinned", runtime.name)
-        })?;
-        runtime.image_repo = image_repo.to_string();
-        runtime.image_digest = image_digest.to_string();
+        if let Some((image_repo, image_digest)) = image.split_once('@') {
+            // Reproducible content pin: repo@sha256:…
+            runtime.image_repo = image_repo.to_string();
+            runtime.pin = ImagePin::Digest(image_digest.to_string());
+        } else {
+            // Recovery tag ref: repo:version (the last colon separates the tag,
+            // leaving an optional registry-port colon in the repo intact).
+            let (image_repo, version) = image.rsplit_once(':').with_context(|| {
+                format!(
+                    "lockfile image '{image}' for runtime {} is neither a digest pin \
+                     (repo@sha256:…) nor a tag ref (repo:version)",
+                    runtime.name
+                )
+            })?;
+            runtime.image_repo = image_repo.to_string();
+            runtime.version = version.parse().with_context(|| {
+                format!(
+                    "lockfile image tag '{version}' for runtime {} is not a semver version",
+                    runtime.name
+                )
+            })?;
+            runtime.pin = ImagePin::Unpinned;
+        }
     }
     for name in lockfile.phoxal_runtimes.images.keys() {
         if !runtime_names.contains(name) {
@@ -549,9 +567,22 @@ async fn execute_plan(plan: &SimulatePlan) -> Result<()> {
 
 fn pull_platform_images(app: &AppContext, resolved: &ResolvedRobot) -> Result<()> {
     for runtime in &resolved.platform_runtimes {
-        let image = runtime.pinned_image();
+        // `deploy_ref` is a real digest pin or an honest tag ref — never a
+        // fabricated `sha256:` — so this can't attempt to pull a fake digest.
+        let image = runtime.deploy_ref();
         app.ui.info(format!("pulling {image}"));
-        shell::run_status("docker", ["pull", image.as_str()], None)?;
+        shell::run_status("docker", ["pull", image.as_str()], None).with_context(|| {
+            if runtime.digest_pin().is_some() {
+                format!("failed to pull pinned runtime image {image}")
+            } else {
+                format!(
+                    "failed to pull runtime image {image} by tag. The phoxal/framework GHCR \
+                     runtime images may not be published for this runtime set yet. Publish the \
+                     runtime images, then run `phoxal-cli update --pin-digests` to pin real \
+                     digests, or `phoxal-cli update --refresh-releases` to pick up a newer set."
+                )
+            }
+        })?;
     }
     Ok(())
 }

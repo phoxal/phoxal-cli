@@ -18,12 +18,18 @@ fn resolves_minimal_robot_to_full_platform_set() -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
         CATALOG.names().collect::<Vec<_>>()
     );
+    // Offline resolution must never fabricate an OCI digest: every runtime
+    // stays unpinned and deploys by its `repo:version` tag, not `repo@sha256:…`.
     assert!(
         resolved
             .platform_runtimes
             .iter()
-            .all(|runtime| runtime.image_digest.starts_with("sha256:"))
+            .all(|runtime| runtime.digest_pin().is_none())
     );
+    assert!(resolved.platform_runtimes.iter().all(|runtime| {
+        let deploy = runtime.deploy_ref();
+        !deploy.contains('@') && deploy.ends_with(":0.0.0-dev")
+    }));
 
     Ok(())
 }

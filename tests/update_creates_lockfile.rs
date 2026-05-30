@@ -29,6 +29,15 @@ fn update_creates_idempotent_lockfile() -> anyhow::Result<()> {
     assert_eq!(lockfile.phoxal_runtimes.resolved, "0.0.0-dev");
     assert!(lockfile.phoxal_runtimes.releases_fetched_at.is_some());
     assert_eq!(lockfile.phoxal_runtimes.images.len(), CATALOG.entries.len());
+    // Offline `update` must not write fake digests: every image entry is a
+    // `repo:version` tag ref, never a fabricated `repo@sha256:…` pin.
+    assert!(
+        lockfile
+            .phoxal_runtimes
+            .images
+            .values()
+            .all(|image| !image.contains("@sha256:") && image.ends_with(":0.0.0-dev"))
+    );
     assert!(lockfile.components.is_empty());
     assert_eq!(lockfile.tools.len(), DEFAULT_TOOL_VERSIONS.len());
 

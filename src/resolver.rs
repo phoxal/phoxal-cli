@@ -52,18 +52,57 @@ pub enum ReleaseSource<'a> {
     RefreshCache(&'a Path),
 }
 
+/// How a platform runtime image is referenced for deployment.
+///
+/// A [`ImagePin::Digest`] is a reproducible OCI content pin obtained from the
+/// registry (via `docker buildx imagetools inspect`). [`ImagePin::Unpinned`]
+/// means no digest was resolved — the image is deployed by its `repo:version`
+/// tag. We never fabricate a digest: an unpinned image is deployed by tag,
+/// which is the honest pre-publish-recovery behavior and is still a real,
+/// pullable reference (it just isn't content-addressed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImagePin {
+    /// A real registry-reported content digest, e.g. `sha256:…`.
+    Digest(String),
+    /// No digest resolved; deploy by `repo:version` tag.
+    Unpinned,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPlatformRuntime {
     pub name: String,
     pub image_repo: String,
     pub version: Version,
-    pub image_digest: String,
+    pub pin: ImagePin,
 }
 
 impl ResolvedPlatformRuntime {
+    /// The floating tag reference, e.g. `ghcr.io/phoxal/runtime-foo:0.2.0`.
     #[must_use]
-    pub fn pinned_image(&self) -> String {
-        format!("{}@{}", self.image_repo, self.image_digest)
+    pub fn tag_ref(&self) -> String {
+        format!("{}:{}", self.image_repo, self.version)
+    }
+
+    /// The reference Docker should pull and compose should embed: a real
+    /// digest pin when one was resolved, otherwise the `repo:version` tag.
+    /// Never a fabricated digest — so live `simulate` can never attempt to
+    /// pull a fake `repo@sha256:…`.
+    #[must_use]
+    pub fn deploy_ref(&self) -> String {
+        match &self.pin {
+            ImagePin::Digest(digest) => format!("{}@{}", self.image_repo, digest),
+            ImagePin::Unpinned => self.tag_ref(),
+        }
+    }
+
+    /// The real content digest, if one was resolved. `None` during
+    /// pre-publish recovery (deploy-by-tag).
+    #[must_use]
+    pub fn digest_pin(&self) -> Option<&str> {
+        match &self.pin {
+            ImagePin::Digest(digest) => Some(digest.as_str()),
+            ImagePin::Unpinned => None,
+        }
     }
 }
 
@@ -190,16 +229,20 @@ pub fn resolve_with_releases(
             None => runtime_set_version.clone(),
         };
         let image_ref = format!("{image_repo}:{version}");
-        let image_digest = if options.resolve_external_artifacts {
-            resolve_image_digest(&image_ref)?
+        // Only attempt registry digest resolution when explicitly asked
+        // (`--pin-digests`). Otherwise stay unpinned and deploy by tag — we
+        // never synthesize a placeholder `sha256:` that would later be
+        // mistaken for a real OCI pin.
+        let pin = if options.resolve_external_artifacts {
+            ImagePin::Digest(resolve_image_digest(&image_ref)?)
         } else {
-            fake_digest(&image_ref)
+            ImagePin::Unpinned
         };
         platform_runtimes.push(ResolvedPlatformRuntime {
             name: entry.name.to_string(),
             image_repo,
             version,
-            image_digest,
+            pin,
         });
     }
 
@@ -241,8 +284,15 @@ pub fn resolve_with_releases(
     })
 }
 
+/// Resolve a real OCI content digest for `image_ref` from the registry.
+///
+/// This requires `docker buildx imagetools inspect`, which reports the actual
+/// registry index digest. We deliberately do **not** fall back to hashing a
+/// `docker manifest inspect` body — fabricating a `sha256:` from manifest JSON
+/// produces a string that looks like an OCI pin but can never be pulled. If
+/// buildx cannot reach the image, fail loudly with guidance instead.
 pub fn resolve_image_digest(image_ref: &str) -> Result<String> {
-    match shell::run_stdout(
+    let output = shell::run_stdout(
         "docker",
         [
             "buildx",
@@ -253,24 +303,18 @@ pub fn resolve_image_digest(image_ref: &str) -> Result<String> {
             "{{json .Manifest}}",
         ],
         None,
-    ) {
-        Ok(output) => buildx_imagetools_manifest_digest(&output).with_context(|| {
-            format!(
-                "docker buildx imagetools inspect did not report an index digest for {image_ref}"
-            )
-        }),
-        Err(buildx_error) => {
-            let output = shell::run_stdout("docker", ["manifest", "inspect", image_ref], None)
-                .with_context(|| {
-                    format!(
-                        "failed to inspect Docker manifest for {image_ref}; install Docker with buildx and ensure the daemon is running (buildx error: {buildx_error:#})"
-                    )
-                })?;
-            docker_manifest_index_digest(&output).with_context(|| {
-                format!("docker manifest inspect did not yield an index body for {image_ref}")
-            })
-        }
-    }
+    )
+    .with_context(|| {
+        format!(
+            "could not resolve a real image digest for {image_ref}. \
+             `docker buildx imagetools inspect` failed — install Docker with buildx and ensure \
+             the daemon can reach the registry. If the phoxal/framework GHCR runtime images are \
+             not published yet, omit --pin-digests to deploy by tag during pre-publish recovery."
+        )
+    })?;
+    buildx_imagetools_manifest_digest(&output).with_context(|| {
+        format!("docker buildx imagetools inspect did not report an index digest for {image_ref}")
+    })
 }
 
 pub fn resolve_git_ref(url: &str, git_ref: &str) -> Result<String> {
@@ -544,25 +588,9 @@ fn buildx_imagetools_manifest_digest(output: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("manifest index digest not found"))
 }
 
-fn docker_manifest_index_digest(output: &str) -> Result<String> {
-    let value: Value =
-        serde_json::from_str(output).context("docker manifest output was not JSON")?;
-    if value
-        .as_object()
-        .and_then(|object| object.get("manifests"))
-        .and_then(Value::as_array)
-        .is_none_or(|manifests| manifests.is_empty())
-    {
-        bail!("manifest output is not a multi-platform index");
-    }
-    let body = output.trim_end();
-    Ok(format!("sha256:{}", fake_sha(body)))
-}
-
-fn fake_digest(seed: &str) -> String {
-    format!("sha256:{}", fake_sha(seed))
-}
-
+/// Deterministic non-cryptographic stand-in hash for **tool asset** entries
+/// during offline resolution. Never used for OCI image digests — image pins
+/// are either a real registry digest or an honest tag ref (see [`ImagePin`]).
 fn fake_sha(seed: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(seed.as_bytes());
@@ -614,5 +642,43 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn buildx_imagetools_digest_rejects_non_sha256_digest() {
+        // A registry that reports a non-sha256 digest must not be accepted as a
+        // pin — we never coerce a bogus value into a `sha256:` string.
+        let output = r#"{"digest": "md5:deadbeef"}"#;
+        assert!(buildx_imagetools_manifest_digest(output).is_err());
+    }
+
+    fn runtime(pin: ImagePin) -> ResolvedPlatformRuntime {
+        ResolvedPlatformRuntime {
+            name: "asset".to_string(),
+            image_repo: "ghcr.io/phoxal/runtime-asset".to_string(),
+            version: Version::parse("0.2.0").expect("valid version"),
+            pin,
+        }
+    }
+
+    #[test]
+    fn unpinned_runtime_deploys_by_tag_not_fabricated_digest() {
+        let runtime = runtime(ImagePin::Unpinned);
+        assert_eq!(runtime.tag_ref(), "ghcr.io/phoxal/runtime-asset:0.2.0");
+        // The deploy ref is the tag — no `@sha256:` is ever invented.
+        assert_eq!(runtime.deploy_ref(), "ghcr.io/phoxal/runtime-asset:0.2.0");
+        assert!(!runtime.deploy_ref().contains('@'));
+        assert_eq!(runtime.digest_pin(), None);
+    }
+
+    #[test]
+    fn pinned_runtime_deploys_by_digest() {
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let runtime = runtime(ImagePin::Digest(digest.to_string()));
+        assert_eq!(
+            runtime.deploy_ref(),
+            format!("ghcr.io/phoxal/runtime-asset@{digest}")
+        );
+        assert_eq!(runtime.digest_pin(), Some(digest));
     }
 }
