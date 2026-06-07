@@ -74,7 +74,7 @@ jobs:
   # Release from the uploaded binaries. Notes come from CHANGELOG.md (default).
   publish:
     needs: [plan, build]
-    uses: phoxal/organization/.github/workflows/rust-github-release.yml@master
+    uses: phoxal/.github/.github/workflows/rust-github-release.yml@main
     secrets: inherit
     with:
       version: ${{ needs.plan.outputs.version }}

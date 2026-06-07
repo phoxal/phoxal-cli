@@ -14,5 +14,5 @@ concurrency:
 
 jobs:
   prepare:
-    uses: phoxal/organization/.github/workflows/rust-release-prep.yml@master
+    uses: phoxal/.github/.github/workflows/rust-release-prep.yml@main
     secrets: inherit
