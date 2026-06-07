@@ -12,7 +12,7 @@ jobs:
   plan:
     if: |
       github.event.pull_request.merged == true &&
-      startsWith(github.event.pull_request.head.ref, 'release-prep/v')
+      startsWith(github.event.pull_request.head.ref, 'release/v')
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -23,10 +23,10 @@ jobs:
         run: |
           set -euo pipefail
           # Caller-owned gate + version. The release-prep branch
-          # (release-prep/vX.Y.Z) carries the intended version; the reusable
+          # (release/vX.Y.Z) carries the intended version; the reusable
           # release workflow verifies it against Cargo.toml on the merged commit
           # before tagging/publishing.
-          echo "version=${HEAD_REF#release-prep/v}" >> "$GITHUB_OUTPUT"
+          echo "version=${HEAD_REF#release/v}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: plan
