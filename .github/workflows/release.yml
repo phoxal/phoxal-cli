@@ -18,11 +18,24 @@ jobs:
       version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
       - id: v
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
-          v=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "version=${v}" >> "$GITHUB_OUTPUT"
+          # Verify the intended version: the version in Cargo.toml on the merged
+          # commit must match the version advertised in the release-prep PR title.
+          cargo_version=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          title_version="${PR_TITLE#release: prepare v}"
+          if [ "${cargo_version}" != "${title_version}" ]; then
+            echo "::error::Version mismatch: Cargo.toml=${cargo_version} but PR title says v${title_version}. Refusing to release."
+            exit 1
+          fi
+          echo "Verified release version v${cargo_version}."
+          echo "version=${cargo_version}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: plan
@@ -74,20 +87,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Create GitHub Release with binaries (tag + release via API; bypasses git-push workflow restriction)
+      - name: Verify or create version tag (via API; git-push of tags is restricted here)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           v=${{ needs.plan.outputs.version }}
-          gh release create "v${v}" \
-            --title "v${v}" \
-            --notes-file CHANGELOG.md \
-            --target main \
-            dist/*.tar.gz
+          tag="v${v}"
+          sha="${{ github.event.pull_request.merge_commit_sha }}"
+          if existing=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq '.object.sha' 2>/dev/null); then
+            echo "Tag ${tag} already exists at ${existing} (retry-safe; reusing it)."
+            if [ "${existing}" != "${sha}" ]; then
+              echo "::warning::Tag ${tag} points at ${existing}, but this release merged at ${sha}. Keeping the existing tag."
+            fi
+          else
+            echo "Creating tag ${tag} at ${sha} via the Git refs API."
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${tag}" -f sha="${sha}" >/dev/null
+          fi
+
+      - name: Publish or update GitHub Release with binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          v=${{ needs.plan.outputs.version }}
+          tag="v${v}"
+          # Retry-safe: the tag already exists (created above). If a prior run
+          # already created the release, update it and re-upload assets instead
+          # of failing.
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists; updating notes and re-uploading assets."
+            gh release edit "${tag}" --title "${tag}" --notes-file CHANGELOG.md
+            gh release upload "${tag}" dist/*.tar.gz --clobber
+          else
+            echo "Creating release ${tag}."
+            gh release create "${tag}" \
+              --title "${tag}" \
+              --notes-file CHANGELOG.md \
+              dist/*.tar.gz
+          fi
