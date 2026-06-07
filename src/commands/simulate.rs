@@ -375,7 +375,10 @@ fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) -> Result<(
             .get(&tool.name)
             .with_context(|| format!("lockfile is missing tool {}", tool.name))?;
         if locked.requested != tool.requested {
-            bail!("lockfile tool {} does not match robot.yaml", tool.name);
+            bail!(
+                "lockfile tool {} does not match robot.yaml; re-run `phoxal update` to regenerate phoxal.lock",
+                tool.name
+            );
         }
         tool.resolved = locked.resolved.clone();
         if !locked.repo.is_empty() {
