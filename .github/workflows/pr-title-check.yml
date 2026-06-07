@@ -1,0 +1,13 @@
+name: Lint PR
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint:
+    uses: phoxal/organization/.github/workflows/pr-title-check.yml@master
+    secrets: inherit
