@@ -30,6 +30,23 @@ jobs:
         id: bump
         run: |
           set -euo pipefail
+          # Self-trigger guard: never react to our own release-prep merge.
+          # Merging a release-prep PR is a push to main and would otherwise
+          # re-run this workflow. Covers squash/rebase merges (HEAD subject is
+          # the release-prep commit) and merge-commit merges (the subject shows
+          # up among the commits introduced by this push).
+          before="${{ github.event.before }}"
+          if [ -n "${before}" ] && [ "${before}" != "0000000000000000000000000000000000000000" ] \
+             && git rev-parse -q --verify "${before}^{commit}" >/dev/null 2>&1; then
+            pushed_subjects=$(git log --format='%s' "${before}..${{ github.sha }}")
+          else
+            pushed_subjects=$(git log -1 --format='%s')
+          fi
+          if printf '%s\n' "${pushed_subjects}" | grep -qE '^release: prepare v[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "This push contains a release-prep commit; release.yml owns it. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           last_tag=$(git describe --tags --match 'v*.*.*' --abbrev=0 2>/dev/null || echo "v0.0.0")
             current_version=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
             if ! git rev-parse "v${current_version}" >/dev/null 2>&1 && [ "${current_version}" != "${last_tag#v}" ]; then
@@ -40,11 +57,11 @@ jobs:
             
           commits=$(git log --format="%s%n%n%b" "${last_tag}..HEAD" 2>/dev/null || git log --format="%s%n%n%b")
           if echo "$commits" | grep -qE "^[a-z]+(\([^)]+\))?!:" || echo "$commits" | grep -qE "^BREAKING CHANGE:"; then
-            bump=major
+            bump="major"
           elif echo "$commits" | grep -qE "^feat(\([^)]+\))?:"; then
-            bump=minor
+            bump="minor"
           elif echo "$commits" | grep -qE "^fix(\([^)]+\))?:"; then
-            bump=patch
+            bump="patch"
           else
             echo "No bumping commits since ${last_tag}; nothing to propose."
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -59,9 +76,11 @@ jobs:
             patch) patch=$((patch+1)) ;;
           esac
           new_version="${major}.${minor}.${patch}"
-          echo "version=${new_version}" >> "$GITHUB_OUTPUT"
-          echo "bump=${bump}" >> "$GITHUB_OUTPUT"
-          echo "last_tag=${last_tag}" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${new_version}"
+            echo "bump=${bump}"
+            echo "last_tag=${last_tag}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Update Cargo.toml workspace version
         if: steps.bump.outputs.skip != 'true'
