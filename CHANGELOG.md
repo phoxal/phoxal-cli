@@ -4,6 +4,17 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.2.2) - 2026-06-07
+
+
+### CI
+
+- Gate release on the release-prep branch, not the PR title (#25)
+
+### Fixed
+
+- Make the lockfile-mismatch error in simulate actionable (#26)
+
 ## [0.2.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.2.1) - 2026-06-07
 
 
