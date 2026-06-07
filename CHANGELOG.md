@@ -4,6 +4,19 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.2.1) - 2026-06-07
+
+
+### CI
+
+- Adopt shared reusable release workflows (#20)
+- Enforce Conventional Commit PR titles (#21)
+- Repoint reusable workflows to public phoxal/.github (#22)
+
+### Fixed
+
+- Clarify rustup install hint in doctor (#23)
+
 ## [0.2.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.2.0) - 2026-06-07
 
 
