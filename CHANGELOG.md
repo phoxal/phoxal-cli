@@ -4,6 +4,34 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.2.0) - 2026-06-07
+
+
+### Added
+
+- *(compose)* Hand-write router service on upstream zenoh + add local_zenoh module
+- *(simulate)* Two-stack bring-up via phoxal-link network + compose --wait readiness
+- *(simulate)* World becomes CLI arg; caches move to ~/.phoxal/
+- *(gate)* Add live split-recovery gate for robot-v1 simulate default (#11)
+
+### CI
+
+- *(release)* Explicit, retry-safe release tag handling (#19)
+
+### Documentation
+
+- *(README)* Document simulate <world> + host layout under ~/.phoxal/
+
+### Fixed
+
+- *(resolver)* Never enter fake image digests into simulate or phoxal.lock (#10)
+
+### Other
+
+- Adopt phoxal framework renames (infra/api/core/runtime/validation)
+- Restore framework branch pin to main after restructure merge
+- *(docker)* Point OCI image.source label at phoxal/phoxal-cli
+
 ## [0.1.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.1.2) - 2026-05-28
 
 
@@ -66,7 +94,7 @@ All notable changes documented here. The format follows
 ### Refactored
 
 - *(workspace)* Carve members into future-repo subdirs
-- *(engine)* Fold phoxal-utils-conventions into phoxal-core-engine
+- *(engine)* Fold phoxal-utils-conventions into phoxal-engine
 - *(api)* Introduce pub mod v1 in every phoxal-*-api crate
 - *(phoxal-cli)* Delete orphan command modules + phoxal-cli-webots
 
