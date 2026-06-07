@@ -75,7 +75,7 @@ fn check_rustup(app: &AppContext) {
     match shell::run_stdout("rustup", ["--version"], None) {
         Ok(_) => app.ui.success("rustup is installed"),
         Err(_) => app.ui.warn(format!(
-            "rustup is missing; install from https://rustup.rs for {}",
+            "rustup is missing; install it from https://rustup.rs (detected OS: {})",
             std::env::consts::OS
         )),
     }
