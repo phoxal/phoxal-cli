@@ -318,7 +318,13 @@ fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) -> Result<(
 
     let mut component_sources = BTreeSet::new();
     for component in &mut resolved.components {
-        let ResolvedComponentSource::Git { git, tag, commit } = &mut component.source else {
+        let ResolvedComponentSource::Git {
+            git,
+            tag,
+            commit,
+            directory,
+        } = &mut component.source
+        else {
             continue;
         };
         component_sources.insert(component.source_name.clone());
@@ -334,8 +340,9 @@ fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) -> Result<(
         let crate::lockfile::LockedComponentSource::Git {
             git: locked_git,
             tag: locked_tag,
+            directory: locked_directory,
         } = &locked.source;
-        if locked_git != git || locked_tag != tag {
+        if locked_git != git || locked_tag != tag || locked_directory != directory {
             bail!(
                 "lockfile component source {} does not match robot.yaml",
                 component.source_name

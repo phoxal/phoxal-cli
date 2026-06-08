@@ -37,9 +37,12 @@ pub fn assemble(project_root: &Path, resolved: &ResolvedRobot, out_dir: &Path) -
 
     for component in &resolved.components {
         let source_dir = match &component.source {
-            ResolvedComponentSource::Git { git, commit, .. } => {
-                ensure_component_cache(&component.source_name, git, commit)?
-            }
+            ResolvedComponentSource::Git {
+                git,
+                commit,
+                directory,
+                ..
+            } => component_source_dir(ensure_repo_cache(git, commit)?, directory.as_deref())?,
             ResolvedComponentSource::Path { path } => resolve_project_path(project_root, path),
         };
         let destination = components_dir.join(&component.source_name);
@@ -49,20 +52,22 @@ pub fn assemble(project_root: &Path, resolved: &ResolvedRobot, out_dir: &Path) -
     Ok(())
 }
 
-fn ensure_component_cache(source_name: &str, git: &str, commit: &str) -> Result<PathBuf> {
+/// Clone a component repository at a pinned commit into the host cache,
+/// keyed by `(repository, commit)` so a shared catalog repository hosting
+/// many components is cloned once and reused across every component that
+/// references it.
+fn ensure_repo_cache(git: &str, commit: &str) -> Result<PathBuf> {
     let cache_dir = host_paths::cache_dir()?
         .join("components")
-        .join(format!("{source_name}-{commit}"));
-    if cache_dir.join(COMPONENT_FILE).is_file() {
+        .join(format!("{}-{commit}", repo_slug(git)));
+    if cache_dir.join(".git").is_dir() {
         return Ok(cache_dir);
-    }
-    if let Some(parent) = cache_dir.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create component cache {}", parent.display()))?;
     }
     let parent = cache_dir
         .parent()
         .context("component cache path did not have a parent directory")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create component cache {}", parent.display()))?;
     let staging = tempfile::TempDir::new_in(parent)
         .with_context(|| format!("failed to create staging cache in {}", parent.display()))?;
     let cache_arg = staging.path().to_string_lossy().to_string();
@@ -72,16 +77,9 @@ fn ensure_component_cache(source_name: &str, git: &str, commit: &str) -> Result<
         None,
     )?;
     shell::run_status("git", ["checkout", commit], Some(staging.path()))?;
-    if !staging.path().join(COMPONENT_FILE).is_file() {
-        bail!(
-            "component source {} is missing required {}",
-            staging.path().display(),
-            COMPONENT_FILE
-        );
-    }
     match fs::rename(staging.path(), &cache_dir) {
         Ok(()) => {}
-        Err(error) if cache_dir.join(COMPONENT_FILE).is_file() => {
+        Err(error) if cache_dir.join(".git").is_dir() => {
             tracing::debug!(
                 "component cache {} appeared during clone; keeping existing destination ({error})",
                 cache_dir.display()
@@ -94,6 +92,35 @@ fn ensure_component_cache(source_name: &str, git: &str, commit: &str) -> Result<
         }
     }
     Ok(cache_dir)
+}
+
+/// Resolve the component definition directory inside a cached repository,
+/// applying the optional `directory` subdirectory selector. Guards against
+/// absolute paths and `..` traversal so a manifest cannot read outside the
+/// cloned repository.
+fn component_source_dir(repo_root: PathBuf, directory: Option<&Path>) -> Result<PathBuf> {
+    let Some(directory) = directory else {
+        return Ok(repo_root);
+    };
+    for part in directory.components() {
+        if !matches!(part, std::path::Component::Normal(_)) {
+            bail!(
+                "component source directory {} must be a relative path without '..'",
+                directory.display()
+            );
+        }
+    }
+    Ok(repo_root.join(directory))
+}
+
+/// Filesystem-safe slug for a git remote URL, so distinct repositories never
+/// share a cache directory.
+fn repo_slug(git: &str) -> String {
+    let trimmed = git.strip_suffix(".git").unwrap_or(git);
+    trimmed
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect()
 }
 
 fn copy_component_definition(source_dir: &Path, destination: &Path) -> Result<()> {

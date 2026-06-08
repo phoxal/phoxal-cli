@@ -88,6 +88,9 @@ pub enum ResolvedComponentSource {
         git: String,
         tag: String,
         commit: String,
+        /// Subdirectory within the repository holding the component
+        /// definition. `None` means the repository root.
+        directory: Option<PathBuf>,
     },
     Path {
         path: PathBuf,
@@ -328,6 +331,7 @@ fn resolve_components(robot: &Robot) -> Result<Vec<ResolvedComponent>> {
                     git: source.git.clone(),
                     tag: source.tag.clone(),
                     commit,
+                    directory: source.directory.clone(),
                 }
             }
             ComponentSource::Path(source) => ResolvedComponentSource::Path {
