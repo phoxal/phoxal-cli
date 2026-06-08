@@ -1,8 +1,8 @@
+use phoxal::model::robot::RobotV1 as Robot;
 use phoxal_cli::catalog::CATALOG;
 use phoxal_cli::lockfile::Lockfile;
 use phoxal_cli::releases::ReleasesSnapshot;
 use phoxal_cli::resolver::{ResolveOptions, resolve_with_releases};
-use phoxal_core_robot::RobotV1 as Robot;
 
 #[test]
 fn lockfile_roundtrips_through_yaml() -> anyhow::Result<()> {

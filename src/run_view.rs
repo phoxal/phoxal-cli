@@ -21,8 +21,9 @@ pub fn assemble(project_root: &Path, resolved: &ResolvedRobot, out_dir: &Path) -
     fs::create_dir_all(out_dir)
         .with_context(|| format!("failed to create run view {}", out_dir.display()))?;
 
-    let robot_yaml = serde_yaml::to_string(&phoxal_core_robot::Robot::V1(resolved.robot.clone()))
-        .context("failed to serialize robot")?;
+    let robot_yaml =
+        serde_yaml::to_string(&phoxal::model::robot::Robot::V1(resolved.robot.clone()))
+            .context("failed to serialize robot")?;
     fs::write(out_dir.join("robot.yaml"), robot_yaml)
         .with_context(|| format!("failed to write {}", out_dir.join("robot.yaml").display()))?;
 

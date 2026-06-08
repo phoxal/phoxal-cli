@@ -129,7 +129,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-	phoxal-core-engine = "0.2"
+phoxal = {{ git = "https://github.com/phoxal/framework", branch = "main" }}
 "#,
             command.name
         ),

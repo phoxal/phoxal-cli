@@ -3,8 +3,8 @@ use webots_proto::types::ProtoField as WebotsField;
 
 use crate::webots_staging::native_fields::{NativeValue, native_webots_fields_for_capability};
 use crate::webots_staging::scene::WebotsSceneDescription;
-use phoxal_core_component::v1::capability::{Capability as PhysicalCapability, LidarOutput};
-use phoxal_core_simulation::capability::Capability as SimulationCapability;
+use phoxal::model::component::v1::capability::{Capability as PhysicalCapability, LidarOutput};
+use phoxal::model::simulation::capability::Capability as SimulationCapability;
 
 impl WebotsSceneDescription {
     pub fn render_ranging_capability(
