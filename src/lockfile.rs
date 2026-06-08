@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -42,7 +42,12 @@ pub struct LockedComponent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum LockedComponentSource {
-    Git { git: String, tag: String },
+    Git {
+        git: String,
+        tag: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        directory: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,12 +77,18 @@ impl Lockfile {
             .components
             .iter()
             .filter_map(|component| match &component.source {
-                ResolvedComponentSource::Git { git, tag, commit } => Some((
+                ResolvedComponentSource::Git {
+                    git,
+                    tag,
+                    commit,
+                    directory,
+                } => Some((
                     component.source_name.clone(),
                     LockedComponent {
                         source: LockedComponentSource::Git {
                             git: git.clone(),
                             tag: tag.clone(),
+                            directory: directory.clone(),
                         },
                         commit: commit.clone(),
                     },
@@ -141,5 +152,44 @@ impl Lockfile {
     #[must_use]
     pub fn has_current_schema(&self) -> bool {
         self.schema_version == LOCKFILE_SCHEMA_VERSION
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn locked_component_directory_round_trips() {
+        let locked = LockedComponent {
+            source: LockedComponentSource::Git {
+                git: "https://github.com/phoxal/components".to_string(),
+                tag: "v0.3.0".to_string(),
+                directory: Some(PathBuf::from("bno085")),
+            },
+            commit: "abc123".to_string(),
+        };
+        let yaml = serde_yaml::to_string(&locked).expect("serialize");
+        assert!(yaml.contains("directory: bno085"), "got: {yaml}");
+        let reparsed: LockedComponent = serde_yaml::from_str(&yaml).expect("reparse");
+        assert_eq!(reparsed, locked);
+    }
+
+    #[test]
+    fn locked_component_omits_absent_directory() {
+        let locked = LockedComponent {
+            source: LockedComponentSource::Git {
+                git: "https://github.com/phoxal/component-bno085".to_string(),
+                tag: "main".to_string(),
+                directory: None,
+            },
+            commit: "abc123".to_string(),
+        };
+        let yaml = serde_yaml::to_string(&locked).expect("serialize");
+        assert!(!yaml.contains("directory"), "got: {yaml}");
+        // A pre-`directory` lockfile (no field) still parses.
+        let legacy = "source:\n  git: https://github.com/phoxal/component-bno085\n  tag: main\ncommit: abc123\n";
+        let parsed: LockedComponent = serde_yaml::from_str(legacy).expect("legacy parse");
+        assert_eq!(parsed, locked);
     }
 }
