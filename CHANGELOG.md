@@ -4,6 +4,22 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.3.0) - 2026-06-09
+
+
+### Added
+
+- *(resolver)* Stage git components from a repository subdirectory (#29)
+
+### CI
+
+- Gate releases on the release/ branch prefix (#28)
+- Use the shared rust-ci reusable workflow (#32)
+
+### Refactored
+
+- Depend on single `phoxal` crate (#31)
+
 ## [0.2.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.2.2) - 2026-06-07
 
 
