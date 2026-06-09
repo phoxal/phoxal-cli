@@ -999,7 +999,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2306,7 +2306,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2674,19 +2674,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoxal-api-component"
-version = "0.3.0"
-source = "git+https://github.com/phoxal/framework?branch=main#0749b6bc8d3417b3c368ae0d58e1811a8b7ca9ad"
+name = "phoxal"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "069b276097c1231660a800e2fc27719cf4cc9d42e0f8928589d96da8db877847"
 dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "clap",
  "derive-new",
- "phoxal-infra-bus",
+ "derive_setters",
+ "dotenvy",
+ "nalgebra",
+ "rmp-serde",
  "serde",
  "serde_bytes",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "urdf-rs",
+ "zenoh",
 ]
 
 [[package]]
 name = "phoxal-cli"
-version = "0.1.2"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2699,12 +2715,7 @@ dependencies = [
  "hex",
  "nalgebra",
  "pathdiff",
- "phoxal-core-component",
- "phoxal-core-engine",
- "phoxal-core-robot",
- "phoxal-core-simulation",
- "phoxal-core-structure",
- "phoxal-infra-helpers",
+ "phoxal",
  "reqwest",
  "semver",
  "serde",
@@ -2719,117 +2730,6 @@ dependencies = [
  "tracing-subscriber",
  "urdf-rs",
  "webots-proto",
-]
-
-[[package]]
-name = "phoxal-core-component"
-version = "0.3.0"
-source = "git+https://github.com/phoxal/framework?branch=main#0749b6bc8d3417b3c368ae0d58e1811a8b7ca9ad"
-dependencies = [
- "anyhow",
- "derive-new",
- "serde",
- "serde_yaml",
-]
-
-[[package]]
-name = "phoxal-core-engine"
-version = "0.3.0"
-source = "git+https://github.com/phoxal/framework?branch=main#0749b6bc8d3417b3c368ae0d58e1811a8b7ca9ad"
-dependencies = [
- "anyhow",
- "arc-swap",
- "async-trait",
- "clap",
- "dotenvy",
- "phoxal-api-component",
- "phoxal-core-component",
- "phoxal-core-robot",
- "phoxal-core-spatial",
- "phoxal-core-structure",
- "phoxal-infra-bus",
- "phoxal-infra-helpers",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "urdf-rs",
-]
-
-[[package]]
-name = "phoxal-core-robot"
-version = "0.3.0"
-source = "git+https://github.com/phoxal/framework?branch=main#0749b6bc8d3417b3c368ae0d58e1811a8b7ca9ad"
-dependencies = [
- "anyhow",
- "nalgebra",
- "phoxal-core-component",
- "serde",
- "serde_yaml",
- "urdf-rs",
-]
-
-[[package]]
-name = "phoxal-core-simulation"
-version = "0.3.0"
-source = "git+https://github.com/phoxal/framework?branch=main#0749b6bc8d3417b3c368ae0d58e1811a8b7ca9ad"
-dependencies = [
- "anyhow",
- "derive-new",
- "phoxal-core-component",
- "serde",
- "serde_yaml",
-]
-
-[[package]]
-name = "phoxal-core-spatial"
-version = "0.3.0"
-source = "git+https://github.com/phoxal/framework?branch=main#0749b6bc8d3417b3c368ae0d58e1811a8b7ca9ad"
-dependencies = [
- "anyhow",
- "nalgebra",
- "phoxal-api-component",
- "phoxal-core-component",
- "phoxal-core-robot",
- "phoxal-core-structure",
- "serde",
- "urdf-rs",
-]
-
-[[package]]
-name = "phoxal-core-structure"
-version = "0.3.0"
-source = "git+https://github.com/phoxal/framework?branch=main#0749b6bc8d3417b3c368ae0d58e1811a8b7ca9ad"
-dependencies = [
- "anyhow",
- "derive-new",
- "serde",
- "urdf-rs",
-]
-
-[[package]]
-name = "phoxal-infra-bus"
-version = "0.3.0"
-source = "git+https://github.com/phoxal/framework?branch=main#0749b6bc8d3417b3c368ae0d58e1811a8b7ca9ad"
-dependencies = [
- "derive-new",
- "derive_setters",
- "rmp-serde",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "zenoh",
-]
-
-[[package]]
-name = "phoxal-infra-helpers"
-version = "0.3.0"
-source = "git+https://github.com/phoxal/framework?branch=main#0749b6bc8d3417b3c368ae0d58e1811a8b7ca9ad"
-dependencies = [
- "anyhow",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -3352,7 +3252,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3420,7 +3320,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3441,7 +3341,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4049,7 +3949,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4921,7 +4821,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

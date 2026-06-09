@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use heck::ToUpperCamelCase;
 use phoxal::model::simulation::v1::Simulation;
 use phoxal::model::structure::Structure;
-use phoxal::runtime::staged::Robot;
+use phoxal::model::v1::Robot;
 use webots_proto::Proto;
 use webots_proto::ast::proto::ast::{AstNode, ExternProto};
 use webots_proto::ast::proto::span::Span;

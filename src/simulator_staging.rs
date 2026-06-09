@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal::model::simulation::Simulation;
 use phoxal::model::structure::Structure;
-use phoxal::runtime::staged::Robot;
+use phoxal::model::v1::Robot;
 use webots_proto::FieldValue;
 use webots_proto::ast::proto::ast::{
     ArrayElement, ArrayValue, AstNode, AstNodeKind, NodeBodyElement, NodeField,
@@ -65,7 +65,7 @@ pub fn stage_webots_artifacts(
 
     let mut component_solid_links = BTreeMap::<String, Vec<String>>::new();
     let mut referenced_contact_materials = BTreeSet::<String>::new();
-    for component_type in robot.model.used_component_types() {
+    for component_type in robot.manifest.used_component_types() {
         let component = robot
             .components
             .get(component_type)

@@ -36,11 +36,13 @@ motion:
 components:
   sources:
     oak_d_lite:
-      git: https://github.com/phoxal/component-oak_d_lite
+      git: https://github.com/phoxal/components
       tag: main
+      directory: oak_d_lite
     ddsm115:
-      git: https://github.com/phoxal/component-ddsm115
+      git: https://github.com/phoxal/components
       tag: main
+      directory: ddsm115
     passive_caster:
       path: ./components/passive_caster
   instances:
