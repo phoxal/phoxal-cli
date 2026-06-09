@@ -6,8 +6,8 @@ pub mod vision;
 use webots_proto::r2025a::Node;
 
 use crate::webots_staging::scene::WebotsSceneDescription;
-use phoxal_core_component::v1::capability::Capability as PhysicalCapability;
-use phoxal_core_simulation::capability::Capability as SimulationCapability;
+use phoxal::model::component::v1::capability::Capability as PhysicalCapability;
+use phoxal::model::simulation::capability::Capability as SimulationCapability;
 
 impl WebotsSceneDescription {
     pub fn render_link_capability(

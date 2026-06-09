@@ -226,7 +226,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::SystemTime;
 
-    use phoxal_core_robot::RobotV1 as Robot;
+    use phoxal::model::robot::RobotV1 as Robot;
     use semver::Version;
     use serde_yaml::{Mapping, Value};
 

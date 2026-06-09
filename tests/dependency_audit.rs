@@ -4,11 +4,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const ALLOWED_BASELINE: &[&str] = &[
-    "phoxal-core-engine",
-    "phoxal-core-robot",
-    "phoxal-infra-helpers",
-];
+const ALLOWED_BASELINE: &[&str] = &["phoxal"];
 
 #[test]
 fn phoxal_cli_path_dependencies_do_not_grow_past_the_snapshot() {

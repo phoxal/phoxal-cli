@@ -96,7 +96,7 @@ fn write_robot_project(root: &std::path::Path) -> anyhow::Result<()> {
     fs::write(root.join("robot.yaml"), minimal_robot_yaml())?;
     fs::write(
         root.join("structure.urdf"),
-        r#"<robot name="testbot"><link name="base_link"/></robot>"#,
+        r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="base_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
     )?;
     fs::create_dir_all(root.join("worlds"))?;
     fs::write(

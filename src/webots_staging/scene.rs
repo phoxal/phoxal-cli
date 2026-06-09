@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use phoxal_core_component::v1::capability::{Capability as PhysicalCapability, StructuralTarget};
-use phoxal_core_engine::staged::Robot;
-use phoxal_core_simulation::capability::Capability as SimulationCapability;
-use phoxal_core_simulation::v1::Simulation;
-use phoxal_core_structure::Structure;
+use phoxal::model::component::v1::capability::{
+    Capability as PhysicalCapability, StructuralTarget,
+};
+use phoxal::model::simulation::capability::Capability as SimulationCapability;
+use phoxal::model::simulation::v1::Simulation;
+use phoxal::model::structure::Structure;
+use phoxal::model::v1::Robot;
 
 use crate::webots_staging::support::urdf::convert_joint_type;
 use crate::webots_staging::{metadata, proto_name_for_robot};
@@ -47,7 +49,7 @@ impl WebotsSceneDescription {
             .collect::<Result<BTreeMap<_, _>>>()?;
 
         let mounted_components_for_link = configuration
-            .model
+            .manifest
             .components
             .iter()
             .map(|(component_id, model_component)| {
@@ -96,7 +98,7 @@ impl WebotsSceneDescription {
             );
 
         Ok(Self {
-            robot_name: configuration.model.identity.id.clone(),
+            robot_name: configuration.manifest.identity.id.clone(),
             root_link_id,
             links,
             contact_materials: BTreeMap::new(),
@@ -111,7 +113,7 @@ impl WebotsSceneDescription {
     pub fn from_component(
         component_type: &str,
         structure: &Structure,
-        component: &phoxal_core_component::v1::Component,
+        component: &phoxal::model::component::v1::Component,
         simulation: &Simulation,
     ) -> Result<Self> {
         let root_link_id = structure.root_link_name()?.to_string();
@@ -270,7 +272,7 @@ impl WebotsSceneDescription {
 #[derive(Debug, Clone)]
 pub struct RuntimeComponentBinding {
     pub capability_id: String,
-    pub physical: phoxal_core_component::v1::capability::Capability,
+    pub physical: phoxal::model::component::v1::capability::Capability,
     pub simulation: Option<SimulationCapability>,
 }
 
