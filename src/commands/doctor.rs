@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use semver::{Version, VersionReq};
+use toml::Value as TomlValue;
 
 use crate::AppContext;
+use crate::catalog::SUPPORTED_RUNTIME_TRAIN;
 use crate::host_paths;
 use crate::shell;
 
@@ -21,7 +22,7 @@ pub struct Doctor {
 
 impl Doctor {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        check_cli_min_version(app)?;
+        check_user_runtime_deps(app)?;
         check_docker(app)?;
         check_rustup(app);
         if self.fix {
@@ -33,33 +34,207 @@ impl Doctor {
     }
 }
 
-fn check_cli_min_version(app: &AppContext) -> Result<()> {
+fn check_user_runtime_deps(app: &AppContext) -> Result<()> {
     let robot_path = match crate::resolver::discover_robot_yaml(app.project.root()) {
         Ok(path) => path,
         Err(_) => {
             app.ui
-                .warn("robot.yaml not found; skipping phoxal.cli_min_version check");
+                .warn("robot.yaml not found; skipping user runtime dependency check");
             return Ok(());
         }
     };
     let robot = crate::resolver::load_robot(&robot_path)?;
-    let req = VersionReq::parse(&robot.phoxal.cli_min_version).with_context(|| {
-        format!(
-            "invalid phoxal.cli_min_version '{}'",
-            robot.phoxal.cli_min_version
-        )
-    })?;
-    let version = Version::parse(env!("CARGO_PKG_VERSION"))
-        .context("installed phoxal-cli version is not semver")?;
-    if !req.matches(&version) {
-        bail!(
-            "phoxal-cli {} does not satisfy robot.yaml phoxal.cli_min_version {}",
-            version,
-            robot.phoxal.cli_min_version
-        );
+    let robot_root = robot_path
+        .parent()
+        .context("robot.yaml did not have a parent directory")?;
+    let expected = expected_runtime_train(app, robot_root);
+    let Some(expected_train) = parse_runtime_train(&expected) else {
+        app.ui.warn(format!(
+            "could not parse supported platform runtime train {expected}; skipping user runtime dependency check"
+        ));
+        return Ok(());
+    };
+
+    for (name, runtime) in &robot.user_runtimes {
+        let runtime_dir = resolve_robot_path(robot_root, &runtime.path);
+        let manifest_path = runtime_dir.join("Cargo.toml");
+        let Ok(contents) = fs::read_to_string(&manifest_path) else {
+            app.ui.warn(format!(
+                "user runtime '{name}' has no readable Cargo.toml at {}; cannot check phoxal dependency",
+                manifest_path.display()
+            ));
+            continue;
+        };
+        let Ok(manifest) = toml::from_str::<TomlValue>(&contents) else {
+            app.ui.warn(format!(
+                "user runtime '{name}' has an unparsable Cargo.toml at {}; cannot check phoxal dependency",
+                manifest_path.display()
+            ));
+            continue;
+        };
+        let Some(dep) = manifest
+            .get("dependencies")
+            .and_then(|dependencies| dependencies.get("phoxal"))
+        else {
+            app.ui.warn(format!(
+                "user runtime '{name}' is missing a phoxal dependency; pin it to the platform runtime train {expected}"
+            ));
+            continue;
+        };
+
+        match phoxal_dependency(dep) {
+            PhoxalDependency::Branch(branch) => app.ui.warn(format!(
+                "user runtime '{name}' floats on branch '{branch}'; pin it to the platform runtime train {expected}"
+            )),
+            PhoxalDependency::Pinned(version) => match parse_runtime_train(&version) {
+                Some(actual_train) if actual_train == expected_train => app.ui.success(format!(
+                    "user runtime '{name}' phoxal dependency matches platform runtime train {expected}"
+                )),
+                Some(_) => app.ui.warn(format!(
+                    "user runtime '{name}' pins phoxal {version}; expected platform runtime train {expected}"
+                )),
+                None => app.ui.warn(format!(
+                    "user runtime '{name}' has an unparsable phoxal dependency {version}; pin it to the platform runtime train {expected}"
+                )),
+            },
+            PhoxalDependency::Unparsable => app.ui.warn(format!(
+                "user runtime '{name}' has an unparsable phoxal dependency; pin it to the platform runtime train {expected}"
+            )),
+        }
     }
-    app.ui.success(format!("phoxal-cli version {version}"));
+
     Ok(())
+}
+
+fn expected_runtime_train(app: &AppContext, robot_root: &Path) -> String {
+    let lock_path = robot_root.join(LOCKFILE_NAME);
+    if !lock_path.is_file() {
+        return SUPPORTED_RUNTIME_TRAIN.to_string();
+    }
+    match Lockfile::read(&lock_path) {
+        Ok(lockfile) => lockfile.phoxal_runtimes.resolved,
+        Err(err) => {
+            app.ui.warn(format!(
+                "failed to read {}; checking user runtime deps against {SUPPORTED_RUNTIME_TRAIN}: {err:#}",
+                lock_path.display()
+            ));
+            SUPPORTED_RUNTIME_TRAIN.to_string()
+        }
+    }
+}
+
+fn resolve_robot_path(robot_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        robot_root.join(path)
+    }
+}
+
+enum PhoxalDependency {
+    Branch(String),
+    Pinned(String),
+    Unparsable,
+}
+
+fn phoxal_dependency(dep: &TomlValue) -> PhoxalDependency {
+    if let Some(version) = dep.as_str() {
+        return PhoxalDependency::Pinned(version.to_string());
+    }
+    let Some(table) = dep.as_table() else {
+        return PhoxalDependency::Unparsable;
+    };
+    if let Some(branch) = table.get("branch").and_then(TomlValue::as_str) {
+        return PhoxalDependency::Branch(branch.to_string());
+    }
+    if let Some(version) = table.get("version").and_then(TomlValue::as_str) {
+        return PhoxalDependency::Pinned(version.to_string());
+    }
+    if let Some(tag) = table.get("tag").and_then(TomlValue::as_str) {
+        return PhoxalDependency::Pinned(tag.trim_start_matches('v').to_string());
+    }
+    PhoxalDependency::Unparsable
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeTrain {
+    major: u64,
+    minor: u64,
+}
+
+fn parse_runtime_train(value: &str) -> Option<RuntimeTrain> {
+    let trimmed = value.trim().trim_start_matches('v');
+    for token in trimmed
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '+'))
+    {
+        let token = token.trim_start_matches('v');
+        let mut parts = token.split('.');
+        let (Some(major), Some(minor)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if !major.chars().all(|ch| ch.is_ascii_digit())
+            || !minor.chars().all(|ch| ch.is_ascii_digit())
+        {
+            continue;
+        }
+        return Some(RuntimeTrain {
+            major: major.parse().ok()?,
+            minor: minor.parse().ok()?,
+        });
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_version_and_requirement_trains() {
+        let train = RuntimeTrain { major: 0, minor: 7 };
+
+        assert_eq!(parse_runtime_train("0.7.0"), Some(train));
+        assert_eq!(parse_runtime_train("v0.7.1"), Some(train));
+        assert_eq!(parse_runtime_train("^0.7"), Some(train));
+        assert_eq!(parse_runtime_train(">=0.7, <0.8"), Some(train));
+        assert_eq!(parse_runtime_train("main"), None);
+    }
+
+    #[test]
+    fn classifies_phoxal_dependency_forms() {
+        let manifest: TomlValue = toml::from_str(
+            r#"
+[dependencies]
+string = "0.7.0"
+table = { version = "^0.7" }
+tag = { git = "https://github.com/phoxal/framework", tag = "v0.7.0" }
+branch = { git = "https://github.com/phoxal/framework", branch = "main" }
+"#,
+        )
+        .expect("valid toml");
+        let dependencies = manifest
+            .get("dependencies")
+            .expect("dependencies")
+            .as_table()
+            .expect("dependencies table");
+
+        assert!(matches!(
+            phoxal_dependency(dependencies.get("string").expect("string")),
+            PhoxalDependency::Pinned(version) if version == "0.7.0"
+        ));
+        assert!(matches!(
+            phoxal_dependency(dependencies.get("table").expect("table")),
+            PhoxalDependency::Pinned(version) if version == "^0.7"
+        ));
+        assert!(matches!(
+            phoxal_dependency(dependencies.get("tag").expect("tag")),
+            PhoxalDependency::Pinned(version) if version == "0.7.0"
+        ));
+        assert!(matches!(
+            phoxal_dependency(dependencies.get("branch").expect("branch")),
+            PhoxalDependency::Branch(branch) if branch == "main"
+        ));
+    }
 }
 
 fn check_docker(app: &AppContext) -> Result<()> {

@@ -109,9 +109,6 @@ fn write_robot_project(root: &std::path::Path) -> anyhow::Result<()> {
 fn minimal_robot_yaml() -> &'static str {
     r#"version: v1
 
-phoxal:
-  cli_min_version: "^0.1"
-
 identity:
   id: testbot
   namespace: test
@@ -140,6 +137,6 @@ components:
 fn releases_snapshot() -> ReleasesSnapshot {
     ReleasesSnapshot {
         fetched_at: std::time::SystemTime::UNIX_EPOCH,
-        versions: vec!["0.0.0-dev".into()],
+        versions: vec!["0.7.0".into()],
     }
 }

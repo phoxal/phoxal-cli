@@ -5,6 +5,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 
 use crate::AppContext;
+use crate::catalog::{DEFAULT_RUNTIME_VERSION, SUPPORTED_RUNTIME_TRAIN};
+use crate::lockfile::{LOCKFILE_NAME, Lockfile};
 
 #[derive(Debug, Subcommand)]
 pub enum Create {
@@ -65,9 +67,6 @@ fn create_robot(app: &AppContext, command: &Robot) -> Result<()> {
         format!(
             r#"version: v1
 
-phoxal:
-  cli_min_version: "^{}"
-
 identity:
   id: {}
   namespace: dev
@@ -75,7 +74,7 @@ identity:
 structure: structure.urdf
 
 phoxal_runtimes:
-  version: "^0.1"
+  version: "{}"
 
 motion:
   kinematic:
@@ -91,8 +90,7 @@ components:
   sources: {{}}
   instances: {{}}
 "#,
-            env!("CARGO_PKG_VERSION"),
-            command.id
+            command.id, SUPPORTED_RUNTIME_TRAIN
         ),
     )?;
     write_new(
@@ -117,6 +115,7 @@ components:
 
 fn create_runtime(app: &AppContext, command: &Runtime) -> Result<()> {
     let robot_root = discovered_robot_root(app)?;
+    let runtime_version = runtime_scaffold_phoxal_version(&robot_root)?;
     let runtime_dir = robot_root.join("runtimes").join(&command.name);
     fs::create_dir_all(runtime_dir.join("src"))
         .with_context(|| format!("failed to create {}", runtime_dir.display()))?;
@@ -129,14 +128,59 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-phoxal = {{ git = "https://github.com/phoxal/framework", branch = "main" }}
+phoxal = "{}"
+anyhow = "1.0.102"
+async-trait = "0.1.89"
+clap = {{ version = "4.6.1", features = ["derive", "env"] }}
+tokio = {{ version = "1", features = ["macros", "rt", "rt-multi-thread", "signal"] }}
 "#,
-            command.name
+            command.name, runtime_version
         ),
     )?;
     write_new(
         runtime_dir.join("src/main.rs"),
-        "fn main() {\n    println!(\"runtime scaffold\");\n}\n".to_string(),
+        format!(
+            r#"use anyhow::Result;
+use phoxal::runtime::clock::Step;
+use phoxal::runtime::{{Io, RobotRuntimeArgs, Runtime, RuntimeInputs}};
+
+#[tokio::main]
+async fn main() -> Result<()> {{
+    phoxal::runtime::execute::<UserRuntime>().await
+}}
+
+#[derive(Debug, clap::Args)]
+struct Args {{}}
+
+struct UserRuntime;
+
+#[async_trait::async_trait]
+impl Runtime for UserRuntime {{
+    const RUNTIME_ID: &'static str = "{}";
+
+    type Args = Args;
+    type Config = ();
+    type Input = std::convert::Infallible;
+
+    fn config(_args: &Self::Args, _common: &RobotRuntimeArgs) -> Result<Self::Config> {{
+        Ok(())
+    }}
+
+    fn clock_period(_config: &Self::Config) -> std::time::Duration {{
+        std::time::Duration::from_millis(20)
+    }}
+
+    async fn new(_io: &mut Io<Self::Input>, _config: Self::Config) -> Result<Self> {{
+        Ok(Self)
+    }}
+
+    async fn step(&mut self, _step: Step, _inputs: RuntimeInputs<Self::Input>) -> Result<()> {{
+        Ok(())
+    }}
+}}
+"#,
+            command.name
+        ),
     )?;
     app.ui
         .success(format!("created runtime {}", runtime_dir.display()));
@@ -211,6 +255,16 @@ fn discovered_robot_root(app: &AppContext) -> Result<PathBuf> {
         .parent()
         .map(std::path::Path::to_path_buf)
         .context("robot.yaml did not have a parent directory")
+}
+
+fn runtime_scaffold_phoxal_version(robot_root: &std::path::Path) -> Result<String> {
+    let lock_path = robot_root.join(LOCKFILE_NAME);
+    if lock_path.is_file() {
+        let lockfile = Lockfile::read(&lock_path)?;
+        Ok(lockfile.phoxal_runtimes.resolved)
+    } else {
+        Ok(DEFAULT_RUNTIME_VERSION.to_string())
+    }
 }
 
 fn write_new(path: PathBuf, contents: String) -> Result<()> {

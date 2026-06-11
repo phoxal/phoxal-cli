@@ -1,8 +1,5 @@
 version: v1
 
-phoxal:
-  cli_min_version: "^0.6"
-
 identity:
   id: robot-v1
   namespace: dev
@@ -10,12 +7,12 @@ identity:
 structure: structure.urdf
 
 phoxal_runtimes:
-  version: "^0.1"
+  version: "^0.7"
   overrides:
     drive:
       version: "latest"
     localize:
-      version: "0.1.4"
+      version: "0.7.0"
 
 user_runtimes:
   mission_behavior:
