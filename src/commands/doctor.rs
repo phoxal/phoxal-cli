@@ -185,58 +185,6 @@ fn parse_runtime_train(value: &str) -> Option<RuntimeTrain> {
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_version_and_requirement_trains() {
-        let train = RuntimeTrain { major: 0, minor: 7 };
-
-        assert_eq!(parse_runtime_train("0.7.0"), Some(train));
-        assert_eq!(parse_runtime_train("v0.7.1"), Some(train));
-        assert_eq!(parse_runtime_train("^0.7"), Some(train));
-        assert_eq!(parse_runtime_train(">=0.7, <0.8"), Some(train));
-        assert_eq!(parse_runtime_train("main"), None);
-    }
-
-    #[test]
-    fn classifies_phoxal_dependency_forms() {
-        let manifest: TomlValue = toml::from_str(
-            r#"
-[dependencies]
-string = "0.7.0"
-table = { version = "^0.7" }
-tag = { git = "https://github.com/phoxal/framework", tag = "v0.7.0" }
-branch = { git = "https://github.com/phoxal/framework", branch = "main" }
-"#,
-        )
-        .expect("valid toml");
-        let dependencies = manifest
-            .get("dependencies")
-            .expect("dependencies")
-            .as_table()
-            .expect("dependencies table");
-
-        assert!(matches!(
-            phoxal_dependency(dependencies.get("string").expect("string")),
-            PhoxalDependency::Pinned(version) if version == "0.7.0"
-        ));
-        assert!(matches!(
-            phoxal_dependency(dependencies.get("table").expect("table")),
-            PhoxalDependency::Pinned(version) if version == "^0.7"
-        ));
-        assert!(matches!(
-            phoxal_dependency(dependencies.get("tag").expect("tag")),
-            PhoxalDependency::Pinned(version) if version == "0.7.0"
-        ));
-        assert!(matches!(
-            phoxal_dependency(dependencies.get("branch").expect("branch")),
-            PhoxalDependency::Branch(branch) if branch == "main"
-        ));
-    }
-}
-
 fn check_docker(app: &AppContext) -> Result<()> {
     shell::run_stdout("docker", ["--version"], None)
         .context("Docker is not installed or not on PATH")?;
@@ -444,4 +392,56 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     tmp.persist(path)
         .map(|_| ())
         .with_context(|| format!("failed to persist {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_version_and_requirement_trains() {
+        let train = RuntimeTrain { major: 0, minor: 7 };
+
+        assert_eq!(parse_runtime_train("0.7.0"), Some(train));
+        assert_eq!(parse_runtime_train("v0.7.1"), Some(train));
+        assert_eq!(parse_runtime_train("^0.7"), Some(train));
+        assert_eq!(parse_runtime_train(">=0.7, <0.8"), Some(train));
+        assert_eq!(parse_runtime_train("main"), None);
+    }
+
+    #[test]
+    fn classifies_phoxal_dependency_forms() {
+        let manifest: TomlValue = toml::from_str(
+            r#"
+[dependencies]
+string = "0.7.0"
+table = { version = "^0.7" }
+tag = { git = "https://github.com/phoxal/framework", tag = "v0.7.0" }
+branch = { git = "https://github.com/phoxal/framework", branch = "main" }
+"#,
+        )
+        .expect("valid toml");
+        let dependencies = manifest
+            .get("dependencies")
+            .expect("dependencies")
+            .as_table()
+            .expect("dependencies table");
+
+        assert!(matches!(
+            phoxal_dependency(dependencies.get("string").expect("string")),
+            PhoxalDependency::Pinned(version) if version == "0.7.0"
+        ));
+        assert!(matches!(
+            phoxal_dependency(dependencies.get("table").expect("table")),
+            PhoxalDependency::Pinned(version) if version == "^0.7"
+        ));
+        assert!(matches!(
+            phoxal_dependency(dependencies.get("tag").expect("tag")),
+            PhoxalDependency::Pinned(version) if version == "0.7.0"
+        ));
+        assert!(matches!(
+            phoxal_dependency(dependencies.get("branch").expect("branch")),
+            PhoxalDependency::Branch(branch) if branch == "main"
+        ));
+    }
 }
