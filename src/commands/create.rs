@@ -64,34 +64,7 @@ fn create_robot(app: &AppContext, command: &Robot) -> Result<()> {
     fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
     write_new(
         root.join("robot.yaml"),
-        format!(
-            r#"version: v1
-
-identity:
-  id: {}
-  namespace: dev
-
-structure: structure.urdf
-
-phoxal_runtimes:
-  version: "{}"
-
-motion:
-  kinematic:
-    kind: differential
-    left_actuators: []
-    right_actuators: []
-    left_encoders: []
-    right_encoders: []
-    wheel_radius_m: 0.1
-    wheel_base_m: 0.5
-
-components:
-  sources: {{}}
-  instances: {{}}
-"#,
-            command.id, SUPPORTED_RUNTIME_TRAIN
-        ),
+        robot_yaml(&command.id, SUPPORTED_RUNTIME_TRAIN),
     )?;
     write_new(
         root.join("structure.urdf"),
@@ -111,6 +84,46 @@ components:
     )?;
     app.ui.success(format!("created robot {}", root.display()));
     Ok(())
+}
+
+/// Body of the scaffolded `robot.yaml`.
+///
+/// The differential drive lists are seeded with placeholder `<instance>.<capability>`
+/// references (rather than empty lists) so a freshly scaffolded project passes
+/// `phoxal-cli validate`/`doctor` out of the box — robot validation rejects empty
+/// actuator/encoder lists. The user replaces the placeholders with their real drive
+/// instances, defined under `components.instances`.
+pub fn robot_yaml(id: &str, runtime_train: &str) -> String {
+    format!(
+        r#"version: v1
+
+identity:
+  id: {id}
+  namespace: dev
+
+structure: structure.urdf
+
+phoxal_runtimes:
+  version: "{runtime_train}"
+
+motion:
+  kinematic:
+    kind: differential
+    # Placeholder drive references so a fresh scaffold validates. Replace these
+    # with your robot's real `<instance>.<capability>` ids and define the
+    # matching instances under `components.instances` below.
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+
+components:
+  sources: {{}}
+  instances: {{}}
+"#
+    )
 }
 
 fn create_runtime(app: &AppContext, command: &Runtime) -> Result<()> {
