@@ -5,7 +5,6 @@ use clap::{Parser, Subcommand};
 
 use crate::AppContext;
 
-pub mod create;
 pub mod doctor;
 pub mod simulate;
 pub mod update;
@@ -14,7 +13,7 @@ pub mod validate;
 #[derive(Debug, Parser)]
 #[command(
     name = "phoxal-cli",
-    about = "Resolve, validate, simulate, doctor, and scaffold Phoxal robot projects."
+    about = "Resolve, validate, simulate, and doctor Phoxal robot projects."
 )]
 pub struct Cli {
     #[arg(
@@ -38,8 +37,6 @@ pub enum RootCommand {
     Simulate(simulate::Simulate),
     #[command(about = "Check host prerequisites and pinned Phoxal tool binaries.")]
     Doctor(doctor::Doctor),
-    #[command(subcommand, about = "Scaffold robot, runtime, and component files.")]
-    Create(create::Create),
 }
 
 impl RootCommand {
@@ -49,7 +46,6 @@ impl RootCommand {
             Self::Update(command) => command.run(app).await,
             Self::Simulate(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
-            Self::Create(command) => command.run(app).await,
         }
     }
 }
