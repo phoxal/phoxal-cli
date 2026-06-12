@@ -1,9 +1,10 @@
 # Keeps https://phoxal.com/install.sh in sync with install.sh in this repo.
 #
 # The website repo (phoxal/website) is plain GitHub Pages served from main, so
-# the synced copy must land on its default branch. Requires the
-# WEBSITE_SYNC_TOKEN secret: a fine-grained PAT with contents:write on
-# phoxal/website.
+# the synced copy must land on its default branch. Cross-repo push is
+# authenticated with the org "phoxal" GitHub App (RELEASE_APP_ID /
+# RELEASE_APP_PRIVATE_KEY org secrets); the App must be installed on
+# phoxal/website with contents:write.
 name: sync-install-script
 
 on:
@@ -21,13 +22,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Mint a token for phoxal/website
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: phoxal
+          repositories: website
+
       - uses: actions/checkout@v4
         with:
           repository: phoxal/website
-          token: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           path: website
 
       - name: Sync install.sh
+        env:
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
         run: |
           set -euo pipefail
           if cmp -s install.sh website/install.sh; then
@@ -36,8 +48,8 @@ jobs:
           fi
           cp install.sh website/install.sh
           cd website
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_SLUG}[bot]@users.noreply.github.com"
           git add install.sh
           git commit -m "chore: sync install.sh from phoxal/phoxal-cli@${GITHUB_SHA}"
           git push

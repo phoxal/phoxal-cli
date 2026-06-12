@@ -1,7 +1,7 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # phoxal-cli installer
 #
-#   curl -fsSL https://phoxal.com/install.sh | sh
+#   curl -fsSL https://phoxal.com/install.sh | bash
 #
 # Canonical source: https://github.com/phoxal/phoxal-cli (install.sh at repo
 # root). The copy served at https://phoxal.com/install.sh is synced from here
@@ -17,7 +17,7 @@
 #   binary    phoxal-cli-<target>            (inside the archive)
 #   checksum  <archive>.sha256               ("<hex>  <archive>")
 
-set -eu
+set -euo pipefail
 
 REPO="phoxal/phoxal-cli"
 RELEASES="https://github.com/${REPO}/releases"

@@ -5,13 +5,13 @@ Consumer CLI for the Phoxal robot framework. Owns the resolver, `robot.yaml` dis
 ## Install
 
 ```sh
-curl -fsSL https://phoxal.com/install.sh | sh
+curl -fsSL https://phoxal.com/install.sh | bash
 ```
 
 To pin a release, set `PHOXAL_CLI_VERSION` to a tag:
 
 ```sh
-curl -fsSL https://phoxal.com/install.sh | PHOXAL_CLI_VERSION=v0.4.0 sh
+curl -fsSL https://phoxal.com/install.sh | PHOXAL_CLI_VERSION=v0.4.0 bash
 ```
 
 To update an existing install to the latest release:
