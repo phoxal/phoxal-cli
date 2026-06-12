@@ -4,6 +4,13 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.4.0) - 2026-06-12
+
+
+### Added
+
+- Decouple CLI version from robot.yaml and pin scaffolds to the runtime train (#34) [**breaking**]
+
 ## [0.3.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.3.0) - 2026-06-09
 
 
