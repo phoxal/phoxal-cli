@@ -1,6 +1,6 @@
 # phoxal-cli
 
-Consumer CLI for the Phoxal robot framework. Owns the resolver, `robot.yaml` discovery, `phoxal.lock` generation, and the `validate` / `simulate` / `doctor` / `create` commands.
+Consumer CLI for the Phoxal robot framework. Owns the resolver, `robot.yaml` discovery, `phoxal.lock` generation, and the `validate` / `simulate` / `doctor` commands.
 
 ## Install
 

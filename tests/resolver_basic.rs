@@ -9,7 +9,7 @@ fn resolves_minimal_robot_to_full_platform_set() -> anyhow::Result<()> {
     let snapshot = releases_snapshot();
     let resolved = resolve_with_releases(&robot, &CATALOG, offline_options(), &snapshot)?;
 
-    assert_eq!(resolved.runtime_set_version.to_string(), "0.0.0-dev");
+    assert_eq!(resolved.runtime_set_version.to_string(), "0.7.0");
     assert_eq!(
         resolved
             .platform_runtimes
@@ -28,7 +28,7 @@ fn resolves_minimal_robot_to_full_platform_set() -> anyhow::Result<()> {
     );
     assert!(resolved.platform_runtimes.iter().all(|runtime| {
         let deploy = runtime.deploy_ref();
-        !deploy.contains('@') && deploy.ends_with(":0.0.0-dev")
+        !deploy.contains('@') && deploy.ends_with(":0.7.0")
     }));
 
     Ok(())
@@ -89,9 +89,6 @@ fn offline_options() -> ResolveOptions {
 fn minimal_robot_yaml() -> String {
     r#"version: v1
 
-phoxal:
-  cli_min_version: "^0.1"
-
 identity:
   id: testbot
   namespace: test
@@ -129,6 +126,6 @@ components:
 fn releases_snapshot() -> ReleasesSnapshot {
     ReleasesSnapshot {
         fetched_at: std::time::SystemTime::UNIX_EPOCH,
-        versions: vec!["0.0.0-dev".into()],
+        versions: vec!["0.7.0".into()],
     }
 }

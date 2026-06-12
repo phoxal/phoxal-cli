@@ -231,7 +231,7 @@ mod tests {
     use serde_yaml::{Mapping, Value};
 
     use super::*;
-    use crate::catalog::{PlatformRuntimeCatalog, PlatformRuntimeEntry};
+    use crate::catalog::{PlatformRuntimeCatalog, PlatformRuntimeEntry, SUPPORTED_RUNTIME_TRAIN};
     use crate::local_zenoh;
     use crate::resolver::{ImagePin, ResolvedPlatformRuntime, ResolvedRobot};
 
@@ -243,7 +243,7 @@ mod tests {
     }];
 
     static TEST_CATALOG: PlatformRuntimeCatalog = PlatformRuntimeCatalog {
-        supported_runtimes_version_req: "*",
+        supported_runtimes_version_req: SUPPORTED_RUNTIME_TRAIN,
         entries: TEST_CATALOG_ENTRIES,
     };
 
@@ -379,9 +379,6 @@ mod tests {
     }
 
     const MINIMAL_ROBOT: &str = r#"version: v1
-
-phoxal:
-  cli_min_version: "^0.1"
 
 identity:
   id: testbot

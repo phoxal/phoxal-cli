@@ -26,7 +26,7 @@ fn update_creates_idempotent_lockfile() -> anyhow::Result<()> {
     let lockfile = Lockfile::read(&lock_path)?;
     assert_eq!(lockfile.schema_version, LOCKFILE_SCHEMA_VERSION);
     assert_eq!(lockfile.phoxal_runtimes.requested, "latest");
-    assert_eq!(lockfile.phoxal_runtimes.resolved, "0.0.0-dev");
+    assert_eq!(lockfile.phoxal_runtimes.resolved, "0.7.0");
     assert!(lockfile.phoxal_runtimes.releases_fetched_at.is_some());
     assert_eq!(lockfile.phoxal_runtimes.images.len(), CATALOG.entries.len());
     // Offline `update` must not write fake digests: every image entry is a
@@ -36,7 +36,7 @@ fn update_creates_idempotent_lockfile() -> anyhow::Result<()> {
             .phoxal_runtimes
             .images
             .values()
-            .all(|image| !image.contains("@sha256:") && image.ends_with(":0.0.0-dev"))
+            .all(|image| !image.contains("@sha256:") && image.ends_with(":0.7.0"))
     );
     assert!(lockfile.components.is_empty());
     assert_eq!(lockfile.tools.len(), DEFAULT_TOOL_VERSIONS.len());
@@ -68,9 +68,6 @@ fn write_robot_project(root: &std::path::Path) -> anyhow::Result<()> {
 fn minimal_robot_yaml() -> &'static str {
     r#"version: v1
 
-phoxal:
-  cli_min_version: "^0.1"
-
 identity:
   id: testbot
   namespace: test
@@ -99,6 +96,6 @@ components:
 fn releases_snapshot() -> ReleasesSnapshot {
     ReleasesSnapshot {
         fetched_at: std::time::SystemTime::UNIX_EPOCH,
-        versions: vec!["0.0.0-dev".into()],
+        versions: vec!["0.7.0".into()],
     }
 }

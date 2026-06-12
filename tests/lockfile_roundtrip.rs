@@ -9,7 +9,7 @@ fn lockfile_roundtrips_through_yaml() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(include_str!("fixtures/plan_robot.yaml"))?;
     let snapshot = ReleasesSnapshot {
         fetched_at: std::time::SystemTime::UNIX_EPOCH,
-        versions: vec!["0.1.2".into()],
+        versions: vec!["0.7.0".into()],
     };
     let resolved = resolve_with_releases(
         &robot,

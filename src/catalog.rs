@@ -21,6 +21,9 @@ pub struct ToolVersion {
     pub binary_template: &'static str,
 }
 
+// Must track the `phoxal` dependency line in Cargo.toml.
+pub const SUPPORTED_RUNTIME_TRAIN: &str = "^0.7";
+
 pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
     ToolVersion {
         name: "simulator_webots_controller",
@@ -57,7 +60,7 @@ pub fn lookup_tool_version(name: &str) -> Option<&'static ToolVersion> {
 }
 
 pub const CATALOG: PlatformRuntimeCatalog = PlatformRuntimeCatalog {
-    supported_runtimes_version_req: "*",
+    supported_runtimes_version_req: SUPPORTED_RUNTIME_TRAIN,
     entries: &[
         entry("asset", "ghcr.io/phoxal/runtime-asset", false, true),
         entry("presence", "ghcr.io/phoxal/runtime-presence", false, true),
