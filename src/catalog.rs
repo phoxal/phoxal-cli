@@ -23,7 +23,6 @@ pub struct ToolVersion {
 
 // Must track the `phoxal` dependency line in Cargo.toml.
 pub const SUPPORTED_RUNTIME_TRAIN: &str = "^0.7";
-pub const DEFAULT_RUNTIME_VERSION: &str = "0.7.0";
 
 pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
     ToolVersion {
