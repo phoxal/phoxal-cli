@@ -5,13 +5,19 @@ Consumer CLI for the Phoxal robot framework. Owns the resolver, `robot.yaml` dis
 ## Install
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/phoxal/phoxal-cli/main/install.sh | sh
+curl -fsSL https://phoxal.com/install.sh | sh
 ```
 
 To pin a release, set `PHOXAL_CLI_VERSION` to a tag:
 
 ```sh
-PHOXAL_CLI_VERSION=v0.0.1 sh install.sh
+curl -fsSL https://phoxal.com/install.sh | PHOXAL_CLI_VERSION=v0.4.0 sh
+```
+
+To update an existing install to the latest release:
+
+```sh
+phoxal-cli self upgrade
 ```
 
 ### Build from Source

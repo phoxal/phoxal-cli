@@ -1,0 +1,43 @@
+# Keeps https://phoxal.com/install.sh in sync with install.sh in this repo.
+#
+# The website repo (phoxal/website) is plain GitHub Pages served from main, so
+# the synced copy must land on its default branch. Requires the
+# WEBSITE_SYNC_TOKEN secret: a fine-grained PAT with contents:write on
+# phoxal/website.
+name: sync-install-script
+
+on:
+  push:
+    branches: [main]
+    paths: [install.sh]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: phoxal/website
+          token: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+          path: website
+
+      - name: Sync install.sh
+        run: |
+          set -euo pipefail
+          if cmp -s install.sh website/install.sh; then
+            echo "install.sh already in sync"
+            exit 0
+          fi
+          cp install.sh website/install.sh
+          cd website
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add install.sh
+          git commit -m "chore: sync install.sh from phoxal/phoxal-cli@${GITHUB_SHA}"
+          git push

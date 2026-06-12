@@ -62,13 +62,23 @@ jobs:
           name=$(grep -m1 '^name = ' Cargo.toml | sed 's/name = "\(.*\)"/\1/')
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/${name}" "dist/${name}-${{ matrix.target }}"
-          tar -czf "dist/${name}-${{ needs.plan.outputs.version }}-${{ matrix.target }}.tar.gz" \
-            -C dist "${name}-${{ matrix.target }}"
+          archive="${name}-${{ needs.plan.outputs.version }}-${{ matrix.target }}.tar.gz"
+          tar -czf "dist/${archive}" -C dist "${name}-${{ matrix.target }}"
+          # Sibling checksum asset, verified by install.sh and `self upgrade`.
+          # Format: "<hex>  <archive>" (sha256sum default).
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${archive}" > "${archive}.sha256"
+          else
+            shasum -a 256 "${archive}" > "${archive}.sha256"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
 
   # Shared release seam: verify version, create the vX.Y.Z tag via the Git refs
   # API (git-push of tags is restricted here), and create-or-update the GitHub
@@ -79,5 +89,5 @@ jobs:
     secrets: inherit
     with:
       version: ${{ needs.plan.outputs.version }}
-      asset-pattern: dist/*.tar.gz
+      asset-pattern: dist/*.tar.gz*
       tag-via: api

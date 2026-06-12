@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use crate::AppContext;
 
 pub mod doctor;
+pub mod self_cmd;
 pub mod simulate;
 pub mod update;
 pub mod validate;
@@ -13,6 +14,7 @@ pub mod validate;
 #[derive(Debug, Parser)]
 #[command(
     name = "phoxal-cli",
+    version,
     about = "Resolve, validate, simulate, and doctor Phoxal robot projects."
 )]
 pub struct Cli {
@@ -37,6 +39,10 @@ pub enum RootCommand {
     Simulate(simulate::Simulate),
     #[command(about = "Check host prerequisites and pinned Phoxal tool binaries.")]
     Doctor(doctor::Doctor),
+    #[command(about = "Print the phoxal-cli version.")]
+    Version,
+    #[command(name = "self", about = "Manage this phoxal-cli installation.")]
+    SelfCmd(self_cmd::SelfCmd),
 }
 
 impl RootCommand {
@@ -46,6 +52,16 @@ impl RootCommand {
             Self::Update(command) => command.run(app).await,
             Self::Simulate(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
+            Self::Version => {
+                println!(
+                    "phoxal-cli {} ({}-{})",
+                    env!("CARGO_PKG_VERSION"),
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                );
+                Ok(())
+            }
+            Self::SelfCmd(command) => command.run(app).await,
         }
     }
 }
