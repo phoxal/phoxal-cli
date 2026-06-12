@@ -30,6 +30,7 @@ semver = "1.0.27"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_yaml = "0.9"
+self_replace = { package = "self-replace", version = "1.5.0" }
 sha2 = "0.11.0"
 tar = "0.4.44"
 tempfile = "3.27.0"
@@ -48,11 +49,6 @@ unused = "warn"
 lto = false
 codegen-units = 16
 
-# The profile that 'dist' will build with
-[profile.dist]
-inherits = "release"
-lto = "thin"
-
 [package]
 name = "phoxal-cli"
 version.workspace = true
@@ -62,9 +58,6 @@ description.workspace = true
 documentation.workspace = true
 homepage.workspace = true
 repository.workspace = true
-
-[package.metadata.dist]
-dist = true
 
 [dependencies]
 anyhow = { workspace = true }
@@ -81,6 +74,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 reqwest = { workspace = true }
 semver = { workspace = true, features = ["serde"] }
+self_replace = { workspace = true }
 nalgebra = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
