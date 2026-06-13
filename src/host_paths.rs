@@ -12,6 +12,10 @@ pub fn cache_dir() -> Result<PathBuf> {
     phoxal_home().map(|path| path.join("cache"))
 }
 
+pub fn tools_cache_dir() -> Result<PathBuf> {
+    cache_dir().map(|path| path.join("tools"))
+}
+
 pub fn worlds_dir() -> Result<PathBuf> {
     phoxal_home().map(|path| path.join("worlds"))
 }

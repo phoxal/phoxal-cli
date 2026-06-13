@@ -5,6 +5,7 @@ pub mod commands;
 pub mod compose;
 pub mod context;
 pub mod host_config;
+pub mod host_doctor;
 pub mod host_paths;
 pub mod local_zenoh;
 pub mod lockfile;

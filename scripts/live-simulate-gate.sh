@@ -133,13 +133,10 @@ fi
 
 # --- 4. live gate ----------------------------------------------------------
 
-step "Live preflight — Docker daemon + Webots"
+step "Live host diagnosis"
 "${CLI_BIN}" doctor >/dev/null 2>&1 \
-  || fail "phoxal-cli doctor failed — Docker is not installed or the daemon is not running"
-ok "Docker daemon is running"
-command -v webots >/dev/null 2>&1 \
-  || fail "Webots not found on PATH — install Webots (the simulate controller launches 'webots')"
-ok "Webots found on PATH"
+  || fail "phoxal-cli doctor failed unexpectedly"
+ok "host diagnosis complete; live simulate will enforce required preflight"
 
 step "Live gate — phoxal-cli simulate ${WORLD} --locked"
 warn "this is the interactive live gate; it runs until you stop it (Ctrl-C)."

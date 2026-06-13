@@ -37,7 +37,7 @@ pub enum RootCommand {
     Update(update::Update),
     #[command(about = "Resolve and launch the local Webots simulation stack.")]
     Simulate(simulate::Simulate),
-    #[command(about = "Check host prerequisites and pinned Phoxal tool binaries.")]
+    #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
     #[command(about = "Print the phoxal-cli version.")]
     Version,

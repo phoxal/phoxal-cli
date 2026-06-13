@@ -14,7 +14,7 @@ use webots_proto::ast::proto::span::Span;
 
 use crate::host_paths;
 use crate::resolver::{ResolvedComponentSource, ResolvedRobot};
-use crate::utils::copy_dir_recursive;
+use crate::utils::{copy_dir_recursive, make_executable};
 use crate::webots_staging::{RobotInstance, WebotsController};
 
 const SIMULATOR_WEBOTS_CONTROLLER: &str = "simulator_webots_controller";
@@ -277,14 +277,14 @@ fn stage_controller_binaries(resolved: &ResolvedRobot, controllers_dir: &Path) -
     for tool_name in [SIMULATOR_WEBOTS_CONTROLLER, SIMULATOR_WEBOTS_SUPERVISOR] {
         let Some(tool) = resolved.tools.iter().find(|tool| tool.name == tool_name) else {
             tracing::warn!(
-                "resolved simulator tool {tool_name} is missing; Webots will fail to spawn controllers — run `phoxal-cli doctor --fix`"
+                "resolved simulator tool {tool_name} is missing; Webots will fail to spawn controllers; tool provisioning is being reworked and no automatic download is available in this build"
             );
             continue;
         };
         let source = cached_tool_path(&tool.name, &tool.resolved, &tool.binary_name)?;
         if !source.is_file() {
             tracing::warn!(
-                "cached simulator binaries not found at {}; Webots will fail to spawn controllers — run `phoxal-cli doctor --fix`",
+                "cached simulator binaries not found at {}; Webots will fail to spawn controllers; tool provisioning is being reworked and no automatic download is available in this build",
                 source.display()
             );
             continue;
@@ -307,8 +307,7 @@ fn stage_controller_binaries(resolved: &ResolvedRobot, controllers_dir: &Path) -
 }
 
 fn cached_tool_path(name: &str, version: &str, binary_name: &str) -> Result<PathBuf> {
-    Ok(host_paths::cache_dir()?
-        .join("tools")
+    Ok(host_paths::tools_cache_dir()?
         .join(name)
         .join(version)
         .join(binary_name))
@@ -324,23 +323,6 @@ fn webots_controller_name(binary_name: &str) -> Result<String> {
                 "simulator tool binary '{binary_name}' does not end with host target suffix '-{target}'"
             )
         })
-}
-
-#[cfg(unix)]
-fn make_executable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = fs::metadata(path)
-        .with_context(|| format!("failed to stat {}", path.display()))?
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)
-        .with_context(|| format!("failed to chmod {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 fn robot_def_name(robot_id: &str) -> Result<String> {
