@@ -4,6 +4,17 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.5.0) - 2026-06-13
+
+
+### Added
+
+- Self upgrade, version commands, and a phoxal.com installer (#38)
+
+### Refactored
+
+- *(cli)* Make doctor a read-only host-readiness check (#40) (#42)
+
 ## [0.4.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.4.0) - 2026-06-12
 
 
