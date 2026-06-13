@@ -11,10 +11,26 @@ pub mod simulate;
 pub mod update;
 pub mod validate;
 
+/// Version string shared by the `--version` flag and the `version` subcommand,
+/// e.g. `0.5.0 (macos-aarch64)`. clap prefixes `--version` with the binary name
+/// and the subcommand prefixes it explicitly, so both render identically.
+/// clap's `version` needs a `&'static str`, so the computed value is cached.
+pub fn long_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        format!(
+            "{} ({}-{})",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "phoxal-cli",
-    version,
+    version = long_version(),
     about = "Resolve, validate, simulate, and doctor Phoxal robot projects."
 )]
 pub struct Cli {
@@ -53,12 +69,7 @@ impl RootCommand {
             Self::Simulate(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
             Self::Version => {
-                println!(
-                    "phoxal-cli {} ({}-{})",
-                    env!("CARGO_PKG_VERSION"),
-                    std::env::consts::OS,
-                    std::env::consts::ARCH
-                );
+                println!("phoxal-cli {}", long_version());
                 Ok(())
             }
             Self::SelfCmd(command) => command.run(app).await,
