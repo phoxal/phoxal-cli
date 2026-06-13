@@ -139,6 +139,7 @@ pub async fn run(
             Ok(plan)
         }
         SimulateMode::Live => {
+            crate::host_doctor::preflight()?;
             let project_root = app.project.root().to_path_buf();
             let resolve_options = options.clone();
             let resolved = tokio::task::spawn_blocking(move || {
@@ -720,10 +721,10 @@ fn spawn_cached_tool(
     tool_name: &str,
     processes: &mut crate::process::SpawnedProcesses,
 ) -> Result<()> {
-    let cache_dir = host_paths::cache_dir()?.join("tools").join(tool_name);
+    let cache_dir = host_paths::tools_cache_dir()?.join(tool_name);
     if !cache_dir.is_dir() {
         bail!(
-            "cached tool {tool_name} is missing under {}; run doctor --fix",
+            "cached tool {tool_name} is missing under {}; tool provisioning is being reworked and no automatic download is available in this build",
             cache_dir.display()
         );
     }
@@ -742,7 +743,7 @@ fn spawn_webots(
     processes: &mut crate::process::SpawnedProcesses,
 ) -> Result<()> {
     let world = staged_webots_world_path(project_root);
-    let mut command = ProcessCommand::new("webots");
+    let mut command = ProcessCommand::new(crate::host_doctor::webots_executable_path()?);
     command.arg(world);
     processes.spawn("webots", &mut command)
 }
