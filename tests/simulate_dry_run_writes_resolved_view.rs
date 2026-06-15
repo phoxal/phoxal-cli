@@ -137,6 +137,6 @@ components:
 fn releases_snapshot() -> ReleasesSnapshot {
     ReleasesSnapshot {
         fetched_at: std::time::SystemTime::UNIX_EPOCH,
-        versions: vec!["0.7.0".into()],
+        versions: vec!["0.8.0".into()],
     }
 }

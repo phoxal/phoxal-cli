@@ -7,12 +7,12 @@ identity:
 structure: structure.urdf
 
 phoxal_runtimes:
-  version: "^0.7"
+  version: "^0.8"
   overrides:
     drive:
       version: "latest"
     localize:
-      version: "0.7.0"
+      version: "0.8.0"
 
 user_runtimes:
   mission_behavior:

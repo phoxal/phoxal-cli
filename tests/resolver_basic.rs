@@ -9,7 +9,7 @@ fn resolves_minimal_robot_to_full_platform_set() -> anyhow::Result<()> {
     let snapshot = releases_snapshot();
     let resolved = resolve_with_releases(&robot, &CATALOG, offline_options(), &snapshot)?;
 
-    assert_eq!(resolved.runtime_set_version.to_string(), "0.7.0");
+    assert_eq!(resolved.runtime_set_version.to_string(), "0.8.0");
     assert_eq!(
         resolved
             .platform_runtimes
@@ -28,7 +28,7 @@ fn resolves_minimal_robot_to_full_platform_set() -> anyhow::Result<()> {
     );
     assert!(resolved.platform_runtimes.iter().all(|runtime| {
         let deploy = runtime.deploy_ref();
-        !deploy.contains('@') && deploy.ends_with(":0.7.0")
+        !deploy.contains('@') && deploy.ends_with(":0.8.0")
     }));
 
     Ok(())
@@ -75,6 +75,79 @@ fn missing_instance_source_fails() -> anyhow::Result<()> {
     let error = resolve_with_releases(&robot, &CATALOG, offline_options(), &snapshot)
         .expect_err("missing source should fail");
     assert!(error.to_string().contains("references missing source"));
+
+    Ok(())
+}
+
+#[test]
+fn webots_tools_resolve_from_framework_on_the_runtime_train() -> anyhow::Result<()> {
+    // #41: the Webots controller/supervisor ship from phoxal/framework in the
+    // same release as the runtimes, so they must resolve to the runtime-set
+    // version (0.8.0 here), not a hardcoded tool pin.
+    let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
+    let snapshot = releases_snapshot();
+    let resolved = resolve_with_releases(&robot, &CATALOG, offline_options(), &snapshot)?;
+
+    for tool_name in ["simulator_webots_controller", "simulator_webots_supervisor"] {
+        let tool = resolved
+            .tools
+            .iter()
+            .find(|tool| tool.name == tool_name)
+            .unwrap_or_else(|| panic!("{tool_name} resolved"));
+        assert_eq!(tool.repo, "phoxal/framework", "{tool_name} repo");
+        assert_eq!(tool.resolved, "0.8.0", "{tool_name} version tracks the train");
+        assert!(
+            tool.asset.starts_with("phoxal-simulator-0.8.0-"),
+            "{tool_name} asset {} should be version-matched",
+            tool.asset
+        );
+    }
+    // A non-train tool keeps its own pinned version line.
+    let joypad = resolved
+        .tools
+        .iter()
+        .find(|tool| tool.name == "joypad")
+        .expect("joypad resolved");
+    assert_eq!(joypad.repo, "phoxal/joypad");
+    assert_eq!(joypad.resolved, "0.1.0");
+
+    Ok(())
+}
+
+#[test]
+fn pinning_a_runtime_train_tool_is_rejected() -> anyhow::Result<()> {
+    // A per-robot version pin on a train-tracked tool would silently desync the
+    // simulator binaries from the runtimes/crate.
+    let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
+        "phoxal_runtimes:\n  version: \"latest\"",
+        "phoxal_runtimes:\n  version: \"latest\"\n\ntools:\n  simulator_webots_controller:\n    version: \"0.1.0\"",
+    ))?;
+    let snapshot = releases_snapshot();
+    let error = resolve_with_releases(&robot, &CATALOG, offline_options(), &snapshot)
+        .expect_err("pinning a train tool should fail");
+    assert!(
+        error.to_string().contains("tracks the runtime version train"),
+        "unexpected error: {error}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn pinned_tool_version_override_is_preserved() -> anyhow::Result<()> {
+    // Non-train tools may still be pinned per robot.
+    let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
+        "phoxal_runtimes:\n  version: \"latest\"",
+        "phoxal_runtimes:\n  version: \"latest\"\n\ntools:\n  joypad:\n    version: \"0.9.9\"",
+    ))?;
+    let snapshot = releases_snapshot();
+    let resolved = resolve_with_releases(&robot, &CATALOG, offline_options(), &snapshot)?;
+    let joypad = resolved
+        .tools
+        .iter()
+        .find(|tool| tool.name == "joypad")
+        .expect("joypad resolved");
+    assert_eq!(joypad.resolved, "0.9.9");
 
     Ok(())
 }
@@ -126,6 +199,6 @@ components:
 fn releases_snapshot() -> ReleasesSnapshot {
     ReleasesSnapshot {
         fetched_at: std::time::SystemTime::UNIX_EPOCH,
-        versions: vec!["0.7.0".into()],
+        versions: vec!["0.8.0".into()],
     }
 }

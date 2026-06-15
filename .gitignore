@@ -6,3 +6,4 @@ target/
 .claude/
 .aider*
 
+.DS_Store
