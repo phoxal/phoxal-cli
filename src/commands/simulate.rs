@@ -139,6 +139,18 @@ pub async fn run(
             Ok(plan)
         }
         SimulateMode::Live => {
+            // The Webots controller/supervisor are host-native binaries published
+            // only for x86_64 Linux + arm64 macOS — Cyberbotics ships no Linux ARM
+            // Webots build, so a live sim cannot obtain them here. Fail fast and
+            // clear rather than surfacing a missing-binary warning deep in staging.
+            let host_target = crate::resolver::host_target_triple();
+            if host_target == "aarch64-unknown-linux-gnu" {
+                anyhow::bail!(
+                    "phoxal-cli simulate is not supported on host target {host_target}: \
+                     Cyberbotics publishes no Linux ARM Webots build, so the Webots \
+                     simulator binaries are unavailable for this host"
+                );
+            }
             crate::host_doctor::preflight()?;
             let project_root = app.project.root().to_path_buf();
             let resolve_options = options.clone();

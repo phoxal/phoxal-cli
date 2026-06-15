@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::catalog::{DEFAULT_TOOL_VERSIONS, PlatformRuntimeCatalog, lookup_tool_version};
+use crate::catalog::{DEFAULT_TOOL_VERSIONS, PlatformRuntimeCatalog, ToolVersionSource, lookup_tool_version};
 use crate::releases::{self, ReleasesSnapshot};
 use crate::shell;
 
@@ -273,7 +273,7 @@ pub fn resolve_with_releases(
     // tree. We always attempt it; the only thing the offline path skips is
     // image digest pinning.
     let components = resolve_components(robot)?;
-    let tools = resolve_tools(robot, options.resolve_external_artifacts)?;
+    let tools = resolve_tools(robot, &runtime_set_version, options.resolve_external_artifacts)?;
 
     Ok(ResolvedRobot {
         robot: robot.clone(),
@@ -392,20 +392,47 @@ fn resolve_components(robot: &Robot) -> Result<Vec<ResolvedComponent>> {
     Ok(components)
 }
 
-fn resolve_tools(robot: &Robot, resolve_external_artifacts: bool) -> Result<Vec<ResolvedTool>> {
-    let mut requested = DEFAULT_TOOL_VERSIONS
-        .iter()
-        .map(|tool| (tool.name.to_string(), tool.version.to_string()))
-        .collect::<BTreeMap<_, _>>();
-    for (name, tool) in &robot.tools {
-        requested.insert(name.clone(), tool.version.clone());
+fn resolve_tools(
+    robot: &Robot,
+    runtime_set_version: &Version,
+    resolve_external_artifacts: bool,
+) -> Result<Vec<ResolvedTool>> {
+    // Reject robot.yaml tool selectors for unknown tools up front (previously a
+    // robot.tools entry seeded the request map; now the catalog is the source of
+    // truth and overrides only adjust known, pinned tools).
+    for name in robot.tools.keys() {
+        if lookup_tool_version(name).is_none() {
+            bail!("unknown native tool '{name}'");
+        }
     }
     let target = host_target_triple();
-    requested
-        .into_iter()
-        .map(|(name, version)| {
-            let catalog_tool = lookup_tool_version(&name)
-                .with_context(|| format!("unknown native tool '{name}'"))?;
+    DEFAULT_TOOL_VERSIONS
+        .iter()
+        .map(|catalog_tool| {
+            let name = catalog_tool.name;
+            let override_version = robot.tools.get(name).map(|tool| tool.version.as_str());
+            let version = match catalog_tool.version {
+                ToolVersionSource::RuntimeTrain => {
+                    // Train-tracked tools are version-matched to the runtime set
+                    // by construction; a per-robot pin would silently desync the
+                    // simulator binaries from the runtimes/crate. (The "no Webots
+                    // build for this host" check lives in the live `simulate`
+                    // path, where the binaries are actually required — see
+                    // commands/simulate.rs — so validate/dry-run stay usable on
+                    // hosts without a Webots build.)
+                    if let Some(requested) = override_version {
+                        bail!(
+                            "tool '{name}' tracks the runtime version train and cannot be pinned \
+                             via robot.yaml tools.{name}.version (got '{requested}'); it always \
+                             matches phoxal_runtimes.version (resolved {runtime_set_version})"
+                        );
+                    }
+                    runtime_set_version.to_string()
+                }
+                ToolVersionSource::Pinned(pinned) => {
+                    override_version.unwrap_or(pinned).to_string()
+                }
+            };
             let asset = render_tool_template(catalog_tool.artifact_template, &version, &target);
             let binary_name = render_tool_template(catalog_tool.binary_template, &version, &target);
             let sha256 = if resolve_external_artifacts {
@@ -415,7 +442,7 @@ fn resolve_tools(robot: &Robot, resolve_external_artifacts: bool) -> Result<Vec<
                 fake_sha(&format!("{name}:{version}:{asset}"))
             };
             Ok(ResolvedTool {
-                name,
+                name: name.to_string(),
                 requested: version.clone(),
                 resolved: version,
                 repo: catalog_tool.repo.to_string(),

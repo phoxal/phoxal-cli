@@ -12,43 +12,57 @@ pub struct PlatformRuntimeCatalog {
     pub entries: &'static [PlatformRuntimeEntry],
 }
 
+/// Where a tool's version comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolVersionSource {
+    /// Pinned to a fixed version, bumped manually as that tool releases.
+    Pinned(&'static str),
+    /// Tracks the resolved platform-runtime version (the framework release
+    /// train). Used for tools that ship from `phoxal/framework` in the same
+    /// release as the runtimes, so they are always version-matched.
+    RuntimeTrain,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolVersion {
     pub name: &'static str,
-    pub version: &'static str,
+    pub version: ToolVersionSource,
     pub repo: &'static str,
     pub artifact_template: &'static str,
     pub binary_template: &'static str,
 }
 
 // Must track the `phoxal` dependency line in Cargo.toml.
-pub const SUPPORTED_RUNTIME_TRAIN: &str = "^0.7";
+pub const SUPPORTED_RUNTIME_TRAIN: &str = "^0.8";
 
 pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
+    // The Webots controller + supervisor now ship from phoxal/framework in the
+    // same release as the platform runtimes, so they ride the runtime version
+    // train rather than a hand-bumped pin (was phoxal/simulator @ 0.2.0).
     ToolVersion {
         name: "simulator_webots_controller",
-        version: "0.2.0",
-        repo: "phoxal/simulator",
+        version: ToolVersionSource::RuntimeTrain,
+        repo: "phoxal/framework",
         artifact_template: "phoxal-simulator-{version}-{target}.tar.gz",
         binary_template: "phoxal-simulator-webots-controller-{target}",
     },
     ToolVersion {
         name: "simulator_webots_supervisor",
-        version: "0.2.0",
-        repo: "phoxal/simulator",
+        version: ToolVersionSource::RuntimeTrain,
+        repo: "phoxal/framework",
         artifact_template: "phoxal-simulator-{version}-{target}.tar.gz",
         binary_template: "phoxal-simulator-webots-supervisor-{target}",
     },
     ToolVersion {
         name: "rerun_proxy",
-        version: "0.1.0",
+        version: ToolVersionSource::Pinned("0.1.0"),
         repo: "phoxal/operator",
         artifact_template: "phoxal-rerun-proxy-{version}-{target}.tar.gz",
         binary_template: "phoxal-rerun-proxy-{target}",
     },
     ToolVersion {
         name: "joypad",
-        version: "0.1.0",
+        version: ToolVersionSource::Pinned("0.1.0"),
         repo: "phoxal/joypad",
         artifact_template: "phoxal-joypad-{version}-{target}.tar.gz",
         binary_template: "phoxal-joypad-{target}",
