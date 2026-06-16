@@ -4,8 +4,36 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
-## [0.5.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.5.1) - 2026-06-13
+## [0.6.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.6.0) - 2026-06-16
 
+
+### Added
+
+- *(cli)* Lock and recipe-build user runtimes (#55)
+- *(cli)* Provision Webots simulator binaries on live simulate (#57)
+
+### Fixed
+
+- *(cli)* Widen supported runtime train to any 0.x≥0.8 (#48)
+- *(cli)* Validate hard-fails user-runtime framework mismatch (#49)
+- *(cli)* Validate platform-runtime override version against releases (#51)
+- *(cli)* Simulate no longer silently writes phoxal.lock (#50)
+
+### Refactored
+
+- *(cli)* Derive platform-runtime image repo from name (#52)
+- *(cli)* Split simulate.rs into docker_stack + local_build modules (#53)
+
+### Style
+
+- *(cli)* Apply rustfmt to resolver + resolver_basic test (#47)
+
+## [0.5.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.5.1) - 2026-06-16
+
+
+### Added
+
+- *(cli)* Consume the Webots simulator from the framework release train (#45)
 
 ### Fixed
 
