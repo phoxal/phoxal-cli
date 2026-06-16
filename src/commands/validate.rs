@@ -553,6 +553,5 @@ components:
       mount_link: right_wheel_mount
 "#
         ))
-        .map_err(Into::into)
     }
 }
