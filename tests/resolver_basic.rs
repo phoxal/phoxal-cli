@@ -95,7 +95,10 @@ fn webots_tools_resolve_from_framework_on_the_runtime_train() -> anyhow::Result<
             .find(|tool| tool.name == tool_name)
             .unwrap_or_else(|| panic!("{tool_name} resolved"));
         assert_eq!(tool.repo, "phoxal/framework", "{tool_name} repo");
-        assert_eq!(tool.resolved, "0.8.0", "{tool_name} version tracks the train");
+        assert_eq!(
+            tool.resolved, "0.8.0",
+            "{tool_name} version tracks the train"
+        );
         assert!(
             tool.asset.starts_with("phoxal-simulator-0.8.0-"),
             "{tool_name} asset {} should be version-matched",
@@ -126,7 +129,9 @@ fn pinning_a_runtime_train_tool_is_rejected() -> anyhow::Result<()> {
     let error = resolve_with_releases(&robot, &CATALOG, offline_options(), &snapshot)
         .expect_err("pinning a train tool should fail");
     assert!(
-        error.to_string().contains("tracks the runtime version train"),
+        error
+            .to_string()
+            .contains("tracks the runtime version train"),
         "unexpected error: {error}"
     );
 
