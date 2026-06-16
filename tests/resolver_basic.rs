@@ -221,14 +221,19 @@ fn webots_tools_resolve_from_framework_on_the_runtime_train() -> anyhow::Result<
             tool.asset
         );
     }
-    // A non-train tool keeps its own pinned version line.
+    // Joypad now ships from phoxal/framework on the same runtime train.
     let joypad = resolved
         .tools
         .iter()
         .find(|tool| tool.name == "joypad")
         .expect("joypad resolved");
-    assert_eq!(joypad.repo, "phoxal/joypad");
-    assert_eq!(joypad.resolved, "0.1.0");
+    assert_eq!(joypad.repo, "phoxal/framework");
+    assert_eq!(joypad.resolved, "0.8.0");
+    assert!(
+        joypad.asset.starts_with("phoxal-joypad-0.8.0-"),
+        "joypad asset {} should be version-matched",
+        joypad.asset
+    );
 
     Ok(())
 }
@@ -236,36 +241,42 @@ fn webots_tools_resolve_from_framework_on_the_runtime_train() -> anyhow::Result<
 #[test]
 fn pinning_a_runtime_train_tool_is_rejected() -> anyhow::Result<()> {
     // A per-robot version pin on a train-tracked tool would silently desync the
-    // simulator binaries from the runtimes/crate.
-    let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
-        "phoxal_runtimes:\n  version: \"latest\"",
-        "phoxal_runtimes:\n  version: \"latest\"\n\ntools:\n  simulator_webots_controller:\n    version: \"0.1.0\"",
-    ))?;
-    let snapshot = releases_snapshot();
-    let error = resolve_with_releases(
-        &robot,
-        std::path::Path::new("."),
-        &CATALOG,
-        offline_options(),
-        &snapshot,
-    )
-    .expect_err("pinning a train tool should fail");
-    assert!(
-        error
-            .to_string()
-            .contains("tracks the runtime version train"),
-        "unexpected error: {error}"
-    );
+    // train tools from the runtimes/crate.
+    for tool_name in ["simulator_webots_controller", "joypad"] {
+        let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
+            "phoxal_runtimes:\n  version: \"latest\"",
+            &format!(
+                "phoxal_runtimes:\n  version: \"latest\"\n\ntools:\n  {tool_name}:\n    version: \"0.1.0\""
+            ),
+        ))?;
+        let snapshot = releases_snapshot();
+        let error = match resolve_with_releases(
+            &robot,
+            std::path::Path::new("."),
+            &CATALOG,
+            offline_options(),
+            &snapshot,
+        ) {
+            Ok(_) => panic!("pinning {tool_name} should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("tracks the runtime version train"),
+            "unexpected error for {tool_name}: {error}"
+        );
+    }
 
     Ok(())
 }
 
 #[test]
 fn pinned_tool_version_override_is_preserved() -> anyhow::Result<()> {
-    // Non-train tools may still be pinned per robot.
+    // Pinned tools may still be overridden per robot.
     let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
         "phoxal_runtimes:\n  version: \"latest\"",
-        "phoxal_runtimes:\n  version: \"latest\"\n\ntools:\n  joypad:\n    version: \"0.9.9\"",
+        "phoxal_runtimes:\n  version: \"latest\"\n\ntools:\n  rerun_proxy:\n    version: \"0.9.9\"",
     ))?;
     let snapshot = releases_snapshot();
     let resolved = resolve_with_releases(
@@ -275,12 +286,12 @@ fn pinned_tool_version_override_is_preserved() -> anyhow::Result<()> {
         offline_options(),
         &snapshot,
     )?;
-    let joypad = resolved
+    let rerun_proxy = resolved
         .tools
         .iter()
-        .find(|tool| tool.name == "joypad")
-        .expect("joypad resolved");
-    assert_eq!(joypad.resolved, "0.9.9");
+        .find(|tool| tool.name == "rerun_proxy")
+        .expect("rerun_proxy resolved");
+    assert_eq!(rerun_proxy.resolved, "0.9.9");
 
     Ok(())
 }
