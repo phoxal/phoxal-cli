@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use crate::host_paths;
 use crate::resolver::{ResolvedComponentSource, ResolvedRobot};
 use crate::shell;
-use crate::utils::copy_dir_recursive;
+use crate::utils::{copy_dir_recursive, resolve_project_path};
 
 const COMPONENT_FILE: &str = "component.yaml";
 const STRUCTURE_FILE: &str = "structure.urdf";
@@ -159,12 +159,4 @@ fn copy_file(source: &Path, destination: &Path) -> Result<()> {
         )
     })?;
     Ok(())
-}
-
-fn resolve_project_path(project_root: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        project_root.join(path)
-    }
 }

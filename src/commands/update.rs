@@ -89,7 +89,7 @@ fn run_with_release_source(
         resolve_external_artifacts: options.resolve_external_artifacts,
     };
     let resolved = if let Some(releases) = releases {
-        resolve_with_releases(&robot, &CATALOG, resolve_options, releases)?
+        resolve_with_releases(&robot, project_root, &CATALOG, resolve_options, releases)?
     } else {
         let cache_dir = host_paths::cache_dir()?;
         let source = if options.refresh_releases {
@@ -97,7 +97,7 @@ fn run_with_release_source(
         } else {
             ReleaseSource::CacheDir(&cache_dir)
         };
-        resolve_with_release_source(&robot, &CATALOG, resolve_options, source)?
+        resolve_with_release_source(&robot, project_root, &CATALOG, resolve_options, source)?
     };
     let lockfile = Lockfile::from_resolved(&resolved);
     let lockfile_path = project_root.join(LOCKFILE_NAME);

@@ -144,7 +144,7 @@ pub fn generate(
         let image = user_runtime_images
             .get(&runtime.name)
             .cloned()
-            .unwrap_or_else(|| runtime.image_tag.clone());
+            .unwrap_or_else(|| runtime.image.clone());
         services.insert(
             format!("user-{}", runtime.name),
             ComposeService {

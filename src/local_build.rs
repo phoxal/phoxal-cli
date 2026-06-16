@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
 
 use crate::AppContext;
-use crate::resolver::{ResolvedComponentSource, ResolvedRobot};
+use crate::resolver::{ResolvedComponentSource, ResolvedRobot, ResolvedUserRuntimeBuild};
+use crate::utils::resolve_project_path;
 use crate::{host_paths, shell};
 
 pub(crate) fn pull_platform_images(app: &AppContext, resolved: &ResolvedRobot) -> Result<()> {
@@ -38,19 +39,40 @@ pub(crate) fn build_user_runtimes(
     let mut images = BTreeMap::new();
     for runtime in &resolved.user_runtimes {
         let runtime_dir = resolve_project_path(project_root, &runtime.path);
-        let hash = hash_tree(&runtime_dir)?;
-        let image = format!(
-            "phoxal-local/{}/user-runtime/{}:{}",
-            resolved.robot.identity.id, runtime.name, hash
-        );
         shell::run_status(
             "docker",
-            ["build", "-t", image.as_str(), "."],
+            docker_build_args(&runtime.image, runtime.build.as_ref()),
             Some(&runtime_dir),
         )?;
-        images.insert(runtime.name.clone(), image);
+        images.insert(runtime.name.clone(), runtime.image.clone());
     }
     Ok(images)
+}
+
+pub(crate) fn docker_build_args(
+    image: &str,
+    build: Option<&ResolvedUserRuntimeBuild>,
+) -> Vec<OsString> {
+    let context = build
+        .map(|build| build.context.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut args = vec![
+        OsString::from("build"),
+        OsString::from("-t"),
+        OsString::from(image),
+    ];
+    if let Some(build) = build {
+        if let Some(dockerfile) = &build.dockerfile {
+            args.push(OsString::from("-f"));
+            args.push(build.context.join(dockerfile).into_os_string());
+        }
+        if let Some(target) = &build.target {
+            args.push(OsString::from("--target"));
+            args.push(OsString::from(target));
+        }
+    }
+    args.push(context.into_os_string());
+    args
 }
 
 pub(crate) fn build_component_drivers(project_root: &Path, resolved: &ResolvedRobot) -> Result<()> {
@@ -95,39 +117,47 @@ fn collect_absolute_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn hash_tree(path: &Path) -> Result<String> {
-    let mut files = Vec::new();
-    collect_files(path, path, &mut files)?;
-    files.sort();
-    let mut hasher = Sha256::new();
-    for file in files {
-        hasher.update(file.to_string_lossy().as_bytes());
-        hasher.update(fs::read(path.join(&file))?);
-    }
-    Ok(hex::encode(hasher.finalize())[..16].to_string())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn collect_files(root: &Path, path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name();
-        if name == ".git" || name == "target" {
-            continue;
-        }
-        if path.is_dir() {
-            collect_files(root, &path, files)?;
-        } else if path.is_file() {
-            files.push(path.strip_prefix(root)?.to_path_buf());
-        }
+    #[test]
+    fn docker_build_args_use_default_context_without_recipe() {
+        assert_eq!(
+            docker_build_args("phoxal-local/test/user-runtime/drive:abc", None),
+            os_args([
+                "build",
+                "-t",
+                "phoxal-local/test/user-runtime/drive:abc",
+                "."
+            ])
+        );
     }
-    Ok(())
-}
 
-fn resolve_project_path(project_root: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        project_root.join(path)
+    #[test]
+    fn docker_build_args_apply_recipe_context_dockerfile_and_target() {
+        let build = ResolvedUserRuntimeBuild {
+            context: PathBuf::from("container"),
+            dockerfile: Some(PathBuf::from("Dockerfile.runtime")),
+            target: Some("runtime".to_string()),
+        };
+
+        assert_eq!(
+            docker_build_args("phoxal-local/test/user-runtime/drive:abc", Some(&build)),
+            os_args([
+                "build",
+                "-t",
+                "phoxal-local/test/user-runtime/drive:abc",
+                "-f",
+                "container/Dockerfile.runtime",
+                "--target",
+                "runtime",
+                "container",
+            ])
+        );
+    }
+
+    fn os_args<const N: usize>(values: [&str; N]) -> Vec<OsString> {
+        values.into_iter().map(OsString::from).collect()
     }
 }

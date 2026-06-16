@@ -125,6 +125,13 @@ fn collect_user_runtime_dependency_report(
 ) -> UserRuntimeDependencyReport {
     let mut report = UserRuntimeDependencyReport::default();
     for (name, runtime) in &robot.user_runtimes {
+        if let Err(error) = crate::resolver::validate_user_runtime_framework_selector(
+            name,
+            &runtime.framework,
+            CATALOG.supported_runtimes_version_req,
+        ) {
+            report.problems.push(error.to_string());
+        }
         let runtime_dir = resolve_robot_path(robot_root, &runtime.path);
         let manifest_path = runtime_dir.join("Cargo.toml");
         let Ok(contents) = fs::read_to_string(&manifest_path) else {
@@ -504,6 +511,72 @@ serde = "1"
                 "user runtime 'drive' has no readable Cargo.toml at {}; cannot check phoxal dependency",
                 runtime_dir.join("Cargo.toml").display()
             )]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn out_of_train_user_runtime_framework_collects_problem() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let runtime_dir = temp.path().join("runtimes/drive");
+        write_manifest(
+            &runtime_dir,
+            r#"
+[package]
+name = "drive"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+phoxal = "0.8.5"
+"#,
+        )?;
+        let robot = Robot::parse_from_string(
+            r#"version: v1
+
+identity:
+  id: testbot
+  namespace: test
+
+structure: structure.urdf
+
+phoxal_runtimes:
+  version: "latest"
+
+user_runtimes:
+  drive:
+    path: runtimes/drive
+    framework: "1.0.0"
+
+motion:
+  kinematic:
+    kind: differential
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+
+components:
+  sources: {}
+  instances: {}
+"#,
+        )?;
+
+        let problems = collect_user_runtime_problems(
+            temp.path(),
+            &robot,
+            EXPECTED_RUNTIME_TRAIN,
+            parse_expected_runtime_train(),
+        );
+
+        assert_eq!(
+            problems,
+            vec![
+                "user runtime 'drive' framework selector '1.0.0' is outside the supported runtime train >=0.8.0, <1.0.0"
+                    .to_string()
+            ]
         );
         Ok(())
     }

@@ -8,15 +8,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::releases::ReleasesSnapshot;
-use crate::resolver::{ImagePin, ResolvedComponentSource, ResolvedRobot};
+use crate::resolver::{ImagePin, ResolvedComponentSource, ResolvedRobot, ResolvedUserRuntimeBuild};
 
 pub const LOCKFILE_NAME: &str = "phoxal.lock";
-pub const LOCKFILE_SCHEMA_VERSION: u32 = 2;
+pub const LOCKFILE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lockfile {
     pub schema_version: u32,
     pub phoxal_runtimes: LockedPhoxalRuntimes,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub user_runtimes: BTreeMap<String, LockedUserRuntime>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub components: BTreeMap<String, LockedComponent>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -33,6 +35,16 @@ pub struct LockedPhoxalRuntimes {
     /// recovery / not yet pinned). The lockfile never stores a fabricated
     /// digest.
     pub images: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockedUserRuntime {
+    pub path: PathBuf,
+    pub framework: String,
+    pub source_hash: String,
+    pub image: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<ResolvedUserRuntimeBuild>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +86,22 @@ impl Lockfile {
             .platform_runtimes
             .iter()
             .map(|runtime| (runtime.name.clone(), runtime.deploy_ref()))
+            .collect();
+        let user_runtimes = resolved
+            .user_runtimes
+            .iter()
+            .map(|runtime| {
+                (
+                    runtime.name.clone(),
+                    LockedUserRuntime {
+                        path: runtime.path.clone(),
+                        framework: runtime.framework.clone(),
+                        source_hash: runtime.source_hash.clone(),
+                        image: runtime.image.clone(),
+                        build: runtime.build.clone(),
+                    },
+                )
+            })
             .collect();
         let components = resolved
             .components
@@ -124,6 +152,7 @@ impl Lockfile {
                 releases_fetched_at: resolved.releases_fetched_at.map(DateTime::<Utc>::from),
                 images,
             },
+            user_runtimes,
             components,
             tools,
         }
@@ -234,6 +263,47 @@ pub(crate) fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) 
         }
     }
 
+    let mut user_runtime_names = BTreeSet::new();
+    for runtime in &mut resolved.user_runtimes {
+        user_runtime_names.insert(runtime.name.clone());
+        let locked = lockfile
+            .user_runtimes
+            .get(&runtime.name)
+            .with_context(|| format!("lockfile is missing user runtime {}", runtime.name))?;
+        if locked.path != runtime.path
+            || locked.framework != runtime.framework
+            || locked.build != runtime.build
+        {
+            bail!(
+                "lockfile user runtime {} does not match robot.yaml; re-run `phoxal update` to regenerate phoxal.lock",
+                runtime.name
+            );
+        }
+        if locked.source_hash != runtime.source_hash {
+            bail!(
+                "user runtime {} source tree drifted from lockfile: current hash {} does not match locked hash {}",
+                runtime.name,
+                runtime.source_hash,
+                locked.source_hash
+            );
+        }
+        if locked.image != runtime.image {
+            bail!(
+                "lockfile image '{}' for user runtime {} does not match resolved image '{}'",
+                locked.image,
+                runtime.name,
+                runtime.image
+            );
+        }
+        runtime.image = locked.image.clone();
+        runtime.source_hash = locked.source_hash.clone();
+    }
+    for name in lockfile.user_runtimes.keys() {
+        if !user_runtime_names.contains(name) {
+            bail!("lockfile has unknown user runtime {name}");
+        }
+    }
+
     let mut component_sources = BTreeSet::new();
     for component in &mut resolved.components {
         let ResolvedComponentSource::Git {
@@ -331,6 +401,67 @@ pub(crate) fn reconcile_lockfile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolver::{ResolvedRobot, ResolvedUserRuntime};
+    use phoxal::model::robot::RobotV1 as Robot;
+    use semver::Version;
+    use std::time::SystemTime;
+
+    #[test]
+    fn schema_version_is_bumped_for_user_runtime_locks() {
+        assert_eq!(LOCKFILE_SCHEMA_VERSION, 3);
+    }
+
+    #[test]
+    fn locked_user_runtime_round_trips() {
+        let mut user_runtimes = BTreeMap::new();
+        user_runtimes.insert(
+            "autonomy".to_string(),
+            LockedUserRuntime {
+                path: PathBuf::from("runtimes/autonomy"),
+                framework: "0.9.0".to_string(),
+                source_hash: "abc123".to_string(),
+                image: "phoxal-local/testbot/user-runtime/autonomy:abc123".to_string(),
+                build: Some(ResolvedUserRuntimeBuild {
+                    context: PathBuf::from("container"),
+                    dockerfile: Some(PathBuf::from("Dockerfile.runtime")),
+                    target: Some("runtime".to_string()),
+                }),
+            },
+        );
+        let lockfile = Lockfile {
+            schema_version: LOCKFILE_SCHEMA_VERSION,
+            phoxal_runtimes: LockedPhoxalRuntimes {
+                requested: "latest".to_string(),
+                resolved: "0.9.0".to_string(),
+                releases_fetched_at: None,
+                images: BTreeMap::new(),
+            },
+            user_runtimes,
+            components: BTreeMap::new(),
+            tools: BTreeMap::new(),
+        };
+
+        let yaml = serde_yaml::to_string(&lockfile).expect("serialize");
+        assert!(yaml.contains("user_runtimes:"), "got: {yaml}");
+        assert!(yaml.contains("source_hash: abc123"), "got: {yaml}");
+        let reparsed: Lockfile = serde_yaml::from_str(&yaml).expect("reparse");
+        assert_eq!(reparsed, lockfile);
+    }
+
+    #[test]
+    fn user_runtime_source_hash_changes_are_drift() -> anyhow::Result<()> {
+        let resolved = resolved_with_user_runtime("abc123")?;
+        let lockfile = Lockfile::from_resolved(&resolved);
+        assert!(lockfile.is_drift_free(&resolved));
+
+        let mut changed = resolved.clone();
+        changed.user_runtimes[0].source_hash = "def456".to_string();
+        changed.user_runtimes[0].image =
+            "phoxal-local/testbot/user-runtime/autonomy:def456".to_string();
+
+        assert!(!lockfile.is_drift_free(&changed));
+        Ok(())
+    }
 
     #[test]
     fn locked_component_directory_round_trips() {
@@ -365,4 +496,54 @@ mod tests {
         let parsed: LockedComponent = serde_yaml::from_str(legacy).expect("legacy parse");
         assert_eq!(parsed, locked);
     }
+
+    fn resolved_with_user_runtime(source_hash: &str) -> anyhow::Result<ResolvedRobot> {
+        Ok(ResolvedRobot {
+            robot: Robot::parse_from_string(MINIMAL_ROBOT)?,
+            runtime_set_version: Version::parse("0.9.0")?,
+            requested_runtime_set: "latest".to_string(),
+            releases_fetched_at: Some(SystemTime::UNIX_EPOCH),
+            platform_runtimes: Vec::new(),
+            user_runtimes: vec![ResolvedUserRuntime {
+                name: "autonomy".to_string(),
+                path: PathBuf::from("runtimes/autonomy"),
+                framework: "0.9.0".to_string(),
+                build: Some(ResolvedUserRuntimeBuild {
+                    context: PathBuf::from("container"),
+                    dockerfile: Some(PathBuf::from("Dockerfile.runtime")),
+                    target: Some("runtime".to_string()),
+                }),
+                source_hash: source_hash.to_string(),
+                image: format!("phoxal-local/testbot/user-runtime/autonomy:{source_hash}"),
+            }],
+            components: Vec::new(),
+            tools: Vec::new(),
+        })
+    }
+
+    const MINIMAL_ROBOT: &str = r#"version: v1
+
+identity:
+  id: testbot
+  namespace: test
+
+structure: structure.urdf
+
+phoxal_runtimes:
+  version: "latest"
+
+motion:
+  kinematic:
+    kind: differential
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+
+components:
+  sources: {}
+  instances: {}
+"#;
 }
