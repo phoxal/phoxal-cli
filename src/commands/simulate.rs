@@ -143,16 +143,19 @@ pub async fn run(
             Ok(plan)
         }
         SimulateMode::Live => {
-            // The Webots controller/supervisor are host-native binaries published
-            // only for x86_64 Linux + arm64 macOS — Cyberbotics ships no Linux ARM
-            // Webots build, so a live sim cannot obtain them here. Fail fast and
-            // clear rather than surfacing a missing-binary warning deep in staging.
+            // The Webots controller/supervisor are host-native binaries that
+            // phoxal/framework publishes only for x86_64 Linux and arm64 macOS.
+            // Reject any other host up front (Intel macOS, Linux ARM, Windows, …)
+            // rather than letting provisioning fail later with an opaque "release
+            // asset not found".
             let host_target = crate::resolver::host_target_triple();
-            if host_target == "aarch64-unknown-linux-gnu" {
+            const SIMULATOR_HOST_TARGETS: [&str; 2] =
+                ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"];
+            if !SIMULATOR_HOST_TARGETS.contains(&host_target.as_str()) {
                 anyhow::bail!(
                     "phoxal-cli simulate is not supported on host target {host_target}: \
-                     Cyberbotics publishes no Linux ARM Webots build, so the Webots \
-                     simulator binaries are unavailable for this host"
+                     the Webots simulator binaries are published only for {}",
+                    SIMULATOR_HOST_TARGETS.join(" and ")
                 );
             }
             crate::host_doctor::preflight()?;
@@ -164,6 +167,7 @@ pub async fn run(
             .await
             .context("simulate resolver worker failed")??;
             crate::local_build::pull_platform_images(app, &resolved.resolved)?;
+            crate::tool_provisioning::ensure_simulator_binaries(&app.ui, &resolved.resolved)?;
             let user_images = crate::local_build::build_user_runtimes(
                 &resolved.project_root,
                 &resolved.resolved,
@@ -457,7 +461,7 @@ fn spawn_cached_tool(
     let cache_dir = host_paths::tools_cache_dir()?.join(tool_name);
     if !cache_dir.is_dir() {
         bail!(
-            "cached tool {tool_name} is missing under {}; tool provisioning is being reworked and no automatic download is available in this build",
+            "cached tool {tool_name} is missing under {}; it has not been provisioned",
             cache_dir.display()
         );
     }

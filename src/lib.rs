@@ -18,6 +18,7 @@ pub mod resolver;
 pub mod run_view;
 pub mod shell;
 pub mod simulator_staging;
+pub mod tool_provisioning;
 pub mod ui;
 pub mod utils;
 pub mod webots_staging;
