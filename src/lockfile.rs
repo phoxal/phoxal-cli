@@ -1,12 +1,14 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::resolver::{ResolvedComponentSource, ResolvedRobot};
+use crate::releases::ReleasesSnapshot;
+use crate::resolver::{ImagePin, ResolvedComponentSource, ResolvedRobot};
 
 pub const LOCKFILE_NAME: &str = "phoxal.lock";
 pub const LOCKFILE_SCHEMA_VERSION: u32 = 2;
@@ -153,6 +155,177 @@ impl Lockfile {
     pub fn has_current_schema(&self) -> bool {
         self.schema_version == LOCKFILE_SCHEMA_VERSION
     }
+}
+
+pub(crate) fn releases_snapshot_from_lockfile(lockfile: &Lockfile) -> Result<ReleasesSnapshot> {
+    let resolved_version = lockfile
+        .phoxal_runtimes
+        .resolved
+        .parse::<semver::Version>()?;
+    Ok(ReleasesSnapshot {
+        fetched_at: lockfile
+            .phoxal_runtimes
+            .releases_fetched_at
+            .map(SystemTime::from)
+            .unwrap_or(SystemTime::UNIX_EPOCH),
+        versions: vec![resolved_version.to_string()],
+    })
+}
+
+pub(crate) fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) -> Result<()> {
+    if !lockfile.has_current_schema() {
+        bail!(
+            "lockfile schema_version {} is stale; regenerate {} with schema_version {}",
+            lockfile.schema_version,
+            LOCKFILE_NAME,
+            LOCKFILE_SCHEMA_VERSION
+        );
+    }
+    if lockfile.phoxal_runtimes.requested != resolved.requested_runtime_set {
+        bail!(
+            "lockfile requested runtime-set selector '{}' does not match robot.yaml selector '{}'",
+            lockfile.phoxal_runtimes.requested,
+            resolved.requested_runtime_set
+        );
+    }
+    resolved.runtime_set_version =
+        lockfile.phoxal_runtimes.resolved.parse().with_context(|| {
+            format!(
+                "lockfile runtime-set version '{}' is not semver",
+                lockfile.phoxal_runtimes.resolved
+            )
+        })?;
+
+    let mut runtime_names = BTreeSet::new();
+    for runtime in &mut resolved.platform_runtimes {
+        runtime_names.insert(runtime.name.clone());
+        let image = lockfile
+            .phoxal_runtimes
+            .images
+            .get(&runtime.name)
+            .with_context(|| format!("lockfile is missing image for runtime {}", runtime.name))?;
+        if let Some((image_repo, image_digest)) = image.split_once('@') {
+            // Reproducible content pin: repo@sha256:…
+            runtime.image_repo = image_repo.to_string();
+            runtime.pin = ImagePin::Digest(image_digest.to_string());
+        } else {
+            // Recovery tag ref: repo:version (the last colon separates the tag,
+            // leaving an optional registry-port colon in the repo intact).
+            let (image_repo, version) = image.rsplit_once(':').with_context(|| {
+                format!(
+                    "lockfile image '{image}' for runtime {} is neither a digest pin \
+                     (repo@sha256:…) nor a tag ref (repo:version)",
+                    runtime.name
+                )
+            })?;
+            runtime.image_repo = image_repo.to_string();
+            runtime.version = version.parse().with_context(|| {
+                format!(
+                    "lockfile image tag '{version}' for runtime {} is not a semver version",
+                    runtime.name
+                )
+            })?;
+            runtime.pin = ImagePin::Unpinned;
+        }
+    }
+    for name in lockfile.phoxal_runtimes.images.keys() {
+        if !runtime_names.contains(name) {
+            bail!("lockfile has image for unknown runtime {name}");
+        }
+    }
+
+    let mut component_sources = BTreeSet::new();
+    for component in &mut resolved.components {
+        let ResolvedComponentSource::Git {
+            git,
+            tag,
+            commit,
+            directory,
+        } = &mut component.source
+        else {
+            continue;
+        };
+        component_sources.insert(component.source_name.clone());
+        let locked = lockfile
+            .components
+            .get(&component.source_name)
+            .with_context(|| {
+                format!(
+                    "lockfile is missing component source {}",
+                    component.source_name
+                )
+            })?;
+        let crate::lockfile::LockedComponentSource::Git {
+            git: locked_git,
+            tag: locked_tag,
+            directory: locked_directory,
+        } = &locked.source;
+        if locked_git != git || locked_tag != tag || locked_directory != directory {
+            bail!(
+                "lockfile component source {} does not match robot.yaml",
+                component.source_name
+            );
+        }
+        *commit = locked.commit.clone();
+    }
+    for name in lockfile.components.keys() {
+        if !component_sources.contains(name) {
+            bail!("lockfile has component source {name} that robot.yaml no longer uses");
+        }
+    }
+
+    let mut tool_names = BTreeSet::new();
+    for tool in &mut resolved.tools {
+        tool_names.insert(tool.name.clone());
+        let locked = lockfile
+            .tools
+            .get(&tool.name)
+            .with_context(|| format!("lockfile is missing tool {}", tool.name))?;
+        if locked.requested != tool.requested {
+            bail!(
+                "lockfile tool {} does not match robot.yaml; re-run `phoxal update` to regenerate phoxal.lock",
+                tool.name
+            );
+        }
+        tool.resolved = locked.resolved.clone();
+        if !locked.repo.is_empty() {
+            tool.repo = locked.repo.clone();
+        }
+        tool.asset = locked.asset.clone();
+        if !locked.binary_name.is_empty() {
+            tool.binary_name = locked.binary_name.clone();
+        }
+        tool.sha256 = locked.sha256.clone();
+    }
+    for name in lockfile.tools.keys() {
+        if !tool_names.contains(name) {
+            bail!("lockfile has unknown tool {name}");
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn reconcile_lockfile(
+    project_root: &Path,
+    resolved: &ResolvedRobot,
+    locked: bool,
+) -> Result<Option<PathBuf>> {
+    let lock_path = project_root.join(LOCKFILE_NAME);
+    let expected = Lockfile::from_resolved(resolved);
+    if lock_path.is_file() {
+        let actual = Lockfile::read(&lock_path)?;
+        if actual.is_drift_free(resolved) {
+            return Ok(None);
+        }
+        if locked {
+            bail!("{} differs from recomputed resolution", lock_path.display());
+        }
+    } else if locked {
+        bail!("{} is required by --locked", lock_path.display());
+    }
+    expected.write(&lock_path)?;
+    Ok(Some(lock_path))
 }
 
 #[cfg(test)]
