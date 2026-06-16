@@ -38,9 +38,9 @@ pub struct ToolVersion {
 pub const SUPPORTED_RUNTIME_TRAIN: &str = ">=0.8.0, <1.0.0";
 
 pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
-    // The Webots controller + supervisor now ship from phoxal/framework in the
-    // same release as the platform runtimes, so they ride the runtime version
-    // train rather than a hand-bumped pin (was phoxal/simulator @ 0.2.0).
+    // The Webots simulator binaries and joypad ship from phoxal/framework on
+    // the same release as the platform runtimes, so they ride the runtime
+    // version train rather than hand-bumped pins.
     ToolVersion {
         name: "simulator_webots_controller",
         version: ToolVersionSource::RuntimeTrain,
@@ -64,8 +64,8 @@ pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
     },
     ToolVersion {
         name: "joypad",
-        version: ToolVersionSource::Pinned("0.1.0"),
-        repo: "phoxal/joypad",
+        version: ToolVersionSource::RuntimeTrain,
+        repo: "phoxal/framework",
         artifact_template: "phoxal-joypad-{version}-{target}.tar.gz",
         binary_template: "phoxal-joypad-{target}",
     },
