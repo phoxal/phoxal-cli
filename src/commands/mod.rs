@@ -70,6 +70,10 @@ impl RootCommand {
             Self::Doctor(command) => command.run(app).await,
             Self::Version => {
                 println!("phoxal-cli {}", long_version());
+                println!(
+                    "supported runtime train: {}",
+                    crate::catalog::SUPPORTED_RUNTIME_TRAIN
+                );
                 Ok(())
             }
             Self::SelfCmd(command) => command.run(app).await,
