@@ -43,6 +43,11 @@ pub struct Simulate {
     pub dry_run: bool,
     #[arg(
         long,
+        help = "Refresh phoxal.lock when it is missing or stale (simulate's only way to mutate the lock)."
+    )]
+    pub update_lock: bool,
+    #[arg(
+        long,
         help = "Launch rerun-proxy from the cached Phoxal tool binaries."
     )]
     pub rerun_proxy: bool,
@@ -65,6 +70,7 @@ pub enum SimulateMode {
 pub struct SimulateOptions {
     pub world: String,
     pub locked: bool,
+    pub update_lock: bool,
     pub rerun_proxy: bool,
     pub joypad: bool,
     pub resolve_external_artifacts: bool,
@@ -111,6 +117,7 @@ impl Simulate {
         let options = SimulateOptions {
             world: self.world.clone(),
             locked: self.locked,
+            update_lock: self.update_lock,
             rerun_proxy: self.rerun_proxy,
             joypad: self.joypad,
             resolve_external_artifacts: self.pin_digests,
@@ -155,7 +162,7 @@ pub async fn run(
             let project_root = app.project.root().to_path_buf();
             let resolve_options = options.clone();
             let resolved = tokio::task::spawn_blocking(move || {
-                resolve_project(&project_root, resolve_options)
+                resolve_project(&project_root, resolve_options, SimulateMode::Live)
             })
             .await
             .context("simulate resolver worker failed")??;
@@ -170,7 +177,7 @@ pub async fn run(
 }
 
 pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<SimulatePlan> {
-    let resolved = resolve_project(project_start, options.clone())?;
+    let resolved = resolve_project(project_start, options.clone(), SimulateMode::DryRun)?;
     write_simulation_files(resolved, options, &BTreeMap::new(), SimulateMode::DryRun)
 }
 
@@ -179,17 +186,27 @@ pub fn prepare_with_releases(
     options: SimulateOptions,
     releases: &ReleasesSnapshot,
 ) -> Result<SimulatePlan> {
-    let resolved = resolve_project_with_releases(project_start, options.clone(), Some(releases))?;
+    let resolved = resolve_project_with_releases(
+        project_start,
+        options.clone(),
+        SimulateMode::DryRun,
+        Some(releases),
+    )?;
     write_simulation_files(resolved, options, &BTreeMap::new(), SimulateMode::DryRun)
 }
 
-fn resolve_project(project_start: &Path, options: SimulateOptions) -> Result<ResolvedSimulation> {
-    resolve_project_with_releases(project_start, options, None)
+fn resolve_project(
+    project_start: &Path,
+    options: SimulateOptions,
+    mode: SimulateMode,
+) -> Result<ResolvedSimulation> {
+    resolve_project_with_releases(project_start, options, mode, None)
 }
 
 fn resolve_project_with_releases(
     project_start: &Path,
     options: SimulateOptions,
+    mode: SimulateMode,
     releases: Option<&ReleasesSnapshot>,
 ) -> Result<ResolvedSimulation> {
     let robot_path = crate::resolver::discover_robot_yaml(project_start)
@@ -260,7 +277,17 @@ fn resolve_project_with_releases(
             });
         }
     }
-    let lockfile_written = reconcile_lockfile(&project_root, &resolved, false)?;
+    let lockfile_written = match mode {
+        SimulateMode::DryRun => None,
+        SimulateMode::Live if options.update_lock => {
+            reconcile_lockfile(&project_root, &resolved, false)?
+        }
+        SimulateMode::Live => bail!(
+            "{LOCKFILE_NAME} is missing or stale; run `phoxal-cli update` to refresh it \
+             (recommended), or `phoxal-cli simulate --update-lock` to refresh inline, \
+             or commit the lock and use `--locked` to require it as-is."
+        ),
+    };
     Ok(ResolvedSimulation {
         robot_path,
         project_root,
@@ -885,5 +912,90 @@ fn resolve_project_path(project_root: &Path, path: &Path) -> PathBuf {
         path.to_path_buf()
     } else {
         project_root.join(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_resolve_missing_lock_requires_update_or_explicit_update_lock() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_robot_project(temp.path())?;
+        let snapshot = ReleasesSnapshot {
+            fetched_at: SystemTime::UNIX_EPOCH,
+            versions: vec!["0.8.0".into()],
+        };
+
+        let result = resolve_project_with_releases(
+            temp.path(),
+            SimulateOptions {
+                world: "test".to_string(),
+                update_lock: false,
+                resolve_external_artifacts: false,
+                ..SimulateOptions::default()
+            },
+            SimulateMode::Live,
+            Some(&snapshot),
+        );
+        let error = match result {
+            Ok(_) => bail!(
+                "live resolve unexpectedly succeeded without {}",
+                LOCKFILE_NAME
+            ),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+
+        assert!(
+            message.contains("phoxal-cli update"),
+            "expected actionable update guidance, got: {message}"
+        );
+        assert!(!temp.path().join(LOCKFILE_NAME).exists());
+
+        Ok(())
+    }
+
+    fn write_robot_project(root: &Path) -> Result<()> {
+        fs::write(root.join("robot.yaml"), minimal_robot_yaml())?;
+        fs::write(
+            root.join("structure.urdf"),
+            r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="base_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
+        )?;
+        fs::create_dir_all(root.join("worlds"))?;
+        fs::write(
+            root.join("worlds/test.wbt"),
+            "#VRML_SIM R2023b utf8\n\nWorldInfo {\n}\n",
+        )?;
+        Ok(())
+    }
+
+    fn minimal_robot_yaml() -> &'static str {
+        r#"version: v1
+
+identity:
+  id: testbot
+  namespace: test
+
+structure: structure.urdf
+
+phoxal_runtimes:
+  version: "latest"
+
+motion:
+  kinematic:
+    kind: differential
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+
+components:
+  sources: {}
+  instances: {}
+"#
     }
 }
