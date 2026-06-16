@@ -1,9 +1,13 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
 pub fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(destination)
@@ -44,4 +48,41 @@ pub fn make_executable(path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub(crate) fn hash_tree(path: &Path) -> Result<String> {
+    let mut files = Vec::new();
+    collect_hash_files(path, path, &mut files)?;
+    files.sort();
+    let mut hasher = Sha256::new();
+    for file in files {
+        hasher.update(file.to_string_lossy().as_bytes());
+        hasher.update(fs::read(path.join(&file))?);
+    }
+    Ok(hex::encode(hasher.finalize())[..16].to_string())
+}
+
+fn collect_hash_files(root: &Path, path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        if name == ".git" || name == "target" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_hash_files(root, &path, files)?;
+        } else if path.is_file() {
+            files.push(path.strip_prefix(root)?.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_project_path(project_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    }
 }

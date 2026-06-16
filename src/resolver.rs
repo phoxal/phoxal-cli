@@ -4,9 +4,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
-use phoxal::model::robot::{RobotV1 as Robot, v1::ComponentSource};
+use phoxal::model::robot::{
+    RobotV1 as Robot,
+    v1::{ComponentSource, UserRuntime},
+};
 use semver::{Version, VersionReq};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -15,6 +18,7 @@ use crate::catalog::{
 };
 use crate::releases::{self, ReleasesSnapshot};
 use crate::shell;
+use crate::utils::{hash_tree, resolve_project_path};
 
 const ROBOT_FILE: &str = "robot.yaml";
 
@@ -112,7 +116,19 @@ impl ResolvedPlatformRuntime {
 pub struct ResolvedUserRuntime {
     pub name: String,
     pub path: PathBuf,
-    pub image_tag: String,
+    pub framework: String,
+    pub build: Option<ResolvedUserRuntimeBuild>,
+    pub source_hash: String,
+    pub image: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedUserRuntimeBuild {
+    pub context: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dockerfile: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +194,7 @@ pub fn load_robot(path: &Path) -> Result<Robot> {
 
 pub fn resolve_with_release_source(
     robot: &Robot,
+    project_root: &Path,
     catalog: &PlatformRuntimeCatalog,
     options: ResolveOptions,
     release_source: ReleaseSource<'_>,
@@ -187,11 +204,12 @@ pub fn resolve_with_release_source(
         ReleaseSource::CacheDir(cache_dir) => releases::known_releases_snapshot(cache_dir)?,
         ReleaseSource::RefreshCache(cache_dir) => releases::refresh(cache_dir)?,
     };
-    resolve_with_releases(robot, catalog, options, &snapshot)
+    resolve_with_releases(robot, project_root, catalog, options, &snapshot)
 }
 
 pub fn resolve_with_releases(
     robot: &Robot,
+    project_root: &Path,
     catalog: &PlatformRuntimeCatalog,
     options: ResolveOptions,
     releases: &ReleasesSnapshot,
@@ -260,15 +278,18 @@ pub fn resolve_with_releases(
     let user_runtimes = robot
         .user_runtimes
         .iter()
-        .map(|(name, runtime)| ResolvedUserRuntime {
-            name: name.clone(),
-            path: runtime.path.clone(),
-            image_tag: format!(
-                "phoxal-local/{}/user-runtime/{}:unbuilt",
-                robot.identity.id, name
-            ),
+        .map(|(name, runtime)| {
+            resolve_user_runtime(
+                project_root,
+                &robot.identity.id,
+                name,
+                runtime,
+                &runtime_set_version,
+                catalog.supported_runtimes_version_req,
+                &release_versions,
+            )
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     // Git ref → commit SHA resolution is cheap (no Docker, just network) and
     // is required for `simulate --dry-run` to assemble a usable .phoxal/run/
@@ -357,6 +378,158 @@ pub fn host_target_triple() -> String {
             other => other,
         };
         format!("{arch}-{os}")
+    })
+}
+
+fn resolve_user_runtime(
+    project_root: &Path,
+    robot_id: &str,
+    name: &str,
+    runtime: &UserRuntime,
+    runtime_set_version: &Version,
+    supported_runtime_req: &str,
+    releases: &[Version],
+) -> Result<ResolvedUserRuntime> {
+    let runtime_dir = resolve_project_path(project_root, &runtime.path);
+    if !runtime_dir.is_dir() {
+        bail!(
+            "user runtime '{name}' source dir {} does not exist; user runtimes must have an on-disk source directory to hash/build",
+            runtime_dir.display()
+        );
+    }
+    let framework = resolve_user_runtime_framework(
+        name,
+        &runtime.framework,
+        runtime_set_version,
+        supported_runtime_req,
+        releases,
+    )?;
+    let source_hash = hash_tree(&runtime_dir).with_context(|| {
+        format!(
+            "failed to hash user runtime '{name}' source tree at {}",
+            runtime_dir.display()
+        )
+    })?;
+    let image = format!("phoxal-local/{robot_id}/user-runtime/{name}:{source_hash}");
+    let build = runtime
+        .build
+        .as_ref()
+        .map(mirror_user_runtime_build)
+        .transpose()?;
+
+    Ok(ResolvedUserRuntime {
+        name: name.to_string(),
+        path: runtime.path.clone(),
+        framework,
+        build,
+        source_hash,
+        image,
+    })
+}
+
+fn mirror_user_runtime_build(build: &impl Serialize) -> Result<ResolvedUserRuntimeBuild> {
+    let value =
+        serde_yaml::to_value(build).context("failed to serialize user runtime build recipe")?;
+    serde_yaml::from_value(value).context("failed to mirror user runtime build recipe")
+}
+
+pub(crate) fn resolve_user_runtime_framework(
+    runtime_name: &str,
+    selector: &str,
+    runtime_set_version: &Version,
+    supported_runtime_req: &str,
+    releases: &[Version],
+) -> Result<String> {
+    if selector == "match-platform" {
+        return Ok(runtime_set_version.to_string());
+    }
+    validate_user_runtime_framework_selector(runtime_name, selector, supported_runtime_req)?;
+    ensure_user_runtime_framework_resolves(
+        runtime_name,
+        selector,
+        supported_runtime_req,
+        releases,
+    )?;
+    Ok(selector.to_string())
+}
+
+pub(crate) fn validate_user_runtime_framework_selector(
+    runtime_name: &str,
+    selector: &str,
+    supported_runtime_req: &str,
+) -> Result<()> {
+    if selector == "match-platform" {
+        return Ok(());
+    }
+    let supported = VersionReq::parse(supported_runtime_req).with_context(|| {
+        format!("invalid CLI supported runtime requirement {supported_runtime_req}")
+    })?;
+    if let Ok(version) = Version::parse(selector) {
+        if supported_matches(supported_runtime_req, &supported, &version) {
+            return Ok(());
+        }
+        bail!(
+            "user runtime '{runtime_name}' framework selector '{selector}' is outside the supported runtime train {supported_runtime_req}"
+        );
+    }
+    let req = VersionReq::parse(selector).with_context(|| {
+        format!("invalid user runtime '{runtime_name}' framework selector '{selector}'")
+    })?;
+    if sampled_supported_version_matches(&req, supported_runtime_req, &supported) {
+        Ok(())
+    } else {
+        bail!(
+            "user runtime '{runtime_name}' framework selector '{selector}' has no version in the supported runtime train {supported_runtime_req}"
+        );
+    }
+}
+
+fn ensure_user_runtime_framework_resolves(
+    runtime_name: &str,
+    selector: &str,
+    supported_runtime_req: &str,
+    releases: &[Version],
+) -> Result<()> {
+    let supported = VersionReq::parse(supported_runtime_req).with_context(|| {
+        format!("invalid CLI supported runtime requirement {supported_runtime_req}")
+    })?;
+    if let Ok(version) = Version::parse(selector) {
+        if releases.contains(&version) {
+            return Ok(());
+        }
+        bail!(
+            "user runtime '{runtime_name}' framework version {selector} is not a known runtime release"
+        );
+    }
+    let req = VersionReq::parse(selector).with_context(|| {
+        format!("invalid user runtime '{runtime_name}' framework selector '{selector}'")
+    })?;
+    newest_matching(releases, |version| {
+        supported_matches(supported_runtime_req, &supported, version) && req.matches(version)
+    })
+    .map(|_| ())
+    .with_context(|| {
+        format!(
+            "no known supported runtime release matches user runtime '{runtime_name}' framework selector '{selector}'"
+        )
+    })
+}
+
+fn sampled_supported_version_matches(
+    req: &VersionReq,
+    supported_runtime_req: &str,
+    supported: &VersionReq,
+) -> bool {
+    if supported_runtime_req == "*" {
+        return true;
+    }
+    (0..=3).any(|major| {
+        (0..=64).any(|minor| {
+            [0, 1, 9, 99].into_iter().any(|patch| {
+                let version = Version::new(major, minor, patch);
+                supported.matches(&version) && req.matches(&version)
+            })
+        })
     })
 }
 

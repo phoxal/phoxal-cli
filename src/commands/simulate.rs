@@ -233,6 +233,7 @@ fn resolve_project_with_releases(
         let snapshot = crate::lockfile::releases_snapshot_from_lockfile(lockfile)?;
         let mut resolved = resolve_with_releases(
             &robot,
+            &project_root,
             &CATALOG,
             ResolveOptions {
                 locked: true,
@@ -258,11 +259,12 @@ fn resolve_project_with_releases(
         resolve_external_artifacts: options.resolve_external_artifacts,
     };
     let resolved = if let Some(releases) = releases {
-        resolve_with_releases(&robot, &CATALOG, resolve_options, releases)?
+        resolve_with_releases(&robot, &project_root, &CATALOG, resolve_options, releases)?
     } else {
         let cache_dir = host_paths::cache_dir()?;
         resolve_with_release_source(
             &robot,
+            &project_root,
             &CATALOG,
             resolve_options,
             ReleaseSource::CacheDir(&cache_dir),
