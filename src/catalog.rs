@@ -32,8 +32,11 @@ pub struct ToolVersion {
     pub binary_template: &'static str,
 }
 
-// Must track the `phoxal` dependency line in Cargo.toml.
-pub const SUPPORTED_RUNTIME_TRAIN: &str = "^0.8";
+// The CLI can orchestrate any pre-1.0 runtime train at or above this floor:
+// Phoxal's 0.x wire contracts are append-only, so framework minors remain
+// compatible. Bump the floor only when the CLI drops an old train, not for
+// every framework minor.
+pub const SUPPORTED_RUNTIME_TRAIN: &str = ">=0.8.0, <1.0.0";
 
 pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
     // The Webots controller + supervisor now ship from phoxal/framework in the
@@ -126,5 +129,22 @@ impl PlatformRuntimeCatalog {
 
     pub fn names_vec(&self) -> Vec<&'static str> {
         self.names().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use semver::{Version, VersionReq};
+
+    use super::SUPPORTED_RUNTIME_TRAIN;
+
+    #[test]
+    fn supported_runtime_train_is_valid_and_covers_current_zero_x_train() {
+        let train = SUPPORTED_RUNTIME_TRAIN
+            .parse::<VersionReq>()
+            .expect("supported runtime train should parse as a semver requirement");
+
+        assert!(train.matches(&Version::parse("0.9.0").unwrap()));
+        assert!(!train.matches(&Version::parse("1.0.0").unwrap()));
     }
 }
