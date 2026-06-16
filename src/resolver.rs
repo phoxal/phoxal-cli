@@ -10,7 +10,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::catalog::{DEFAULT_TOOL_VERSIONS, PlatformRuntimeCatalog, ToolVersionSource, lookup_tool_version};
+use crate::catalog::{
+    DEFAULT_TOOL_VERSIONS, PlatformRuntimeCatalog, ToolVersionSource, lookup_tool_version,
+};
 use crate::releases::{self, ReleasesSnapshot};
 use crate::shell;
 
@@ -273,7 +275,11 @@ pub fn resolve_with_releases(
     // tree. We always attempt it; the only thing the offline path skips is
     // image digest pinning.
     let components = resolve_components(robot)?;
-    let tools = resolve_tools(robot, &runtime_set_version, options.resolve_external_artifacts)?;
+    let tools = resolve_tools(
+        robot,
+        &runtime_set_version,
+        options.resolve_external_artifacts,
+    )?;
 
     Ok(ResolvedRobot {
         robot: robot.clone(),
@@ -429,9 +435,7 @@ fn resolve_tools(
                     }
                     runtime_set_version.to_string()
                 }
-                ToolVersionSource::Pinned(pinned) => {
-                    override_version.unwrap_or(pinned).to_string()
-                }
+                ToolVersionSource::Pinned(pinned) => override_version.unwrap_or(pinned).to_string(),
             };
             let asset = render_tool_template(catalog_tool.artifact_template, &version, &target);
             let binary_name = render_tool_template(catalog_tool.binary_template, &version, &target);
