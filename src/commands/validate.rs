@@ -265,7 +265,12 @@ fn print_text_report(robot: &Robot) {
             .get(runtime.name)
             .and_then(|runtime| runtime.version.as_deref())
             .unwrap_or(&robot.phoxal_runtimes.version);
-        println!("  - {} -> {}:{}", runtime.name, runtime.image_repo, version);
+        println!(
+            "  - {} -> {}:{}",
+            runtime.name,
+            runtime.image_repo(),
+            version
+        );
     }
     println!("user_runtimes:");
     for (name, runtime) in &robot.user_runtimes {
@@ -298,7 +303,7 @@ fn print_json_report(robot: &Robot) -> Result<()> {
                 .unwrap_or(&robot.phoxal_runtimes.version);
             serde_json::json!({
                 "name": runtime.name,
-                "image_repo": runtime.image_repo,
+                "image_repo": runtime.image_repo(),
                 "version": version,
             })
         }).collect::<Vec<_>>(),

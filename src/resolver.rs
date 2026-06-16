@@ -224,7 +224,7 @@ pub fn resolve_with_releases(
         }
         let image_repo = runtime_override
             .and_then(|runtime_override| runtime_override.image.clone())
-            .unwrap_or_else(|| entry.image_repo.to_string());
+            .unwrap_or_else(|| entry.image_repo());
         let version = match runtime_override
             .and_then(|runtime_override| runtime_override.version.as_deref())
         {

@@ -237,7 +237,6 @@ mod tests {
 
     static TEST_CATALOG_ENTRIES: &[PlatformRuntimeEntry] = &[PlatformRuntimeEntry {
         name: "asset",
-        image_repo: "ghcr.io/phoxal/runtime-asset",
         uses_supervisor_api: false,
         wires_to_router: true,
     }];
