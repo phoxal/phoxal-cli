@@ -1,6 +1,7 @@
 use std::fs;
 
 use phoxal_cli::commands::simulate::{SimulateOptions, prepare_with_releases};
+use phoxal_cli::lockfile::LOCKFILE_NAME;
 use phoxal_cli::releases::ReleasesSnapshot;
 
 #[test]
@@ -22,6 +23,8 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
     )?;
 
     assert!(temp.path().join(".phoxal/run/robot.yaml").is_file());
+    assert!(!temp.path().join(LOCKFILE_NAME).exists());
+    assert!(plan.lockfile_written.is_none());
     assert!(temp.path().join(".phoxal/run/structure.urdf").is_file());
     assert!(
         temp.path()
