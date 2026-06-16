@@ -213,7 +213,12 @@ fn print_text_report(robot: &Robot) {
             .get(runtime.name)
             .and_then(|runtime| runtime.version.as_deref())
             .unwrap_or(&robot.phoxal_runtimes.version);
-        println!("  - {} -> {}:{}", runtime.name, runtime.image_repo(), version);
+        println!(
+            "  - {} -> {}:{}",
+            runtime.name,
+            runtime.image_repo(),
+            version
+        );
     }
     println!("user_runtimes:");
     for (name, runtime) in &robot.user_runtimes {
