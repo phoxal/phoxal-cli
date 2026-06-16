@@ -584,6 +584,13 @@ fn select_override_version(
             .ok_or_else(|| anyhow!("no known runtime releases are available"));
     }
     if let Ok(version) = Version::parse(requested) {
+        // A platform-runtime override must still resolve to a real published
+        // runtime release — never a fabricated version. (The runtime-set path
+        // enforces the same membership check; this branch previously returned
+        // the parsed version without verifying it exists.)
+        if !releases.contains(&version) {
+            bail!("platform runtime override version {requested} is not a known runtime release");
+        }
         return Ok(version);
     }
     let req = VersionReq::parse(requested)
@@ -685,6 +692,26 @@ mod tests {
         // pin — we never coerce a bogus value into a `sha256:` string.
         let output = r#"{"digest": "md5:deadbeef"}"#;
         assert!(buildx_imagetools_manifest_digest(output).is_err());
+    }
+
+    #[test]
+    fn override_exact_version_must_be_a_known_release() {
+        let default = Version::parse("0.9.0").unwrap();
+        let releases = vec![Version::parse("0.8.0").unwrap(), default.clone()];
+
+        // A real published version is accepted as-is.
+        assert_eq!(
+            select_override_version("0.8.0", &default, &releases).unwrap(),
+            Version::parse("0.8.0").unwrap()
+        );
+
+        // A fabricated version that is not in the release list is rejected,
+        // rather than being returned unchecked.
+        let err = select_override_version("0.7.99", &default, &releases).unwrap_err();
+        assert!(
+            err.to_string().contains("not a known runtime release"),
+            "unexpected error: {err}"
+        );
     }
 
     fn runtime(pin: ImagePin) -> ResolvedPlatformRuntime {
