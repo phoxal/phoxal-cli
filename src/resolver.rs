@@ -637,7 +637,11 @@ fn render_tool_template(template: &str, version: &str, target: &str) -> String {
         .replace("{target}", target)
 }
 
-fn resolve_release_asset_sha256(repo: &str, version: &str, asset: &str) -> Result<Option<String>> {
+pub(crate) fn resolve_release_asset_sha256(
+    repo: &str,
+    version: &str,
+    asset: &str,
+) -> Result<Option<String>> {
     let url = format!("https://api.github.com/repos/{repo}/releases/tags/v{version}");
     let client = reqwest::blocking::Client::builder()
         .user_agent("phoxal-cli")

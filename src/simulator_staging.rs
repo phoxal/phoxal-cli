@@ -277,14 +277,14 @@ fn stage_controller_binaries(resolved: &ResolvedRobot, controllers_dir: &Path) -
     for tool_name in [SIMULATOR_WEBOTS_CONTROLLER, SIMULATOR_WEBOTS_SUPERVISOR] {
         let Some(tool) = resolved.tools.iter().find(|tool| tool.name == tool_name) else {
             tracing::warn!(
-                "resolved simulator tool {tool_name} is missing; Webots will fail to spawn controllers; tool provisioning is being reworked and no automatic download is available in this build"
+                "resolved simulator tool {tool_name} is missing; Webots will fail to spawn controllers"
             );
             continue;
         };
         let source = cached_tool_path(&tool.name, &tool.resolved, &tool.binary_name)?;
         if !source.is_file() {
             tracing::warn!(
-                "cached simulator binaries not found at {}; Webots will fail to spawn controllers; tool provisioning is being reworked and no automatic download is available in this build",
+                "cached simulator binary not found at {}; Webots will fail to spawn controllers (a live `simulate` provisions it; a dry-run does not)",
                 source.display()
             );
             continue;
@@ -306,7 +306,7 @@ fn stage_controller_binaries(resolved: &ResolvedRobot, controllers_dir: &Path) -
     Ok(())
 }
 
-fn cached_tool_path(name: &str, version: &str, binary_name: &str) -> Result<PathBuf> {
+pub(crate) fn cached_tool_path(name: &str, version: &str, binary_name: &str) -> Result<PathBuf> {
     Ok(host_paths::tools_cache_dir()?
         .join(name)
         .join(version)
