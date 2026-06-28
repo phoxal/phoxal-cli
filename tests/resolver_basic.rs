@@ -22,15 +22,7 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
             .iter()
             .map(|runtime| runtime.name.as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "asset",
-            "drive",
-            "driver-ddsm115",
-            "localize",
-            "map",
-            "mission",
-            "odometry"
-        ]
+        vec!["asset", "drive", "localize", "map", "mission", "odometry"]
     );
     assert!(resolved.platform_runtimes.iter().all(|runtime| {
         runtime.digest_pin().is_none()
