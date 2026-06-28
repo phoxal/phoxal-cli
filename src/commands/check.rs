@@ -663,18 +663,18 @@ mod tests {
             ("mission".to_string(), "mission:ok".to_string()),
             (
                 "drive".to_string(),
-                "ghcr.io/phoxal/runtime-drive:y2026_2-stable".to_string(),
+                "ghcr.io/phoxal/runtime-drive:y2026_1-stable".to_string(),
             ),
         ];
 
         let outcome = run_check(
             &images,
             &[],
-            "y2026_2",
+            "y2026_1",
             "stable",
             |image_ref| match image_ref {
-                "mission:ok" => Ok(raw("mission", "y2026_2", &[])),
-                "ghcr.io/phoxal/runtime-drive:y2026_2-stable" => {
+                "mission:ok" => Ok(raw("mission", "y2026_1", &[])),
+                "ghcr.io/phoxal/runtime-drive:y2026_1-stable" => {
                     Err(MissingImageError::new(anyhow!("not found")).into())
                 }
                 unexpected => bail!("unexpected image {unexpected}"),
@@ -684,7 +684,7 @@ mod tests {
 
         assert_eq!(
             outcome.missing_images,
-            vec!["ghcr.io/phoxal/runtime-drive:y2026_2-stable".to_string()]
+            vec!["ghcr.io/phoxal/runtime-drive:y2026_1-stable".to_string()]
         );
         assert!(!outcome.is_ok());
         Ok(())

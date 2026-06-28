@@ -72,13 +72,23 @@ pub const CATALOG: PlatformRuntimeCatalog = PlatformRuntimeCatalog {
     // release CI, not here (the framework tree isn't present at CLI build time).
     entries: &[
         entry("asset", &["y2026_1"], false, true),
+        entry("battery", &["y2026_1"], false, true),
         entry("drive", &["y2026_1"], false, true),
+        entry("explore", &["y2026_1"], false, true),
+        entry("follow", &["y2026_1"], false, true),
+        entry("frame", &["y2026_1"], false, true),
+        entry("joint", &["y2026_1"], false, true),
         entry("localize", &["y2026_1"], false, true),
         entry("map", &["y2026_1"], false, true),
         entry("mission", &["y2026_1"], false, true),
+        entry("motion", &["y2026_1"], false, true),
         entry("odometry", &["y2026_1"], false, true),
-        entry("battery", &["y2026_2"], false, true),
-        entry("safety", &["y2026_2"], false, true),
+        entry("perception", &["y2026_1"], false, true),
+        entry("plan", &["y2026_1"], false, true),
+        entry("power", &["y2026_1"], false, true),
+        entry("presence", &["y2026_1"], false, true),
+        entry("safety", &["y2026_1"], false, true),
+        entry("video", &["y2026_1"], false, true),
     ],
 };
 
@@ -175,9 +185,28 @@ mod tests {
     fn entries_for_api_returns_the_official_set_for_that_api() {
         assert_eq!(
             CATALOG.names_for_api("y2026_1"),
-            vec!["asset", "drive", "localize", "map", "mission", "odometry"]
+            vec![
+                "asset",
+                "battery",
+                "drive",
+                "explore",
+                "follow",
+                "frame",
+                "joint",
+                "localize",
+                "map",
+                "mission",
+                "motion",
+                "odometry",
+                "perception",
+                "plan",
+                "power",
+                "presence",
+                "safety",
+                "video"
+            ]
         );
-        assert_eq!(CATALOG.names_for_api("y2026_2"), vec!["battery", "safety"]);
+        assert!(CATALOG.names_for_api("y2026_2").is_empty());
         assert!(CATALOG.names_for_api("y2099_1").is_empty());
     }
 

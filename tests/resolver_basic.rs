@@ -22,7 +22,26 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
             .iter()
             .map(|runtime| runtime.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["asset", "drive", "localize", "map", "mission", "odometry"]
+        vec![
+            "asset",
+            "battery",
+            "drive",
+            "explore",
+            "follow",
+            "frame",
+            "joint",
+            "localize",
+            "map",
+            "mission",
+            "motion",
+            "odometry",
+            "perception",
+            "plan",
+            "power",
+            "presence",
+            "safety",
+            "video"
+        ]
     );
     assert!(resolved.platform_runtimes.iter().all(|runtime| {
         runtime.digest_pin().is_none()
@@ -44,8 +63,8 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
 }
 
 #[test]
-fn resolves_second_api_to_its_official_set() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_2"))?;
+fn resolves_known_api_to_its_official_set() -> anyhow::Result<()> {
+    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1"))?;
     let resolved = resolve(
         &robot,
         std::path::Path::new("."),
@@ -59,13 +78,32 @@ fn resolves_second_api_to_its_official_set() -> anyhow::Result<()> {
             .iter()
             .map(|runtime| runtime.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["battery", "safety"]
+        vec![
+            "asset",
+            "battery",
+            "drive",
+            "explore",
+            "follow",
+            "frame",
+            "joint",
+            "localize",
+            "map",
+            "mission",
+            "motion",
+            "odometry",
+            "perception",
+            "plan",
+            "power",
+            "presence",
+            "safety",
+            "video"
+        ]
     );
     assert!(
         resolved
             .platform_runtimes
             .iter()
-            .all(|runtime| runtime.tag_ref().ends_with(":y2026_2-stable"))
+            .all(|runtime| runtime.tag_ref().ends_with(":y2026_1-stable"))
     );
 
     Ok(())
@@ -107,7 +145,7 @@ fn image_override_for_official_runtime_is_preserved() -> anyhow::Result<()> {
 fn unknown_platform_image_key_fails_for_api() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
         "phoxal_runtimes:\n  channel: stable",
-        "phoxal_runtimes:\n  channel: stable\n  images:\n    battery: ghcr.io/phoxal/runtime-battery:y2026_1-stable",
+        "phoxal_runtimes:\n  channel: stable\n  images:\n    diagnostics: ghcr.io/phoxal/runtime-diagnostics:y2026_1-stable",
     ))?;
 
     let error = resolve(
