@@ -2,6 +2,7 @@ use std::fs;
 
 use phoxal_cli::commands::simulate::{SimulateOptions, prepare};
 use phoxal_cli::lockfile::LOCKFILE_NAME;
+use serde_yaml::{Mapping, Value};
 
 #[test]
 fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
@@ -62,6 +63,44 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
     assert!(compose.contains("x-phoxal-native-tools"));
     assert!(compose.contains("rerun_proxy"));
     assert!(compose.contains("joypad"));
+    let compose_yaml: Value = serde_yaml::from_str(&compose)?;
+    let services = mapping(
+        compose_yaml
+            .as_mapping()
+            .and_then(|root| root.get(key("services")))
+            .expect("services"),
+        "services",
+    )?;
+    let drive = mapping(
+        services.get(key("drive")).expect("drive service"),
+        "drive service",
+    )?;
+    let environment = mapping(
+        drive.get(key("environment")).expect("drive environment"),
+        "drive environment",
+    )?;
+    assert_eq!(environment.get(key("PHOXAL_NAMESPACE")), Some(&key("test")));
+    assert_eq!(
+        environment.get(key("PHOXAL_ROBOT_ID")),
+        Some(&key("testbot"))
+    );
+    assert_eq!(
+        environment.get(key("PHOXAL_BUNDLE_ROOT")),
+        Some(&key("/robot"))
+    );
+    assert_eq!(
+        environment.get(key("PHOXAL_CONNECT")),
+        Some(&key("tcp/router:7447"))
+    );
+    assert_eq!(
+        environment.get(key("PHOXAL_CLOCK")),
+        Some(&key("simulation"))
+    );
+    assert!(environment.get(key("ROBOT_CONFIG")).is_none());
+    assert!(environment.get(key("ROBOT_ID")).is_none());
+    assert!(environment.get(key("ROBOT_NAMESPACE")).is_none());
+    assert!(environment.get(key("ROBOT_ROUTER_ENDPOINT")).is_none());
+    assert!(environment.get(key("ROBOT_SIMULATION")).is_none());
     // Offline dry-run must not embed a fabricated runtime image digest: every
     // platform runtime image is a `repo:version` tag ref, so a later live
     // `simulate` can never try to `docker pull repo@sha256:<fake>`. (The zenoh
@@ -134,4 +173,14 @@ components:
   sources: {}
   instances: {}
 "#
+}
+
+fn mapping<'a>(value: &'a Value, label: &str) -> anyhow::Result<&'a Mapping> {
+    value
+        .as_mapping()
+        .ok_or_else(|| anyhow::anyhow!("{label} is not a mapping"))
+}
+
+fn key(value: &str) -> Value {
+    Value::String(value.to_string())
 }

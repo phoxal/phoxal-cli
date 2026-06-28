@@ -6,10 +6,26 @@ use serde::Serialize;
 
 use crate::catalog::PlatformRuntimeCatalog;
 use crate::local_zenoh::{LOCAL_ZENOH_NETWORK, LOCAL_ZENOH_PORT};
-use crate::resolver::ResolvedRobot;
+use crate::resolver::{ResolvedRobot, RobotManifestExtras};
 
 const ROBOT_MOUNT: &str = "/robot";
 const ROUTER_SERVICE: &str = "router";
+const ROUTER_ENDPOINT: &str = "tcp/router:7447";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchClock {
+    Real,
+    Simulation,
+}
+
+impl LaunchClock {
+    fn as_env(self) -> &'static str {
+        match self {
+            Self::Real => "real",
+            Self::Simulation => "simulation",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct ComposeFile {
@@ -86,30 +102,45 @@ pub fn generate(
     run_dir: &Path,
     user_runtime_images: &BTreeMap<String, String>,
     native_tools: &[String],
+    manifest_extras: &RobotManifestExtras,
+    clock: LaunchClock,
 ) -> Result<String> {
     let run_mount = format!("{}:{ROBOT_MOUNT}:ro", run_dir.display());
     let mut services = BTreeMap::new();
-    let runtime_environment = || {
+    let runtime_environment = |connect: &str| {
         BTreeMap::from([
-            ("ROBOT_CONFIG".to_string(), ROBOT_MOUNT.to_string()),
             (
-                "ROBOT_ID".to_string(),
-                resolved.robot.identity.id.to_string(),
-            ),
-            (
-                "ROBOT_NAMESPACE".to_string(),
+                "PHOXAL_NAMESPACE".to_string(),
                 resolved.robot.identity.namespace.to_string(),
             ),
             (
-                "ROBOT_ROUTER_ENDPOINT".to_string(),
-                "tcp/router:7447".to_string(),
+                "PHOXAL_ROBOT_ID".to_string(),
+                resolved.robot.identity.id.to_string(),
             ),
-            ("ROBOT_SIMULATION".to_string(), "true".to_string()),
+            ("PHOXAL_BUNDLE_ROOT".to_string(), ROBOT_MOUNT.to_string()),
+            ("PHOXAL_CONNECT".to_string(), connect.to_string()),
+            ("PHOXAL_CLOCK".to_string(), clock.as_env().to_string()),
         ])
+    };
+    let user_runtime_environment = |name: &str| {
+        let mut environment = runtime_environment(ROUTER_ENDPOINT);
+        environment.insert("PHOXAL_PARTICIPANT_ID".to_string(), name.to_string());
+        environment.insert(
+            "PHOXAL_CONFIG".to_string(),
+            manifest_extras
+                .user_runtime_config(name)
+                .map_or_else(|| "{}".to_string(), serde_json::Value::to_string),
+        );
+        environment
     };
     for runtime in &resolved.platform_runtimes {
         let Some(entry) = catalog.lookup(&runtime.name) else {
             continue;
+        };
+        let connect = if entry.wires_to_router {
+            ROUTER_ENDPOINT
+        } else {
+            ""
         };
         let service = ComposeService {
             image: runtime.deploy_ref(),
@@ -119,11 +150,7 @@ pub fn generate(
                 Vec::new()
             },
             volumes: vec![run_mount.clone()],
-            environment: if entry.wires_to_router {
-                runtime_environment()
-            } else {
-                BTreeMap::new()
-            },
+            environment: runtime_environment(connect),
             depends_on: if entry.wires_to_router {
                 router_healthy_depends_on()
             } else {
@@ -151,7 +178,7 @@ pub fn generate(
                 image,
                 command: vec!["run".to_string()],
                 volumes: vec![run_mount.clone()],
-                environment: runtime_environment(),
+                environment: user_runtime_environment(&runtime.name),
                 depends_on: router_healthy_depends_on(),
                 ports: Vec::new(),
                 networks: Vec::new(),
@@ -232,14 +259,25 @@ mod tests {
     use super::*;
     use crate::catalog::{PlatformRuntimeCatalog, PlatformRuntimeEntry};
     use crate::local_zenoh;
-    use crate::resolver::{ImagePin, ResolvedPlatformRuntime, ResolvedRobot};
+    use crate::resolver::{
+        ImagePin, ResolvedPlatformRuntime, ResolvedRobot, ResolvedUserRuntime, RobotManifestExtras,
+        UserRuntimeManifestExtras,
+    };
 
-    static TEST_CATALOG_ENTRIES: &[PlatformRuntimeEntry] = &[PlatformRuntimeEntry {
-        name: "asset",
-        api_versions: &["y2026_1"],
-        uses_supervisor_api: false,
-        wires_to_router: true,
-    }];
+    static TEST_CATALOG_ENTRIES: &[PlatformRuntimeEntry] = &[
+        PlatformRuntimeEntry {
+            name: "asset",
+            api_versions: &["y2026_1"],
+            uses_supervisor_api: false,
+            wires_to_router: true,
+        },
+        PlatformRuntimeEntry {
+            name: "diagnostics",
+            api_versions: &["y2026_1"],
+            uses_supervisor_api: false,
+            wires_to_router: false,
+        },
+    ];
 
     static TEST_CATALOG: PlatformRuntimeCatalog = PlatformRuntimeCatalog {
         entries: TEST_CATALOG_ENTRIES,
@@ -254,6 +292,8 @@ mod tests {
             &PathBuf::from("/tmp/phoxal/run"),
             &BTreeMap::new(),
             &[],
+            &manifest_extras(),
+            LaunchClock::Simulation,
         )?;
         let compose: Value = serde_yaml::from_str(&compose)?;
         let root = mapping(&compose, "compose")?;
@@ -261,6 +301,8 @@ mod tests {
         let services = mapping(root.get(key("services")).expect("services"), "services")?;
         let router = mapping(service(services, "router")?, "router")?;
         let asset = mapping(service(services, "asset")?, "asset")?;
+        let diagnostics = mapping(service(services, "diagnostics")?, "diagnostics")?;
+        let user = mapping(service(services, "user-avoid")?, "user-avoid")?;
 
         assert_eq!(
             router.get(key("image")),
@@ -316,13 +358,52 @@ mod tests {
             asset.get(key("environment")).expect("asset environment"),
             "asset environment",
         )?;
-        assert_eq!(environment.get(key("ROBOT_CONFIG")), Some(&key("/robot")));
         assert_eq!(
-            environment.get(key("ROBOT_ROUTER_ENDPOINT")),
+            environment.get(key("PHOXAL_BUNDLE_ROOT")),
+            Some(&key("/robot"))
+        );
+        assert_eq!(
+            environment.get(key("PHOXAL_CONNECT")),
             Some(&key("tcp/router:7447"))
         );
-        assert_eq!(environment.get(key("ROBOT_ID")), Some(&key("testbot")));
-        assert_eq!(environment.get(key("ROBOT_NAMESPACE")), Some(&key("test")));
+        assert_eq!(
+            environment.get(key("PHOXAL_ROBOT_ID")),
+            Some(&key("testbot"))
+        );
+        assert_eq!(environment.get(key("PHOXAL_NAMESPACE")), Some(&key("test")));
+        assert_eq!(
+            environment.get(key("PHOXAL_CLOCK")),
+            Some(&key("simulation"))
+        );
+        assert!(environment.get(key("ROBOT_CONFIG")).is_none());
+        assert!(environment.get(key("ROBOT_ID")).is_none());
+        assert!(environment.get(key("ROBOT_NAMESPACE")).is_none());
+        assert!(environment.get(key("ROBOT_ROUTER_ENDPOINT")).is_none());
+        assert!(environment.get(key("ROBOT_SIMULATION")).is_none());
+
+        let diagnostics_environment = mapping(
+            diagnostics
+                .get(key("environment"))
+                .expect("diagnostics environment"),
+            "diagnostics environment",
+        )?;
+        assert_eq!(
+            diagnostics_environment.get(key("PHOXAL_CONNECT")),
+            Some(&key(""))
+        );
+
+        let user_environment = mapping(
+            user.get(key("environment")).expect("user environment"),
+            "user environment",
+        )?;
+        assert_eq!(
+            user_environment.get(key("PHOXAL_PARTICIPANT_ID")),
+            Some(&key("avoid"))
+        );
+        assert_eq!(
+            user_environment.get(key("PHOXAL_CONFIG")),
+            Some(&key(r#"{"gain":0.7}"#))
+        );
         let networks = mapping(root.get(key("networks")).expect("networks"), "networks")?;
         let link_network = mapping(
             networks
@@ -340,11 +421,21 @@ mod tests {
             robot: Robot::parse_from_string(MINIMAL_ROBOT)?,
             api_version: "y2026_1".to_string(),
             channel: Channel::Stable,
-            platform_runtimes: vec![resolved_platform_runtime(
-                "asset",
-                "ghcr.io/phoxal/runtime-asset:y2026_1-stable",
-            )],
-            user_runtimes: Vec::new(),
+            platform_runtimes: vec![
+                resolved_platform_runtime("asset", "ghcr.io/phoxal/runtime-asset:y2026_1-stable"),
+                resolved_platform_runtime(
+                    "diagnostics",
+                    "ghcr.io/phoxal/runtime-diagnostics:y2026_1-stable",
+                ),
+            ],
+            user_runtimes: vec![ResolvedUserRuntime {
+                name: "avoid".to_string(),
+                path: PathBuf::from("runtimes/avoid"),
+                framework: "y2026_1".to_string(),
+                build: None,
+                source_hash: "abc123".to_string(),
+                image: "phoxal-local/testbot/user-runtime/avoid:abc123".to_string(),
+            }],
             components: Vec::new(),
             tools: Vec::new(),
         })
@@ -355,6 +446,18 @@ mod tests {
             name: name.to_string(),
             image_ref: image_ref.to_string(),
             pin: ImagePin::Digest(format!("sha256:{name}")),
+        }
+    }
+
+    fn manifest_extras() -> RobotManifestExtras {
+        RobotManifestExtras {
+            user_runtimes: BTreeMap::from([(
+                "avoid".to_string(),
+                UserRuntimeManifestExtras {
+                    image: None,
+                    config: Some(serde_json::json!({ "gain": 0.7 })),
+                },
+            )]),
         }
     }
 
