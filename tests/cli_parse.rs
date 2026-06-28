@@ -30,7 +30,24 @@ fn parses_runtime_add() {
     let RootCommand::Runtime(command) = cli.command else {
         panic!("expected runtime command");
     };
-    let runtime::RuntimeSubcommand::Add(add) = command.command;
+    let runtime::RuntimeSubcommand::Add(add) = command.command else {
+        panic!("expected runtime add command");
+    };
 
     assert_eq!(add.name, "avoid-obstacles");
+}
+
+#[test]
+fn parses_runtime_run() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "runtime", "run", "avoid-obstacles"])
+        .expect("runtime run command should parse");
+
+    let RootCommand::Runtime(command) = cli.command else {
+        panic!("expected runtime command");
+    };
+    let runtime::RuntimeSubcommand::Run(run) = command.command else {
+        panic!("expected runtime run command");
+    };
+
+    assert_eq!(run.name, "avoid-obstacles");
 }
