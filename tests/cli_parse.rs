@@ -1,5 +1,5 @@
 use clap::{CommandFactory, Parser};
-use phoxal_cli::commands::{Cli, RootCommand, self_cmd};
+use phoxal_cli::commands::{Cli, RootCommand, runtime, self_cmd};
 
 #[test]
 fn clap_definition_is_valid() {
@@ -20,4 +20,17 @@ fn parses_self_upgrade_with_normalized_version() {
         upgrade.version.expect("version should parse").to_string(),
         "0.4.0"
     );
+}
+
+#[test]
+fn parses_runtime_add() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "runtime", "add", "avoid-obstacles"])
+        .expect("runtime add command should parse");
+
+    let RootCommand::Runtime(command) = cli.command else {
+        panic!("expected runtime command");
+    };
+    let runtime::RuntimeSubcommand::Add(add) = command.command;
+
+    assert_eq!(add.name, "avoid-obstacles");
 }
