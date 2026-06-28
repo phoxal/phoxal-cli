@@ -22,9 +22,9 @@ pub(crate) fn pull_platform_images(app: &AppContext, resolved: &ResolvedRobot) -
             } else {
                 format!(
                     "failed to pull runtime image {image} by tag. The phoxal/framework GHCR \
-                     runtime images may not be published for this runtime set yet. Publish the \
+                     runtime images may not be published for this API/channel yet. Publish the \
                      runtime images, then run `phoxal-cli update --pin-digests` to pin real \
-                     digests, or `phoxal-cli update --refresh-releases` to pick up a newer set."
+                     digests."
                 )
             }
         })?;

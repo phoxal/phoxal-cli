@@ -8,12 +8,10 @@ identity:
 structure: structure.urdf
 
 phoxal_runtimes:
-  version: "^0.8"
-  overrides:
-    drive:
-      version: "latest"
-    localize:
-      version: "0.8.0"
+  channel: stable
+  images:
+    drive: ghcr.io/phoxal/runtime-drive:y2026_1-v0.13.0
+    localize: ghcr.io/phoxal/runtime-localize:y2026_1-v0.8.0
 
 user_runtimes:
   mission_behavior:

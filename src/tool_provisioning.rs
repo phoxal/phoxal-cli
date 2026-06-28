@@ -1,11 +1,11 @@
 //! Host-native tool provisioning.
 //!
 //! The Webots controller + supervisor are host-native binaries that ship as a
-//! single `phoxal/framework` release tarball (`phoxal-simulator-<version>-<target>.tar.gz`),
-//! version-matched to the runtime train (see [`crate::catalog`]). The resolver
-//! only records the *expected* asset/binary names; this module performs the
-//! actual download + extraction into the tool cache so a live `simulate` can
-//! spawn the controllers without the user fetching anything by hand.
+//! single `phoxal/framework` release tarball (`phoxal-simulator-<version>-<target>.tar.gz`).
+//! The resolver records the explicit tool version and expected asset/binary
+//! names; this module performs the actual download + extraction into the tool
+//! cache so a live `simulate` can spawn the controllers without the user
+//! fetching anything by hand.
 
 use std::fs;
 use std::io;

@@ -2675,9 +2675,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal"
-version = "0.12.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98d56701dec0b1d3f192b05d2f29d02fc38fe5c16d3ac16e4cf1559ee8aad3df"
+checksum = "378153e7a5d50b80181f8d489c2726dd30c35aaca4ecfb747ca9e1e97d27fb67"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2704,7 +2704,6 @@ name = "phoxal-cli"
 version = "0.6.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "console",
  "dirs",
@@ -2734,9 +2733,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-macros"
-version = "0.12.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba094c5aee6808f87c00f15f3a0d22584dd8107566a315dcb30da651b70e69a5"
+checksum = "74f4e964266741e15e05284316dd1e11cd79b07b4ed948dcf63e0f0b04b38ff6"
 dependencies = [
  "heck",
  "proc-macro2",

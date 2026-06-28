@@ -1,17 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::releases::ReleasesSnapshot;
 use crate::resolver::{ImagePin, ResolvedComponentSource, ResolvedRobot, ResolvedUserRuntimeBuild};
 
 pub const LOCKFILE_NAME: &str = "phoxal.lock";
-pub const LOCKFILE_SCHEMA_VERSION: u32 = 3;
+pub const LOCKFILE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lockfile {
@@ -27,14 +24,18 @@ pub struct Lockfile {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockedPhoxalRuntimes {
-    pub requested: String,
-    pub resolved: String,
-    pub releases_fetched_at: Option<DateTime<Utc>>,
-    /// Per-runtime image deploy ref. Either a content pin
-    /// (`repo@sha256:…`, reproducible) or a tag ref (`repo:version`,
-    /// recovery / not yet pinned). The lockfile never stores a fabricated
-    /// digest.
-    pub images: BTreeMap<String, String>,
+    pub api_version: String,
+    pub channel: String,
+    pub images: BTreeMap<String, LockedPlatformRuntimeImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockedPlatformRuntimeImage {
+    /// The selected tag or override ref before digest pinning.
+    pub image_ref: String,
+    /// Real registry digest resolved for `image_ref`, when pinning was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,13 +80,18 @@ pub struct LockedTool {
 impl Lockfile {
     #[must_use]
     pub fn from_resolved(resolved: &ResolvedRobot) -> Self {
-        // Store the deploy ref: a real `repo@sha256:…` pin when resolved, or a
-        // `repo:version` tag ref during recovery. Never a fabricated digest, so
-        // phoxal.lock never presents a fake runtime pin as reproducible.
         let images = resolved
             .platform_runtimes
             .iter()
-            .map(|runtime| (runtime.name.clone(), runtime.deploy_ref()))
+            .map(|runtime| {
+                (
+                    runtime.name.clone(),
+                    LockedPlatformRuntimeImage {
+                        image_ref: runtime.image_ref.clone(),
+                        digest: runtime.digest_pin().map(ToString::to_string),
+                    },
+                )
+            })
             .collect();
         let user_runtimes = resolved
             .user_runtimes
@@ -147,9 +153,8 @@ impl Lockfile {
         Self {
             schema_version: LOCKFILE_SCHEMA_VERSION,
             phoxal_runtimes: LockedPhoxalRuntimes {
-                requested: resolved.requested_runtime_set.clone(),
-                resolved: resolved.runtime_set_version.to_string(),
-                releases_fetched_at: resolved.releases_fetched_at.map(DateTime::<Utc>::from),
+                api_version: resolved.api_version.clone(),
+                channel: resolved.channel.to_string(),
                 images,
             },
             user_runtimes,
@@ -186,21 +191,6 @@ impl Lockfile {
     }
 }
 
-pub(crate) fn releases_snapshot_from_lockfile(lockfile: &Lockfile) -> Result<ReleasesSnapshot> {
-    let resolved_version = lockfile
-        .phoxal_runtimes
-        .resolved
-        .parse::<semver::Version>()?;
-    Ok(ReleasesSnapshot {
-        fetched_at: lockfile
-            .phoxal_runtimes
-            .releases_fetched_at
-            .map(SystemTime::from)
-            .unwrap_or(SystemTime::UNIX_EPOCH),
-        versions: vec![resolved_version.to_string()],
-    })
-}
-
 pub(crate) fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) -> Result<()> {
     if !lockfile.has_current_schema() {
         bail!(
@@ -210,20 +200,20 @@ pub(crate) fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) 
             LOCKFILE_SCHEMA_VERSION
         );
     }
-    if lockfile.phoxal_runtimes.requested != resolved.requested_runtime_set {
+    if lockfile.phoxal_runtimes.api_version != resolved.api_version {
         bail!(
-            "lockfile requested runtime-set selector '{}' does not match robot.yaml selector '{}'",
-            lockfile.phoxal_runtimes.requested,
-            resolved.requested_runtime_set
+            "lockfile api_version '{}' does not match robot.yaml api_version '{}'",
+            lockfile.phoxal_runtimes.api_version,
+            resolved.api_version
         );
     }
-    resolved.runtime_set_version =
-        lockfile.phoxal_runtimes.resolved.parse().with_context(|| {
-            format!(
-                "lockfile runtime-set version '{}' is not semver",
-                lockfile.phoxal_runtimes.resolved
-            )
-        })?;
+    if lockfile.phoxal_runtimes.channel != resolved.channel.to_string() {
+        bail!(
+            "lockfile channel '{}' does not match robot.yaml channel '{}'",
+            lockfile.phoxal_runtimes.channel,
+            resolved.channel
+        );
+    }
 
     let mut runtime_names = BTreeSet::new();
     for runtime in &mut resolved.platform_runtimes {
@@ -233,29 +223,19 @@ pub(crate) fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) 
             .images
             .get(&runtime.name)
             .with_context(|| format!("lockfile is missing image for runtime {}", runtime.name))?;
-        if let Some((image_repo, image_digest)) = image.split_once('@') {
-            // Reproducible content pin: repo@sha256:…
-            runtime.image_repo = image_repo.to_string();
-            runtime.pin = ImagePin::Digest(image_digest.to_string());
-        } else {
-            // Recovery tag ref: repo:version (the last colon separates the tag,
-            // leaving an optional registry-port colon in the repo intact).
-            let (image_repo, version) = image.rsplit_once(':').with_context(|| {
-                format!(
-                    "lockfile image '{image}' for runtime {} is neither a digest pin \
-                     (repo@sha256:…) nor a tag ref (repo:version)",
-                    runtime.name
-                )
-            })?;
-            runtime.image_repo = image_repo.to_string();
-            runtime.version = version.parse().with_context(|| {
-                format!(
-                    "lockfile image tag '{version}' for runtime {} is not a semver version",
-                    runtime.name
-                )
-            })?;
-            runtime.pin = ImagePin::Unpinned;
+        if image.image_ref != runtime.image_ref {
+            bail!(
+                "lockfile image_ref '{}' for runtime {} does not match resolved image_ref '{}'",
+                image.image_ref,
+                runtime.name,
+                runtime.image_ref
+            );
         }
+        runtime.pin = image
+            .digest
+            .as_ref()
+            .map(|digest| ImagePin::Digest(digest.clone()))
+            .unwrap_or(ImagePin::Unpinned);
     }
     for name in lockfile.phoxal_runtimes.images.keys() {
         if !runtime_names.contains(name) {
@@ -403,12 +383,11 @@ mod tests {
     use super::*;
     use crate::resolver::{ResolvedRobot, ResolvedUserRuntime};
     use phoxal::model::robot::RobotV1 as Robot;
-    use semver::Version;
-    use std::time::SystemTime;
+    use phoxal::model::robot::v1::Channel;
 
     #[test]
     fn schema_version_is_bumped_for_user_runtime_locks() {
-        assert_eq!(LOCKFILE_SCHEMA_VERSION, 3);
+        assert_eq!(LOCKFILE_SCHEMA_VERSION, 4);
     }
 
     #[test]
@@ -431,9 +410,8 @@ mod tests {
         let lockfile = Lockfile {
             schema_version: LOCKFILE_SCHEMA_VERSION,
             phoxal_runtimes: LockedPhoxalRuntimes {
-                requested: "latest".to_string(),
-                resolved: "0.9.0".to_string(),
-                releases_fetched_at: None,
+                api_version: "y2026_1".to_string(),
+                channel: "stable".to_string(),
                 images: BTreeMap::new(),
             },
             user_runtimes,
@@ -500,14 +478,13 @@ mod tests {
     fn resolved_with_user_runtime(source_hash: &str) -> anyhow::Result<ResolvedRobot> {
         Ok(ResolvedRobot {
             robot: Robot::parse_from_string(MINIMAL_ROBOT)?,
-            runtime_set_version: Version::parse("0.9.0")?,
-            requested_runtime_set: "latest".to_string(),
-            releases_fetched_at: Some(SystemTime::UNIX_EPOCH),
+            api_version: "y2026_1".to_string(),
+            channel: Channel::Stable,
             platform_runtimes: Vec::new(),
             user_runtimes: vec![ResolvedUserRuntime {
                 name: "autonomy".to_string(),
                 path: PathBuf::from("runtimes/autonomy"),
-                framework: "0.9.0".to_string(),
+                framework: "y2026_1".to_string(),
                 build: Some(ResolvedUserRuntimeBuild {
                     context: PathBuf::from("container"),
                     dockerfile: Some(PathBuf::from("Dockerfile.runtime")),
@@ -531,7 +508,7 @@ identity:
 structure: structure.urdf
 
 phoxal_runtimes:
-  version: "latest"
+  channel: stable
 
 motion:
   kinematic:

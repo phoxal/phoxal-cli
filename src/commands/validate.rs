@@ -4,13 +4,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, ValueEnum};
 use phoxal::model::robot::RobotV1 as Robot;
-use semver::{Version, VersionReq};
 use toml::Value as TomlValue;
 
 use crate::AppContext;
 
-use crate::catalog::{CATALOG, SUPPORTED_RUNTIME_TRAIN};
-use crate::lockfile::{LOCKFILE_NAME, Lockfile};
+use crate::catalog::CATALOG;
 
 #[derive(Debug, Args)]
 pub struct Validate {
@@ -35,11 +33,16 @@ impl Validate {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let robot_path = crate::resolver::discover_robot_yaml(app.project.root())?;
         let robot = crate::resolver::load_robot(&robot_path)?;
-        let platform_names = CATALOG.names_vec();
+        let platform_names = CATALOG.names_for_api(&robot.api_version);
+        if platform_names.is_empty() {
+            return Err(anyhow!(
+                "API version {} is not available in the compiled-in platform runtime catalog",
+                robot.api_version
+            ));
+        }
         robot
             .validate_with(&platform_names)
             .map_err(|errors| anyhow!("Robot errors:\n{}", join_errors(errors)))?;
-        validate_runtime_selector(&robot.phoxal_runtimes.version)?;
         let user_runtime_problems = check_user_runtime_deps(app, &robot_path, &robot)?;
         if !user_runtime_problems.is_empty() {
             if self.allow_user_runtime_drift {
@@ -56,7 +59,7 @@ impl Validate {
         app.ui.success(format!(
             "validated {} with {} platform runtimes",
             robot_path.display(),
-            CATALOG.entries.len()
+            platform_names.len()
         ));
         if self.report {
             match self.report_format {
@@ -68,15 +71,6 @@ impl Validate {
     }
 }
 
-fn validate_runtime_selector(selector: &str) -> Result<()> {
-    if selector == "latest" || Version::parse(selector).is_ok() {
-        return Ok(());
-    }
-    VersionReq::parse(selector)
-        .map(|_| ())
-        .with_context(|| format!("invalid phoxal_runtimes.version selector '{selector}'"))
-}
-
 fn check_user_runtime_deps(
     app: &AppContext,
     robot_path: &Path,
@@ -85,16 +79,7 @@ fn check_user_runtime_deps(
     let robot_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let expected = expected_runtime_train(app, robot_root);
-    let Some(expected_train) = parse_runtime_train(&expected) else {
-        app.ui.warn(format!(
-            "could not parse supported platform runtime train {expected}; skipping user runtime dependency check"
-        ));
-        return Ok(Vec::new());
-    };
-
-    let report =
-        collect_user_runtime_dependency_report(robot_root, robot, &expected, expected_train);
+    let report = collect_user_runtime_dependency_report(robot_root, robot, &robot.api_version);
     for success in report.successes {
         app.ui.success(success);
     }
@@ -111,24 +96,22 @@ struct UserRuntimeDependencyReport {
 fn collect_user_runtime_problems(
     robot_root: &Path,
     robot: &Robot,
-    expected: &str,
-    expected_train: RuntimeTrain,
+    expected_api_version: &str,
 ) -> Vec<String> {
-    collect_user_runtime_dependency_report(robot_root, robot, expected, expected_train).problems
+    collect_user_runtime_dependency_report(robot_root, robot, expected_api_version).problems
 }
 
 fn collect_user_runtime_dependency_report(
     robot_root: &Path,
     robot: &Robot,
-    expected: &str,
-    expected_train: RuntimeTrain,
+    expected_api_version: &str,
 ) -> UserRuntimeDependencyReport {
     let mut report = UserRuntimeDependencyReport::default();
     for (name, runtime) in &robot.user_runtimes {
         if let Err(error) = crate::resolver::validate_user_runtime_framework_selector(
             name,
             &runtime.framework,
-            CATALOG.supported_runtimes_version_req,
+            expected_api_version,
         ) {
             report.problems.push(error.to_string());
         }
@@ -153,50 +136,25 @@ fn collect_user_runtime_dependency_report(
             .and_then(|dependencies| dependencies.get("phoxal"))
         else {
             report.problems.push(format!(
-                "user runtime '{name}' is missing a phoxal dependency; pin it to the platform runtime train {expected}"
+                "user runtime '{name}' is missing a phoxal dependency; add a phoxal dependency built for API {expected_api_version}"
             ));
             continue;
         };
 
         match phoxal_dependency(dep) {
             PhoxalDependency::Branch(branch) => report.problems.push(format!(
-                "user runtime '{name}' floats on branch '{branch}'; pin it to the platform runtime train {expected}"
+                "user runtime '{name}' floats on branch '{branch}'; pin it to a phoxal release or tag built for API {expected_api_version}"
             )),
-            PhoxalDependency::Pinned(version) => match parse_runtime_train(&version) {
-                Some(actual_train) if actual_train == expected_train => report.successes.push(format!(
-                    "user runtime '{name}' phoxal dependency matches platform runtime train {expected}"
-                )),
-                Some(_) => report.problems.push(format!(
-                    "user runtime '{name}' pins phoxal {version}; expected platform runtime train {expected}"
-                )),
-                None => report.problems.push(format!(
-                    "user runtime '{name}' has an unparsable phoxal dependency {version}; pin it to the platform runtime train {expected}"
-                )),
-            },
+            PhoxalDependency::Pinned(version) => report.successes.push(format!(
+                "user runtime '{name}' declares phoxal dependency {version}; expected graph API {expected_api_version}"
+            )),
             PhoxalDependency::Unparsable => report.problems.push(format!(
-                "user runtime '{name}' has an unparsable phoxal dependency; pin it to the platform runtime train {expected}"
+                "user runtime '{name}' has an unparsable phoxal dependency; pin it to a phoxal release or tag built for API {expected_api_version}"
             )),
         }
     }
 
     report
-}
-
-fn expected_runtime_train(app: &AppContext, robot_root: &Path) -> String {
-    let lock_path = robot_root.join(LOCKFILE_NAME);
-    if !lock_path.is_file() {
-        return SUPPORTED_RUNTIME_TRAIN.to_string();
-    }
-    match Lockfile::read(&lock_path) {
-        Ok(lockfile) => lockfile.phoxal_runtimes.resolved,
-        Err(err) => {
-            app.ui.warn(format!(
-                "failed to read {}; checking user runtime deps against {SUPPORTED_RUNTIME_TRAIN}: {err:#}",
-                lock_path.display()
-            ));
-            SUPPORTED_RUNTIME_TRAIN.to_string()
-        }
-    }
 }
 
 fn resolve_robot_path(robot_root: &Path, path: &Path) -> PathBuf {
@@ -232,52 +190,26 @@ fn phoxal_dependency(dep: &TomlValue) -> PhoxalDependency {
     PhoxalDependency::Unparsable
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RuntimeTrain {
-    major: u64,
-    minor: u64,
-}
-
-fn parse_runtime_train(value: &str) -> Option<RuntimeTrain> {
-    let trimmed = value.trim().trim_start_matches('v');
-    for token in trimmed
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '+'))
-    {
-        let token = token.trim_start_matches('v');
-        let mut parts = token.split('.');
-        let (Some(major), Some(minor)) = (parts.next(), parts.next()) else {
-            continue;
-        };
-        if !major.chars().all(|ch| ch.is_ascii_digit())
-            || !minor.chars().all(|ch| ch.is_ascii_digit())
-        {
-            continue;
-        }
-        return Some(RuntimeTrain {
-            major: major.parse().ok()?,
-            minor: minor.parse().ok()?,
-        });
-    }
-    None
-}
-
 fn print_text_report(robot: &Robot) {
     println!("robot: {}", robot.identity.id);
-    println!("runtime_set: {}", robot.phoxal_runtimes.version);
+    println!("api_version: {}", robot.api_version);
+    println!("channel: {}", robot.phoxal_runtimes.channel);
     println!("platform_runtimes:");
-    for runtime in CATALOG.entries {
-        let version = robot
+    for runtime in CATALOG.entries_for_api(&robot.api_version) {
+        let image_ref = robot
             .phoxal_runtimes
-            .overrides
+            .images
             .get(runtime.name)
-            .and_then(|runtime| runtime.version.as_deref())
-            .unwrap_or(&robot.phoxal_runtimes.version);
-        println!(
-            "  - {} -> {}:{}",
-            runtime.name,
-            runtime.image_repo(),
-            version
-        );
+            .cloned()
+            .unwrap_or_else(|| {
+                format!(
+                    "{}:{}-{}",
+                    runtime.image_repo(),
+                    robot.api_version,
+                    robot.phoxal_runtimes.channel
+                )
+            });
+        println!("  - {} -> {}", runtime.name, image_ref);
     }
     println!("user_runtimes:");
     for (name, runtime) in &robot.user_runtimes {
@@ -300,18 +232,26 @@ fn print_text_report(robot: &Robot) {
 fn print_json_report(robot: &Robot) -> Result<()> {
     let report = serde_json::json!({
         "robot": robot.identity.id,
-        "runtime_set": robot.phoxal_runtimes.version,
-        "platform_runtimes": CATALOG.entries.iter().map(|runtime| {
-            let version = robot
+        "api_version": robot.api_version,
+        "channel": robot.phoxal_runtimes.channel,
+        "platform_runtimes": CATALOG.entries_for_api(&robot.api_version).map(|runtime| {
+            let image_ref = robot
                 .phoxal_runtimes
-                .overrides
+                .images
                 .get(runtime.name)
-                .and_then(|runtime| runtime.version.as_deref())
-                .unwrap_or(&robot.phoxal_runtimes.version);
+                .cloned()
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}:{}-{}",
+                        runtime.image_repo(),
+                        robot.api_version,
+                        robot.phoxal_runtimes.channel
+                    )
+                });
             serde_json::json!({
                 "name": runtime.name,
-                "image_repo": runtime.image_repo(),
-                "version": version,
+                "api_versions": runtime.api_versions,
+                "image_ref": image_ref,
             })
         }).collect::<Vec<_>>(),
         "user_runtimes": robot.user_runtimes.iter().map(|(name, runtime)| {
@@ -343,19 +283,6 @@ fn join_errors(errors: Vec<phoxal::model::robot::ValidationError>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const EXPECTED_RUNTIME_TRAIN: &str = "^0.8";
-
-    #[test]
-    fn parses_version_and_requirement_trains() {
-        let train = RuntimeTrain { major: 0, minor: 7 };
-
-        assert_eq!(parse_runtime_train("0.7.0"), Some(train));
-        assert_eq!(parse_runtime_train("v0.7.1"), Some(train));
-        assert_eq!(parse_runtime_train("^0.7"), Some(train));
-        assert_eq!(parse_runtime_train(">=0.7, <0.8"), Some(train));
-        assert_eq!(parse_runtime_train("main"), None);
-    }
 
     #[test]
     fn classifies_phoxal_dependency_forms() {
@@ -394,7 +321,7 @@ branch = { git = "https://github.com/phoxal/framework", branch = "main" }
     }
 
     #[test]
-    fn matching_user_runtime_train_collects_no_problems() -> anyhow::Result<()> {
+    fn pinned_user_runtime_phoxal_dep_collects_no_problems() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtimes/drive");
         write_manifest(
@@ -406,24 +333,19 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-phoxal = "0.8.5"
+phoxal = "0.14.0"
 "#,
         )?;
         let robot = robot_with_user_runtime("runtimes/drive")?;
 
-        let problems = collect_user_runtime_problems(
-            temp.path(),
-            &robot,
-            EXPECTED_RUNTIME_TRAIN,
-            parse_expected_runtime_train(),
-        );
+        let problems = collect_user_runtime_problems(temp.path(), &robot, "y2026_1");
 
         assert!(problems.is_empty(), "unexpected problems: {problems:?}");
         Ok(())
     }
 
     #[test]
-    fn mismatched_user_runtime_pin_collects_problem() -> anyhow::Result<()> {
+    fn branch_user_runtime_phoxal_dep_collects_problem() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtimes/drive");
         write_manifest(
@@ -435,22 +357,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-phoxal = "0.7.0"
+phoxal = { git = "https://github.com/phoxal/framework", branch = "main" }
 "#,
         )?;
         let robot = robot_with_user_runtime("runtimes/drive")?;
 
-        let problems = collect_user_runtime_problems(
-            temp.path(),
-            &robot,
-            EXPECTED_RUNTIME_TRAIN,
-            parse_expected_runtime_train(),
-        );
+        let problems = collect_user_runtime_problems(temp.path(), &robot, "y2026_1");
 
         assert_eq!(
             problems,
             vec![
-                "user runtime 'drive' pins phoxal 0.7.0; expected platform runtime train ^0.8"
+                "user runtime 'drive' floats on branch 'main'; pin it to a phoxal release or tag built for API y2026_1"
                     .to_string()
             ]
         );
@@ -475,17 +392,12 @@ serde = "1"
         )?;
         let robot = robot_with_user_runtime("runtimes/drive")?;
 
-        let problems = collect_user_runtime_problems(
-            temp.path(),
-            &robot,
-            EXPECTED_RUNTIME_TRAIN,
-            parse_expected_runtime_train(),
-        );
+        let problems = collect_user_runtime_problems(temp.path(), &robot, "y2026_1");
 
         assert_eq!(
             problems,
             vec![
-                "user runtime 'drive' is missing a phoxal dependency; pin it to the platform runtime train ^0.8"
+                "user runtime 'drive' is missing a phoxal dependency; add a phoxal dependency built for API y2026_1"
                     .to_string()
             ]
         );
@@ -498,12 +410,7 @@ serde = "1"
         let runtime_dir = temp.path().join("runtimes/drive");
         let robot = robot_with_user_runtime("runtimes/drive")?;
 
-        let problems = collect_user_runtime_problems(
-            temp.path(),
-            &robot,
-            EXPECTED_RUNTIME_TRAIN,
-            parse_expected_runtime_train(),
-        );
+        let problems = collect_user_runtime_problems(temp.path(), &robot, "y2026_1");
 
         assert_eq!(
             problems,
@@ -516,7 +423,7 @@ serde = "1"
     }
 
     #[test]
-    fn out_of_train_user_runtime_framework_collects_problem() -> anyhow::Result<()> {
+    fn empty_user_runtime_framework_collects_problem() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtimes/drive");
         write_manifest(
@@ -528,7 +435,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-phoxal = "0.8.5"
+phoxal = "0.14.0"
 "#,
         )?;
         let robot = Robot::parse_from_string(
@@ -542,12 +449,12 @@ identity:
 structure: structure.urdf
 
 phoxal_runtimes:
-  version: "latest"
+  channel: stable
 
 user_runtimes:
   drive:
     path: runtimes/drive
-    framework: "1.0.0"
+    framework: ""
 
 motion:
   kinematic:
@@ -565,25 +472,16 @@ components:
 "#,
         )?;
 
-        let problems = collect_user_runtime_problems(
-            temp.path(),
-            &robot,
-            EXPECTED_RUNTIME_TRAIN,
-            parse_expected_runtime_train(),
-        );
+        let problems = collect_user_runtime_problems(temp.path(), &robot, "y2026_1");
 
         assert_eq!(
             problems,
             vec![
-                "user runtime 'drive' framework selector '1.0.0' is outside the supported runtime train >=0.8.0, <1.0.0"
+                "user runtime 'drive': framework '' must be \"match-platform\" or the graph api_version 'y2026_1'"
                     .to_string()
             ]
         );
         Ok(())
-    }
-
-    fn parse_expected_runtime_train() -> RuntimeTrain {
-        parse_runtime_train(EXPECTED_RUNTIME_TRAIN).expect("expected runtime train parses")
     }
 
     fn write_manifest(runtime_dir: &Path, manifest: &str) -> anyhow::Result<()> {
@@ -604,7 +502,7 @@ identity:
 structure: structure.urdf
 
 phoxal_runtimes:
-  version: "latest"
+  channel: stable
 
 user_runtimes:
   drive:

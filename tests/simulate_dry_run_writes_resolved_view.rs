@@ -1,16 +1,14 @@
 use std::fs;
 
-use phoxal_cli::commands::simulate::{SimulateOptions, prepare_with_releases};
+use phoxal_cli::commands::simulate::{SimulateOptions, prepare};
 use phoxal_cli::lockfile::LOCKFILE_NAME;
-use phoxal_cli::releases::ReleasesSnapshot;
 
 #[test]
 fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     write_robot_project(temp.path())?;
 
-    let snapshot = releases_snapshot();
-    let plan = prepare_with_releases(
+    let plan = prepare(
         temp.path(),
         SimulateOptions {
             world: "test".to_string(),
@@ -19,7 +17,6 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
             resolve_external_artifacts: false,
             ..SimulateOptions::default()
         },
-        &snapshot,
     )?;
 
     assert!(temp.path().join(".phoxal/run/robot.yaml").is_file());
@@ -70,6 +67,7 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
     // `simulate` can never try to `docker pull repo@sha256:<fake>`. (The zenoh
     // router image is a real, published digest pin and is intentionally exempt.)
     assert!(compose.contains("ghcr.io/phoxal/runtime-"));
+    assert!(compose.contains("ghcr.io/phoxal/runtime-drive:y2026_1-stable"));
     for line in compose.lines() {
         if line.contains("ghcr.io/phoxal/runtime-") {
             assert!(
@@ -120,7 +118,7 @@ identity:
 structure: structure.urdf
 
 phoxal_runtimes:
-  version: "latest"
+  channel: stable
 
 motion:
   kinematic:
@@ -136,11 +134,4 @@ components:
   sources: {}
   instances: {}
 "#
-}
-
-fn releases_snapshot() -> ReleasesSnapshot {
-    ReleasesSnapshot {
-        fetched_at: std::time::SystemTime::UNIX_EPOCH,
-        versions: vec!["0.8.0".into()],
-    }
 }
