@@ -7,6 +7,7 @@ use crate::AppContext;
 
 pub mod check;
 pub mod doctor;
+pub mod runtime;
 pub mod self_cmd;
 pub mod simulate;
 pub mod update;
@@ -58,6 +59,8 @@ pub enum RootCommand {
     Simulate(simulate::Simulate),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
+    #[command(about = "Manage user runtime crates.")]
+    Runtime(runtime::Runtime),
     #[command(about = "Print the phoxal-cli version.")]
     Version,
     #[command(name = "self", about = "Manage this phoxal-cli installation.")]
@@ -72,6 +75,7 @@ impl RootCommand {
             Self::Update(command) => command.run(app).await,
             Self::Simulate(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
+            Self::Runtime(command) => command.run(app).await,
             Self::Version => {
                 println!("phoxal-cli {}", long_version());
                 let mut api_versions = crate::catalog::CATALOG
