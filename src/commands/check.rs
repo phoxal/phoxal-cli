@@ -10,7 +10,10 @@ use serde::Deserialize;
 use crate::AppContext;
 use crate::catalog::CATALOG;
 use crate::check as graph_check;
-use crate::resolver::{ResolveOptions, discover_robot_yaml, load_robot, resolve};
+use crate::component_driver::component_crate_dir;
+use crate::resolver::{
+    ResolveOptions, ResolvedComponent, ResolvedRobot, discover_robot_yaml, load_robot, resolve,
+};
 use crate::utils::{cargo_binary_name, resolve_project_path};
 
 #[derive(Debug, Args)]
@@ -108,21 +111,12 @@ fn run(project_start: &std::path::Path) -> Result<CheckRunResult> {
         .iter()
         .map(|runtime| (runtime.name.clone(), runtime.tag_ref()))
         .collect::<Vec<_>>();
-    let source_runtimes = resolved
-        .user_runtimes
-        .iter()
-        .map(|runtime| {
-            (
-                runtime.name.clone(),
-                resolve_project_path(project_root, &runtime.path),
-            )
-        })
-        .collect::<Vec<_>>();
-    // Component-driver source checks are next; they need git clone plus component crate layout support.
-    let participant_count = platform_refs.len() + source_runtimes.len();
+    let source_participants =
+        source_participants_from_resolved(project_root, &resolved, component_crate_dir)?;
+    let participant_count = platform_refs.len() + source_participants.len();
     let outcome = run_check(
         &platform_refs,
-        &source_runtimes,
+        &source_participants,
         &resolved.api_version,
         &resolved.channel.to_string(),
         fetch_emit_apis_from_docker,
@@ -137,9 +131,85 @@ fn run(project_start: &std::path::Path) -> Result<CheckRunResult> {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceParticipant {
+    pub name: String,
+    pub crate_dir: PathBuf,
+    pub kind: SourceParticipantKind,
+}
+
+impl SourceParticipant {
+    #[must_use]
+    pub fn user_runtime(name: impl Into<String>, crate_dir: PathBuf) -> Self {
+        Self {
+            name: name.into(),
+            crate_dir,
+            kind: SourceParticipantKind::UserRuntime,
+        }
+    }
+
+    #[must_use]
+    pub fn component_driver(name: impl Into<String>, crate_dir: PathBuf) -> Self {
+        Self {
+            name: name.into(),
+            crate_dir,
+            kind: SourceParticipantKind::ComponentDriver,
+        }
+    }
+
+    fn kind_label(&self) -> &'static str {
+        match self.kind {
+            SourceParticipantKind::UserRuntime => "user runtime",
+            SourceParticipantKind::ComponentDriver => "component driver",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceParticipantKind {
+    UserRuntime,
+    ComponentDriver,
+}
+
+fn source_participants_from_resolved(
+    project_root: &Path,
+    resolved: &ResolvedRobot,
+    mut locate_component_crate: impl FnMut(&ResolvedComponent, &Path) -> Result<PathBuf>,
+) -> Result<Vec<SourceParticipant>> {
+    let mut participants = resolved
+        .user_runtimes
+        .iter()
+        .map(|runtime| {
+            SourceParticipant::user_runtime(
+                runtime.name.clone(),
+                resolve_project_path(project_root, &runtime.path),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for component in resolved
+        .components
+        .iter()
+        .filter(|component| component.has_driver)
+    {
+        let crate_dir = locate_component_crate(component, project_root).with_context(|| {
+            format!(
+                "failed to locate component driver {} source",
+                component.instance
+            )
+        })?;
+        participants.push(SourceParticipant::component_driver(
+            component.instance.clone(),
+            crate_dir,
+        ));
+    }
+
+    Ok(participants)
+}
+
 pub fn run_check(
     resolved_platform_image_refs: &[(String, String)],
-    source_runtimes: &[(String, PathBuf)],
+    source_participants: &[SourceParticipant],
     root_api: &str,
     _channel: &str,
     mut fetch: impl FnMut(&str) -> Result<RawEmitApis>,
@@ -167,17 +237,21 @@ pub fn run_check(
         participants.push(participant);
     }
 
-    for (runtime_name, crate_dir) in source_runtimes {
-        let raw = build(crate_dir).with_context(|| {
+    for participant in source_participants {
+        let raw = build(&participant.crate_dir).with_context(|| {
             format!(
-                "failed to obtain emit-apis for user runtime {runtime_name} ({})",
-                crate_dir.display()
+                "failed to obtain emit-apis for {} {} ({})",
+                participant.kind_label(),
+                participant.name,
+                participant.crate_dir.display()
             )
         })?;
         let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
             format!(
-                "failed to interpret emit-apis for user runtime {runtime_name} ({})",
-                crate_dir.display()
+                "failed to interpret emit-apis for {} {} ({})",
+                participant.kind_label(),
+                participant.name,
+                participant.crate_dir.display()
             )
         })?;
         participants.push(participant);
@@ -198,27 +272,30 @@ fn fetch_emit_apis_from_docker(image_ref: &str) -> Result<RawEmitApis> {
 }
 
 fn build_emit_apis_from_source(dir: &Path) -> Result<RawEmitApis> {
-    let crate_dir = dir.canonicalize().with_context(|| {
+    let crate_dir = dir
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize source crate {}", dir.display()))?;
+    let binary_name = cargo_binary_name(&crate_dir, None)?;
+    // Build + run via `cargo run` rather than locating the binary by hand: a crate
+    // that is a workspace member (e.g. a `phoxal/components` driver) compiles into the
+    // *workspace-root* `target/`, not `<crate_dir>/target/`, so a fixed
+    // `<crate_dir>/target/debug/<bin>` path would miss it. `cargo run` resolves the
+    // location workspace-aware, and `--quiet` keeps stdout to just the binary's
+    // `emit-apis` JSON (cargo's own progress goes to stderr).
+    let output = crate::shell::run_stdout(
+        "cargo",
+        ["run", "--quiet", "--bin", &binary_name, "--", "emit-apis"],
+        Some(&crate_dir),
+    )
+    .with_context(|| {
         format!(
-            "failed to canonicalize user runtime source {}",
-            dir.display()
+            "failed to build/run `{binary_name} emit-apis` for source crate {}",
+            crate_dir.display()
         )
     })?;
-    crate::shell::run_status("cargo", ["build"], Some(&crate_dir))
-        .with_context(|| format!("cargo build failed in {}", crate_dir.display()))?;
-    let binary_name = cargo_binary_name(&crate_dir, None)?;
-    let binary_path = crate_dir
-        .join("target")
-        .join("debug")
-        .join(format!("{binary_name}{}", std::env::consts::EXE_SUFFIX));
-    let executable = binary_path
-        .to_str()
-        .ok_or_else(|| anyhow!("binary path is not UTF-8: {}", binary_path.display()))?;
-    let output = crate::shell::run_stdout(executable, ["emit-apis"], Some(&crate_dir))
-        .with_context(|| format!("failed to run {} emit-apis", binary_path.display()))?;
     serde_json::from_str(&output).with_context(|| {
         format!(
-            "emit-apis output from user runtime source {} was not valid JSON",
+            "emit-apis output from source crate {} was not valid JSON",
             crate_dir.display()
         )
     })
@@ -287,7 +364,7 @@ fn format_problem(problem: &graph_check::Problem) -> String {
             expected,
             found,
         } => {
-            format!("runtime {artifact_id} reports api_version {found}, expected {expected}")
+            format!("participant {artifact_id} reports api_version {found}, expected {expected}")
         }
         graph_check::Problem::MissingProducer {
             family,
@@ -328,12 +405,14 @@ impl std::error::Error for MissingImageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolver::ResolvedComponentSource;
     use graph_check::{Direction, Problem};
+    use phoxal::model::robot::v1::{Channel, Robot};
 
     #[test]
     fn healthy_graph_passes_with_fake_emit_apis() -> Result<()> {
         let images = vec![("mission".to_string(), "mission:ok".to_string())];
-        let sources = vec![(
+        let sources = vec![SourceParticipant::user_runtime(
             "drive".to_string(),
             PathBuf::from("/fake/project/runtimes/drive"),
         )];
@@ -369,8 +448,46 @@ mod tests {
     }
 
     #[test]
+    fn healthy_graph_passes_with_platform_and_component_driver_source() -> Result<()> {
+        let images = vec![("mission".to_string(), "mission:ok".to_string())];
+        let sources = vec![SourceParticipant::component_driver(
+            "left_drive".to_string(),
+            PathBuf::from("/fake/project/components/ddsm115"),
+        )];
+
+        let outcome = run_check(
+            &images,
+            &sources,
+            "y2026_1",
+            "stable",
+            |image_ref| match image_ref {
+                "mission:ok" => Ok(raw(
+                    "mission",
+                    "y2026_1",
+                    &[("drive::Target", "drive/target", "publish")],
+                )),
+                unexpected => bail!("unexpected image {unexpected}"),
+            },
+            |dir| {
+                if dir == Path::new("/fake/project/components/ddsm115") {
+                    Ok(raw(
+                        "ddsm115",
+                        "y2026_1",
+                        &[("drive::Target", "drive/target", "subscribe")],
+                    ))
+                } else {
+                    bail!("unexpected source dir {}", dir.display())
+                }
+            },
+        )?;
+
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
+        Ok(())
+    }
+
+    #[test]
     fn source_wrong_api_version_fails_with_mismatch_problem() -> Result<()> {
-        let sources = vec![(
+        let sources = vec![SourceParticipant::user_runtime(
             "drive".to_string(),
             PathBuf::from("/fake/project/runtimes/drive"),
         )];
@@ -397,8 +514,36 @@ mod tests {
     }
 
     #[test]
+    fn component_driver_wrong_api_version_fails_with_mismatch_problem() -> Result<()> {
+        let sources = vec![SourceParticipant::component_driver(
+            "left_drive".to_string(),
+            PathBuf::from("/fake/project/components/ddsm115"),
+        )];
+
+        let outcome = run_check(
+            &[],
+            &sources,
+            "y2026_1",
+            "stable",
+            |_| bail!("no platform images should be fetched"),
+            |_| Ok(raw("ddsm115", "y2026_2", &[])),
+        )?;
+
+        assert_eq!(
+            outcome.report.problems,
+            vec![Problem::ApiVersionMismatch {
+                artifact_id: "ddsm115".to_string(),
+                expected: "y2026_1".to_string(),
+                found: "y2026_2".to_string()
+            }]
+        );
+        assert!(!outcome.is_ok());
+        Ok(())
+    }
+
+    #[test]
     fn source_build_error_is_a_hard_error() {
-        let sources = vec![(
+        let sources = vec![SourceParticipant::user_runtime(
             "drive".to_string(),
             PathBuf::from("/fake/project/runtimes/drive"),
         )];
@@ -419,6 +564,91 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("source build failed"), "{message}");
+    }
+
+    #[test]
+    fn component_driver_build_error_is_a_hard_error() {
+        let sources = vec![SourceParticipant::component_driver(
+            "left_drive".to_string(),
+            PathBuf::from("/fake/project/components/ddsm115"),
+        )];
+
+        let error = run_check(
+            &[],
+            &sources,
+            "y2026_1",
+            "stable",
+            |_| bail!("no platform images should be fetched"),
+            |_| Err(anyhow!("component build failed")),
+        )
+        .expect_err("component driver build failures should abort check");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("failed to obtain emit-apis for component driver left_drive"),
+            "{message}"
+        );
+        assert!(message.contains("component build failed"), "{message}");
+    }
+
+    #[test]
+    fn components_without_drivers_are_not_built() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let resolved = resolved_with_components(vec![
+            ResolvedComponent {
+                instance: "left_drive".to_string(),
+                source_name: "ddsm115".to_string(),
+                source: ResolvedComponentSource::Path {
+                    path: PathBuf::from("components/ddsm115"),
+                },
+                has_driver: true,
+            },
+            ResolvedComponent {
+                instance: "caster".to_string(),
+                source_name: "passive_caster".to_string(),
+                source: ResolvedComponentSource::Path {
+                    path: PathBuf::from("components/passive_caster"),
+                },
+                has_driver: false,
+            },
+        ])?;
+        let mut located = Vec::new();
+        let source_participants = source_participants_from_resolved(
+            temp.path(),
+            &resolved,
+            |component, project_root| {
+                located.push(component.instance.clone());
+                Ok(project_root
+                    .join("component-crates")
+                    .join(&component.instance))
+            },
+        )?;
+
+        assert_eq!(located, vec!["left_drive"]);
+        assert_eq!(
+            source_participants,
+            vec![SourceParticipant::component_driver(
+                "left_drive".to_string(),
+                temp.path().join("component-crates/left_drive")
+            )]
+        );
+
+        let mut built = Vec::new();
+        let outcome = run_check(
+            &[],
+            &source_participants,
+            "y2026_1",
+            "stable",
+            |_| bail!("no platform images should be fetched"),
+            |dir| {
+                built.push(dir.to_path_buf());
+                Ok(raw("ddsm115", "y2026_1", &[]))
+            },
+        )?;
+
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
+        assert_eq!(built, vec![temp.path().join("component-crates/left_drive")]);
+        Ok(())
     }
 
     #[test]
@@ -510,4 +740,43 @@ mod tests {
                 .collect(),
         }
     }
+
+    fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<ResolvedRobot> {
+        Ok(ResolvedRobot {
+            robot: Robot::parse_from_string(MINIMAL_ROBOT)?,
+            api_version: "y2026_1".to_string(),
+            channel: Channel::Stable,
+            platform_runtimes: Vec::new(),
+            user_runtimes: Vec::new(),
+            components,
+            tools: Vec::new(),
+        })
+    }
+
+    const MINIMAL_ROBOT: &str = r#"schema: v0
+api_version: y2026_1
+
+identity:
+  id: testbot
+  namespace: test
+
+structure: structure.urdf
+
+phoxal_runtimes:
+  channel: stable
+
+motion:
+  kinematic:
+    kind: differential
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+
+components:
+  sources: {}
+  instances: {}
+"#;
 }

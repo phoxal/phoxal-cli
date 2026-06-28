@@ -3,6 +3,7 @@
 pub mod catalog;
 pub mod check;
 pub mod commands;
+pub(crate) mod component_driver;
 pub mod compose;
 pub mod context;
 pub mod docker_stack;
