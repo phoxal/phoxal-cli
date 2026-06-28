@@ -6,8 +6,9 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
+use toml::Value as TomlValue;
 
 pub fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(destination)
@@ -85,4 +86,56 @@ pub(crate) fn resolve_project_path(project_root: &Path, path: &Path) -> PathBuf 
     } else {
         project_root.join(path)
     }
+}
+
+pub(crate) fn cargo_binary_name(crate_dir: &Path, preferred_name: Option<&str>) -> Result<String> {
+    let manifest_path = crate_dir.join("Cargo.toml");
+    let contents = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest = toml::from_str::<TomlValue>(&contents)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let bin_names = manifest
+        .get("bin")
+        .and_then(TomlValue::as_array)
+        .map(|bins| {
+            bins.iter()
+                .filter_map(|bin| {
+                    bin.as_table()
+                        .and_then(|table| table.get("name"))
+                        .and_then(TomlValue::as_str)
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if let Some(preferred_name) = preferred_name
+        && bin_names.iter().any(|bin_name| bin_name == preferred_name)
+    {
+        return Ok(preferred_name.to_string());
+    }
+    if bin_names.len() == 1 {
+        return Ok(bin_names[0].clone());
+    }
+    if !bin_names.is_empty() {
+        if let Some(preferred_name) = preferred_name {
+            bail!(
+                "{} declares multiple [[bin]] targets ({}) but none named '{preferred_name}'",
+                manifest_path.display(),
+                bin_names.join(", ")
+            );
+        }
+        bail!(
+            "{} declares multiple [[bin]] targets ({}); declare exactly one [[bin]] or use package.name as the binary",
+            manifest_path.display(),
+            bin_names.join(", ")
+        );
+    }
+
+    manifest
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(TomlValue::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("{} does not declare package.name", manifest_path.display()))
 }

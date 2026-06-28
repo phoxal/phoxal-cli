@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
@@ -8,6 +11,7 @@ use crate::AppContext;
 use crate::catalog::CATALOG;
 use crate::check as graph_check;
 use crate::resolver::{ResolveOptions, discover_robot_yaml, load_robot, resolve};
+use crate::utils::{cargo_binary_name, resolve_project_path};
 
 #[derive(Debug, Args)]
 pub struct CheckCmd;
@@ -52,13 +56,6 @@ impl CheckCmd {
             .await
             .context("check worker failed")??;
 
-        if result.user_runtime_count > 0 {
-            app.ui.warn(format!(
-                "user-runtime emit-apis checking is not yet included; skipped {} user runtime(s)",
-                result.user_runtime_count
-            ));
-        }
-
         if !result.outcome.missing_images.is_empty() {
             bail!(
                 "{}",
@@ -86,7 +83,6 @@ impl CheckCmd {
 struct CheckRunResult {
     api_version: String,
     channel: String,
-    user_runtime_count: usize,
     participant_count: usize,
     outcome: CheckOutcome,
 }
@@ -112,18 +108,30 @@ fn run(project_start: &std::path::Path) -> Result<CheckRunResult> {
         .iter()
         .map(|runtime| (runtime.name.clone(), runtime.tag_ref()))
         .collect::<Vec<_>>();
-    let participant_count = platform_refs.len();
+    let source_runtimes = resolved
+        .user_runtimes
+        .iter()
+        .map(|runtime| {
+            (
+                runtime.name.clone(),
+                resolve_project_path(project_root, &runtime.path),
+            )
+        })
+        .collect::<Vec<_>>();
+    // Component-driver source checks are next; they need git clone plus component crate layout support.
+    let participant_count = platform_refs.len() + source_runtimes.len();
     let outcome = run_check(
         &platform_refs,
+        &source_runtimes,
         &resolved.api_version,
         &resolved.channel.to_string(),
         fetch_emit_apis_from_docker,
+        build_emit_apis_from_source,
     )?;
 
     Ok(CheckRunResult {
         api_version: resolved.api_version,
         channel: resolved.channel.to_string(),
-        user_runtime_count: resolved.user_runtimes.len(),
         participant_count,
         outcome,
     })
@@ -131,9 +139,11 @@ fn run(project_start: &std::path::Path) -> Result<CheckRunResult> {
 
 pub fn run_check(
     resolved_platform_image_refs: &[(String, String)],
+    source_runtimes: &[(String, PathBuf)],
     root_api: &str,
     _channel: &str,
     mut fetch: impl FnMut(&str) -> Result<RawEmitApis>,
+    mut build: impl FnMut(&Path) -> Result<RawEmitApis>,
 ) -> Result<CheckOutcome> {
     let mut missing_images = Vec::new();
     let mut participants = Vec::new();
@@ -157,6 +167,22 @@ pub fn run_check(
         participants.push(participant);
     }
 
+    for (runtime_name, crate_dir) in source_runtimes {
+        let raw = build(crate_dir).with_context(|| {
+            format!(
+                "failed to obtain emit-apis for user runtime {runtime_name} ({})",
+                crate_dir.display()
+            )
+        })?;
+        let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
+            format!(
+                "failed to interpret emit-apis for user runtime {runtime_name} ({})",
+                crate_dir.display()
+            )
+        })?;
+        participants.push(participant);
+    }
+
     let report = graph_check::check_graph(&participants, root_api);
     Ok(CheckOutcome {
         missing_images,
@@ -169,6 +195,33 @@ fn fetch_emit_apis_from_docker(image_ref: &str) -> Result<RawEmitApis> {
         .map_err(MissingImageError::new)?;
     serde_json::from_str(&output)
         .with_context(|| format!("docker emit-apis output for {image_ref} was not valid JSON"))
+}
+
+fn build_emit_apis_from_source(dir: &Path) -> Result<RawEmitApis> {
+    let crate_dir = dir.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize user runtime source {}",
+            dir.display()
+        )
+    })?;
+    crate::shell::run_status("cargo", ["build"], Some(&crate_dir))
+        .with_context(|| format!("cargo build failed in {}", crate_dir.display()))?;
+    let binary_name = cargo_binary_name(&crate_dir, None)?;
+    let binary_path = crate_dir
+        .join("target")
+        .join("debug")
+        .join(format!("{binary_name}{}", std::env::consts::EXE_SUFFIX));
+    let executable = binary_path
+        .to_str()
+        .ok_or_else(|| anyhow!("binary path is not UTF-8: {}", binary_path.display()))?;
+    let output = crate::shell::run_stdout(executable, ["emit-apis"], Some(&crate_dir))
+        .with_context(|| format!("failed to run {} emit-apis", binary_path.display()))?;
+    serde_json::from_str(&output).with_context(|| {
+        format!(
+            "emit-apis output from user runtime source {} was not valid JSON",
+            crate_dir.display()
+        )
+    })
 }
 
 impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
@@ -279,36 +332,57 @@ mod tests {
 
     #[test]
     fn healthy_graph_passes_with_fake_emit_apis() -> Result<()> {
-        let images = vec![
-            ("mission".to_string(), "mission:ok".to_string()),
-            ("drive".to_string(), "drive:ok".to_string()),
-        ];
+        let images = vec![("mission".to_string(), "mission:ok".to_string())];
+        let sources = vec![(
+            "drive".to_string(),
+            PathBuf::from("/fake/project/runtimes/drive"),
+        )];
 
-        let outcome = run_check(&images, "y2026_1", "stable", |image_ref| match image_ref {
-            "mission:ok" => Ok(raw(
-                "mission",
-                "y2026_1",
-                &[("drive::Target", "drive/target", "publish")],
-            )),
-            "drive:ok" => Ok(raw(
-                "drive",
-                "y2026_1",
-                &[("drive::Target", "drive/target", "subscribe")],
-            )),
-            unexpected => bail!("unexpected image {unexpected}"),
-        })?;
+        let outcome = run_check(
+            &images,
+            &sources,
+            "y2026_1",
+            "stable",
+            |image_ref| match image_ref {
+                "mission:ok" => Ok(raw(
+                    "mission",
+                    "y2026_1",
+                    &[("drive::Target", "drive/target", "publish")],
+                )),
+                unexpected => bail!("unexpected image {unexpected}"),
+            },
+            |dir| {
+                if dir == Path::new("/fake/project/runtimes/drive") {
+                    Ok(raw(
+                        "drive",
+                        "y2026_1",
+                        &[("drive::Target", "drive/target", "subscribe")],
+                    ))
+                } else {
+                    bail!("unexpected source dir {}", dir.display())
+                }
+            },
+        )?;
 
         assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
         Ok(())
     }
 
     #[test]
-    fn wrong_api_version_fails_with_mismatch_problem() -> Result<()> {
-        let images = vec![("drive".to_string(), "drive:wrong-api".to_string())];
+    fn source_wrong_api_version_fails_with_mismatch_problem() -> Result<()> {
+        let sources = vec![(
+            "drive".to_string(),
+            PathBuf::from("/fake/project/runtimes/drive"),
+        )];
 
-        let outcome = run_check(&images, "y2026_1", "stable", |_| {
-            Ok(raw("drive", "y2026_2", &[]))
-        })?;
+        let outcome = run_check(
+            &[],
+            &sources,
+            "y2026_1",
+            "stable",
+            |_| bail!("no platform images should be fetched"),
+            |_| Ok(raw("drive", "y2026_2", &[])),
+        )?;
 
         assert_eq!(
             outcome.report.problems,
@@ -323,6 +397,31 @@ mod tests {
     }
 
     #[test]
+    fn source_build_error_is_a_hard_error() {
+        let sources = vec![(
+            "drive".to_string(),
+            PathBuf::from("/fake/project/runtimes/drive"),
+        )];
+
+        let error = run_check(
+            &[],
+            &sources,
+            "y2026_1",
+            "stable",
+            |_| bail!("no platform images should be fetched"),
+            |_| Err(MissingImageError::new(anyhow!("source build failed")).into()),
+        )
+        .expect_err("source build failures should abort check");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("failed to obtain emit-apis for user runtime drive"),
+            "{message}"
+        );
+        assert!(message.contains("source build failed"), "{message}");
+    }
+
+    #[test]
     fn missing_image_is_reported_after_other_images_are_checked() -> Result<()> {
         let images = vec![
             ("mission".to_string(), "mission:ok".to_string()),
@@ -332,13 +431,20 @@ mod tests {
             ),
         ];
 
-        let outcome = run_check(&images, "y2026_2", "stable", |image_ref| match image_ref {
-            "mission:ok" => Ok(raw("mission", "y2026_2", &[])),
-            "ghcr.io/phoxal/runtime-drive:y2026_2-stable" => {
-                Err(MissingImageError::new(anyhow!("not found")).into())
-            }
-            unexpected => bail!("unexpected image {unexpected}"),
-        })?;
+        let outcome = run_check(
+            &images,
+            &[],
+            "y2026_2",
+            "stable",
+            |image_ref| match image_ref {
+                "mission:ok" => Ok(raw("mission", "y2026_2", &[])),
+                "ghcr.io/phoxal/runtime-drive:y2026_2-stable" => {
+                    Err(MissingImageError::new(anyhow!("not found")).into())
+                }
+                unexpected => bail!("unexpected image {unexpected}"),
+            },
+            |_| bail!("no source runtimes should be built"),
+        )?;
 
         assert_eq!(
             outcome.missing_images,
