@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::AppContext;
-use crate::resolver::{ResolvedComponentSource, ResolvedRobot, ResolvedUserRuntimeBuild};
+use crate::component_driver::component_crate_dir;
+use crate::resolver::{ResolvedRobot, ResolvedUserRuntimeBuild};
+use crate::shell;
 use crate::utils::resolve_project_path;
-use crate::{host_paths, shell};
 
 pub(crate) fn pull_platform_images(app: &AppContext, resolved: &ResolvedRobot) -> Result<()> {
     for runtime in &resolved.platform_runtimes {
@@ -76,23 +77,25 @@ pub(crate) fn docker_build_args(
 }
 
 pub(crate) fn build_component_drivers(project_root: &Path, resolved: &ResolvedRobot) -> Result<()> {
-    let host_cache_dir = host_paths::cache_dir()?;
     for component in &resolved.components {
         if !component.has_driver {
             continue;
         }
-        let driver_dir = match &component.source {
-            ResolvedComponentSource::Path { path } => {
-                resolve_project_path(project_root, path).join("driver")
-            }
-            ResolvedComponentSource::Git { commit, .. } => host_cache_dir
-                .join("components")
-                .join(format!("{}-{commit}", component.source_name))
-                .join("driver"),
-        };
-        if driver_dir.is_dir() {
-            shell::run_status("cargo", ["build", "--release"], Some(&driver_dir))?;
-        }
+        let driver_dir = component_crate_dir(component, project_root).with_context(|| {
+            format!(
+                "failed to locate component driver {} source",
+                component.instance
+            )
+        })?;
+        shell::run_status("cargo", ["build", "--release"], Some(&driver_dir)).with_context(
+            || {
+                format!(
+                    "failed to build component driver {} in {}",
+                    component.instance,
+                    driver_dir.display()
+                )
+            },
+        )?;
     }
     Ok(())
 }
