@@ -1,6 +1,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod catalog;
+pub mod check;
 pub mod commands;
 pub mod compose;
 pub mod context;
