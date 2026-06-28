@@ -73,7 +73,6 @@ pub const CATALOG: PlatformRuntimeCatalog = PlatformRuntimeCatalog {
     entries: &[
         entry("asset", &["y2026_1"], false, true),
         entry("drive", &["y2026_1"], false, true),
-        entry("driver-ddsm115", &["y2026_1"], false, true),
         entry("localize", &["y2026_1"], false, true),
         entry("map", &["y2026_1"], false, true),
         entry("mission", &["y2026_1"], false, true),
@@ -176,15 +175,7 @@ mod tests {
     fn entries_for_api_returns_the_official_set_for_that_api() {
         assert_eq!(
             CATALOG.names_for_api("y2026_1"),
-            vec![
-                "asset",
-                "drive",
-                "driver-ddsm115",
-                "localize",
-                "map",
-                "mission",
-                "odometry"
-            ]
+            vec!["asset", "drive", "localize", "map", "mission", "odometry"]
         );
         assert_eq!(CATALOG.names_for_api("y2026_2"), vec!["battery", "safety"]);
         assert!(CATALOG.names_for_api("y2099_1").is_empty());
