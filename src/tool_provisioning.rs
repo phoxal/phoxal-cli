@@ -86,7 +86,11 @@ pub fn ensure_simulator_binaries(ui: &Ui, resolved: &ResolvedRobot) -> Result<()
     for (tool, dest) in &missing {
         extract_binary(&tarball, &tool.binary_name, dest)
             .with_context(|| format!("failed to extract {} from {asset}", tool.binary_name))?;
-        ui.success(format!("staged {} into {}", tool.binary_name, dest.display()));
+        ui.success(format!(
+            "staged {} into {}",
+            tool.binary_name,
+            dest.display()
+        ));
     }
     Ok(())
 }
@@ -144,9 +148,14 @@ fn download_release_asset(ui: &Ui, repo: &str, version: &str, asset: &str) -> Re
 /// truncated binary in the cache.
 fn extract_binary(tarball: &[u8], binary_name: &str, dest: &Path) -> Result<()> {
     let mut archive = Archive::new(GzDecoder::new(tarball));
-    for entry in archive.entries().context("failed to read simulator tarball")? {
+    for entry in archive
+        .entries()
+        .context("failed to read simulator tarball")?
+    {
         let mut entry = entry.context("failed to read simulator tarball entry")?;
-        let entry_path = entry.path().context("simulator tarball entry has no path")?;
+        let entry_path = entry
+            .path()
+            .context("simulator tarball entry has no path")?;
         if entry_path.file_name().and_then(|name| name.to_str()) != Some(binary_name) {
             continue;
         }
@@ -195,8 +204,14 @@ mod tests {
     #[test]
     fn extract_binary_writes_named_member_and_marks_executable() {
         let tarball = tar_gz_with(&[
-            ("phoxal-simulator-webots-controller-aarch64-apple-darwin", b"CTRL"),
-            ("phoxal-simulator-webots-supervisor-aarch64-apple-darwin", b"SUPER"),
+            (
+                "phoxal-simulator-webots-controller-aarch64-apple-darwin",
+                b"CTRL",
+            ),
+            (
+                "phoxal-simulator-webots-supervisor-aarch64-apple-darwin",
+                b"SUPER",
+            ),
         ]);
         let dir = tempfile::tempdir().expect("tempdir");
         let dest = dir
@@ -253,8 +268,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let dest = dir.path().join("missing");
 
-        let err = extract_binary(&tarball, "not-present", &dest)
-            .expect_err("missing member must error");
+        let err =
+            extract_binary(&tarball, "not-present", &dest).expect_err("missing member must error");
         assert!(
             err.to_string().contains("not-present"),
             "error should name the missing binary, got: {err}"
