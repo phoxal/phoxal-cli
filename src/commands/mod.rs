@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 
 use crate::AppContext;
 
+pub mod check;
 pub mod doctor;
 pub mod self_cmd;
 pub mod simulate;
@@ -47,6 +48,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum RootCommand {
+    #[command(about = "Validate the robot graph's API version + topology via emit-apis.")]
+    Check(check::CheckCmd),
     #[command(about = "Validate the robot project discovered from robot.yaml.")]
     Validate(validate::Validate),
     #[command(about = "Resolve robot.yaml and refresh phoxal.lock.")]
@@ -64,6 +67,7 @@ pub enum RootCommand {
 impl RootCommand {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match self {
+            Self::Check(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
             Self::Update(command) => command.run(app).await,
             Self::Simulate(command) => command.run(app).await,
