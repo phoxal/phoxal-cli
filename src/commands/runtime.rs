@@ -13,7 +13,7 @@ use toml::Value as TomlValue;
 use crate::AppContext;
 use crate::catalog::CATALOG;
 use crate::resolver::{discover_robot_yaml, load_robot};
-use crate::utils::resolve_project_path;
+use crate::utils::{cargo_binary_name, resolve_project_path};
 
 #[derive(Debug, Args)]
 pub struct Runtime {
@@ -291,46 +291,7 @@ pub(crate) fn run_env(
 }
 
 fn runtime_binary_name(crate_dir: &Path, runtime_name: &str) -> Result<String> {
-    let manifest_path = crate_dir.join("Cargo.toml");
-    let contents = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let manifest = toml::from_str::<TomlValue>(&contents)
-        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
-    let bin_names = manifest
-        .get("bin")
-        .and_then(TomlValue::as_array)
-        .map(|bins| {
-            bins.iter()
-                .filter_map(|bin| {
-                    bin.as_table()
-                        .and_then(|table| table.get("name"))
-                        .and_then(TomlValue::as_str)
-                        .map(str::to_string)
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    if bin_names.iter().any(|bin_name| bin_name == runtime_name) {
-        return Ok(runtime_name.to_string());
-    }
-    if bin_names.len() == 1 {
-        return Ok(bin_names[0].clone());
-    }
-    if !bin_names.is_empty() {
-        bail!(
-            "{} declares multiple [[bin]] targets ({}) but none named '{runtime_name}'",
-            manifest_path.display(),
-            bin_names.join(", ")
-        );
-    }
-
-    manifest
-        .get("package")
-        .and_then(|package| package.get("name"))
-        .and_then(TomlValue::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("{} does not declare package.name", manifest_path.display()))
+    cargo_binary_name(crate_dir, Some(runtime_name))
 }
 
 fn build_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Result<()> {
