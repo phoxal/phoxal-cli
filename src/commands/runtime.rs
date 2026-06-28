@@ -1,15 +1,19 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use heck::ToUpperCamelCase;
-use phoxal::model::robot::v1::UserRuntime;
+use phoxal::model::robot::{RobotV1 as Robot, v1::UserRuntime};
 use semver::Version;
+use serde_json::Value as JsonValue;
 use toml::Value as TomlValue;
 
 use crate::AppContext;
+use crate::catalog::CATALOG;
 use crate::resolver::{discover_robot_yaml, load_robot};
+use crate::utils::resolve_project_path;
 
 #[derive(Debug, Args)]
 pub struct Runtime {
@@ -21,11 +25,19 @@ pub struct Runtime {
 pub enum RuntimeSubcommand {
     #[command(about = "Scaffold a user runtime crate and register it in robot.yaml.")]
     Add(Add),
+    #[command(about = "Build and run one user runtime host-native against the dev bus.")]
+    Run(Run),
 }
 
 #[derive(Debug, Args)]
 pub struct Add {
     #[arg(help = "Runtime id, used as the crate name and user_runtimes key.")]
+    pub name: String,
+}
+
+#[derive(Debug, Args)]
+pub struct Run {
+    #[arg(help = "User runtime id from user_runtimes.")]
     pub name: String,
 }
 
@@ -37,10 +49,21 @@ pub struct AddRuntimeOutcome {
     pub manifest_path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeRunPlan {
+    name: String,
+    robot_id: String,
+    namespace: String,
+    crate_dir: PathBuf,
+    binary_path: PathBuf,
+    env: Vec<(String, String)>,
+}
+
 impl Runtime {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match &self.command {
             RuntimeSubcommand::Add(command) => command.run(app).await,
+            RuntimeSubcommand::Run(command) => command.run(app).await,
         }
     }
 }
@@ -59,6 +82,23 @@ impl Add {
             outcome.name
         );
         Ok(())
+    }
+}
+
+impl Run {
+    pub async fn run(&self, app: &AppContext) -> Result<()> {
+        let plan = runtime_run_plan(app.project.root(), &self.name)?;
+
+        app.ui.step(format!("building {}", plan.name), || {
+            build_user_runtime_host_native(&plan, &app.ui)
+        })?;
+
+        app.ui.info(format!(
+            "running {} in namespace {}",
+            plan.name, plan.namespace
+        ));
+        let status = run_user_runtime_host_native(&plan, &app.ui)?;
+        forward_runtime_exit_status(&plan.name, status)
     }
 }
 
@@ -107,6 +147,249 @@ pub fn add_runtime(project_start: &Path, name: &str) -> Result<AddRuntimeOutcome
         crate_dir,
         manifest_path,
     })
+}
+
+fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> {
+    let robot_path = discover_robot_yaml(project_start)
+        .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
+    let project_root = robot_path
+        .parent()
+        .context("robot.yaml did not have a parent directory")?;
+    let (robot, config) = load_robot_for_runtime_run(&robot_path, name)?;
+
+    if CATALOG
+        .entries_for_api(&robot.api_version)
+        .any(|entry| entry.name == name)
+    {
+        bail!(
+            "'{name}' is a platform runtime for api_version {}; platform runtimes are images, not host-native user runtimes",
+            robot.api_version
+        );
+    }
+
+    let runtime = robot.user_runtimes.get(name).ok_or_else(|| {
+        let available = robot
+            .user_runtimes
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if available.is_empty() {
+            anyhow!("user runtime '{name}' is not defined in user_runtimes")
+        } else {
+            anyhow!("user runtime '{name}' is not defined in user_runtimes; available: {available}")
+        }
+    })?;
+    let crate_dir = resolve_project_path(project_root, &runtime.path);
+    if !crate_dir.is_dir() {
+        bail!(
+            "user runtime '{name}' source dir {} does not exist",
+            crate_dir.display()
+        );
+    }
+    let binary_name = runtime_binary_name(&crate_dir, name)?;
+    let binary_path = crate_dir
+        .join("target")
+        .join("debug")
+        .join(format!("{binary_name}{}", std::env::consts::EXE_SUFFIX));
+    let env = run_env(
+        name,
+        &robot.identity.id,
+        &robot.identity.namespace,
+        config.as_ref(),
+    );
+
+    Ok(RuntimeRunPlan {
+        name: name.to_string(),
+        robot_id: robot.identity.id,
+        namespace: robot.identity.namespace,
+        crate_dir,
+        binary_path,
+        env,
+    })
+}
+
+fn load_robot_for_runtime_run(
+    robot_path: &Path,
+    runtime_name: &str,
+) -> Result<(Robot, Option<JsonValue>)> {
+    let contents = fs::read_to_string(robot_path)
+        .with_context(|| format!("failed to read robot file {}", robot_path.display()))?;
+    let mut yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents)
+        .with_context(|| format!("failed to parse robot file {}", robot_path.display()))?;
+    let (config, stripped_config) = take_user_runtime_config(&mut yaml, runtime_name)?;
+
+    let robot = if stripped_config {
+        let sanitized = serde_yaml::to_string(&yaml)
+            .with_context(|| format!("failed to prepare {}", robot_path.display()))?;
+        Robot::read_from_string(&sanitized)
+    } else {
+        load_robot(robot_path)
+    }?;
+
+    Ok((robot, config))
+}
+
+fn take_user_runtime_config(
+    yaml: &mut serde_yaml::Value,
+    runtime_name: &str,
+) -> Result<(Option<JsonValue>, bool)> {
+    let Some(user_runtimes) = yaml
+        .as_mapping_mut()
+        .and_then(|mapping| mapping.get_mut("user_runtimes"))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return Ok((None, false));
+    };
+
+    let mut target_config = None;
+    let mut stripped_config = false;
+    for (name, runtime) in user_runtimes {
+        let Some(name) = name.as_str() else {
+            continue;
+        };
+        let Some(runtime) = runtime.as_mapping_mut() else {
+            continue;
+        };
+        let config = runtime.remove("config");
+        stripped_config |= config.is_some();
+        if name == runtime_name {
+            target_config = config;
+        }
+    }
+
+    target_config
+        .map(|config| {
+            serde_json::to_value(config).with_context(|| {
+                format!("user_runtimes.{runtime_name}.config must be representable as JSON")
+            })
+        })
+        .transpose()
+        .map(|config| (config, stripped_config))
+}
+
+pub(crate) fn run_env(
+    name: &str,
+    robot_id: &str,
+    namespace: &str,
+    config: Option<&JsonValue>,
+) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("PHOXAL_PARTICIPANT_ID".to_string(), name.to_string()),
+        ("PHOXAL_ROBOT_ID".to_string(), robot_id.to_string()),
+        ("PHOXAL_NAMESPACE".to_string(), namespace.to_string()),
+    ];
+    // A scaffolded user runtime always declares `config = Config`, so the runner
+    // deserializes its typed config from PHOXAL_CONFIG. When the manifest has no
+    // config block, pass an empty object `{}` (not nothing → the runner would see
+    // `null` and reject a struct): an empty/all-default `Config` then deserializes
+    // cleanly, and a `Config` with required fields fails with a clear "missing
+    // field" error instead of a confusing "invalid type: null".
+    let config_json = config.map_or_else(|| "{}".to_string(), JsonValue::to_string);
+    env.push(("PHOXAL_CONFIG".to_string(), config_json));
+    env
+}
+
+fn runtime_binary_name(crate_dir: &Path, runtime_name: &str) -> Result<String> {
+    let manifest_path = crate_dir.join("Cargo.toml");
+    let contents = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest = toml::from_str::<TomlValue>(&contents)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let bin_names = manifest
+        .get("bin")
+        .and_then(TomlValue::as_array)
+        .map(|bins| {
+            bins.iter()
+                .filter_map(|bin| {
+                    bin.as_table()
+                        .and_then(|table| table.get("name"))
+                        .and_then(TomlValue::as_str)
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if bin_names.iter().any(|bin_name| bin_name == runtime_name) {
+        return Ok(runtime_name.to_string());
+    }
+    if bin_names.len() == 1 {
+        return Ok(bin_names[0].clone());
+    }
+    if !bin_names.is_empty() {
+        bail!(
+            "{} declares multiple [[bin]] targets ({}) but none named '{runtime_name}'",
+            manifest_path.display(),
+            bin_names.join(", ")
+        );
+    }
+
+    manifest
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(TomlValue::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("{} does not declare package.name", manifest_path.display()))
+}
+
+fn build_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Result<()> {
+    let mut command = Command::new("cargo");
+    command.arg("build").current_dir(&plan.crate_dir);
+    let status = ui.command_status(&mut command).with_context(|| {
+        format!(
+            "failed to start cargo build for user runtime '{}' in {}",
+            plan.name,
+            plan.crate_dir.display()
+        )
+    })?;
+    if !status.success() {
+        bail!(
+            "cargo build failed for user runtime '{}' in {} with status {status}",
+            plan.name,
+            plan.crate_dir.display()
+        );
+    }
+    Ok(())
+}
+
+fn run_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Result<ExitStatus> {
+    let mut command = Command::new(&plan.binary_path);
+    command
+        .current_dir(&plan.crate_dir)
+        .env_remove("PHOXAL_CONNECT")
+        .env_remove("PHOXAL_CONFIG")
+        .env_remove("PHOXAL_BUNDLE_ROOT")
+        .env_remove("PHOXAL_COMPONENT_INSTANCE")
+        .env_remove("PHOXAL_CLOCK")
+        .envs(plan.env.iter().map(|(key, value)| (key, value)));
+    let mut child = ui.command_spawn(&mut command).with_context(|| {
+        format!(
+            "failed to spawn user runtime '{}' at {}",
+            plan.name,
+            plan.binary_path.display()
+        )
+    })?;
+    child
+        .wait()
+        .with_context(|| format!("failed to wait for user runtime '{}'", plan.name))
+}
+
+fn forward_runtime_exit_status(runtime_name: &str, status: ExitStatus) -> Result<()> {
+    if status.success() {
+        return Ok(());
+    }
+    if let Some(code) = status.code() {
+        std::process::exit(code);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            std::process::exit(128 + signal);
+        }
+    }
+    bail!("user runtime '{runtime_name}' terminated without an exit code: {status}")
 }
 
 fn validate_runtime_name(name: &str) -> Result<&str> {
@@ -302,6 +585,8 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use serde_json::json;
+
     use phoxal::model::robot::RobotV1 as Robot;
 
     use super::*;
@@ -375,6 +660,158 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_env_sets_launch_contract_without_config() {
+        let env = run_env("avoid-obstacles", "testbot", "dev", None);
+
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "PHOXAL_PARTICIPANT_ID")
+                .map(|(_, v)| v.as_str()),
+            Some("avoid-obstacles")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "PHOXAL_ROBOT_ID")
+                .map(|(_, v)| v.as_str()),
+            Some("testbot")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "PHOXAL_NAMESPACE")
+                .map(|(_, v)| v.as_str()),
+            Some("dev")
+        );
+        // With no manifest config block, PHOXAL_CONFIG defaults to an empty object
+        // so the runtime's typed `Config` deserializes (it would reject `null`).
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "PHOXAL_CONFIG")
+                .map(|(_, v)| v.as_str()),
+            Some("{}")
+        );
+        assert!(env.iter().all(|(key, _)| key != "PHOXAL_CONNECT"));
+    }
+
+    #[test]
+    fn run_env_sets_config_when_present() {
+        let config = json!({
+            "gain": 0.7,
+            "labels": ["left", "right"],
+        });
+        let env = run_env("avoid-obstacles", "testbot", "test", Some(&config));
+
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "PHOXAL_PARTICIPANT_ID")
+                .map(|(_, value)| value.as_str()),
+            Some("avoid-obstacles")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "PHOXAL_ROBOT_ID")
+                .map(|(_, value)| value.as_str()),
+            Some("testbot")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "PHOXAL_NAMESPACE")
+                .map(|(_, value)| value.as_str()),
+            Some("test")
+        );
+        let config_json = env
+            .iter()
+            .find(|(key, _)| key == "PHOXAL_CONFIG")
+            .map(|(_, value)| value)
+            .expect("PHOXAL_CONFIG should be set");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(config_json).unwrap(),
+            config
+        );
+    }
+
+    #[test]
+    fn runtime_run_unknown_runtime_errors_before_building() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
+
+        let error = runtime_run_plan(temp.path(), "missing")
+            .expect_err("unknown runtime should fail before cargo build");
+
+        assert!(
+            error
+                .to_string()
+                .contains("user runtime 'missing' is not defined in user_runtimes"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_run_platform_runtime_name_errors_before_building() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        fs::write(
+            temp.path().join("robot.yaml"),
+            minimal_robot_yaml_with_user_runtime(
+                "drive",
+                r#"
+    path: runtimes/drive
+"#,
+            ),
+        )?;
+
+        let error = runtime_run_plan(temp.path(), "drive")
+            .expect_err("platform runtime name should fail before cargo build");
+
+        assert!(
+            error.to_string().contains("'drive' is a platform runtime"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_run_plan_serializes_manifest_config() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        fs::create_dir_all(temp.path().join("runtimes").join("avoid-obstacles"))?;
+        fs::write(
+            temp.path()
+                .join("runtimes")
+                .join("avoid-obstacles")
+                .join("Cargo.toml"),
+            runtime_cargo_toml("avoid-obstacles", "0.15"),
+        )?;
+        fs::write(
+            temp.path().join("robot.yaml"),
+            minimal_robot_yaml_with_user_runtime(
+                "avoid-obstacles",
+                r#"
+    path: runtimes/avoid-obstacles
+    config:
+      gain: 0.7
+      labels: [left, right]
+"#,
+            ),
+        )?;
+
+        let plan = runtime_run_plan(temp.path(), "avoid-obstacles")?;
+        let config_json = plan
+            .env
+            .iter()
+            .find(|(key, _)| key == "PHOXAL_CONFIG")
+            .map(|(_, value)| value)
+            .expect("PHOXAL_CONFIG should be set");
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(config_json)?,
+            json!({
+                "gain": 0.7,
+                "labels": ["left", "right"],
+            })
+        );
+        Ok(())
+    }
+
     fn minimal_robot_yaml() -> &'static str {
         r#"schema: v0
 api_version: y2026_1
@@ -402,5 +839,12 @@ components:
   sources: {}
   instances: {}
 "#
+    }
+
+    fn minimal_robot_yaml_with_user_runtime(name: &str, runtime_yaml: &str) -> String {
+        minimal_robot_yaml().replace(
+            "\ncomponents:\n",
+            &format!("\nuser_runtimes:\n  {name}:{runtime_yaml}\ncomponents:\n"),
+        )
     }
 }
