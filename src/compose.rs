@@ -224,25 +224,24 @@ fn is_false(value: &bool) -> bool {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
-    use std::time::SystemTime;
 
     use phoxal::model::robot::RobotV1 as Robot;
-    use semver::Version;
+    use phoxal::model::robot::v1::Channel;
     use serde_yaml::{Mapping, Value};
 
     use super::*;
-    use crate::catalog::{PlatformRuntimeCatalog, PlatformRuntimeEntry, SUPPORTED_RUNTIME_TRAIN};
+    use crate::catalog::{PlatformRuntimeCatalog, PlatformRuntimeEntry};
     use crate::local_zenoh;
     use crate::resolver::{ImagePin, ResolvedPlatformRuntime, ResolvedRobot};
 
     static TEST_CATALOG_ENTRIES: &[PlatformRuntimeEntry] = &[PlatformRuntimeEntry {
         name: "asset",
+        api_versions: &["y2026_1"],
         uses_supervisor_api: false,
         wires_to_router: true,
     }];
 
     static TEST_CATALOG: PlatformRuntimeCatalog = PlatformRuntimeCatalog {
-        supported_runtimes_version_req: SUPPORTED_RUNTIME_TRAIN,
         entries: TEST_CATALOG_ENTRIES,
     };
 
@@ -339,12 +338,11 @@ mod tests {
     fn resolved_robot() -> anyhow::Result<ResolvedRobot> {
         Ok(ResolvedRobot {
             robot: Robot::parse_from_string(MINIMAL_ROBOT)?,
-            runtime_set_version: Version::parse("0.0.0-dev")?,
-            requested_runtime_set: "0.0.0-dev".to_string(),
-            releases_fetched_at: Some(SystemTime::UNIX_EPOCH),
+            api_version: "y2026_1".to_string(),
+            channel: Channel::Stable,
             platform_runtimes: vec![resolved_platform_runtime(
                 "asset",
-                "ghcr.io/phoxal/runtime-asset",
+                "ghcr.io/phoxal/runtime-asset:y2026_1-stable",
             )],
             user_runtimes: Vec::new(),
             components: Vec::new(),
@@ -352,11 +350,10 @@ mod tests {
         })
     }
 
-    fn resolved_platform_runtime(name: &str, image_repo: &str) -> ResolvedPlatformRuntime {
+    fn resolved_platform_runtime(name: &str, image_ref: &str) -> ResolvedPlatformRuntime {
         ResolvedPlatformRuntime {
             name: name.to_string(),
-            image_repo: image_repo.to_string(),
-            version: Version::parse("0.0.0-dev").expect("valid test version"),
+            image_ref: image_ref.to_string(),
             pin: ImagePin::Digest(format!("sha256:{name}")),
         }
     }
@@ -387,7 +384,7 @@ identity:
 structure: structure.urdf
 
 phoxal_runtimes:
-  version: "latest"
+  channel: stable
 
 motion:
   kinematic:

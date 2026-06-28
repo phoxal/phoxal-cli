@@ -9,13 +9,8 @@ use serde::Serialize;
 
 use crate::AppContext;
 use crate::catalog::CATALOG;
-use crate::host_paths;
 use crate::lockfile::{LOCKFILE_NAME, Lockfile};
-use crate::releases::ReleasesSnapshot;
-use crate::resolver::{
-    ReleaseSource, ResolveOptions, ResolvedRobot, resolve_with_release_source,
-    resolve_with_releases,
-};
+use crate::resolver::{ResolveOptions, ResolvedRobot, resolve};
 use crate::world;
 
 #[derive(Debug, Args)]
@@ -188,33 +183,10 @@ pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<Simulat
     write_simulation_files(resolved, options, &BTreeMap::new(), SimulateMode::DryRun)
 }
 
-pub fn prepare_with_releases(
-    project_start: &Path,
-    options: SimulateOptions,
-    releases: &ReleasesSnapshot,
-) -> Result<SimulatePlan> {
-    let resolved = resolve_project_with_releases(
-        project_start,
-        options.clone(),
-        SimulateMode::DryRun,
-        Some(releases),
-    )?;
-    write_simulation_files(resolved, options, &BTreeMap::new(), SimulateMode::DryRun)
-}
-
 fn resolve_project(
     project_start: &Path,
     options: SimulateOptions,
     mode: SimulateMode,
-) -> Result<ResolvedSimulation> {
-    resolve_project_with_releases(project_start, options, mode, None)
-}
-
-fn resolve_project_with_releases(
-    project_start: &Path,
-    options: SimulateOptions,
-    mode: SimulateMode,
-    releases: Option<&ReleasesSnapshot>,
 ) -> Result<ResolvedSimulation> {
     let robot_path = crate::resolver::discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
@@ -234,17 +206,14 @@ fn resolve_project_with_releases(
         let lockfile = lockfile
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("{} is required by --locked", lock_path.display()))?;
-        let snapshot = crate::lockfile::releases_snapshot_from_lockfile(lockfile)?;
-        let mut resolved = resolve_with_releases(
+        let mut resolved = resolve(
             &robot,
             &project_root,
             &CATALOG,
             ResolveOptions {
                 locked: true,
-                allow_floating: true,
                 resolve_external_artifacts: false,
             },
-            &snapshot,
         )?;
         crate::lockfile::apply_lockfile(lockfile, &mut resolved)
             .with_context(|| format!("{} is stale", lock_path.display()))?;
@@ -259,21 +228,9 @@ fn resolve_project_with_releases(
 
     let resolve_options = ResolveOptions {
         locked: false,
-        allow_floating: true,
         resolve_external_artifacts: options.resolve_external_artifacts,
     };
-    let resolved = if let Some(releases) = releases {
-        resolve_with_releases(&robot, &project_root, &CATALOG, resolve_options, releases)?
-    } else {
-        let cache_dir = host_paths::cache_dir()?;
-        resolve_with_release_source(
-            &robot,
-            &project_root,
-            &CATALOG,
-            resolve_options,
-            ReleaseSource::CacheDir(&cache_dir),
-        )?
-    };
+    let resolved = resolve(&robot, &project_root, &CATALOG, resolve_options)?;
     if let Some(lockfile) = &lockfile {
         let mut locked_resolved = resolved.clone();
         if crate::lockfile::apply_lockfile(lockfile, &mut locked_resolved).is_ok() {
@@ -415,18 +372,15 @@ fn report_plan_only(plan: &SimulatePlan) {
         println!("wrote {}", path.display());
     }
     println!(
-        "runtime set: {} (requested {})",
-        plan.resolved.runtime_set_version, plan.resolved.requested_runtime_set
+        "api_version: {} (channel {})",
+        plan.resolved.api_version, plan.resolved.channel
     );
     println!(
         "platform runtimes ({}):",
         plan.resolved.platform_runtimes.len()
     );
     for runtime in &plan.resolved.platform_runtimes {
-        println!(
-            "  - {} -> {}:{}",
-            runtime.name, runtime.image_repo, runtime.version
-        );
+        println!("  - {} -> {}", runtime.name, runtime.tag_ref());
     }
     println!("compose file: {}", plan.compose_path.display());
     println!("dry-run — no containers or processes started");
@@ -458,15 +412,23 @@ fn spawn_cached_tool(
     tool_name: &str,
     processes: &mut crate::process::SpawnedProcesses,
 ) -> Result<()> {
-    let cache_dir = host_paths::tools_cache_dir()?.join(tool_name);
-    if !cache_dir.is_dir() {
+    let tool = resolved
+        .tools
+        .iter()
+        .find(|tool| tool.name == tool_name)
+        .with_context(|| {
+            format!("resolved tool {tool_name} is missing; cannot spawn requested native tool")
+        })?;
+    let binary =
+        crate::simulator_staging::cached_tool_path(&tool.name, &tool.resolved, &tool.binary_name)?;
+    if !binary.is_file() {
         bail!(
-            "cached tool {tool_name} is missing under {}; it has not been provisioned",
-            cache_dir.display()
+            "cached tool {} v{} is missing at {}; it has not been provisioned",
+            tool.name,
+            tool.resolved,
+            binary.display()
         );
     }
-    let binary = newest_cached_binary(&cache_dir, tool_name)
-        .with_context(|| format!("failed to find cached binary for {tool_name}"))?;
     let mut command = ProcessCommand::new(binary);
     command.env("ROBOT_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447");
     command.env("ROBOT_ID", &resolved.robot.identity.id);
@@ -491,35 +453,6 @@ fn staged_webots_world_path(project_root: &Path) -> PathBuf {
         .join("webots")
         .join("worlds")
         .join("default.wbt")
-}
-
-fn newest_cached_binary(cache_dir: &Path, tool_name: &str) -> Result<PathBuf> {
-    let mut candidates = Vec::new();
-    let normalized_tool_name = tool_name.replace('_', "-");
-    for version in fs::read_dir(cache_dir)
-        .with_context(|| format!("failed to read {}", cache_dir.display()))?
-    {
-        let version = version?;
-        let version_path = version.path();
-        if !version_path.is_dir() {
-            continue;
-        }
-        for entry in fs::read_dir(&version_path)
-            .with_context(|| format!("failed to read {}", version_path.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.replace('_', "-").contains(&normalized_tool_name))
-            {
-                candidates.push(path);
-            }
-        }
-    }
-    candidates.sort();
-    candidates.pop().context("no cached binary found")
 }
 
 fn native_tool_labels(options: SimulateOptions) -> Vec<String> {
@@ -559,18 +492,13 @@ fn compose_service_names(resolved: &ResolvedRobot) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::SystemTime;
 
     #[test]
     fn live_resolve_missing_lock_requires_update_or_explicit_update_lock() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_robot_project(temp.path())?;
-        let snapshot = ReleasesSnapshot {
-            fetched_at: SystemTime::UNIX_EPOCH,
-            versions: vec!["0.8.0".into()],
-        };
 
-        let result = resolve_project_with_releases(
+        let result = resolve_project(
             temp.path(),
             SimulateOptions {
                 world: "test".to_string(),
@@ -579,7 +507,6 @@ mod tests {
                 ..SimulateOptions::default()
             },
             SimulateMode::Live,
-            Some(&snapshot),
         );
         let error = match result {
             Ok(_) => bail!(
@@ -624,7 +551,7 @@ identity:
 structure: structure.urdf
 
 phoxal_runtimes:
-  version: "latest"
+  channel: stable
 
 motion:
   kinematic:

@@ -70,10 +70,14 @@ impl RootCommand {
             Self::Doctor(command) => command.run(app).await,
             Self::Version => {
                 println!("phoxal-cli {}", long_version());
-                println!(
-                    "supported runtime train: {}",
-                    crate::catalog::SUPPORTED_RUNTIME_TRAIN
-                );
+                let mut api_versions = crate::catalog::CATALOG
+                    .entries
+                    .iter()
+                    .flat_map(|entry| entry.api_versions.iter().copied())
+                    .collect::<Vec<_>>();
+                api_versions.sort_unstable();
+                api_versions.dedup();
+                println!("official runtime API versions: {}", api_versions.join(", "));
                 Ok(())
             }
             Self::SelfCmd(command) => command.run(app).await,

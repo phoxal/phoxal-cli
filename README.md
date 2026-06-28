@@ -45,7 +45,7 @@ Example: `phoxal simulate default` finds `worlds/default.wbt` in the project.
 `scripts/live-simulate-gate.sh` is the documented gate that proves the
 separated repos run together end to end — `robot.yaml` → `phoxal-cli` → a real
 `phoxal.lock` (real GHCR digests) → generated `.phoxal/run/` → router → Webots
-→ the mandatory runtime set. It is the live counterpart to recovery Gates 8–9
+→ the mandatory API/channel runtime set. It is the live counterpart to recovery Gates 8–9
 in `phoxal/organization`'s `REPOSITORIES.md`, and depends on real image digests
 (#10) and a published runtime image set (`phoxal/framework#31`).
 
@@ -56,7 +56,7 @@ scripts/live-simulate-gate.sh --live     # full live run (needs Docker daemon + 
 ```
 
 The smoke phase runs `update --pin-digests`, asserts every runtime image in
-`phoxal.lock` is pinned to a real `repo@sha256:…` digest (never a tag ref), and
+`phoxal.lock` records a selected `image_ref` plus a real `sha256:…` digest, and
 runs `simulate default --locked --dry-run` to verify locked resolution and that
 the generated compose references those digest pins. It needs only
 `docker buildx` (no daemon). The `--live` phase additionally requires a running
@@ -71,7 +71,7 @@ missing, runtime startup, or bus connection).
 ```text
 ~/.phoxal/cache/                    GitHub releases, component clones, downloaded tools - shared across projects.
 ~/.phoxal/worlds/                   Optional fallback for shared world files (see Simulate above).
-~/.phoxal/config.yaml               Optional. Today only `zenoh_image: <ref>` overrides the compiled default.
+~/.phoxal/config.yaml               Optional. Today only `zenoh_image: <ref>` replaces the compiled default.
 
 <project>/.phoxal/run/              Generated compose + staged robot view (regenerated each simulate).
 <project>/.phoxal/webots/           Generated Webots controllers + protos.
