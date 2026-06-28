@@ -1,18 +1,43 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 
 use crate::AppContext;
 
 pub mod check;
 pub mod deploy;
 pub mod doctor;
+pub mod outdated;
+pub mod pull;
+pub mod robot;
 pub mod runtime;
 pub mod self_cmd;
 pub mod simulate;
 pub mod update;
 pub mod validate;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum MessageFormat {
+    #[default]
+    Human,
+    Json,
+}
+
+pub fn print_message<T: Serialize>(
+    value: &T,
+    human: impl FnOnce() -> Result<()>,
+    format: MessageFormat,
+) -> Result<()> {
+    match format {
+        MessageFormat::Human => human(),
+        MessageFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(value)?);
+            Ok(())
+        }
+    }
+}
 
 /// Version string shared by the `--version` flag and the `version` subcommand,
 /// e.g. `0.5.0 (macos-aarch64)`. clap prefixes `--version` with the binary name
@@ -60,6 +85,12 @@ pub enum RootCommand {
     Simulate(simulate::Simulate),
     #[command(about = "Build deployment artifacts.")]
     Deploy(deploy::Deploy),
+    #[command(about = "Scaffold and manage robot projects.")]
+    Robot(robot::Robot),
+    #[command(about = "Refresh official runtime images and host tools.")]
+    Pull(pull::Pull),
+    #[command(about = "Report newer remote image/tool digests than the local cache.")]
+    Outdated(outdated::Outdated),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
     #[command(about = "Manage user runtime crates.")]
@@ -78,6 +109,9 @@ impl RootCommand {
             Self::Update(command) => command.run(app).await,
             Self::Simulate(command) => command.run(app).await,
             Self::Deploy(command) => command.run(app).await,
+            Self::Robot(command) => command.run(app).await,
+            Self::Pull(command) => command.run(app).await,
+            Self::Outdated(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
             Self::Runtime(command) => command.run(app).await,
             Self::Version => {

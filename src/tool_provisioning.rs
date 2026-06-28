@@ -1,12 +1,11 @@
 //! Host-native tool provisioning.
 //!
-//! The Webots controller + supervisor are host-native binaries that ship as a
-//! single `phoxal/framework` release tarball (`phoxal-simulator-<version>-<target>.tar.gz`).
-//! The resolver records the explicit tool version and expected asset/binary
-//! names; this module performs the actual download + extraction into the tool
-//! cache so a live `simulate` can spawn the controllers without the user
-//! fetching anything by hand.
+//! Webots controllers, joypad, and future host-native tools ship as release
+//! tarballs rather than Docker images. The resolver records each tool's
+//! explicit version plus expected asset/binary names; this module performs the
+//! download + extraction into the tool cache before commands run the binaries.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,75 +21,57 @@ use crate::simulator_staging::cached_tool_path;
 use crate::ui::Ui;
 use crate::utils::make_executable;
 
-const SIMULATOR_WEBOTS_CONTROLLER: &str = "simulator_webots_controller";
-const SIMULATOR_WEBOTS_SUPERVISOR: &str = "simulator_webots_supervisor";
+type ToolAssetKey = (String, String, String);
+type MissingToolBinary<'a> = (&'a ResolvedTool, PathBuf);
 
-/// Ensure the host-native Webots controller + supervisor binaries are present in
-/// the tool cache, downloading them when they are missing.
+/// Ensure the requested host-native tool binaries are present in the cache,
+/// downloading and extracting release assets when binaries are missing.
 ///
-/// The two binaries ride a single `phoxal/framework` simulator release tarball,
-/// so when either is missing we download that tarball once, verify it against
-/// the release's published sha256, and extract both binaries into
-/// `~/.phoxal/cache/tools/<tool>/<version>/`.
-///
-/// Idempotent: binaries already in the cache are left untouched, so a warm cache
-/// makes this a no-op. Intended for the live `simulate` path only — a dry-run
-/// must stay offline and therefore does not call this.
-pub fn ensure_simulator_binaries(ui: &Ui, resolved: &ResolvedRobot) -> Result<()> {
-    let mut wanted: Vec<(&ResolvedTool, PathBuf)> = Vec::new();
-    for tool_name in [SIMULATOR_WEBOTS_CONTROLLER, SIMULATOR_WEBOTS_SUPERVISOR] {
-        let Some(tool) = resolved.tools.iter().find(|tool| tool.name == tool_name) else {
-            // The resolver always emits both simulator tools; their absence is a
-            // resolution contract break, not a recoverable provisioning miss.
-            bail!(
-                "resolved tool {tool_name} is missing from the resolution; cannot provision the Webots binaries"
-            );
-        };
-        let dest = cached_tool_path(&tool.name, &tool.resolved, &tool.binary_name)?;
-        wanted.push((tool, dest));
-    }
-
-    // Controller + supervisor are version-matched and share one tarball (same
-    // repo + version + asset). Assert that invariant across BOTH tools — not
-    // just the missing ones — so that a cached-one/missing-one split can't mix a
-    // stale cached binary with one freshly downloaded from a different asset if a
-    // future catalog change splits them.
-    let (lead_tool, _) = &wanted[0];
-    let repo = lead_tool.repo.as_str();
-    let version = lead_tool.resolved.as_str();
-    let asset = lead_tool.asset.as_str();
-    for (tool, _) in &wanted {
-        if tool.repo != repo || tool.resolved != version || tool.asset != asset {
-            bail!(
-                "simulator tools disagree on release asset ({} {} {} vs {} {} {}); cannot provision from a single tarball",
-                lead_tool.name,
-                version,
-                asset,
-                tool.name,
-                tool.resolved,
-                tool.asset
-            );
-        }
-    }
-
-    let missing: Vec<&(&ResolvedTool, PathBuf)> =
-        wanted.iter().filter(|(_, dest)| !dest.is_file()).collect();
-    if missing.is_empty() {
+/// Tools sharing the same `(repo, version, asset)` are grouped so one tarball
+/// download can satisfy multiple binaries, for example the Webots controller
+/// and supervisor. Idempotent: binaries already in the cache are left untouched.
+pub fn ensure_tool_binaries<I, S>(ui: &Ui, resolved: &ResolvedRobot, tool_names: I) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let requested = tool_names
+        .into_iter()
+        .map(|name| name.as_ref().to_string())
+        .collect::<BTreeSet<_>>();
+    if requested.is_empty() {
         return Ok(());
     }
 
-    ui.info(format!(
-        "provisioning Webots simulator binaries from {repo} v{version}"
-    ));
-    let tarball = download_release_asset(ui, repo, version, asset)?;
-    for (tool, dest) in &missing {
-        extract_binary(&tarball, &tool.binary_name, dest)
-            .with_context(|| format!("failed to extract {} from {asset}", tool.binary_name))?;
-        ui.success(format!(
-            "staged {} into {}",
-            tool.binary_name,
-            dest.display()
-        ));
+    let mut missing_by_asset: BTreeMap<ToolAssetKey, Vec<MissingToolBinary<'_>>> = BTreeMap::new();
+    for tool_name in requested {
+        let Some(tool) = resolved.tools.iter().find(|tool| tool.name == tool_name) else {
+            bail!(
+                "resolved tool {tool_name} is missing from the resolution; cannot provision requested host tools"
+            );
+        };
+        let dest = cached_tool_path(&tool.name, &tool.resolved, &tool.binary_name)?;
+        if dest.is_file() {
+            continue;
+        }
+        missing_by_asset
+            .entry((tool.repo.clone(), tool.resolved.clone(), tool.asset.clone()))
+            .or_default()
+            .push((tool, dest));
+    }
+
+    for ((repo, version, asset), missing) in missing_by_asset {
+        ui.info(format!("provisioning host tools from {repo} v{version}"));
+        let tarball = download_release_asset(ui, &repo, &version, &asset)?;
+        for (tool, dest) in missing {
+            extract_binary(&tarball, &tool.binary_name, &dest)
+                .with_context(|| format!("failed to extract {} from {asset}", tool.binary_name))?;
+            ui.success(format!(
+                "staged {} into {}",
+                tool.binary_name,
+                dest.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -148,14 +129,9 @@ fn download_release_asset(ui: &Ui, repo: &str, version: &str, asset: &str) -> Re
 /// truncated binary in the cache.
 fn extract_binary(tarball: &[u8], binary_name: &str, dest: &Path) -> Result<()> {
     let mut archive = Archive::new(GzDecoder::new(tarball));
-    for entry in archive
-        .entries()
-        .context("failed to read simulator tarball")?
-    {
-        let mut entry = entry.context("failed to read simulator tarball entry")?;
-        let entry_path = entry
-            .path()
-            .context("simulator tarball entry has no path")?;
+    for entry in archive.entries().context("failed to read tool tarball")? {
+        let mut entry = entry.context("failed to read tool tarball entry")?;
+        let entry_path = entry.path().context("tool tarball entry has no path")?;
         if entry_path.file_name().and_then(|name| name.to_str()) != Some(binary_name) {
             continue;
         }
@@ -174,7 +150,7 @@ fn extract_binary(tarball: &[u8], binary_name: &str, dest: &Path) -> Result<()> 
             .with_context(|| format!("failed to finalize {}", dest.display()))?;
         return Ok(());
     }
-    bail!("simulator tarball does not contain expected binary {binary_name}")
+    bail!("tool tarball does not contain expected binary {binary_name}")
 }
 
 #[cfg(test)]

@@ -13,7 +13,6 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
         temp.path(),
         SimulateOptions {
             world: "test".to_string(),
-            rerun_proxy: true,
             joypad: true,
             resolve_external_artifacts: false,
             ..SimulateOptions::default()
@@ -61,7 +60,6 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
     let compose = fs::read_to_string(&plan.compose_path)?;
     assert!(compose.starts_with("name: testbot\n"));
     assert!(compose.contains("x-phoxal-native-tools"));
-    assert!(compose.contains("rerun_proxy"));
     assert!(compose.contains("joypad"));
     let compose_yaml: Value = serde_yaml::from_str(&compose)?;
     let services = mapping(
@@ -120,7 +118,6 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
     assert!(state.contains("mode: dry-run"));
     assert!(!state.contains("simulator_webots_controller"));
     assert!(!state.contains("simulator_webots_supervisor"));
-    assert!(state.contains("rerun_proxy"));
     assert!(state.contains("joypad"));
     assert!(state.contains("webots"));
 

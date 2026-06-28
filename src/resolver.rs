@@ -221,17 +221,90 @@ pub fn load_robot_with_extras(path: &Path) -> Result<LoadedRobot> {
         .with_context(|| format!("failed to read robot file {}", path.display()))?;
     let mut yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents)
         .with_context(|| format!("failed to parse robot file {}", path.display()))?;
-    let (extras, stripped_extras) = take_manifest_extras(&mut yaml, path)?;
+    parse_robot_value_with_extras(&mut yaml, path)
+}
 
-    let robot = if stripped_extras {
-        let sanitized = serde_yaml::to_string(&yaml)
-            .with_context(|| format!("failed to prepare {}", path.display()))?;
-        Robot::read_from_string(&sanitized)
-    } else {
-        Robot::read_from_string(&contents)
-    }?;
+pub fn load_robot_with_extras_and_overlays(
+    path: &Path,
+    overlays: &[String],
+) -> Result<LoadedRobot> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read robot file {}", path.display()))?;
+    let mut yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents)
+        .with_context(|| format!("failed to parse robot file {}", path.display()))?;
+
+    for overlay in overlays {
+        validate_overlay_name(overlay)?;
+        let overlay_path = path.with_file_name(format!("robot.{overlay}.yaml"));
+        let overlay_contents = fs::read_to_string(&overlay_path)
+            .with_context(|| format!("failed to read overlay {}", overlay_path.display()))?;
+        let overlay_yaml = serde_yaml::from_str::<serde_yaml::Value>(&overlay_contents)
+            .with_context(|| format!("failed to parse overlay {}", overlay_path.display()))?;
+        merge_yaml_overlay(&mut yaml, overlay_yaml, &mut Vec::new());
+    }
+
+    parse_robot_value_with_extras(&mut yaml, path)
+}
+
+fn parse_robot_value_with_extras(yaml: &mut serde_yaml::Value, path: &Path) -> Result<LoadedRobot> {
+    let (extras, _) = take_manifest_extras(yaml, path)?;
+    let sanitized = serde_yaml::to_string(&yaml)
+        .with_context(|| format!("failed to prepare {}", path.display()))?;
+    let robot = Robot::read_from_string(&sanitized)?;
 
     Ok(LoadedRobot { robot, extras })
+}
+
+fn validate_overlay_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name == "."
+        || name == ".."
+        || name.chars().any(char::is_whitespace)
+    {
+        bail!(
+            "overlay name '{name}' is invalid; use a simple name such as `prod` for robot.prod.yaml"
+        );
+    }
+    Ok(())
+}
+
+fn merge_yaml_overlay(
+    base: &mut serde_yaml::Value,
+    overlay: serde_yaml::Value,
+    path: &mut Vec<String>,
+) {
+    if is_replace_whole_user_runtime_config(path) {
+        *base = overlay;
+        return;
+    }
+
+    match (base, overlay) {
+        (serde_yaml::Value::Mapping(base_map), serde_yaml::Value::Mapping(overlay_map)) => {
+            for (key, value) in overlay_map {
+                let pushed_path = if let Some(segment) = key.as_str().map(str::to_string) {
+                    path.push(segment);
+                    true
+                } else {
+                    false
+                };
+                if let Some(existing) = base_map.get_mut(&key) {
+                    merge_yaml_overlay(existing, value, path);
+                } else {
+                    base_map.insert(key, value);
+                }
+                if pushed_path {
+                    path.pop();
+                }
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
+}
+
+fn is_replace_whole_user_runtime_config(path: &[String]) -> bool {
+    path.len() == 3 && path[0] == "user_runtimes" && path[2] == "config"
 }
 
 fn take_manifest_extras(
@@ -299,7 +372,8 @@ pub fn resolve(
     let platform_names = catalog.names_for_api(&api_version);
     if platform_names.is_empty() {
         bail!(
-            "API version {api_version} is not available in the compiled-in platform runtime catalog"
+            "{}",
+            format_unavailable_api_version_error(catalog, &api_version, channel.as_str())
         );
     }
     robot
@@ -700,6 +774,49 @@ fn join_errors(errors: Vec<phoxal::model::robot::ValidationError>) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn format_unavailable_api_version_error(
+    catalog: &PlatformRuntimeCatalog,
+    api_version: &str,
+    channel: &str,
+) -> String {
+    let mut available = catalog
+        .entries
+        .iter()
+        .flat_map(|entry| entry.api_versions.iter().copied())
+        .collect::<Vec<_>>();
+    available.sort_unstable();
+    available.dedup();
+    let suggested = available
+        .iter()
+        .rev()
+        .copied()
+        .find(|candidate| *candidate != api_version);
+
+    let mut message = format!(
+        "API version {api_version} is not available on channel {channel}: this CLI has no complete official runtime image set for that API version"
+    );
+    if !available.is_empty() {
+        message.push_str("\n\nAvailable api_versions in this CLI: ");
+        message.push_str(&available.join(", "));
+    }
+    message.push_str("\n\nFix:");
+    if let Some(suggested) = suggested {
+        message.push_str("\n  - use api_version: ");
+        message.push_str(suggested);
+    } else {
+        message.push_str("\n  - use an api_version listed by `phoxal-cli version`");
+    }
+    message.push_str(
+        "\n  - or use phoxal_runtimes.channel: edge if this API version is intentionally experimental",
+    );
+    message.push_str("\n  - or wait until Phoxal publishes the complete ");
+    message.push_str(api_version);
+    message.push('-');
+    message.push_str(channel);
+    message.push_str(" official runtime set");
+    message
 }
 
 #[cfg(test)]

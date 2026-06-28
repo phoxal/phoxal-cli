@@ -1,30 +1,58 @@
 use std::{
+    collections::BTreeMap,
     fmt,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::AppContext;
 use crate::catalog::CATALOG;
 use crate::check as graph_check;
+use crate::commands::MessageFormat;
 use crate::component_driver::component_crate_dir;
 use crate::resolver::{
     ResolveOptions, ResolvedComponent, ResolvedRobot, discover_robot_yaml, load_robot, resolve,
 };
+use crate::simulator_staging::cached_tool_path;
 use crate::utils::{cargo_binary_name, resolve_project_path};
 
 #[derive(Debug, Args)]
-pub struct CheckCmd;
+pub struct CheckCmd {
+    #[arg(
+        long,
+        help = "Refresh official runtime images and host tools before running emit-apis."
+    )]
+    pub pull: bool,
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Only build/check the named user runtime crate after resolving the full project."
+    )]
+    pub runtime: Option<String>,
+    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
+    pub message_format: MessageFormat,
+}
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckOptions {
+    pub pull: bool,
+    pub runtime: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RawEmitApis {
     pub artifact: RawArtifact,
     pub api_version: String,
+    #[serde(default)]
+    pub bus_abi: Option<String>,
     #[serde(alias = "contracts")]
     pub required_contracts: Vec<RawContract>,
+    #[serde(default)]
+    pub config_schema: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -42,6 +70,7 @@ pub struct RawContract {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckOutcome {
     pub missing_images: Vec<String>,
+    pub official_runtime_refs: BTreeMap<String, String>,
     pub report: graph_check::Report,
 }
 
@@ -55,18 +84,50 @@ impl CheckOutcome {
 impl CheckCmd {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let project_root = app.project.root().to_path_buf();
-        let result = tokio::task::spawn_blocking(move || run(&project_root))
+        let options = CheckOptions {
+            pull: self.pull,
+            runtime: self.runtime.clone(),
+        };
+        let ui = app.ui;
+        let result = tokio::task::spawn_blocking(move || run(&project_root, options, &ui))
             .await
             .context("check worker failed")??;
 
         ensure_check_outcome_ok(&result.api_version, &result.channel, &result.outcome)?;
 
-        println!(
-            "ok: {} participants validated against api_version {} (channel {})",
-            result.participant_count, result.api_version, result.channel
-        );
+        if result.channel != "stable" {
+            eprintln!(
+                "warning: v0 is pre-stable: artifacts built at different times may not interoperate; pin digests with phoxal-cli deploy build"
+            );
+        }
+
+        let output = CheckOutput {
+            status: "ok",
+            api_version: result.api_version.clone(),
+            channel: result.channel.clone(),
+            participant_count: result.participant_count,
+        };
+        crate::commands::print_message(
+            &output,
+            || {
+                println!(
+                    "ok: {} participants validated against api_version {} (channel {})",
+                    result.participant_count, result.api_version, result.channel
+                );
+                Ok(())
+            },
+            self.message_format,
+        )?;
         Ok(())
     }
+}
+
+#[derive(Debug, Serialize)]
+struct CheckOutput {
+    status: &'static str,
+    api_version: String,
+    channel: String,
+    participant_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +138,11 @@ struct CheckRunResult {
     outcome: CheckOutcome,
 }
 
-fn run(project_start: &std::path::Path) -> Result<CheckRunResult> {
+fn run(
+    project_start: &std::path::Path,
+    options: CheckOptions,
+    ui: &crate::Ui,
+) -> Result<CheckRunResult> {
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
     let project_root = robot_path
@@ -98,15 +163,30 @@ fn run(project_start: &std::path::Path) -> Result<CheckRunResult> {
         .iter()
         .map(|runtime| (runtime.name.clone(), runtime.tag_ref()))
         .collect::<Vec<_>>();
-    let source_participants =
+    if options.pull {
+        crate::local_build::pull_platform_image_refs(&platform_refs)?;
+    }
+    let tool_names = resolved
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    crate::tool_provisioning::ensure_tool_binaries(ui, &resolved, tool_names)?;
+    let tool_participants = tool_participants_from_resolved(&resolved)?;
+    let mut source_participants =
         source_participants_from_resolved(project_root, &resolved, component_crate_dir)?;
-    let participant_count = platform_refs.len() + source_participants.len();
+    if let Some(runtime_name) = options.runtime.as_deref() {
+        filter_to_user_runtime(&resolved, &mut source_participants, runtime_name)?;
+    }
+    let participant_count =
+        platform_refs.len() + tool_participants.len() + source_participants.len();
     let outcome = run_check(
         &platform_refs,
+        &tool_participants,
         &source_participants,
         &resolved.api_version,
-        &resolved.channel.to_string(),
         fetch_emit_apis_from_docker,
+        fetch_emit_apis_from_tool,
         build_emit_apis_from_source,
     )?;
 
@@ -158,6 +238,27 @@ pub enum SourceParticipantKind {
     ComponentDriver,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolParticipant {
+    pub name: String,
+    pub binary_path: PathBuf,
+}
+
+pub(crate) fn tool_participants_from_resolved(
+    resolved: &ResolvedRobot,
+) -> Result<Vec<ToolParticipant>> {
+    resolved
+        .tools
+        .iter()
+        .map(|tool| {
+            Ok(ToolParticipant {
+                name: tool.name.clone(),
+                binary_path: cached_tool_path(&tool.name, &tool.resolved, &tool.binary_name)?,
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn source_participants_from_resolved(
     project_root: &Path,
     resolved: &ResolvedRobot,
@@ -194,15 +295,46 @@ pub(crate) fn source_participants_from_resolved(
     Ok(participants)
 }
 
+fn filter_to_user_runtime(
+    resolved: &ResolvedRobot,
+    participants: &mut Vec<SourceParticipant>,
+    runtime_name: &str,
+) -> Result<()> {
+    if !resolved
+        .user_runtimes
+        .iter()
+        .any(|runtime| runtime.name == runtime_name)
+    {
+        let available = resolved
+            .user_runtimes
+            .iter()
+            .map(|runtime| runtime.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if available.is_empty() {
+            bail!("user runtime '{runtime_name}' is not defined in user_runtimes");
+        }
+        bail!(
+            "user runtime '{runtime_name}' is not defined in user_runtimes; available: {available}"
+        );
+    }
+    participants.retain(|participant| {
+        participant.kind == SourceParticipantKind::UserRuntime && participant.name == runtime_name
+    });
+    Ok(())
+}
+
 pub fn run_check(
     resolved_platform_image_refs: &[(String, String)],
+    tool_participants: &[ToolParticipant],
     source_participants: &[SourceParticipant],
     root_api: &str,
-    _channel: &str,
     mut fetch: impl FnMut(&str) -> Result<RawEmitApis>,
+    mut fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
     mut build: impl FnMut(&Path) -> Result<RawEmitApis>,
 ) -> Result<CheckOutcome> {
     let mut missing_images = Vec::new();
+    let mut official_runtime_refs = BTreeMap::new();
     let mut participants = Vec::new();
 
     for (runtime_name, image_ref) in resolved_platform_image_refs {
@@ -218,8 +350,30 @@ pub fn run_check(
                 });
             }
         };
+        let artifact_id = raw.artifact.id.clone();
         let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
             format!("failed to interpret emit-apis for runtime {runtime_name} ({image_ref})")
+        })?;
+        official_runtime_refs.insert(runtime_name.clone(), image_ref.clone());
+        official_runtime_refs.insert(format!("runtime-{runtime_name}"), image_ref.clone());
+        official_runtime_refs.insert(artifact_id, image_ref.clone());
+        participants.push(participant);
+    }
+
+    for tool in tool_participants {
+        let raw = fetch_tool(&tool.binary_path).with_context(|| {
+            format!(
+                "failed to obtain emit-apis for tool {} ({})",
+                tool.name,
+                tool.binary_path.display()
+            )
+        })?;
+        let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
+            format!(
+                "failed to interpret emit-apis for tool {} ({})",
+                tool.name,
+                tool.binary_path.display()
+            )
         })?;
         participants.push(participant);
     }
@@ -247,6 +401,7 @@ pub fn run_check(
     let report = graph_check::check_graph(&participants, root_api);
     Ok(CheckOutcome {
         missing_images,
+        official_runtime_refs,
         report,
     })
 }
@@ -256,6 +411,17 @@ pub(crate) fn fetch_emit_apis_from_docker(image_ref: &str) -> Result<RawEmitApis
         .map_err(MissingImageError::new)?;
     serde_json::from_str(&output)
         .with_context(|| format!("docker emit-apis output for {image_ref} was not valid JSON"))
+}
+
+pub(crate) fn fetch_emit_apis_from_tool(binary_path: &Path) -> Result<RawEmitApis> {
+    let executable = binary_path.to_string_lossy();
+    let output = crate::shell::run_stdout(executable.as_ref(), ["emit-apis"], None)?;
+    serde_json::from_str(&output).with_context(|| {
+        format!(
+            "emit-apis output from tool {} was not valid JSON",
+            binary_path.display()
+        )
+    })
 }
 
 pub(crate) fn build_emit_apis_from_source(dir: &Path) -> Result<RawEmitApis> {
@@ -316,6 +482,8 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
         Ok(Self {
             artifact_id,
             api_version: raw.api_version,
+            bus_abi: raw.bus_abi,
+            config_schema: raw.config_schema,
             contracts,
         })
     }
@@ -334,7 +502,10 @@ pub(crate) fn ensure_check_outcome_ok(
     }
 
     if !outcome.report.is_ok() {
-        bail!("{}", format_report_error(&outcome.report));
+        bail!(
+            "{}",
+            format_report_error(&outcome.report, &outcome.official_runtime_refs)
+        );
     }
 
     Ok(())
@@ -351,16 +522,69 @@ fn format_missing_images_error(
         message.push_str("\n  - ");
         message.push_str(image_ref);
     }
+    message.push_str("\n\nFix:");
+    if let Some(api) = suggested_available_api_version(api_version) {
+        message.push_str("\n  - use api_version: ");
+        message.push_str(api);
+    } else {
+        message.push_str("\n  - use an api_version listed by `phoxal-cli version`");
+    }
+    message.push_str(
+        "\n  - or use phoxal_runtimes.channel: edge if this API version is intentionally experimental",
+    );
+    message.push_str("\n  - or wait until Phoxal publishes the complete ");
+    message.push_str(api_version);
+    message.push('-');
+    message.push_str(channel);
+    message.push_str(" official runtime set");
     message
 }
 
-fn format_report_error(report: &graph_check::Report) -> String {
+fn suggested_available_api_version(requested: &str) -> Option<&'static str> {
+    let mut versions = CATALOG
+        .entries
+        .iter()
+        .flat_map(|entry| entry.api_versions.iter().copied())
+        .filter(|api| *api != requested)
+        .collect::<Vec<_>>();
+    versions.sort_unstable();
+    versions.dedup();
+    versions.pop()
+}
+
+fn format_report_error(
+    report: &graph_check::Report,
+    official_runtime_refs: &BTreeMap<String, String>,
+) -> String {
     let mut message = String::from("robot graph check failed:");
     for problem in &report.problems {
-        message.push_str("\n  - ");
-        message.push_str(&format_problem(problem));
+        if let Some(formatted) = format_official_runtime_mismatch(problem, official_runtime_refs) {
+            message.push_str("\n\n");
+            message.push_str(&formatted);
+        } else {
+            message.push_str("\n  - ");
+            message.push_str(&format_problem(problem));
+        }
     }
     message
+}
+
+fn format_official_runtime_mismatch(
+    problem: &graph_check::Problem,
+    official_runtime_refs: &BTreeMap<String, String>,
+) -> Option<String> {
+    let graph_check::Problem::ApiVersionMismatch {
+        artifact_id,
+        expected,
+        found,
+    } = problem
+    else {
+        return None;
+    };
+    let selected = official_runtime_refs.get(artifact_id)?;
+    Some(format!(
+        "official runtime image reports the wrong api_version\n\n{artifact_id}:\n  selected: {selected}\n  expected: {expected}\n  emitted:  {found}"
+    ))
 }
 
 fn format_problem(problem: &graph_check::Problem) -> String {
@@ -425,9 +649,9 @@ mod tests {
 
         let outcome = run_check(
             &images,
+            &[],
             &sources,
             "y2026_1",
-            "stable",
             |image_ref| match image_ref {
                 "mission:ok" => Ok(raw(
                     "mission",
@@ -436,6 +660,7 @@ mod tests {
                 )),
                 unexpected => bail!("unexpected image {unexpected}"),
             },
+            |_| bail!("no tools should be fetched"),
             |dir| {
                 if dir == Path::new("/fake/project/runtimes/drive") {
                     Ok(raw(
@@ -463,9 +688,9 @@ mod tests {
 
         let outcome = run_check(
             &images,
+            &[],
             &sources,
             "y2026_1",
-            "stable",
             |image_ref| match image_ref {
                 "mission:ok" => Ok(raw(
                     "mission",
@@ -474,10 +699,56 @@ mod tests {
                 )),
                 unexpected => bail!("unexpected image {unexpected}"),
             },
+            |_| bail!("no tools should be fetched"),
             |dir| {
                 if dir == Path::new("/fake/project/components/ddsm115") {
                     Ok(raw(
                         "ddsm115",
+                        "y2026_1",
+                        &[("drive::Target", "drive/target", "subscribe")],
+                    ))
+                } else {
+                    bail!("unexpected source dir {}", dir.display())
+                }
+            },
+        )?;
+
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn tools_are_included_in_graph_check() -> Result<()> {
+        let tools = vec![ToolParticipant {
+            name: "joypad".to_string(),
+            binary_path: PathBuf::from("/fake/cache/joypad"),
+        }];
+        let sources = vec![SourceParticipant::user_runtime(
+            "drive".to_string(),
+            PathBuf::from("/fake/project/runtimes/drive"),
+        )];
+
+        let outcome = run_check(
+            &[],
+            &tools,
+            &sources,
+            "y2026_1",
+            |_| bail!("no platform images should be fetched"),
+            |path| {
+                if path == Path::new("/fake/cache/joypad") {
+                    Ok(raw(
+                        "joypad",
+                        "y2026_1",
+                        &[("drive::Target", "drive/target", "publish")],
+                    ))
+                } else {
+                    bail!("unexpected tool path {}", path.display())
+                }
+            },
+            |dir| {
+                if dir == Path::new("/fake/project/runtimes/drive") {
+                    Ok(raw(
+                        "drive",
                         "y2026_1",
                         &[("drive::Target", "drive/target", "subscribe")],
                     ))
@@ -500,10 +771,11 @@ mod tests {
 
         let outcome = run_check(
             &[],
+            &[],
             &sources,
             "y2026_1",
-            "stable",
             |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
             |_| Ok(raw("drive", "y2026_2", &[])),
         )?;
 
@@ -528,10 +800,11 @@ mod tests {
 
         let outcome = run_check(
             &[],
+            &[],
             &sources,
             "y2026_1",
-            "stable",
             |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
             |_| Ok(raw("ddsm115", "y2026_2", &[])),
         )?;
 
@@ -556,10 +829,11 @@ mod tests {
 
         let error = run_check(
             &[],
+            &[],
             &sources,
             "y2026_1",
-            "stable",
             |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
             |_| Err(MissingImageError::new(anyhow!("source build failed")).into()),
         )
         .expect_err("source build failures should abort check");
@@ -581,10 +855,11 @@ mod tests {
 
         let error = run_check(
             &[],
+            &[],
             &sources,
             "y2026_1",
-            "stable",
             |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
             |_| Err(anyhow!("component build failed")),
         )
         .expect_err("component driver build failures should abort check");
@@ -642,10 +917,11 @@ mod tests {
         let mut built = Vec::new();
         let outcome = run_check(
             &[],
+            &[],
             &source_participants,
             "y2026_1",
-            "stable",
             |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
             |dir| {
                 built.push(dir.to_path_buf());
                 Ok(raw("ddsm115", "y2026_1", &[]))
@@ -670,8 +946,8 @@ mod tests {
         let outcome = run_check(
             &images,
             &[],
+            &[],
             "y2026_1",
-            "stable",
             |image_ref| match image_ref {
                 "mission:ok" => Ok(raw("mission", "y2026_1", &[])),
                 "ghcr.io/phoxal/runtime-drive:y2026_1-stable" => {
@@ -679,6 +955,7 @@ mod tests {
                 }
                 unexpected => bail!("unexpected image {unexpected}"),
             },
+            |_| bail!("no tools should be fetched"),
             |_| bail!("no source runtimes should be built"),
         )?;
 
@@ -714,6 +991,7 @@ mod tests {
             r#"{
                 "artifact": { "id": "drive", "ignored": true },
                 "api_version": "y2026_1",
+                "bus_abi": "v0",
                 "required_contracts": [
                     {
                         "family": "drive::Target",
@@ -721,13 +999,23 @@ mod tests {
                         "direction": "subscribe",
                         "ignored": true
                     }
-                ]
+                ],
+                "config_schema": { "type": "object" }
             }"#,
         )?;
         let participant = graph_check::ParticipantApis::try_from(parsed)?;
 
         assert_eq!(participant.artifact_id, "drive");
         assert_eq!(participant.api_version, "y2026_1");
+        assert_eq!(participant.bus_abi.as_deref(), Some("v0"));
+        assert_eq!(
+            participant
+                .config_schema
+                .as_ref()
+                .and_then(|schema| schema.get("type"))
+                .and_then(Value::as_str),
+            Some("object")
+        );
         assert_eq!(participant.contracts[0].direction, Direction::Subscribe);
         Ok(())
     }
@@ -736,6 +1024,7 @@ mod tests {
         RawEmitApis {
             artifact: RawArtifact { id: id.to_string() },
             api_version: api_version.to_string(),
+            bus_abi: None,
             required_contracts: contracts
                 .iter()
                 .map(|(family, topic, direction)| RawContract {
@@ -744,6 +1033,7 @@ mod tests {
                     direction: (*direction).to_string(),
                 })
                 .collect(),
+            config_schema: None,
         }
     }
 

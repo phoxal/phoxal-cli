@@ -4,16 +4,17 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::AppContext;
 use crate::catalog::CATALOG;
+use crate::commands::MessageFormat;
 use crate::commands::check;
 use crate::component_driver::component_crate_dir;
 use crate::compose::LaunchClock;
 use crate::resolver::{
     ResolveOptions, ResolvedRobot, ResolvedUserRuntime, RobotManifestExtras, discover_robot_yaml,
-    load_robot_with_extras, resolve,
+    load_robot_with_extras_and_overlays, resolve,
 };
 use crate::utils::resolve_project_path;
 
@@ -33,11 +34,20 @@ pub enum DeploySubcommand {
 pub struct Build {
     #[arg(long, value_enum, default_value_t = DeployTarget::Compose)]
     pub target: DeployTarget,
+    #[arg(
+        long,
+        value_name = "ENV",
+        help = "Apply robot.<env>.yaml overlay before building the deployment artifact."
+    )]
+    pub env: Vec<String>,
     #[arg(long, value_name = "PATH")]
     pub output: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
+    pub message_format: MessageFormat,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
 pub enum DeployTarget {
     Compose,
     Balena,
@@ -46,15 +56,17 @@ pub enum DeployTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildOptions {
     pub target: DeployTarget,
+    pub env: Vec<String>,
     pub output: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BuildSummary {
     pub output_path: PathBuf,
     pub bundle_dir: PathBuf,
     pub platform_runtime_count: usize,
     pub user_runtime_count: usize,
+    pub applied_overlays: Vec<String>,
 }
 
 impl Deploy {
@@ -70,15 +82,25 @@ impl Build {
         let project_root = app.project.root().to_path_buf();
         let options = BuildOptions {
             target: self.target,
+            env: self.env.clone(),
             output: self.output.clone(),
         };
         let summary = tokio::task::spawn_blocking(move || run(&project_root, options))
             .await
             .context("deploy build worker failed")??;
 
-        println!("wrote deployment bundle: {}", summary.bundle_dir.display());
-        println!("wrote compose artifact: {}", summary.output_path.display());
-        Ok(())
+        crate::commands::print_message(
+            &summary,
+            || {
+                if !summary.applied_overlays.is_empty() {
+                    println!("applied overlays: {}", summary.applied_overlays.join(", "));
+                }
+                println!("wrote deployment bundle: {}", summary.bundle_dir.display());
+                println!("wrote compose artifact: {}", summary.output_path.display());
+                Ok(())
+            },
+            self.message_format,
+        )
     }
 }
 
@@ -92,7 +114,7 @@ pub fn run(project_start: &Path, options: BuildOptions) -> Result<BuildSummary> 
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let loaded = load_robot_with_extras(&robot_path)?;
+    let loaded = load_robot_with_extras_and_overlays(&robot_path, &options.env)?;
     let resolved = resolve(
         &loaded.robot,
         project_root,
@@ -146,6 +168,7 @@ pub fn run(project_start: &Path, options: BuildOptions) -> Result<BuildSummary> 
         bundle_dir,
         platform_runtime_count: resolved.platform_runtimes.len(),
         user_runtime_count: resolved.user_runtimes.len(),
+        applied_overlays: options.env,
     })
 }
 
@@ -155,14 +178,22 @@ fn run_pinned_graph_check(project_root: &Path, resolved: &ResolvedRobot) -> Resu
         .iter()
         .map(|runtime| (runtime.name.clone(), runtime.deploy_ref()))
         .collect::<Vec<_>>();
+    let tool_names = resolved
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    crate::tool_provisioning::ensure_tool_binaries(&crate::Ui::new(), resolved, tool_names)?;
+    let tool_participants = check::tool_participants_from_resolved(resolved)?;
     let source_participants =
         check::source_participants_from_resolved(project_root, resolved, component_crate_dir)?;
     let outcome = check::run_check(
         &platform_refs,
+        &tool_participants,
         &source_participants,
         &resolved.api_version,
-        &resolved.channel.to_string(),
         check::fetch_emit_apis_from_docker,
+        check::fetch_emit_apis_from_tool,
         check::build_emit_apis_from_source,
     )?;
     check::ensure_check_outcome_ok(

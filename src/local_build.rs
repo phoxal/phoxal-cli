@@ -12,17 +12,27 @@ use crate::shell;
 use crate::utils::resolve_project_path;
 
 pub(crate) fn pull_platform_images(app: &AppContext, resolved: &ResolvedRobot) -> Result<()> {
-    for runtime in &resolved.platform_runtimes {
+    let refs = resolved
+        .platform_runtimes
+        .iter()
+        .map(|runtime| (runtime.name.clone(), runtime.deploy_ref()))
+        .collect::<Vec<_>>();
+    for (_, image) in &refs {
+        app.ui.info(format!("pulling {image}"));
+    }
+    pull_platform_image_refs(&refs)
+}
+
+pub(crate) fn pull_platform_image_refs(runtime_refs: &[(String, String)]) -> Result<()> {
+    for (runtime_name, image) in runtime_refs {
         // `deploy_ref` is a real digest pin or an honest tag ref — never a
         // fabricated `sha256:` — so this can't attempt to pull a fake digest.
-        let image = runtime.deploy_ref();
-        app.ui.info(format!("pulling {image}"));
         shell::run_status("docker", ["pull", image.as_str()], None).with_context(|| {
-            if runtime.digest_pin().is_some() {
+            if image.contains("@sha256:") {
                 format!("failed to pull pinned runtime image {image}")
             } else {
                 format!(
-                    "failed to pull runtime image {image} by tag. The phoxal/framework GHCR \
+                    "failed to pull runtime image {runtime_name} ({image}) by tag. The phoxal/framework GHCR \
                      runtime images may not be published for this API/channel yet. Publish the \
                      runtime images, then run `phoxal-cli update --pin-digests` to pin real \
                      digests."

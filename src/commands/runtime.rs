@@ -7,12 +7,16 @@ use clap::{Args, Subcommand};
 use heck::ToUpperCamelCase;
 use phoxal::model::robot::v1::UserRuntime;
 use semver::Version;
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 use toml::Value as TomlValue;
 
 use crate::AppContext;
 use crate::catalog::CATALOG;
-use crate::resolver::{discover_robot_yaml, load_robot, load_robot_with_extras};
+use crate::commands::MessageFormat;
+use crate::resolver::{
+    ResolveOptions, discover_robot_yaml, load_robot, load_robot_with_extras, resolve,
+};
 use crate::utils::{cargo_binary_name, resolve_project_path};
 
 #[derive(Debug, Args)]
@@ -27,6 +31,8 @@ pub enum RuntimeSubcommand {
     Add(Add),
     #[command(about = "Build and run one user runtime host-native against the dev bus.")]
     Run(Run),
+    #[command(about = "Build local deployment image(s) for user runtime(s).")]
+    Image(Image),
 }
 
 #[derive(Debug, Args)]
@@ -41,12 +47,31 @@ pub struct Run {
     pub name: String,
 }
 
+#[derive(Debug, Args)]
+pub struct Image {
+    #[arg(help = "User runtime id from user_runtimes. Omit to build all user runtimes.")]
+    pub name: Option<String>,
+    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
+    pub message_format: MessageFormat,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddRuntimeOutcome {
     pub name: String,
     pub api_version: String,
     pub crate_dir: PathBuf,
     pub manifest_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RuntimeImageSummary {
+    pub images: Vec<RuntimeImageRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RuntimeImageRef {
+    pub name: String,
+    pub image: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +89,7 @@ impl Runtime {
         match &self.command {
             RuntimeSubcommand::Add(command) => command.run(app).await,
             RuntimeSubcommand::Run(command) => command.run(app).await,
+            RuntimeSubcommand::Image(command) => command.run(app).await,
         }
     }
 }
@@ -99,6 +125,28 @@ impl Run {
         ));
         let status = run_user_runtime_host_native(&plan, &app.ui)?;
         forward_runtime_exit_status(&plan.name, status)
+    }
+}
+
+impl Image {
+    pub async fn run(&self, app: &AppContext) -> Result<()> {
+        let project_root = app.project.root().to_path_buf();
+        let name = self.name.clone();
+        let summary = tokio::task::spawn_blocking(move || {
+            build_runtime_images(&project_root, name.as_deref())
+        })
+        .await
+        .context("runtime image worker failed")??;
+        crate::commands::print_message(
+            &summary,
+            || {
+                for image in &summary.images {
+                    println!("{} -> {}", image.name, image.image);
+                }
+                Ok(())
+            },
+            self.message_format,
+        )
     }
 }
 
@@ -209,6 +257,53 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
         binary_path,
         env,
     })
+}
+
+pub fn build_runtime_images(
+    project_start: &Path,
+    name: Option<&str>,
+) -> Result<RuntimeImageSummary> {
+    let robot_path = discover_robot_yaml(project_start)
+        .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
+    let project_root = robot_path
+        .parent()
+        .context("robot.yaml did not have a parent directory")?;
+    let robot = load_robot(&robot_path)?;
+    let mut resolved = resolve(
+        &robot,
+        project_root,
+        &CATALOG,
+        ResolveOptions {
+            locked: false,
+            resolve_external_artifacts: false,
+        },
+    )?;
+    if let Some(name) = name {
+        if !resolved
+            .user_runtimes
+            .iter()
+            .any(|runtime| runtime.name == name)
+        {
+            let available = resolved
+                .user_runtimes
+                .iter()
+                .map(|runtime| runtime.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if available.is_empty() {
+                bail!("user runtime '{name}' is not defined in user_runtimes");
+            }
+            bail!("user runtime '{name}' is not defined in user_runtimes; available: {available}");
+        }
+        resolved
+            .user_runtimes
+            .retain(|runtime| runtime.name == name);
+    }
+    let images = crate::local_build::build_user_runtimes(project_root, &resolved)?
+        .into_iter()
+        .map(|(name, image)| RuntimeImageRef { name, image })
+        .collect();
+    Ok(RuntimeImageSummary { images })
 }
 
 pub(crate) fn run_env(

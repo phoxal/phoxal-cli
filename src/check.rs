@@ -26,6 +26,10 @@ pub struct ParticipantApis {
     pub artifact_id: String,
     /// The API version the artifact reports (`emit-apis` `api_version`).
     pub api_version: String,
+    /// The framework-owned bus ABI reported by the artifact, if present.
+    pub bus_abi: Option<String>,
+    /// The artifact's emitted config schema, preserved for later validation.
+    pub config_schema: Option<serde_json::Value>,
     /// The contracts the artifact participates in.
     pub contracts: Vec<Contract>,
 }
@@ -202,6 +206,8 @@ mod tests {
         ParticipantApis {
             artifact_id: id.to_string(),
             api_version: api.to_string(),
+            bus_abi: None,
+            config_schema: None,
             contracts,
         }
     }
