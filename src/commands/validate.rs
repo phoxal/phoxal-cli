@@ -532,7 +532,8 @@ phoxal = "0.8.5"
 "#,
         )?;
         let robot = Robot::parse_from_string(
-            r#"version: v1
+            r#"schema: v0
+api_version: y2026_1
 
 identity:
   id: testbot
@@ -593,7 +594,8 @@ components:
 
     fn robot_with_user_runtime(runtime_path: &str) -> anyhow::Result<Robot> {
         Robot::parse_from_string(&format!(
-            r#"version: v1
+            r#"schema: v0
+api_version: y2026_1
 
 identity:
   id: testbot

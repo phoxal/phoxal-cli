@@ -377,7 +377,8 @@ mod tests {
         Value::String(value.to_string())
     }
 
-    const MINIMAL_ROBOT: &str = r#"version: v1
+    const MINIMAL_ROBOT: &str = r#"schema: v0
+api_version: y2026_1
 
 identity:
   id: testbot

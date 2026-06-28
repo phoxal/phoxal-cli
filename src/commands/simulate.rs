@@ -614,7 +614,8 @@ mod tests {
     }
 
     fn minimal_robot_yaml() -> &'static str {
-        r#"version: v1
+        r#"schema: v0
+api_version: y2026_1
 
 identity:
   id: testbot

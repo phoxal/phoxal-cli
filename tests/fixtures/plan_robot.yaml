@@ -1,4 +1,5 @@
-version: v1
+schema: v0
+api_version: y2026_1
 
 identity:
   id: robot-v1
