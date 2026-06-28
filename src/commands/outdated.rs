@@ -45,6 +45,7 @@ pub struct ToolOutdatedEntry {
     pub version: String,
     pub asset: String,
     pub cached_binary_sha256: Option<String>,
+    pub cached_asset_sha256: Option<String>,
     pub locked_asset_sha256: Option<String>,
     pub remote_asset_sha256: Option<String>,
     pub status: OutdatedStatus,
@@ -148,9 +149,10 @@ fn print_human(summary: &OutdatedSummary) -> Result<()> {
             OutdatedStatus::Current | OutdatedStatus::Unknown
         );
         println!(
-            "  - {}: {:?} locked={} remote={}",
+            "  - {}: {:?} cached={} locked={} remote={}",
             tool.name,
             tool.status,
+            tool.cached_asset_sha256.as_deref().unwrap_or("<none>"),
             tool.locked_asset_sha256.as_deref().unwrap_or("<none>"),
             tool.remote_asset_sha256.as_deref().unwrap_or("<unknown>")
         );
@@ -199,27 +201,28 @@ fn tool_outdated_entry(
     } else {
         None
     };
+    let cached_asset_sha256 = crate::tool_provisioning::cached_tool_asset_sha256(tool)?;
     let locked_asset_sha256 = lockfile
         .and_then(|lockfile| lockfile.tools.get(&tool.name))
         .map(|locked| locked.sha256.clone());
     let remote_asset_sha256 =
         resolve_release_asset_sha256(&tool.repo, &tool.resolved, &tool.asset)?;
     let status = match (
-        &locked_asset_sha256,
+        &cached_asset_sha256,
         &remote_asset_sha256,
         &cached_binary_sha256,
     ) {
-        (_, _, None) => OutdatedStatus::Missing,
-        (Some(local), Some(remote), Some(_)) if local == remote => OutdatedStatus::Current,
-        (Some(_), Some(_), Some(_)) => OutdatedStatus::Outdated,
-        (_, None, Some(_)) => OutdatedStatus::Unknown,
-        (None, Some(_), Some(_)) => OutdatedStatus::Unknown,
+        (None, _, None) => OutdatedStatus::Missing,
+        (Some(local), Some(remote), _) if local == remote => OutdatedStatus::Current,
+        (Some(_), Some(_), _) => OutdatedStatus::Outdated,
+        (Some(_), None, _) | (None, _, Some(_)) => OutdatedStatus::Unknown,
     };
     Ok(ToolOutdatedEntry {
         name: tool.name.clone(),
         version: tool.resolved.clone(),
         asset: tool.asset.clone(),
         cached_binary_sha256,
+        cached_asset_sha256,
         locked_asset_sha256,
         remote_asset_sha256,
         status,

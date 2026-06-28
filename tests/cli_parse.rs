@@ -76,6 +76,27 @@ fn parses_runtime_image_with_json_output() {
 }
 
 #[test]
+fn parses_runtime_catalog_json_output() {
+    let cli = Cli::try_parse_from([
+        "phoxal-cli",
+        "runtime",
+        "catalog",
+        "--message-format",
+        "json",
+    ])
+    .expect("runtime catalog command should parse");
+
+    let RootCommand::Runtime(command) = cli.command else {
+        panic!("expected runtime command");
+    };
+    let runtime::RuntimeSubcommand::Catalog(catalog) = command.command else {
+        panic!("expected runtime catalog command");
+    };
+
+    assert_eq!(catalog.message_format, MessageFormat::Json);
+}
+
+#[test]
 fn parses_check_pull_runtime_and_json_output() {
     let cli = Cli::try_parse_from([
         "phoxal-cli",
@@ -95,6 +116,18 @@ fn parses_check_pull_runtime_and_json_output() {
     assert!(command.pull);
     assert_eq!(command.runtime.as_deref(), Some("avoid-obstacles"));
     assert_eq!(command.message_format, MessageFormat::Json);
+}
+
+#[test]
+fn parses_simulate_pull() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "simulate", "default", "--pull"])
+        .expect("simulate --pull should parse");
+
+    let RootCommand::Simulate(simulate) = cli.command else {
+        panic!("expected simulate command");
+    };
+
+    assert!(simulate.pull);
 }
 
 #[test]

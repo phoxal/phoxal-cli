@@ -74,7 +74,12 @@ pub fn run(project_start: &Path, ui: &crate::Ui) -> Result<PullSummary> {
         .iter()
         .map(|tool| tool.name.as_str())
         .collect::<Vec<_>>();
-    crate::tool_provisioning::ensure_tool_binaries(ui, &resolved, tool_names)?;
+    crate::tool_provisioning::ensure_tool_binaries_with_mode(
+        ui,
+        &resolved,
+        tool_names,
+        crate::tool_provisioning::ProvisioningMode::Refresh,
+    )?;
 
     Ok(PullSummary {
         api_version: resolved.api_version,

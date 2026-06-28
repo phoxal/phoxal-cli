@@ -5,22 +5,29 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::AppContext;
 use crate::component_driver::component_crate_dir;
 use crate::resolver::{ResolvedRobot, ResolvedUserRuntimeBuild};
 use crate::shell;
 use crate::utils::resolve_project_path;
 
-pub(crate) fn pull_platform_images(app: &AppContext, resolved: &ResolvedRobot) -> Result<()> {
+pub(crate) fn ensure_platform_images(
+    app: &crate::AppContext,
+    resolved: &ResolvedRobot,
+    refresh: bool,
+) -> Result<()> {
     let refs = resolved
         .platform_runtimes
         .iter()
         .map(|runtime| (runtime.name.clone(), runtime.deploy_ref()))
         .collect::<Vec<_>>();
-    for (_, image) in &refs {
+    for (runtime_name, image) in refs {
+        if !refresh && image_exists_locally(&image)? {
+            continue;
+        }
         app.ui.info(format!("pulling {image}"));
+        pull_platform_image_refs(&[(runtime_name, image)])?;
     }
-    pull_platform_image_refs(&refs)
+    Ok(())
 }
 
 pub(crate) fn pull_platform_image_refs(runtime_refs: &[(String, String)]) -> Result<()> {
@@ -41,6 +48,16 @@ pub(crate) fn pull_platform_image_refs(runtime_refs: &[(String, String)]) -> Res
         })?;
     }
     Ok(())
+}
+
+fn image_exists_locally(image_ref: &str) -> Result<bool> {
+    let output = shell::run_output(
+        "docker",
+        ["image", "inspect", image_ref, "--format", "{{.Id}}"],
+        None,
+    )
+    .with_context(|| format!("failed to inspect local image {image_ref}"))?;
+    Ok(output.status.success())
 }
 
 pub(crate) fn build_user_runtimes(
@@ -137,11 +154,11 @@ mod tests {
     #[test]
     fn docker_build_args_use_default_context_without_recipe() {
         assert_eq!(
-            docker_build_args("phoxal-local/test/user-runtime/drive:abc", None),
+            docker_build_args("phoxal.local/test/user-runtime/drive:dev", None),
             os_args([
                 "build",
                 "-t",
-                "phoxal-local/test/user-runtime/drive:abc",
+                "phoxal.local/test/user-runtime/drive:dev",
                 "."
             ])
         );
@@ -156,11 +173,11 @@ mod tests {
         };
 
         assert_eq!(
-            docker_build_args("phoxal-local/test/user-runtime/drive:abc", Some(&build)),
+            docker_build_args("phoxal.local/test/user-runtime/drive:dev", Some(&build)),
             os_args([
                 "build",
                 "-t",
-                "phoxal-local/test/user-runtime/drive:abc",
+                "phoxal.local/test/user-runtime/drive:dev",
                 "-f",
                 "container/Dockerfile.runtime",
                 "--target",

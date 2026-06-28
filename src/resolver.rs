@@ -533,7 +533,7 @@ fn resolve_user_runtime(
             runtime_dir.display()
         )
     })?;
-    let image = format!("phoxal-local/{robot_id}/user-runtime/{name}:{source_hash}");
+    let image = format!("phoxal.local/{robot_id}/user-runtime/{name}:dev");
     let build = runtime
         .build
         .as_ref()

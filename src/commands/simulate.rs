@@ -31,7 +31,7 @@ pub struct Simulate {
     pub world: String,
     #[arg(
         long,
-        help = "Require phoxal.lock to exist and match recomputed resolution."
+        help = "Require phoxal.sources.lock to exist and match recomputed resolution."
     )]
     pub locked: bool,
     #[arg(
@@ -41,7 +41,7 @@ pub struct Simulate {
     pub dry_run: bool,
     #[arg(
         long,
-        help = "Refresh phoxal.lock when it is missing or stale (simulate's only way to mutate the lock)."
+        help = "Refresh phoxal.sources.lock when it is missing or stale (simulate's only way to mutate the lock)."
     )]
     pub update_lock: bool,
     #[arg(long, help = "Launch joypad from the cached Phoxal tool binaries.")]
@@ -51,6 +51,11 @@ pub struct Simulate {
         help = "Resolve image digests, component git commits, and tool asset hashes from upstream (requires Docker + network). Off by default during the pre-publish recovery period."
     )]
     pub pin_digests: bool,
+    #[arg(
+        long,
+        help = "Refresh official runtime images and host tools instead of reusing compatible cached artifacts."
+    )]
+    pub pull: bool,
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
     pub message_format: MessageFormat,
 }
@@ -67,6 +72,7 @@ pub struct SimulateOptions {
     pub locked: bool,
     pub update_lock: bool,
     pub joypad: bool,
+    pub pull: bool,
     pub resolve_external_artifacts: bool,
     pub message_format: MessageFormat,
 }
@@ -115,6 +121,7 @@ impl Simulate {
             locked: self.locked,
             update_lock: self.update_lock,
             joypad: self.joypad,
+            pull: self.pull,
             resolve_external_artifacts: self.pin_digests,
             message_format: self.message_format,
         };
@@ -166,11 +173,12 @@ pub async fn run(
             })
             .await
             .context("simulate resolver worker failed")??;
-            crate::local_build::pull_platform_images(app, &resolved.resolved)?;
-            crate::tool_provisioning::ensure_tool_binaries(
+            crate::local_build::ensure_platform_images(app, &resolved.resolved, options.pull)?;
+            crate::tool_provisioning::ensure_tool_binaries_with_mode(
                 &app.ui,
                 &resolved.resolved,
                 requested_tool_names(&options),
+                crate::tool_provisioning::ProvisioningMode::from_pull(options.pull),
             )?;
             let user_images = crate::local_build::build_user_runtimes(
                 &resolved.project_root,

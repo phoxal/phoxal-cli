@@ -79,7 +79,7 @@ pub enum RootCommand {
     Check(check::CheckCmd),
     #[command(about = "Validate the robot project discovered from robot.yaml.")]
     Validate(validate::Validate),
-    #[command(about = "Resolve robot.yaml and refresh phoxal.lock.")]
+    #[command(about = "Resolve robot.yaml and refresh phoxal.sources.lock.")]
     Update(update::Update),
     #[command(about = "Resolve and launch the local Webots simulation stack.")]
     Simulate(simulate::Simulate),

@@ -30,8 +30,20 @@ pub struct ParticipantApis {
     pub bus_abi: Option<String>,
     /// The artifact's emitted config schema, preserved for later validation.
     pub config_schema: Option<serde_json::Value>,
+    /// The manifest scope this participant is launched under. Normal runtimes
+    /// see the whole graph; component drivers are launched once per component
+    /// instance and dynamic component topics must be materialized only for that
+    /// instance.
+    pub scope: ParticipantScope,
     /// The contracts the artifact participates in.
     pub contracts: Vec<Contract>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ParticipantScope {
+    #[default]
+    Graph,
+    ComponentInstance(String),
 }
 
 /// One `{family, topic, direction}` contract use from an `emit-apis` report.
@@ -111,12 +123,30 @@ pub enum Problem {
         /// Artifacts that consume the contract (sorted, de-duplicated).
         consumers: Vec<String>,
     },
+    /// A user runtime's manifest config does not match its emitted JSON Schema.
+    InvalidConfig {
+        runtime_id: String,
+        errors: Vec<String>,
+    },
+}
+
+/// A non-fatal topology issue. Observable-only publishers are valid, so these
+/// are surfaced as warnings rather than blocking `phoxal check`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Warning {
+    MissingConsumer {
+        family: String,
+        topic: String,
+        /// Artifacts that produce the contract (sorted, de-duplicated).
+        producers: Vec<String>,
+    },
 }
 
 /// The outcome of validating a graph: the problems found (empty == healthy).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Report {
     pub problems: Vec<Problem>,
+    pub warnings: Vec<Warning>,
 }
 
 impl Report {
@@ -124,6 +154,26 @@ impl Report {
     pub fn is_ok(&self) -> bool {
         self.problems.is_empty()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RobotGraph {
+    pub component_capabilities: Vec<ComponentCapability>,
+    pub motion_capabilities: BTreeSet<(String, String)>,
+}
+
+impl RobotGraph {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.component_capabilities.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ComponentCapability {
+    pub instance: String,
+    pub capability: String,
+    pub kind: String,
 }
 
 /// Validate a robot graph: single-API-version (D59/D63) + topology cardinality.
@@ -134,7 +184,18 @@ impl Report {
 /// by family+topic) so output and tests are deterministic.
 #[must_use]
 pub fn check_graph(participants: &[ParticipantApis], root_api_version: &str) -> Report {
+    check_graph_with_topology(participants, root_api_version, &RobotGraph::default())
+}
+
+#[must_use]
+pub fn check_graph_with_topology(
+    participants: &[ParticipantApis],
+    root_api_version: &str,
+    robot_graph: &RobotGraph,
+) -> Report {
     let mut problems = Vec::new();
+    let mut warnings = Vec::new();
+    let participants = materialize_participants(participants, robot_graph);
 
     // 1. Single API version — report each disagreeing artifact, in artifact order.
     let mut mismatches: Vec<&ParticipantApis> = participants
@@ -150,27 +211,27 @@ pub fn check_graph(participants: &[ParticipantApis], root_api_version: &str) -> 
         });
     }
 
-    // 2. Topology cardinality. Producers are keyed by (family, topic, direction) so
-    // matching is by *kind*: a `subscribe` needs a `publish`, a query client needs a
-    // server — a publisher cannot satisfy a query request. A contract is keyed by
-    // (family, topic) — for dynamic per-instance topics this is the shared template,
-    // the right graph-level granularity ("does some participant produce this contract").
-    let mut producers: BTreeSet<(String, String, Direction)> = BTreeSet::new();
-    for p in participants {
+    // 2. Topology cardinality. Producers/consumers are keyed by
+    // (family, concrete topic, direction) so matching is by *kind*: a `subscribe`
+    // needs a `publish`, and a query client needs a server. Dynamic component
+    // templates have already been expanded to manifest-derived concrete topics.
+    let mut by_direction: BTreeMap<(String, String, Direction), BTreeSet<String>> = BTreeMap::new();
+    for p in &participants {
         for c in &p.contracts {
-            if c.direction.is_producer() {
-                producers.insert((c.family.clone(), c.topic.clone(), c.direction));
-            }
+            by_direction
+                .entry((c.family.clone(), c.topic.clone(), c.direction))
+                .or_default()
+                .insert(p.artifact_id.clone());
         }
     }
 
     // Collect consumers per unmet contract, de-duplicated and ordered.
     let mut unmet: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
-    for p in participants {
+    for p in &participants {
         for c in &p.contracts {
             if let Some(required) = c.direction.required_producer() {
                 let needed = (c.family.clone(), c.topic.clone(), required);
-                if !producers.contains(&needed) {
+                if !by_direction.contains_key(&needed) {
                     unmet
                         .entry((c.family.clone(), c.topic.clone()))
                         .or_default()
@@ -179,6 +240,7 @@ pub fn check_graph(participants: &[ParticipantApis], root_api_version: &str) -> 
             }
         }
     }
+
     for ((family, topic), consumers) in unmet {
         problems.push(Problem::MissingProducer {
             family,
@@ -187,7 +249,129 @@ pub fn check_graph(participants: &[ParticipantApis], root_api_version: &str) -> 
         });
     }
 
-    Report { problems }
+    let mut missing_consumers: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for ((family, topic, direction), producers) in &by_direction {
+        if let Some(required_consumer) = direction.required_consumer() {
+            let needed = (family.clone(), topic.clone(), required_consumer);
+            if !by_direction.contains_key(&needed) {
+                missing_consumers
+                    .entry((family.clone(), topic.clone()))
+                    .or_default()
+                    .extend(producers.iter().cloned());
+            }
+        }
+    }
+    for ((family, topic), producers) in missing_consumers {
+        warnings.push(Warning::MissingConsumer {
+            family,
+            topic,
+            producers: producers.into_iter().collect(),
+        });
+    }
+
+    Report { problems, warnings }
+}
+
+impl Direction {
+    #[must_use]
+    pub const fn required_consumer(self) -> Option<Self> {
+        Some(match self {
+            Self::Publish => Self::Subscribe,
+            Self::ServerRequest => Self::QueryRequest,
+            Self::ServerResponse => Self::QueryResponse,
+            _ => return None,
+        })
+    }
+}
+
+fn materialize_participants(
+    participants: &[ParticipantApis],
+    robot_graph: &RobotGraph,
+) -> Vec<ParticipantApis> {
+    if robot_graph.is_empty() {
+        return participants.to_vec();
+    }
+
+    participants
+        .iter()
+        .map(|participant| {
+            let contracts = participant
+                .contracts
+                .iter()
+                .flat_map(|contract| materialize_contract(participant, contract, robot_graph))
+                .collect();
+            ParticipantApis {
+                artifact_id: participant.artifact_id.clone(),
+                api_version: participant.api_version.clone(),
+                bus_abi: participant.bus_abi.clone(),
+                config_schema: participant.config_schema.clone(),
+                scope: participant.scope.clone(),
+                contracts,
+            }
+        })
+        .collect()
+}
+
+fn materialize_contract(
+    participant: &ParticipantApis,
+    contract: &Contract,
+    robot_graph: &RobotGraph,
+) -> Vec<Contract> {
+    if !contract.topic.contains("{instance}") && !contract.topic.contains("{capability}") {
+        return vec![contract.clone()];
+    }
+
+    let kind = component_topic_kind(&contract.topic);
+    let mut candidates = robot_graph
+        .component_capabilities
+        .iter()
+        .filter(|capability| kind.is_none_or(|kind| capability.kind == kind))
+        .filter(|capability| match &participant.scope {
+            ParticipantScope::Graph => {
+                !is_motion_topic_kind(kind)
+                    || robot_graph.motion_capabilities.is_empty()
+                    || robot_graph
+                        .motion_capabilities
+                        .contains(&(capability.instance.clone(), capability.capability.clone()))
+            }
+            ParticipantScope::ComponentInstance(instance) => capability.instance == *instance,
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+
+    let mut materialized = candidates
+        .into_iter()
+        .map(|capability| Contract {
+            family: contract.family.clone(),
+            topic: contract
+                .topic
+                .replace("{instance}", &capability.instance)
+                .replace("{capability}", &capability.capability),
+            direction: contract.direction,
+        })
+        .collect::<Vec<_>>();
+    materialized.sort_by(|a, b| a.topic.cmp(&b.topic).then(a.direction.cmp(&b.direction)));
+    materialized.dedup();
+
+    if materialized.is_empty() {
+        vec![contract.clone()]
+    } else {
+        materialized
+    }
+}
+
+fn component_topic_kind(topic: &str) -> Option<&str> {
+    let mut segments = topic.split('/');
+    match (segments.next(), segments.next(), segments.next()) {
+        (Some("component"), Some("{instance}" | "*"), Some(kind)) if !kind.starts_with('{') => {
+            Some(kind)
+        }
+        _ => None,
+    }
+}
+
+fn is_motion_topic_kind(kind: Option<&str>) -> bool {
+    matches!(kind, Some("motor" | "encoder"))
 }
 
 #[cfg(test)]
@@ -208,7 +392,56 @@ mod tests {
             api_version: api.to_string(),
             bus_abi: None,
             config_schema: None,
+            scope: ParticipantScope::Graph,
             contracts,
+        }
+    }
+
+    fn scoped_component_participant(
+        id: &str,
+        instance: &str,
+        contracts: Vec<Contract>,
+    ) -> ParticipantApis {
+        ParticipantApis {
+            artifact_id: id.to_string(),
+            api_version: "y2026_1".to_string(),
+            bus_abi: None,
+            config_schema: None,
+            scope: ParticipantScope::ComponentInstance(instance.to_string()),
+            contracts,
+        }
+    }
+
+    fn robot_graph() -> RobotGraph {
+        RobotGraph {
+            component_capabilities: vec![
+                ComponentCapability {
+                    instance: "left_drive".to_string(),
+                    capability: "motor".to_string(),
+                    kind: "motor".to_string(),
+                },
+                ComponentCapability {
+                    instance: "right_drive".to_string(),
+                    capability: "motor".to_string(),
+                    kind: "motor".to_string(),
+                },
+                ComponentCapability {
+                    instance: "left_drive".to_string(),
+                    capability: "encoder".to_string(),
+                    kind: "encoder".to_string(),
+                },
+                ComponentCapability {
+                    instance: "right_drive".to_string(),
+                    capability: "encoder".to_string(),
+                    kind: "encoder".to_string(),
+                },
+            ],
+            motion_capabilities: BTreeSet::from([
+                ("left_drive".to_string(), "motor".to_string()),
+                ("right_drive".to_string(), "motor".to_string()),
+                ("left_drive".to_string(), "encoder".to_string()),
+                ("right_drive".to_string(), "encoder".to_string()),
+            ]),
         }
     }
 
@@ -317,6 +550,30 @@ mod tests {
     }
 
     #[test]
+    fn publisher_without_consumer_is_a_warning() {
+        let graph = vec![participant(
+            "odometry",
+            "y2026_1",
+            vec![contract(
+                "odometry::State",
+                "odometry/state",
+                Direction::Publish,
+            )],
+        )];
+        let report = check_graph(&graph, "y2026_1");
+
+        assert!(report.problems.is_empty());
+        assert_eq!(
+            report.warnings,
+            vec![Warning::MissingConsumer {
+                family: "odometry::State".to_string(),
+                topic: "odometry/state".to_string(),
+                producers: vec!["odometry".to_string()],
+            }]
+        );
+    }
+
+    #[test]
     fn query_client_without_server_is_a_missing_producer() {
         let graph = vec![participant(
             "client",
@@ -334,6 +591,107 @@ mod tests {
             Problem::MissingProducer { family, topic, .. }
                 if family == "asset::GetRequest" && topic == "asset/get"
         ));
+    }
+
+    #[test]
+    fn query_server_without_client_is_a_warning() {
+        let graph = vec![participant(
+            "asset",
+            "y2026_1",
+            vec![
+                contract("asset::GetRequest", "asset/get", Direction::ServerRequest),
+                contract("asset::GetResponse", "asset/get", Direction::ServerResponse),
+            ],
+        )];
+        let report = check_graph(&graph, "y2026_1");
+
+        assert!(report.problems.is_empty());
+        assert_eq!(
+            report.warnings,
+            vec![
+                Warning::MissingConsumer {
+                    family: "asset::GetRequest".to_string(),
+                    topic: "asset/get".to_string(),
+                    producers: vec!["asset".to_string()],
+                },
+                Warning::MissingConsumer {
+                    family: "asset::GetResponse".to_string(),
+                    topic: "asset/get".to_string(),
+                    producers: vec!["asset".to_string()],
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn component_templates_expand_to_concrete_manifest_topics() {
+        let participants = vec![
+            participant(
+                "motion",
+                "y2026_1",
+                vec![contract(
+                    "component::MotorCommand",
+                    "component/{instance}/motor/{capability}/command",
+                    Direction::Publish,
+                )],
+            ),
+            scoped_component_participant(
+                "left-driver",
+                "left_drive",
+                vec![contract(
+                    "component::MotorCommand",
+                    "component/{instance}/motor/{capability}/command",
+                    Direction::Subscribe,
+                )],
+            ),
+        ];
+
+        let report = check_graph_with_topology(&participants, "y2026_1", &robot_graph());
+
+        assert!(report.problems.is_empty());
+        assert_eq!(
+            report.warnings,
+            vec![Warning::MissingConsumer {
+                family: "component::MotorCommand".to_string(),
+                topic: "component/right_drive/motor/motor/command".to_string(),
+                producers: vec!["motion".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn component_templates_report_missing_concrete_driver_output() {
+        let participants = vec![
+            scoped_component_participant(
+                "left-driver",
+                "left_drive",
+                vec![contract(
+                    "component::EncoderSample",
+                    "component/{instance}/encoder/{capability}/sample",
+                    Direction::Publish,
+                )],
+            ),
+            participant(
+                "odometry",
+                "y2026_1",
+                vec![contract(
+                    "component::EncoderSample",
+                    "component/{instance}/encoder/{capability}/sample",
+                    Direction::Subscribe,
+                )],
+            ),
+        ];
+
+        let report = check_graph_with_topology(&participants, "y2026_1", &robot_graph());
+
+        assert_eq!(
+            report.problems,
+            vec![Problem::MissingProducer {
+                family: "component::EncoderSample".to_string(),
+                topic: "component/right_drive/encoder/encoder/sample".to_string(),
+                consumers: vec!["odometry".to_string()],
+            }]
+        );
     }
 
     #[test]

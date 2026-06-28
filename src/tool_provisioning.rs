@@ -24,6 +24,23 @@ use crate::utils::make_executable;
 type ToolAssetKey = (String, String, String);
 type MissingToolBinary<'a> = (&'a ResolvedTool, PathBuf);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvisioningMode {
+    MissingOnly,
+    Refresh,
+}
+
+impl ProvisioningMode {
+    #[must_use]
+    pub const fn from_pull(pull: bool) -> Self {
+        if pull {
+            Self::Refresh
+        } else {
+            Self::MissingOnly
+        }
+    }
+}
+
 /// Ensure the requested host-native tool binaries are present in the cache,
 /// downloading and extracting release assets when binaries are missing.
 ///
@@ -31,6 +48,19 @@ type MissingToolBinary<'a> = (&'a ResolvedTool, PathBuf);
 /// download can satisfy multiple binaries, for example the Webots controller
 /// and supervisor. Idempotent: binaries already in the cache are left untouched.
 pub fn ensure_tool_binaries<I, S>(ui: &Ui, resolved: &ResolvedRobot, tool_names: I) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    ensure_tool_binaries_with_mode(ui, resolved, tool_names, ProvisioningMode::MissingOnly)
+}
+
+pub fn ensure_tool_binaries_with_mode<I, S>(
+    ui: &Ui,
+    resolved: &ResolvedRobot,
+    tool_names: I,
+    mode: ProvisioningMode,
+) -> Result<()>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -51,7 +81,7 @@ where
             );
         };
         let dest = cached_tool_path(&tool.name, &tool.resolved, &tool.binary_name)?;
-        if dest.is_file() {
+        if mode == ProvisioningMode::MissingOnly && dest.is_file() {
             continue;
         }
         missing_by_asset
@@ -63,8 +93,10 @@ where
     for ((repo, version, asset), missing) in missing_by_asset {
         ui.info(format!("provisioning host tools from {repo} v{version}"));
         let tarball = download_release_asset(ui, &repo, &version, &asset)?;
+        let asset_path = cached_tool_asset_path(&repo, &version, &asset)?;
+        write_cached_tool_asset(&asset_path, &tarball.bytes)?;
         for (tool, dest) in missing {
-            extract_binary(&tarball, &tool.binary_name, &dest)
+            extract_binary(&tarball.bytes, &tool.binary_name, &dest)
                 .with_context(|| format!("failed to extract {} from {asset}", tool.binary_name))?;
             ui.success(format!(
                 "staged {} into {}",
@@ -76,6 +108,11 @@ where
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DownloadedAsset {
+    bytes: Vec<u8>,
+}
+
 /// Download a `phoxal/<repo>` release asset and verify it against the release's
 /// published sha256 digest.
 ///
@@ -83,7 +120,12 @@ where
 /// trusting the lockfile's per-tool sha: during the pre-publish recovery period
 /// that field is a content-addressing placeholder (see `resolver::fake_sha`),
 /// not a real artifact hash.
-fn download_release_asset(ui: &Ui, repo: &str, version: &str, asset: &str) -> Result<Vec<u8>> {
+fn download_release_asset(
+    ui: &Ui,
+    repo: &str,
+    version: &str,
+    asset: &str,
+) -> Result<DownloadedAsset> {
     let url = format!("https://github.com/{repo}/releases/download/v{version}/{asset}");
     let client = reqwest::blocking::Client::builder()
         .user_agent("phoxal-cli")
@@ -107,9 +149,9 @@ fn download_release_asset(ui: &Ui, repo: &str, version: &str, asset: &str) -> Re
         .with_context(|| format!("failed to read {asset} body"))?
         .to_vec();
 
+    let actual = hex::encode(Sha256::digest(&bytes));
     match resolve_release_asset_sha256(repo, version, asset)? {
         Some(expected) => {
-            let actual = hex::encode(Sha256::digest(&bytes));
             if actual != expected {
                 bail!("sha256 mismatch for {asset}: expected {expected}, got {actual}");
             }
@@ -120,7 +162,38 @@ fn download_release_asset(ui: &Ui, repo: &str, version: &str, asset: &str) -> Re
             ));
         }
     }
-    Ok(bytes)
+    Ok(DownloadedAsset { bytes })
+}
+
+pub(crate) fn cached_tool_asset_path(repo: &str, version: &str, asset: &str) -> Result<PathBuf> {
+    let repo = repo.replace('/', "__");
+    Ok(crate::host_paths::tools_cache_dir()?
+        .join("_assets")
+        .join(repo)
+        .join(version)
+        .join(asset))
+}
+
+pub(crate) fn cached_tool_asset_sha256(tool: &ResolvedTool) -> Result<Option<String>> {
+    let asset_path = cached_tool_asset_path(&tool.repo, &tool.resolved, &tool.asset)?;
+    if !asset_path.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(hex::encode(Sha256::digest(
+        fs::read(&asset_path).with_context(|| {
+            format!("failed to read cached tool asset {}", asset_path.display())
+        })?,
+    ))))
+}
+
+fn write_cached_tool_asset(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let partial = path.with_extension("partial");
+    fs::write(&partial, bytes).with_context(|| format!("failed to write {}", partial.display()))?;
+    fs::rename(&partial, path).with_context(|| format!("failed to finalize {}", path.display()))
 }
 
 /// Extract the single archive member named `binary_name` from an in-memory
@@ -220,9 +293,12 @@ mod tests {
     #[ignore = "hits the network and is specific to aarch64-apple-darwin"]
     fn provisions_real_simulator_release_from_github() {
         let asset = "phoxal-simulator-0.8.0-aarch64-apple-darwin.tar.gz";
-        let bytes = download_release_asset(&Ui, "phoxal/framework", "0.8.0", asset)
+        let tarball = download_release_asset(&Ui, "phoxal/framework", "0.8.0", asset)
             .expect("download + sha256-verify the simulator tarball");
-        assert!(bytes.len() > 1_000_000, "tarball should be multi-MB");
+        assert!(
+            tarball.bytes.len() > 1_000_000,
+            "tarball should be multi-MB"
+        );
 
         let dir = tempfile::tempdir().expect("tempdir");
         for binary in [
@@ -230,7 +306,7 @@ mod tests {
             "phoxal-simulator-webots-supervisor-aarch64-apple-darwin",
         ] {
             let dest = dir.path().join(binary);
-            extract_binary(&bytes, binary, &dest).expect("extract binary");
+            extract_binary(&tarball.bytes, binary, &dest).expect("extract binary");
             assert!(
                 fs::metadata(&dest).expect("stat extracted").len() > 0,
                 "extracted {binary} must be non-empty"

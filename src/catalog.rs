@@ -118,9 +118,10 @@ impl PlatformRuntimeCatalog {
         &'a self,
         api_version: &'a str,
     ) -> impl Iterator<Item = &'a PlatformRuntimeEntry> + 'a {
+        let complete = self.has_complete_api_set(api_version);
         self.entries
             .iter()
-            .filter(move |entry| entry.api_versions.contains(&api_version))
+            .filter(move |entry| complete && entry.api_versions.contains(&api_version))
     }
 
     /// Iterate every official runtime name known to this CLI release.
@@ -137,6 +138,15 @@ impl PlatformRuntimeCatalog {
         self.entries_for_api(api_version)
             .map(|entry| entry.name)
             .collect()
+    }
+
+    #[must_use]
+    pub fn has_complete_api_set(&self, api_version: &str) -> bool {
+        !self.entries.is_empty()
+            && self
+                .entries
+                .iter()
+                .all(|entry| entry.api_versions.contains(&api_version))
     }
 
     /// Look up a runtime by catalog name.
@@ -156,7 +166,7 @@ impl PlatformRuntimeCatalog {
 
 #[cfg(test)]
 mod tests {
-    use super::CATALOG;
+    use super::{CATALOG, PlatformRuntimeCatalog, PlatformRuntimeEntry};
     use std::collections::BTreeSet;
 
     #[test]
@@ -219,6 +229,29 @@ mod tests {
         );
         assert!(CATALOG.names_for_api("y2026_2").is_empty());
         assert!(CATALOG.names_for_api("y2099_1").is_empty());
+    }
+
+    #[test]
+    fn api_version_requires_complete_official_set() {
+        static PARTIAL: &[PlatformRuntimeEntry] = &[
+            PlatformRuntimeEntry {
+                name: "drive",
+                api_versions: &["y2026_1", "y2026_2"],
+                uses_supervisor_api: false,
+                wires_to_router: true,
+            },
+            PlatformRuntimeEntry {
+                name: "map",
+                api_versions: &["y2026_1"],
+                uses_supervisor_api: false,
+                wires_to_router: true,
+            },
+        ];
+        let catalog = PlatformRuntimeCatalog { entries: PARTIAL };
+
+        assert!(catalog.has_complete_api_set("y2026_1"));
+        assert!(!catalog.has_complete_api_set("y2026_2"));
+        assert_eq!(catalog.names_for_api("y2026_2"), Vec::<&'static str>::new());
     }
 
     #[test]

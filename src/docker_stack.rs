@@ -20,7 +20,7 @@ pub(crate) fn tear_down_stack(compose_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_link_network() -> Result<()> {
+pub(crate) fn ensure_link_network() -> Result<()> {
     let network = crate::local_zenoh::LOCAL_ZENOH_NETWORK;
     let output = shell::run_output("docker", ["network", "inspect", network], None)
         .context("failed to inspect phoxal link network")?;

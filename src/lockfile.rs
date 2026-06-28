@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::resolver::{ImagePin, ResolvedComponentSource, ResolvedRobot, ResolvedUserRuntimeBuild};
 
-pub const LOCKFILE_NAME: &str = "phoxal.lock";
+pub const LOCKFILE_NAME: &str = "phoxal.sources.lock";
 pub const LOCKFILE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,7 +255,7 @@ pub(crate) fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) 
             || locked.build != runtime.build
         {
             bail!(
-                "lockfile user runtime {} does not match robot.yaml; re-run `phoxal update` to regenerate phoxal.lock",
+                "lockfile user runtime {} does not match robot.yaml; re-run `phoxal update` to regenerate phoxal.sources.lock",
                 runtime.name
             );
         }
@@ -333,7 +333,7 @@ pub(crate) fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) 
             .with_context(|| format!("lockfile is missing tool {}", tool.name))?;
         if locked.requested != tool.requested {
             bail!(
-                "lockfile tool {} does not match robot.yaml; re-run `phoxal update` to regenerate phoxal.lock",
+                "lockfile tool {} does not match robot.yaml; re-run `phoxal update` to regenerate phoxal.sources.lock",
                 tool.name
             );
         }
@@ -399,7 +399,7 @@ mod tests {
                 path: PathBuf::from("runtimes/autonomy"),
                 framework: "0.9.0".to_string(),
                 source_hash: "abc123".to_string(),
-                image: "phoxal-local/testbot/user-runtime/autonomy:abc123".to_string(),
+                image: "phoxal.local/testbot/user-runtime/autonomy:dev".to_string(),
                 build: Some(ResolvedUserRuntimeBuild {
                     context: PathBuf::from("container"),
                     dockerfile: Some(PathBuf::from("Dockerfile.runtime")),
@@ -435,7 +435,7 @@ mod tests {
         let mut changed = resolved.clone();
         changed.user_runtimes[0].source_hash = "def456".to_string();
         changed.user_runtimes[0].image =
-            "phoxal-local/testbot/user-runtime/autonomy:def456".to_string();
+            "phoxal.local/testbot/user-runtime/autonomy:dev".to_string();
 
         assert!(!lockfile.is_drift_free(&changed));
         Ok(())
@@ -491,7 +491,7 @@ mod tests {
                     target: Some("runtime".to_string()),
                 }),
                 source_hash: source_hash.to_string(),
-                image: format!("phoxal-local/testbot/user-runtime/autonomy:{source_hash}"),
+                image: "phoxal.local/testbot/user-runtime/autonomy:dev".to_string(),
             }],
             components: Vec::new(),
             tools: Vec::new(),

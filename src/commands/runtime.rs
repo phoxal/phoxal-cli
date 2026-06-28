@@ -33,6 +33,8 @@ pub enum RuntimeSubcommand {
     Run(Run),
     #[command(about = "Build local deployment image(s) for user runtime(s).")]
     Image(Image),
+    #[command(about = "Print the compiled-in official runtime catalog.")]
+    Catalog(Catalog),
 }
 
 #[derive(Debug, Args)]
@@ -51,6 +53,12 @@ pub struct Run {
 pub struct Image {
     #[arg(help = "User runtime id from user_runtimes. Omit to build all user runtimes.")]
     pub name: Option<String>,
+    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
+    pub message_format: MessageFormat,
+}
+
+#[derive(Debug, Args)]
+pub struct Catalog {
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
     pub message_format: MessageFormat,
 }
@@ -74,11 +82,24 @@ pub struct RuntimeImageRef {
     pub image: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RuntimeCatalogSummary {
+    pub entries: Vec<RuntimeCatalogEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RuntimeCatalogEntry {
+    pub id: String,
+    pub image: String,
+    pub participant_kind: &'static str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimeRunPlan {
     name: String,
     robot_id: String,
     namespace: String,
+    run_dir: PathBuf,
     crate_dir: PathBuf,
     binary_path: PathBuf,
     env: Vec<(String, String)>,
@@ -90,6 +111,7 @@ impl Runtime {
             RuntimeSubcommand::Add(command) => command.run(app).await,
             RuntimeSubcommand::Run(command) => command.run(app).await,
             RuntimeSubcommand::Image(command) => command.run(app).await,
+            RuntimeSubcommand::Catalog(command) => command.run(app).await,
         }
     }
 }
@@ -123,6 +145,10 @@ impl Run {
             "running {} in namespace {}",
             plan.name, plan.namespace
         ));
+        app.ui
+            .info(format!("using dev bundle {}", plan.run_dir.display()));
+        crate::docker_stack::ensure_link_network()?;
+        crate::local_zenoh::start_if_absent()?;
         let status = run_user_runtime_host_native(&plan, &app.ui)?;
         forward_runtime_exit_status(&plan.name, status)
     }
@@ -147,6 +173,39 @@ impl Image {
             },
             self.message_format,
         )
+    }
+}
+
+impl Catalog {
+    pub async fn run(&self, _app: &AppContext) -> Result<()> {
+        let summary = runtime_catalog_summary();
+        crate::commands::print_message(
+            &summary,
+            || {
+                for entry in &summary.entries {
+                    println!(
+                        "{} -> {} ({})",
+                        entry.id, entry.image, entry.participant_kind
+                    );
+                }
+                Ok(())
+            },
+            self.message_format,
+        )
+    }
+}
+
+pub fn runtime_catalog_summary() -> RuntimeCatalogSummary {
+    RuntimeCatalogSummary {
+        entries: CATALOG
+            .entries
+            .iter()
+            .map(|entry| RuntimeCatalogEntry {
+                id: entry.name.to_string(),
+                image: entry.image_repo(),
+                participant_kind: "runtime",
+            })
+            .collect(),
     }
 }
 
@@ -217,7 +276,7 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
         );
     }
 
-    let runtime = robot.user_runtimes.get(name).ok_or_else(|| {
+    let manifest_runtime = robot.user_runtimes.get(name).ok_or_else(|| {
         let available = robot
             .user_runtimes
             .keys()
@@ -230,13 +289,25 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
             anyhow!("user runtime '{name}' is not defined in user_runtimes; available: {available}")
         }
     })?;
-    let crate_dir = resolve_project_path(project_root, &runtime.path);
+    let crate_dir = resolve_project_path(project_root, &manifest_runtime.path);
     if !crate_dir.is_dir() {
         bail!(
             "user runtime '{name}' source dir {} does not exist",
             crate_dir.display()
         );
     }
+
+    let resolved = resolve(
+        &robot,
+        project_root,
+        &CATALOG,
+        ResolveOptions {
+            locked: false,
+            resolve_external_artifacts: false,
+        },
+    )?;
+    let run_dir = project_root.join(".phoxal").join("run");
+    crate::run_view::assemble(project_root, &resolved, &run_dir)?;
     let binary_name = runtime_binary_name(&crate_dir, name)?;
     let binary_path = crate_dir
         .join("target")
@@ -247,12 +318,14 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
         &robot.identity.id,
         &robot.identity.namespace,
         config.as_ref(),
+        &run_dir,
     );
 
     Ok(RuntimeRunPlan {
         name: name.to_string(),
         robot_id: robot.identity.id,
         namespace: robot.identity.namespace,
+        run_dir,
         crate_dir,
         binary_path,
         env,
@@ -311,11 +384,21 @@ pub(crate) fn run_env(
     robot_id: &str,
     namespace: &str,
     config: Option<&JsonValue>,
+    bundle_root: &Path,
 ) -> Vec<(String, String)> {
     let mut env = vec![
         ("PHOXAL_PARTICIPANT_ID".to_string(), name.to_string()),
         ("PHOXAL_ROBOT_ID".to_string(), robot_id.to_string()),
         ("PHOXAL_NAMESPACE".to_string(), namespace.to_string()),
+        (
+            "PHOXAL_BUNDLE_ROOT".to_string(),
+            bundle_root.display().to_string(),
+        ),
+        (
+            "PHOXAL_CONNECT".to_string(),
+            format!("tcp/127.0.0.1:{}", crate::local_zenoh::LOCAL_ZENOH_PORT),
+        ),
+        ("PHOXAL_CLOCK".to_string(), "real".to_string()),
     ];
     // A scaffolded user runtime always declares `config = Config`, so the runner
     // deserializes its typed config from PHOXAL_CONFIG. When the manifest has no
@@ -498,7 +581,7 @@ struct {pascal_name} {{
 #[phoxal::runtime]
 impl {pascal_name} {{
     #[setup]
-    async fn setup(_ctx: &mut SetupContext<Self>) -> Result<Self> {{
+    async fn setup(_ctx: &mut SetupContext<Self>, _config: Self::Config) -> Result<Self> {{
         Ok(Self {{}})
     }}
 
@@ -661,7 +744,8 @@ mod tests {
 
     #[test]
     fn run_env_sets_launch_contract_without_config() {
-        let env = run_env("avoid-obstacles", "testbot", "dev", None);
+        let bundle_root = PathBuf::from("/tmp/phoxal/run");
+        let env = run_env("avoid-obstacles", "testbot", "dev", None, &bundle_root);
 
         assert_eq!(
             env.iter()
@@ -681,6 +765,24 @@ mod tests {
                 .map(|(_, v)| v.as_str()),
             Some("dev")
         );
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "PHOXAL_BUNDLE_ROOT")
+                .map(|(_, v)| v.as_str()),
+            Some("/tmp/phoxal/run")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "PHOXAL_CONNECT")
+                .map(|(_, v)| v.as_str()),
+            Some("tcp/127.0.0.1:7447")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "PHOXAL_CLOCK")
+                .map(|(_, v)| v.as_str()),
+            Some("real")
+        );
         // With no manifest config block, PHOXAL_CONFIG defaults to an empty object
         // so the runtime's typed `Config` deserializes (it would reject `null`).
         assert_eq!(
@@ -689,7 +791,6 @@ mod tests {
                 .map(|(_, v)| v.as_str()),
             Some("{}")
         );
-        assert!(env.iter().all(|(key, _)| key != "PHOXAL_CONNECT"));
     }
 
     #[test]
@@ -698,7 +799,13 @@ mod tests {
             "gain": 0.7,
             "labels": ["left", "right"],
         });
-        let env = run_env("avoid-obstacles", "testbot", "test", Some(&config));
+        let env = run_env(
+            "avoid-obstacles",
+            "testbot",
+            "test",
+            Some(&config),
+            &PathBuf::from("/tmp/phoxal/run"),
+        );
 
         assert_eq!(
             env.iter()
@@ -791,6 +898,10 @@ mod tests {
       labels: [left, right]
 "#,
             ),
+        )?;
+        fs::write(
+            temp.path().join("structure.urdf"),
+            r#"<robot name="testbot"><link name="base_link"/></robot>"#,
         )?;
 
         let plan = runtime_run_plan(temp.path(), "avoid-obstacles")?;

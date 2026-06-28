@@ -50,6 +50,7 @@ pub struct Build {
 #[serde(rename_all = "snake_case")]
 pub enum DeployTarget {
     Compose,
+    #[value(hide = true)]
     Balena,
 }
 
@@ -64,6 +65,7 @@ pub struct BuildOptions {
 pub struct BuildSummary {
     pub output_path: PathBuf,
     pub bundle_dir: PathBuf,
+    pub metadata_path: PathBuf,
     pub platform_runtime_count: usize,
     pub user_runtime_count: usize,
     pub applied_overlays: Vec<String>,
@@ -96,6 +98,7 @@ impl Build {
                     println!("applied overlays: {}", summary.applied_overlays.join(", "));
                 }
                 println!("wrote deployment bundle: {}", summary.bundle_dir.display());
+                println!("wrote deploy metadata: {}", summary.metadata_path.display());
                 println!("wrote compose artifact: {}", summary.output_path.display());
                 Ok(())
             },
@@ -125,11 +128,15 @@ pub fn run(project_start: &Path, options: BuildOptions) -> Result<BuildSummary> 
         },
     )?;
 
-    run_pinned_graph_check(project_root, &resolved)?;
-    let user_runtime_images =
-        resolve_production_user_runtime_images(&resolved, &loaded.extras, |image_ref| {
-            crate::resolver::resolve_image_digest(image_ref)
-        })?;
+    run_pinned_graph_check(project_root, &resolved, &loaded.extras)?;
+    let user_runtime_images = match options.target {
+        DeployTarget::Compose => crate::local_build::build_user_runtimes(project_root, &resolved)?,
+        DeployTarget::Balena => {
+            resolve_production_user_runtime_images(&resolved, &loaded.extras, |image_ref| {
+                crate::resolver::resolve_image_digest(image_ref)
+            })?
+        }
+    };
 
     let output_path = options.output.map_or_else(
         || {
@@ -155,24 +162,33 @@ pub fn run(project_start: &Path, options: BuildOptions) -> Result<BuildSummary> 
         &loaded.extras,
         LaunchClock::Real,
     )?;
-    ensure_all_compose_image_refs_are_digest_pinned(&compose)?;
+    if options.target == DeployTarget::Balena {
+        ensure_all_compose_image_refs_are_digest_pinned(&compose)?;
+    }
 
     crate::run_view::assemble(project_root, &resolved, &bundle_dir)?;
+    let metadata_path = bundle_dir.join("deploy-metadata.json");
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    write_deploy_metadata(&metadata_path, &robot_path, &options.env)?;
     fs::write(&output_path, compose)
         .with_context(|| format!("failed to write {}", output_path.display()))?;
 
     Ok(BuildSummary {
         output_path,
         bundle_dir,
+        metadata_path,
         platform_runtime_count: resolved.platform_runtimes.len(),
         user_runtime_count: resolved.user_runtimes.len(),
         applied_overlays: options.env,
     })
 }
 
-fn run_pinned_graph_check(project_root: &Path, resolved: &ResolvedRobot) -> Result<()> {
+fn run_pinned_graph_check(
+    project_root: &Path,
+    resolved: &ResolvedRobot,
+    manifest_extras: &RobotManifestExtras,
+) -> Result<()> {
     let platform_refs = resolved
         .platform_runtimes
         .iter()
@@ -187,11 +203,16 @@ fn run_pinned_graph_check(project_root: &Path, resolved: &ResolvedRobot) -> Resu
     let tool_participants = check::tool_participants_from_resolved(resolved)?;
     let source_participants =
         check::source_participants_from_resolved(project_root, resolved, component_crate_dir)?;
-    let outcome = check::run_check(
+    let robot_graph = check::robot_graph_from_resolved(resolved);
+    let outcome = check::run_check_with_context(
         &platform_refs,
         &tool_participants,
         &source_participants,
-        &resolved.api_version,
+        check::CheckGraphContext {
+            root_api: &resolved.api_version,
+            robot_graph: &robot_graph,
+            manifest_extras,
+        },
         check::fetch_emit_apis_from_docker,
         check::fetch_emit_apis_from_tool,
         check::build_emit_apis_from_source,
@@ -235,7 +256,7 @@ fn production_user_runtime_image_ref<'a>(
 }
 
 fn is_local_user_runtime_image(image_ref: &str) -> bool {
-    image_ref.starts_with("phoxal-local/")
+    image_ref.starts_with("phoxal.local/")
 }
 
 pub(crate) fn pin_image_ref(
@@ -277,6 +298,58 @@ fn is_digest_pinned_image_ref(image_ref: &str) -> bool {
     image_ref
         .rsplit_once('@')
         .is_some_and(|(_, digest)| digest.starts_with("sha256:"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DeployMetadata {
+    base_robot: HashedInput,
+    overlays: Vec<OverlayMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct HashedInput {
+    path: PathBuf,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct OverlayMetadata {
+    name: String,
+    path: PathBuf,
+    sha256: String,
+}
+
+fn write_deploy_metadata(path: &Path, robot_path: &Path, overlays: &[String]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let metadata = DeployMetadata {
+        base_robot: HashedInput {
+            path: robot_path.to_path_buf(),
+            sha256: sha256_file(robot_path)?,
+        },
+        overlays: overlays
+            .iter()
+            .map(|name| {
+                let overlay_path = robot_path.with_file_name(format!("robot.{name}.yaml"));
+                Ok(OverlayMetadata {
+                    name: name.clone(),
+                    path: overlay_path.clone(),
+                    sha256: sha256_file(&overlay_path)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    };
+    fs::write(path, serde_json::to_string_pretty(&metadata)?)
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 #[cfg(test)]
@@ -341,13 +414,13 @@ services:
             (
                 "manifest digest",
                 Some("ghcr.io/acme/avoid@sha256:pinned"),
-                "phoxal-local/testbot/user-runtime/avoid:abc",
+                "phoxal.local/testbot/user-runtime/avoid:dev",
                 Ok("ghcr.io/acme/avoid@sha256:pinned"),
             ),
             (
                 "manifest tag",
                 Some("ghcr.io/acme/avoid:v1"),
-                "phoxal-local/testbot/user-runtime/avoid:abc",
+                "phoxal.local/testbot/user-runtime/avoid:dev",
                 Ok(
                     "ghcr.io/acme/avoid:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 ),
@@ -361,7 +434,7 @@ services:
             (
                 "local sim image only",
                 None,
-                "phoxal-local/testbot/user-runtime/avoid:abc",
+                "phoxal.local/testbot/user-runtime/avoid:dev",
                 Err("production deploy needs a pullable image for user runtime avoid"),
             ),
         ];

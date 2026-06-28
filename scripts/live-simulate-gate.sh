@@ -3,14 +3,14 @@
 #
 # Proves the separated repos run together end to end:
 #
-#   robot.yaml → phoxal-cli → real phoxal.lock (real GHCR digests)
+#   robot.yaml → phoxal-cli → real phoxal.sources.lock (real GHCR digests)
 #             → generated .phoxal/run/ → router → Webots → mandatory runtime set
 #
 # Two phases:
 #
 #   Smoke (default) — no Docker daemon, no Webots needed:
 #     1. phoxal-cli update --pin-digests   (resolve REAL GHCR image digests)
-#     2. assert phoxal.lock pins every runtime image as repo@sha256:… (not a tag)
+#     2. assert phoxal.sources.lock pins every runtime image as repo@sha256:… (not a tag)
 #     3. phoxal-cli simulate default --locked --dry-run
 #        (locked resolution + compose generation against the real-digest lock)
 #
@@ -75,13 +75,13 @@ if ! (cd "${robot_dir}" && "${CLI_BIN}" update --pin-digests); then
     scripts/verify-runtime-release.sh, then re-run.
   - rate limited / auth: set GITHUB_TOKEN, or 'docker login ghcr.io' for private packages."
 fi
-ok "phoxal.lock written with --pin-digests"
+ok "phoxal.sources.lock written with --pin-digests"
 
 # --- 2. assert real digest pins (not tag refs) -----------------------------
 
-step "Gate — phoxal.lock pins every runtime image as a real digest"
-lock="${robot_dir}/phoxal.lock"
-[[ -f "${lock}" ]] || fail "phoxal.lock not found at ${lock}"
+step "Gate — phoxal.sources.lock pins every runtime image as a real digest"
+lock="${robot_dir}/phoxal.sources.lock"
+[[ -f "${lock}" ]] || fail "phoxal.sources.lock not found at ${lock}"
 # The lockfile images block: every runtime line must be repo@sha256:…, never a
 # bare repo:version tag ref (that would be an unresolved / fake-digest recovery
 # state — see phoxal/phoxal-cli#10).
@@ -89,7 +89,7 @@ tag_refs="$(awk '/^  images:/{f=1;next} /^[a-z]/{f=0} f && /ghcr.io\/phoxal\/run
 pinned="$(grep -c '@sha256:' "${lock}")"
 if [[ -n "${tag_refs}" ]]; then
   printf '%s\n' "${tag_refs}" >&2
-  fail "phoxal.lock has unpinned runtime images (tag refs above). The GHCR images
+  fail "phoxal.sources.lock has unpinned runtime images (tag refs above). The GHCR images
   for this runtime set are not resolvable — publish them (framework#31) and re-run
   update --pin-digests."
 fi
@@ -113,7 +113,7 @@ else
 fi
 
 if [[ "${live}" -eq 0 ]]; then
-  printf "\n${green}Smoke gate green.${reset} Real-digest phoxal.lock + locked compose verified.\n"
+  printf "\n${green}Smoke gate green.${reset} Real-digest phoxal.sources.lock + locked compose verified.\n"
   cat <<EOF
 
 To run the full LIVE gate (needs a running Docker daemon + Webots on PATH):
@@ -126,7 +126,7 @@ The live run (phoxal-cli simulate ${WORLD} --locked) should show:
   - all mandatory runtime services start from the pinned GHCR images;
   - Webots launches the staged world;
   - runtimes connect to tcp/router:7447 and read /robot;
-  - host tools (rerun-proxy/joypad, when requested) connect via tcp/127.0.0.1:7447.
+  - host tools (joypad, when requested) connect via tcp/127.0.0.1:7447.
 EOF
   exit 0
 fi

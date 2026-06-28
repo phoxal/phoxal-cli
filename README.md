@@ -1,6 +1,6 @@
 # phoxal-cli
 
-Consumer CLI for the Phoxal robot framework. Owns the resolver, `robot.yaml` discovery, `phoxal.lock` generation, and the `validate` / `simulate` / `doctor` commands.
+Consumer CLI for the Phoxal robot framework. Owns the resolver, `robot.yaml` discovery, `phoxal.sources.lock` generation, and the `validate` / `simulate` / `doctor` commands.
 
 ## Install
 
@@ -44,7 +44,7 @@ Example: `phoxal simulate default` finds `worlds/default.wbt` in the project.
 
 `scripts/live-simulate-gate.sh` is the documented gate that proves the
 separated repos run together end to end — `robot.yaml` → `phoxal-cli` → a real
-`phoxal.lock` (real GHCR digests) → generated `.phoxal/run/` → router → Webots
+`phoxal.sources.lock` (real GHCR digests) → generated `.phoxal/run/` → router → Webots
 → the mandatory API/channel runtime set. It is the live counterpart to recovery Gates 8–9
 in `phoxal/organization`'s `REPOSITORIES.md`, and depends on real image digests
 (#10) and a published runtime image set (`phoxal/framework#31`).
@@ -56,7 +56,7 @@ scripts/live-simulate-gate.sh --live     # full live run (needs Docker daemon + 
 ```
 
 The smoke phase runs `update --pin-digests`, asserts every runtime image in
-`phoxal.lock` records a selected `image_ref` plus a real `sha256:…` digest, and
+`phoxal.sources.lock` records a selected `image_ref` plus a real `sha256:…` digest, and
 runs `simulate default --locked --dry-run` to verify locked resolution and that
 the generated compose references those digest pins. It needs only
 `docker buildx` (no daemon). The `--live` phase additionally requires a running

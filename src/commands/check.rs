@@ -1,11 +1,13 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
+use phoxal::model::component::v1::CapabilityRef;
+use phoxal::model::robot::v1::KinematicConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -15,7 +17,8 @@ use crate::check as graph_check;
 use crate::commands::MessageFormat;
 use crate::component_driver::component_crate_dir;
 use crate::resolver::{
-    ResolveOptions, ResolvedComponent, ResolvedRobot, discover_robot_yaml, load_robot, resolve,
+    ResolveOptions, ResolvedComponent, ResolvedRobot, RobotManifestExtras, discover_robot_yaml,
+    load_robot_with_extras, resolve,
 };
 use crate::simulator_staging::cached_tool_path;
 use crate::utils::{cargo_binary_name, resolve_project_path};
@@ -74,6 +77,13 @@ pub struct CheckOutcome {
     pub report: graph_check::Report,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CheckGraphContext<'a> {
+    pub root_api: &'a str,
+    pub robot_graph: &'a graph_check::RobotGraph,
+    pub manifest_extras: &'a RobotManifestExtras,
+}
+
 impl CheckOutcome {
     #[must_use]
     pub fn is_ok(&self) -> bool {
@@ -95,17 +105,19 @@ impl CheckCmd {
 
         ensure_check_outcome_ok(&result.api_version, &result.channel, &result.outcome)?;
 
-        if result.channel != "stable" {
-            eprintln!(
-                "warning: v0 is pre-stable: artifacts built at different times may not interoperate; pin digests with phoxal-cli deploy build"
-            );
+        for warning in &result.outcome.report.warnings {
+            eprintln!("warning: {}", format_warning(warning));
         }
+        eprintln!(
+            "warning: v0 is pre-stable: artifacts built at different times may not interoperate; pin digests with phoxal-cli deploy build"
+        );
 
         let output = CheckOutput {
             status: "ok",
             api_version: result.api_version.clone(),
             channel: result.channel.clone(),
             participant_count: result.participant_count,
+            warning_count: result.outcome.report.warnings.len(),
         };
         crate::commands::print_message(
             &output,
@@ -128,6 +140,7 @@ struct CheckOutput {
     api_version: String,
     channel: String,
     participant_count: usize,
+    warning_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,7 +161,9 @@ fn run(
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let robot = load_robot(&robot_path)?;
+    let loaded = load_robot_with_extras(&robot_path)?;
+    let robot = loaded.robot;
+    let manifest_extras = loaded.extras;
     let resolved = resolve(
         &robot,
         project_root,
@@ -171,20 +186,30 @@ fn run(
         .iter()
         .map(|tool| tool.name.as_str())
         .collect::<Vec<_>>();
-    crate::tool_provisioning::ensure_tool_binaries(ui, &resolved, tool_names)?;
+    crate::tool_provisioning::ensure_tool_binaries_with_mode(
+        ui,
+        &resolved,
+        tool_names,
+        crate::tool_provisioning::ProvisioningMode::from_pull(options.pull),
+    )?;
     let tool_participants = tool_participants_from_resolved(&resolved)?;
-    let mut source_participants =
+    let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_crate_dir)?;
     if let Some(runtime_name) = options.runtime.as_deref() {
-        filter_to_user_runtime(&resolved, &mut source_participants, runtime_name)?;
+        ensure_user_runtime_exists(&resolved, runtime_name)?;
     }
     let participant_count =
         platform_refs.len() + tool_participants.len() + source_participants.len();
-    let outcome = run_check(
+    let robot_graph = robot_graph_from_resolved(&resolved);
+    let outcome = run_check_with_context(
         &platform_refs,
         &tool_participants,
         &source_participants,
-        &resolved.api_version,
+        CheckGraphContext {
+            root_api: &resolved.api_version,
+            robot_graph: &robot_graph,
+            manifest_extras: &manifest_extras,
+        },
         fetch_emit_apis_from_docker,
         fetch_emit_apis_from_tool,
         build_emit_apis_from_source,
@@ -295,11 +320,7 @@ pub(crate) fn source_participants_from_resolved(
     Ok(participants)
 }
 
-fn filter_to_user_runtime(
-    resolved: &ResolvedRobot,
-    participants: &mut Vec<SourceParticipant>,
-    runtime_name: &str,
-) -> Result<()> {
+fn ensure_user_runtime_exists(resolved: &ResolvedRobot, runtime_name: &str) -> Result<()> {
     if !resolved
         .user_runtimes
         .iter()
@@ -318,9 +339,6 @@ fn filter_to_user_runtime(
             "user runtime '{runtime_name}' is not defined in user_runtimes; available: {available}"
         );
     }
-    participants.retain(|participant| {
-        participant.kind == SourceParticipantKind::UserRuntime && participant.name == runtime_name
-    });
     Ok(())
 }
 
@@ -329,6 +347,32 @@ pub fn run_check(
     tool_participants: &[ToolParticipant],
     source_participants: &[SourceParticipant],
     root_api: &str,
+    fetch: impl FnMut(&str) -> Result<RawEmitApis>,
+    fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
+    build: impl FnMut(&Path) -> Result<RawEmitApis>,
+) -> Result<CheckOutcome> {
+    let robot_graph = graph_check::RobotGraph::default();
+    let manifest_extras = RobotManifestExtras::default();
+    run_check_with_context(
+        resolved_platform_image_refs,
+        tool_participants,
+        source_participants,
+        CheckGraphContext {
+            root_api,
+            robot_graph: &robot_graph,
+            manifest_extras: &manifest_extras,
+        },
+        fetch,
+        fetch_tool,
+        build,
+    )
+}
+
+pub fn run_check_with_context(
+    resolved_platform_image_refs: &[(String, String)],
+    tool_participants: &[ToolParticipant],
+    source_participants: &[SourceParticipant],
+    context: CheckGraphContext<'_>,
     mut fetch: impl FnMut(&str) -> Result<RawEmitApis>,
     mut fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
     mut build: impl FnMut(&Path) -> Result<RawEmitApis>,
@@ -378,6 +422,7 @@ pub fn run_check(
         participants.push(participant);
     }
 
+    let mut config_problems = Vec::new();
     for participant in source_participants {
         let raw = build(&participant.crate_dir).with_context(|| {
             format!(
@@ -387,18 +432,36 @@ pub fn run_check(
                 participant.crate_dir.display()
             )
         })?;
-        let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
-            format!(
-                "failed to interpret emit-apis for {} {} ({})",
-                participant.kind_label(),
-                participant.name,
-                participant.crate_dir.display()
+        let mut participant_apis =
+            graph_check::ParticipantApis::try_from(raw).with_context(|| {
+                format!(
+                    "failed to interpret emit-apis for {} {} ({})",
+                    participant.kind_label(),
+                    participant.name,
+                    participant.crate_dir.display()
+                )
+            })?;
+        if participant.kind == SourceParticipantKind::ComponentDriver {
+            participant_apis.scope =
+                graph_check::ParticipantScope::ComponentInstance(participant.name.clone());
+        } else if participant.kind == SourceParticipantKind::UserRuntime
+            && let Some(problem) = validate_user_runtime_config(
+                &participant.name,
+                participant_apis.config_schema.as_ref(),
+                context.manifest_extras,
             )
-        })?;
-        participants.push(participant);
+        {
+            config_problems.push(problem);
+        }
+        participants.push(participant_apis);
     }
 
-    let report = graph_check::check_graph(&participants, root_api);
+    let mut report = graph_check::check_graph_with_topology(
+        &participants,
+        context.root_api,
+        context.robot_graph,
+    );
+    report.problems.extend(config_problems);
     Ok(CheckOutcome {
         missing_images,
         official_runtime_refs,
@@ -406,11 +469,408 @@ pub fn run_check(
     })
 }
 
+pub(crate) fn robot_graph_from_resolved(resolved: &ResolvedRobot) -> graph_check::RobotGraph {
+    let mut component_capabilities = Vec::new();
+    for (instance_name, instance) in &resolved.robot.components.instances {
+        for (capability_id, parameters) in &instance.parameters {
+            component_capabilities.push(graph_check::ComponentCapability {
+                instance: instance_name.clone(),
+                capability: capability_id.clone(),
+                kind: parameters.kind_name().to_string(),
+            });
+        }
+    }
+    component_capabilities.sort();
+    component_capabilities.dedup();
+
+    let mut motion_capabilities = BTreeSet::new();
+    collect_motion_capabilities(&resolved.robot.motion.kinematic, &mut motion_capabilities);
+
+    graph_check::RobotGraph {
+        component_capabilities,
+        motion_capabilities,
+    }
+}
+
+fn collect_motion_capabilities(
+    kinematic: &KinematicConfig,
+    motion_capabilities: &mut BTreeSet<(String, String)>,
+) {
+    let mut insert = |capability: &CapabilityRef| {
+        motion_capabilities.insert((
+            capability.component_id.clone(),
+            capability.capability_id.clone(),
+        ));
+    };
+    match kinematic {
+        KinematicConfig::Differential {
+            left_actuators,
+            right_actuators,
+            left_encoders,
+            right_encoders,
+            ..
+        } => {
+            for capability in left_actuators
+                .iter()
+                .chain(right_actuators)
+                .chain(left_encoders)
+                .chain(right_encoders)
+            {
+                insert(capability);
+            }
+        }
+        KinematicConfig::Mecanum {
+            front_left_actuator,
+            front_right_actuator,
+            rear_left_actuator,
+            rear_right_actuator,
+            ..
+        } => {
+            for capability in [
+                front_left_actuator,
+                front_right_actuator,
+                rear_left_actuator,
+                rear_right_actuator,
+            ] {
+                insert(capability);
+            }
+        }
+        KinematicConfig::Ackermann {
+            steering_actuator,
+            drive_actuator,
+            steering_encoder,
+            drive_encoder,
+            ..
+        } => {
+            insert(steering_actuator);
+            insert(drive_actuator);
+            if let Some(capability) = steering_encoder {
+                insert(capability);
+            }
+            if let Some(capability) = drive_encoder {
+                insert(capability);
+            }
+        }
+        KinematicConfig::Omnidirectional {
+            actuators,
+            encoders,
+        } => {
+            for capability in actuators.iter().chain(encoders) {
+                insert(capability);
+            }
+        }
+    }
+}
+
+fn validate_user_runtime_config(
+    runtime_id: &str,
+    schema: Option<&Value>,
+    manifest_extras: &RobotManifestExtras,
+) -> Option<graph_check::Problem> {
+    let schema = schema?;
+    let config = manifest_extras
+        .user_runtime_config(runtime_id)
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut errors = Vec::new();
+    validate_json_schema(
+        schema,
+        &config,
+        schema,
+        &format!("user_runtimes.{runtime_id}.config"),
+        &mut errors,
+    );
+    if errors.is_empty() {
+        None
+    } else {
+        Some(graph_check::Problem::InvalidConfig {
+            runtime_id: runtime_id.to_string(),
+            errors,
+        })
+    }
+}
+
+fn validate_json_schema(
+    schema: &Value,
+    value: &Value,
+    root: &Value,
+    path: &str,
+    errors: &mut Vec<String>,
+) {
+    if schema.as_bool() == Some(true) {
+        return;
+    }
+    if schema.as_bool() == Some(false) {
+        errors.push(format!("{path} is not allowed by schema"));
+        return;
+    }
+    let Some(object) = schema.as_object() else {
+        return;
+    };
+
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        if let Some(target) = resolve_json_schema_ref(root, reference) {
+            validate_json_schema(target, value, root, path, errors);
+        } else {
+            errors.push(format!("{path}: unresolved schema reference {reference}"));
+        }
+        return;
+    }
+
+    if let Some(const_value) = object.get("const")
+        && value != const_value
+    {
+        errors.push(format!("{path} must equal {const_value}"));
+    }
+    if let Some(enum_values) = object.get("enum").and_then(Value::as_array)
+        && !enum_values.iter().any(|candidate| candidate == value)
+    {
+        errors.push(format!(
+            "{path} must be one of {}",
+            Value::Array(enum_values.clone())
+        ));
+    }
+
+    if let Some(all_of) = object.get("allOf").and_then(Value::as_array) {
+        for subschema in all_of {
+            validate_json_schema(subschema, value, root, path, errors);
+        }
+    }
+    if let Some(any_of) = object.get("anyOf").and_then(Value::as_array)
+        && !any_of
+            .iter()
+            .any(|subschema| schema_matches(subschema, value, root, path))
+    {
+        errors.push(format!("{path} does not match any allowed schema"));
+    }
+    if let Some(one_of) = object.get("oneOf").and_then(Value::as_array) {
+        let matches = one_of
+            .iter()
+            .filter(|subschema| schema_matches(subschema, value, root, path))
+            .count();
+        if matches != 1 {
+            errors.push(format!(
+                "{path} must match exactly one allowed schema, matched {matches}"
+            ));
+        }
+    }
+
+    if let Some(schema_type) = object.get("type")
+        && !json_type_matches(schema_type, value)
+    {
+        errors.push(format!(
+            "{path} must be {}, got {}",
+            format_schema_type(schema_type),
+            json_value_type(value)
+        ));
+        return;
+    }
+
+    match value {
+        Value::Object(values) => {
+            let properties = object.get("properties").and_then(Value::as_object);
+            if let Some(required) = object.get("required").and_then(Value::as_array) {
+                for field in required.iter().filter_map(Value::as_str) {
+                    if !values.contains_key(field) {
+                        errors.push(format!("{path}.{field} is required"));
+                    }
+                }
+            }
+            if let Some(properties) = properties {
+                for (field, field_schema) in properties {
+                    if let Some(field_value) = values.get(field) {
+                        validate_json_schema(
+                            field_schema,
+                            field_value,
+                            root,
+                            &format!("{path}.{field}"),
+                            errors,
+                        );
+                    }
+                }
+            }
+            match object.get("additionalProperties") {
+                Some(Value::Bool(false)) => {
+                    if let Some(properties) = properties {
+                        for field in values.keys() {
+                            if !properties.contains_key(field) {
+                                errors.push(format!("{path}.{field} is not allowed"));
+                            }
+                        }
+                    }
+                }
+                Some(schema) if !schema.is_boolean() => {
+                    for (field, field_value) in values {
+                        if properties.is_none_or(|properties| !properties.contains_key(field)) {
+                            validate_json_schema(
+                                schema,
+                                field_value,
+                                root,
+                                &format!("{path}.{field}"),
+                                errors,
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Value::Array(values) => {
+            if let Some(items) = object.get("items") {
+                for (index, item) in values.iter().enumerate() {
+                    validate_json_schema(items, item, root, &format!("{path}[{index}]"), errors);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn schema_matches(schema: &Value, value: &Value, root: &Value, path: &str) -> bool {
+    let mut errors = Vec::new();
+    validate_json_schema(schema, value, root, path, &mut errors);
+    errors.is_empty()
+}
+
+fn resolve_json_schema_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    let pointer = reference.strip_prefix('#')?;
+    root.pointer(pointer)
+}
+
+fn json_type_matches(schema_type: &Value, value: &Value) -> bool {
+    match schema_type {
+        Value::String(schema_type) => json_single_type_matches(schema_type, value),
+        Value::Array(types) => types
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|schema_type| json_single_type_matches(schema_type, value)),
+        _ => true,
+    }
+}
+
+fn json_single_type_matches(schema_type: &str, value: &Value) -> bool {
+    match schema_type {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "number" => value.is_number(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => true,
+    }
+}
+
+fn format_schema_type(schema_type: &Value) -> String {
+    match schema_type {
+        Value::String(schema_type) => schema_type.clone(),
+        Value::Array(types) => types
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" or "),
+        _ => "the declared type".to_string(),
+    }
+}
+
+fn json_value_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 pub(crate) fn fetch_emit_apis_from_docker(image_ref: &str) -> Result<RawEmitApis> {
-    let output = crate::shell::run_stdout("docker", ["run", "--rm", image_ref, "emit-apis"], None)
-        .map_err(MissingImageError::new)?;
+    let output = crate::shell::run_output("docker", ["run", "--rm", image_ref, "emit-apis"], None)
+        .with_context(|| format!("failed to start docker emit-apis for {image_ref}"))?;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let cause = classify_docker_emit_apis_failure(image_ref, &stdout, &stderr);
+        return match cause {
+            DockerEmitApisFailure::MissingImage(message) => {
+                Err(MissingImageError::new(anyhow!(message)).into())
+            }
+            DockerEmitApisFailure::Hard(message) => {
+                bail!("docker emit-apis for {image_ref} failed: {message}")
+            }
+        };
+    }
+    let output = String::from_utf8(output.stdout)
+        .with_context(|| format!("docker emit-apis output for {image_ref} was not UTF-8"))?;
     serde_json::from_str(&output)
         .with_context(|| format!("docker emit-apis output for {image_ref} was not valid JSON"))
+}
+
+enum DockerEmitApisFailure {
+    MissingImage(String),
+    Hard(String),
+}
+
+fn classify_docker_emit_apis_failure(
+    image_ref: &str,
+    stdout: &str,
+    stderr: &str,
+) -> DockerEmitApisFailure {
+    let combined = format!("{stdout}\n{stderr}");
+    let lower = combined.to_ascii_lowercase();
+    if is_missing_image_failure(&lower) {
+        return DockerEmitApisFailure::MissingImage(format!(
+            "official runtime image {image_ref} is not available: {}",
+            first_nonempty_line(&combined)
+        ));
+    }
+    let cause = if lower.contains("cannot connect to the docker daemon")
+        || lower.contains("is the docker daemon running")
+    {
+        "Docker daemon is not running".to_string()
+    } else if lower.contains("unauthorized")
+        || lower.contains("authentication required")
+        || lower.contains("access denied")
+        || lower.contains("requested access to the resource is denied")
+    {
+        "registry authentication or authorization failed".to_string()
+    } else if lower.contains("executable file not found")
+        || lower.contains("unknown command")
+        || lower.contains("no such file or directory")
+    {
+        "artifact does not expose a runnable top-level `emit-apis` command".to_string()
+    } else {
+        format!(
+            "container exited while running `emit-apis`: {}",
+            first_nonempty_line(&combined)
+        )
+    };
+    DockerEmitApisFailure::Hard(cause)
+}
+
+fn is_missing_image_failure(lower: &str) -> bool {
+    if lower.contains("unauthorized")
+        || lower.contains("authentication required")
+        || lower.contains("requested access to the resource is denied")
+        || lower.contains("executable file not found")
+    {
+        return false;
+    }
+    lower.contains("manifest unknown")
+        || lower.contains("no matching manifest")
+        || lower.contains("manifest for")
+        || lower.contains("repository does not exist")
+        || (lower.contains("not found") && lower.contains("manifest"))
+}
+
+fn first_nonempty_line(output: &str) -> String {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no stdout/stderr")
+        .to_string()
 }
 
 pub(crate) fn fetch_emit_apis_from_tool(binary_path: &Path) -> Result<RawEmitApis> {
@@ -484,6 +944,7 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
             api_version: raw.api_version,
             bus_abi: raw.bus_abi,
             config_schema: raw.config_schema,
+            scope: graph_check::ParticipantScope::Graph,
             contracts,
         })
     }
@@ -604,6 +1065,27 @@ fn format_problem(problem: &graph_check::Problem) -> String {
             format!(
                 "no producer for {family} ({topic}); consumed by: {}",
                 consumers.join(", ")
+            )
+        }
+        graph_check::Problem::InvalidConfig { runtime_id, errors } => {
+            format!(
+                "invalid config for user runtime {runtime_id}: {}",
+                errors.join("; ")
+            )
+        }
+    }
+}
+
+fn format_warning(warning: &graph_check::Warning) -> String {
+    match warning {
+        graph_check::Warning::MissingConsumer {
+            family,
+            topic,
+            producers,
+        } => {
+            format!(
+                "no consumer for {family} ({topic}); produced by: {}",
+                producers.join(", ")
             )
         }
     }
@@ -1018,6 +1500,82 @@ mod tests {
         );
         assert_eq!(participant.contracts[0].direction, Direction::Subscribe);
         Ok(())
+    }
+
+    #[test]
+    fn user_runtime_config_is_validated_against_emitted_schema() -> Result<()> {
+        let sources = vec![SourceParticipant::user_runtime(
+            "avoid".to_string(),
+            PathBuf::from("/fake/project/runtimes/avoid"),
+        )];
+        let extras = RobotManifestExtras {
+            user_runtimes: BTreeMap::from([(
+                "avoid".to_string(),
+                crate::resolver::UserRuntimeManifestExtras {
+                    image: None,
+                    config: Some(serde_json::json!({ "gain": "fast" })),
+                },
+            )]),
+        };
+        let robot_graph = graph_check::RobotGraph::default();
+
+        let outcome = run_check_with_context(
+            &[],
+            &[],
+            &sources,
+            CheckGraphContext {
+                root_api: "y2026_1",
+                robot_graph: &robot_graph,
+                manifest_extras: &extras,
+            },
+            |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
+            |_| {
+                let mut raw = raw("avoid", "y2026_1", &[]);
+                raw.config_schema = Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["gain"],
+                    "properties": {
+                        "gain": { "type": "number" }
+                    },
+                    "additionalProperties": false
+                }));
+                Ok(raw)
+            },
+        )?;
+
+        assert_eq!(outcome.report.problems.len(), 1);
+        assert!(matches!(
+            &outcome.report.problems[0],
+            Problem::InvalidConfig { runtime_id, errors }
+                if runtime_id == "avoid"
+                    && errors.iter().any(|error| error.contains("gain"))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn docker_emit_apis_classifier_only_treats_manifest_absence_as_missing() {
+        let missing = classify_docker_emit_apis_failure(
+            "ghcr.io/phoxal/runtime-drive:y2026_2-stable",
+            "",
+            "manifest unknown: manifest unknown",
+        );
+        assert!(matches!(missing, DockerEmitApisFailure::MissingImage(_)));
+
+        let missing_subcommand = classify_docker_emit_apis_failure(
+            "ghcr.io/phoxal/runtime-drive:y2026_1-stable",
+            "",
+            r#"exec: "emit-apis": executable file not found in $PATH"#,
+        );
+        assert!(matches!(missing_subcommand, DockerEmitApisFailure::Hard(_)));
+
+        let auth_failure = classify_docker_emit_apis_failure(
+            "ghcr.io/phoxal/runtime-drive:y2026_1-stable",
+            "",
+            "unauthorized: authentication required",
+        );
+        assert!(matches!(auth_failure, DockerEmitApisFailure::Hard(_)));
     }
 
     fn raw(id: &str, api_version: &str, contracts: &[(&str, &str, &str)]) -> RawEmitApis {
