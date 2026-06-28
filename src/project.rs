@@ -2,8 +2,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use phoxal::runtime::{COMPONENT_FILE, DEFAULT_ROBOT_NAMESPACE, MESHES_DIR, STRUCTURE_FILE};
 
+// Bundle-layout conventions. These were `pub` constants in `phoxal::runtime` up to
+// framework 0.10.0; the 0.11 rewrite made them private to the framework's model
+// internals, so the CLI owns its copies (as it already does for SIMULATION_FILE).
+const COMPONENT_FILE: &str = "component.yaml";
+const STRUCTURE_FILE: &str = "structure.urdf";
+const MESHES_DIR: &str = "meshes";
+const DEFAULT_ROBOT_NAMESPACE: &str = "dev";
 const SIMULATION_FILE: &str = "simulation.yaml";
 
 #[derive(Debug, Clone)]
