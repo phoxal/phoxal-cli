@@ -1,5 +1,5 @@
 use clap::{CommandFactory, Parser};
-use phoxal_cli::commands::{Cli, RootCommand, runtime, self_cmd};
+use phoxal_cli::commands::{Cli, RootCommand, deploy, runtime, self_cmd};
 
 #[test]
 fn clap_definition_is_valid() {
@@ -50,4 +50,18 @@ fn parses_runtime_run() {
     };
 
     assert_eq!(run.name, "avoid-obstacles");
+}
+
+#[test]
+fn parses_deploy_build_defaults_to_compose() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "deploy", "build"])
+        .expect("deploy build command should parse");
+
+    let RootCommand::Deploy(command) = cli.command else {
+        panic!("expected deploy command");
+    };
+    let deploy::DeploySubcommand::Build(build) = command.command;
+
+    assert_eq!(build.target, deploy::DeployTarget::Compose);
+    assert!(build.output.is_none());
 }

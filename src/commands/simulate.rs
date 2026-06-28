@@ -9,8 +9,9 @@ use serde::Serialize;
 
 use crate::AppContext;
 use crate::catalog::CATALOG;
+use crate::compose::LaunchClock;
 use crate::lockfile::{LOCKFILE_NAME, Lockfile};
-use crate::resolver::{ResolveOptions, ResolvedRobot, resolve};
+use crate::resolver::{ResolveOptions, ResolvedRobot, RobotManifestExtras, resolve};
 use crate::world;
 
 #[derive(Debug, Args)]
@@ -87,6 +88,7 @@ struct ResolvedSimulation {
     project_root: PathBuf,
     world_path: PathBuf,
     resolved: ResolvedRobot,
+    manifest_extras: RobotManifestExtras,
     lockfile_written: Option<PathBuf>,
 }
 
@@ -195,7 +197,9 @@ fn resolve_project(
         .context("robot.yaml did not have a parent directory")?
         .to_path_buf();
     let world_path = world::resolve_world(&project_root, &options.world)?;
-    let robot = crate::resolver::load_robot(&robot_path)?;
+    let loaded = crate::resolver::load_robot_with_extras(&robot_path)?;
+    let robot = loaded.robot;
+    let manifest_extras = loaded.extras;
     let lock_path = project_root.join(LOCKFILE_NAME);
     let lockfile = if lock_path.is_file() {
         Some(Lockfile::read(&lock_path)?)
@@ -222,6 +226,7 @@ fn resolve_project(
             project_root,
             world_path,
             resolved,
+            manifest_extras,
             lockfile_written: None,
         });
     }
@@ -239,6 +244,7 @@ fn resolve_project(
                 project_root,
                 world_path,
                 resolved: locked_resolved,
+                manifest_extras,
                 lockfile_written: None,
             });
         }
@@ -259,6 +265,7 @@ fn resolve_project(
         project_root,
         world_path,
         resolved,
+        manifest_extras,
         lockfile_written,
     })
 }
@@ -287,6 +294,8 @@ fn write_simulation_files(
             &run_dir,
             user_images,
             &native_tools,
+            &resolved.manifest_extras,
+            LaunchClock::Simulation,
         )?,
     )
     .with_context(|| format!("failed to write {}", compose_path.display()))?;

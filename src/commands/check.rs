@@ -59,20 +59,7 @@ impl CheckCmd {
             .await
             .context("check worker failed")??;
 
-        if !result.outcome.missing_images.is_empty() {
-            bail!(
-                "{}",
-                format_missing_images_error(
-                    &result.api_version,
-                    &result.channel,
-                    &result.outcome.missing_images
-                )
-            );
-        }
-
-        if !result.outcome.report.is_ok() {
-            bail!("{}", format_report_error(&result.outcome.report));
-        }
+        ensure_check_outcome_ok(&result.api_version, &result.channel, &result.outcome)?;
 
         println!(
             "ok: {} participants validated against api_version {} (channel {})",
@@ -171,7 +158,7 @@ pub enum SourceParticipantKind {
     ComponentDriver,
 }
 
-fn source_participants_from_resolved(
+pub(crate) fn source_participants_from_resolved(
     project_root: &Path,
     resolved: &ResolvedRobot,
     mut locate_component_crate: impl FnMut(&ResolvedComponent, &Path) -> Result<PathBuf>,
@@ -264,14 +251,14 @@ pub fn run_check(
     })
 }
 
-fn fetch_emit_apis_from_docker(image_ref: &str) -> Result<RawEmitApis> {
+pub(crate) fn fetch_emit_apis_from_docker(image_ref: &str) -> Result<RawEmitApis> {
     let output = crate::shell::run_stdout("docker", ["run", "--rm", image_ref, "emit-apis"], None)
         .map_err(MissingImageError::new)?;
     serde_json::from_str(&output)
         .with_context(|| format!("docker emit-apis output for {image_ref} was not valid JSON"))
 }
 
-fn build_emit_apis_from_source(dir: &Path) -> Result<RawEmitApis> {
+pub(crate) fn build_emit_apis_from_source(dir: &Path) -> Result<RawEmitApis> {
     let crate_dir = dir
         .canonicalize()
         .with_context(|| format!("failed to canonicalize source crate {}", dir.display()))?;
@@ -332,6 +319,25 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
             contracts,
         })
     }
+}
+
+pub(crate) fn ensure_check_outcome_ok(
+    api_version: &str,
+    channel: &str,
+    outcome: &CheckOutcome,
+) -> Result<()> {
+    if !outcome.missing_images.is_empty() {
+        bail!(
+            "{}",
+            format_missing_images_error(api_version, channel, &outcome.missing_images)
+        );
+    }
+
+    if !outcome.report.is_ok() {
+        bail!("{}", format_report_error(&outcome.report));
+    }
+
+    Ok(())
 }
 
 fn format_missing_images_error(

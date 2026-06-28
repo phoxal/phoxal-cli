@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -41,6 +42,39 @@ pub struct ResolvedRobot {
     pub user_runtimes: Vec<ResolvedUserRuntime>,
     pub components: Vec<ResolvedComponent>,
     pub tools: Vec<ResolvedTool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RobotManifestExtras {
+    pub user_runtimes: BTreeMap<String, UserRuntimeManifestExtras>,
+}
+
+impl RobotManifestExtras {
+    #[must_use]
+    pub fn user_runtime_config(&self, runtime_name: &str) -> Option<&Value> {
+        self.user_runtimes
+            .get(runtime_name)
+            .and_then(|runtime| runtime.config.as_ref())
+    }
+
+    #[must_use]
+    pub fn user_runtime_image(&self, runtime_name: &str) -> Option<&str> {
+        self.user_runtimes
+            .get(runtime_name)
+            .and_then(|runtime| runtime.image.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UserRuntimeManifestExtras {
+    pub image: Option<String>,
+    pub config: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedRobot {
+    pub robot: Robot,
+    pub extras: RobotManifestExtras,
 }
 
 /// How a platform runtime image is referenced for deployment.
@@ -174,9 +208,84 @@ pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
 }
 
 pub fn load_robot(path: &Path) -> Result<Robot> {
+    // Delegate to the extras-aware loader so EVERY command tolerates the
+    // `user_runtimes.<name>.image`/`config` keys: the typed `phoxal` model uses
+    // `deny_unknown_fields` and does not carry those fields, so they must be
+    // stripped before the typed parse. Commands that don't need the extras
+    // (check/validate/update/runtime add) just discard them.
+    load_robot_with_extras(path).map(|loaded| loaded.robot)
+}
+
+pub fn load_robot_with_extras(path: &Path) -> Result<LoadedRobot> {
     let contents = fs::read_to_string(path)
         .with_context(|| format!("failed to read robot file {}", path.display()))?;
-    Robot::read_from_string(&contents)
+    let mut yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents)
+        .with_context(|| format!("failed to parse robot file {}", path.display()))?;
+    let (extras, stripped_extras) = take_manifest_extras(&mut yaml, path)?;
+
+    let robot = if stripped_extras {
+        let sanitized = serde_yaml::to_string(&yaml)
+            .with_context(|| format!("failed to prepare {}", path.display()))?;
+        Robot::read_from_string(&sanitized)
+    } else {
+        Robot::read_from_string(&contents)
+    }?;
+
+    Ok(LoadedRobot { robot, extras })
+}
+
+fn take_manifest_extras(
+    yaml: &mut serde_yaml::Value,
+    robot_path: &Path,
+) -> Result<(RobotManifestExtras, bool)> {
+    let Some(user_runtimes) = yaml
+        .as_mapping_mut()
+        .and_then(|mapping| mapping.get_mut("user_runtimes"))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return Ok((RobotManifestExtras::default(), false));
+    };
+
+    let mut extras = RobotManifestExtras::default();
+    let mut stripped_extras = false;
+    for (name, runtime) in user_runtimes {
+        let Some(name) = name.as_str() else {
+            continue;
+        };
+        let Some(runtime) = runtime.as_mapping_mut() else {
+            continue;
+        };
+        let image = runtime.remove("image");
+        let config = runtime.remove("config");
+        stripped_extras |= image.is_some() || config.is_some();
+
+        let image = image
+            .map(|image| {
+                image.as_str().map(ToString::to_string).ok_or_else(|| {
+                    anyhow!(
+                        "user_runtimes.{name}.image in {} must be a string",
+                        robot_path.display()
+                    )
+                })
+            })
+            .transpose()?;
+        let config = config
+            .map(|config| {
+                serde_json::to_value(config).with_context(|| {
+                    format!("user_runtimes.{name}.config must be representable as JSON")
+                })
+            })
+            .transpose()?;
+
+        if image.is_some() || config.is_some() {
+            extras.user_runtimes.insert(
+                name.to_string(),
+                UserRuntimeManifestExtras { image, config },
+            );
+        }
+    }
+
+    Ok((extras, stripped_extras))
 }
 
 pub fn resolve(
@@ -596,6 +705,57 @@ fn join_errors(errors: Vec<phoxal::model::robot::ValidationError>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_robot_tolerates_user_runtime_image_and_config() -> anyhow::Result<()> {
+        // The typed `phoxal` model denies unknown fields and does not carry
+        // `user_runtimes.<name>.image`/`config`; `load_robot` must strip them (like
+        // the extras-aware loader) so every command — not just deploy/simulate —
+        // accepts a manifest that declares them.
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("robot.yaml");
+        std::fs::write(
+            &path,
+            r#"schema: v0
+api_version: y2026_1
+identity:
+  id: bot
+  namespace: dev
+structure: structure.urdf
+phoxal_runtimes:
+  channel: stable
+user_runtimes:
+  brain:
+    path: runtimes/brain
+    image: ghcr.io/acme/brain@sha256:abc
+    config:
+      gain: 0.5
+motion:
+  kinematic:
+    kind: differential
+    left_actuators: [l.motor]
+    right_actuators: [r.motor]
+    left_encoders: [l.encoder]
+    right_encoders: [r.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+components:
+  sources: {}
+  instances: {}
+"#,
+        )?;
+
+        // Plain load_robot (used by check/validate/update/runtime add) must parse it
+        // despite the image/config keys the typed model does not know about.
+        let robot = load_robot(&path)?;
+        assert!(robot.user_runtimes.contains_key("brain"));
+
+        // The extras-aware loader still parses it too.
+        let loaded = load_robot_with_extras(&path)?;
+        assert!(loaded.robot.user_runtimes.contains_key("brain"));
+
+        Ok(())
+    }
 
     #[test]
     fn buildx_imagetools_digest_uses_index_digest_not_platform_leaf() -> anyhow::Result<()> {

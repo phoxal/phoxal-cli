@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use crate::AppContext;
 
 pub mod check;
+pub mod deploy;
 pub mod doctor;
 pub mod runtime;
 pub mod self_cmd;
@@ -57,6 +58,8 @@ pub enum RootCommand {
     Update(update::Update),
     #[command(about = "Resolve and launch the local Webots simulation stack.")]
     Simulate(simulate::Simulate),
+    #[command(about = "Build deployment artifacts.")]
+    Deploy(deploy::Deploy),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
     #[command(about = "Manage user runtime crates.")]
@@ -74,6 +77,7 @@ impl RootCommand {
             Self::Validate(command) => command.run(app).await,
             Self::Update(command) => command.run(app).await,
             Self::Simulate(command) => command.run(app).await,
+            Self::Deploy(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
             Self::Runtime(command) => command.run(app).await,
             Self::Version => {

@@ -5,14 +5,14 @@ use std::process::{Command, ExitStatus};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use heck::ToUpperCamelCase;
-use phoxal::model::robot::{RobotV1 as Robot, v1::UserRuntime};
+use phoxal::model::robot::v1::UserRuntime;
 use semver::Version;
 use serde_json::Value as JsonValue;
 use toml::Value as TomlValue;
 
 use crate::AppContext;
 use crate::catalog::CATALOG;
-use crate::resolver::{discover_robot_yaml, load_robot};
+use crate::resolver::{discover_robot_yaml, load_robot, load_robot_with_extras};
 use crate::utils::{cargo_binary_name, resolve_project_path};
 
 #[derive(Debug, Args)]
@@ -155,7 +155,9 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let (robot, config) = load_robot_for_runtime_run(&robot_path, name)?;
+    let loaded = load_robot_with_extras(&robot_path)?;
+    let config = loaded.extras.user_runtime_config(name).cloned();
+    let robot = loaded.robot;
 
     if CATALOG
         .entries_for_api(&robot.api_version)
@@ -207,65 +209,6 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
         binary_path,
         env,
     })
-}
-
-fn load_robot_for_runtime_run(
-    robot_path: &Path,
-    runtime_name: &str,
-) -> Result<(Robot, Option<JsonValue>)> {
-    let contents = fs::read_to_string(robot_path)
-        .with_context(|| format!("failed to read robot file {}", robot_path.display()))?;
-    let mut yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents)
-        .with_context(|| format!("failed to parse robot file {}", robot_path.display()))?;
-    let (config, stripped_config) = take_user_runtime_config(&mut yaml, runtime_name)?;
-
-    let robot = if stripped_config {
-        let sanitized = serde_yaml::to_string(&yaml)
-            .with_context(|| format!("failed to prepare {}", robot_path.display()))?;
-        Robot::read_from_string(&sanitized)
-    } else {
-        load_robot(robot_path)
-    }?;
-
-    Ok((robot, config))
-}
-
-fn take_user_runtime_config(
-    yaml: &mut serde_yaml::Value,
-    runtime_name: &str,
-) -> Result<(Option<JsonValue>, bool)> {
-    let Some(user_runtimes) = yaml
-        .as_mapping_mut()
-        .and_then(|mapping| mapping.get_mut("user_runtimes"))
-        .and_then(serde_yaml::Value::as_mapping_mut)
-    else {
-        return Ok((None, false));
-    };
-
-    let mut target_config = None;
-    let mut stripped_config = false;
-    for (name, runtime) in user_runtimes {
-        let Some(name) = name.as_str() else {
-            continue;
-        };
-        let Some(runtime) = runtime.as_mapping_mut() else {
-            continue;
-        };
-        let config = runtime.remove("config");
-        stripped_config |= config.is_some();
-        if name == runtime_name {
-            target_config = config;
-        }
-    }
-
-    target_config
-        .map(|config| {
-            serde_json::to_value(config).with_context(|| {
-                format!("user_runtimes.{runtime_name}.config must be representable as JSON")
-            })
-        })
-        .transpose()
-        .map(|config| (config, stripped_config))
 }
 
 pub(crate) fn run_env(
