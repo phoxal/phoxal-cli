@@ -15,9 +15,13 @@ fn lockfile_roundtrips_through_yaml() -> anyhow::Result<()> {
         &robot,
         temp.path(),
         &CATALOG,
+        // Fully offline: no `git ls-remote` for component commits, no registry
+        // digest/tool-hash network. The lock still round-trips with the empty
+        // commits the offline resolve leaves behind.
         ResolveOptions {
+            locked: false,
             resolve_external_artifacts: false,
-            ..ResolveOptions::default()
+            resolve_source_commits: false,
         },
     )?;
     let lockfile = Lockfile::from_resolved(&resolved);

@@ -41,13 +41,6 @@ pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
         binary_template: "phoxal-simulator-webots-supervisor-{target}",
     },
     ToolVersion {
-        name: "rerun_proxy",
-        default_version: "0.1.0",
-        repo: "phoxal/operator",
-        artifact_template: "phoxal-rerun-proxy-{version}-{target}.tar.gz",
-        binary_template: "phoxal-rerun-proxy-{target}",
-    },
-    ToolVersion {
         name: "joypad",
         default_version: "0.14.0",
         repo: "phoxal/framework",
@@ -115,29 +108,57 @@ impl PlatformRuntimeEntry {
 }
 
 impl PlatformRuntimeCatalog {
+    /// Iterate the official runtime entries published for `api_version`.
+    ///
+    /// This is the CLI-side availability gate: an API version is considered
+    /// selectable only when the compiled-in catalog exposes the complete
+    /// official runtime set for that version. The resolver then combines these
+    /// entries with the selected channel to form API-scoped image refs.
     pub fn entries_for_api<'a>(
         &'a self,
         api_version: &'a str,
     ) -> impl Iterator<Item = &'a PlatformRuntimeEntry> + 'a {
+        let complete = self.has_complete_api_set(api_version);
         self.entries
             .iter()
-            .filter(move |entry| entry.api_versions.contains(&api_version))
+            .filter(move |entry| complete && entry.api_versions.contains(&api_version))
     }
 
+    /// Iterate every official runtime name known to this CLI release.
     pub fn names(&self) -> impl Iterator<Item = &'static str> {
         self.entries.iter().map(|entry| entry.name)
     }
 
+    /// Return the official runtime names available for `api_version`.
+    ///
+    /// An empty result means this CLI cannot resolve a complete official image
+    /// set for that API version; callers should fail with availability guidance
+    /// instead of trying to synthesize image refs.
     pub fn names_for_api(&self, api_version: &str) -> Vec<&'static str> {
         self.entries_for_api(api_version)
             .map(|entry| entry.name)
             .collect()
     }
 
+    #[must_use]
+    pub fn has_complete_api_set(&self, api_version: &str) -> bool {
+        !self.entries.is_empty()
+            && self
+                .entries
+                .iter()
+                .all(|entry| entry.api_versions.contains(&api_version))
+    }
+
+    /// Look up a runtime by catalog name.
+    ///
+    /// Compose/deploy generation uses this to recover topology flags for an
+    /// already-resolved runtime. It does not by itself prove API availability;
+    /// use [`Self::entries_for_api`] or [`Self::names_for_api`] for that gate.
     pub fn lookup(&self, name: &str) -> Option<&PlatformRuntimeEntry> {
         self.entries.iter().find(|entry| entry.name == name)
     }
 
+    /// Return all official runtime names known to this CLI release.
     pub fn names_vec(&self) -> Vec<&'static str> {
         self.names().collect()
     }
@@ -145,7 +166,7 @@ impl PlatformRuntimeCatalog {
 
 #[cfg(test)]
 mod tests {
-    use super::CATALOG;
+    use super::{CATALOG, PlatformRuntimeCatalog, PlatformRuntimeEntry};
     use std::collections::BTreeSet;
 
     #[test]
@@ -208,6 +229,29 @@ mod tests {
         );
         assert!(CATALOG.names_for_api("y2026_2").is_empty());
         assert!(CATALOG.names_for_api("y2099_1").is_empty());
+    }
+
+    #[test]
+    fn api_version_requires_complete_official_set() {
+        static PARTIAL: &[PlatformRuntimeEntry] = &[
+            PlatformRuntimeEntry {
+                name: "drive",
+                api_versions: &["y2026_1", "y2026_2"],
+                uses_supervisor_api: false,
+                wires_to_router: true,
+            },
+            PlatformRuntimeEntry {
+                name: "map",
+                api_versions: &["y2026_1"],
+                uses_supervisor_api: false,
+                wires_to_router: true,
+            },
+        ];
+        let catalog = PlatformRuntimeCatalog { entries: PARTIAL };
+
+        assert!(catalog.has_complete_api_set("y2026_1"));
+        assert!(!catalog.has_complete_api_set("y2026_2"));
+        assert_eq!(catalog.names_for_api("y2026_2"), Vec::<&'static str>::new());
     }
 
     #[test]

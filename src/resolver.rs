@@ -21,7 +21,15 @@ const ROBOT_FILE: &str = "robot.yaml";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolveOptions {
     pub locked: bool,
+    /// Resolve external artifact digests/checksums from the network
+    /// (registry image digests, tool asset sha256). Off for offline flows.
     pub resolve_external_artifacts: bool,
+    /// Resolve git component `tag` → `commit` from the network
+    /// (`git ls-remote`). This is the lock-refresh axis: only the explicit
+    /// refresh flows (`update`, `pull`, live/`--pull` simulate, `deploy build`)
+    /// set it. Default/offline flows (`check`, `outdated`, dry-run) leave it
+    /// off and fill commits from `phoxal.sources.lock` instead.
+    pub resolve_source_commits: bool,
 }
 
 impl Default for ResolveOptions {
@@ -29,6 +37,7 @@ impl Default for ResolveOptions {
         Self {
             locked: false,
             resolve_external_artifacts: true,
+            resolve_source_commits: true,
         }
     }
 }
@@ -47,6 +56,7 @@ pub struct ResolvedRobot {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RobotManifestExtras {
     pub user_runtimes: BTreeMap<String, UserRuntimeManifestExtras>,
+    pub bus: BusManifestExtras,
 }
 
 impl RobotManifestExtras {
@@ -63,6 +73,11 @@ impl RobotManifestExtras {
             .get(runtime_name)
             .and_then(|runtime| runtime.image.as_deref())
     }
+
+    #[must_use]
+    pub fn materialized_bus_profile(&self, default_connect: &str) -> MaterializedBusProfile {
+        self.bus.materialize(default_connect)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -71,11 +86,55 @@ pub struct UserRuntimeManifestExtras {
     pub config: Option<Value>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct BusManifestExtras {
+    pub selected_profile: Option<String>,
+    pub profiles: BTreeMap<String, BusProfileConfig>,
+}
+
+impl BusManifestExtras {
+    #[must_use]
+    pub fn selected_profile_name(&self) -> &str {
+        self.selected_profile
+            .as_deref()
+            .unwrap_or(DEFAULT_BUS_PROFILE_NAME)
+    }
+
+    #[must_use]
+    pub fn materialize(&self, default_connect: &str) -> MaterializedBusProfile {
+        let selected_profile = self.selected_profile_name().to_string();
+        let configured = self.profiles.get(&selected_profile);
+        MaterializedBusProfile {
+            selected_profile,
+            connect: configured
+                .and_then(|profile| profile.connect.clone())
+                .unwrap_or_else(|| default_connect.to_string()),
+        }
+    }
+}
+
+/// A manifest bus profile. Per the transport spec a profile is just
+/// `{ connect: <endpoint> }`; the router-binding `listen` endpoint is deploy
+/// infra (a CLI-side default), not a manifest profile field.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct BusProfileConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MaterializedBusProfile {
+    pub selected_profile: String,
+    pub connect: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedRobot {
     pub robot: Robot,
     pub extras: RobotManifestExtras,
 }
+
+const DEFAULT_BUS_PROFILE_NAME: &str = "default";
 
 /// How a platform runtime image is referenced for deployment.
 ///
@@ -221,33 +280,114 @@ pub fn load_robot_with_extras(path: &Path) -> Result<LoadedRobot> {
         .with_context(|| format!("failed to read robot file {}", path.display()))?;
     let mut yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents)
         .with_context(|| format!("failed to parse robot file {}", path.display()))?;
-    let (extras, stripped_extras) = take_manifest_extras(&mut yaml, path)?;
+    parse_robot_value_with_extras(&mut yaml, path)
+}
 
-    let robot = if stripped_extras {
-        let sanitized = serde_yaml::to_string(&yaml)
-            .with_context(|| format!("failed to prepare {}", path.display()))?;
-        Robot::read_from_string(&sanitized)
-    } else {
-        Robot::read_from_string(&contents)
-    }?;
+pub fn load_robot_with_extras_and_overlays(
+    path: &Path,
+    overlays: &[String],
+) -> Result<LoadedRobot> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read robot file {}", path.display()))?;
+    let mut yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents)
+        .with_context(|| format!("failed to parse robot file {}", path.display()))?;
+
+    for overlay in overlays {
+        validate_overlay_name(overlay)?;
+        let overlay_path = path.with_file_name(format!("robot.{overlay}.yaml"));
+        let overlay_contents = fs::read_to_string(&overlay_path)
+            .with_context(|| format!("failed to read overlay {}", overlay_path.display()))?;
+        let overlay_yaml = serde_yaml::from_str::<serde_yaml::Value>(&overlay_contents)
+            .with_context(|| format!("failed to parse overlay {}", overlay_path.display()))?;
+        merge_yaml_overlay(&mut yaml, overlay_yaml, &mut Vec::new());
+    }
+
+    parse_robot_value_with_extras(&mut yaml, path)
+}
+
+fn parse_robot_value_with_extras(yaml: &mut serde_yaml::Value, path: &Path) -> Result<LoadedRobot> {
+    let (extras, _) = take_manifest_extras(yaml, path)?;
+    let sanitized = serde_yaml::to_string(&yaml)
+        .with_context(|| format!("failed to prepare {}", path.display()))?;
+    let robot = Robot::read_from_string(&sanitized)?;
 
     Ok(LoadedRobot { robot, extras })
+}
+
+fn validate_overlay_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name == "."
+        || name == ".."
+        || name.chars().any(char::is_whitespace)
+    {
+        bail!(
+            "overlay name '{name}' is invalid; use a simple name such as `prod` for robot.prod.yaml"
+        );
+    }
+    Ok(())
+}
+
+fn merge_yaml_overlay(
+    base: &mut serde_yaml::Value,
+    overlay: serde_yaml::Value,
+    path: &mut Vec<String>,
+) {
+    if is_replace_whole_user_runtime_config(path) {
+        *base = overlay;
+        return;
+    }
+
+    match (base, overlay) {
+        (serde_yaml::Value::Mapping(base_map), serde_yaml::Value::Mapping(overlay_map)) => {
+            for (key, value) in overlay_map {
+                let pushed_path = if let Some(segment) = key.as_str().map(str::to_string) {
+                    path.push(segment);
+                    true
+                } else {
+                    false
+                };
+                if let Some(existing) = base_map.get_mut(&key) {
+                    merge_yaml_overlay(existing, value, path);
+                } else {
+                    base_map.insert(key, value);
+                }
+                if pushed_path {
+                    path.pop();
+                }
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
+}
+
+fn is_replace_whole_user_runtime_config(path: &[String]) -> bool {
+    path.len() == 3 && path[0] == "user_runtimes" && path[2] == "config"
 }
 
 fn take_manifest_extras(
     yaml: &mut serde_yaml::Value,
     robot_path: &Path,
 ) -> Result<(RobotManifestExtras, bool)> {
+    let mut extras = RobotManifestExtras::default();
+    let mut stripped_extras = false;
+
+    if let Some(root) = yaml.as_mapping_mut()
+        && let Some(bus) = root.remove("bus")
+    {
+        extras.bus = parse_bus_manifest_extras(&bus, robot_path)?;
+        stripped_extras = true;
+    }
+
     let Some(user_runtimes) = yaml
         .as_mapping_mut()
         .and_then(|mapping| mapping.get_mut("user_runtimes"))
         .and_then(serde_yaml::Value::as_mapping_mut)
     else {
-        return Ok((RobotManifestExtras::default(), false));
+        return Ok((extras, stripped_extras));
     };
 
-    let mut extras = RobotManifestExtras::default();
-    let mut stripped_extras = false;
     for (name, runtime) in user_runtimes {
         let Some(name) = name.as_str() else {
             continue;
@@ -288,6 +428,170 @@ fn take_manifest_extras(
     Ok((extras, stripped_extras))
 }
 
+fn parse_bus_manifest_extras(
+    bus: &serde_yaml::Value,
+    robot_path: &Path,
+) -> Result<BusManifestExtras> {
+    let bus = bus.as_mapping().ok_or_else(|| {
+        anyhow!(
+            "bus in {} must be a mapping with profiles",
+            robot_path.display()
+        )
+    })?;
+    for key in bus.keys().filter_map(serde_yaml::Value::as_str) {
+        if !matches!(
+            key,
+            "profiles" | "selected" | "profile" | "default" | "default_profile"
+        ) {
+            bail!("bus.{key} in {} is not supported", robot_path.display());
+        }
+    }
+
+    // `bus.profiles` is optional: the `default` profile (local Zenoh) is
+    // implicit, so a manifest may declare only non-default profiles, or omit
+    // the block entirely. Declare only what differs from the implicit default.
+    let profiles = match bus.get("profiles") {
+        Some(profiles_value) => parse_bus_profiles(profiles_value, robot_path)?,
+        None => BTreeMap::new(),
+    };
+    let selected_profile = parse_selected_bus_profile(bus, robot_path)?;
+    // Only an explicitly named, non-default selected profile must exist: the
+    // implicit `default` never needs to be declared in bus.profiles.
+    if let Some(selected_name) = selected_profile.as_deref()
+        && selected_name != DEFAULT_BUS_PROFILE_NAME
+        && !profiles.contains_key(selected_name)
+    {
+        let available = profiles.keys().cloned().collect::<Vec<_>>().join(", ");
+        bail!(
+            "bus selected profile '{selected_name}' in {} is not defined in bus.profiles; available: {available}",
+            robot_path.display()
+        );
+    }
+
+    Ok(BusManifestExtras {
+        selected_profile,
+        profiles,
+    })
+}
+
+fn parse_bus_profiles(
+    profiles: &serde_yaml::Value,
+    robot_path: &Path,
+) -> Result<BTreeMap<String, BusProfileConfig>> {
+    let profiles = profiles.as_mapping().ok_or_else(|| {
+        anyhow!(
+            "bus.profiles in {} must be a mapping of profile names",
+            robot_path.display()
+        )
+    })?;
+    if profiles.is_empty() {
+        bail!(
+            "bus.profiles in {} must define at least one profile",
+            robot_path.display()
+        );
+    }
+
+    let mut parsed = BTreeMap::new();
+    for (name, profile) in profiles {
+        let Some(name) = name.as_str() else {
+            continue;
+        };
+        validate_bus_profile_name(name)?;
+        let profile = parse_bus_profile_config(name, profile, robot_path)?;
+        parsed.insert(name.to_string(), profile);
+    }
+    Ok(parsed)
+}
+
+fn parse_bus_profile_config(
+    name: &str,
+    profile: &serde_yaml::Value,
+    robot_path: &Path,
+) -> Result<BusProfileConfig> {
+    let profile = profile.as_mapping().ok_or_else(|| {
+        anyhow!(
+            "bus.profiles.{name} in {} must be a mapping",
+            robot_path.display()
+        )
+    })?;
+    for key in profile.keys().filter_map(serde_yaml::Value::as_str) {
+        // A profile is just `{ connect }` per the transport spec; `listen` is
+        // router-binding deploy infra, not a manifest profile field.
+        if key != "connect" {
+            bail!(
+                "bus.profiles.{name}.{key} in {} is not supported",
+                robot_path.display()
+            );
+        }
+    }
+    Ok(BusProfileConfig {
+        connect: profile
+            .get("connect")
+            .map(|value| parse_bus_endpoint(name, "connect", value, robot_path))
+            .transpose()?,
+    })
+}
+
+fn parse_bus_endpoint(
+    profile_name: &str,
+    field: &str,
+    value: &serde_yaml::Value,
+    robot_path: &Path,
+) -> Result<String> {
+    let Some(endpoint) = value.as_str() else {
+        bail!(
+            "bus.profiles.{profile_name}.{field} in {} must be a string",
+            robot_path.display()
+        );
+    };
+    if endpoint.trim().is_empty() {
+        bail!(
+            "bus.profiles.{profile_name}.{field} in {} must not be empty",
+            robot_path.display()
+        );
+    }
+    Ok(endpoint.to_string())
+}
+
+fn parse_selected_bus_profile(
+    bus: &serde_yaml::Mapping,
+    robot_path: &Path,
+) -> Result<Option<String>> {
+    let mut selected = None;
+    for key in ["selected", "profile", "default", "default_profile"] {
+        let Some(value) = bus.get(key) else {
+            continue;
+        };
+        let Some(name) = value.as_str() else {
+            bail!("bus.{key} in {} must be a string", robot_path.display());
+        };
+        validate_bus_profile_name(name)?;
+        if let Some(existing) = &selected
+            && existing != name
+        {
+            bail!(
+                "bus profile selectors in {} disagree: '{existing}' and '{name}'",
+                robot_path.display()
+            );
+        }
+        selected = Some(name.to_string());
+    }
+    Ok(selected)
+}
+
+fn validate_bus_profile_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name == "."
+        || name == ".."
+        || name.chars().any(char::is_whitespace)
+    {
+        bail!("bus profile name '{name}' is invalid; use a simple name such as `default` or `dev`");
+    }
+    Ok(())
+}
+
 pub fn resolve(
     robot: &Robot,
     project_root: &Path,
@@ -299,7 +603,8 @@ pub fn resolve(
     let platform_names = catalog.names_for_api(&api_version);
     if platform_names.is_empty() {
         bail!(
-            "API version {api_version} is not available in the compiled-in platform runtime catalog"
+            "{}",
+            format_unavailable_api_version_error(catalog, &api_version, channel.as_str())
         );
     }
     robot
@@ -353,11 +658,13 @@ pub fn resolve(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Git ref → commit SHA resolution is cheap (no Docker, just network) and
-    // is required for `simulate --dry-run` to assemble a usable .phoxal/run/
-    // tree. We always attempt it; the only thing the offline path skips is
-    // image digest pinning.
-    let components = resolve_components(robot)?;
+    // Git ref → commit SHA resolution needs the network (`git ls-remote`), so
+    // it is gated on `resolve_source_commits`. Default flows (check, outdated,
+    // dry-run) stay offline: a git component is resolved with an empty commit,
+    // which the caller fills from `phoxal.sources.lock` via `apply_lockfile`.
+    // Only the explicit refresh flows (`update`, `pull`, live/`--pull` simulate,
+    // `deploy build`) hit the network here.
+    let components = resolve_components(robot, options.resolve_source_commits)?;
     let tools = resolve_tools(robot, options.resolve_external_artifacts)?;
 
     Ok(ResolvedRobot {
@@ -459,7 +766,7 @@ fn resolve_user_runtime(
             runtime_dir.display()
         )
     })?;
-    let image = format!("phoxal-local/{robot_id}/user-runtime/{name}:{source_hash}");
+    let image = format!("phoxal.local/{robot_id}/user-runtime/{name}:dev");
     let build = runtime
         .build
         .as_ref()
@@ -507,7 +814,10 @@ pub(crate) fn validate_user_runtime_framework_selector(
     )
 }
 
-fn resolve_components(robot: &Robot) -> Result<Vec<ResolvedComponent>> {
+fn resolve_components(
+    robot: &Robot,
+    resolve_source_commits: bool,
+) -> Result<Vec<ResolvedComponent>> {
     let mut components = Vec::new();
     for (instance_name, instance) in &robot.components.instances {
         let source = robot
@@ -523,7 +833,14 @@ fn resolve_components(robot: &Robot) -> Result<Vec<ResolvedComponent>> {
             })?;
         let source = match source {
             ComponentSource::Git(source) => {
-                let commit = resolve_git_ref(&source.git, &source.tag)?;
+                // Only hit the network for the commit in explicit refresh flows;
+                // otherwise leave it empty for `apply_lockfile` to fill from the
+                // cached source lock (no `git ls-remote` in the default path).
+                let commit = if resolve_source_commits {
+                    resolve_git_ref(&source.git, &source.tag)?
+                } else {
+                    String::new()
+                };
                 ResolvedComponentSource::Git {
                     git: source.git.clone(),
                     tag: source.tag.clone(),
@@ -702,9 +1019,143 @@ fn join_errors(errors: Vec<phoxal::model::robot::ValidationError>) -> String {
         .join("\n")
 }
 
+fn format_unavailable_api_version_error(
+    catalog: &PlatformRuntimeCatalog,
+    api_version: &str,
+    channel: &str,
+) -> String {
+    let mut available = catalog
+        .entries
+        .iter()
+        .flat_map(|entry| entry.api_versions.iter().copied())
+        .collect::<Vec<_>>();
+    available.sort_unstable();
+    available.dedup();
+    let suggested = available
+        .iter()
+        .rev()
+        .copied()
+        .find(|candidate| *candidate != api_version);
+
+    let mut message = format!(
+        "API version {api_version} is not available on channel {channel}: this CLI has no complete official runtime image set for that API version"
+    );
+
+    // List the full expected official runtime ref set for the requested
+    // (api_version, channel), mirroring `format_missing_images_error` in
+    // check.rs. The catalog cannot resolve a complete set for the unavailable
+    // version, so the expected refs are every known official runtime name at
+    // the requested api/channel.
+    let mut expected_refs = catalog
+        .names()
+        .map(|name| format!("ghcr.io/phoxal/runtime-{name}:{api_version}-{channel}"))
+        .collect::<Vec<_>>();
+    expected_refs.sort_unstable();
+    expected_refs.dedup();
+    if !expected_refs.is_empty() {
+        message.push_str("\n\nExpected official runtime images:");
+        for image_ref in &expected_refs {
+            message.push_str("\n  - ");
+            message.push_str(image_ref);
+        }
+    }
+
+    if !available.is_empty() {
+        message.push_str("\n\nAvailable api_versions in this CLI: ");
+        message.push_str(&available.join(", "));
+    }
+    message.push_str("\n\nFix:");
+    if let Some(suggested) = suggested {
+        message.push_str("\n  - use api_version: ");
+        message.push_str(suggested);
+    } else {
+        message.push_str("\n  - use an api_version listed by `phoxal-cli version`");
+    }
+    message.push_str(
+        "\n  - or use phoxal_runtimes.channel: edge if this API version is intentionally experimental",
+    );
+    message.push_str("\n  - or wait until Phoxal publishes the complete ");
+    message.push_str(api_version);
+    message.push('-');
+    message.push_str(channel);
+    message.push_str(" official runtime set");
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::CATALOG;
+
+    #[test]
+    fn offline_resolve_leaves_git_component_commits_unresolved() -> anyhow::Result<()> {
+        // FIX #2: the default offline path must NOT run `git ls-remote`. A git
+        // component is resolved with an empty commit (filled later from
+        // phoxal.sources.lock). This test resolves a git component with
+        // `resolve_source_commits: false`; if resolution tried to reach the
+        // network it would either hang or fail, so an empty commit proves no
+        // ls-remote was attempted.
+        let robot = Robot::parse_from_string(GIT_COMPONENT_ROBOT)?;
+        let resolved = resolve(
+            &robot,
+            std::path::Path::new("."),
+            &CATALOG,
+            ResolveOptions {
+                locked: false,
+                resolve_external_artifacts: false,
+                resolve_source_commits: false,
+            },
+        )?;
+
+        let git_component = resolved
+            .components
+            .iter()
+            .find(|component| component.source_name == "ddsm115")
+            .expect("ddsm115 component resolved");
+        match &git_component.source {
+            ResolvedComponentSource::Git { commit, tag, .. } => {
+                assert_eq!(tag, "main");
+                assert!(
+                    commit.is_empty(),
+                    "offline resolve must leave the git commit empty (no ls-remote), got {commit:?}"
+                );
+            }
+            other => panic!("expected a git component source, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    const GIT_COMPONENT_ROBOT: &str = r#"schema: v0
+api_version: y2026_1
+identity:
+  id: testbot
+  namespace: test
+structure: structure.urdf
+phoxal_runtimes:
+  channel: stable
+motion:
+  kinematic:
+    kind: differential
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+components:
+  sources:
+    ddsm115:
+      git: https://github.com/phoxal/components
+      tag: main
+      directory: ddsm115
+  instances:
+    left_drive:
+      component: ddsm115
+      mount_link: left_wheel_mount
+    right_drive:
+      component: ddsm115
+      mount_link: right_wheel_mount
+"#;
 
     #[test]
     fn load_robot_tolerates_user_runtime_image_and_config() -> anyhow::Result<()> {
@@ -754,6 +1205,176 @@ components:
         let loaded = load_robot_with_extras(&path)?;
         assert!(loaded.robot.user_runtimes.contains_key("brain"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn load_robot_extracts_bus_profiles() -> anyhow::Result<()> {
+        // Per the transport spec the `default` profile is implicit and a
+        // profile is just `{ connect }`; declare only the non-default profile.
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("robot.yaml");
+        std::fs::write(
+            &path,
+            r#"schema: v0
+api_version: y2026_1
+identity:
+  id: bot
+  namespace: dev
+structure: structure.urdf
+bus:
+  selected: lab
+  profiles:
+    lab:
+      connect: tcp/lab-router:7447
+phoxal_runtimes:
+  channel: stable
+motion:
+  kinematic:
+    kind: differential
+    left_actuators: [l.motor]
+    right_actuators: [r.motor]
+    left_encoders: [l.encoder]
+    right_encoders: [r.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+components:
+  sources: {}
+  instances: {}
+"#,
+        )?;
+
+        let loaded = load_robot_with_extras(&path)?;
+        let materialized = loaded.extras.materialized_bus_profile("tcp/router:7447");
+
+        assert_eq!(materialized.selected_profile, "lab");
+        assert_eq!(materialized.connect, "tcp/lab-router:7447");
+        Ok(())
+    }
+
+    #[test]
+    fn load_robot_implicit_default_profile_needs_no_declaration() -> anyhow::Result<()> {
+        // No `bus` block at all: the implicit `default` profile materializes to
+        // the CLI-provided default connect endpoint.
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("robot.yaml");
+        std::fs::write(
+            &path,
+            r#"schema: v0
+api_version: y2026_1
+identity:
+  id: bot
+  namespace: dev
+structure: structure.urdf
+phoxal_runtimes:
+  channel: stable
+motion:
+  kinematic:
+    kind: differential
+    left_actuators: [l.motor]
+    right_actuators: [r.motor]
+    left_encoders: [l.encoder]
+    right_encoders: [r.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+components:
+  sources: {}
+  instances: {}
+"#,
+        )?;
+
+        let loaded = load_robot_with_extras(&path)?;
+        let materialized = loaded.extras.materialized_bus_profile("tcp/router:7447");
+
+        assert_eq!(materialized.selected_profile, "default");
+        assert_eq!(materialized.connect, "tcp/router:7447");
+        Ok(())
+    }
+
+    #[test]
+    fn load_robot_rejects_listen_as_profile_field() -> anyhow::Result<()> {
+        // `listen` is router-binding deploy infra, not a manifest profile field.
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("robot.yaml");
+        std::fs::write(
+            &path,
+            r#"schema: v0
+api_version: y2026_1
+identity:
+  id: bot
+  namespace: dev
+structure: structure.urdf
+bus:
+  profiles:
+    lab:
+      connect: tcp/lab-router:7447
+      listen: tcp/0.0.0.0:7448
+phoxal_runtimes:
+  channel: stable
+motion:
+  kinematic:
+    kind: differential
+    left_actuators: [l.motor]
+    right_actuators: [r.motor]
+    left_encoders: [l.encoder]
+    right_encoders: [r.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+components:
+  sources: {}
+  instances: {}
+"#,
+        )?;
+
+        let error =
+            load_robot_with_extras(&path).expect_err("listen is not a manifest profile field");
+        assert!(
+            error.to_string().contains("bus.profiles.lab.listen"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn load_robot_rejects_missing_selected_bus_profile() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("robot.yaml");
+        std::fs::write(
+            &path,
+            r#"schema: v0
+api_version: y2026_1
+identity:
+  id: bot
+  namespace: dev
+structure: structure.urdf
+bus:
+  selected: missing
+  profiles:
+    lab:
+      connect: tcp/lab-router:7447
+phoxal_runtimes:
+  channel: stable
+motion:
+  kinematic:
+    kind: differential
+    left_actuators: [l.motor]
+    right_actuators: [r.motor]
+    left_encoders: [l.encoder]
+    right_encoders: [r.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+components:
+  sources: {}
+  instances: {}
+"#,
+        )?;
+
+        let error =
+            load_robot_with_extras(&path).expect_err("selected profile must exist in bus.profiles");
+        assert!(
+            error.to_string().contains("bus selected profile 'missing'"),
+            "{error:#}"
+        );
         Ok(())
     }
 

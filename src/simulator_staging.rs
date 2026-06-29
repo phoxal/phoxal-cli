@@ -25,6 +25,7 @@ pub fn stage_webots_artifacts(
     resolved: &ResolvedRobot,
     run_dir: &Path,
     world_path: &Path,
+    router_endpoint: &str,
 ) -> Result<()> {
     let webots_dir = project_root.join(".phoxal").join("webots");
     if webots_dir.exists() {
@@ -126,7 +127,7 @@ pub fn stage_webots_artifacts(
         robot_id: resolved.robot.identity.id.clone(),
         controller: Some(WebotsController {
             controller_name: "phoxal-simulator-webots-controller".to_string(),
-            controller_args: controller_args(resolved),
+            controller_args: controller_args(resolved, router_endpoint),
         }),
         supervisor: Some(false),
         synchronization: Some(true),
@@ -137,7 +138,7 @@ pub fn stage_webots_artifacts(
         &component_solid_links,
         &instance,
     )?;
-    let supervisor_node = build_supervisor_node(controller_args(resolved));
+    let supervisor_node = build_supervisor_node(controller_args(resolved, router_endpoint));
     let world_path = worlds_dir.join("default.wbt");
     let externproto =
         crate::webots_staging::externproto_for_generated_proto(&robot_proto_path, &world_path)?;
@@ -262,14 +263,14 @@ fn build_supervisor_node(controller_args: Vec<String>) -> AstNode {
     )
 }
 
-fn controller_args(resolved: &ResolvedRobot) -> Vec<String> {
+fn controller_args(resolved: &ResolvedRobot, router_endpoint: &str) -> Vec<String> {
     vec![
         "--robot-id".to_string(),
         resolved.robot.identity.id.clone(),
         "--robot-namespace".to_string(),
         resolved.robot.identity.namespace.clone(),
         "--robot-router-endpoint".to_string(),
-        "tcp/127.0.0.1:7447".to_string(),
+        router_endpoint.to_string(),
     ]
 }
 

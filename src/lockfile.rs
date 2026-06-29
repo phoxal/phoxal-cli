@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::resolver::{ImagePin, ResolvedComponentSource, ResolvedRobot, ResolvedUserRuntimeBuild};
 
-pub const LOCKFILE_NAME: &str = "phoxal.lock";
+pub const LOCKFILE_NAME: &str = "phoxal.sources.lock";
 pub const LOCKFILE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,7 +255,7 @@ pub(crate) fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) 
             || locked.build != runtime.build
         {
             bail!(
-                "lockfile user runtime {} does not match robot.yaml; re-run `phoxal update` to regenerate phoxal.lock",
+                "lockfile user runtime {} does not match robot.yaml; re-run `phoxal update` to regenerate phoxal.sources.lock",
                 runtime.name
             );
         }
@@ -333,7 +333,7 @@ pub(crate) fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) 
             .with_context(|| format!("lockfile is missing tool {}", tool.name))?;
         if locked.requested != tool.requested {
             bail!(
-                "lockfile tool {} does not match robot.yaml; re-run `phoxal update` to regenerate phoxal.lock",
+                "lockfile tool {} does not match robot.yaml; re-run `phoxal update` to regenerate phoxal.sources.lock",
                 tool.name
             );
         }
@@ -353,6 +353,46 @@ pub(crate) fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) 
         }
     }
 
+    Ok(())
+}
+
+/// Fill in the fields the offline resolve left unresolved (git component
+/// commits, plus locked tool/image refs) from `phoxal.sources.lock`, so an
+/// offline command never reaches the network.
+///
+/// A lockfile is only *required* when the project actually has git component
+/// sources (their commit is empty after an offline resolve). A path-only
+/// project needs none; a present-but-drifted lock is applied best-effort and
+/// ignored on mismatch rather than blocking the offline command.
+pub(crate) fn apply_sources_lock_offline(
+    project_root: &Path,
+    resolved: &mut ResolvedRobot,
+) -> Result<()> {
+    let has_git_components = resolved
+        .components
+        .iter()
+        .any(|component| matches!(component.source, ResolvedComponentSource::Git { .. }));
+    let lock_path = project_root.join(LOCKFILE_NAME);
+    if !lock_path.is_file() {
+        if has_git_components {
+            bail!(
+                "{} is required to resolve git component sources offline; run `phoxal-cli update` to refresh it",
+                lock_path.display()
+            );
+        }
+        return Ok(());
+    }
+    let lockfile = Lockfile::read(&lock_path)?;
+    if has_git_components {
+        apply_lockfile(&lockfile, resolved).with_context(|| {
+            format!(
+                "{} is stale; run `phoxal-cli update` to refresh it",
+                lock_path.display()
+            )
+        })?;
+    } else {
+        let _ = apply_lockfile(&lockfile, resolved);
+    }
     Ok(())
 }
 
@@ -399,7 +439,7 @@ mod tests {
                 path: PathBuf::from("runtimes/autonomy"),
                 framework: "0.9.0".to_string(),
                 source_hash: "abc123".to_string(),
-                image: "phoxal-local/testbot/user-runtime/autonomy:abc123".to_string(),
+                image: "phoxal.local/testbot/user-runtime/autonomy:dev".to_string(),
                 build: Some(ResolvedUserRuntimeBuild {
                     context: PathBuf::from("container"),
                     dockerfile: Some(PathBuf::from("Dockerfile.runtime")),
@@ -435,7 +475,7 @@ mod tests {
         let mut changed = resolved.clone();
         changed.user_runtimes[0].source_hash = "def456".to_string();
         changed.user_runtimes[0].image =
-            "phoxal-local/testbot/user-runtime/autonomy:def456".to_string();
+            "phoxal.local/testbot/user-runtime/autonomy:dev".to_string();
 
         assert!(!lockfile.is_drift_free(&changed));
         Ok(())
@@ -491,7 +531,7 @@ mod tests {
                     target: Some("runtime".to_string()),
                 }),
                 source_hash: source_hash.to_string(),
-                image: format!("phoxal-local/testbot/user-runtime/autonomy:{source_hash}"),
+                image: "phoxal.local/testbot/user-runtime/autonomy:dev".to_string(),
             }],
             components: Vec::new(),
             tools: Vec::new(),

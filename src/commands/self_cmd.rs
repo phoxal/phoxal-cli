@@ -37,9 +37,14 @@ pub enum SelfSubcommand {
 
 #[derive(Debug, Args)]
 pub struct Upgrade {
-    #[arg(long, value_name = "tag", value_parser = parse_version_arg)]
+    #[arg(
+        long,
+        value_name = "tag",
+        value_parser = parse_version_arg,
+        help = "Install this release tag (e.g. v0.5.0) instead of the latest."
+    )]
     pub version: Option<Version>,
-    #[arg(long)]
+    #[arg(long, help = "Reinstall even when already on the target version.")]
     pub force: bool,
 }
 

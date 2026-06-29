@@ -203,10 +203,7 @@ fn user_runtime_match_platform_resolves_to_api_version_hash_and_image() -> anyho
     assert_eq!(runtime.source_hash.len(), 16);
     assert_eq!(
         runtime.image,
-        format!(
-            "phoxal-local/testbot/user-runtime/autonomy:{}",
-            runtime.source_hash
-        )
+        "phoxal.local/testbot/user-runtime/autonomy:dev"
     );
     assert_eq!(second.user_runtimes[0].source_hash, runtime.source_hash);
 
@@ -323,8 +320,9 @@ fn tool_version_override_is_preserved_for_any_known_tool() -> anyhow::Result<()>
 
 fn offline_options() -> ResolveOptions {
     ResolveOptions {
+        locked: false,
         resolve_external_artifacts: false,
-        ..ResolveOptions::default()
+        resolve_source_commits: false,
     }
 }
 
