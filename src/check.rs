@@ -22,7 +22,14 @@ use std::collections::{BTreeMap, BTreeSet};
 /// One participant's `emit-apis` report, reduced to what graph validation needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParticipantApis {
-    /// The artifact id (`emit-apis` `artifact.id`), e.g. `"drive"`.
+    /// The concrete participant/instance id used for graph membership and
+    /// diagnostics. For most participants this equals `artifact_id`, but a
+    /// component driver is launched once per component instance, so several
+    /// instances of the same driver share one `artifact_id` yet must remain
+    /// distinct nodes in the graph (e.g. `left_drive`, `right_drive`).
+    pub participant_id: String,
+    /// The artifact id (`emit-apis` `artifact.id`), e.g. `"drive"`. Kept for
+    /// artifact-identity validation; not used to key the topology graph.
     pub artifact_id: String,
     /// The API version the artifact reports (`emit-apis` `api_version`).
     pub api_version: String,
@@ -135,6 +142,22 @@ pub enum Problem {
         runtime_id: String,
         errors: Vec<String>,
     },
+    /// A participant declares a `component/{instance}/...` template contract that
+    /// expands to no concrete component capability in scope. The template can
+    /// never bind to a real topic, so it is a hard error rather than a silent
+    /// literal match between two placeholder topics.
+    UnresolvedComponentTemplate {
+        /// The artifact that declared the template (the concrete participant /
+        /// instance id, not the emitted artifact id).
+        artifact_id: String,
+        /// The raw template topic, e.g. `component/{instance}/motor/{capability}/command`.
+        template: String,
+        family: String,
+        /// What concrete candidate was missing for the template to expand:
+        /// either a component instance (component-driver scope) or, in graph
+        /// scope, the kind of capability the manifest has none of.
+        missing: String,
+    },
 }
 
 /// A non-fatal topology issue. Observable-only publishers are valid, so these
@@ -169,13 +192,6 @@ pub struct RobotGraph {
     pub motion_capabilities: BTreeSet<(String, String)>,
 }
 
-impl RobotGraph {
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.component_capabilities.is_empty()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ComponentCapability {
     pub instance: String,
@@ -202,17 +218,26 @@ pub fn check_graph_with_topology(
 ) -> Report {
     let mut problems = Vec::new();
     let mut warnings = Vec::new();
-    let participants = materialize_participants(participants, robot_graph);
+    // Expand component templates to concrete manifest topics. Templates that
+    // cannot expand surface as hard `UnresolvedComponentTemplate` problems here
+    // rather than leaking placeholder topics into the topology graph (where two
+    // sides would otherwise "match" literally with no real binding).
+    let MaterializedGraph {
+        participants,
+        problems: mut template_problems,
+    } = materialize_participants(participants, robot_graph);
+    template_problems.sort_by_key(problem_sort_key);
+    problems.append(&mut template_problems);
 
-    // 1. Single API version — report each disagreeing artifact, in artifact order.
+    // 1. Single API version — report each disagreeing participant, in id order.
     let mut mismatches: Vec<&ParticipantApis> = participants
         .iter()
         .filter(|p| p.api_version != root_api_version)
         .collect();
-    mismatches.sort_by(|a, b| a.artifact_id.cmp(&b.artifact_id));
+    mismatches.sort_by(|a, b| a.participant_id.cmp(&b.participant_id));
     for p in mismatches {
         problems.push(Problem::ApiVersionMismatch {
-            artifact_id: p.artifact_id.clone(),
+            artifact_id: p.participant_id.clone(),
             expected: root_api_version.to_string(),
             found: p.api_version.clone(),
         });
@@ -221,14 +246,18 @@ pub fn check_graph_with_topology(
     // 2. Topology cardinality. Producers/consumers are keyed by
     // (family, concrete topic, direction) so matching is by *kind*: a `subscribe`
     // needs a `publish`, and a query client needs a server. Dynamic component
-    // templates have already been expanded to manifest-derived concrete topics.
+    // templates have already been expanded to manifest-derived concrete topics;
+    // any topic still containing a placeholder was reported above and is skipped.
     let mut by_direction: BTreeMap<(String, String, Direction), BTreeSet<String>> = BTreeMap::new();
     for p in &participants {
         for c in &p.contracts {
+            if is_template_topic(&c.topic) {
+                continue;
+            }
             by_direction
                 .entry((c.family.clone(), c.topic.clone(), c.direction))
                 .or_default()
-                .insert(p.artifact_id.clone());
+                .insert(p.participant_id.clone());
         }
     }
 
@@ -236,13 +265,16 @@ pub fn check_graph_with_topology(
     let mut unmet: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     for p in &participants {
         for c in &p.contracts {
+            if is_template_topic(&c.topic) {
+                continue;
+            }
             if let Some(required) = c.direction.required_producer() {
                 let needed = (c.family.clone(), c.topic.clone(), required);
                 if !by_direction.contains_key(&needed) {
                     unmet
                         .entry((c.family.clone(), c.topic.clone()))
                         .or_default()
-                        .insert(p.artifact_id.clone());
+                        .insert(p.participant_id.clone());
                 }
             }
         }
@@ -310,23 +342,53 @@ impl Direction {
     }
 }
 
+/// Whether a topic still carries an unexpanded component-template placeholder.
+/// Such a topic must never be matched literally against another participant.
+fn is_template_topic(topic: &str) -> bool {
+    topic.contains("{instance}") || topic.contains("{capability}")
+}
+
+/// A stable ordering key for problems so report output and tests are
+/// deterministic regardless of the order problems were appended.
+fn problem_sort_key(problem: &Problem) -> (u8, String, String) {
+    match problem {
+        Problem::ApiVersionMismatch { artifact_id, .. } => (0, artifact_id.clone(), String::new()),
+        Problem::MissingProducer { family, topic, .. } => (1, family.clone(), topic.clone()),
+        Problem::MissingConsumer { family, topic, .. } => (2, family.clone(), topic.clone()),
+        Problem::InvalidConfig { runtime_id, .. } => (3, runtime_id.clone(), String::new()),
+        Problem::UnresolvedComponentTemplate {
+            artifact_id,
+            template,
+            family,
+            ..
+        } => (4, artifact_id.clone(), format!("{template}\u{0}{family}")),
+    }
+}
+
+/// The expanded graph plus any hard problems found while expanding component
+/// templates (templates that bind to no concrete capability in scope).
+struct MaterializedGraph {
+    participants: Vec<ParticipantApis>,
+    problems: Vec<Problem>,
+}
+
 fn materialize_participants(
     participants: &[ParticipantApis],
     robot_graph: &RobotGraph,
-) -> Vec<ParticipantApis> {
-    if robot_graph.is_empty() {
-        return participants.to_vec();
-    }
-
-    participants
+) -> MaterializedGraph {
+    let mut problems = Vec::new();
+    let materialized = participants
         .iter()
         .map(|participant| {
             let contracts = participant
                 .contracts
                 .iter()
-                .flat_map(|contract| materialize_contract(participant, contract, robot_graph))
+                .flat_map(|contract| {
+                    materialize_contract(participant, contract, robot_graph, &mut problems)
+                })
                 .collect();
             ParticipantApis {
+                participant_id: participant.participant_id.clone(),
                 artifact_id: participant.artifact_id.clone(),
                 api_version: participant.api_version.clone(),
                 bus_abi: participant.bus_abi.clone(),
@@ -335,15 +397,21 @@ fn materialize_participants(
                 contracts,
             }
         })
-        .collect()
+        .collect();
+
+    MaterializedGraph {
+        participants: materialized,
+        problems,
+    }
 }
 
 fn materialize_contract(
     participant: &ParticipantApis,
     contract: &Contract,
     robot_graph: &RobotGraph,
+    problems: &mut Vec<Problem>,
 ) -> Vec<Contract> {
-    if !contract.topic.contains("{instance}") && !contract.topic.contains("{capability}") {
+    if !is_template_topic(&contract.topic) {
         return vec![contract.clone()];
     }
 
@@ -380,9 +448,33 @@ fn materialize_contract(
     materialized.dedup();
 
     if materialized.is_empty() {
-        vec![contract.clone()]
+        // A component template that expands to nothing in scope can never bind to
+        // a real topic. Returning the placeholder topic would let two sides
+        // satisfy each other literally, so emit a hard problem and drop the
+        // contract from the graph instead.
+        problems.push(Problem::UnresolvedComponentTemplate {
+            artifact_id: participant.participant_id.clone(),
+            template: contract.topic.clone(),
+            family: contract.family.clone(),
+            missing: missing_candidate_description(participant, kind),
+        });
+        Vec::new()
     } else {
         materialized
+    }
+}
+
+/// Describe what concrete candidate the template lacked, for the diagnostic.
+fn missing_candidate_description(participant: &ParticipantApis, kind: Option<&str>) -> String {
+    match &participant.scope {
+        ParticipantScope::ComponentInstance(instance) => match kind {
+            Some(kind) => format!("component instance '{instance}' has no '{kind}' capability"),
+            None => format!("component instance '{instance}' has no matching capability"),
+        },
+        ParticipantScope::Graph => match kind {
+            Some(kind) => format!("no component instance provides a '{kind}' capability in scope"),
+            None => "no component instance provides a matching capability in scope".to_string(),
+        },
     }
 }
 
@@ -414,6 +506,7 @@ mod tests {
 
     fn participant(id: &str, api: &str, contracts: Vec<Contract>) -> ParticipantApis {
         ParticipantApis {
+            participant_id: id.to_string(),
             artifact_id: id.to_string(),
             api_version: api.to_string(),
             bus_abi: None,
@@ -429,6 +522,9 @@ mod tests {
         contracts: Vec<Contract>,
     ) -> ParticipantApis {
         ParticipantApis {
+            // A component driver shares one artifact id across instances but is a
+            // distinct participant per instance — key the graph by the instance.
+            participant_id: instance.to_string(),
             artifact_id: id.to_string(),
             api_version: "y2026_1".to_string(),
             bus_abi: None,
@@ -718,6 +814,100 @@ mod tests {
                 consumers: vec!["odometry".to_string()],
             }]
         );
+    }
+
+    #[test]
+    fn component_templates_never_match_literally_with_empty_components() {
+        // BLOCKER regression: with no concrete component instances in the graph,
+        // two participants whose only contracts are the SAME component template
+        // must NOT satisfy each other by matching the placeholder topic literally.
+        // Each unexpandable template is a hard problem; neither side is bound.
+        let participants = vec![
+            participant(
+                "motion",
+                "y2026_1",
+                vec![contract(
+                    "component::MotorCommand",
+                    "component/{instance}/motor/{capability}/command",
+                    Direction::Publish,
+                )],
+            ),
+            participant(
+                "phantom-driver",
+                "y2026_1",
+                vec![contract(
+                    "component::MotorCommand",
+                    "component/{instance}/motor/{capability}/command",
+                    Direction::Subscribe,
+                )],
+            ),
+        ];
+
+        // Empty robot graph: no component instances/capabilities exist.
+        let report = check_graph_with_topology(&participants, "y2026_1", &RobotGraph::default());
+
+        // The literal placeholder topic must never appear as a satisfied edge,
+        // and must never be reported as a missing producer/consumer either.
+        assert_eq!(
+            report,
+            Report {
+                problems: vec![
+                    Problem::UnresolvedComponentTemplate {
+                        artifact_id: "motion".to_string(),
+                        template: "component/{instance}/motor/{capability}/command".to_string(),
+                        family: "component::MotorCommand".to_string(),
+                        missing: "no component instance provides a 'motor' capability in scope"
+                            .to_string(),
+                    },
+                    Problem::UnresolvedComponentTemplate {
+                        artifact_id: "phantom-driver".to_string(),
+                        template: "component/{instance}/motor/{capability}/command".to_string(),
+                        family: "component::MotorCommand".to_string(),
+                        missing: "no component instance provides a 'motor' capability in scope"
+                            .to_string(),
+                    },
+                ],
+                warnings: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn component_driver_template_missing_capability_is_a_hard_problem() {
+        // A component driver scoped to an instance that lacks the capability the
+        // template needs (here: encoder, while the instance only has a motor)
+        // must produce a hard `UnresolvedComponentTemplate`, not a literal match.
+        let graph = RobotGraph {
+            component_capabilities: vec![ComponentCapability {
+                instance: "left_drive".to_string(),
+                capability: "motor".to_string(),
+                kind: "motor".to_string(),
+            }],
+            motion_capabilities: BTreeSet::new(),
+        };
+        let participants = vec![scoped_component_participant(
+            "ddsm115",
+            "left_drive",
+            vec![contract(
+                "component::EncoderSample",
+                "component/{instance}/encoder/{capability}/sample",
+                Direction::Publish,
+            )],
+        )];
+
+        let report = check_graph_with_topology(&participants, "y2026_1", &graph);
+
+        assert_eq!(
+            report.problems,
+            vec![Problem::UnresolvedComponentTemplate {
+                // Keyed by the concrete instance id, not the shared driver artifact.
+                artifact_id: "left_drive".to_string(),
+                template: "component/{instance}/encoder/{capability}/sample".to_string(),
+                family: "component::EncoderSample".to_string(),
+                missing: "component instance 'left_drive' has no 'encoder' capability".to_string(),
+            }]
+        );
+        assert!(report.warnings.is_empty());
     }
 
     #[test]

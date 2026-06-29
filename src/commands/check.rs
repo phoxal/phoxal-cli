@@ -586,6 +586,11 @@ pub fn run_check_with_deployed_user_runtime_images(
                 )
             })?;
         if participant.kind == SourceParticipantKind::ComponentDriver {
+            // A component driver is launched once per component instance. Several
+            // instances of the same driver share `artifact_id` (validated against
+            // the emitted artifact identity), so key graph membership and
+            // diagnostics by the concrete instance id instead.
+            participant_apis.participant_id = participant.name.clone();
             participant_apis.scope =
                 graph_check::ParticipantScope::ComponentInstance(participant.name.clone());
         } else if participant.kind == SourceParticipantKind::UserRuntime
@@ -984,9 +989,20 @@ fn validate_artifact_identity(
             expected_id
         );
     }
-    if raw.artifact.kind != expected_kind {
+    // Kind is only softly enforced today. The framework's `emit-apis` on
+    // published 0.17 hard-codes `kind = "runtime"` for *every* binary — runtimes,
+    // tools, and component drivers alike — so a strict `kind == expected_kind`
+    // check would false-fail real tools and drivers. Accept the universal
+    // `"runtime"` value for any participant, and only reject a kind that is
+    // neither the expected one nor that universal value (e.g. an outright garbage
+    // kind), so swapped artifacts are still caught by the strict `id` binding.
+    //
+    // TODO(framework emit-apis kinds): once `emit-apis` emits the true artifact
+    // kind (`tool`/`driver`/`runtime`), tighten this back to `kind ==
+    // expected_kind` and update the tests accordingly.
+    if raw.artifact.kind != expected_kind && raw.artifact.kind != "runtime" {
         bail!(
-            "{label} emit-apis artifact.kind '{}' does not match expected kind '{}'",
+            "{label} emit-apis artifact.kind '{}' is neither the expected kind '{}' nor the framework's current universal 'runtime'",
             raw.artifact.kind,
             expected_kind
         );
@@ -1020,6 +1036,10 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Self {
+            // Default the participant id to the artifact id; callers that launch
+            // one artifact per instance (component drivers) override it with the
+            // concrete instance id below.
+            participant_id: artifact_id.clone(),
             artifact_id,
             api_version: raw.api_version,
             bus_abi: raw.bus_abi,
@@ -1161,6 +1181,16 @@ fn format_problem(problem: &graph_check::Problem) -> String {
             format!(
                 "invalid config for user runtime {runtime_id}: {}",
                 errors.join("; ")
+            )
+        }
+        graph_check::Problem::UnresolvedComponentTemplate {
+            artifact_id,
+            template,
+            family,
+            missing,
+        } => {
+            format!(
+                "unresolved component template for {artifact_id}: {family} ({template}) expands to no concrete topic ({missing})"
             )
         }
     }
@@ -1512,13 +1542,18 @@ mod tests {
     }
 
     #[test]
-    fn tool_artifact_kind_must_be_tool() {
+    fn tool_artifact_kind_runtime_is_accepted_today() -> Result<()> {
+        // The framework's `emit-apis` currently emits `kind = "runtime"` for every
+        // binary, including tools. The kind check is softened to accept that
+        // universal value so real tools are not false-failed; the strict `id`
+        // binding still guards against swapped artifacts. (See the TODO in
+        // `validate_artifact_identity`.)
         let tools = vec![ToolParticipant {
             name: "joypad".to_string(),
             binary_path: PathBuf::from("/fake/cache/joypad"),
         }];
 
-        let error = run_check(
+        let outcome = run_check(
             &[],
             &tools,
             &[],
@@ -1532,12 +1567,41 @@ mod tests {
                 }
             },
             |_| bail!("no source runtimes should be built"),
+        )?;
+
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn tool_artifact_kind_garbage_is_rejected() {
+        // A kind that is neither the expected `tool` nor the framework's current
+        // universal `runtime` is still rejected.
+        let tools = vec![ToolParticipant {
+            name: "joypad".to_string(),
+            binary_path: PathBuf::from("/fake/cache/joypad"),
+        }];
+
+        let error = run_check(
+            &[],
+            &tools,
+            &[],
+            "y2026_1",
+            |_| bail!("no platform images should be fetched"),
+            |path| {
+                if path == Path::new("/fake/cache/joypad") {
+                    Ok(raw_kind("nonsense", "joypad", "y2026_1", &[]))
+                } else {
+                    bail!("unexpected tool path {}", path.display())
+                }
+            },
+            |_| bail!("no source runtimes should be built"),
         )
-        .expect_err("tool binary reporting runtime kind should abort check");
+        .expect_err("tool binary reporting a garbage kind should abort check");
 
         let message = error.to_string();
         assert!(
-            message.contains("tool emit-apis artifact.kind 'runtime'")
+            message.contains("tool emit-apis artifact.kind 'nonsense'")
                 && message.contains("expected kind 'tool'"),
             "{message}"
         );
@@ -1711,7 +1775,8 @@ mod tests {
 
         assert!(matches!(
             outcome.report.problems.as_slice(),
-            [Problem::MissingProducer { consumers, .. }] if consumers == &vec!["ddsm115".to_string()]
+            // Keyed by the concrete component instance id, not the driver artifact.
+            [Problem::MissingProducer { consumers, .. }] if consumers == &vec!["left_drive".to_string()]
         ));
         Ok(())
     }
@@ -1781,7 +1846,10 @@ mod tests {
         assert_eq!(
             outcome.report.problems,
             vec![Problem::ApiVersionMismatch {
-                artifact_id: "ddsm115".to_string(),
+                // Component-driver diagnostics are keyed by the concrete instance
+                // id (`left_drive`), not the shared driver artifact (`ddsm115`),
+                // so multiple instances of one driver stay distinct in the report.
+                artifact_id: "left_drive".to_string(),
                 expected: "y2026_1".to_string(),
                 found: "y2026_2".to_string()
             }]

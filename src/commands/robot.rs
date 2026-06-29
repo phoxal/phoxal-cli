@@ -162,6 +162,13 @@ fn is_valid_robot_name(name: &str) -> bool {
 }
 
 fn robot_yaml(name: &str) -> String {
+    // The scaffold is deliberately self-consistent: every motion `CapabilityRef`
+    // (left_drive.motor, right_drive.encoder, ...) resolves to a declared
+    // component instance with the matching capability, so `phoxal-cli check`
+    // reaches a meaningful graph check instead of failing on dangling motion
+    // references. The instances are driverless placeholders (no `driver:` block),
+    // so `check` does not try to build a non-existent driver crate; the user adds
+    // a real component source + `driver:` block when wiring up hardware.
     format!(
         r#"schema: v0
 api_version: y2026_1
@@ -186,8 +193,25 @@ motion:
     wheel_base_m: 0.5
 
 components:
-  sources: {{}}
-  instances: {{}}
+  sources:
+    # Replace this placeholder with the real component source (e.g. a git
+    # catalog entry) and add a `driver:` block to each instance to wire up
+    # hardware. See the docs for the full component schema.
+    placeholder_wheel:
+      path: components/placeholder_wheel
+  instances:
+    left_drive:
+      component: placeholder_wheel
+      mount_link: base_link
+      parameters:
+        motor:   {{ kind: motor,   direction_sign: 1 }}
+        encoder: {{ kind: encoder, direction_sign: 1 }}
+    right_drive:
+      component: placeholder_wheel
+      mount_link: base_link
+      parameters:
+        motor:   {{ kind: motor,   direction_sign: 1 }}
+        encoder: {{ kind: encoder, direction_sign: 1 }}
 "#
     )
 }
@@ -229,6 +253,68 @@ mod tests {
         let error = new_robot(temp.path(), "rover-one")
             .expect_err("creating the same project twice should fail");
         assert!(error.to_string().contains("already exists"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn robot_new_scaffold_is_self_consistent_and_reaches_a_meaningful_check() -> Result<()> {
+        use phoxal::model::component::v1::CapabilityRef;
+        use phoxal::model::robot::v1::{KinematicConfig, Robot};
+
+        let temp = tempfile::tempdir()?;
+        let summary = new_robot(temp.path(), "rover-one")?;
+        let yaml = fs::read_to_string(&summary.robot_path)?;
+
+        // 1. The generated manifest parses and passes model validation.
+        let robot = Robot::parse_from_string(&yaml).expect("scaffold robot.yaml should parse");
+        robot
+            .validate()
+            .expect("scaffold robot.yaml should pass model validation");
+
+        // 2. Every motion CapabilityRef resolves to a declared component instance
+        //    with the matching capability. This is what makes `phoxal-cli check`
+        //    reach a meaningful topology check: with the round-1 fix, a dangling
+        //    motion ref would otherwise surface as an UnresolvedComponentTemplate.
+        let KinematicConfig::Differential {
+            left_actuators,
+            right_actuators,
+            left_encoders,
+            right_encoders,
+            ..
+        } = &robot.motion.kinematic
+        else {
+            panic!("scaffold should use a differential kinematic config");
+        };
+        let resolves = |capability: &CapabilityRef| {
+            robot
+                .components
+                .instances
+                .get(&capability.component_id)
+                .is_some_and(|instance| instance.parameters.contains_key(&capability.capability_id))
+        };
+        for capability in left_actuators
+            .iter()
+            .chain(right_actuators)
+            .chain(left_encoders)
+            .chain(right_encoders)
+        {
+            assert!(
+                resolves(capability),
+                "motion ref {capability} does not bind to a declared component capability"
+            );
+        }
+
+        // 3. The placeholder instances are driverless, so `check` never tries to
+        //    build a non-existent driver crate from the scaffold.
+        assert!(
+            robot
+                .components
+                .instances
+                .values()
+                .all(|instance| instance.driver.is_none()),
+            "scaffold component instances should be driverless placeholders"
+        );
 
         Ok(())
     }
