@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::component_driver::component_crate_dir;
 use crate::resolver::{ResolvedRobot, ResolvedUserRuntimeBuild};
@@ -64,6 +64,27 @@ pub(crate) fn build_user_runtimes(
     project_root: &Path,
     resolved: &ResolvedRobot,
 ) -> Result<BTreeMap<String, String>> {
+    build_user_runtimes_with_ref_mode(project_root, resolved, UserRuntimeImageRefMode::Tag)
+}
+
+pub(crate) fn build_user_runtimes_immutable(
+    project_root: &Path,
+    resolved: &ResolvedRobot,
+) -> Result<BTreeMap<String, String>> {
+    build_user_runtimes_with_ref_mode(project_root, resolved, UserRuntimeImageRefMode::Immutable)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UserRuntimeImageRefMode {
+    Tag,
+    Immutable,
+}
+
+fn build_user_runtimes_with_ref_mode(
+    project_root: &Path,
+    resolved: &ResolvedRobot,
+    mode: UserRuntimeImageRefMode,
+) -> Result<BTreeMap<String, String>> {
     let mut images = BTreeMap::new();
     for runtime in &resolved.user_runtimes {
         let runtime_dir = resolve_project_path(project_root, &runtime.path);
@@ -72,9 +93,39 @@ pub(crate) fn build_user_runtimes(
             docker_build_args(&runtime.image, runtime.build.as_ref()),
             Some(&runtime_dir),
         )?;
-        images.insert(runtime.name.clone(), runtime.image.clone());
+        let image_ref = match mode {
+            UserRuntimeImageRefMode::Tag => runtime.image.clone(),
+            UserRuntimeImageRefMode::Immutable => immutable_local_image_ref(&runtime.image)
+                .with_context(|| {
+                    format!(
+                        "failed to resolve immutable image id for user runtime {}",
+                        runtime.name
+                    )
+                })?,
+        };
+        images.insert(runtime.name.clone(), image_ref);
     }
     Ok(images)
+}
+
+fn immutable_local_image_ref(image_ref: &str) -> Result<String> {
+    let output = shell::run_stdout(
+        "docker",
+        ["image", "inspect", image_ref, "--format", "{{.Id}}"],
+        None,
+    )
+    .with_context(|| format!("failed to inspect built image {image_ref}"))?;
+    let image_id = output.trim();
+    if !is_sha256_image_id(image_id) {
+        bail!("docker reported invalid image id for {image_ref}: {image_id}");
+    }
+    Ok(image_id.to_string())
+}
+
+pub(crate) fn is_sha256_image_id(image_ref: &str) -> bool {
+    image_ref
+        .strip_prefix("sha256:")
+        .is_some_and(|digest| digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 pub(crate) fn docker_build_args(
@@ -185,6 +236,15 @@ mod tests {
                 "container",
             ])
         );
+    }
+
+    #[test]
+    fn sha256_image_ids_are_recognized_as_immutable_refs() {
+        assert!(is_sha256_image_id(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(!is_sha256_image_id("phoxal.local/test/runtime:dev"));
+        assert!(!is_sha256_image_id("sha256:not-a-real-image-id"));
     }
 
     fn os_args<const N: usize>(values: [&str; N]) -> Vec<OsString> {

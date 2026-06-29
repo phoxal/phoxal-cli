@@ -84,6 +84,14 @@ pub struct CheckGraphContext<'a> {
     pub manifest_extras: &'a RobotManifestExtras,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CheckParticipants<'a> {
+    pub platform_image_refs: &'a [(String, String)],
+    pub user_runtime_images: &'a [UserRuntimeImageParticipant],
+    pub tool_participants: &'a [ToolParticipant],
+    pub source_participants: &'a [SourceParticipant],
+}
+
 impl CheckOutcome {
     #[must_use]
     pub fn is_ok(&self) -> bool {
@@ -193,11 +201,13 @@ fn run(
         crate::tool_provisioning::ProvisioningMode::from_pull(options.pull),
     )?;
     let tool_participants = tool_participants_from_resolved(&resolved)?;
-    let source_participants =
+    let all_source_participants =
         source_participants_from_resolved(project_root, &resolved, component_crate_dir)?;
     if let Some(runtime_name) = options.runtime.as_deref() {
         ensure_user_runtime_exists(&resolved, runtime_name)?;
     }
+    let source_participants =
+        source_participants_for_runtime(&all_source_participants, options.runtime.as_deref());
     let participant_count =
         platform_refs.len() + tool_participants.len() + source_participants.len();
     let robot_graph = robot_graph_from_resolved(&resolved);
@@ -267,6 +277,12 @@ pub enum SourceParticipantKind {
 pub struct ToolParticipant {
     pub name: String,
     pub binary_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserRuntimeImageParticipant {
+    pub name: String,
+    pub image_ref: String,
 }
 
 pub(crate) fn tool_participants_from_resolved(
@@ -342,6 +358,24 @@ fn ensure_user_runtime_exists(resolved: &ResolvedRobot, runtime_name: &str) -> R
     Ok(())
 }
 
+fn source_participants_for_runtime(
+    source_participants: &[SourceParticipant],
+    runtime_name: Option<&str>,
+) -> Vec<SourceParticipant> {
+    let Some(runtime_name) = runtime_name else {
+        return source_participants.to_vec();
+    };
+
+    source_participants
+        .iter()
+        .filter(|participant| {
+            participant.kind == SourceParticipantKind::UserRuntime
+                && participant.name == runtime_name
+        })
+        .cloned()
+        .collect()
+}
+
 pub fn run_check(
     resolved_platform_image_refs: &[(String, String)],
     tool_participants: &[ToolParticipant],
@@ -373,6 +407,27 @@ pub fn run_check_with_context(
     tool_participants: &[ToolParticipant],
     source_participants: &[SourceParticipant],
     context: CheckGraphContext<'_>,
+    fetch: impl FnMut(&str) -> Result<RawEmitApis>,
+    fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
+    build: impl FnMut(&Path) -> Result<RawEmitApis>,
+) -> Result<CheckOutcome> {
+    run_check_with_deployed_user_runtime_images(
+        CheckParticipants {
+            platform_image_refs: resolved_platform_image_refs,
+            user_runtime_images: &[],
+            tool_participants,
+            source_participants,
+        },
+        context,
+        fetch,
+        fetch_tool,
+        build,
+    )
+}
+
+pub fn run_check_with_deployed_user_runtime_images(
+    inputs: CheckParticipants<'_>,
+    context: CheckGraphContext<'_>,
     mut fetch: impl FnMut(&str) -> Result<RawEmitApis>,
     mut fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
     mut build: impl FnMut(&Path) -> Result<RawEmitApis>,
@@ -380,8 +435,9 @@ pub fn run_check_with_context(
     let mut missing_images = Vec::new();
     let mut official_runtime_refs = BTreeMap::new();
     let mut participants = Vec::new();
+    let mut config_problems = Vec::new();
 
-    for (runtime_name, image_ref) in resolved_platform_image_refs {
+    for (runtime_name, image_ref) in inputs.platform_image_refs {
         let raw = match fetch(image_ref) {
             Ok(raw) => raw,
             Err(error) if error.downcast_ref::<MissingImageError>().is_some() => {
@@ -404,7 +460,31 @@ pub fn run_check_with_context(
         participants.push(participant);
     }
 
-    for tool in tool_participants {
+    for runtime in inputs.user_runtime_images {
+        let raw = fetch(&runtime.image_ref).with_context(|| {
+            format!(
+                "failed to obtain emit-apis for user runtime {} ({})",
+                runtime.name, runtime.image_ref
+            )
+        })?;
+        validate_user_runtime_artifact_id(&runtime.name, &raw)?;
+        let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
+            format!(
+                "failed to interpret emit-apis for user runtime {} ({})",
+                runtime.name, runtime.image_ref
+            )
+        })?;
+        if let Some(problem) = validate_user_runtime_config(
+            &runtime.name,
+            participant.config_schema.as_ref(),
+            context.manifest_extras,
+        ) {
+            config_problems.push(problem);
+        }
+        participants.push(participant);
+    }
+
+    for tool in inputs.tool_participants {
         let raw = fetch_tool(&tool.binary_path).with_context(|| {
             format!(
                 "failed to obtain emit-apis for tool {} ({})",
@@ -422,8 +502,7 @@ pub fn run_check_with_context(
         participants.push(participant);
     }
 
-    let mut config_problems = Vec::new();
-    for participant in source_participants {
+    for participant in inputs.source_participants {
         let raw = build(&participant.crate_dir).with_context(|| {
             format!(
                 "failed to obtain emit-apis for {} {} ({})",
@@ -432,6 +511,7 @@ pub fn run_check_with_context(
                 participant.crate_dir.display()
             )
         })?;
+        validate_source_artifact_id(participant, &raw)?;
         let mut participant_apis =
             graph_check::ParticipantApis::try_from(raw).with_context(|| {
                 format!(
@@ -914,6 +994,27 @@ pub(crate) fn build_emit_apis_from_source(dir: &Path) -> Result<RawEmitApis> {
     })
 }
 
+pub(crate) fn validate_user_runtime_artifact_id(
+    manifest_key: &str,
+    raw: &RawEmitApis,
+) -> Result<()> {
+    if raw.artifact.id != manifest_key {
+        bail!(
+            "user runtime emit-apis artifact.id '{}' does not match manifest key user_runtimes.{}",
+            raw.artifact.id,
+            manifest_key
+        );
+    }
+    Ok(())
+}
+
+fn validate_source_artifact_id(participant: &SourceParticipant, raw: &RawEmitApis) -> Result<()> {
+    if participant.kind == SourceParticipantKind::UserRuntime {
+        validate_user_runtime_artifact_id(&participant.name, raw)?;
+    }
+    Ok(())
+}
+
 impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
     type Error = anyhow::Error;
 
@@ -1065,6 +1166,16 @@ fn format_problem(problem: &graph_check::Problem) -> String {
             format!(
                 "no producer for {family} ({topic}); consumed by: {}",
                 consumers.join(", ")
+            )
+        }
+        graph_check::Problem::MissingConsumer {
+            family,
+            topic,
+            producers,
+        } => {
+            format!(
+                "no consumer for {family} ({topic}); produced by: {}",
+                producers.join(", ")
             )
         }
         graph_check::Problem::InvalidConfig { runtime_id, errors } => {
@@ -1245,6 +1356,57 @@ mod tests {
     }
 
     #[test]
+    fn deployed_user_runtime_images_are_checked_from_image_refs() -> Result<()> {
+        let user_images = vec![UserRuntimeImageParticipant {
+            name: "avoid".to_string(),
+            image_ref: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+        }];
+        let sources = vec![SourceParticipant::component_driver(
+            "left_drive".to_string(),
+            PathBuf::from("/fake/project/components/ddsm115"),
+        )];
+        let robot_graph = graph_check::RobotGraph::default();
+        let extras = RobotManifestExtras::default();
+
+        let mut fetched_images = Vec::new();
+        let mut built_sources = Vec::new();
+        let outcome = run_check_with_deployed_user_runtime_images(
+            CheckParticipants {
+                platform_image_refs: &[],
+                user_runtime_images: &user_images,
+                tool_participants: &[],
+                source_participants: &sources,
+            },
+            CheckGraphContext {
+                root_api: "y2026_1",
+                robot_graph: &robot_graph,
+                manifest_extras: &extras,
+            },
+            |image_ref| {
+                fetched_images.push(image_ref.to_string());
+                Ok(raw("avoid", "y2026_1", &[]))
+            },
+            |_| bail!("no tools should be fetched"),
+            |dir| {
+                built_sources.push(dir.to_path_buf());
+                Ok(raw("ddsm115", "y2026_1", &[]))
+            },
+        )?;
+
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
+        assert_eq!(
+            fetched_images,
+            vec!["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+        );
+        assert_eq!(
+            built_sources,
+            vec![PathBuf::from("/fake/project/components/ddsm115")]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn source_wrong_api_version_fails_with_mismatch_problem() -> Result<()> {
         let sources = vec![SourceParticipant::user_runtime(
             "drive".to_string(),
@@ -1270,6 +1432,76 @@ mod tests {
             }]
         );
         assert!(!outcome.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn user_runtime_artifact_id_must_match_manifest_key() {
+        let sources = vec![SourceParticipant::user_runtime(
+            "avoid".to_string(),
+            PathBuf::from("/fake/project/runtimes/avoid"),
+        )];
+
+        let error = run_check(
+            &[],
+            &[],
+            &sources,
+            "y2026_1",
+            |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
+            |_| Ok(raw("surprise", "y2026_1", &[])),
+        )
+        .expect_err("mismatched user runtime artifact id should abort check");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("artifact.id 'surprise'")
+                && message.contains("manifest key user_runtimes.avoid"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn scoped_runtime_check_does_not_build_unrelated_source_participants() -> Result<()> {
+        let all_sources = vec![
+            SourceParticipant::user_runtime(
+                "bad".to_string(),
+                PathBuf::from("/fake/project/runtimes/bad"),
+            ),
+            SourceParticipant::user_runtime(
+                "other".to_string(),
+                PathBuf::from("/fake/project/runtimes/other"),
+            ),
+            SourceParticipant::component_driver(
+                "left_drive".to_string(),
+                PathBuf::from("/fake/project/components/ddsm115"),
+            ),
+        ];
+        let sources = source_participants_for_runtime(&all_sources, Some("other"));
+
+        let mut built = Vec::new();
+        let outcome = run_check(
+            &[],
+            &[],
+            &sources,
+            "y2026_1",
+            |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
+            |dir| {
+                built.push(dir.to_path_buf());
+                if dir == Path::new("/fake/project/runtimes/other") {
+                    Ok(raw("other", "y2026_1", &[]))
+                } else {
+                    bail!(
+                        "unrelated source participant should not be built: {}",
+                        dir.display()
+                    )
+                }
+            },
+        )?;
+
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
+        assert_eq!(built, vec![PathBuf::from("/fake/project/runtimes/other")]);
         Ok(())
     }
 

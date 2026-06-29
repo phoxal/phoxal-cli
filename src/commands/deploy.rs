@@ -26,7 +26,7 @@ pub struct Deploy {
 
 #[derive(Debug, Subcommand)]
 pub enum DeploySubcommand {
-    #[command(about = "Build a digest-pinned deployment artifact.")]
+    #[command(about = "Build an immutable deployment artifact.")]
     Build(Build),
 }
 
@@ -128,15 +128,22 @@ pub fn run(project_start: &Path, options: BuildOptions) -> Result<BuildSummary> 
         },
     )?;
 
-    run_pinned_graph_check(project_root, &resolved, &loaded.extras)?;
     let user_runtime_images = match options.target {
-        DeployTarget::Compose => crate::local_build::build_user_runtimes(project_root, &resolved)?,
+        DeployTarget::Compose => {
+            crate::local_build::build_user_runtimes_immutable(project_root, &resolved)?
+        }
         DeployTarget::Balena => {
             resolve_production_user_runtime_images(&resolved, &loaded.extras, |image_ref| {
                 crate::resolver::resolve_image_digest(image_ref)
             })?
         }
     };
+    run_pinned_graph_check(
+        project_root,
+        &resolved,
+        &loaded.extras,
+        &user_runtime_images,
+    )?;
 
     let output_path = options.output.map_or_else(
         || {
@@ -162,9 +169,7 @@ pub fn run(project_start: &Path, options: BuildOptions) -> Result<BuildSummary> 
         &loaded.extras,
         LaunchClock::Real,
     )?;
-    if options.target == DeployTarget::Balena {
-        ensure_all_compose_image_refs_are_digest_pinned(&compose)?;
-    }
+    ensure_all_compose_image_refs_are_immutable(&compose)?;
 
     crate::run_view::assemble(project_root, &resolved, &bundle_dir)?;
     let metadata_path = bundle_dir.join("deploy-metadata.json");
@@ -188,6 +193,7 @@ fn run_pinned_graph_check(
     project_root: &Path,
     resolved: &ResolvedRobot,
     manifest_extras: &RobotManifestExtras,
+    user_runtime_images: &BTreeMap<String, String>,
 ) -> Result<()> {
     let platform_refs = resolved
         .platform_runtimes
@@ -202,12 +208,31 @@ fn run_pinned_graph_check(
     crate::tool_provisioning::ensure_tool_binaries(&crate::Ui::new(), resolved, tool_names)?;
     let tool_participants = check::tool_participants_from_resolved(resolved)?;
     let source_participants =
-        check::source_participants_from_resolved(project_root, resolved, component_crate_dir)?;
+        check::source_participants_from_resolved(project_root, resolved, component_crate_dir)?
+            .into_iter()
+            .filter(|participant| participant.kind == check::SourceParticipantKind::ComponentDriver)
+            .collect::<Vec<_>>();
+    let user_runtime_image_participants = resolved
+        .user_runtimes
+        .iter()
+        .map(|runtime| {
+            let image_ref = user_runtime_images.get(&runtime.name).with_context(|| {
+                format!("missing built image ref for user runtime {}", runtime.name)
+            })?;
+            Ok(check::UserRuntimeImageParticipant {
+                name: runtime.name.clone(),
+                image_ref: image_ref.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let robot_graph = check::robot_graph_from_resolved(resolved);
-    let outcome = check::run_check_with_context(
-        &platform_refs,
-        &tool_participants,
-        &source_participants,
+    let outcome = check::run_check_with_deployed_user_runtime_images(
+        check::CheckParticipants {
+            platform_image_refs: &platform_refs,
+            user_runtime_images: &user_runtime_image_participants,
+            tool_participants: &tool_participants,
+            source_participants: &source_participants,
+        },
         check::CheckGraphContext {
             root_api: &resolved.api_version,
             robot_graph: &robot_graph,
@@ -270,7 +295,7 @@ pub(crate) fn pin_image_ref(
     Ok(format!("{image_ref}@{digest}"))
 }
 
-pub(crate) fn ensure_all_compose_image_refs_are_digest_pinned(compose: &str) -> Result<()> {
+pub(crate) fn ensure_all_compose_image_refs_are_immutable(compose: &str) -> Result<()> {
     #[derive(Deserialize)]
     struct ComposeImages {
         services: BTreeMap<String, ComposeImageService>,
@@ -284,14 +309,18 @@ pub(crate) fn ensure_all_compose_image_refs_are_digest_pinned(compose: &str) -> 
     let compose: ComposeImages =
         serde_yaml::from_str(compose).context("failed to parse generated compose artifact")?;
     for (service_name, service) in compose.services {
-        if !is_digest_pinned_image_ref(&service.image) {
+        if !is_immutable_image_ref(&service.image) {
             bail!(
-                "deployment artifact contains unpinned image ref for service {service_name}: {}",
+                "deployment artifact contains mutable image ref for service {service_name}: {}",
                 service.image
             );
         }
     }
     Ok(())
+}
+
+fn is_immutable_image_ref(image_ref: &str) -> bool {
+    is_digest_pinned_image_ref(image_ref) || crate::local_build::is_sha256_image_id(image_ref)
 }
 
 fn is_digest_pinned_image_ref(image_ref: &str) -> bool {
@@ -361,27 +390,29 @@ mod tests {
     use crate::resolver::{ResolvedPlatformRuntime, UserRuntimeManifestExtras};
 
     #[test]
-    fn compose_image_assertion_requires_every_service_to_use_digest() -> Result<()> {
+    fn compose_image_assertion_requires_every_service_to_use_immutable_ref() -> Result<()> {
         let valid = r#"
 services:
   router:
     image: eclipse/zenoh:1.9.0@sha256:router
   drive:
     image: ghcr.io/phoxal/runtime-drive:y2026_1-stable@sha256:drive
+  user-avoid:
+    image: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 "#;
-        ensure_all_compose_image_refs_are_digest_pinned(valid)?;
+        ensure_all_compose_image_refs_are_immutable(valid)?;
 
         let invalid = r#"
 services:
   drive:
     image: ghcr.io/phoxal/runtime-drive:y2026_1-stable
 "#;
-        let error = ensure_all_compose_image_refs_are_digest_pinned(invalid)
+        let error = ensure_all_compose_image_refs_are_immutable(invalid)
             .expect_err("floating tags should fail deploy artifact validation");
         assert!(
             error
                 .to_string()
-                .contains("deployment artifact contains unpinned image ref for service drive"),
+                .contains("deployment artifact contains mutable image ref for service drive"),
             "{error:#}"
         );
 

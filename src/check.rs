@@ -1,4 +1,4 @@
-//! Graph validation for `phoxal check` (D59/D63).
+//! Graph validation for `phoxal-cli check` (D59/D63).
 //!
 //! This is the pure core: given the `emit-apis` report of every participant in a
 //! robot graph plus the manifest's root `api_version`, it enforces the
@@ -123,6 +123,13 @@ pub enum Problem {
         /// Artifacts that consume the contract (sorted, de-duplicated).
         consumers: Vec<String>,
     },
+    /// A query/server contract has no peer anywhere in the graph.
+    MissingConsumer {
+        family: String,
+        topic: String,
+        /// Artifacts that produce the contract (sorted, de-duplicated).
+        producers: Vec<String>,
+    },
     /// A user runtime's manifest config does not match its emitted JSON Schema.
     InvalidConfig {
         runtime_id: String,
@@ -131,7 +138,7 @@ pub enum Problem {
 }
 
 /// A non-fatal topology issue. Observable-only publishers are valid, so these
-/// are surfaced as warnings rather than blocking `phoxal check`.
+/// are surfaced as warnings rather than blocking `phoxal-cli check`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Warning {
     MissingConsumer {
@@ -249,11 +256,18 @@ pub fn check_graph_with_topology(
         });
     }
 
-    let mut missing_consumers: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    let mut missing_query_consumers: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    let mut missing_pubsub_consumers: BTreeMap<(String, String), BTreeSet<String>> =
+        BTreeMap::new();
     for ((family, topic, direction), producers) in &by_direction {
         if let Some(required_consumer) = direction.required_consumer() {
             let needed = (family.clone(), topic.clone(), required_consumer);
             if !by_direction.contains_key(&needed) {
+                let missing_consumers = if direction.is_query_server() {
+                    &mut missing_query_consumers
+                } else {
+                    &mut missing_pubsub_consumers
+                };
                 missing_consumers
                     .entry((family.clone(), topic.clone()))
                     .or_default()
@@ -261,7 +275,14 @@ pub fn check_graph_with_topology(
             }
         }
     }
-    for ((family, topic), producers) in missing_consumers {
+    for ((family, topic), producers) in missing_query_consumers {
+        problems.push(Problem::MissingConsumer {
+            family,
+            topic,
+            producers: producers.into_iter().collect(),
+        });
+    }
+    for ((family, topic), producers) in missing_pubsub_consumers {
         warnings.push(Warning::MissingConsumer {
             family,
             topic,
@@ -281,6 +302,11 @@ impl Direction {
             Self::ServerResponse => Self::QueryResponse,
             _ => return None,
         })
+    }
+
+    #[must_use]
+    const fn is_query_server(self) -> bool {
+        matches!(self, Self::ServerRequest | Self::ServerResponse)
     }
 }
 
@@ -594,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn query_server_without_client_is_a_warning() {
+    fn query_server_without_client_is_a_problem() {
         let graph = vec![participant(
             "asset",
             "y2026_1",
@@ -605,22 +631,22 @@ mod tests {
         )];
         let report = check_graph(&graph, "y2026_1");
 
-        assert!(report.problems.is_empty());
         assert_eq!(
-            report.warnings,
+            report.problems,
             vec![
-                Warning::MissingConsumer {
+                Problem::MissingConsumer {
                     family: "asset::GetRequest".to_string(),
                     topic: "asset/get".to_string(),
                     producers: vec!["asset".to_string()],
                 },
-                Warning::MissingConsumer {
+                Problem::MissingConsumer {
                     family: "asset::GetResponse".to_string(),
                     topic: "asset/get".to_string(),
                     producers: vec!["asset".to_string()],
                 }
             ]
         );
+        assert!(report.warnings.is_empty());
     }
 
     #[test]

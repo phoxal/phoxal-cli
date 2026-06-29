@@ -5,10 +5,10 @@ use std::process::{Command, ExitStatus};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use heck::ToUpperCamelCase;
-use phoxal::model::robot::v1::UserRuntime;
 use semver::Version;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use toml::Value as TomlValue;
 
 use crate::AppContext;
@@ -101,7 +101,7 @@ struct RuntimeRunPlan {
     namespace: String,
     run_dir: PathBuf,
     crate_dir: PathBuf,
-    binary_path: PathBuf,
+    binary_name: String,
     env: Vec<(String, String)>,
 }
 
@@ -126,7 +126,7 @@ impl Add {
             outcome.manifest_path.display()
         );
         println!(
-            "next: run `phoxal check`; later `phoxal runtime run {}`",
+            "next: run `phoxal-cli check`; later `phoxal-cli runtime run {}`",
             outcome.name
         );
         Ok(())
@@ -216,7 +216,8 @@ pub fn add_runtime(project_start: &Path, name: &str) -> Result<AddRuntimeOutcome
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let mut robot = load_robot(&robot_path)?;
+    let mut robot_yaml = read_robot_yaml(&robot_path)?;
+    let robot = load_robot(&robot_path)?;
     let api_version = robot.api_version.clone();
     let manifest_path = PathBuf::from("runtimes").join(name);
     let crate_dir = project_root.join(&manifest_path);
@@ -236,17 +237,8 @@ pub fn add_runtime(project_start: &Path, name: &str) -> Result<AddRuntimeOutcome
 
     let phoxal_version = cli_phoxal_dependency_major_minor()?;
     scaffold_runtime_crate(&crate_dir, name, &api_version, &phoxal_version)?;
-    robot.user_runtimes.insert(
-        name.to_string(),
-        UserRuntime {
-            path: manifest_path.clone(),
-            framework: "match-platform".to_string(),
-            build: None,
-        },
-    );
-    robot
-        .write_to_dir(project_root)
-        .with_context(|| format!("failed to update {}", robot_path.display()))?;
+    insert_user_runtime_manifest_entry(&mut robot_yaml, name, &manifest_path)?;
+    write_robot_yaml(&robot_path, &robot_yaml)?;
 
     Ok(AddRuntimeOutcome {
         name: name.to_string(),
@@ -309,10 +301,6 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
     let run_dir = project_root.join(".phoxal").join("run");
     crate::run_view::assemble(project_root, &resolved, &run_dir)?;
     let binary_name = runtime_binary_name(&crate_dir, name)?;
-    let binary_path = crate_dir
-        .join("target")
-        .join("debug")
-        .join(format!("{binary_name}{}", std::env::consts::EXE_SUFFIX));
     let env = run_env(
         name,
         &robot.identity.id,
@@ -327,7 +315,7 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
         namespace: robot.identity.namespace,
         run_dir,
         crate_dir,
-        binary_path,
+        binary_name,
         env,
     })
 }
@@ -417,11 +405,16 @@ fn runtime_binary_name(crate_dir: &Path, runtime_name: &str) -> Result<String> {
 
 fn build_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Result<()> {
     let mut command = Command::new("cargo");
-    command.arg("build").current_dir(&plan.crate_dir);
+    command
+        .arg("build")
+        .arg("--bin")
+        .arg(&plan.binary_name)
+        .current_dir(&plan.crate_dir);
     let status = ui.command_status(&mut command).with_context(|| {
         format!(
-            "failed to start cargo build for user runtime '{}' in {}",
+            "failed to start cargo build for user runtime '{}' ({}) in {}",
             plan.name,
+            plan.binary_name,
             plan.crate_dir.display()
         )
     })?;
@@ -436,8 +429,13 @@ fn build_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Resu
 }
 
 fn run_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Result<ExitStatus> {
-    let mut command = Command::new(&plan.binary_path);
+    let mut command = Command::new("cargo");
     command
+        .arg("run")
+        .arg("--quiet")
+        .arg("--bin")
+        .arg(&plan.binary_name)
+        .arg("--")
         .current_dir(&plan.crate_dir)
         .env_remove("PHOXAL_CONNECT")
         .env_remove("PHOXAL_CONFIG")
@@ -447,9 +445,10 @@ fn run_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Result
         .envs(plan.env.iter().map(|(key, value)| (key, value)));
     let mut child = ui.command_spawn(&mut command).with_context(|| {
         format!(
-            "failed to spawn user runtime '{}' at {}",
+            "failed to spawn `cargo run --bin {}` for user runtime '{}' in {}",
+            plan.binary_name,
             plan.name,
-            plan.binary_path.display()
+            plan.crate_dir.display()
         )
     })?;
     child
@@ -472,6 +471,63 @@ fn forward_runtime_exit_status(runtime_name: &str, status: ExitStatus) -> Result
         }
     }
     bail!("user runtime '{runtime_name}' terminated without an exit code: {status}")
+}
+
+fn read_robot_yaml(path: &Path) -> Result<YamlValue> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read robot file {}", path.display()))?;
+    serde_yaml::from_str(&contents)
+        .with_context(|| format!("failed to parse robot file {}", path.display()))
+}
+
+fn write_robot_yaml(path: &Path, yaml: &YamlValue) -> Result<()> {
+    let contents = serde_yaml::to_string(yaml)
+        .with_context(|| format!("failed to serialize {}", path.display()))?;
+    fs::write(path, contents).with_context(|| format!("failed to update {}", path.display()))
+}
+
+fn insert_user_runtime_manifest_entry(
+    yaml: &mut YamlValue,
+    name: &str,
+    manifest_path: &Path,
+) -> Result<()> {
+    let root = yaml
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow!("robot.yaml root must be a mapping"))?;
+    let user_runtimes_key = YamlValue::String("user_runtimes".to_string());
+    if root.get(&user_runtimes_key).is_none() {
+        root.insert(
+            user_runtimes_key.clone(),
+            YamlValue::Mapping(YamlMapping::new()),
+        );
+    }
+    let user_runtimes = root
+        .get_mut(&user_runtimes_key)
+        .and_then(YamlValue::as_mapping_mut)
+        .ok_or_else(|| anyhow!("robot.yaml user_runtimes must be a mapping"))?;
+    let runtime_key = YamlValue::String(name.to_string());
+    if user_runtimes.contains_key(&runtime_key) {
+        bail!("user_runtimes.{name} already exists in robot.yaml");
+    }
+
+    let mut runtime = YamlMapping::new();
+    runtime.insert(
+        YamlValue::String("path".to_string()),
+        YamlValue::String(manifest_path_string(manifest_path)),
+    );
+    runtime.insert(
+        YamlValue::String("framework".to_string()),
+        YamlValue::String("match-platform".to_string()),
+    );
+    user_runtimes.insert(runtime_key, YamlValue::Mapping(runtime));
+    Ok(())
+}
+
+fn manifest_path_string(path: &Path) -> String {
+    path.iter()
+        .map(|segment| segment.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn validate_runtime_name(name: &str) -> Result<&str> {
@@ -565,7 +621,7 @@ fn runtime_main_rs(name: &str, api_version: &str, pascal_name: &str) -> String {
 use phoxal::api::{api_version} as api;
 use phoxal::prelude::*;
 
-/// Typed config for this runtime (validated by `phoxal check`).
+/// Typed config for this runtime (validated by `phoxal-cli check`).
 #[derive(Debug, serde::Deserialize)]
 pub struct Config {{
     // Add config fields here.
@@ -717,6 +773,78 @@ mod tests {
         let error = add_runtime(temp.path(), "avoid-obstacles")
             .expect_err("adding the same runtime twice should fail");
         assert!(error.to_string().contains("already exists"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn add_runtime_preserves_other_runtime_image_and_config_extras() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        fs::write(
+            temp.path().join("robot.yaml"),
+            minimal_robot_yaml_with_user_runtime(
+                "brain",
+                r#"
+    path: runtimes/brain
+    image: ghcr.io/acme/brain@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    config:
+      planner:
+        gain: 0.7
+        labels: [left, right]
+"#,
+            ),
+        )?;
+
+        add_runtime(temp.path(), "avoid-obstacles")?;
+
+        let robot_yaml = fs::read_to_string(temp.path().join("robot.yaml"))?;
+        let yaml: YamlValue = serde_yaml::from_str(&robot_yaml)?;
+        let user_runtimes = yaml
+            .get("user_runtimes")
+            .and_then(YamlValue::as_mapping)
+            .expect("user_runtimes should remain a mapping");
+        let brain = user_runtimes
+            .get(YamlValue::String("brain".to_string()))
+            .and_then(YamlValue::as_mapping)
+            .expect("existing runtime should survive");
+        assert_eq!(
+            brain.get(YamlValue::String("image".to_string())),
+            Some(&YamlValue::String(
+                "ghcr.io/acme/brain@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string()
+            ))
+        );
+        let labels = brain
+            .get(YamlValue::String("config".to_string()))
+            .and_then(|config| config.get("planner"))
+            .and_then(|planner| planner.get("labels"))
+            .and_then(YamlValue::as_sequence)
+            .expect("nested config labels should survive");
+        assert_eq!(
+            labels,
+            &vec![
+                YamlValue::String("left".to_string()),
+                YamlValue::String("right".to_string())
+            ]
+        );
+
+        let avoid = user_runtimes
+            .get(YamlValue::String("avoid-obstacles".to_string()))
+            .and_then(YamlValue::as_mapping)
+            .expect("new runtime should be registered");
+        assert_eq!(
+            avoid.get(YamlValue::String("path".to_string())),
+            Some(&YamlValue::String("runtimes/avoid-obstacles".to_string()))
+        );
+
+        let loaded = load_robot_with_extras(&temp.path().join("robot.yaml"))?;
+        assert_eq!(
+            loaded.extras.user_runtime_image("brain"),
+            Some(
+                "ghcr.io/acme/brain@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )
+        );
+        assert!(loaded.robot.user_runtimes.contains_key("avoid-obstacles"));
 
         Ok(())
     }
