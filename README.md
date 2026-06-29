@@ -1,6 +1,41 @@
 # phoxal-cli
 
-Consumer CLI for the Phoxal robot framework. Owns the resolver, `robot.yaml` discovery, `phoxal.sources.lock` generation, and the `validate` / `simulate` / `doctor` commands.
+Consumer CLI for the Phoxal robot framework.
+You run it from a robot project: it reads `robot.yaml`, resolves the graph against its compiled-in official runtime catalog, and drives the develop, simulate, and deploy loop.
+It owns the resolver, `robot.yaml` discovery, and `phoxal.sources.lock` generation.
+
+## Commands
+
+```sh
+phoxal-cli robot new rover        # scaffold a robot project
+cd rover
+
+phoxal-cli check                  # validate the graph's api_version + topology via emit-apis
+phoxal-cli runtime add brain      # scaffold a user runtime crate, register it in robot.yaml
+phoxal-cli runtime run brain      # build and run that runtime host-native against the dev bus
+phoxal-cli simulate default       # launch the Webots simulation stack
+
+phoxal-cli pull                   # refresh cached official images + host tools
+phoxal-cli outdated               # report cached artifacts with newer remote digests
+phoxal-cli deploy build           # write an immutable, digest-pinned deployment artifact
+```
+
+| Command | What it does |
+|---|---|
+| `robot new <name>` | Scaffold a robot project (`robot.yaml`, `structure.urdf`, default world, `runtimes/`). |
+| `check` | Resolve `robot.yaml`, then run each participant's `emit-apis` and fail if any reports a different `api_version` or the producer/consumer topology is unsatisfied. Offline by default; `--pull` refreshes official images first; `--runtime <name>` scopes the build to one user runtime. |
+| `simulate <world>` | Resolve, generate the run bundle, and launch the Webots stack (router, official runtimes, user runtimes, component drivers). |
+| `runtime add\|run\|image\|catalog` | Scaffold a user runtime, run one host-native, build local deployment images, or print the official runtime catalog. |
+| `pull` / `outdated` | Refresh, or report drift in, cached official images and host tools for the selected `(api_version, channel)`. |
+| `deploy build` | Re-run the static check on a pulled set and write a compose artifact whose image refs are all immutable. |
+| `validate` / `update` | Lower-level checks and `phoxal.sources.lock` refresh that back the workflows above. |
+| `doctor` | Check host prerequisites (Docker, Webots) without changing anything. |
+| `self upgrade` | Update the CLI binary itself. |
+
+Commands that emit machine-readable state accept `--message-format human|json`.
+
+> `v0` is pre-stable: artifacts built at different times may not interoperate.
+> Pin digests with `phoxal-cli deploy build`.
 
 ## Install
 
@@ -29,7 +64,7 @@ cargo install --git https://github.com/phoxal/phoxal-cli
 ## Simulate
 
 ```sh
-phoxal simulate <world>
+phoxal-cli simulate <world>
 ```
 
 `<world>` resolves to a `.wbt` file in this order:
@@ -38,14 +73,14 @@ phoxal simulate <world>
 2. `<project>/<world>` (path-as-given, e.g. `worlds/foo.wbt`)
 3. `~/.phoxal/worlds/<world>.wbt` (shared worlds across robots)
 
-Example: `phoxal simulate default` finds `worlds/default.wbt` in the project.
+Example: `phoxal-cli simulate default` finds `worlds/default.wbt` in the project.
 
 ## Live split-recovery gate
 
 `scripts/live-simulate-gate.sh` is the documented gate that proves the
-separated repos run together end to end — `robot.yaml` → `phoxal-cli` → a real
-`phoxal.sources.lock` (real GHCR digests) → generated `.phoxal/run/` → router → Webots
-→ the mandatory API/channel runtime set. It is the live counterpart to recovery Gates 8–9
+separated repos run together end to end: `robot.yaml` -> `phoxal-cli` -> a real
+`phoxal.sources.lock` (real GHCR digests) -> generated `.phoxal/run/` -> router -> Webots
+-> the mandatory API/channel runtime set. It is the live counterpart to recovery Gates 8-9
 in `phoxal/organization`'s `REPOSITORIES.md`, and depends on real image digests
 (#10) and a published runtime image set (`phoxal/framework#31`).
 
@@ -80,9 +115,9 @@ missing, runtime startup, or bus connection).
 
 ## License
 
-AGPL-3.0-only — see [LICENSE](LICENSE) for the full license text.
+AGPL-3.0-only - see [LICENSE](LICENSE) for the full license text.
 A commercial license is available for downstream products that cannot
-comply with AGPL — see [COMMERCIAL.md](COMMERCIAL.md) and reach out via
+comply with AGPL - see [COMMERCIAL.md](COMMERCIAL.md) and reach out via
 <https://phoxal.com>.
 
 ## Contributing

@@ -59,7 +59,9 @@ pub fn long_version() -> &'static str {
 #[command(
     name = "phoxal-cli",
     version = long_version(),
-    about = "Resolve, validate, simulate, and doctor Phoxal robot projects."
+    about = "Build, check, simulate, and deploy Phoxal robot projects.",
+    long_about = "Build, check, simulate, and deploy Phoxal robot projects.\n\n\
+                  phoxal-cli reads robot.yaml, resolves the graph against its compiled-in official runtime catalog, and drives the develop/simulate/deploy loop. Start with `robot new`, then `check`, `simulate`, and `deploy build`."
 )]
 pub struct Cli {
     #[arg(
@@ -75,27 +77,31 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum RootCommand {
-    #[command(about = "Validate the robot graph's API version + topology via emit-apis.")]
+    #[command(
+        about = "Check the robot graph's single api_version and topology via emit-apis.",
+        long_about = "Check the robot graph's single api_version and topology via emit-apis.\n\n\
+                      Resolves robot.yaml, then runs each participant's emit-apis (official images, host tools, and locally built user runtimes/component drivers) and fails if any normal participant reports a different api_version or if the producer/consumer topology is unsatisfied. Offline by default: cached official images are used and pulled only when missing (pass --pull to refresh first)."
+    )]
     Check(check::CheckCmd),
-    #[command(about = "Validate the robot project discovered from robot.yaml.")]
+    #[command(about = "Validate robot.yaml structure and user-runtime phoxal dependencies.")]
     Validate(validate::Validate),
-    #[command(about = "Resolve robot.yaml and refresh phoxal.sources.lock.")]
+    #[command(about = "Resolve robot.yaml and write phoxal.sources.lock.")]
     Update(update::Update),
-    #[command(about = "Resolve and launch the local Webots simulation stack.")]
+    #[command(about = "Resolve, generate the run bundle, and launch the Webots simulation stack.")]
     Simulate(simulate::Simulate),
-    #[command(about = "Build deployment artifacts.")]
+    #[command(about = "Build an immutable, digest-pinned deployment artifact.")]
     Deploy(deploy::Deploy),
     #[command(about = "Scaffold and manage robot projects.")]
     Robot(robot::Robot),
-    #[command(about = "Refresh official runtime images and host tools.")]
+    #[command(about = "Refresh cached official runtime images and host tools.")]
     Pull(pull::Pull),
-    #[command(about = "Report newer remote image/tool digests than the local cache.")]
+    #[command(about = "Report cached official images/tools that have newer remote digests.")]
     Outdated(outdated::Outdated),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
-    #[command(about = "Manage user runtime crates.")]
+    #[command(about = "Scaffold and run user runtime crates.")]
     Runtime(runtime::Runtime),
-    #[command(about = "Print the phoxal-cli version.")]
+    #[command(about = "Print the phoxal-cli version and supported api_versions.")]
     Version,
     #[command(name = "self", about = "Manage this phoxal-cli installation.")]
     SelfCmd(self_cmd::SelfCmd),

@@ -11,7 +11,12 @@ use crate::resolver::{ResolveOptions, discover_robot_yaml, load_robot, resolve};
 
 #[derive(Debug, Args)]
 pub struct Pull {
-    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = MessageFormat::Human,
+        help = "Output format for the pull summary."
+    )]
     pub message_format: MessageFormat,
 }
 

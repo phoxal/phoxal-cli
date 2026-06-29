@@ -16,15 +16,26 @@ pub struct Robot {
 
 #[derive(Debug, Subcommand)]
 pub enum RobotSubcommand {
-    #[command(about = "Scaffold a new robot project.")]
+    #[command(
+        about = "Scaffold a new robot project.",
+        long_about = "Scaffold a new robot project.\n\n\
+                      Creates <name>/ with robot.yaml (root schema + api_version, default stable channel), structure.urdf, a default world, and a runtimes/ directory. Prints the v0 pre-stable warning."
+    )]
     New(New),
 }
 
 #[derive(Debug, Args)]
 pub struct New {
-    #[arg(help = "Robot project name and default robot identity id.")]
+    #[arg(
+        help = "Robot project name; must be kebab-case and becomes the default robot identity id."
+    )]
     pub name: String,
-    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = MessageFormat::Human,
+        help = "Output format for the scaffold summary."
+    )]
     pub message_format: MessageFormat,
 }
 

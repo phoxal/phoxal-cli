@@ -10,10 +10,9 @@ use crate::resolver::{ResolveOptions, discover_robot_yaml, load_robot, resolve};
 
 #[derive(Debug, Args)]
 pub struct Update {
-    /// Resolve image digests, component git commits, and tool asset hashes
-    /// from their upstream sources (requires Docker + network). Off by
-    /// default during the pre-publish recovery period — see
-    /// `.plans/framework-restructure-installable-cli/` for the rollout.
+    /// Resolve official image digests and tool asset hashes from upstream
+    /// (requires Docker + network). Off by default during the pre-publish
+    /// recovery period. Component git commits are always refreshed.
     #[arg(long)]
     pub pin_digests: bool,
 }
@@ -62,7 +61,7 @@ pub fn run(project_start: &Path, options: UpdateOptions) -> Result<UpdateSummary
         locked: false,
         // `--pin-digests` governs registry image + tool-asset digest pinning.
         resolve_external_artifacts: options.resolve_external_artifacts,
-        // `update` always refreshes component git commits — locking them is the
+        // `update` always refreshes component git commits - locking them is the
         // command's whole job, independent of digest pinning.
         resolve_source_commits: true,
     };

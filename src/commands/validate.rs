@@ -14,7 +14,12 @@ use crate::catalog::CATALOG;
 pub struct Validate {
     #[arg(long, help = "Print the derived runtime/component graph.")]
     pub report: bool,
-    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = ReportFormat::Text,
+        help = "Format for the --report output."
+    )]
     pub report_format: ReportFormat,
     #[arg(
         long,

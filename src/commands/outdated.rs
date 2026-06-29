@@ -18,7 +18,12 @@ use crate::simulator_staging::cached_tool_path;
 
 #[derive(Debug, Args)]
 pub struct Outdated {
-    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = MessageFormat::Human,
+        help = "Output format for the drift report."
+    )]
     pub message_format: MessageFormat,
 }
 

@@ -26,23 +26,41 @@ pub struct Deploy {
 
 #[derive(Debug, Subcommand)]
 pub enum DeploySubcommand {
-    #[command(about = "Build an immutable deployment artifact.")]
+    #[command(
+        about = "Build an immutable, digest-pinned deployment artifact.",
+        long_about = "Build an immutable, digest-pinned deployment artifact.\n\n\
+                      Resolves and pulls every official/user/tool ref, re-runs the static emit-apis check on the pinned set, and writes a compose artifact whose image refs are all immutable (repository@sha256:digest or local sha256 image ids)."
+    )]
     Build(Build),
 }
 
 #[derive(Debug, Args)]
 pub struct Build {
-    #[arg(long, value_enum, default_value_t = DeployTarget::Compose)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = DeployTarget::Compose,
+        help = "Deployment backend (only `compose` is implemented; `balena` is reserved)."
+    )]
     pub target: DeployTarget,
     #[arg(
         long,
         value_name = "ENV",
-        help = "Apply robot.<env>.yaml overlay before building the deployment artifact."
+        help = "Apply a robot.<env>.yaml overlay before building (repeatable)."
     )]
     pub env: Vec<String>,
-    #[arg(long, value_name = "PATH")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Write the compose artifact here instead of .phoxal/deploy/compose.yaml."
+    )]
     pub output: Option<PathBuf>,
-    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = MessageFormat::Human,
+        help = "Output format for the build summary."
+    )]
     pub message_format: MessageFormat,
 }
 
@@ -139,7 +157,7 @@ pub fn run(project_start: &Path, options: BuildOptions) -> Result<BuildSummary> 
         },
     )?;
 
-    // Only the compose path is reachable here — the Balena target bails above.
+    // Only the compose path is reachable here - the Balena target bails above.
     let user_runtime_images =
         crate::local_build::build_user_runtimes_immutable(project_root, &resolved)?;
     run_pinned_graph_check(

@@ -36,7 +36,12 @@ pub struct CheckCmd {
         help = "Only build/check the named user runtime crate after resolving the full project."
     )]
     pub runtime: Option<String>,
-    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = MessageFormat::Human,
+        help = "Output format for the check result."
+    )]
     pub message_format: MessageFormat,
 }
 

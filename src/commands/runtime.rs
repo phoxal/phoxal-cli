@@ -27,11 +27,19 @@ pub struct Runtime {
 
 #[derive(Debug, Subcommand)]
 pub enum RuntimeSubcommand {
-    #[command(about = "Scaffold a user runtime crate and register it in robot.yaml.")]
+    #[command(
+        about = "Scaffold a user runtime crate and register it in robot.yaml.",
+        long_about = "Scaffold a user runtime crate and register it in robot.yaml.\n\n\
+                      Generates runtimes/<name>/ with a #[derive(phoxal::Runtime)] crate (mandatory #[setup], a typed Config, and a blocking phoxal::run) and adds a user_runtimes.<name> entry to robot.yaml."
+    )]
     Add(Add),
-    #[command(about = "Build and run one user runtime host-native against the dev bus.")]
+    #[command(
+        about = "Build and run one user runtime host-native against the dev bus.",
+        long_about = "Build and run one user runtime host-native against the dev bus.\n\n\
+                      Generates the dev bundle, starts the local Zenoh container if absent, builds the named user runtime, and runs only it on the host. Does not start Webots, official runtimes, or component drivers."
+    )]
     Run(Run),
-    #[command(about = "Build local deployment image(s) for user runtime(s).")]
+    #[command(about = "Build a local deployment image for one or all user runtimes.")]
     Image(Image),
     #[command(about = "Print the compiled-in official runtime catalog.")]
     Catalog(Catalog),
@@ -39,7 +47,7 @@ pub enum RuntimeSubcommand {
 
 #[derive(Debug, Args)]
 pub struct Add {
-    #[arg(help = "Runtime id, used as the crate name and user_runtimes key.")]
+    #[arg(help = "Runtime id; kebab-case, used as the crate name and user_runtimes key.")]
     pub name: String,
 }
 
@@ -53,13 +61,23 @@ pub struct Run {
 pub struct Image {
     #[arg(help = "User runtime id from user_runtimes. Omit to build all user runtimes.")]
     pub name: Option<String>,
-    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = MessageFormat::Human,
+        help = "Output format for the built image list."
+    )]
     pub message_format: MessageFormat,
 }
 
 #[derive(Debug, Args)]
 pub struct Catalog {
-    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = MessageFormat::Human,
+        help = "Output format for the catalog listing."
+    )]
     pub message_format: MessageFormat,
 }
 
