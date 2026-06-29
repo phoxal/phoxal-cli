@@ -100,6 +100,9 @@ impl Build {
                 println!("wrote deployment bundle: {}", summary.bundle_dir.display());
                 println!("wrote deploy metadata: {}", summary.metadata_path.display());
                 println!("wrote compose artifact: {}", summary.output_path.display());
+                println!(
+                    "note: local compose deploys use immutable local Docker image IDs for user runtimes; production registry targets require pushed repository@sha256:digest refs"
+                );
                 Ok(())
             },
             self.message_format,
@@ -175,7 +178,7 @@ pub fn run(project_start: &Path, options: BuildOptions) -> Result<BuildSummary> 
     let metadata_path = bundle_dir.join("deploy-metadata.json");
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
-    write_deploy_metadata(&metadata_path, &robot_path, &options.env)?;
+    write_deploy_metadata(&metadata_path, &robot_path, &options.env, &resolved)?;
     fs::write(&output_path, compose)
         .with_context(|| format!("failed to write {}", output_path.display()))?;
 
@@ -333,6 +336,7 @@ fn is_digest_pinned_image_ref(image_ref: &str) -> bool {
 struct DeployMetadata {
     base_robot: HashedInput,
     overlays: Vec<OverlayMetadata>,
+    tools: Vec<ToolMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -348,7 +352,21 @@ struct OverlayMetadata {
     sha256: String,
 }
 
-fn write_deploy_metadata(path: &Path, robot_path: &Path, overlays: &[String]) -> Result<()> {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ToolMetadata {
+    name: String,
+    repo: String,
+    version: String,
+    asset: String,
+    sha256: String,
+}
+
+fn write_deploy_metadata(
+    path: &Path,
+    robot_path: &Path,
+    overlays: &[String],
+    resolved: &ResolvedRobot,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -369,6 +387,17 @@ fn write_deploy_metadata(path: &Path, robot_path: &Path, overlays: &[String]) ->
                 })
             })
             .collect::<Result<Vec<_>>>()?,
+        tools: resolved
+            .tools
+            .iter()
+            .map(|tool| ToolMetadata {
+                name: tool.name.clone(),
+                repo: tool.repo.clone(),
+                version: tool.resolved.clone(),
+                asset: tool.asset.clone(),
+                sha256: tool.sha256.clone(),
+            })
+            .collect(),
     };
     fs::write(path, serde_json::to_string_pretty(&metadata)?)
         .with_context(|| format!("failed to write {}", path.display()))
@@ -387,7 +416,7 @@ mod tests {
     use phoxal::model::robot::RobotV1 as Robot;
     use phoxal::model::robot::v1::Channel;
 
-    use crate::resolver::{ResolvedPlatformRuntime, UserRuntimeManifestExtras};
+    use crate::resolver::{ResolvedPlatformRuntime, ResolvedTool, UserRuntimeManifestExtras};
 
     #[test]
     fn compose_image_assertion_requires_every_service_to_use_immutable_ref() -> Result<()> {
@@ -497,6 +526,41 @@ services:
         Ok(())
     }
 
+    #[test]
+    fn deploy_metadata_records_resolved_tools() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let robot_path = temp.path().join("robot.yaml");
+        fs::write(&robot_path, MINIMAL_ROBOT)?;
+        let mut resolved = resolved_robot("phoxal.local/testbot/user-runtime/avoid:dev")?;
+        resolved.tools.push(ResolvedTool {
+            name: "joypad".to_string(),
+            requested: "0.14.0".to_string(),
+            resolved: "0.14.0".to_string(),
+            repo: "phoxal/framework".to_string(),
+            asset: "phoxal-tools-0.14.0-aarch64-apple-darwin.tar.gz".to_string(),
+            binary_name: "phoxal-joypad-aarch64-apple-darwin".to_string(),
+            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        });
+        let metadata_path = temp.path().join("bundle/deploy-metadata.json");
+
+        write_deploy_metadata(&metadata_path, &robot_path, &[], &resolved)?;
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(metadata_path)?)?;
+        assert_eq!(metadata["tools"][0]["name"], "joypad");
+        assert_eq!(metadata["tools"][0]["repo"], "phoxal/framework");
+        assert_eq!(metadata["tools"][0]["version"], "0.14.0");
+        assert_eq!(
+            metadata["tools"][0]["asset"],
+            "phoxal-tools-0.14.0-aarch64-apple-darwin.tar.gz"
+        );
+        assert_eq!(
+            metadata["tools"][0]["sha256"],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        Ok(())
+    }
+
     fn resolved_robot(user_image: &str) -> Result<ResolvedRobot> {
         Ok(ResolvedRobot {
             robot: Robot::parse_from_string(MINIMAL_ROBOT)?,
@@ -536,6 +600,7 @@ services:
                     )])
                 })
                 .unwrap_or_default(),
+            ..RobotManifestExtras::default()
         }
     }
 

@@ -106,6 +106,8 @@ pub fn generate(
     clock: LaunchClock,
 ) -> Result<String> {
     let run_mount = format!("{}:{ROBOT_MOUNT}:ro", run_dir.display());
+    let default_listen = format!("tcp/0.0.0.0:{LOCAL_ZENOH_PORT}");
+    let bus_profile = manifest_extras.materialized_bus_profile(ROUTER_ENDPOINT, &default_listen);
     let mut services = BTreeMap::new();
     let runtime_environment = |connect: &str| {
         BTreeMap::from([
@@ -123,7 +125,7 @@ pub fn generate(
         ])
     };
     let user_runtime_environment = |name: &str| {
-        let mut environment = runtime_environment(ROUTER_ENDPOINT);
+        let mut environment = runtime_environment(&bus_profile.connect);
         environment.insert("PHOXAL_PARTICIPANT_ID".to_string(), name.to_string());
         environment.insert(
             "PHOXAL_CONFIG".to_string(),
@@ -138,7 +140,7 @@ pub fn generate(
             continue;
         };
         let connect = if entry.wires_to_router {
-            ROUTER_ENDPOINT
+            bus_profile.connect.as_str()
         } else {
             ""
         };
@@ -165,7 +167,10 @@ pub fn generate(
         services.insert(runtime.name.clone(), service);
     }
 
-    services.insert(ROUTER_SERVICE.to_string(), router_service());
+    services.insert(
+        ROUTER_SERVICE.to_string(),
+        router_service(&bus_profile.listen),
+    );
 
     for runtime in &resolved.user_runtimes {
         let image = user_runtime_images
@@ -200,12 +205,12 @@ pub fn generate(
     })?)
 }
 
-fn router_service() -> ComposeService {
+fn router_service(listen: &str) -> ComposeService {
     ComposeService {
         image: crate::local_zenoh::zenoh_image(),
         command: vec![
             "-l".to_string(),
-            format!("tcp/0.0.0.0:{LOCAL_ZENOH_PORT}"),
+            listen.to_string(),
             "-e".to_string(),
             format!(
                 "tcp/{}:{LOCAL_ZENOH_PORT}",
@@ -260,8 +265,8 @@ mod tests {
     use crate::catalog::{PlatformRuntimeCatalog, PlatformRuntimeEntry};
     use crate::local_zenoh;
     use crate::resolver::{
-        ImagePin, ResolvedPlatformRuntime, ResolvedRobot, ResolvedUserRuntime, RobotManifestExtras,
-        UserRuntimeManifestExtras,
+        BusManifestExtras, BusProfileConfig, ImagePin, ResolvedPlatformRuntime, ResolvedRobot,
+        ResolvedUserRuntime, RobotManifestExtras, UserRuntimeManifestExtras,
     };
 
     static TEST_CATALOG_ENTRIES: &[PlatformRuntimeEntry] = &[
@@ -416,6 +421,67 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn selected_bus_profile_materializes_connect_and_listen() -> anyhow::Result<()> {
+        let resolved = resolved_robot()?;
+        let mut extras = manifest_extras();
+        extras.bus = BusManifestExtras {
+            selected_profile: Some("lab".to_string()),
+            profiles: BTreeMap::from([(
+                "lab".to_string(),
+                BusProfileConfig {
+                    connect: Some("tcp/lab-router:7447".to_string()),
+                    listen: Some("tcp/0.0.0.0:7448".to_string()),
+                },
+            )]),
+        };
+        let compose = generate(
+            &resolved,
+            &TEST_CATALOG,
+            &PathBuf::from("/tmp/phoxal/run"),
+            &BTreeMap::new(),
+            &[],
+            &extras,
+            LaunchClock::Simulation,
+        )?;
+        let compose: Value = serde_yaml::from_str(&compose)?;
+        let root = mapping(&compose, "compose")?;
+        let services = mapping(root.get(key("services")).expect("services"), "services")?;
+        let router = mapping(service(services, "router")?, "router")?;
+        let asset = mapping(service(services, "asset")?, "asset")?;
+        let user = mapping(service(services, "user-avoid")?, "user-avoid")?;
+
+        assert_eq!(
+            router.get(key("command")),
+            Some(&Value::Sequence(vec![
+                key("-l"),
+                key("tcp/0.0.0.0:7448"),
+                key("-e"),
+                key("tcp/phoxal-local-zenoh:7447"),
+                key("--no-multicast-scouting"),
+                key("--cfg"),
+                key("mode:\"router\""),
+            ]))
+        );
+        let asset_environment = mapping(
+            asset.get(key("environment")).expect("asset environment"),
+            "asset environment",
+        )?;
+        assert_eq!(
+            asset_environment.get(key("PHOXAL_CONNECT")),
+            Some(&key("tcp/lab-router:7447"))
+        );
+        let user_environment = mapping(
+            user.get(key("environment")).expect("user environment"),
+            "user environment",
+        )?;
+        assert_eq!(
+            user_environment.get(key("PHOXAL_CONNECT")),
+            Some(&key("tcp/lab-router:7447"))
+        );
+        Ok(())
+    }
+
     fn resolved_robot() -> anyhow::Result<ResolvedRobot> {
         Ok(ResolvedRobot {
             robot: Robot::parse_from_string(MINIMAL_ROBOT)?,
@@ -458,6 +524,7 @@ mod tests {
                     config: Some(serde_json::json!({ "gain": 0.7 })),
                 },
             )]),
+            ..RobotManifestExtras::default()
         }
     }
 

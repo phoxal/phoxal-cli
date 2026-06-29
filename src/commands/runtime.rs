@@ -256,6 +256,11 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
         .context("robot.yaml did not have a parent directory")?;
     let loaded = load_robot_with_extras(&robot_path)?;
     let config = loaded.extras.user_runtime_config(name).cloned();
+    let default_connect = format!("tcp/127.0.0.1:{}", crate::local_zenoh::LOCAL_ZENOH_PORT);
+    let default_listen = format!("tcp/0.0.0.0:{}", crate::local_zenoh::LOCAL_ZENOH_PORT);
+    let bus_profile = loaded
+        .extras
+        .materialized_bus_profile(&default_connect, &default_listen);
     let robot = loaded.robot;
 
     if CATALOG
@@ -306,6 +311,7 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
         &robot.identity.id,
         &robot.identity.namespace,
         config.as_ref(),
+        &bus_profile.connect,
         &run_dir,
     );
 
@@ -372,6 +378,7 @@ pub(crate) fn run_env(
     robot_id: &str,
     namespace: &str,
     config: Option<&JsonValue>,
+    bus_connect: &str,
     bundle_root: &Path,
 ) -> Vec<(String, String)> {
     let mut env = vec![
@@ -382,10 +389,7 @@ pub(crate) fn run_env(
             "PHOXAL_BUNDLE_ROOT".to_string(),
             bundle_root.display().to_string(),
         ),
-        (
-            "PHOXAL_CONNECT".to_string(),
-            format!("tcp/127.0.0.1:{}", crate::local_zenoh::LOCAL_ZENOH_PORT),
-        ),
+        ("PHOXAL_CONNECT".to_string(), bus_connect.to_string()),
         ("PHOXAL_CLOCK".to_string(), "real".to_string()),
     ];
     // A scaffolded user runtime always declares `config = Config`, so the runner
@@ -873,7 +877,14 @@ mod tests {
     #[test]
     fn run_env_sets_launch_contract_without_config() {
         let bundle_root = PathBuf::from("/tmp/phoxal/run");
-        let env = run_env("avoid-obstacles", "testbot", "dev", None, &bundle_root);
+        let env = run_env(
+            "avoid-obstacles",
+            "testbot",
+            "dev",
+            None,
+            "tcp/127.0.0.1:7447",
+            &bundle_root,
+        );
 
         assert_eq!(
             env.iter()
@@ -932,6 +943,7 @@ mod tests {
             "testbot",
             "test",
             Some(&config),
+            "tcp/127.0.0.1:7447",
             &PathBuf::from("/tmp/phoxal/run"),
         );
 
@@ -1046,6 +1058,45 @@ mod tests {
                 "gain": 0.7,
                 "labels": ["left", "right"],
             })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_run_plan_uses_selected_bus_profile_connect() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        fs::create_dir_all(temp.path().join("runtimes").join("avoid-obstacles"))?;
+        fs::write(
+            temp.path()
+                .join("runtimes")
+                .join("avoid-obstacles")
+                .join("Cargo.toml"),
+            runtime_cargo_toml("avoid-obstacles", "0.15"),
+        )?;
+        let robot_yaml = minimal_robot_yaml_with_user_runtime(
+            "avoid-obstacles",
+            r#"
+    path: runtimes/avoid-obstacles
+"#,
+        )
+        .replace(
+            "\nphoxal_runtimes:\n",
+            "\nbus:\n  selected: lab\n  profiles:\n    lab:\n      connect: tcp/lab-router:7447\n      listen: tcp/0.0.0.0:7448\n\nphoxal_runtimes:\n",
+        );
+        fs::write(temp.path().join("robot.yaml"), robot_yaml)?;
+        fs::write(
+            temp.path().join("structure.urdf"),
+            r#"<robot name="testbot"><link name="base_link"/></robot>"#,
+        )?;
+
+        let plan = runtime_run_plan(temp.path(), "avoid-obstacles")?;
+
+        assert_eq!(
+            plan.env
+                .iter()
+                .find(|(key, _)| key == "PHOXAL_CONNECT")
+                .map(|(_, value)| value.as_str()),
+            Some("tcp/lab-router:7447")
         );
         Ok(())
     }

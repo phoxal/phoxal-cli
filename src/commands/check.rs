@@ -60,6 +60,7 @@ pub struct RawEmitApis {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RawArtifact {
+    pub kind: String,
     pub id: String,
 }
 
@@ -236,6 +237,7 @@ fn run(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceParticipant {
     pub name: String,
+    pub expected_artifact_id: String,
     pub crate_dir: PathBuf,
     pub kind: SourceParticipantKind,
 }
@@ -243,8 +245,10 @@ pub struct SourceParticipant {
 impl SourceParticipant {
     #[must_use]
     pub fn user_runtime(name: impl Into<String>, crate_dir: PathBuf) -> Self {
+        let name = name.into();
         Self {
-            name: name.into(),
+            expected_artifact_id: name.clone(),
+            name,
             crate_dir,
             kind: SourceParticipantKind::UserRuntime,
         }
@@ -252,8 +256,19 @@ impl SourceParticipant {
 
     #[must_use]
     pub fn component_driver(name: impl Into<String>, crate_dir: PathBuf) -> Self {
+        let name = name.into();
+        Self::component_driver_with_artifact_id(name.clone(), name, crate_dir)
+    }
+
+    #[must_use]
+    pub fn component_driver_with_artifact_id(
+        name: impl Into<String>,
+        expected_artifact_id: impl Into<String>,
+        crate_dir: PathBuf,
+    ) -> Self {
         Self {
             name: name.into(),
+            expected_artifact_id: expected_artifact_id.into(),
             crate_dir,
             kind: SourceParticipantKind::ComponentDriver,
         }
@@ -327,8 +342,9 @@ pub(crate) fn source_participants_from_resolved(
                 component.instance
             )
         })?;
-        participants.push(SourceParticipant::component_driver(
+        participants.push(SourceParticipant::component_driver_with_artifact_id(
             component.instance.clone(),
+            component.source_name.clone(),
             crate_dir,
         ));
     }
@@ -360,20 +376,9 @@ fn ensure_user_runtime_exists(resolved: &ResolvedRobot, runtime_name: &str) -> R
 
 fn source_participants_for_runtime(
     source_participants: &[SourceParticipant],
-    runtime_name: Option<&str>,
+    _runtime_name: Option<&str>,
 ) -> Vec<SourceParticipant> {
-    let Some(runtime_name) = runtime_name else {
-        return source_participants.to_vec();
-    };
-
-    source_participants
-        .iter()
-        .filter(|participant| {
-            participant.kind == SourceParticipantKind::UserRuntime
-                && participant.name == runtime_name
-        })
-        .cloned()
-        .collect()
+    source_participants.to_vec()
 }
 
 pub fn run_check(
@@ -450,6 +455,7 @@ pub fn run_check_with_deployed_user_runtime_images(
                 });
             }
         };
+        validate_artifact_identity("official runtime", runtime_name, "runtime", &raw)?;
         let artifact_id = raw.artifact.id.clone();
         let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
             format!("failed to interpret emit-apis for runtime {runtime_name} ({image_ref})")
@@ -467,7 +473,7 @@ pub fn run_check_with_deployed_user_runtime_images(
                 runtime.name, runtime.image_ref
             )
         })?;
-        validate_user_runtime_artifact_id(&runtime.name, &raw)?;
+        validate_runtime_artifact_identity("user runtime", &runtime.name, &raw)?;
         let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
             format!(
                 "failed to interpret emit-apis for user runtime {} ({})",
@@ -492,6 +498,7 @@ pub fn run_check_with_deployed_user_runtime_images(
                 tool.binary_path.display()
             )
         })?;
+        validate_artifact_identity("tool", &tool.name, "tool", &raw)?;
         let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
             format!(
                 "failed to interpret emit-apis for tool {} ({})",
@@ -511,7 +518,7 @@ pub fn run_check_with_deployed_user_runtime_images(
                 participant.crate_dir.display()
             )
         })?;
-        validate_source_artifact_id(participant, &raw)?;
+        validate_source_artifact_identity(participant, &raw)?;
         let mut participant_apis =
             graph_check::ParticipantApis::try_from(raw).with_context(|| {
                 format!(
@@ -652,13 +659,10 @@ fn validate_user_runtime_config(
         .user_runtime_config(runtime_id)
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
-    let mut errors = Vec::new();
-    validate_json_schema(
+    let errors = validate_json_schema(
         schema,
         &config,
-        schema,
         &format!("user_runtimes.{runtime_id}.config"),
-        &mut errors,
     );
     if errors.is_empty() {
         None
@@ -670,199 +674,28 @@ fn validate_user_runtime_config(
     }
 }
 
-fn validate_json_schema(
-    schema: &Value,
-    value: &Value,
-    root: &Value,
-    path: &str,
-    errors: &mut Vec<String>,
-) {
-    if schema.as_bool() == Some(true) {
-        return;
-    }
-    if schema.as_bool() == Some(false) {
-        errors.push(format!("{path} is not allowed by schema"));
-        return;
-    }
-    let Some(object) = schema.as_object() else {
-        return;
+fn validate_json_schema(schema: &Value, value: &Value, path: &str) -> Vec<String> {
+    let validator = match jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft202012)
+        .build(schema)
+    {
+        Ok(validator) => validator,
+        Err(error) => {
+            return vec![format!("{path}: emitted config_schema is invalid: {error}")];
+        }
     };
 
-    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-        if let Some(target) = resolve_json_schema_ref(root, reference) {
-            validate_json_schema(target, value, root, path, errors);
-        } else {
-            errors.push(format!("{path}: unresolved schema reference {reference}"));
-        }
-        return;
-    }
-
-    if let Some(const_value) = object.get("const")
-        && value != const_value
-    {
-        errors.push(format!("{path} must equal {const_value}"));
-    }
-    if let Some(enum_values) = object.get("enum").and_then(Value::as_array)
-        && !enum_values.iter().any(|candidate| candidate == value)
-    {
-        errors.push(format!(
-            "{path} must be one of {}",
-            Value::Array(enum_values.clone())
-        ));
-    }
-
-    if let Some(all_of) = object.get("allOf").and_then(Value::as_array) {
-        for subschema in all_of {
-            validate_json_schema(subschema, value, root, path, errors);
-        }
-    }
-    if let Some(any_of) = object.get("anyOf").and_then(Value::as_array)
-        && !any_of
-            .iter()
-            .any(|subschema| schema_matches(subschema, value, root, path))
-    {
-        errors.push(format!("{path} does not match any allowed schema"));
-    }
-    if let Some(one_of) = object.get("oneOf").and_then(Value::as_array) {
-        let matches = one_of
-            .iter()
-            .filter(|subschema| schema_matches(subschema, value, root, path))
-            .count();
-        if matches != 1 {
-            errors.push(format!(
-                "{path} must match exactly one allowed schema, matched {matches}"
-            ));
-        }
-    }
-
-    if let Some(schema_type) = object.get("type")
-        && !json_type_matches(schema_type, value)
-    {
-        errors.push(format!(
-            "{path} must be {}, got {}",
-            format_schema_type(schema_type),
-            json_value_type(value)
-        ));
-        return;
-    }
-
-    match value {
-        Value::Object(values) => {
-            let properties = object.get("properties").and_then(Value::as_object);
-            if let Some(required) = object.get("required").and_then(Value::as_array) {
-                for field in required.iter().filter_map(Value::as_str) {
-                    if !values.contains_key(field) {
-                        errors.push(format!("{path}.{field} is required"));
-                    }
-                }
+    validator
+        .iter_errors(value)
+        .map(|error| {
+            let instance_path = error.instance_path().to_string();
+            if instance_path.is_empty() {
+                format!("{path}: {error}")
+            } else {
+                format!("{path}{instance_path}: {error}")
             }
-            if let Some(properties) = properties {
-                for (field, field_schema) in properties {
-                    if let Some(field_value) = values.get(field) {
-                        validate_json_schema(
-                            field_schema,
-                            field_value,
-                            root,
-                            &format!("{path}.{field}"),
-                            errors,
-                        );
-                    }
-                }
-            }
-            match object.get("additionalProperties") {
-                Some(Value::Bool(false)) => {
-                    if let Some(properties) = properties {
-                        for field in values.keys() {
-                            if !properties.contains_key(field) {
-                                errors.push(format!("{path}.{field} is not allowed"));
-                            }
-                        }
-                    }
-                }
-                Some(schema) if !schema.is_boolean() => {
-                    for (field, field_value) in values {
-                        if properties.is_none_or(|properties| !properties.contains_key(field)) {
-                            validate_json_schema(
-                                schema,
-                                field_value,
-                                root,
-                                &format!("{path}.{field}"),
-                                errors,
-                            );
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        Value::Array(values) => {
-            if let Some(items) = object.get("items") {
-                for (index, item) in values.iter().enumerate() {
-                    validate_json_schema(items, item, root, &format!("{path}[{index}]"), errors);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn schema_matches(schema: &Value, value: &Value, root: &Value, path: &str) -> bool {
-    let mut errors = Vec::new();
-    validate_json_schema(schema, value, root, path, &mut errors);
-    errors.is_empty()
-}
-
-fn resolve_json_schema_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
-    let pointer = reference.strip_prefix('#')?;
-    root.pointer(pointer)
-}
-
-fn json_type_matches(schema_type: &Value, value: &Value) -> bool {
-    match schema_type {
-        Value::String(schema_type) => json_single_type_matches(schema_type, value),
-        Value::Array(types) => types
-            .iter()
-            .filter_map(Value::as_str)
-            .any(|schema_type| json_single_type_matches(schema_type, value)),
-        _ => true,
-    }
-}
-
-fn json_single_type_matches(schema_type: &str, value: &Value) -> bool {
-    match schema_type {
-        "object" => value.is_object(),
-        "array" => value.is_array(),
-        "string" => value.is_string(),
-        "number" => value.is_number(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-        "boolean" => value.is_boolean(),
-        "null" => value.is_null(),
-        _ => true,
-    }
-}
-
-fn format_schema_type(schema_type: &Value) -> String {
-    match schema_type {
-        Value::String(schema_type) => schema_type.clone(),
-        Value::Array(types) => types
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join(" or "),
-        _ => "the declared type".to_string(),
-    }
-}
-
-fn json_value_type(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
+        })
+        .collect()
 }
 
 pub(crate) fn fetch_emit_apis_from_docker(image_ref: &str) -> Result<RawEmitApis> {
@@ -994,23 +827,49 @@ pub(crate) fn build_emit_apis_from_source(dir: &Path) -> Result<RawEmitApis> {
     })
 }
 
-pub(crate) fn validate_user_runtime_artifact_id(
-    manifest_key: &str,
+fn validate_runtime_artifact_identity(
+    label: &str,
+    expected_id: &str,
     raw: &RawEmitApis,
 ) -> Result<()> {
-    if raw.artifact.id != manifest_key {
-        bail!(
-            "user runtime emit-apis artifact.id '{}' does not match manifest key user_runtimes.{}",
-            raw.artifact.id,
-            manifest_key
-        );
-    }
-    Ok(())
+    validate_artifact_identity(label, expected_id, "runtime", raw)
 }
 
-fn validate_source_artifact_id(participant: &SourceParticipant, raw: &RawEmitApis) -> Result<()> {
-    if participant.kind == SourceParticipantKind::UserRuntime {
-        validate_user_runtime_artifact_id(&participant.name, raw)?;
+fn validate_source_artifact_identity(
+    participant: &SourceParticipant,
+    raw: &RawEmitApis,
+) -> Result<()> {
+    let expected_kind = match participant.kind {
+        SourceParticipantKind::UserRuntime => "runtime",
+        SourceParticipantKind::ComponentDriver => "driver",
+    };
+    validate_artifact_identity(
+        participant.kind_label(),
+        participant.expected_artifact_id.as_str(),
+        expected_kind,
+        raw,
+    )
+}
+
+fn validate_artifact_identity(
+    label: &str,
+    expected_id: &str,
+    expected_kind: &str,
+    raw: &RawEmitApis,
+) -> Result<()> {
+    if raw.artifact.id != expected_id {
+        bail!(
+            "{label} emit-apis artifact.id '{}' does not match expected artifact id '{}'",
+            raw.artifact.id,
+            expected_id
+        );
+    }
+    if raw.artifact.kind != expected_kind {
+        bail!(
+            "{label} emit-apis artifact.kind '{}' does not match expected kind '{}'",
+            raw.artifact.kind,
+            expected_kind
+        );
     }
     Ok(())
 }
@@ -1274,8 +1133,9 @@ mod tests {
     #[test]
     fn healthy_graph_passes_with_platform_and_component_driver_source() -> Result<()> {
         let images = vec![("mission".to_string(), "mission:ok".to_string())];
-        let sources = vec![SourceParticipant::component_driver(
+        let sources = vec![SourceParticipant::component_driver_with_artifact_id(
             "left_drive".to_string(),
+            "ddsm115".to_string(),
             PathBuf::from("/fake/project/components/ddsm115"),
         )];
 
@@ -1295,7 +1155,8 @@ mod tests {
             |_| bail!("no tools should be fetched"),
             |dir| {
                 if dir == Path::new("/fake/project/components/ddsm115") {
-                    Ok(raw(
+                    Ok(raw_kind(
+                        "driver",
                         "ddsm115",
                         "y2026_1",
                         &[("drive::Target", "drive/target", "subscribe")],
@@ -1329,7 +1190,8 @@ mod tests {
             |_| bail!("no platform images should be fetched"),
             |path| {
                 if path == Path::new("/fake/cache/joypad") {
-                    Ok(raw(
+                    Ok(raw_kind(
+                        "tool",
                         "joypad",
                         "y2026_1",
                         &[("drive::Target", "drive/target", "publish")],
@@ -1362,8 +1224,9 @@ mod tests {
             image_ref: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_string(),
         }];
-        let sources = vec![SourceParticipant::component_driver(
+        let sources = vec![SourceParticipant::component_driver_with_artifact_id(
             "left_drive".to_string(),
+            "ddsm115".to_string(),
             PathBuf::from("/fake/project/components/ddsm115"),
         )];
         let robot_graph = graph_check::RobotGraph::default();
@@ -1390,7 +1253,7 @@ mod tests {
             |_| bail!("no tools should be fetched"),
             |dir| {
                 built_sources.push(dir.to_path_buf());
-                Ok(raw("ddsm115", "y2026_1", &[]))
+                Ok(raw_kind("driver", "ddsm115", "y2026_1", &[]))
             },
         )?;
 
@@ -1456,13 +1319,108 @@ mod tests {
         let message = error.to_string();
         assert!(
             message.contains("artifact.id 'surprise'")
-                && message.contains("manifest key user_runtimes.avoid"),
+                && message.contains("expected artifact id 'avoid'"),
             "{message}"
         );
     }
 
     #[test]
-    fn scoped_runtime_check_does_not_build_unrelated_source_participants() -> Result<()> {
+    fn official_runtime_artifact_identity_must_match_resolved_name() {
+        let images = vec![("drive".to_string(), "drive:swapped".to_string())];
+
+        let error = run_check(
+            &images,
+            &[],
+            &[],
+            "y2026_1",
+            |image_ref| match image_ref {
+                "drive:swapped" => Ok(raw("mission", "y2026_1", &[])),
+                unexpected => bail!("unexpected image {unexpected}"),
+            },
+            |_| bail!("no tools should be fetched"),
+            |_| bail!("no source runtimes should be built"),
+        )
+        .expect_err("swapped official runtime image should abort check");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("official runtime emit-apis artifact.id 'mission'")
+                && message.contains("expected artifact id 'drive'"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn tool_artifact_identity_must_match_resolved_tool() {
+        let tools = vec![ToolParticipant {
+            name: "joypad".to_string(),
+            binary_path: PathBuf::from("/fake/cache/joypad"),
+        }];
+
+        let error = run_check(
+            &[],
+            &tools,
+            &[],
+            "y2026_1",
+            |_| bail!("no platform images should be fetched"),
+            |path| {
+                if path == Path::new("/fake/cache/joypad") {
+                    Ok(raw_kind(
+                        "tool",
+                        "simulator_webots_controller",
+                        "y2026_1",
+                        &[],
+                    ))
+                } else {
+                    bail!("unexpected tool path {}", path.display())
+                }
+            },
+            |_| bail!("no source runtimes should be built"),
+        )
+        .expect_err("swapped tool binary should abort check");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("tool emit-apis artifact.id 'simulator_webots_controller'")
+                && message.contains("expected artifact id 'joypad'"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn tool_artifact_kind_must_be_tool() {
+        let tools = vec![ToolParticipant {
+            name: "joypad".to_string(),
+            binary_path: PathBuf::from("/fake/cache/joypad"),
+        }];
+
+        let error = run_check(
+            &[],
+            &tools,
+            &[],
+            "y2026_1",
+            |_| bail!("no platform images should be fetched"),
+            |path| {
+                if path == Path::new("/fake/cache/joypad") {
+                    Ok(raw("joypad", "y2026_1", &[]))
+                } else {
+                    bail!("unexpected tool path {}", path.display())
+                }
+            },
+            |_| bail!("no source runtimes should be built"),
+        )
+        .expect_err("tool binary reporting runtime kind should abort check");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("tool emit-apis artifact.kind 'runtime'")
+                && message.contains("expected kind 'tool'"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn scoped_runtime_check_keeps_all_source_participants() -> Result<()> {
         let all_sources = vec![
             SourceParticipant::user_runtime(
                 "bad".to_string(),
@@ -1472,8 +1430,9 @@ mod tests {
                 "other".to_string(),
                 PathBuf::from("/fake/project/runtimes/other"),
             ),
-            SourceParticipant::component_driver(
+            SourceParticipant::component_driver_with_artifact_id(
                 "left_drive".to_string(),
+                "ddsm115".to_string(),
                 PathBuf::from("/fake/project/components/ddsm115"),
             ),
         ];
@@ -1489,8 +1448,12 @@ mod tests {
             |_| bail!("no tools should be fetched"),
             |dir| {
                 built.push(dir.to_path_buf());
-                if dir == Path::new("/fake/project/runtimes/other") {
+                if dir == Path::new("/fake/project/runtimes/bad") {
+                    Ok(raw("bad", "y2026_1", &[]))
+                } else if dir == Path::new("/fake/project/runtimes/other") {
                     Ok(raw("other", "y2026_1", &[]))
+                } else if dir == Path::new("/fake/project/components/ddsm115") {
+                    Ok(raw_kind("driver", "ddsm115", "y2026_1", &[]))
                 } else {
                     bail!(
                         "unrelated source participant should not be built: {}",
@@ -1501,14 +1464,110 @@ mod tests {
         )?;
 
         assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
-        assert_eq!(built, vec![PathBuf::from("/fake/project/runtimes/other")]);
+        assert_eq!(
+            built,
+            vec![
+                PathBuf::from("/fake/project/runtimes/bad"),
+                PathBuf::from("/fake/project/runtimes/other"),
+                PathBuf::from("/fake/project/components/ddsm115")
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_runtime_check_detects_component_driver_topology_problems() -> Result<()> {
+        let all_sources = vec![
+            SourceParticipant::user_runtime(
+                "other".to_string(),
+                PathBuf::from("/fake/project/runtimes/other"),
+            ),
+            SourceParticipant::component_driver_with_artifact_id(
+                "left_drive".to_string(),
+                "ddsm115".to_string(),
+                PathBuf::from("/fake/project/components/ddsm115"),
+            ),
+        ];
+        let sources = source_participants_for_runtime(&all_sources, Some("other"));
+
+        let outcome = run_check(
+            &[],
+            &[],
+            &sources,
+            "y2026_1",
+            |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
+            |dir| {
+                if dir == Path::new("/fake/project/runtimes/other") {
+                    Ok(raw("other", "y2026_1", &[]))
+                } else if dir == Path::new("/fake/project/components/ddsm115") {
+                    Ok(raw_kind(
+                        "driver",
+                        "ddsm115",
+                        "y2026_1",
+                        &[("drive::Target", "drive/target", "subscribe")],
+                    ))
+                } else {
+                    bail!("unexpected source dir {}", dir.display())
+                }
+            },
+        )?;
+
+        assert!(matches!(
+            outcome.report.problems.as_slice(),
+            [Problem::MissingProducer { consumers, .. }] if consumers == &vec!["ddsm115".to_string()]
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_runtime_check_detects_other_user_runtime_topology_problems() -> Result<()> {
+        let all_sources = vec![
+            SourceParticipant::user_runtime(
+                "bad".to_string(),
+                PathBuf::from("/fake/project/runtimes/bad"),
+            ),
+            SourceParticipant::user_runtime(
+                "other".to_string(),
+                PathBuf::from("/fake/project/runtimes/other"),
+            ),
+        ];
+        let sources = source_participants_for_runtime(&all_sources, Some("other"));
+
+        let outcome = run_check(
+            &[],
+            &[],
+            &sources,
+            "y2026_1",
+            |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
+            |dir| {
+                if dir == Path::new("/fake/project/runtimes/bad") {
+                    Ok(raw(
+                        "bad",
+                        "y2026_1",
+                        &[("drive::Target", "drive/target", "subscribe")],
+                    ))
+                } else if dir == Path::new("/fake/project/runtimes/other") {
+                    Ok(raw("other", "y2026_1", &[]))
+                } else {
+                    bail!("unexpected source dir {}", dir.display())
+                }
+            },
+        )?;
+
+        assert!(matches!(
+            outcome.report.problems.as_slice(),
+            [Problem::MissingProducer { consumers, .. }] if consumers == &vec!["bad".to_string()]
+        ));
         Ok(())
     }
 
     #[test]
     fn component_driver_wrong_api_version_fails_with_mismatch_problem() -> Result<()> {
-        let sources = vec![SourceParticipant::component_driver(
+        let sources = vec![SourceParticipant::component_driver_with_artifact_id(
             "left_drive".to_string(),
+            "ddsm115".to_string(),
             PathBuf::from("/fake/project/components/ddsm115"),
         )];
 
@@ -1519,7 +1578,7 @@ mod tests {
             "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
-            |_| Ok(raw("ddsm115", "y2026_2", &[])),
+            |_| Ok(raw_kind("driver", "ddsm115", "y2026_2", &[])),
         )?;
 
         assert_eq!(
@@ -1562,8 +1621,9 @@ mod tests {
 
     #[test]
     fn component_driver_build_error_is_a_hard_error() {
-        let sources = vec![SourceParticipant::component_driver(
+        let sources = vec![SourceParticipant::component_driver_with_artifact_id(
             "left_drive".to_string(),
+            "ddsm115".to_string(),
             PathBuf::from("/fake/project/components/ddsm115"),
         )];
 
@@ -1622,8 +1682,9 @@ mod tests {
         assert_eq!(located, vec!["left_drive"]);
         assert_eq!(
             source_participants,
-            vec![SourceParticipant::component_driver(
+            vec![SourceParticipant::component_driver_with_artifact_id(
                 "left_drive".to_string(),
+                "ddsm115".to_string(),
                 temp.path().join("component-crates/left_drive")
             )]
         );
@@ -1638,7 +1699,7 @@ mod tests {
             |_| bail!("no tools should be fetched"),
             |dir| {
                 built.push(dir.to_path_buf());
-                Ok(raw("ddsm115", "y2026_1", &[]))
+                Ok(raw_kind("driver", "ddsm115", "y2026_1", &[]))
             },
         )?;
 
@@ -1703,7 +1764,7 @@ mod tests {
     fn raw_emit_apis_accepts_required_contracts_json() -> Result<()> {
         let parsed: RawEmitApis = serde_json::from_str(
             r#"{
-                "artifact": { "id": "drive", "ignored": true },
+                "artifact": { "kind": "runtime", "id": "drive", "ignored": true },
                 "api_version": "y2026_1",
                 "bus_abi": "v0",
                 "required_contracts": [
@@ -1748,6 +1809,7 @@ mod tests {
                     config: Some(serde_json::json!({ "gain": "fast" })),
                 },
             )]),
+            ..RobotManifestExtras::default()
         };
         let robot_graph = graph_check::RobotGraph::default();
 
@@ -1787,6 +1849,95 @@ mod tests {
     }
 
     #[test]
+    fn user_runtime_config_uses_full_json_schema_keywords() -> Result<()> {
+        let sources = vec![SourceParticipant::user_runtime(
+            "avoid".to_string(),
+            PathBuf::from("/fake/project/runtimes/avoid"),
+        )];
+        let extras = RobotManifestExtras {
+            user_runtimes: BTreeMap::from([(
+                "avoid".to_string(),
+                crate::resolver::UserRuntimeManifestExtras {
+                    image: None,
+                    config: Some(serde_json::json!({
+                        "gains": [0.25, 5.5],
+                        "mode": "FAST",
+                        "extra": true
+                    })),
+                },
+            )]),
+            ..RobotManifestExtras::default()
+        };
+        let robot_graph = graph_check::RobotGraph::default();
+
+        let outcome = run_check_with_context(
+            &[],
+            &[],
+            &sources,
+            CheckGraphContext {
+                root_api: "y2026_1",
+                robot_graph: &robot_graph,
+                manifest_extras: &extras,
+            },
+            |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
+            |_| {
+                let mut raw = raw("avoid", "y2026_1", &[]);
+                raw.config_schema = Some(serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "required": ["gains", "mode"],
+                    "properties": {
+                        "gains": {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "items": { "$ref": "#/$defs/gain" }
+                        },
+                        "mode": {
+                            "type": "string",
+                            "pattern": "^[a-z]+$"
+                        }
+                    },
+                    "additionalProperties": false,
+                    "$defs": {
+                        "gain": {
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 1.0
+                        }
+                    }
+                }));
+                Ok(raw)
+            },
+        )?;
+
+        let [Problem::InvalidConfig { runtime_id, errors }] = outcome.report.problems.as_slice()
+        else {
+            panic!(
+                "expected one InvalidConfig problem, got {:?}",
+                outcome.report.problems
+            );
+        };
+        assert_eq!(runtime_id, "avoid");
+        assert!(
+            errors.iter().any(|error| error.contains("/gains/1")),
+            "{errors:?}"
+        );
+        assert!(
+            errors.iter().any(|error| error.contains("/mode")),
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.to_ascii_lowercase().contains("additional properties")),
+            "{errors:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn docker_emit_apis_classifier_only_treats_manifest_absence_as_missing() {
         let missing = classify_docker_emit_apis_failure(
             "ghcr.io/phoxal/runtime-drive:y2026_2-stable",
@@ -1811,8 +1962,20 @@ mod tests {
     }
 
     fn raw(id: &str, api_version: &str, contracts: &[(&str, &str, &str)]) -> RawEmitApis {
+        raw_kind("runtime", id, api_version, contracts)
+    }
+
+    fn raw_kind(
+        kind: &str,
+        id: &str,
+        api_version: &str,
+        contracts: &[(&str, &str, &str)],
+    ) -> RawEmitApis {
         RawEmitApis {
-            artifact: RawArtifact { id: id.to_string() },
+            artifact: RawArtifact {
+                kind: kind.to_string(),
+                id: id.to_string(),
+            },
             api_version: api_version.to_string(),
             bus_abi: None,
             required_contracts: contracts

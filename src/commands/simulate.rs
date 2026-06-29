@@ -41,7 +41,7 @@ pub struct Simulate {
     pub dry_run: bool,
     #[arg(
         long,
-        help = "Refresh phoxal.sources.lock when it is missing or stale (simulate's only way to mutate the lock)."
+        help = "Refresh phoxal.sources.lock when it is missing or stale (live simulate only)."
     )]
     pub update_lock: bool,
     #[arg(long, help = "Launch joypad from the cached Phoxal tool binaries.")]
@@ -53,7 +53,7 @@ pub struct Simulate {
     pub pin_digests: bool,
     #[arg(
         long,
-        help = "Refresh official runtime images and host tools instead of reusing compatible cached artifacts."
+        help = "Refresh official runtime images and host tools instead of reusing compatible cached artifacts; live mode also reconciles phoxal.sources.lock before provisioning."
     )]
     pub pull: bool,
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
@@ -84,6 +84,7 @@ pub struct SimulatePlan {
     pub run_dir: PathBuf,
     pub compose_path: PathBuf,
     pub state_path: PathBuf,
+    pub bus_connect: String,
     pub lockfile_written: Option<PathBuf>,
     pub written_files: Vec<PathBuf>,
     pub native_tools: Vec<String>,
@@ -222,6 +223,11 @@ fn resolve_project(
         None
     };
     if options.locked {
+        if options.pull {
+            bail!(
+                "simulate --pull cannot be combined with --locked because --pull refreshes moving refs before applying the lock"
+            );
+        }
         let lockfile = lockfile
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("{} is required by --locked", lock_path.display()))?;
@@ -251,7 +257,9 @@ fn resolve_project(
         resolve_external_artifacts: options.resolve_external_artifacts,
     };
     let resolved = resolve(&robot, &project_root, &CATALOG, resolve_options)?;
-    if let Some(lockfile) = &lockfile {
+    if !options.pull
+        && let Some(lockfile) = &lockfile
+    {
         let mut locked_resolved = resolved.clone();
         if crate::lockfile::apply_lockfile(lockfile, &mut locked_resolved).is_ok() {
             return Ok(ResolvedSimulation {
@@ -266,7 +274,7 @@ fn resolve_project(
     }
     let lockfile_written = match mode {
         SimulateMode::DryRun => None,
-        SimulateMode::Live if options.update_lock => {
+        SimulateMode::Live if options.update_lock || options.pull => {
             crate::lockfile::reconcile_lockfile(&project_root, &resolved, false)?
         }
         SimulateMode::Live => bail!(
@@ -293,11 +301,17 @@ fn write_simulation_files(
 ) -> Result<SimulatePlan> {
     let run_dir = resolved.project_root.join(".phoxal").join("run");
     crate::run_view::assemble(&resolved.project_root, &resolved.resolved, &run_dir)?;
+    let default_connect = format!("tcp/127.0.0.1:{}", crate::local_zenoh::LOCAL_ZENOH_PORT);
+    let default_listen = format!("tcp/0.0.0.0:{}", crate::local_zenoh::LOCAL_ZENOH_PORT);
+    let bus_profile = resolved
+        .manifest_extras
+        .materialized_bus_profile(&default_connect, &default_listen);
     crate::simulator_staging::stage_webots_artifacts(
         &resolved.project_root,
         &resolved.resolved,
         &run_dir,
         &resolved.world_path,
+        &bus_profile.connect,
     )?;
     let native_tools = native_tool_labels(options);
     let compose_path = run_dir.join("docker-compose.yml");
@@ -351,6 +365,7 @@ fn write_simulation_files(
         run_dir,
         compose_path,
         state_path,
+        bus_connect: bus_profile.connect,
         lockfile_written: resolved.lockfile_written,
         written_files,
         native_tools,
@@ -444,7 +459,7 @@ async fn execute_plan(plan: &SimulatePlan) -> Result<()> {
 
     let mut processes = crate::process::SpawnedProcesses::new();
     if plan.native_tools.iter().any(|tool| tool == JOYPAD) {
-        spawn_cached_tool(&plan.resolved, JOYPAD, &mut processes)?;
+        spawn_cached_tool(&plan.resolved, JOYPAD, &plan.bus_connect, &mut processes)?;
     }
     spawn_webots(&plan.project_root, &plan.resolved, &mut processes)?;
     processes.write_state(&plan.state_path)?;
@@ -460,6 +475,7 @@ async fn execute_plan(plan: &SimulatePlan) -> Result<()> {
 fn spawn_cached_tool(
     resolved: &ResolvedRobot,
     tool_name: &str,
+    router_endpoint: &str,
     processes: &mut crate::process::SpawnedProcesses,
 ) -> Result<()> {
     let tool = resolved
@@ -480,7 +496,7 @@ fn spawn_cached_tool(
         );
     }
     let mut command = ProcessCommand::new(binary);
-    command.env("ROBOT_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447");
+    command.env("ROBOT_ROUTER_ENDPOINT", router_endpoint);
     command.env("ROBOT_ID", &resolved.robot.identity.id);
     command.env("ROBOT_NAMESPACE", &resolved.robot.identity.namespace);
     processes.spawn(tool_name, &mut command)
@@ -578,6 +594,59 @@ mod tests {
         );
         assert!(!temp.path().join(LOCKFILE_NAME).exists());
 
+        Ok(())
+    }
+
+    #[test]
+    fn live_resolve_pull_reconciles_missing_lock_before_provisioning() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_robot_project(temp.path())?;
+
+        let resolved = resolve_project(
+            temp.path(),
+            SimulateOptions {
+                world: "test".to_string(),
+                pull: true,
+                resolve_external_artifacts: false,
+                ..SimulateOptions::default()
+            },
+            SimulateMode::Live,
+        )?;
+
+        assert_eq!(
+            resolved.lockfile_written,
+            Some(temp.path().join(LOCKFILE_NAME))
+        );
+        assert!(temp.path().join(LOCKFILE_NAME).is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn locked_and_pull_are_rejected() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_robot_project(temp.path())?;
+
+        let result = resolve_project(
+            temp.path(),
+            SimulateOptions {
+                world: "test".to_string(),
+                locked: true,
+                pull: true,
+                ..SimulateOptions::default()
+            },
+            SimulateMode::Live,
+        );
+        let error = match result {
+            Ok(_) => bail!("--locked and --pull unexpectedly succeeded"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("simulate --pull cannot be combined with --locked"),
+            "{error:#}"
+        );
         Ok(())
     }
 
