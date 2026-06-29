@@ -84,6 +84,7 @@ pub fn run(project_start: &Path) -> Result<OutdatedSummary> {
         ResolveOptions {
             locked: false,
             resolve_external_artifacts: false,
+            resolve_source_commits: false,
         },
     )?;
     let lockfile = Lockfile::read(&project_root.join(LOCKFILE_NAME)).ok();

@@ -21,7 +21,15 @@ const ROBOT_FILE: &str = "robot.yaml";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolveOptions {
     pub locked: bool,
+    /// Resolve external artifact digests/checksums from the network
+    /// (registry image digests, tool asset sha256). Off for offline flows.
     pub resolve_external_artifacts: bool,
+    /// Resolve git component `tag` → `commit` from the network
+    /// (`git ls-remote`). This is the lock-refresh axis: only the explicit
+    /// refresh flows (`update`, `pull`, live/`--pull` simulate, `deploy build`)
+    /// set it. Default/offline flows (`check`, `outdated`, dry-run) leave it
+    /// off and fill commits from `phoxal.sources.lock` instead.
+    pub resolve_source_commits: bool,
 }
 
 impl Default for ResolveOptions {
@@ -29,6 +37,7 @@ impl Default for ResolveOptions {
         Self {
             locked: false,
             resolve_external_artifacts: true,
+            resolve_source_commits: true,
         }
     }
 }
@@ -66,12 +75,8 @@ impl RobotManifestExtras {
     }
 
     #[must_use]
-    pub fn materialized_bus_profile(
-        &self,
-        default_connect: &str,
-        default_listen: &str,
-    ) -> MaterializedBusProfile {
-        self.bus.materialize(default_connect, default_listen)
+    pub fn materialized_bus_profile(&self, default_connect: &str) -> MaterializedBusProfile {
+        self.bus.materialize(default_connect)
     }
 }
 
@@ -96,11 +101,7 @@ impl BusManifestExtras {
     }
 
     #[must_use]
-    pub fn materialize(
-        &self,
-        default_connect: &str,
-        default_listen: &str,
-    ) -> MaterializedBusProfile {
+    pub fn materialize(&self, default_connect: &str) -> MaterializedBusProfile {
         let selected_profile = self.selected_profile_name().to_string();
         let configured = self.profiles.get(&selected_profile);
         MaterializedBusProfile {
@@ -108,26 +109,23 @@ impl BusManifestExtras {
             connect: configured
                 .and_then(|profile| profile.connect.clone())
                 .unwrap_or_else(|| default_connect.to_string()),
-            listen: configured
-                .and_then(|profile| profile.listen.clone())
-                .unwrap_or_else(|| default_listen.to_string()),
         }
     }
 }
 
+/// A manifest bus profile. Per the transport spec a profile is just
+/// `{ connect: <endpoint> }`; the router-binding `listen` endpoint is deploy
+/// infra (a CLI-side default), not a manifest profile field.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct BusProfileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connect: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub listen: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MaterializedBusProfile {
     pub selected_profile: String,
     pub connect: String,
-    pub listen: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -449,15 +447,20 @@ fn parse_bus_manifest_extras(
         }
     }
 
-    let profiles_value = bus
-        .get("profiles")
-        .ok_or_else(|| anyhow!("bus.profiles in {} is required", robot_path.display()))?;
-    let profiles = parse_bus_profiles(profiles_value, robot_path)?;
+    // `bus.profiles` is optional: the `default` profile (local Zenoh) is
+    // implicit, so a manifest may declare only non-default profiles, or omit
+    // the block entirely. Declare only what differs from the implicit default.
+    let profiles = match bus.get("profiles") {
+        Some(profiles_value) => parse_bus_profiles(profiles_value, robot_path)?,
+        None => BTreeMap::new(),
+    };
     let selected_profile = parse_selected_bus_profile(bus, robot_path)?;
-    let selected_name = selected_profile
-        .as_deref()
-        .unwrap_or(DEFAULT_BUS_PROFILE_NAME);
-    if !profiles.contains_key(selected_name) {
+    // Only an explicitly named, non-default selected profile must exist: the
+    // implicit `default` never needs to be declared in bus.profiles.
+    if let Some(selected_name) = selected_profile.as_deref()
+        && selected_name != DEFAULT_BUS_PROFILE_NAME
+        && !profiles.contains_key(selected_name)
+    {
         let available = profiles.keys().cloned().collect::<Vec<_>>().join(", ");
         bail!(
             "bus selected profile '{selected_name}' in {} is not defined in bus.profiles; available: {available}",
@@ -512,7 +515,9 @@ fn parse_bus_profile_config(
         )
     })?;
     for key in profile.keys().filter_map(serde_yaml::Value::as_str) {
-        if !matches!(key, "connect" | "listen") {
+        // A profile is just `{ connect }` per the transport spec; `listen` is
+        // router-binding deploy infra, not a manifest profile field.
+        if key != "connect" {
             bail!(
                 "bus.profiles.{name}.{key} in {} is not supported",
                 robot_path.display()
@@ -523,10 +528,6 @@ fn parse_bus_profile_config(
         connect: profile
             .get("connect")
             .map(|value| parse_bus_endpoint(name, "connect", value, robot_path))
-            .transpose()?,
-        listen: profile
-            .get("listen")
-            .map(|value| parse_bus_endpoint(name, "listen", value, robot_path))
             .transpose()?,
     })
 }
@@ -657,11 +658,13 @@ pub fn resolve(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Git ref → commit SHA resolution is cheap (no Docker, just network) and
-    // is required for `simulate --dry-run` to assemble a usable .phoxal/run/
-    // tree. We always attempt it; the only thing the offline path skips is
-    // image digest pinning.
-    let components = resolve_components(robot)?;
+    // Git ref → commit SHA resolution needs the network (`git ls-remote`), so
+    // it is gated on `resolve_source_commits`. Default flows (check, outdated,
+    // dry-run) stay offline: a git component is resolved with an empty commit,
+    // which the caller fills from `phoxal.sources.lock` via `apply_lockfile`.
+    // Only the explicit refresh flows (`update`, `pull`, live/`--pull` simulate,
+    // `deploy build`) hit the network here.
+    let components = resolve_components(robot, options.resolve_source_commits)?;
     let tools = resolve_tools(robot, options.resolve_external_artifacts)?;
 
     Ok(ResolvedRobot {
@@ -811,7 +814,10 @@ pub(crate) fn validate_user_runtime_framework_selector(
     )
 }
 
-fn resolve_components(robot: &Robot) -> Result<Vec<ResolvedComponent>> {
+fn resolve_components(
+    robot: &Robot,
+    resolve_source_commits: bool,
+) -> Result<Vec<ResolvedComponent>> {
     let mut components = Vec::new();
     for (instance_name, instance) in &robot.components.instances {
         let source = robot
@@ -827,7 +833,14 @@ fn resolve_components(robot: &Robot) -> Result<Vec<ResolvedComponent>> {
             })?;
         let source = match source {
             ComponentSource::Git(source) => {
-                let commit = resolve_git_ref(&source.git, &source.tag)?;
+                // Only hit the network for the commit in explicit refresh flows;
+                // otherwise leave it empty for `apply_lockfile` to fill from the
+                // cached source lock (no `git ls-remote` in the default path).
+                let commit = if resolve_source_commits {
+                    resolve_git_ref(&source.git, &source.tag)?
+                } else {
+                    String::new()
+                };
                 ResolvedComponentSource::Git {
                     git: source.git.clone(),
                     tag: source.tag.clone(),
@@ -1027,6 +1040,26 @@ fn format_unavailable_api_version_error(
     let mut message = format!(
         "API version {api_version} is not available on channel {channel}: this CLI has no complete official runtime image set for that API version"
     );
+
+    // List the full expected official runtime ref set for the requested
+    // (api_version, channel), mirroring `format_missing_images_error` in
+    // check.rs. The catalog cannot resolve a complete set for the unavailable
+    // version, so the expected refs are every known official runtime name at
+    // the requested api/channel.
+    let mut expected_refs = catalog
+        .names()
+        .map(|name| format!("ghcr.io/phoxal/runtime-{name}:{api_version}-{channel}"))
+        .collect::<Vec<_>>();
+    expected_refs.sort_unstable();
+    expected_refs.dedup();
+    if !expected_refs.is_empty() {
+        message.push_str("\n\nExpected official runtime images:");
+        for image_ref in &expected_refs {
+            message.push_str("\n  - ");
+            message.push_str(image_ref);
+        }
+    }
+
     if !available.is_empty() {
         message.push_str("\n\nAvailable api_versions in this CLI: ");
         message.push_str(&available.join(", "));
@@ -1052,6 +1085,77 @@ fn format_unavailable_api_version_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::CATALOG;
+
+    #[test]
+    fn offline_resolve_leaves_git_component_commits_unresolved() -> anyhow::Result<()> {
+        // FIX #2: the default offline path must NOT run `git ls-remote`. A git
+        // component is resolved with an empty commit (filled later from
+        // phoxal.sources.lock). This test resolves a git component with
+        // `resolve_source_commits: false`; if resolution tried to reach the
+        // network it would either hang or fail, so an empty commit proves no
+        // ls-remote was attempted.
+        let robot = Robot::parse_from_string(GIT_COMPONENT_ROBOT)?;
+        let resolved = resolve(
+            &robot,
+            std::path::Path::new("."),
+            &CATALOG,
+            ResolveOptions {
+                locked: false,
+                resolve_external_artifacts: false,
+                resolve_source_commits: false,
+            },
+        )?;
+
+        let git_component = resolved
+            .components
+            .iter()
+            .find(|component| component.source_name == "ddsm115")
+            .expect("ddsm115 component resolved");
+        match &git_component.source {
+            ResolvedComponentSource::Git { commit, tag, .. } => {
+                assert_eq!(tag, "main");
+                assert!(
+                    commit.is_empty(),
+                    "offline resolve must leave the git commit empty (no ls-remote), got {commit:?}"
+                );
+            }
+            other => panic!("expected a git component source, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    const GIT_COMPONENT_ROBOT: &str = r#"schema: v0
+api_version: y2026_1
+identity:
+  id: testbot
+  namespace: test
+structure: structure.urdf
+phoxal_runtimes:
+  channel: stable
+motion:
+  kinematic:
+    kind: differential
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+components:
+  sources:
+    ddsm115:
+      git: https://github.com/phoxal/components
+      tag: main
+      directory: ddsm115
+  instances:
+    left_drive:
+      component: ddsm115
+      mount_link: left_wheel_mount
+    right_drive:
+      component: ddsm115
+      mount_link: right_wheel_mount
+"#;
 
     #[test]
     fn load_robot_tolerates_user_runtime_image_and_config() -> anyhow::Result<()> {
@@ -1106,6 +1210,8 @@ components:
 
     #[test]
     fn load_robot_extracts_bus_profiles() -> anyhow::Result<()> {
+        // Per the transport spec the `default` profile is implicit and a
+        // profile is just `{ connect }`; declare only the non-default profile.
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("robot.yaml");
         std::fs::write(
@@ -1119,9 +1225,87 @@ structure: structure.urdf
 bus:
   selected: lab
   profiles:
-    default:
-      connect: tcp/127.0.0.1:7447
-      listen: tcp/0.0.0.0:7447
+    lab:
+      connect: tcp/lab-router:7447
+phoxal_runtimes:
+  channel: stable
+motion:
+  kinematic:
+    kind: differential
+    left_actuators: [l.motor]
+    right_actuators: [r.motor]
+    left_encoders: [l.encoder]
+    right_encoders: [r.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+components:
+  sources: {}
+  instances: {}
+"#,
+        )?;
+
+        let loaded = load_robot_with_extras(&path)?;
+        let materialized = loaded.extras.materialized_bus_profile("tcp/router:7447");
+
+        assert_eq!(materialized.selected_profile, "lab");
+        assert_eq!(materialized.connect, "tcp/lab-router:7447");
+        Ok(())
+    }
+
+    #[test]
+    fn load_robot_implicit_default_profile_needs_no_declaration() -> anyhow::Result<()> {
+        // No `bus` block at all: the implicit `default` profile materializes to
+        // the CLI-provided default connect endpoint.
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("robot.yaml");
+        std::fs::write(
+            &path,
+            r#"schema: v0
+api_version: y2026_1
+identity:
+  id: bot
+  namespace: dev
+structure: structure.urdf
+phoxal_runtimes:
+  channel: stable
+motion:
+  kinematic:
+    kind: differential
+    left_actuators: [l.motor]
+    right_actuators: [r.motor]
+    left_encoders: [l.encoder]
+    right_encoders: [r.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+components:
+  sources: {}
+  instances: {}
+"#,
+        )?;
+
+        let loaded = load_robot_with_extras(&path)?;
+        let materialized = loaded.extras.materialized_bus_profile("tcp/router:7447");
+
+        assert_eq!(materialized.selected_profile, "default");
+        assert_eq!(materialized.connect, "tcp/router:7447");
+        Ok(())
+    }
+
+    #[test]
+    fn load_robot_rejects_listen_as_profile_field() -> anyhow::Result<()> {
+        // `listen` is router-binding deploy infra, not a manifest profile field.
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("robot.yaml");
+        std::fs::write(
+            &path,
+            r#"schema: v0
+api_version: y2026_1
+identity:
+  id: bot
+  namespace: dev
+structure: structure.urdf
+bus:
+  profiles:
     lab:
       connect: tcp/lab-router:7447
       listen: tcp/0.0.0.0:7448
@@ -1142,14 +1326,12 @@ components:
 "#,
         )?;
 
-        let loaded = load_robot_with_extras(&path)?;
-        let materialized = loaded
-            .extras
-            .materialized_bus_profile("tcp/router:7447", "tcp/0.0.0.0:7447");
-
-        assert_eq!(materialized.selected_profile, "lab");
-        assert_eq!(materialized.connect, "tcp/lab-router:7447");
-        assert_eq!(materialized.listen, "tcp/0.0.0.0:7448");
+        let error =
+            load_robot_with_extras(&path).expect_err("listen is not a manifest profile field");
+        assert!(
+            error.to_string().contains("bus.profiles.lab.listen"),
+            "{error:#}"
+        );
         Ok(())
     }
 
@@ -1168,8 +1350,8 @@ structure: structure.urdf
 bus:
   selected: missing
   profiles:
-    default:
-      connect: tcp/127.0.0.1:7447
+    lab:
+      connect: tcp/lab-router:7447
 phoxal_runtimes:
   channel: stable
 motion:

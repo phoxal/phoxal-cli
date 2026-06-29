@@ -356,6 +356,46 @@ pub(crate) fn apply_lockfile(lockfile: &Lockfile, resolved: &mut ResolvedRobot) 
     Ok(())
 }
 
+/// Fill in the fields the offline resolve left unresolved (git component
+/// commits, plus locked tool/image refs) from `phoxal.sources.lock`, so an
+/// offline command never reaches the network.
+///
+/// A lockfile is only *required* when the project actually has git component
+/// sources (their commit is empty after an offline resolve). A path-only
+/// project needs none; a present-but-drifted lock is applied best-effort and
+/// ignored on mismatch rather than blocking the offline command.
+pub(crate) fn apply_sources_lock_offline(
+    project_root: &Path,
+    resolved: &mut ResolvedRobot,
+) -> Result<()> {
+    let has_git_components = resolved
+        .components
+        .iter()
+        .any(|component| matches!(component.source, ResolvedComponentSource::Git { .. }));
+    let lock_path = project_root.join(LOCKFILE_NAME);
+    if !lock_path.is_file() {
+        if has_git_components {
+            bail!(
+                "{} is required to resolve git component sources offline; run `phoxal-cli update` to refresh it",
+                lock_path.display()
+            );
+        }
+        return Ok(());
+    }
+    let lockfile = Lockfile::read(&lock_path)?;
+    if has_git_components {
+        apply_lockfile(&lockfile, resolved).with_context(|| {
+            format!(
+                "{} is stale; run `phoxal-cli update` to refresh it",
+                lock_path.display()
+            )
+        })?;
+    } else {
+        let _ = apply_lockfile(&lockfile, resolved);
+    }
+    Ok(())
+}
+
 pub(crate) fn reconcile_lockfile(
     project_root: &Path,
     resolved: &ResolvedRobot,

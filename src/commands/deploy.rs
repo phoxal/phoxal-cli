@@ -13,7 +13,7 @@ use crate::commands::check;
 use crate::component_driver::component_crate_dir;
 use crate::compose::LaunchClock;
 use crate::resolver::{
-    ResolveOptions, ResolvedRobot, ResolvedUserRuntime, RobotManifestExtras, discover_robot_yaml,
+    ResolveOptions, ResolvedRobot, RobotManifestExtras, discover_robot_yaml,
     load_robot_with_extras_and_overlays, resolve,
 };
 use crate::utils::resolve_project_path;
@@ -50,7 +50,6 @@ pub struct Build {
 #[serde(rename_all = "snake_case")]
 pub enum DeployTarget {
     Compose,
-    #[value(hide = true)]
     Balena,
 }
 
@@ -111,8 +110,17 @@ impl Build {
 }
 
 pub fn run(project_start: &Path, options: BuildOptions) -> Result<BuildSummary> {
+    // D55 names Balena as the production target, but no Balena adapter is
+    // implemented yet. Keep the surface honest: `--target balena` is visible in
+    // help (so we don't pretend the flag doesn't exist), but it returns a clear
+    // "not yet implemented" error instead of silently succeeding via the compose
+    // path. TODO(phoxal-cli#balena): build the Balena deployment adapter; the
+    // `resolve_production_user_runtime_images` / `pin_image_ref` helpers below
+    // are the digest-pinning scaffolding that adapter will reuse.
     if options.target == DeployTarget::Balena {
-        bail!("deploy build --target balena is not yet supported");
+        bail!(
+            "deploy build --target balena is not yet implemented (tracked follow-up); use --target compose"
+        );
     }
 
     let robot_path = discover_robot_yaml(project_start)
@@ -131,16 +139,9 @@ pub fn run(project_start: &Path, options: BuildOptions) -> Result<BuildSummary> 
         },
     )?;
 
-    let user_runtime_images = match options.target {
-        DeployTarget::Compose => {
-            crate::local_build::build_user_runtimes_immutable(project_root, &resolved)?
-        }
-        DeployTarget::Balena => {
-            resolve_production_user_runtime_images(&resolved, &loaded.extras, |image_ref| {
-                crate::resolver::resolve_image_digest(image_ref)
-            })?
-        }
-    };
+    // Only the compose path is reachable here — the Balena target bails above.
+    let user_runtime_images =
+        crate::local_build::build_user_runtimes_immutable(project_root, &resolved)?;
     run_pinned_graph_check(
         project_root,
         &resolved,
@@ -252,51 +253,12 @@ fn run_pinned_graph_check(
     )
 }
 
-pub(crate) fn resolve_production_user_runtime_images(
-    resolved: &ResolvedRobot,
-    manifest_extras: &RobotManifestExtras,
-    mut resolve_digest: impl FnMut(&str) -> Result<String>,
-) -> Result<BTreeMap<String, String>> {
-    let mut images = BTreeMap::new();
-    for runtime in &resolved.user_runtimes {
-        let image_ref = production_user_runtime_image_ref(runtime, manifest_extras)?;
-        let pinned = pin_image_ref(image_ref, &mut resolve_digest)
-            .with_context(|| format!("failed to pin image for user runtime {}", runtime.name))?;
-        images.insert(runtime.name.clone(), pinned);
-    }
-    Ok(images)
-}
-
-fn production_user_runtime_image_ref<'a>(
-    runtime: &'a ResolvedUserRuntime,
-    manifest_extras: &'a RobotManifestExtras,
-) -> Result<&'a str> {
-    if let Some(image) = manifest_extras.user_runtime_image(&runtime.name) {
-        return Ok(image);
-    }
-    if !is_local_user_runtime_image(&runtime.image) {
-        return Ok(&runtime.image);
-    }
-    bail!(
-        "production deploy needs a pullable image for user runtime {}",
-        runtime.name
-    )
-}
-
-fn is_local_user_runtime_image(image_ref: &str) -> bool {
-    image_ref.starts_with("phoxal.local/")
-}
-
-pub(crate) fn pin_image_ref(
-    image_ref: &str,
-    mut resolve_digest: impl FnMut(&str) -> Result<String>,
-) -> Result<String> {
-    if is_digest_pinned_image_ref(image_ref) {
-        return Ok(image_ref.to_string());
-    }
-    let digest = resolve_digest(image_ref)?;
-    Ok(format!("{image_ref}@{digest}"))
-}
+// NOTE: the production user-runtime image resolution + digest pinning that the
+// Balena target needs (resolve each user runtime to a pullable ref, then pin it
+// to an immutable `@sha256:` digest) is intentionally NOT implemented in this
+// pass. See the tracked Balena follow-up referenced in `run()`. When that
+// adapter lands it can reuse `ensure_all_compose_image_refs_are_immutable` /
+// `is_digest_pinned_image_ref` below plus `resolver::resolve_image_digest`.
 
 pub(crate) fn ensure_all_compose_image_refs_are_immutable(compose: &str) -> Result<()> {
     #[derive(Deserialize)]
@@ -416,7 +378,7 @@ mod tests {
     use phoxal::model::robot::RobotV1 as Robot;
     use phoxal::model::robot::v1::Channel;
 
-    use crate::resolver::{ResolvedPlatformRuntime, ResolvedTool, UserRuntimeManifestExtras};
+    use crate::resolver::{ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime};
 
     #[test]
     fn compose_image_assertion_requires_every_service_to_use_immutable_ref() -> Result<()> {
@@ -449,81 +411,24 @@ services:
     }
 
     #[test]
-    fn pin_image_ref_leaves_digest_refs_and_resolves_tags() -> Result<()> {
-        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        assert_eq!(
-            pin_image_ref("ghcr.io/acme/avoid@sha256:already", |_| {
-                bail!("already pinned refs should not resolve")
-            })?,
-            "ghcr.io/acme/avoid@sha256:already"
+    fn balena_target_is_an_honest_not_implemented_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let robot_path = temp.path().join("robot.yaml");
+        fs::write(&robot_path, MINIMAL_ROBOT).expect("write robot.yaml");
+        let error = run(
+            temp.path(),
+            BuildOptions {
+                target: DeployTarget::Balena,
+                env: Vec::new(),
+                output: None,
+            },
+        )
+        .expect_err("balena target must not silently succeed");
+        let message = error.to_string();
+        assert!(
+            message.contains("balena") && message.contains("not yet implemented"),
+            "{message}"
         );
-        assert_eq!(
-            pin_image_ref("ghcr.io/acme/avoid:v1", |image_ref| {
-                assert_eq!(image_ref, "ghcr.io/acme/avoid:v1");
-                Ok(digest.to_string())
-            })?,
-            format!("ghcr.io/acme/avoid:v1@{digest}")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_user_runtime_images_require_pullable_refs_and_pin_them() -> Result<()> {
-        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let cases = [
-            (
-                "manifest digest",
-                Some("ghcr.io/acme/avoid@sha256:pinned"),
-                "phoxal.local/testbot/user-runtime/avoid:dev",
-                Ok("ghcr.io/acme/avoid@sha256:pinned"),
-            ),
-            (
-                "manifest tag",
-                Some("ghcr.io/acme/avoid:v1"),
-                "phoxal.local/testbot/user-runtime/avoid:dev",
-                Ok(
-                    "ghcr.io/acme/avoid:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                ),
-            ),
-            (
-                "future resolved image",
-                None,
-                "ghcr.io/acme/avoid@sha256:pinned",
-                Ok("ghcr.io/acme/avoid@sha256:pinned"),
-            ),
-            (
-                "local sim image only",
-                None,
-                "phoxal.local/testbot/user-runtime/avoid:dev",
-                Err("production deploy needs a pullable image for user runtime avoid"),
-            ),
-        ];
-
-        for (name, manifest_image, resolved_image, expected) in cases {
-            let resolved = resolved_robot(resolved_image)?;
-            let extras = manifest_extras(manifest_image);
-            let result =
-                resolve_production_user_runtime_images(&resolved, &extras, |_| Ok(digest.into()));
-
-            match expected {
-                Ok(expected_image) => {
-                    let images = result.with_context(|| format!("case {name} failed"))?;
-                    assert_eq!(
-                        images.get("avoid").map(String::as_str),
-                        Some(expected_image)
-                    );
-                }
-                Err(expected_message) => {
-                    let error = result.expect_err("case should fail");
-                    assert!(
-                        error.to_string().contains(expected_message),
-                        "case {name}: {error:#}"
-                    );
-                }
-            }
-        }
-
-        Ok(())
     }
 
     #[test]
@@ -585,23 +490,6 @@ services:
             components: Vec::new(),
             tools: Vec::new(),
         })
-    }
-
-    fn manifest_extras(image: Option<&str>) -> RobotManifestExtras {
-        RobotManifestExtras {
-            user_runtimes: image
-                .map(|image| {
-                    BTreeMap::from([(
-                        "avoid".to_string(),
-                        UserRuntimeManifestExtras {
-                            image: Some(image.to_string()),
-                            config: None,
-                        },
-                    )])
-                })
-                .unwrap_or_default(),
-            ..RobotManifestExtras::default()
-        }
     }
 
     const MINIMAL_ROBOT: &str = r#"schema: v0

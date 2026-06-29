@@ -59,8 +59,11 @@ pub fn run(project_start: &Path, ui: &crate::Ui) -> Result<PullSummary> {
         project_root,
         &CATALOG,
         ResolveOptions {
+            // pull refreshes official images + host tools only; it never reads
+            // component commits, so it stays off the network for git refs.
             locked: false,
             resolve_external_artifacts: false,
+            resolve_source_commits: false,
         },
     )?;
     let platform_refs = resolved

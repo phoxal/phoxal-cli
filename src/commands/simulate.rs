@@ -238,6 +238,8 @@ fn resolve_project(
             ResolveOptions {
                 locked: true,
                 resolve_external_artifacts: false,
+                // --locked never touches the network: the lock supplies commits.
+                resolve_source_commits: false,
             },
         )?;
         crate::lockfile::apply_lockfile(lockfile, &mut resolved)
@@ -255,6 +257,9 @@ fn resolve_project(
     let resolve_options = ResolveOptions {
         locked: false,
         resolve_external_artifacts: options.resolve_external_artifacts,
+        // Refresh component commits from the network only on an explicit --pull;
+        // otherwise the lock (applied just below) supplies them offline.
+        resolve_source_commits: options.pull,
     };
     let resolved = resolve(&robot, &project_root, &CATALOG, resolve_options)?;
     if !options.pull
@@ -302,10 +307,9 @@ fn write_simulation_files(
     let run_dir = resolved.project_root.join(".phoxal").join("run");
     crate::run_view::assemble(&resolved.project_root, &resolved.resolved, &run_dir)?;
     let default_connect = format!("tcp/127.0.0.1:{}", crate::local_zenoh::LOCAL_ZENOH_PORT);
-    let default_listen = format!("tcp/0.0.0.0:{}", crate::local_zenoh::LOCAL_ZENOH_PORT);
     let bus_profile = resolved
         .manifest_extras
-        .materialized_bus_profile(&default_connect, &default_listen);
+        .materialized_bus_profile(&default_connect);
     crate::simulator_staging::stage_webots_artifacts(
         &resolved.project_root,
         &resolved.resolved,

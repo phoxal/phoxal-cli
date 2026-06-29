@@ -106,8 +106,10 @@ pub fn generate(
     clock: LaunchClock,
 ) -> Result<String> {
     let run_mount = format!("{}:{ROBOT_MOUNT}:ro", run_dir.display());
-    let default_listen = format!("tcp/0.0.0.0:{LOCAL_ZENOH_PORT}");
-    let bus_profile = manifest_extras.materialized_bus_profile(ROUTER_ENDPOINT, &default_listen);
+    // The router's `listen` binding is deploy infra (a CLI-side default), not a
+    // manifest profile field; only `connect` is materialized from the profile.
+    let router_listen = format!("tcp/0.0.0.0:{LOCAL_ZENOH_PORT}");
+    let bus_profile = manifest_extras.materialized_bus_profile(ROUTER_ENDPOINT);
     let mut services = BTreeMap::new();
     let runtime_environment = |connect: &str| {
         BTreeMap::from([
@@ -167,10 +169,7 @@ pub fn generate(
         services.insert(runtime.name.clone(), service);
     }
 
-    services.insert(
-        ROUTER_SERVICE.to_string(),
-        router_service(&bus_profile.listen),
-    );
+    services.insert(ROUTER_SERVICE.to_string(), router_service(&router_listen));
 
     for runtime in &resolved.user_runtimes {
         let image = user_runtime_images
@@ -422,16 +421,18 @@ mod tests {
     }
 
     #[test]
-    fn selected_bus_profile_materializes_connect_and_listen() -> anyhow::Result<()> {
+    fn selected_bus_profile_materializes_connect_and_keeps_default_router_listen()
+    -> anyhow::Result<()> {
         let resolved = resolved_robot()?;
         let mut extras = manifest_extras();
+        // A profile is just `{ connect }`; the router-binding `listen` endpoint
+        // is deploy infra (the CLI default), never a manifest profile field.
         extras.bus = BusManifestExtras {
             selected_profile: Some("lab".to_string()),
             profiles: BTreeMap::from([(
                 "lab".to_string(),
                 BusProfileConfig {
                     connect: Some("tcp/lab-router:7447".to_string()),
-                    listen: Some("tcp/0.0.0.0:7448".to_string()),
                 },
             )]),
         };
@@ -455,7 +456,7 @@ mod tests {
             router.get(key("command")),
             Some(&Value::Sequence(vec![
                 key("-l"),
-                key("tcp/0.0.0.0:7448"),
+                key("tcp/0.0.0.0:7447"),
                 key("-e"),
                 key("tcp/phoxal-local-zenoh:7447"),
                 key("--no-multicast-scouting"),

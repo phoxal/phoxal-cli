@@ -46,25 +46,25 @@ pub struct CheckOptions {
     pub runtime: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct RawEmitApis {
     pub artifact: RawArtifact,
     pub api_version: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bus_abi: Option<String>,
     #[serde(alias = "contracts")]
     pub required_contracts: Vec<RawContract>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<Value>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RawArtifact {
     pub kind: String,
     pub id: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RawContract {
     pub family: String,
     pub topic: String,
@@ -112,14 +112,17 @@ impl CheckCmd {
             .await
             .context("check worker failed")??;
 
-        ensure_check_outcome_ok(&result.api_version, &result.channel, &result.outcome)?;
-
+        // Emit the graph warnings and the v0 pre-stable warning to stderr BEFORE
+        // the hard outcome check so a failing `phoxal check` still surfaces them.
+        // These go to stderr only; JSON stdout (below) stays clean.
         for warning in &result.outcome.report.warnings {
             eprintln!("warning: {}", format_warning(warning));
         }
         eprintln!(
             "warning: v0 is pre-stable: artifacts built at different times may not interoperate; pin digests with phoxal-cli deploy build"
         );
+
+        ensure_check_outcome_ok(&result.api_version, &result.channel, &result.outcome)?;
 
         let output = CheckOutput {
             status: "ok",
@@ -173,15 +176,21 @@ fn run(
     let loaded = load_robot_with_extras(&robot_path)?;
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
-    let resolved = resolve(
+    // `check` is offline by default: resolve without touching the network
+    // (`resolve_external_artifacts: false` skips `git ls-remote` for component
+    // commits and registry digest pinning), then fill git component commits from
+    // `phoxal.sources.lock` so component drivers can be located from cache.
+    let mut resolved = resolve(
         &robot,
         project_root,
         &CATALOG,
         ResolveOptions {
             locked: false,
             resolve_external_artifacts: false,
+            resolve_source_commits: false,
         },
     )?;
+    crate::lockfile::apply_sources_lock_offline(project_root, &mut resolved)?;
     let platform_refs = resolved
         .platform_runtimes
         .iter()
@@ -240,6 +249,11 @@ pub struct SourceParticipant {
     pub expected_artifact_id: String,
     pub crate_dir: PathBuf,
     pub kind: SourceParticipantKind,
+    /// Whether `check` should run the expensive build for this participant or
+    /// reuse already-emitted metadata. `check --runtime <name>` scopes the
+    /// build to the named user runtime (`Build`) while keeping every other
+    /// participant in the graph via cached metadata (`UseCached`).
+    pub build_mode: SourceBuildMode,
 }
 
 impl SourceParticipant {
@@ -251,6 +265,7 @@ impl SourceParticipant {
             name,
             crate_dir,
             kind: SourceParticipantKind::UserRuntime,
+            build_mode: SourceBuildMode::Build,
         }
     }
 
@@ -271,6 +286,7 @@ impl SourceParticipant {
             expected_artifact_id: expected_artifact_id.into(),
             crate_dir,
             kind: SourceParticipantKind::ComponentDriver,
+            build_mode: SourceBuildMode::Build,
         }
     }
 
@@ -286,6 +302,18 @@ impl SourceParticipant {
 pub enum SourceParticipantKind {
     UserRuntime,
     ComponentDriver,
+}
+
+/// How `check` obtains a source participant's `emit-apis` metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBuildMode {
+    /// Build the crate and run `emit-apis` on the fresh binary (expensive).
+    Build,
+    /// Reuse already-emitted metadata instead of rebuilding. Used for the
+    /// participants outside a `check --runtime <name>` build scope so the full
+    /// graph is still validated without rebuilding (or being failed by) crates
+    /// the user did not ask to build.
+    UseCached,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,11 +402,35 @@ fn ensure_user_runtime_exists(resolved: &ResolvedRobot, runtime_name: &str) -> R
     Ok(())
 }
 
+/// Apply a `check --runtime <name>` build scope to the source participants.
+///
+/// Every participant stays in the returned set so the full graph is still
+/// validated for topology/api consistency. When `runtime_name` is `Some`, only
+/// the named user runtime is marked `Build`; every other source participant is
+/// marked `UseCached` so the expensive build is scoped to the one crate the
+/// user asked about, while broken or unrelated crates still contribute their
+/// already-emitted metadata to the graph. With no scope, everything builds.
 fn source_participants_for_runtime(
     source_participants: &[SourceParticipant],
-    _runtime_name: Option<&str>,
+    runtime_name: Option<&str>,
 ) -> Vec<SourceParticipant> {
-    source_participants.to_vec()
+    source_participants
+        .iter()
+        .map(|participant| {
+            let mut participant = participant.clone();
+            participant.build_mode = match runtime_name {
+                Some(name)
+                    if participant.kind == SourceParticipantKind::UserRuntime
+                        && participant.name == name =>
+                {
+                    SourceBuildMode::Build
+                }
+                Some(_) => SourceBuildMode::UseCached,
+                None => SourceBuildMode::Build,
+            };
+            participant
+        })
+        .collect()
 }
 
 pub fn run_check(
@@ -388,7 +440,7 @@ pub fn run_check(
     root_api: &str,
     fetch: impl FnMut(&str) -> Result<RawEmitApis>,
     fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
-    build: impl FnMut(&Path) -> Result<RawEmitApis>,
+    build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
 ) -> Result<CheckOutcome> {
     let robot_graph = graph_check::RobotGraph::default();
     let manifest_extras = RobotManifestExtras::default();
@@ -414,7 +466,7 @@ pub fn run_check_with_context(
     context: CheckGraphContext<'_>,
     fetch: impl FnMut(&str) -> Result<RawEmitApis>,
     fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
-    build: impl FnMut(&Path) -> Result<RawEmitApis>,
+    build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
 ) -> Result<CheckOutcome> {
     run_check_with_deployed_user_runtime_images(
         CheckParticipants {
@@ -435,7 +487,7 @@ pub fn run_check_with_deployed_user_runtime_images(
     context: CheckGraphContext<'_>,
     mut fetch: impl FnMut(&str) -> Result<RawEmitApis>,
     mut fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
-    mut build: impl FnMut(&Path) -> Result<RawEmitApis>,
+    mut build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
 ) -> Result<CheckOutcome> {
     let mut missing_images = Vec::new();
     let mut official_runtime_refs = BTreeMap::new();
@@ -510,7 +562,7 @@ pub fn run_check_with_deployed_user_runtime_images(
     }
 
     for participant in inputs.source_participants {
-        let raw = build(&participant.crate_dir).with_context(|| {
+        let raw = build(participant).with_context(|| {
             format!(
                 "failed to obtain emit-apis for {} {} ({})",
                 participant.kind_label(),
@@ -797,7 +849,35 @@ pub(crate) fn fetch_emit_apis_from_tool(binary_path: &Path) -> Result<RawEmitApi
     })
 }
 
-pub(crate) fn build_emit_apis_from_source(dir: &Path) -> Result<RawEmitApis> {
+pub(crate) fn build_emit_apis_from_source(participant: &SourceParticipant) -> Result<RawEmitApis> {
+    match participant.build_mode {
+        SourceBuildMode::Build => {
+            let raw = build_emit_apis_by_building(&participant.crate_dir)?;
+            // Cache the freshly-emitted metadata keyed by the source tree so a
+            // later `check --runtime <other>` can reuse it without rebuilding.
+            if let Err(error) = write_source_emit_apis_cache(&participant.crate_dir, &raw) {
+                tracing::debug!(
+                    "failed to cache emit-apis for {}: {error:#}",
+                    participant.crate_dir.display()
+                );
+            }
+            Ok(raw)
+        }
+        SourceBuildMode::UseCached => read_source_emit_apis_cache(&participant.crate_dir)
+            .with_context(|| {
+                format!(
+                    "no cached emit-apis for {} {} ({}); run `phoxal check` once (no --runtime) \
+                     to build every participant and populate the cache, then re-run \
+                     `phoxal check --runtime <name>`",
+                    participant.kind_label(),
+                    participant.name,
+                    participant.crate_dir.display()
+                )
+            }),
+    }
+}
+
+fn build_emit_apis_by_building(dir: &Path) -> Result<RawEmitApis> {
     let crate_dir = dir
         .canonicalize()
         .with_context(|| format!("failed to canonicalize source crate {}", dir.display()))?;
@@ -825,6 +905,41 @@ pub(crate) fn build_emit_apis_from_source(dir: &Path) -> Result<RawEmitApis> {
             crate_dir.display()
         )
     })
+}
+
+/// Cache file for a source crate's last-built `emit-apis`, keyed by the source
+/// tree hash so cached metadata always matches the current source. A scoped
+/// `check --runtime <name>` reads this for the participants it does not rebuild.
+fn source_emit_apis_cache_path(crate_dir: &Path) -> Result<PathBuf> {
+    let source_hash = crate::utils::hash_tree(crate_dir).with_context(|| {
+        format!(
+            "failed to hash source crate {} for emit-apis cache",
+            crate_dir.display()
+        )
+    })?;
+    Ok(crate::host_paths::cache_dir()?
+        .join("emit-apis")
+        .join(format!("{source_hash}.json")))
+}
+
+fn write_source_emit_apis_cache(crate_dir: &Path, raw: &RawEmitApis) -> Result<()> {
+    let path = source_emit_apis_cache_path(crate_dir)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create emit-apis cache dir {}", parent.display())
+        })?;
+    }
+    let json = serde_json::to_string(raw).context("failed to serialize emit-apis for cache")?;
+    std::fs::write(&path, json)
+        .with_context(|| format!("failed to write emit-apis cache {}", path.display()))
+}
+
+fn read_source_emit_apis_cache(crate_dir: &Path) -> Result<RawEmitApis> {
+    let path = source_emit_apis_cache_path(crate_dir)?;
+    let json = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read emit-apis cache {}", path.display()))?;
+    serde_json::from_str(&json)
+        .with_context(|| format!("cached emit-apis {} was not valid JSON", path.display()))
 }
 
 fn validate_runtime_artifact_identity(
@@ -1113,7 +1228,8 @@ mod tests {
                 unexpected => bail!("unexpected image {unexpected}"),
             },
             |_| bail!("no tools should be fetched"),
-            |dir| {
+            |participant| {
+                let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/runtimes/drive") {
                     Ok(raw(
                         "drive",
@@ -1153,7 +1269,8 @@ mod tests {
                 unexpected => bail!("unexpected image {unexpected}"),
             },
             |_| bail!("no tools should be fetched"),
-            |dir| {
+            |participant| {
+                let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/components/ddsm115") {
                     Ok(raw_kind(
                         "driver",
@@ -1200,7 +1317,8 @@ mod tests {
                     bail!("unexpected tool path {}", path.display())
                 }
             },
-            |dir| {
+            |participant| {
+                let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/runtimes/drive") {
                     Ok(raw(
                         "drive",
@@ -1251,7 +1369,8 @@ mod tests {
                 Ok(raw("avoid", "y2026_1", &[]))
             },
             |_| bail!("no tools should be fetched"),
-            |dir| {
+            |participant| {
+                let dir = participant.crate_dir.as_path();
                 built_sources.push(dir.to_path_buf());
                 Ok(raw_kind("driver", "ddsm115", "y2026_1", &[]))
             },
@@ -1420,7 +1539,10 @@ mod tests {
     }
 
     #[test]
-    fn scoped_runtime_check_keeps_all_source_participants() -> Result<()> {
+    fn scoped_runtime_check_only_builds_the_named_runtime() -> Result<()> {
+        // `check --runtime other` keeps every source participant in the graph
+        // (so topology is still validated) but scopes the expensive BUILD to the
+        // named user runtime; every other participant is marked `UseCached`.
         let all_sources = vec![
             SourceParticipant::user_runtime(
                 "bad".to_string(),
@@ -1438,6 +1560,18 @@ mod tests {
         ];
         let sources = source_participants_for_runtime(&all_sources, Some("other"));
 
+        assert_eq!(
+            sources
+                .iter()
+                .map(|participant| (participant.name.clone(), participant.build_mode))
+                .collect::<Vec<_>>(),
+            vec![
+                ("bad".to_string(), SourceBuildMode::UseCached),
+                ("other".to_string(), SourceBuildMode::Build),
+                ("left_drive".to_string(), SourceBuildMode::UseCached),
+            ]
+        );
+
         let mut built = Vec::new();
         let outcome = run_check(
             &[],
@@ -1446,8 +1580,14 @@ mod tests {
             "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
-            |dir| {
-                built.push(dir.to_path_buf());
+            |participant| {
+                let dir = participant.crate_dir.as_path();
+                // Model the real builder's contract: `Build` participants run the
+                // expensive build; `UseCached` participants only ever read cached
+                // metadata and must never trigger a build.
+                if participant.build_mode == SourceBuildMode::Build {
+                    built.push(dir.to_path_buf());
+                }
                 if dir == Path::new("/fake/project/runtimes/bad") {
                     Ok(raw("bad", "y2026_1", &[]))
                 } else if dir == Path::new("/fake/project/runtimes/other") {
@@ -1464,14 +1604,64 @@ mod tests {
         )?;
 
         assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
-        assert_eq!(
-            built,
-            vec![
+        // Only the named runtime crate is actually built.
+        assert_eq!(built, vec![PathBuf::from("/fake/project/runtimes/other")]);
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_runtime_check_ignores_unrelated_build_failures_but_keeps_topology() -> Result<()> {
+        // `check --runtime other`: an unrelated user runtime that fails to BUILD
+        // must NOT fail the scoped check (its metadata comes from cache), yet a
+        // topology problem contributed by another participant is still detected.
+        let all_sources = vec![
+            SourceParticipant::user_runtime(
+                "bad".to_string(),
                 PathBuf::from("/fake/project/runtimes/bad"),
+            ),
+            SourceParticipant::user_runtime(
+                "other".to_string(),
                 PathBuf::from("/fake/project/runtimes/other"),
-                PathBuf::from("/fake/project/components/ddsm115")
-            ]
-        );
+            ),
+        ];
+        let sources = source_participants_for_runtime(&all_sources, Some("other"));
+
+        let outcome = run_check(
+            &[],
+            &[],
+            &sources,
+            "y2026_1",
+            |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
+            |participant| {
+                let dir = participant.crate_dir.as_path();
+                match participant.build_mode {
+                    // The only participant we actually build is `other`.
+                    SourceBuildMode::Build => {
+                        assert_eq!(dir, Path::new("/fake/project/runtimes/other"));
+                        Ok(raw("other", "y2026_1", &[]))
+                    }
+                    // Cached metadata for the unrelated `bad` runtime: it would
+                    // fail to BUILD, but the scoped check reads cache instead and
+                    // still folds its (broken topology) contract into the graph.
+                    SourceBuildMode::UseCached => {
+                        assert_eq!(dir, Path::new("/fake/project/runtimes/bad"));
+                        Ok(raw(
+                            "bad",
+                            "y2026_1",
+                            &[("drive::Target", "drive/target", "subscribe")],
+                        ))
+                    }
+                }
+            },
+        )?;
+
+        // The unrelated build failure did not abort the check, but `bad`'s
+        // unsatisfied consumer (from cached metadata) is still reported.
+        assert!(matches!(
+            outcome.report.problems.as_slice(),
+            [Problem::MissingProducer { consumers, .. }] if consumers == &vec!["bad".to_string()]
+        ));
         Ok(())
     }
 
@@ -1497,7 +1687,8 @@ mod tests {
             "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
-            |dir| {
+            |participant| {
+                let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/runtimes/other") {
                     Ok(raw("other", "y2026_1", &[]))
                 } else if dir == Path::new("/fake/project/components/ddsm115") {
@@ -1541,7 +1732,8 @@ mod tests {
             "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
-            |dir| {
+            |participant| {
+                let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/runtimes/bad") {
                     Ok(raw(
                         "bad",
@@ -1697,7 +1889,8 @@ mod tests {
             "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
-            |dir| {
+            |participant| {
+                let dir = participant.crate_dir.as_path();
                 built.push(dir.to_path_buf());
                 Ok(raw_kind("driver", "ddsm115", "y2026_1", &[]))
             },

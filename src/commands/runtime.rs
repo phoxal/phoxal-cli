@@ -257,10 +257,7 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
     let loaded = load_robot_with_extras(&robot_path)?;
     let config = loaded.extras.user_runtime_config(name).cloned();
     let default_connect = format!("tcp/127.0.0.1:{}", crate::local_zenoh::LOCAL_ZENOH_PORT);
-    let default_listen = format!("tcp/0.0.0.0:{}", crate::local_zenoh::LOCAL_ZENOH_PORT);
-    let bus_profile = loaded
-        .extras
-        .materialized_bus_profile(&default_connect, &default_listen);
+    let bus_profile = loaded.extras.materialized_bus_profile(&default_connect);
     let robot = loaded.robot;
 
     if CATALOG
@@ -294,15 +291,19 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
         );
     }
 
-    let resolved = resolve(
+    let mut resolved = resolve(
         &robot,
         project_root,
         &CATALOG,
         ResolveOptions {
             locked: false,
             resolve_external_artifacts: false,
+            resolve_source_commits: false,
         },
     )?;
+    // Offline: fill git component commits from phoxal.sources.lock so the run
+    // view can be assembled without `git ls-remote`.
+    crate::lockfile::apply_sources_lock_offline(project_root, &mut resolved)?;
     let run_dir = project_root.join(".phoxal").join("run");
     crate::run_view::assemble(project_root, &resolved, &run_dir)?;
     let binary_name = runtime_binary_name(&crate_dir, name)?;
@@ -343,6 +344,7 @@ pub fn build_runtime_images(
         ResolveOptions {
             locked: false,
             resolve_external_artifacts: false,
+            resolve_source_commits: false,
         },
     )?;
     if let Some(name) = name {
@@ -1081,7 +1083,7 @@ mod tests {
         )
         .replace(
             "\nphoxal_runtimes:\n",
-            "\nbus:\n  selected: lab\n  profiles:\n    lab:\n      connect: tcp/lab-router:7447\n      listen: tcp/0.0.0.0:7448\n\nphoxal_runtimes:\n",
+            "\nbus:\n  selected: lab\n  profiles:\n    lab:\n      connect: tcp/lab-router:7447\n\nphoxal_runtimes:\n",
         );
         fs::write(temp.path().join("robot.yaml"), robot_yaml)?;
         fs::write(
