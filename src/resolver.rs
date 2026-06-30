@@ -20,22 +20,21 @@ const ROBOT_FILE: &str = "robot.yaml";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolveOptions {
-    pub locked: bool,
     /// Resolve external artifact digests/checksums from the network
     /// (registry image digests, tool asset sha256). Off for offline flows.
     pub resolve_external_artifacts: bool,
-    /// Resolve git component `tag` → `commit` from the network
-    /// (`git ls-remote`). This is the lock-refresh axis: only the explicit
-    /// refresh flows (`update`, `pull`, live/`--pull` simulate, `deploy build`)
-    /// set it. Default/offline flows (`check`, `outdated`, dry-run) leave it
-    /// off and fill commits from `phoxal.sources.lock` instead.
+    /// Resolve git component `tag` → `commit`. A `tag` that is already a full
+    /// commit SHA resolves with no network; a tag/branch ref is resolved live
+    /// via `git ls-remote`. Flows that need to locate/stage component driver
+    /// sources (`check`, `runtime run`, simulate, `deploy build`) set this;
+    /// flows that never read component commits (`pull`, `outdated`) leave it
+    /// off so they stay fully offline.
     pub resolve_source_commits: bool,
 }
 
 impl Default for ResolveOptions {
     fn default() -> Self {
         Self {
-            locked: false,
             resolve_external_artifacts: true,
             resolve_source_commits: true,
         }
@@ -626,10 +625,10 @@ pub fn resolve(
                     channel.as_str()
                 )
             });
-        // Only attempt registry digest resolution when explicitly asked
-        // (`--pin-digests`). Otherwise stay unpinned and deploy by tag — we
-        // never synthesize a placeholder `sha256:` that would later be
-        // mistaken for a real OCI pin.
+        // Only attempt registry digest resolution when the flow asks for it
+        // (`resolve_external_artifacts`, e.g. `deploy build`). Otherwise stay
+        // unpinned and deploy by tag - we never synthesize a placeholder
+        // `sha256:` that would later be mistaken for a real OCI pin.
         let pin = if let Some(digest) = image_ref_digest(&image_ref) {
             ImagePin::Digest(digest.to_string())
         } else if options.resolve_external_artifacts {
@@ -658,12 +657,10 @@ pub fn resolve(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Git ref → commit SHA resolution needs the network (`git ls-remote`), so
-    // it is gated on `resolve_source_commits`. Default flows (check, outdated,
-    // dry-run) stay offline: a git component is resolved with an empty commit,
-    // which the caller fills from `phoxal.sources.lock` via `apply_lockfile`.
-    // Only the explicit refresh flows (`update`, `pull`, live/`--pull` simulate,
-    // `deploy build`) hit the network here.
+    // Git ref → commit SHA resolution: when `resolve_source_commits` is set, a
+    // `tag` that is already a full commit SHA resolves with no network, while a
+    // tag/branch ref is resolved live via `git ls-remote`. Flows that never read
+    // component commits (`pull`, `outdated`) leave it off so they stay offline.
     let components = resolve_components(robot, options.resolve_source_commits)?;
     let tools = resolve_tools(robot, options.resolve_external_artifacts)?;
 
@@ -703,12 +700,36 @@ pub fn resolve_image_digest(image_ref: &str) -> Result<String> {
             "could not resolve a real image digest for {image_ref}. \
              `docker buildx imagetools inspect` failed — install Docker with buildx and ensure \
              the daemon can reach the registry. If the phoxal/framework GHCR runtime images are \
-             not published yet, omit --pin-digests to deploy by tag during pre-publish recovery."
+             not published yet, deploy by tag (`simulate`/`check` resolve no digests) until they \
+             are published."
         )
     })?;
     buildx_imagetools_manifest_digest(&output).with_context(|| {
         format!("docker buildx imagetools inspect did not report an index digest for {image_ref}")
     })
+}
+
+/// Resolve a git component `tag` to a concrete commit SHA.
+///
+/// A `tag` that is already a full 40-character commit SHA is an explicit pin and
+/// is returned as-is with no network access. Any other ref (a tag or branch
+/// name) is resolved live via `git ls-remote`; if the network is unavailable the
+/// failure is reported with an actionable fix.
+fn resolve_component_commit(url: &str, git_ref: &str) -> Result<String> {
+    if is_full_commit_sha(git_ref) {
+        return Ok(git_ref.to_string());
+    }
+    resolve_git_ref(url, git_ref).with_context(|| {
+        format!(
+            "could not resolve git component ref '{git_ref}' from {url} without network access. \
+             Pin the component to an explicit commit SHA in robot.yaml (components.sources.<name>.tag: <40-char sha>), \
+             or run with network access so `git ls-remote` can resolve the ref."
+        )
+    })
+}
+
+fn is_full_commit_sha(value: &str) -> bool {
+    value.len() == 40 && value.chars().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub fn resolve_git_ref(url: &str, git_ref: &str) -> Result<String> {
@@ -833,11 +854,12 @@ fn resolve_components(
             })?;
         let source = match source {
             ComponentSource::Git(source) => {
-                // Only hit the network for the commit in explicit refresh flows;
-                // otherwise leave it empty for `apply_lockfile` to fill from the
-                // cached source lock (no `git ls-remote` in the default path).
+                // Resolve the commit live. A `tag` that is already a full commit
+                // SHA needs no network; a tag/branch ref is resolved via
+                // `git ls-remote`. Flows that never read commits leave
+                // `resolve_source_commits` off and skip this entirely.
                 let commit = if resolve_source_commits {
-                    resolve_git_ref(&source.git, &source.tag)?
+                    resolve_component_commit(&source.git, &source.tag)?
                 } else {
                     String::new()
                 };
@@ -1088,20 +1110,18 @@ mod tests {
     use crate::catalog::CATALOG;
 
     #[test]
-    fn offline_resolve_leaves_git_component_commits_unresolved() -> anyhow::Result<()> {
-        // FIX #2: the default offline path must NOT run `git ls-remote`. A git
-        // component is resolved with an empty commit (filled later from
-        // phoxal.sources.lock). This test resolves a git component with
-        // `resolve_source_commits: false`; if resolution tried to reach the
-        // network it would either hang or fail, so an empty commit proves no
-        // ls-remote was attempted.
+    fn resolve_without_source_commits_leaves_git_component_commits_empty() -> anyhow::Result<()> {
+        // Flows that never read component commits (`pull`, `outdated`) resolve
+        // with `resolve_source_commits: false` and must NOT run `git ls-remote`.
+        // A git component is resolved with an empty commit; if resolution tried
+        // to reach the network it would either hang or fail, so an empty commit
+        // proves no ls-remote was attempted.
         let robot = Robot::parse_from_string(GIT_COMPONENT_ROBOT)?;
         let resolved = resolve(
             &robot,
             std::path::Path::new("."),
             &CATALOG,
             ResolveOptions {
-                locked: false,
                 resolve_external_artifacts: false,
                 resolve_source_commits: false,
             },
@@ -1156,6 +1176,56 @@ components:
       component: ddsm115
       mount_link: right_wheel_mount
 "#;
+
+    #[test]
+    fn explicit_commit_sha_tag_resolves_without_network() -> anyhow::Result<()> {
+        // A `tag` that is already a full commit SHA is an explicit pin: it must
+        // resolve with no network (no `git ls-remote`), so a live-resolution
+        // flow works offline when components are pinned to a SHA.
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let robot = Robot::parse_from_string(
+            &GIT_COMPONENT_ROBOT.replace("tag: main", &format!("tag: {sha}")),
+        )?;
+        let resolved = resolve(
+            &robot,
+            std::path::Path::new("."),
+            &CATALOG,
+            ResolveOptions {
+                resolve_external_artifacts: false,
+                resolve_source_commits: true,
+            },
+        )?;
+
+        let git_component = resolved
+            .components
+            .iter()
+            .find(|component| component.source_name == "ddsm115")
+            .expect("ddsm115 component resolved");
+        match &git_component.source {
+            ResolvedComponentSource::Git { commit, tag, .. } => {
+                assert_eq!(tag, sha);
+                assert_eq!(commit, sha);
+            }
+            other => panic!("expected a git component source, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn full_commit_sha_is_detected() {
+        assert!(is_full_commit_sha(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(!is_full_commit_sha("main"));
+        assert!(!is_full_commit_sha("v0.3.0"));
+        // 39 chars (too short) and a non-hex char are both rejected.
+        assert!(!is_full_commit_sha(
+            "0123456789abcdef0123456789abcdef0123456"
+        ));
+        assert!(!is_full_commit_sha(
+            "0123456789abcdef0123456789abcdef0123456z"
+        ));
+    }
 
     #[test]
     fn load_robot_tolerates_user_runtime_image_and_config() -> anyhow::Result<()> {

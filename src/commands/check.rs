@@ -181,21 +181,22 @@ fn run(
     let loaded = load_robot_with_extras(&robot_path)?;
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
-    // `check` is offline by default: resolve without touching the network
-    // (`resolve_external_artifacts: false` skips `git ls-remote` for component
-    // commits and registry digest pinning), then fill git component commits from
-    // `phoxal.sources.lock` so component drivers can be located from cache.
-    let mut resolved = resolve(
+    // `check` resolves live: it never pins registry/tool digests
+    // (`resolve_external_artifacts: false`), but it does resolve git component
+    // commits (`resolve_source_commits: true`) so component drivers can be
+    // located and staged. A path-only / official-only graph needs no network; a
+    // git component pinned to a commit SHA resolves offline; a tag/branch ref is
+    // resolved live via `git ls-remote` (with an actionable error if the network
+    // is unavailable).
+    let resolved = resolve(
         &robot,
         project_root,
         &CATALOG,
         ResolveOptions {
-            locked: false,
             resolve_external_artifacts: false,
-            resolve_source_commits: false,
+            resolve_source_commits: true,
         },
     )?;
-    crate::lockfile::apply_sources_lock_offline(project_root, &mut resolved)?;
     let platform_refs = resolved
         .platform_runtimes
         .iter()

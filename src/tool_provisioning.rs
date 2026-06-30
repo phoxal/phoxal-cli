@@ -116,8 +116,8 @@ struct DownloadedAsset {
 /// Download a `phoxal/<repo>` release asset and verify it against the release's
 /// published sha256 digest.
 ///
-/// We re-fetch the authoritative digest from the GitHub release API rather than
-/// trusting the lockfile's per-tool sha: during the pre-publish recovery period
+/// We fetch the authoritative digest from the GitHub release API rather than
+/// trusting the resolved per-tool sha: during the pre-publish recovery period
 /// that field is a content-addressing placeholder (see `resolver::fake_sha`),
 /// not a real artifact hash.
 fn download_release_asset(

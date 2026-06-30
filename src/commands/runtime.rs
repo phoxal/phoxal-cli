@@ -309,19 +309,19 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
         );
     }
 
-    let mut resolved = resolve(
+    // Resolve git component commits live so the run view can be assembled. A
+    // path-only graph needs no network; a git component pinned to a commit SHA
+    // resolves offline; a tag/branch ref is resolved via `git ls-remote` (with
+    // an actionable error if the network is unavailable).
+    let resolved = resolve(
         &robot,
         project_root,
         &CATALOG,
         ResolveOptions {
-            locked: false,
             resolve_external_artifacts: false,
-            resolve_source_commits: false,
+            resolve_source_commits: true,
         },
     )?;
-    // Offline: fill git component commits from phoxal.sources.lock so the run
-    // view can be assembled without `git ls-remote`.
-    crate::lockfile::apply_sources_lock_offline(project_root, &mut resolved)?;
     let run_dir = project_root.join(".phoxal").join("run");
     crate::run_view::assemble(project_root, &resolved, &run_dir)?;
     let binary_name = runtime_binary_name(&crate_dir, name)?;
@@ -355,12 +355,13 @@ pub fn build_runtime_images(
         .parent()
         .context("robot.yaml did not have a parent directory")?;
     let robot = load_robot(&robot_path)?;
+    // Building user-runtime images never reads component commits, so this stays
+    // fully offline (`resolve_source_commits: false`).
     let mut resolved = resolve(
         &robot,
         project_root,
         &CATALOG,
         ResolveOptions {
-            locked: false,
             resolve_external_artifacts: false,
             resolve_source_commits: false,
         },

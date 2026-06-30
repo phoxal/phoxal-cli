@@ -320,7 +320,6 @@ fn tool_version_override_is_preserved_for_any_known_tool() -> anyhow::Result<()>
 
 fn offline_options() -> ResolveOptions {
     ResolveOptions {
-        locked: false,
         resolve_external_artifacts: false,
         resolve_source_commits: false,
     }

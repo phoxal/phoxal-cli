@@ -10,7 +10,8 @@
 //! The command surface (see [`commands`]) is:
 //!
 //! - `check` - validate the resolved graph's single `api_version` and topology
-//!   via `emit-apis`; offline by default, `--pull` to refresh official images.
+//!   via `emit-apis`; cached official images (`--pull` to refresh), git component
+//!   commits resolved live unless pinned to a commit SHA in `robot.yaml`.
 //! - `simulate <world>` - resolve, generate the run bundle, and launch the
 //!   Webots simulation stack.
 //! - `deploy build` - produce an immutable, digest-pinned deployment artifact.
@@ -20,9 +21,11 @@
 //!   and host tools.
 //! - `doctor` - check host prerequisites; `self upgrade` - update the CLI.
 //!
-//! `validate` and `update` are the lower-level predecessors of `check` and the
-//! lockfile half of `pull`; they remain for the lock-file/report workflows that
-//! still drive `phoxal.sources.lock` directly.
+//! There is no lockfile: versions, image digests, and component commits all
+//! resolve live from GitHub releases, Docker/GHCR, and `git ls-remote` on every
+//! run. Production reproducibility is the `deploy build` digest-pinned
+//! (`@sha256`) bundle, not a cached resolution. `validate` remains as the
+//! lower-level structural/dependency predecessor of `check`.
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -38,7 +41,6 @@ pub mod host_doctor;
 pub mod host_paths;
 pub mod local_build;
 pub mod local_zenoh;
-pub mod lockfile;
 pub mod process;
 pub mod project;
 pub mod resolver;

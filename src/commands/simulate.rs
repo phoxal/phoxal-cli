@@ -11,7 +11,6 @@ use crate::AppContext;
 use crate::catalog::CATALOG;
 use crate::commands::MessageFormat;
 use crate::compose::LaunchClock;
-use crate::lockfile::{LOCKFILE_NAME, Lockfile};
 use crate::resolver::{ResolveOptions, ResolvedRobot, RobotManifestExtras, resolve};
 use crate::world;
 
@@ -31,29 +30,14 @@ pub struct Simulate {
     pub world: String,
     #[arg(
         long,
-        help = "Require phoxal.sources.lock to exist and match recomputed resolution."
-    )]
-    pub locked: bool,
-    #[arg(
-        long,
         help = "Resolve and write run artifacts without starting containers or processes."
     )]
     pub dry_run: bool,
-    #[arg(
-        long,
-        help = "Refresh phoxal.sources.lock when it is missing or stale (live simulate only)."
-    )]
-    pub update_lock: bool,
     #[arg(long, help = "Launch joypad from the cached Phoxal tool binaries.")]
     pub joypad: bool,
     #[arg(
         long,
-        help = "Resolve image digests, component git commits, and tool asset hashes from upstream (requires Docker + network). Off by default during the pre-publish recovery period."
-    )]
-    pub pin_digests: bool,
-    #[arg(
-        long,
-        help = "Refresh official runtime images and host tools instead of reusing compatible cached artifacts; live mode also reconciles phoxal.sources.lock before provisioning."
+        help = "Refresh official runtime images and host tools instead of reusing compatible cached artifacts."
     )]
     pub pull: bool,
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
@@ -69,11 +53,8 @@ pub enum SimulateMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimulateOptions {
     pub world: String,
-    pub locked: bool,
-    pub update_lock: bool,
     pub joypad: bool,
     pub pull: bool,
-    pub resolve_external_artifacts: bool,
     pub message_format: MessageFormat,
 }
 
@@ -85,7 +66,6 @@ pub struct SimulatePlan {
     pub compose_path: PathBuf,
     pub state_path: PathBuf,
     pub bus_connect: String,
-    pub lockfile_written: Option<PathBuf>,
     pub written_files: Vec<PathBuf>,
     pub native_tools: Vec<String>,
     pub compose_services: Vec<String>,
@@ -98,7 +78,6 @@ struct ResolvedSimulation {
     world_path: PathBuf,
     resolved: ResolvedRobot,
     manifest_extras: RobotManifestExtras,
-    lockfile_written: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,11 +98,8 @@ impl Simulate {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let options = SimulateOptions {
             world: self.world.clone(),
-            locked: self.locked,
-            update_lock: self.update_lock,
             joypad: self.joypad,
             pull: self.pull,
-            resolve_external_artifacts: self.pin_digests,
             message_format: self.message_format,
         };
         let mode = if self.dry_run {
@@ -204,7 +180,7 @@ pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<Simulat
 fn resolve_project(
     project_start: &Path,
     options: SimulateOptions,
-    mode: SimulateMode,
+    _mode: SimulateMode,
 ) -> Result<ResolvedSimulation> {
     let robot_path = crate::resolver::discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
@@ -216,85 +192,28 @@ fn resolve_project(
     let loaded = crate::resolver::load_robot_with_extras(&robot_path)?;
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
-    let lock_path = project_root.join(LOCKFILE_NAME);
-    let lockfile = if lock_path.is_file() {
-        Some(Lockfile::read(&lock_path)?)
-    } else {
-        None
-    };
-    if options.locked {
-        if options.pull {
-            bail!(
-                "simulate --pull cannot be combined with --locked because --pull refreshes moving refs before applying the lock"
-            );
-        }
-        let lockfile = lockfile
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("{} is required by --locked", lock_path.display()))?;
-        let mut resolved = resolve(
-            &robot,
-            &project_root,
-            &CATALOG,
-            ResolveOptions {
-                locked: true,
-                resolve_external_artifacts: false,
-                // --locked never touches the network: the lock supplies commits.
-                resolve_source_commits: false,
-            },
-        )?;
-        crate::lockfile::apply_lockfile(lockfile, &mut resolved)
-            .with_context(|| format!("{} is stale", lock_path.display()))?;
-        return Ok(ResolvedSimulation {
-            robot_path,
-            project_root,
-            world_path,
-            resolved,
-            manifest_extras,
-            lockfile_written: None,
-        });
-    }
 
-    let resolve_options = ResolveOptions {
-        locked: false,
-        resolve_external_artifacts: options.resolve_external_artifacts,
-        // Refresh component commits from the network only on an explicit --pull;
-        // otherwise the lock (applied just below) supplies them offline.
-        resolve_source_commits: options.pull,
-    };
-    let resolved = resolve(&robot, &project_root, &CATALOG, resolve_options)?;
-    if !options.pull
-        && let Some(lockfile) = &lockfile
-    {
-        let mut locked_resolved = resolved.clone();
-        if crate::lockfile::apply_lockfile(lockfile, &mut locked_resolved).is_ok() {
-            return Ok(ResolvedSimulation {
-                robot_path,
-                project_root,
-                world_path,
-                resolved: locked_resolved,
-                manifest_extras,
-                lockfile_written: None,
-            });
-        }
-    }
-    let lockfile_written = match mode {
-        SimulateMode::DryRun => None,
-        SimulateMode::Live if options.update_lock || options.pull => {
-            crate::lockfile::reconcile_lockfile(&project_root, &resolved, false)?
-        }
-        SimulateMode::Live => bail!(
-            "{LOCKFILE_NAME} is missing or stale; run `phoxal-cli update` to refresh it \
-             (recommended), or `phoxal-cli simulate --update-lock` to refresh inline, \
-             or commit the lock and use `--locked` to require it as-is."
-        ),
-    };
+    // Always resolve live: simulate never pins registry/tool digests (deploy
+    // handles digest pinning), but it does resolve git component commits so
+    // component drivers can be staged. A path-only / official-only graph needs
+    // no network; a git component pinned to a commit SHA resolves offline; a
+    // tag/branch ref is resolved live via `git ls-remote` (with an actionable
+    // error if the network is unavailable).
+    let resolved = resolve(
+        &robot,
+        &project_root,
+        &CATALOG,
+        ResolveOptions {
+            resolve_external_artifacts: false,
+            resolve_source_commits: true,
+        },
+    )?;
     Ok(ResolvedSimulation {
         robot_path,
         project_root,
         world_path,
         resolved,
         manifest_extras,
-        lockfile_written,
     })
 }
 
@@ -357,9 +276,6 @@ fn write_simulation_files(
     if mode == SimulateMode::DryRun {
         written_files.push(state_path.clone());
     }
-    if let Some(lockfile_path) = &resolved.lockfile_written {
-        written_files.push(lockfile_path.clone());
-    }
     written_files.sort();
     written_files.dedup();
 
@@ -370,7 +286,6 @@ fn write_simulation_files(
         compose_path,
         state_path,
         bus_connect: bus_profile.connect,
-        lockfile_written: resolved.lockfile_written,
         written_files,
         native_tools,
         compose_services,
@@ -569,40 +484,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_resolve_missing_lock_requires_update_or_explicit_update_lock() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        write_robot_project(temp.path())?;
-
-        let result = resolve_project(
-            temp.path(),
-            SimulateOptions {
-                world: "test".to_string(),
-                update_lock: false,
-                resolve_external_artifacts: false,
-                ..SimulateOptions::default()
-            },
-            SimulateMode::Live,
-        );
-        let error = match result {
-            Ok(_) => bail!(
-                "live resolve unexpectedly succeeded without {}",
-                LOCKFILE_NAME
-            ),
-            Err(error) => error,
-        };
-        let message = format!("{error:#}");
-
-        assert!(
-            message.contains("phoxal-cli update"),
-            "expected actionable update guidance, got: {message}"
-        );
-        assert!(!temp.path().join(LOCKFILE_NAME).exists());
-
-        Ok(())
-    }
-
-    #[test]
-    fn live_resolve_pull_reconciles_missing_lock_before_provisioning() -> Result<()> {
+    fn live_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
+        // With no lockfile, a path-only / official-only project resolves live
+        // with no network for either mode: there is nothing to look up remotely
+        // (no git components), so resolution succeeds and writes no lock.
         let temp = tempfile::tempdir()?;
         write_robot_project(temp.path())?;
 
@@ -610,47 +495,31 @@ mod tests {
             temp.path(),
             SimulateOptions {
                 world: "test".to_string(),
-                pull: true,
-                resolve_external_artifacts: false,
                 ..SimulateOptions::default()
             },
             SimulateMode::Live,
         )?;
 
-        assert_eq!(
-            resolved.lockfile_written,
-            Some(temp.path().join(LOCKFILE_NAME))
-        );
-        assert!(temp.path().join(LOCKFILE_NAME).is_file());
+        assert_eq!(resolved.resolved.api_version, "y2026_1");
+        assert!(resolved.resolved.components.is_empty());
         Ok(())
     }
 
     #[test]
-    fn locked_and_pull_are_rejected() -> Result<()> {
+    fn dry_run_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_robot_project(temp.path())?;
 
-        let result = resolve_project(
+        let resolved = resolve_project(
             temp.path(),
             SimulateOptions {
                 world: "test".to_string(),
-                locked: true,
-                pull: true,
                 ..SimulateOptions::default()
             },
-            SimulateMode::Live,
-        );
-        let error = match result {
-            Ok(_) => bail!("--locked and --pull unexpectedly succeeded"),
-            Err(error) => error,
-        };
+            SimulateMode::DryRun,
+        )?;
 
-        assert!(
-            error
-                .to_string()
-                .contains("simulate --pull cannot be combined with --locked"),
-            "{error:#}"
-        );
+        assert_eq!(resolved.resolved.api_version, "y2026_1");
         Ok(())
     }
 

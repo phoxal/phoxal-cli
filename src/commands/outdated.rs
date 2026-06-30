@@ -9,7 +9,6 @@ use sha2::{Digest, Sha256};
 use crate::AppContext;
 use crate::catalog::CATALOG;
 use crate::commands::MessageFormat;
-use crate::lockfile::{LOCKFILE_NAME, Lockfile};
 use crate::resolver::{
     ResolveOptions, ResolvedTool, discover_robot_yaml, load_robot, resolve,
     resolve_release_asset_sha256,
@@ -51,7 +50,6 @@ pub struct ToolOutdatedEntry {
     pub asset: String,
     pub cached_binary_sha256: Option<String>,
     pub cached_asset_sha256: Option<String>,
-    pub locked_asset_sha256: Option<String>,
     pub remote_asset_sha256: Option<String>,
     pub status: OutdatedStatus,
 }
@@ -87,12 +85,10 @@ pub fn run(project_start: &Path) -> Result<OutdatedSummary> {
         project_root,
         &CATALOG,
         ResolveOptions {
-            locked: false,
             resolve_external_artifacts: false,
             resolve_source_commits: false,
         },
     )?;
-    let lockfile = Lockfile::read(&project_root.join(LOCKFILE_NAME)).ok();
 
     let mut platform_runtimes = Vec::new();
     for runtime in &resolved.platform_runtimes {
@@ -120,7 +116,7 @@ pub fn run(project_start: &Path) -> Result<OutdatedSummary> {
 
     let mut tools = Vec::new();
     for tool in &resolved.tools {
-        tools.push(tool_outdated_entry(tool, lockfile.as_ref())?);
+        tools.push(tool_outdated_entry(tool)?);
     }
 
     Ok(OutdatedSummary {
@@ -155,11 +151,10 @@ fn print_human(summary: &OutdatedSummary) -> Result<()> {
             OutdatedStatus::Current | OutdatedStatus::Unknown
         );
         println!(
-            "  - {}: {:?} cached={} locked={} remote={}",
+            "  - {}: {:?} cached={} remote={}",
             tool.name,
             tool.status,
             tool.cached_asset_sha256.as_deref().unwrap_or("<none>"),
-            tool.locked_asset_sha256.as_deref().unwrap_or("<none>"),
             tool.remote_asset_sha256.as_deref().unwrap_or("<unknown>")
         );
     }
@@ -194,10 +189,7 @@ fn local_image_digest(image_ref: &str) -> Result<Option<String>> {
         .map(ToString::to_string))
 }
 
-fn tool_outdated_entry(
-    tool: &ResolvedTool,
-    lockfile: Option<&Lockfile>,
-) -> Result<ToolOutdatedEntry> {
+fn tool_outdated_entry(tool: &ResolvedTool) -> Result<ToolOutdatedEntry> {
     let binary_path = cached_tool_path(&tool.name, &tool.resolved, &tool.binary_name)?;
     let cached_binary_sha256 = if binary_path.is_file() {
         Some(hex::encode(Sha256::digest(
@@ -208,9 +200,6 @@ fn tool_outdated_entry(
         None
     };
     let cached_asset_sha256 = crate::tool_provisioning::cached_tool_asset_sha256(tool)?;
-    let locked_asset_sha256 = lockfile
-        .and_then(|lockfile| lockfile.tools.get(&tool.name))
-        .map(|locked| locked.sha256.clone());
     let remote_asset_sha256 =
         resolve_release_asset_sha256(&tool.repo, &tool.resolved, &tool.asset)?;
     let status = match (
@@ -229,7 +218,6 @@ fn tool_outdated_entry(
         asset: tool.asset.clone(),
         cached_binary_sha256,
         cached_asset_sha256,
-        locked_asset_sha256,
         remote_asset_sha256,
         status,
     })
