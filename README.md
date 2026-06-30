@@ -2,7 +2,9 @@
 
 Consumer CLI for the Phoxal robot framework.
 You run it from a robot project: it reads `robot.yaml`, resolves the graph against its compiled-in official runtime catalog, and drives the develop, simulate, and deploy loop.
-It owns the resolver, `robot.yaml` discovery, and `phoxal.sources.lock` generation.
+It owns the resolver and `robot.yaml` discovery.
+There is no lockfile: versions, image digests, and component commits resolve live from GitHub releases, Docker/GHCR, and `git ls-remote` on every run.
+Production reproducibility is the `deploy build` digest-pinned (`@sha256`) bundle.
 
 ## Commands
 
@@ -23,12 +25,12 @@ phoxal-cli deploy build           # write an immutable, digest-pinned deployment
 | Command | What it does |
 |---|---|
 | `robot new <name>` | Scaffold a robot project (`robot.yaml`, `structure.urdf`, default world, `runtimes/`). |
-| `check` | Resolve `robot.yaml`, then run each participant's `emit-apis` and fail if any reports a different `api_version` or the producer/consumer topology is unsatisfied. Offline by default; `--pull` refreshes official images first; `--runtime <name>` scopes the build to one user runtime. |
+| `check` | Resolve `robot.yaml`, then run each participant's `emit-apis` and fail if any reports a different `api_version` or the producer/consumer topology is unsatisfied. Uses cached official images (pulled only when missing); git component commits resolve live unless pinned to a commit SHA in `robot.yaml`. `--pull` refreshes official images first; `--runtime <name>` scopes the build to one user runtime. |
 | `simulate <world>` | Resolve, generate the run bundle, and launch the Webots stack (router, official runtimes, user runtimes, component drivers). |
 | `runtime add\|run\|image\|catalog` | Scaffold a user runtime, run one host-native, build local deployment images, or print the official runtime catalog. |
 | `pull` / `outdated` | Refresh, or report drift in, cached official images and host tools for the selected `(api_version, channel)`. |
-| `deploy build` | Re-run the static check on a pulled set and write a compose artifact whose image refs are all immutable. |
-| `validate` / `update` | Lower-level checks and `phoxal.sources.lock` refresh that back the workflows above. |
+| `deploy build` | Re-run the static check on a pulled set and write a compose artifact whose image refs are all immutable (`repository@sha256:digest`). This digest-pinned bundle is the production reproducibility boundary. |
+| `validate` | Lower-level `robot.yaml` structure and user-runtime phoxal-dependency checks that back `check`. |
 | `doctor` | Check host prerequisites (Docker, Webots) without changing anything. |
 | `self upgrade` | Update the CLI binary itself. |
 
@@ -78,28 +80,28 @@ Example: `phoxal-cli simulate default` finds `worlds/default.wbt` in the project
 ## Live split-recovery gate
 
 `scripts/live-simulate-gate.sh` is the documented gate that proves the
-separated repos run together end to end: `robot.yaml` -> `phoxal-cli` -> a real
-`phoxal.sources.lock` (real GHCR digests) -> generated `.phoxal/run/` -> router -> Webots
--> the mandatory API/channel runtime set. It is the live counterpart to recovery Gates 8-9
-in `phoxal/organization`'s `REPOSITORIES.md`, and depends on real image digests
-(#10) and a published runtime image set (`phoxal/framework#31`).
+separated repos run together end to end: `robot.yaml` -> `phoxal-cli` -> live
+resolution (GHCR images, git component commits, GitHub release tools) ->
+generated `.phoxal/run/` -> router -> Webots -> the mandatory API/channel runtime
+set. It is the live counterpart to recovery Gates 8-9 in
+`phoxal/organization`'s `REPOSITORIES.md`, and depends on a published runtime
+image set (`phoxal/framework#31`).
 
 ```sh
 # from the phoxal-cli checkout; ROBOT_DIR defaults to ../robot-v1
-scripts/live-simulate-gate.sh            # smoke: real-digest lock + locked compose (CI-safe)
+scripts/live-simulate-gate.sh            # smoke: live resolve + compose generation (CI-safe)
 scripts/live-simulate-gate.sh --live     # full live run (needs Docker daemon + Webots)
 ```
 
-The smoke phase runs `update --pin-digests`, asserts every runtime image in
-`phoxal.sources.lock` records a selected `image_ref` plus a real `sha256:…` digest, and
-runs `simulate default --locked --dry-run` to verify locked resolution and that
-the generated compose references those digest pins. It needs only
-`docker buildx` (no daemon). The `--live` phase additionally requires a running
-Docker daemon and Webots on `PATH`, then runs `simulate default --locked` so you
-can confirm the router, the GHCR runtime services, Webots, and bus connectivity
-(`tcp/router:7447`, host tools via `tcp/127.0.0.1:7447`). Failures are reported
-with the actionable cause (missing image/digest, Docker not running, Webots
-missing, runtime startup, or bus connection).
+The smoke phase runs `simulate default --dry-run` to resolve live and generate
+the compose, then asserts the compose references the mandatory
+`ghcr.io/phoxal/runtime-` services. It needs no Docker daemon. The `--live` phase
+additionally requires a running Docker daemon and Webots on `PATH`, then runs
+`simulate default --pull` so you can confirm the router, the GHCR runtime
+services, Webots, and bus connectivity (`tcp/router:7447`, host tools via
+`tcp/127.0.0.1:7447`). Failures are reported with the actionable cause
+(unresolvable git ref, missing image, Docker not running, Webots missing,
+runtime startup, or bus connection).
 
 ## Host layout
 

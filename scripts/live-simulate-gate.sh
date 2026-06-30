@@ -3,23 +3,26 @@
 #
 # Proves the separated repos run together end to end:
 #
-#   robot.yaml → phoxal-cli → real phoxal.sources.lock (real GHCR digests)
-#             → generated .phoxal/run/ → router → Webots → mandatory runtime set
+#   robot.yaml -> phoxal-cli -> live resolution (GHCR images, git component
+#             commits, GitHub release tools) -> generated .phoxal/run/ -> router
+#             -> Webots -> mandatory runtime set
+#
+# There is NO lockfile: every run resolves live. Production reproducibility is
+# the `phoxal-cli deploy build` digest-pinned (@sha256) bundle, exercised
+# separately. This gate exercises live resolve + compose generation + simulate.
 #
 # Two phases:
 #
-#   Smoke (default) — no Docker daemon, no Webots needed:
-#     1. phoxal-cli update --pin-digests   (resolve REAL GHCR image digests)
-#     2. assert phoxal.sources.lock pins every runtime image as repo@sha256:… (not a tag)
-#     3. phoxal-cli simulate default --locked --dry-run
-#        (locked resolution + compose generation against the real-digest lock)
+#   Smoke (default) -- no Docker daemon, no Webots needed:
+#     1. phoxal-cli simulate default --dry-run   (live resolve + compose generation)
+#     2. assert the generated compose references the mandatory runtime services
 #
-#   Live (--live) — needs a running Docker daemon + Webots on PATH:
-#     4. phoxal-cli simulate default --locked   (the full live gate)
+#   Live (--live) -- needs a running Docker daemon + Webots on PATH:
+#     3. phoxal-cli simulate default --pull       (the full live gate)
 #
-# The smoke phase is CI-safe and is what proves the digest plumbing
-# (phoxal/phoxal-cli#10) and the published image set (phoxal/framework#31) line
-# up. The live phase is the manual integration gate.
+# The smoke phase is CI-safe and proves the resolver + compose plumbing line up
+# with the published image set (phoxal/framework#31). The live phase is the
+# manual integration gate.
 #
 # Usage:
 #   scripts/live-simulate-gate.sh [--live] [ROBOT_DIR]
@@ -45,7 +48,7 @@ robot_dir="${robot_dir:-${CLI_REPO}/../robot-v1}"
 WORLD="default"
 
 red="\033[31m"; green="\033[32m"; yellow="\033[33m"; cyan="\033[36m"; reset="\033[0m"
-step() { printf "\n${cyan}▶ %s${reset}\n" "$1"; }
+step() { printf "\n${cyan}> %s${reset}\n" "$1"; }
 ok()   { printf "${green}OK${reset}   %s\n" "$1"; }
 warn() { printf "${yellow}WARN${reset} %s\n" "$1"; }
 fail() { printf "${red}FAIL${reset} %s\n" "$1" >&2; exit 1; }
@@ -62,68 +65,41 @@ if [[ ! -x "${CLI_BIN}" ]]; then
   (cd "${CLI_REPO}" && cargo build --quiet -p phoxal-cli) || fail "phoxal-cli build failed"
 fi
 
-command -v docker >/dev/null 2>&1 \
-  || fail "docker (with buildx) is required to resolve real image digests — install Docker"
+# --- 1. live dry-run (resolve + compose generation) ------------------------
 
-# --- 1. update --pin-digests -----------------------------------------------
-
-step "Gate — robot-v1: phoxal-cli update --pin-digests (real GHCR digests)"
-if ! (cd "${robot_dir}" && "${CLI_BIN}" update --pin-digests); then
-  fail "update --pin-digests failed.
-  - missing image / digest: the phoxal/framework GHCR runtime images may not be
-    published for the resolved runtime set. Verify with framework's
-    scripts/verify-runtime-release.sh, then re-run.
-  - rate limited / auth: set GITHUB_TOKEN, or 'docker login ghcr.io' for private packages."
-fi
-ok "phoxal.sources.lock written with --pin-digests"
-
-# --- 2. assert real digest pins (not tag refs) -----------------------------
-
-step "Gate — phoxal.sources.lock pins every runtime image as a real digest"
-lock="${robot_dir}/phoxal.sources.lock"
-[[ -f "${lock}" ]] || fail "phoxal.sources.lock not found at ${lock}"
-# The lockfile images block: every runtime line must be repo@sha256:…, never a
-# bare repo:version tag ref (that would be an unresolved / fake-digest recovery
-# state — see phoxal/phoxal-cli#10).
-tag_refs="$(awk '/^  images:/{f=1;next} /^[a-z]/{f=0} f && /ghcr.io\/phoxal\/runtime-/ && !/@sha256:/{print}' "${lock}")"
-pinned="$(grep -c '@sha256:' "${lock}")"
-if [[ -n "${tag_refs}" ]]; then
-  printf '%s\n' "${tag_refs}" >&2
-  fail "phoxal.sources.lock has unpinned runtime images (tag refs above). The GHCR images
-  for this runtime set are not resolvable — publish them (framework#31) and re-run
-  update --pin-digests."
-fi
-ok "all runtime images pinned to real sha256 digests (${pinned} pins)"
-
-# --- 3. locked dry-run (structural) ----------------------------------------
-
-step "Gate — phoxal-cli simulate ${WORLD} --locked --dry-run"
+step "Gate -- robot-v1: phoxal-cli simulate ${WORLD} --dry-run (live resolve)"
 if ! (cd "${robot_dir}" && rm -rf .phoxal/run .phoxal/cache \
-        && "${CLI_BIN}" simulate "${WORLD}" --locked --dry-run >/dev/null); then
-  fail "simulate ${WORLD} --locked --dry-run failed (locked resolution drift, or
-  missing world ${WORLD}.wbt). Re-run update and retry."
+        && "${CLI_BIN}" simulate "${WORLD}" --dry-run >/dev/null); then
+  fail "simulate ${WORLD} --dry-run failed (live resolution, or missing world
+  ${WORLD}.wbt). If a git component ref cannot be resolved offline, pin it to a
+  commit SHA in robot.yaml or run with network access."
 fi
 compose="${robot_dir}/.phoxal/run/docker-compose.yml"
 [[ -f "${compose}" ]] || fail "compose not generated at ${compose}"
-# The generated compose must reference the real digest pins, not tag refs.
-if awk '/image: ghcr.io\/phoxal\/runtime-/ && !/@sha256:/{exit 1}' "${compose}"; then
-  ok "compose generated; runtime services reference real digest pins"
+ok "compose generated from live resolution"
+
+# --- 2. assert the mandatory runtime services are present ------------------
+
+step "Gate -- generated compose references the mandatory runtime set"
+if grep -q 'ghcr.io/phoxal/runtime-' "${compose}"; then
+  pins="$(grep -c 'ghcr.io/phoxal/runtime-' "${compose}")"
+  ok "compose references ${pins} official runtime images"
 else
-  fail "generated compose references a runtime image by tag, not digest"
+  fail "generated compose references no ghcr.io/phoxal/runtime- images"
 fi
 
 if [[ "${live}" -eq 0 ]]; then
-  printf "\n${green}Smoke gate green.${reset} Real-digest phoxal.sources.lock + locked compose verified.\n"
+  printf "\n${green}Smoke gate green.${reset} Live resolve + compose generation verified.\n"
   cat <<EOF
 
 To run the full LIVE gate (needs a running Docker daemon + Webots on PATH):
 
   ${BASH_SOURCE[0]} --live ${robot_dir}
 
-The live run (phoxal-cli simulate ${WORLD} --locked) should show:
+The live run (phoxal-cli simulate ${WORLD} --pull) should show:
   - phoxal-local-zenoh singleton starts or is safely reused;
   - the generated compose starts the per-robot router;
-  - all mandatory runtime services start from the pinned GHCR images;
+  - all mandatory runtime services start from the GHCR images;
   - Webots launches the staged world;
   - runtimes connect to tcp/router:7447 and read /robot;
   - host tools (joypad, when requested) connect via tcp/127.0.0.1:7447.
@@ -131,17 +107,20 @@ EOF
   exit 0
 fi
 
-# --- 4. live gate ----------------------------------------------------------
+# --- 3. live gate ----------------------------------------------------------
+
+command -v docker >/dev/null 2>&1 \
+  || fail "docker is required for the live gate -- install Docker and start the daemon"
 
 step "Live host diagnosis"
 "${CLI_BIN}" doctor >/dev/null 2>&1 \
   || fail "phoxal-cli doctor failed unexpectedly"
 ok "host diagnosis complete; live simulate will enforce required preflight"
 
-step "Live gate — phoxal-cli simulate ${WORLD} --locked"
+step "Live gate -- phoxal-cli simulate ${WORLD} --pull"
 warn "this is the interactive live gate; it runs until you stop it (Ctrl-C)."
 warn "watch for: router healthy, every runtime service Up from its GHCR image,"
 warn "Webots window with the staged world, and runtimes reading /robot over the bus."
-(cd "${robot_dir}" && "${CLI_BIN}" simulate "${WORLD}" --locked) \
-  || fail "live simulate failed — see logs above (image pull, runtime startup, or bus connection)."
+(cd "${robot_dir}" && "${CLI_BIN}" simulate "${WORLD}" --pull) \
+  || fail "live simulate failed -- see logs above (image pull, runtime startup, or bus connection)."
 printf "\n${green}Live gate completed.${reset}\n"

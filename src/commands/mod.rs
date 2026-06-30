@@ -15,7 +15,6 @@ pub mod robot;
 pub mod runtime;
 pub mod self_cmd;
 pub mod simulate;
-pub mod update;
 pub mod validate;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -80,13 +79,11 @@ pub enum RootCommand {
     #[command(
         about = "Check the robot graph's single api_version and topology via emit-apis.",
         long_about = "Check the robot graph's single api_version and topology via emit-apis.\n\n\
-                      Resolves robot.yaml, then runs each participant's emit-apis (official images, host tools, and locally built user runtimes/component drivers) and fails if any normal participant reports a different api_version or if the producer/consumer topology is unsatisfied. Offline by default: cached official images are used and pulled only when missing (pass --pull to refresh first)."
+                      Resolves robot.yaml, then runs each participant's emit-apis (official images, host tools, and locally built user runtimes/component drivers) and fails if any normal participant reports a different api_version or if the producer/consumer topology is unsatisfied. Cached official images are used and pulled only when missing (pass --pull to refresh first); git component commits resolve live unless pinned to a commit SHA in robot.yaml."
     )]
     Check(check::CheckCmd),
     #[command(about = "Validate robot.yaml structure and user-runtime phoxal dependencies.")]
     Validate(validate::Validate),
-    #[command(about = "Resolve robot.yaml and write phoxal.sources.lock.")]
-    Update(update::Update),
     #[command(about = "Resolve, generate the run bundle, and launch the Webots simulation stack.")]
     Simulate(simulate::Simulate),
     #[command(about = "Build an immutable, digest-pinned deployment artifact.")]
@@ -112,7 +109,6 @@ impl RootCommand {
         match self {
             Self::Check(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
-            Self::Update(command) => command.run(app).await,
             Self::Simulate(command) => command.run(app).await,
             Self::Deploy(command) => command.run(app).await,
             Self::Robot(command) => command.run(app).await,

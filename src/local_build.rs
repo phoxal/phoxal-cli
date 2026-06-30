@@ -41,8 +41,8 @@ pub(crate) fn pull_platform_image_refs(runtime_refs: &[(String, String)]) -> Res
                 format!(
                     "failed to pull runtime image {runtime_name} ({image}) by tag. The phoxal/framework GHCR \
                      runtime images may not be published for this API/channel yet. Publish the \
-                     runtime images, then run `phoxal-cli update --pin-digests` to pin real \
-                     digests."
+                     runtime images, then re-run. Production deployments pin real digests via \
+                     `phoxal-cli deploy build`."
                 )
             }
         })?;

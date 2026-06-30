@@ -1,7 +1,6 @@
 use std::fs;
 
 use phoxal_cli::commands::simulate::{SimulateOptions, prepare};
-use phoxal_cli::lockfile::LOCKFILE_NAME;
 use serde_yaml::{Mapping, Value};
 
 #[test]
@@ -14,14 +13,13 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
         SimulateOptions {
             world: "test".to_string(),
             joypad: true,
-            resolve_external_artifacts: false,
             ..SimulateOptions::default()
         },
     )?;
 
     assert!(temp.path().join(".phoxal/run/robot.yaml").is_file());
-    assert!(!temp.path().join(LOCKFILE_NAME).exists());
-    assert!(plan.lockfile_written.is_none());
+    // There is no lockfile: dry-run resolves live and writes none.
+    assert!(!temp.path().join("phoxal.sources.lock").exists());
     assert!(temp.path().join(".phoxal/run/structure.urdf").is_file());
     assert!(
         temp.path()
