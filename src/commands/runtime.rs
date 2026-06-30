@@ -627,6 +627,7 @@ edition = "2024"
 
 [dependencies]
 phoxal = "{phoxal_version}"
+phoxal-api = "{phoxal_version}"
 anyhow = "1"
 serde = {{ version = "1", features = ["derive"] }}
 
@@ -642,7 +643,7 @@ fn runtime_main_rs(name: &str, api_version: &str, pascal_name: &str) -> String {
         r#"// `api` is your one API version (D59). Remove this `allow` once you use it
 // in a handle field below (e.g. `Publisher<api::drive::Target>`).
 #[allow(unused_imports)]
-use phoxal::api::{api_version} as api;
+use phoxal_api::{api_version} as api;
 use phoxal::prelude::*;
 
 /// Typed config for this runtime (validated by `phoxal-cli check`).
@@ -783,6 +784,18 @@ mod tests {
         let main = fs::read_to_string(main_rs)?;
         assert!(main.contains(r#"#[phoxal(id = "avoid-obstacles", api = y2026_1"#));
         assert!(main.contains("phoxal::run::<AvoidObstacles>()"));
+        // Scaffolds author against the published api crate (DoD #313): the API
+        // version comes through `phoxal_api::y2026_1`, not the removed
+        // `phoxal::api` facade.
+        assert!(main.contains("use phoxal_api::y2026_1 as api;"));
+        assert!(!main.contains("phoxal::api"));
+
+        // The generated manifest depends on both `phoxal` and the api crate it
+        // imports, pinned to the same major.minor the CLI itself uses.
+        let cargo = fs::read_to_string(&cargo_toml)?;
+        let phoxal_version = cli_phoxal_dependency_major_minor()?;
+        assert!(cargo.contains(&format!("phoxal = \"{phoxal_version}\"")));
+        assert!(cargo.contains(&format!("phoxal-api = \"{phoxal_version}\"")));
 
         let robot = Robot::read_from_dir(temp.path())?;
         let runtime = robot
