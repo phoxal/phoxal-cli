@@ -7,13 +7,13 @@ identity:
 
 structure: structure.urdf
 
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
   images:
-    drive: ghcr.io/phoxal/runtime-drive:y2026_1-v0.13.0
-    localize: ghcr.io/phoxal/runtime-localize:y2026_1-v0.8.0
+    drive: ghcr.io/phoxal/service-drive:y2026_1-v0.13.0
+    localize: ghcr.io/phoxal/service-localize:y2026_1-v0.8.0
 
-user_runtimes:
+user_participants:
   mission_behavior:
     path: ./runtimes/mission_behavior
   inspection_policy:

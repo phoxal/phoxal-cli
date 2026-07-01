@@ -256,7 +256,6 @@ fn run_pinned_graph_check(
             source_participants: &source_participants,
         },
         check::CheckGraphContext {
-            root_api: &resolved.api_version,
             robot_graph: &robot_graph,
             manifest_extras,
         },
@@ -405,7 +404,7 @@ services:
   router:
     image: eclipse/zenoh:1.9.0@sha256:router
   drive:
-    image: ghcr.io/phoxal/runtime-drive:y2026_1-stable@sha256:drive
+    image: ghcr.io/phoxal/service-drive:y2026_1-stable@sha256:drive
   user-avoid:
     image: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 "#;
@@ -414,7 +413,7 @@ services:
         let invalid = r#"
 services:
   drive:
-    image: ghcr.io/phoxal/runtime-drive:y2026_1-stable
+    image: ghcr.io/phoxal/service-drive:y2026_1-stable
 "#;
         let error = ensure_all_compose_image_refs_are_immutable(invalid)
             .expect_err("floating tags should fail deploy artifact validation");
@@ -491,7 +490,7 @@ services:
             channel: Channel::Stable,
             platform_runtimes: vec![ResolvedPlatformRuntime {
                 name: "asset".to_string(),
-                image_ref: "ghcr.io/phoxal/runtime-asset:y2026_1-stable".to_string(),
+                image_ref: "ghcr.io/phoxal/service-asset:y2026_1-stable".to_string(),
                 pin: crate::resolver::ImagePin::Digest(
                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_string(),
@@ -519,7 +518,7 @@ identity:
 
 structure: structure.urdf
 
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
 
 motion:

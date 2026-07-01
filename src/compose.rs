@@ -489,10 +489,10 @@ mod tests {
             api_version: "y2026_1".to_string(),
             channel: Channel::Stable,
             platform_runtimes: vec![
-                resolved_platform_runtime("asset", "ghcr.io/phoxal/runtime-asset:y2026_1-stable"),
+                resolved_platform_runtime("asset", "ghcr.io/phoxal/service-asset:y2026_1-stable"),
                 resolved_platform_runtime(
                     "diagnostics",
-                    "ghcr.io/phoxal/runtime-diagnostics:y2026_1-stable",
+                    "ghcr.io/phoxal/service-diagnostics:y2026_1-stable",
                 ),
             ],
             user_runtimes: vec![ResolvedUserRuntime {
@@ -554,7 +554,7 @@ identity:
 
 structure: structure.urdf
 
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
 
 motion:

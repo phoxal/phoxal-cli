@@ -112,7 +112,7 @@ fn collect_user_runtime_dependency_report(
     expected_api_version: &str,
 ) -> UserRuntimeDependencyReport {
     let mut report = UserRuntimeDependencyReport::default();
-    for (name, runtime) in &robot.user_runtimes {
+    for (name, runtime) in &robot.user_participants {
         if let Err(error) = crate::resolver::validate_user_runtime_framework_selector(
             name,
             &runtime.framework,
@@ -198,11 +198,11 @@ fn phoxal_dependency(dep: &TomlValue) -> PhoxalDependency {
 fn print_text_report(robot: &Robot) {
     println!("robot: {}", robot.identity.id);
     println!("api_version: {}", robot.api_version);
-    println!("channel: {}", robot.phoxal_runtimes.channel);
+    println!("channel: {}", robot.phoxal_participants.channel);
     println!("platform_runtimes:");
     for runtime in CATALOG.entries_for_api(&robot.api_version) {
         let image_ref = robot
-            .phoxal_runtimes
+            .phoxal_participants
             .images
             .get(runtime.name)
             .cloned()
@@ -211,13 +211,13 @@ fn print_text_report(robot: &Robot) {
                     "{}:{}-{}",
                     runtime.image_repo(),
                     robot.api_version,
-                    robot.phoxal_runtimes.channel
+                    robot.phoxal_participants.channel
                 )
             });
         println!("  - {} -> {}", runtime.name, image_ref);
     }
-    println!("user_runtimes:");
-    for (name, runtime) in &robot.user_runtimes {
+    println!("user_participants:");
+    for (name, runtime) in &robot.user_participants {
         println!("  - {} -> {}", name, runtime.path.display());
     }
     println!("components:");
@@ -238,10 +238,10 @@ fn print_json_report(robot: &Robot) -> Result<()> {
     let report = serde_json::json!({
         "robot": robot.identity.id,
         "api_version": robot.api_version,
-        "channel": robot.phoxal_runtimes.channel,
+        "channel": robot.phoxal_participants.channel,
         "platform_runtimes": CATALOG.entries_for_api(&robot.api_version).map(|runtime| {
             let image_ref = robot
-                .phoxal_runtimes
+                .phoxal_participants
                 .images
                 .get(runtime.name)
                 .cloned()
@@ -250,7 +250,7 @@ fn print_json_report(robot: &Robot) -> Result<()> {
                         "{}:{}-{}",
                         runtime.image_repo(),
                         robot.api_version,
-                        robot.phoxal_runtimes.channel
+                        robot.phoxal_participants.channel
                     )
                 });
             serde_json::json!({
@@ -259,7 +259,7 @@ fn print_json_report(robot: &Robot) -> Result<()> {
                 "image_ref": image_ref,
             })
         }).collect::<Vec<_>>(),
-        "user_runtimes": robot.user_runtimes.iter().map(|(name, runtime)| {
+        "user_participants": robot.user_participants.iter().map(|(name, runtime)| {
             serde_json::json!({
                 "name": name,
                 "path": runtime.path,
@@ -453,10 +453,10 @@ identity:
 
 structure: structure.urdf
 
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
 
-user_runtimes:
+user_participants:
   drive:
     path: runtimes/drive
     framework: ""
@@ -506,10 +506,10 @@ identity:
 
 structure: structure.urdf
 
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
 
-user_runtimes:
+user_participants:
   drive:
     path: {runtime_path}
 

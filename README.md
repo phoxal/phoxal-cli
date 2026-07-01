@@ -25,7 +25,7 @@ phoxal-cli deploy build           # write an immutable, digest-pinned deployment
 | Command | What it does |
 |---|---|
 | `robot new <name>` | Scaffold a robot project (`robot.yaml`, `structure.urdf`, default world, `runtimes/`). |
-| `check` | Resolve `robot.yaml`, then run each participant's `emit-apis` and fail if any reports a different `api_version` or the producer/consumer topology is unsatisfied. Uses cached official images (pulled only when missing); git component commits resolve live unless pinned to a commit SHA in `robot.yaml`. `--pull` refreshes official images first; `--runtime <name>` scopes the build to one user runtime. |
+| `check` | Resolve `robot.yaml`, then run each participant's `emit-apis` and fail if participants sharing a contract disagree on its `schema_id` (wire shape) or the producer/consumer topology is unsatisfied (mixed `api_version`s are allowed as long as shared contracts' `schema_id`s agree). Uses cached official images (pulled only when missing); git component commits resolve live unless pinned to a commit SHA in `robot.yaml`. `--pull` refreshes official images first; `--runtime <name>` scopes the build to one user runtime. |
 | `simulate <world>` | Resolve, generate the run bundle, and launch the Webots stack (router, official runtimes, user runtimes, component drivers). |
 | `runtime add\|run\|image\|catalog` | Scaffold a user runtime, run one host-native, build local deployment images, or print the official runtime catalog. |
 | `pull` / `outdated` | Refresh, or report drift in, cached official images and host tools for the selected `(api_version, channel)`. |

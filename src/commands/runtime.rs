@@ -30,7 +30,7 @@ pub enum RuntimeSubcommand {
     #[command(
         about = "Scaffold a user runtime crate and register it in robot.yaml.",
         long_about = "Scaffold a user runtime crate and register it in robot.yaml.\n\n\
-                      Generates runtimes/<name>/ with a #[derive(phoxal::Runtime)] crate (mandatory #[setup], a typed Config, and a blocking phoxal::run) and adds a user_runtimes.<name> entry to robot.yaml."
+                      Generates runtimes/<name>/ with a #[derive(phoxal::Runtime)] crate (mandatory #[setup], a typed Config, and a blocking phoxal::run) and adds a user_participants.<name> entry to robot.yaml."
     )]
     Add(Add),
     #[command(
@@ -47,19 +47,19 @@ pub enum RuntimeSubcommand {
 
 #[derive(Debug, Args)]
 pub struct Add {
-    #[arg(help = "Runtime id; kebab-case, used as the crate name and user_runtimes key.")]
+    #[arg(help = "Runtime id; kebab-case, used as the crate name and user_participants key.")]
     pub name: String,
 }
 
 #[derive(Debug, Args)]
 pub struct Run {
-    #[arg(help = "User runtime id from user_runtimes.")]
+    #[arg(help = "User runtime id from user_participants.")]
     pub name: String,
 }
 
 #[derive(Debug, Args)]
 pub struct Image {
-    #[arg(help = "User runtime id from user_runtimes. Omit to build all user runtimes.")]
+    #[arg(help = "User runtime id from user_participants. Omit to build all user runtimes.")]
     pub name: Option<String>,
     #[arg(
         long,
@@ -139,7 +139,7 @@ impl Add {
         let outcome = add_runtime(app.project.root(), &self.name)?;
         println!("created runtime crate: {}", outcome.crate_dir.display());
         println!(
-            "registered manifest entry: user_runtimes.{} = {{ path: \"{}\" }}",
+            "registered manifest entry: user_participants.{} = {{ path: \"{}\" }}",
             outcome.name,
             outcome.manifest_path.display()
         );
@@ -246,9 +246,9 @@ pub fn add_runtime(project_start: &Path, name: &str) -> Result<AddRuntimeOutcome
             crate_dir.display()
         );
     }
-    if robot.user_runtimes.contains_key(name) {
+    if robot.user_participants.contains_key(name) {
         bail!(
-            "user_runtimes.{name} already exists in {}",
+            "user_participants.{name} already exists in {}",
             robot_path.display()
         );
     }
@@ -288,17 +288,19 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
         );
     }
 
-    let manifest_runtime = robot.user_runtimes.get(name).ok_or_else(|| {
+    let manifest_runtime = robot.user_participants.get(name).ok_or_else(|| {
         let available = robot
-            .user_runtimes
+            .user_participants
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join(", ");
         if available.is_empty() {
-            anyhow!("user runtime '{name}' is not defined in user_runtimes")
+            anyhow!("user runtime '{name}' is not defined in user_participants")
         } else {
-            anyhow!("user runtime '{name}' is not defined in user_runtimes; available: {available}")
+            anyhow!(
+                "user runtime '{name}' is not defined in user_participants; available: {available}"
+            )
         }
     })?;
     let crate_dir = resolve_project_path(project_root, &manifest_runtime.path);
@@ -379,9 +381,11 @@ pub fn build_runtime_images(
                 .collect::<Vec<_>>()
                 .join(", ");
             if available.is_empty() {
-                bail!("user runtime '{name}' is not defined in user_runtimes");
+                bail!("user runtime '{name}' is not defined in user_participants");
             }
-            bail!("user runtime '{name}' is not defined in user_runtimes; available: {available}");
+            bail!(
+                "user runtime '{name}' is not defined in user_participants; available: {available}"
+            );
         }
         resolved
             .user_runtimes
@@ -519,7 +523,7 @@ fn insert_user_runtime_manifest_entry(
     let root = yaml
         .as_mapping_mut()
         .ok_or_else(|| anyhow!("robot.yaml root must be a mapping"))?;
-    let user_runtimes_key = YamlValue::String("user_runtimes".to_string());
+    let user_runtimes_key = YamlValue::String("user_participants".to_string());
     if root.get(&user_runtimes_key).is_none() {
         root.insert(
             user_runtimes_key.clone(),
@@ -529,10 +533,10 @@ fn insert_user_runtime_manifest_entry(
     let user_runtimes = root
         .get_mut(&user_runtimes_key)
         .and_then(YamlValue::as_mapping_mut)
-        .ok_or_else(|| anyhow!("robot.yaml user_runtimes must be a mapping"))?;
+        .ok_or_else(|| anyhow!("robot.yaml user_participants must be a mapping"))?;
     let runtime_key = YamlValue::String(name.to_string());
     if user_runtimes.contains_key(&runtime_key) {
-        bail!("user_runtimes.{name} already exists in robot.yaml");
+        bail!("user_participants.{name} already exists in robot.yaml");
     }
 
     let mut runtime = YamlMapping::new();
@@ -800,7 +804,7 @@ mod tests {
 
         let robot = Robot::read_from_dir(temp.path())?;
         let runtime = robot
-            .user_runtimes
+            .user_participants
             .get("avoid-obstacles")
             .expect("runtime should be registered");
         assert_eq!(
@@ -838,9 +842,9 @@ mod tests {
         let robot_yaml = fs::read_to_string(temp.path().join("robot.yaml"))?;
         let yaml: YamlValue = serde_yaml::from_str(&robot_yaml)?;
         let user_runtimes = yaml
-            .get("user_runtimes")
+            .get("user_participants")
             .and_then(YamlValue::as_mapping)
-            .expect("user_runtimes should remain a mapping");
+            .expect("user_participants should remain a mapping");
         let brain = user_runtimes
             .get(YamlValue::String("brain".to_string()))
             .and_then(YamlValue::as_mapping)
@@ -882,7 +886,12 @@ mod tests {
                 "ghcr.io/acme/brain@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             )
         );
-        assert!(loaded.robot.user_runtimes.contains_key("avoid-obstacles"));
+        assert!(
+            loaded
+                .robot
+                .user_participants
+                .contains_key("avoid-obstacles")
+        );
 
         Ok(())
     }
@@ -1021,7 +1030,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("user runtime 'missing' is not defined in user_runtimes"),
+                .contains("user runtime 'missing' is not defined in user_participants"),
             "{error:#}"
         );
         Ok(())
@@ -1114,8 +1123,8 @@ mod tests {
 "#,
         )
         .replace(
-            "\nphoxal_runtimes:\n",
-            "\nbus:\n  selected: lab\n  profiles:\n    lab:\n      connect: tcp/lab-router:7447\n\nphoxal_runtimes:\n",
+            "\nphoxal_participants:\n",
+            "\nbus:\n  selected: lab\n  profiles:\n    lab:\n      connect: tcp/lab-router:7447\n\nphoxal_participants:\n",
         );
         fs::write(temp.path().join("robot.yaml"), robot_yaml)?;
         fs::write(
@@ -1145,7 +1154,7 @@ identity:
 
 structure: structure.urdf
 
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
 
 motion:
@@ -1167,7 +1176,7 @@ components:
     fn minimal_robot_yaml_with_user_runtime(name: &str, runtime_yaml: &str) -> String {
         minimal_robot_yaml().replace(
             "\ncomponents:\n",
-            &format!("\nuser_runtimes:\n  {name}:{runtime_yaml}\ncomponents:\n"),
+            &format!("\nuser_participants:\n  {name}:{runtime_yaml}\ncomponents:\n"),
         )
     }
 }

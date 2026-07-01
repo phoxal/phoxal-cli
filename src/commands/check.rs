@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     fmt,
     path::{Path, PathBuf},
 };
@@ -74,18 +74,19 @@ pub struct RawContract {
     pub family: String,
     pub topic: String,
     pub direction: String,
+    /// The framework's normalized transitive wire-shape hash for this contract
+    /// body (`emit-apis` per-contract `schema_id`).
+    pub schema_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckOutcome {
     pub missing_images: Vec<String>,
-    pub official_runtime_refs: BTreeMap<String, String>,
     pub report: graph_check::Report,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct CheckGraphContext<'a> {
-    pub root_api: &'a str,
     pub robot_graph: &'a graph_check::RobotGraph,
     pub manifest_extras: &'a RobotManifestExtras,
 }
@@ -232,7 +233,6 @@ fn run(
         &tool_participants,
         &source_participants,
         CheckGraphContext {
-            root_api: &resolved.api_version,
             robot_graph: &robot_graph,
             manifest_extras: &manifest_extras,
         },
@@ -399,10 +399,10 @@ fn ensure_user_runtime_exists(resolved: &ResolvedRobot, runtime_name: &str) -> R
             .collect::<Vec<_>>()
             .join(", ");
         if available.is_empty() {
-            bail!("user runtime '{runtime_name}' is not defined in user_runtimes");
+            bail!("user runtime '{runtime_name}' is not defined in user_participants");
         }
         bail!(
-            "user runtime '{runtime_name}' is not defined in user_runtimes; available: {available}"
+            "user runtime '{runtime_name}' is not defined in user_participants; available: {available}"
         );
     }
     Ok(())
@@ -443,7 +443,6 @@ pub fn run_check(
     resolved_platform_image_refs: &[(String, String)],
     tool_participants: &[ToolParticipant],
     source_participants: &[SourceParticipant],
-    root_api: &str,
     fetch: impl FnMut(&str) -> Result<RawEmitApis>,
     fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
     build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
@@ -455,7 +454,6 @@ pub fn run_check(
         tool_participants,
         source_participants,
         CheckGraphContext {
-            root_api,
             robot_graph: &robot_graph,
             manifest_extras: &manifest_extras,
         },
@@ -496,7 +494,6 @@ pub fn run_check_with_deployed_user_runtime_images(
     mut build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
 ) -> Result<CheckOutcome> {
     let mut missing_images = Vec::new();
-    let mut official_runtime_refs = BTreeMap::new();
     let mut participants = Vec::new();
     let mut config_problems = Vec::new();
 
@@ -513,14 +510,10 @@ pub fn run_check_with_deployed_user_runtime_images(
                 });
             }
         };
-        validate_artifact_identity("official runtime", runtime_name, "runtime", &raw)?;
-        let artifact_id = raw.artifact.id.clone();
+        validate_artifact_identity("official service", runtime_name, "service", &raw)?;
         let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
             format!("failed to interpret emit-apis for runtime {runtime_name} ({image_ref})")
         })?;
-        official_runtime_refs.insert(runtime_name.clone(), image_ref.clone());
-        official_runtime_refs.insert(format!("runtime-{runtime_name}"), image_ref.clone());
-        official_runtime_refs.insert(artifact_id, image_ref.clone());
         participants.push(participant);
     }
 
@@ -606,15 +599,10 @@ pub fn run_check_with_deployed_user_runtime_images(
         participants.push(participant_apis);
     }
 
-    let mut report = graph_check::check_graph_with_topology(
-        &participants,
-        context.root_api,
-        context.robot_graph,
-    );
+    let mut report = graph_check::check_graph_with_topology(&participants, context.robot_graph);
     report.problems.extend(config_problems);
     Ok(CheckOutcome {
         missing_images,
-        official_runtime_refs,
         report,
     })
 }
@@ -725,7 +713,7 @@ fn validate_user_runtime_config(
     let errors = validate_json_schema(
         schema,
         &config,
-        &format!("user_runtimes.{runtime_id}.config"),
+        &format!("user_participants.{runtime_id}.config"),
     );
     if errors.is_empty() {
         None
@@ -958,7 +946,7 @@ fn validate_runtime_artifact_identity(
     expected_id: &str,
     raw: &RawEmitApis,
 ) -> Result<()> {
-    validate_artifact_identity(label, expected_id, "runtime", raw)
+    validate_artifact_identity(label, expected_id, "service", raw)
 }
 
 fn validate_source_artifact_identity(
@@ -966,7 +954,7 @@ fn validate_source_artifact_identity(
     raw: &RawEmitApis,
 ) -> Result<()> {
     let expected_kind = match participant.kind {
-        SourceParticipantKind::UserRuntime => "runtime",
+        SourceParticipantKind::UserRuntime => "service",
         SourceParticipantKind::ComponentDriver => "driver",
     };
     validate_artifact_identity(
@@ -990,20 +978,16 @@ fn validate_artifact_identity(
             expected_id
         );
     }
-    // Kind is only softly enforced today. The framework's `emit-apis` on
-    // published 0.17 hard-codes `kind = "runtime"` for *every* binary — runtimes,
-    // tools, and component drivers alike — so a strict `kind == expected_kind`
-    // check would false-fail real tools and drivers. Accept the universal
-    // `"runtime"` value for any participant, and only reject a kind that is
-    // neither the expected one nor that universal value (e.g. an outright garbage
-    // kind), so swapped artifacts are still caught by the strict `id` binding.
-    //
-    // TODO(framework emit-apis kinds): once `emit-apis` emits the true artifact
-    // kind (`tool`/`driver`/`runtime`), tighten this back to `kind ==
-    // expected_kind` and update the tests accordingly.
+    // As of framework 0.20, `emit-apis` emits the true authoring kind
+    // (`service`/`driver`/`tool`/`simulator`), so `expected_kind` is that true kind
+    // and a real artifact matches it exactly. The legacy `"runtime"` value (which
+    // pre-0.20 binaries hard-coded for every kind) is still tolerated transitionally
+    // so an old cached emit-apis does not false-fail; a kind that is neither the
+    // expected one nor that legacy value (an outright garbage kind) is rejected, and
+    // swapped artifacts are still caught by the strict `id` binding above.
     if raw.artifact.kind != expected_kind && raw.artifact.kind != "runtime" {
         bail!(
-            "{label} emit-apis artifact.kind '{}' is neither the expected kind '{}' nor the framework's current universal 'runtime'",
+            "{label} emit-apis artifact.kind '{}' is neither the expected kind '{}' nor the legacy 'runtime'",
             raw.artifact.kind,
             expected_kind
         );
@@ -1032,6 +1016,7 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
                     family: contract.family,
                     topic: contract.topic,
                     direction,
+                    schema_id: contract.schema_id,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1064,10 +1049,7 @@ pub(crate) fn ensure_check_outcome_ok(
     }
 
     if !outcome.report.is_ok() {
-        bail!(
-            "{}",
-            format_report_error(&outcome.report, &outcome.official_runtime_refs)
-        );
+        bail!("{}", format_report_error(&outcome.report));
     }
 
     Ok(())
@@ -1092,7 +1074,7 @@ fn format_missing_images_error(
         message.push_str("\n  - use an api_version listed by `phoxal-cli version`");
     }
     message.push_str(
-        "\n  - or use phoxal_runtimes.channel: edge if this API version is intentionally experimental",
+        "\n  - or use phoxal_participants.channel: edge if this API version is intentionally experimental",
     );
     message.push_str("\n  - or wait until Phoxal publishes the complete ");
     message.push_str(api_version);
@@ -1114,49 +1096,33 @@ fn suggested_available_api_version(requested: &str) -> Option<&'static str> {
     versions.pop()
 }
 
-fn format_report_error(
-    report: &graph_check::Report,
-    official_runtime_refs: &BTreeMap<String, String>,
-) -> String {
+fn format_report_error(report: &graph_check::Report) -> String {
     let mut message = String::from("robot graph check failed:");
     for problem in &report.problems {
-        if let Some(formatted) = format_official_runtime_mismatch(problem, official_runtime_refs) {
-            message.push_str("\n\n");
-            message.push_str(&formatted);
-        } else {
-            message.push_str("\n  - ");
-            message.push_str(&format_problem(problem));
-        }
+        message.push_str("\n  - ");
+        message.push_str(&format_problem(problem));
     }
     message
 }
 
-fn format_official_runtime_mismatch(
-    problem: &graph_check::Problem,
-    official_runtime_refs: &BTreeMap<String, String>,
-) -> Option<String> {
-    let graph_check::Problem::ApiVersionMismatch {
-        artifact_id,
-        expected,
-        found,
-    } = problem
-    else {
-        return None;
-    };
-    let selected = official_runtime_refs.get(artifact_id)?;
-    Some(format!(
-        "official runtime image reports the wrong api_version\n\n{artifact_id}:\n  selected: {selected}\n  expected: {expected}\n  emitted:  {found}"
-    ))
-}
-
 fn format_problem(problem: &graph_check::Problem) -> String {
     match problem {
-        graph_check::Problem::ApiVersionMismatch {
-            artifact_id,
-            expected,
-            found,
+        graph_check::Problem::ContractSchemaMismatch {
+            family,
+            topic,
+            schema_ids,
         } => {
-            format!("participant {artifact_id} reports api_version {found}, expected {expected}")
+            let reporters = schema_ids
+                .iter()
+                .map(|(schema_id, participants)| {
+                    format!("{schema_id} (reported by {})", participants.join(", "))
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!(
+                "contract {family} ({topic}) has disagreeing wire shapes: {reporters}; \
+                 rebuild the disagreeing side(s) so they compile against the same contract wire shape (schema_id)"
+            )
         }
         graph_check::Problem::MissingProducer {
             family,
@@ -1240,6 +1206,7 @@ mod tests {
     use super::*;
     use crate::resolver::ResolvedComponentSource;
     use graph_check::{Direction, Problem};
+    use std::collections::BTreeMap;
     use phoxal::model::robot::v1::{Channel, Robot};
 
     #[test]
@@ -1254,7 +1221,6 @@ mod tests {
             &images,
             &[],
             &sources,
-            "y2026_1",
             |image_ref| match image_ref {
                 "mission:ok" => Ok(raw(
                     "mission",
@@ -1295,7 +1261,6 @@ mod tests {
             &images,
             &[],
             &sources,
-            "y2026_1",
             |image_ref| match image_ref {
                 "mission:ok" => Ok(raw(
                     "mission",
@@ -1339,7 +1304,6 @@ mod tests {
             &[],
             &tools,
             &sources,
-            "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |path| {
                 if path == Path::new("/fake/cache/joypad") {
@@ -1396,7 +1360,6 @@ mod tests {
                 source_participants: &sources,
             },
             CheckGraphContext {
-                root_api: "y2026_1",
                 robot_graph: &robot_graph,
                 manifest_extras: &extras,
             },
@@ -1425,28 +1388,46 @@ mod tests {
     }
 
     #[test]
-    fn source_wrong_api_version_fails_with_mismatch_problem() -> Result<()> {
+    fn source_wrong_schema_id_fails_with_mismatch_problem() -> Result<()> {
+        // A platform publisher and a source subscriber share `drive/target` but
+        // report different `schema_id`s -> one `ContractSchemaMismatch`.
+        let images = vec![("mission".to_string(), "mission:ok".to_string())];
         let sources = vec![SourceParticipant::user_runtime(
             "drive".to_string(),
             PathBuf::from("/fake/project/runtimes/drive"),
         )];
 
         let outcome = run_check(
-            &[],
+            &images,
             &[],
             &sources,
-            "y2026_1",
-            |_| bail!("no platform images should be fetched"),
+            |image_ref| match image_ref {
+                "mission:ok" => Ok(raw_with_schema(
+                    "mission",
+                    "y2026_1",
+                    &[("drive::Target", "drive/target", "publish", "aaaa")],
+                )),
+                unexpected => bail!("unexpected image {unexpected}"),
+            },
             |_| bail!("no tools should be fetched"),
-            |_| Ok(raw("drive", "y2026_2", &[])),
+            |_| {
+                Ok(raw_with_schema(
+                    "drive",
+                    "y2026_1",
+                    &[("drive::Target", "drive/target", "subscribe", "bbbb")],
+                ))
+            },
         )?;
 
         assert_eq!(
             outcome.report.problems,
-            vec![Problem::ApiVersionMismatch {
-                artifact_id: "drive".to_string(),
-                expected: "y2026_1".to_string(),
-                found: "y2026_2".to_string()
+            vec![Problem::ContractSchemaMismatch {
+                family: "drive::Target".to_string(),
+                topic: "drive/target".to_string(),
+                schema_ids: vec![
+                    ("aaaa".to_string(), vec!["mission".to_string()]),
+                    ("bbbb".to_string(), vec!["drive".to_string()]),
+                ],
             }]
         );
         assert!(!outcome.is_ok());
@@ -1464,7 +1445,6 @@ mod tests {
             &[],
             &[],
             &sources,
-            "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
             |_| Ok(raw("surprise", "y2026_1", &[])),
@@ -1480,14 +1460,13 @@ mod tests {
     }
 
     #[test]
-    fn official_runtime_artifact_identity_must_match_resolved_name() {
+    fn official_service_artifact_identity_must_match_resolved_name() {
         let images = vec![("drive".to_string(), "drive:swapped".to_string())];
 
         let error = run_check(
             &images,
             &[],
             &[],
-            "y2026_1",
             |image_ref| match image_ref {
                 "drive:swapped" => Ok(raw("mission", "y2026_1", &[])),
                 unexpected => bail!("unexpected image {unexpected}"),
@@ -1495,11 +1474,11 @@ mod tests {
             |_| bail!("no tools should be fetched"),
             |_| bail!("no source runtimes should be built"),
         )
-        .expect_err("swapped official runtime image should abort check");
+        .expect_err("swapped official service image should abort check");
 
         let message = error.to_string();
         assert!(
-            message.contains("official runtime emit-apis artifact.id 'mission'")
+            message.contains("official service emit-apis artifact.id 'mission'")
                 && message.contains("expected artifact id 'drive'"),
             "{message}"
         );
@@ -1516,7 +1495,6 @@ mod tests {
             &[],
             &tools,
             &[],
-            "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |path| {
                 if path == Path::new("/fake/cache/joypad") {
@@ -1543,12 +1521,12 @@ mod tests {
     }
 
     #[test]
-    fn tool_artifact_kind_runtime_is_accepted_today() -> Result<()> {
-        // The framework's `emit-apis` currently emits `kind = "runtime"` for every
-        // binary, including tools. The kind check is softened to accept that
-        // universal value so real tools are not false-failed; the strict `id`
-        // binding still guards against swapped artifacts. (See the TODO in
-        // `validate_artifact_identity`.)
+    fn tool_artifact_kind_legacy_runtime_is_tolerated() -> Result<()> {
+        // Framework 0.20 `emit-apis` emits the true authoring kind
+        // (`service`/`driver`/`tool`/`simulator`), but an old/cached pre-0.20 report
+        // hard-coded `kind = "runtime"` for every binary. The kind check tolerates
+        // that legacy value so such a report is not false-failed; the strict `id`
+        // binding still guards against swapped artifacts.
         let tools = vec![ToolParticipant {
             name: "joypad".to_string(),
             binary_path: PathBuf::from("/fake/cache/joypad"),
@@ -1558,7 +1536,6 @@ mod tests {
             &[],
             &tools,
             &[],
-            "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |path| {
                 if path == Path::new("/fake/cache/joypad") {
@@ -1587,7 +1564,6 @@ mod tests {
             &[],
             &tools,
             &[],
-            "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |path| {
                 if path == Path::new("/fake/cache/joypad") {
@@ -1647,7 +1623,6 @@ mod tests {
             &[],
             &[],
             &sources,
-            "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
             |participant| {
@@ -1700,7 +1675,6 @@ mod tests {
             &[],
             &[],
             &sources,
-            "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
             |participant| {
@@ -1754,7 +1728,6 @@ mod tests {
             &[],
             &[],
             &sources,
-            "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
             |participant| {
@@ -1800,7 +1773,6 @@ mod tests {
             &[],
             &[],
             &sources,
-            "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
             |participant| {
@@ -1827,7 +1799,13 @@ mod tests {
     }
 
     #[test]
-    fn component_driver_wrong_api_version_fails_with_mismatch_problem() -> Result<()> {
+    fn component_driver_wrong_schema_id_fails_with_mismatch_problem() -> Result<()> {
+        // A component driver (subscribing `drive/target`) and a platform publisher
+        // report different `schema_id`s for the shared contract. The mismatch is
+        // reported per contract, and the driver appears under its concrete instance
+        // id (`left_drive`), not the shared driver artifact (`ddsm115`), so multiple
+        // instances of one driver stay distinct in the report.
+        let images = vec![("mission".to_string(), "mission:ok".to_string())];
         let sources = vec![SourceParticipant::component_driver_with_artifact_id(
             "left_drive".to_string(),
             "ddsm115".to_string(),
@@ -1835,24 +1813,36 @@ mod tests {
         )];
 
         let outcome = run_check(
-            &[],
+            &images,
             &[],
             &sources,
-            "y2026_1",
-            |_| bail!("no platform images should be fetched"),
+            |image_ref| match image_ref {
+                "mission:ok" => Ok(raw_with_schema(
+                    "mission",
+                    "y2026_1",
+                    &[("drive::Target", "drive/target", "publish", "aaaa")],
+                )),
+                unexpected => bail!("unexpected image {unexpected}"),
+            },
             |_| bail!("no tools should be fetched"),
-            |_| Ok(raw_kind("driver", "ddsm115", "y2026_2", &[])),
+            |_| {
+                Ok(raw_with_schema(
+                    "ddsm115",
+                    "y2026_1",
+                    &[("drive::Target", "drive/target", "subscribe", "bbbb")],
+                ))
+            },
         )?;
 
         assert_eq!(
             outcome.report.problems,
-            vec![Problem::ApiVersionMismatch {
-                // Component-driver diagnostics are keyed by the concrete instance
-                // id (`left_drive`), not the shared driver artifact (`ddsm115`),
-                // so multiple instances of one driver stay distinct in the report.
-                artifact_id: "left_drive".to_string(),
-                expected: "y2026_1".to_string(),
-                found: "y2026_2".to_string()
+            vec![Problem::ContractSchemaMismatch {
+                family: "drive::Target".to_string(),
+                topic: "drive/target".to_string(),
+                schema_ids: vec![
+                    ("aaaa".to_string(), vec!["mission".to_string()]),
+                    ("bbbb".to_string(), vec!["left_drive".to_string()]),
+                ],
             }]
         );
         assert!(!outcome.is_ok());
@@ -1870,7 +1860,6 @@ mod tests {
             &[],
             &[],
             &sources,
-            "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
             |_| Err(MissingImageError::new(anyhow!("source build failed")).into()),
@@ -1897,7 +1886,6 @@ mod tests {
             &[],
             &[],
             &sources,
-            "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
             |_| Err(anyhow!("component build failed")),
@@ -1960,7 +1948,6 @@ mod tests {
             &[],
             &[],
             &source_participants,
-            "y2026_1",
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
             |participant| {
@@ -1981,7 +1968,7 @@ mod tests {
             ("mission".to_string(), "mission:ok".to_string()),
             (
                 "drive".to_string(),
-                "ghcr.io/phoxal/runtime-drive:y2026_1-stable".to_string(),
+                "ghcr.io/phoxal/service-drive:y2026_1-stable".to_string(),
             ),
         ];
 
@@ -1989,10 +1976,9 @@ mod tests {
             &images,
             &[],
             &[],
-            "y2026_1",
             |image_ref| match image_ref {
                 "mission:ok" => Ok(raw("mission", "y2026_1", &[])),
-                "ghcr.io/phoxal/runtime-drive:y2026_1-stable" => {
+                "ghcr.io/phoxal/service-drive:y2026_1-stable" => {
                     Err(MissingImageError::new(anyhow!("not found")).into())
                 }
                 unexpected => bail!("unexpected image {unexpected}"),
@@ -2003,7 +1989,7 @@ mod tests {
 
         assert_eq!(
             outcome.missing_images,
-            vec!["ghcr.io/phoxal/runtime-drive:y2026_1-stable".to_string()]
+            vec!["ghcr.io/phoxal/service-drive:y2026_1-stable".to_string()]
         );
         assert!(!outcome.is_ok());
         Ok(())
@@ -2039,6 +2025,7 @@ mod tests {
                         "family": "drive::Target",
                         "topic": "drive/target",
                         "direction": "subscribe",
+                        "schema_id": "deadbeef",
                         "ignored": true
                     }
                 ],
@@ -2085,7 +2072,6 @@ mod tests {
             &[],
             &sources,
             CheckGraphContext {
-                root_api: "y2026_1",
                 robot_graph: &robot_graph,
                 manifest_extras: &extras,
             },
@@ -2142,7 +2128,6 @@ mod tests {
             &[],
             &sources,
             CheckGraphContext {
-                root_api: "y2026_1",
                 robot_graph: &robot_graph,
                 manifest_extras: &extras,
             },
@@ -2207,21 +2192,21 @@ mod tests {
     #[test]
     fn docker_emit_apis_classifier_only_treats_manifest_absence_as_missing() {
         let missing = classify_docker_emit_apis_failure(
-            "ghcr.io/phoxal/runtime-drive:y2026_2-stable",
+            "ghcr.io/phoxal/service-drive:y2026_2-stable",
             "",
             "manifest unknown: manifest unknown",
         );
         assert!(matches!(missing, DockerEmitApisFailure::MissingImage(_)));
 
         let missing_subcommand = classify_docker_emit_apis_failure(
-            "ghcr.io/phoxal/runtime-drive:y2026_1-stable",
+            "ghcr.io/phoxal/service-drive:y2026_1-stable",
             "",
             r#"exec: "emit-apis": executable file not found in $PATH"#,
         );
         assert!(matches!(missing_subcommand, DockerEmitApisFailure::Hard(_)));
 
         let auth_failure = classify_docker_emit_apis_failure(
-            "ghcr.io/phoxal/runtime-drive:y2026_1-stable",
+            "ghcr.io/phoxal/service-drive:y2026_1-stable",
             "",
             "unauthorized: authentication required",
         );
@@ -2230,6 +2215,33 @@ mod tests {
 
     fn raw(id: &str, api_version: &str, contracts: &[(&str, &str, &str)]) -> RawEmitApis {
         raw_kind("runtime", id, api_version, contracts)
+    }
+
+    /// Like `raw`, but each contract carries an explicit `schema_id` so a test can
+    /// force two participants to disagree on a shared `(family, topic)`.
+    fn raw_with_schema(
+        id: &str,
+        api_version: &str,
+        contracts: &[(&str, &str, &str, &str)],
+    ) -> RawEmitApis {
+        RawEmitApis {
+            artifact: RawArtifact {
+                kind: "runtime".to_string(),
+                id: id.to_string(),
+            },
+            api_version: api_version.to_string(),
+            bus_abi: None,
+            required_contracts: contracts
+                .iter()
+                .map(|(family, topic, direction, schema_id)| RawContract {
+                    family: (*family).to_string(),
+                    topic: (*topic).to_string(),
+                    direction: (*direction).to_string(),
+                    schema_id: (*schema_id).to_string(),
+                })
+                .collect(),
+            config_schema: None,
+        }
     }
 
     fn raw_kind(
@@ -2251,6 +2263,10 @@ mod tests {
                     family: (*family).to_string(),
                     topic: (*topic).to_string(),
                     direction: (*direction).to_string(),
+                    // A single default wire-shape id: every contract in these
+                    // fixtures shares one id, so a shared (family, topic) agrees
+                    // unless a test deliberately overrides it.
+                    schema_id: "deadbeef".to_string(),
                 })
                 .collect(),
             config_schema: None,
@@ -2278,7 +2294,7 @@ identity:
 
 structure: structure.urdf
 
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
 
 motion:
