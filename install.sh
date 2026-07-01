@@ -5,7 +5,7 @@
 #
 # Canonical source: https://github.com/phoxal/phoxal-cli (install.sh at repo
 # root). The copy served at https://phoxal.com/install.sh is synced from here
-# by CI — edit this file, never the website copy.
+# by CI - edit this file, never the website copy.
 #
 # Options (environment variables):
 #   PHOXAL_CLI_VERSION   pin a release, e.g. v0.4.0 (default: latest)

@@ -166,7 +166,7 @@ pub fn probe_rust_tools() -> ProbeStatus {
                 missing.push("cargo");
             }
             ProbeStatus::Warn(format!(
-                "{} missing; user runtime and driver builds may fail — install Rust from https://rustup.rs and ensure rustup and cargo are on PATH",
+                "{} missing; user runtime and driver builds may fail - install Rust from https://rustup.rs and ensure rustup and cargo are on PATH",
                 missing.join(" and ")
             ))
         }

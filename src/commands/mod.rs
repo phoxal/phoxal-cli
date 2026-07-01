@@ -79,7 +79,7 @@ pub enum RootCommand {
     #[command(
         about = "Check the robot graph's per-contract wire-shape agreement and topology via emit-apis.",
         long_about = "Check the robot graph's per-contract wire-shape agreement and topology via emit-apis.\n\n\
-                      Resolves robot.yaml, then runs each participant's emit-apis (official images, host tools, and locally built user runtimes/component drivers) and fails if participants sharing a contract disagree on its schema_id (wire shape) or if the producer/consumer topology is unsatisfied. Mixed api_versions are allowed as long as shared contracts' schema_ids agree. Cached official images are used and pulled only when missing (pass --pull to refresh first); git component commits resolve live unless pinned to a commit SHA in robot.yaml."
+                      Resolves robot.yaml, then runs each participant's emit-apis (official images, host tools, and locally built user runtimes/component drivers) and validates the graph with phoxal::check. It fails if participants sharing a contract disagree on its schema_id (wire shape) or if the producer/consumer topology is unsatisfied. Mixed api_versions are allowed as long as shared contracts' schema_ids agree. Cached official images are used and pulled only when missing (pass --pull to refresh first); git component commits resolve live unless pinned to a commit SHA in robot.yaml."
     )]
     Check(check::CheckCmd),
     #[command(about = "Validate robot.yaml structure and user-runtime phoxal dependencies.")]

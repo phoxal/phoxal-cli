@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
+use phoxal::check as graph_check;
 use phoxal::model::component::v1::CapabilityRef;
 use phoxal::model::robot::v1::KinematicConfig;
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,6 @@ use serde_json::Value;
 
 use crate::AppContext;
 use crate::catalog::CATALOG;
-use crate::check as graph_check;
 use crate::commands::MessageFormat;
 use crate::component_driver::component_crate_dir;
 use crate::resolver::{
@@ -54,6 +54,8 @@ pub struct CheckOptions {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct RawEmitApis {
     pub artifact: RawArtifact,
+    #[serde(default = "default_participant_class")]
+    pub participant_class: String,
     pub api_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bus_abi: Option<String>,
@@ -61,6 +63,10 @@ pub struct RawEmitApis {
     pub required_contracts: Vec<RawContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<Value>,
+}
+
+fn default_participant_class() -> String {
+    "checked".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -978,16 +984,14 @@ fn validate_artifact_identity(
             expected_id
         );
     }
-    // As of framework 0.20, `emit-apis` emits the true authoring kind
-    // (`service`/`driver`/`tool`/`simulator`), so `expected_kind` is that true kind
-    // and a real artifact matches it exactly. The legacy `"runtime"` value (which
-    // pre-0.20 binaries hard-coded for every kind) is still tolerated transitionally
-    // so an old cached emit-apis does not false-fail; a kind that is neither the
-    // expected one nor that legacy value (an outright garbage kind) is rejected, and
-    // swapped artifacts are still caught by the strict `id` binding above.
+    // Keep accepting the legacy universal kind until the cross-repo migration
+    // lands. phoxal/components drivers, and any tools still on phoxal 0.19 with
+    // `#[derive(Runtime)]`, emit `kind = "runtime"`. Exact `service`/`driver`/
+    // `tool` enforcement is deferred until the components and tools crates move
+    // to phoxal 0.20+ true kinds.
     if raw.artifact.kind != expected_kind && raw.artifact.kind != "runtime" {
         bail!(
-            "{label} emit-apis artifact.kind '{}' is neither the expected kind '{}' nor the legacy 'runtime'",
+            "{label} emit-apis artifact.kind '{}' is neither the expected kind '{}' nor the tolerated legacy 'runtime'",
             raw.artifact.kind,
             expected_kind
         );
@@ -1000,6 +1004,8 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
 
     fn try_from(raw: RawEmitApis) -> Result<Self> {
         let artifact_id = raw.artifact.id;
+        let participant_class =
+            graph_check::ParticipantClass::parse(&raw.participant_class).unwrap_or_default();
         let contracts = raw
             .required_contracts
             .into_iter()
@@ -1027,6 +1033,7 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
             // concrete instance id below.
             participant_id: artifact_id.clone(),
             artifact_id,
+            participant_class,
             api_version: raw.api_version,
             bus_abi: raw.bus_abi,
             config_schema: raw.config_schema,
@@ -1144,6 +1151,16 @@ fn format_problem(problem: &graph_check::Problem) -> String {
                 producers.join(", ")
             )
         }
+        graph_check::Problem::MultipleServerResponders {
+            family,
+            topic,
+            responders,
+        } => {
+            format!(
+                "query topic {family} ({topic}) has more than one server: {}; keep exactly one",
+                responders.join(", ")
+            )
+        }
         graph_check::Problem::InvalidConfig { runtime_id, errors } => {
             format!(
                 "invalid config for user runtime {runtime_id}: {}",
@@ -1205,7 +1222,7 @@ impl std::error::Error for MissingImageError {
 mod tests {
     use super::*;
     use crate::resolver::ResolvedComponentSource;
-    use graph_check::{Direction, Problem};
+    use graph_check::{Direction, ParticipantClass, Problem};
     use phoxal::model::robot::v1::{Channel, Robot};
     use std::collections::BTreeMap;
 
@@ -1290,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_are_included_in_graph_check() -> Result<()> {
+    fn privileged_tools_are_included_in_schema_agreement() -> Result<()> {
         let tools = vec![ToolParticipant {
             name: "joypad".to_string(),
             binary_path: PathBuf::from("/fake/cache/joypad"),
@@ -1307,11 +1324,12 @@ mod tests {
             |_| bail!("no platform images should be fetched"),
             |path| {
                 if path == Path::new("/fake/cache/joypad") {
-                    Ok(raw_kind(
+                    Ok(raw_kind_with_schema(
                         "tool",
                         "joypad",
                         "y2026_1",
-                        &[("drive::Target", "drive/target", "publish")],
+                        &[("drive::Target", "drive/target", "subscribe", "bbbb")],
+                        "privileged",
                     ))
                 } else {
                     bail!("unexpected tool path {}", path.display())
@@ -1320,10 +1338,10 @@ mod tests {
             |participant| {
                 let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/runtimes/drive") {
-                    Ok(raw(
+                    Ok(raw_with_schema(
                         "drive",
                         "y2026_1",
-                        &[("drive::Target", "drive/target", "subscribe")],
+                        &[("drive::Target", "drive/target", "publish", "aaaa")],
                     ))
                 } else {
                     bail!("unexpected source dir {}", dir.display())
@@ -1331,7 +1349,53 @@ mod tests {
             },
         )?;
 
-        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
+        assert_eq!(
+            outcome.report.problems,
+            vec![Problem::ContractSchemaMismatch {
+                family: "drive::Target".to_string(),
+                topic: "drive/target".to_string(),
+                schema_ids: vec![
+                    ("aaaa".to_string(), vec!["drive".to_string()]),
+                    ("bbbb".to_string(), vec!["joypad".to_string()]),
+                ],
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn privileged_tools_are_exempt_from_topology() -> Result<()> {
+        let tools = vec![ToolParticipant {
+            name: "joypad".to_string(),
+            binary_path: PathBuf::from("/fake/cache/joypad"),
+        }];
+
+        let outcome = run_check(
+            &[],
+            &tools,
+            &[],
+            |_| bail!("no platform images should be fetched"),
+            |path| {
+                if path == Path::new("/fake/cache/joypad") {
+                    Ok(raw_kind_class(
+                        "tool",
+                        "joypad",
+                        "y2026_1",
+                        &[
+                            ("drive::Target", "drive/target", "subscribe"),
+                            ("odometry::State", "odometry/state", "publish"),
+                        ],
+                        "privileged",
+                    ))
+                } else {
+                    bail!("unexpected tool path {}", path.display())
+                }
+            },
+            |_| bail!("no source runtimes should be built"),
+        )?;
+
+        assert!(outcome.report.problems.is_empty());
+        assert!(outcome.report.warnings.is_empty());
         Ok(())
     }
 
@@ -1498,11 +1562,12 @@ mod tests {
             |_| bail!("no platform images should be fetched"),
             |path| {
                 if path == Path::new("/fake/cache/joypad") {
-                    Ok(raw_kind(
+                    Ok(raw_kind_class(
                         "tool",
                         "simulator_webots_controller",
                         "y2026_1",
                         &[],
+                        "privileged",
                     ))
                 } else {
                     bail!("unexpected tool path {}", path.display())
@@ -1522,11 +1587,6 @@ mod tests {
 
     #[test]
     fn tool_artifact_kind_legacy_runtime_is_tolerated() -> Result<()> {
-        // Framework 0.20 `emit-apis` emits the true authoring kind
-        // (`service`/`driver`/`tool`/`simulator`), but an old/cached pre-0.20 report
-        // hard-coded `kind = "runtime"` for every binary. The kind check tolerates
-        // that legacy value so such a report is not false-failed; the strict `id`
-        // binding still guards against swapped artifacts.
         let tools = vec![ToolParticipant {
             name: "joypad".to_string(),
             binary_path: PathBuf::from("/fake/cache/joypad"),
@@ -1539,7 +1599,13 @@ mod tests {
             |_| bail!("no platform images should be fetched"),
             |path| {
                 if path == Path::new("/fake/cache/joypad") {
-                    Ok(raw("joypad", "y2026_1", &[]))
+                    Ok(raw_kind_class(
+                        "runtime",
+                        "joypad",
+                        "y2026_1",
+                        &[],
+                        "privileged",
+                    ))
                 } else {
                     bail!("unexpected tool path {}", path.display())
                 }
@@ -1552,9 +1618,36 @@ mod tests {
     }
 
     #[test]
+    fn component_driver_artifact_kind_legacy_runtime_is_tolerated() -> Result<()> {
+        let sources = vec![SourceParticipant::component_driver_with_artifact_id(
+            "left_motor",
+            "ddsm115",
+            PathBuf::from("/fake/project/components/ddsm115"),
+        )];
+
+        let outcome = run_check(
+            &[],
+            &[],
+            &sources,
+            |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
+            |_| {
+                Ok(raw_kind_class(
+                    "runtime",
+                    "ddsm115",
+                    "y2026_1",
+                    &[],
+                    "checked",
+                ))
+            },
+        )?;
+
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
+        Ok(())
+    }
+
+    #[test]
     fn tool_artifact_kind_garbage_is_rejected() {
-        // A kind that is neither the expected `tool` nor the framework's current
-        // universal `runtime` is still rejected.
         let tools = vec![ToolParticipant {
             name: "joypad".to_string(),
             binary_path: PathBuf::from("/fake/cache/joypad"),
@@ -1567,7 +1660,13 @@ mod tests {
             |_| bail!("no platform images should be fetched"),
             |path| {
                 if path == Path::new("/fake/cache/joypad") {
-                    Ok(raw_kind("nonsense", "joypad", "y2026_1", &[]))
+                    Ok(raw_kind_class(
+                        "nonsense",
+                        "joypad",
+                        "y2026_1",
+                        &[],
+                        "privileged",
+                    ))
                 } else {
                     bail!("unexpected tool path {}", path.display())
                 }
@@ -1826,10 +1925,12 @@ mod tests {
             },
             |_| bail!("no tools should be fetched"),
             |_| {
-                Ok(raw_with_schema(
+                Ok(raw_kind_with_schema(
+                    "driver",
                     "ddsm115",
                     "y2026_1",
                     &[("drive::Target", "drive/target", "subscribe", "bbbb")],
+                    "checked",
                 ))
             },
         )?;
@@ -2017,7 +2118,7 @@ mod tests {
     fn raw_emit_apis_accepts_required_contracts_json() -> Result<()> {
         let parsed: RawEmitApis = serde_json::from_str(
             r#"{
-                "artifact": { "kind": "runtime", "id": "drive", "ignored": true },
+                "artifact": { "kind": "service", "id": "drive", "ignored": true },
                 "api_version": "y2026_1",
                 "bus_abi": "v0",
                 "required_contracts": [
@@ -2035,6 +2136,7 @@ mod tests {
         let participant = graph_check::ParticipantApis::try_from(parsed)?;
 
         assert_eq!(participant.artifact_id, "drive");
+        assert_eq!(participant.participant_class, ParticipantClass::Checked);
         assert_eq!(participant.api_version, "y2026_1");
         assert_eq!(participant.bus_abi.as_deref(), Some("v0"));
         assert_eq!(
@@ -2047,6 +2149,46 @@ mod tests {
         );
         assert_eq!(participant.contracts[0].direction, Direction::Subscribe);
         Ok(())
+    }
+
+    #[test]
+    fn raw_emit_apis_threads_privileged_participant_class() -> Result<()> {
+        let parsed: RawEmitApis = serde_json::from_str(
+            r#"{
+                "artifact": { "kind": "tool", "id": "joypad" },
+                "participant_class": "privileged",
+                "api_version": "y2026_1",
+                "required_contracts": []
+            }"#,
+        )?;
+        let participant = graph_check::ParticipantApis::try_from(parsed)?;
+
+        assert_eq!(participant.participant_class, ParticipantClass::Privileged);
+        Ok(())
+    }
+
+    #[test]
+    fn raw_emit_apis_unknown_participant_class_defaults_to_checked() -> Result<()> {
+        let mut raw = raw("drive", "y2026_1", &[]);
+        raw.participant_class = "future".to_string();
+        let participant = graph_check::ParticipantApis::try_from(raw)?;
+
+        assert_eq!(participant.participant_class, ParticipantClass::Checked);
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_server_responders_format_names_query_topic_and_fix() {
+        let message = format_problem(&Problem::MultipleServerResponders {
+            family: "asset::GetResponse".to_string(),
+            topic: "asset/get".to_string(),
+            responders: vec!["asset-alpha".to_string(), "asset-beta".to_string()],
+        });
+
+        assert_eq!(
+            message,
+            "query topic asset::GetResponse (asset/get) has more than one server: asset-alpha, asset-beta; keep exactly one"
+        );
     }
 
     #[test]
@@ -2214,7 +2356,7 @@ mod tests {
     }
 
     fn raw(id: &str, api_version: &str, contracts: &[(&str, &str, &str)]) -> RawEmitApis {
-        raw_kind("runtime", id, api_version, contracts)
+        raw_kind("service", id, api_version, contracts)
     }
 
     /// Like `raw`, but each contract carries an explicit `schema_id` so a test can
@@ -2224,11 +2366,22 @@ mod tests {
         api_version: &str,
         contracts: &[(&str, &str, &str, &str)],
     ) -> RawEmitApis {
+        raw_kind_with_schema("service", id, api_version, contracts, "checked")
+    }
+
+    fn raw_kind_with_schema(
+        kind: &str,
+        id: &str,
+        api_version: &str,
+        contracts: &[(&str, &str, &str, &str)],
+        participant_class: &str,
+    ) -> RawEmitApis {
         RawEmitApis {
             artifact: RawArtifact {
-                kind: "runtime".to_string(),
+                kind: kind.to_string(),
                 id: id.to_string(),
             },
+            participant_class: participant_class.to_string(),
             api_version: api_version.to_string(),
             bus_abi: None,
             required_contracts: contracts
@@ -2250,11 +2403,22 @@ mod tests {
         api_version: &str,
         contracts: &[(&str, &str, &str)],
     ) -> RawEmitApis {
+        raw_kind_class(kind, id, api_version, contracts, "checked")
+    }
+
+    fn raw_kind_class(
+        kind: &str,
+        id: &str,
+        api_version: &str,
+        contracts: &[(&str, &str, &str)],
+        participant_class: &str,
+    ) -> RawEmitApis {
         RawEmitApis {
             artifact: RawArtifact {
                 kind: kind.to_string(),
                 id: id.to_string(),
             },
+            participant_class: participant_class.to_string(),
             api_version: api_version.to_string(),
             bus_abi: None,
             required_contracts: contracts
