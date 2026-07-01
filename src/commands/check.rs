@@ -1206,8 +1206,8 @@ mod tests {
     use super::*;
     use crate::resolver::ResolvedComponentSource;
     use graph_check::{Direction, Problem};
-    use std::collections::BTreeMap;
     use phoxal::model::robot::v1::{Channel, Robot};
+    use std::collections::BTreeMap;
 
     #[test]
     fn healthy_graph_passes_with_fake_emit_apis() -> Result<()> {
