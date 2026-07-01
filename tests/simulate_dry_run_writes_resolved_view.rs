@@ -101,10 +101,10 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
     // platform runtime image is a `repo:version` tag ref, so a later live
     // `simulate` can never try to `docker pull repo@sha256:<fake>`. (The zenoh
     // router image is a real, published digest pin and is intentionally exempt.)
-    assert!(compose.contains("ghcr.io/phoxal/runtime-"));
-    assert!(compose.contains("ghcr.io/phoxal/runtime-drive:y2026_1-stable"));
+    assert!(compose.contains("ghcr.io/phoxal/service-"));
+    assert!(compose.contains("ghcr.io/phoxal/service-drive:y2026_1-stable"));
     for line in compose.lines() {
-        if line.contains("ghcr.io/phoxal/runtime-") {
+        if line.contains("ghcr.io/phoxal/service-") {
             assert!(
                 !line.contains("@sha256:"),
                 "platform runtime image must be a tag ref during offline dry-run, got: {line}"
@@ -151,7 +151,7 @@ identity:
 
 structure: structure.urdf
 
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
 
 motion:

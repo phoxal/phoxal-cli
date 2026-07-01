@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal::model::robot::{
     RobotV1 as Robot,
-    v1::{Channel, ComponentSource, UserRuntime},
+    v1::{Channel, ComponentSource, UserParticipant},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -159,7 +159,7 @@ pub struct ResolvedPlatformRuntime {
 }
 
 impl ResolvedPlatformRuntime {
-    /// The selected image reference, e.g. `ghcr.io/phoxal/runtime-drive:y2026_1-stable`.
+    /// The selected image reference, e.g. `ghcr.io/phoxal/service-drive:y2026_1-stable`.
     #[must_use]
     pub fn tag_ref(&self) -> String {
         self.image_ref.clone()
@@ -267,9 +267,9 @@ pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
 
 pub fn load_robot(path: &Path) -> Result<Robot> {
     // Delegate to the extras-aware loader so EVERY command tolerates the
-    // `user_runtimes.<name>.image`/`config` keys: the typed `phoxal` model uses
-    // `deny_unknown_fields` and does not carry those fields, so they must be
-    // stripped before the typed parse. Commands that don't need the extras
+    // `user_participants.<name>.image`/`config` keys as a CLI-side side channel:
+    // they are stripped before the typed parse and threaded through
+    // `RobotManifestExtras`. Commands that don't need the extras
     // (check/validate/update/runtime add) just discard them.
     load_robot_with_extras(path).map(|loaded| loaded.robot)
 }
@@ -362,7 +362,7 @@ fn merge_yaml_overlay(
 }
 
 fn is_replace_whole_user_runtime_config(path: &[String]) -> bool {
-    path.len() == 3 && path[0] == "user_runtimes" && path[2] == "config"
+    path.len() == 3 && path[0] == "user_participants" && path[2] == "config"
 }
 
 fn take_manifest_extras(
@@ -381,7 +381,7 @@ fn take_manifest_extras(
 
     let Some(user_runtimes) = yaml
         .as_mapping_mut()
-        .and_then(|mapping| mapping.get_mut("user_runtimes"))
+        .and_then(|mapping| mapping.get_mut("user_participants"))
         .and_then(serde_yaml::Value::as_mapping_mut)
     else {
         return Ok((extras, stripped_extras));
@@ -402,7 +402,7 @@ fn take_manifest_extras(
             .map(|image| {
                 image.as_str().map(ToString::to_string).ok_or_else(|| {
                     anyhow!(
-                        "user_runtimes.{name}.image in {} must be a string",
+                        "user_participants.{name}.image in {} must be a string",
                         robot_path.display()
                     )
                 })
@@ -411,7 +411,7 @@ fn take_manifest_extras(
         let config = config
             .map(|config| {
                 serde_json::to_value(config).with_context(|| {
-                    format!("user_runtimes.{name}.config must be representable as JSON")
+                    format!("user_participants.{name}.config must be representable as JSON")
                 })
             })
             .transpose()?;
@@ -598,7 +598,7 @@ pub fn resolve(
     options: ResolveOptions,
 ) -> Result<ResolvedRobot> {
     let api_version = robot.api_version.clone();
-    let channel = robot.phoxal_runtimes.channel;
+    let channel = robot.phoxal_participants.channel;
     let platform_names = catalog.names_for_api(&api_version);
     if platform_names.is_empty() {
         bail!(
@@ -613,7 +613,7 @@ pub fn resolve(
     let mut platform_runtimes = Vec::new();
     for entry in catalog.entries_for_api(&api_version) {
         let image_ref = robot
-            .phoxal_runtimes
+            .phoxal_participants
             .images
             .get(entry.name)
             .cloned()
@@ -644,7 +644,7 @@ pub fn resolve(
     }
 
     let user_runtimes = robot
-        .user_runtimes
+        .user_participants
         .iter()
         .map(|(name, runtime)| {
             resolve_user_runtime(
@@ -771,7 +771,7 @@ fn resolve_user_runtime(
     robot_id: &str,
     api_version: &str,
     name: &str,
-    runtime: &UserRuntime,
+    runtime: &UserParticipant,
 ) -> Result<ResolvedUserRuntime> {
     let runtime_dir = resolve_project_path(project_root, &runtime.path);
     if !runtime_dir.is_dir() {
@@ -1070,7 +1070,7 @@ fn format_unavailable_api_version_error(
     // the requested api/channel.
     let mut expected_refs = catalog
         .names()
-        .map(|name| format!("ghcr.io/phoxal/runtime-{name}:{api_version}-{channel}"))
+        .map(|name| format!("ghcr.io/phoxal/service-{name}:{api_version}-{channel}"))
         .collect::<Vec<_>>();
     expected_refs.sort_unstable();
     expected_refs.dedup();
@@ -1094,7 +1094,7 @@ fn format_unavailable_api_version_error(
         message.push_str("\n  - use an api_version listed by `phoxal-cli version`");
     }
     message.push_str(
-        "\n  - or use phoxal_runtimes.channel: edge if this API version is intentionally experimental",
+        "\n  - or use phoxal_participants.channel: edge if this API version is intentionally experimental",
     );
     message.push_str("\n  - or wait until Phoxal publishes the complete ");
     message.push_str(api_version);
@@ -1151,7 +1151,7 @@ identity:
   id: testbot
   namespace: test
 structure: structure.urdf
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
 motion:
   kinematic:
@@ -1229,10 +1229,10 @@ components:
 
     #[test]
     fn load_robot_tolerates_user_runtime_image_and_config() -> anyhow::Result<()> {
-        // The typed `phoxal` model denies unknown fields and does not carry
-        // `user_runtimes.<name>.image`/`config`; `load_robot` must strip them (like
-        // the extras-aware loader) so every command — not just deploy/simulate —
-        // accepts a manifest that declares them.
+        // The CLI threads `user_participants.<name>.image`/`config` through
+        // `RobotManifestExtras` as a side channel; `load_robot` must strip them
+        // (like the extras-aware loader) so every command - not just
+        // deploy/simulate - accepts a manifest that declares them.
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("robot.yaml");
         std::fs::write(
@@ -1243,9 +1243,9 @@ identity:
   id: bot
   namespace: dev
 structure: structure.urdf
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
-user_runtimes:
+user_participants:
   brain:
     path: runtimes/brain
     image: ghcr.io/acme/brain@sha256:abc
@@ -1269,11 +1269,11 @@ components:
         // Plain load_robot (used by check/validate/update/runtime add) must parse it
         // despite the image/config keys the typed model does not know about.
         let robot = load_robot(&path)?;
-        assert!(robot.user_runtimes.contains_key("brain"));
+        assert!(robot.user_participants.contains_key("brain"));
 
         // The extras-aware loader still parses it too.
         let loaded = load_robot_with_extras(&path)?;
-        assert!(loaded.robot.user_runtimes.contains_key("brain"));
+        assert!(loaded.robot.user_participants.contains_key("brain"));
 
         Ok(())
     }
@@ -1297,7 +1297,7 @@ bus:
   profiles:
     lab:
       connect: tcp/lab-router:7447
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
 motion:
   kinematic:
@@ -1336,7 +1336,7 @@ identity:
   id: bot
   namespace: dev
 structure: structure.urdf
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
 motion:
   kinematic:
@@ -1379,7 +1379,7 @@ bus:
     lab:
       connect: tcp/lab-router:7447
       listen: tcp/0.0.0.0:7448
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
 motion:
   kinematic:
@@ -1422,7 +1422,7 @@ bus:
   profiles:
     lab:
       connect: tcp/lab-router:7447
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
 motion:
   kinematic:
@@ -1490,7 +1490,7 @@ components:
     fn runtime(pin: ImagePin) -> ResolvedPlatformRuntime {
         ResolvedPlatformRuntime {
             name: "asset".to_string(),
-            image_ref: "ghcr.io/phoxal/runtime-asset:y2026_1-stable".to_string(),
+            image_ref: "ghcr.io/phoxal/service-asset:y2026_1-stable".to_string(),
             pin,
         }
     }
@@ -1500,12 +1500,12 @@ components:
         let runtime = runtime(ImagePin::Unpinned);
         assert_eq!(
             runtime.tag_ref(),
-            "ghcr.io/phoxal/runtime-asset:y2026_1-stable"
+            "ghcr.io/phoxal/service-asset:y2026_1-stable"
         );
         // The deploy ref is the tag — no `@sha256:` is ever invented.
         assert_eq!(
             runtime.deploy_ref(),
-            "ghcr.io/phoxal/runtime-asset:y2026_1-stable"
+            "ghcr.io/phoxal/service-asset:y2026_1-stable"
         );
         assert!(!runtime.deploy_ref().contains('@'));
         assert_eq!(runtime.digest_pin(), None);
@@ -1517,7 +1517,7 @@ components:
         let runtime = runtime(ImagePin::Digest(digest.to_string()));
         assert_eq!(
             runtime.deploy_ref(),
-            format!("ghcr.io/phoxal/runtime-asset:y2026_1-stable@{digest}")
+            format!("ghcr.io/phoxal/service-asset:y2026_1-stable@{digest}")
         );
         assert_eq!(runtime.digest_pin(), Some(digest));
     }
@@ -1527,7 +1527,7 @@ components:
         let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let runtime = ResolvedPlatformRuntime {
             name: "asset".to_string(),
-            image_ref: format!("ghcr.io/phoxal/runtime-asset@{digest}"),
+            image_ref: format!("ghcr.io/phoxal/service-asset@{digest}"),
             pin: ImagePin::Digest(digest.to_string()),
         };
 

@@ -1,17 +1,20 @@
 //! Graph validation for `phoxal-cli check` (D59/D63).
 //!
 //! This is the pure core: given the `emit-apis` report of every participant in a
-//! robot graph plus the manifest's root `api_version`, it enforces the
-//! single-API-version invariant and topology cardinality. It is deliberately
-//! independent of how the reports are obtained (resolved images, local binaries),
-//! so it is fully unit-testable without Docker or a registry.
+//! robot graph, it enforces per-contract wire-shape agreement and topology
+//! cardinality. It is deliberately independent of how the reports are obtained
+//! (resolved images, local binaries), so it is fully unit-testable without Docker
+//! or a registry.
 //!
 //! Two invariants:
 //!
-//! 1. **Single API version (D59/D63).** Every normal participant must report the
-//!    graph's root `api_version`. The manifest's `api_version` is selection intent;
-//!    the artifacts are the source of truth, so a mismatch is reported against the
-//!    artifact that disagrees.
+//! 1. **Per-contract wire-shape agreement (#16-b).** Every participant that shares
+//!    a `(family, topic)` contract must report the same `schema_id` (the framework's
+//!    normalized transitive wire-shape hash). Mixed `api_version`s are allowed as
+//!    long as the shared contracts' `schema_id`s agree, because the bus decode
+//!    fast-rejects on `schema_id`, not on `api_version`. A `(family, topic)` used
+//!    with more than one distinct `schema_id` across its participants is a hard
+//!    mismatch reported against that contract.
 //! 2. **Topology cardinality.** Every contract a participant *consumes* (subscribes,
 //!    or queries as a client) must have at least one *producer* in the graph (a
 //!    publisher, or a server of that query). A consumed contract with no producer is
@@ -59,6 +62,11 @@ pub struct Contract {
     pub family: String,
     pub topic: String,
     pub direction: Direction,
+    /// The framework's normalized transitive wire-shape hash for this contract
+    /// body (`emit-apis` per-contract `schema_id`). Participants sharing a
+    /// `(family, topic)` must agree on this exact id; the bus decode fast-rejects
+    /// on a `schema_id` mismatch.
+    pub schema_id: String,
 }
 
 /// The direction a participant uses a contract on a topic. Mirrors the framework's
@@ -117,11 +125,16 @@ impl Direction {
 /// A problem found while validating a robot graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
-    /// A participant reports an API version other than the graph's root.
-    ApiVersionMismatch {
-        artifact_id: String,
-        expected: String,
-        found: String,
+    /// Participants sharing a `(family, topic)` contract disagree on its
+    /// `schema_id` (the normalized transitive wire-shape hash). Because the bus
+    /// decode fast-rejects on `schema_id`, a shared contract with more than one
+    /// distinct `schema_id` can never interoperate.
+    ContractSchemaMismatch {
+        family: String,
+        topic: String,
+        /// Each disagreeing `schema_id` paired with the sorted participant ids
+        /// that report it. Sorted by `schema_id` so output is deterministic.
+        schema_ids: Vec<(String, Vec<String>)>,
     },
     /// A consumed contract has no producer anywhere in the graph.
     MissingProducer {
@@ -199,21 +212,20 @@ pub struct ComponentCapability {
     pub kind: String,
 }
 
-/// Validate a robot graph: single-API-version (D59/D63) + topology cardinality.
+/// Validate a robot graph: per-contract `schema_id` agreement (#16-b) + topology
+/// cardinality.
 ///
-/// `participants` is every normal participant's `emit-apis` report;
-/// `root_api_version` is the manifest's root `api_version`. Problems are returned in
-/// a stable order (api-version mismatches first, by artifact; then missing producers
-/// by family+topic) so output and tests are deterministic.
+/// `participants` is every normal participant's `emit-apis` report. Problems are
+/// returned in a stable order (schema mismatches first, by family+topic; then
+/// missing producers by family+topic) so output and tests are deterministic.
 #[must_use]
-pub fn check_graph(participants: &[ParticipantApis], root_api_version: &str) -> Report {
-    check_graph_with_topology(participants, root_api_version, &RobotGraph::default())
+pub fn check_graph(participants: &[ParticipantApis]) -> Report {
+    check_graph_with_topology(participants, &RobotGraph::default())
 }
 
 #[must_use]
 pub fn check_graph_with_topology(
     participants: &[ParticipantApis],
-    root_api_version: &str,
     robot_graph: &RobotGraph,
 ) -> Report {
     let mut problems = Vec::new();
@@ -229,19 +241,13 @@ pub fn check_graph_with_topology(
     template_problems.sort_by_key(problem_sort_key);
     problems.append(&mut template_problems);
 
-    // 1. Single API version — report each disagreeing participant, in id order.
-    let mut mismatches: Vec<&ParticipantApis> = participants
-        .iter()
-        .filter(|p| p.api_version != root_api_version)
-        .collect();
-    mismatches.sort_by(|a, b| a.participant_id.cmp(&b.participant_id));
-    for p in mismatches {
-        problems.push(Problem::ApiVersionMismatch {
-            artifact_id: p.participant_id.clone(),
-            expected: root_api_version.to_string(),
-            found: p.api_version.clone(),
-        });
-    }
+    // 1. Per-contract wire-shape agreement (#16-b). Group non-template contracts
+    // by `(family, materialized topic)`, then by `schema_id`; a shared contract
+    // used with more than one distinct `schema_id` across its participants can
+    // never interoperate (the bus decode fast-rejects on `schema_id`), so it is a
+    // hard mismatch. Mixed `api_version`s are allowed as long as shared contracts'
+    // `schema_id`s agree.
+    problems.extend(schema_mismatches(&participants));
 
     // 2. Topology cardinality. Producers/consumers are keyed by
     // (family, concrete topic, direction) so matching is by *kind*: a `subscribe`
@@ -325,6 +331,49 @@ pub fn check_graph_with_topology(
     Report { problems, warnings }
 }
 
+/// Per-contract `schema_id` agreement (#16-b).
+///
+/// Group non-template contracts by `(family, materialized topic)`, then by
+/// `schema_id`, recording the participants reporting each id. A `(family, topic)`
+/// used with more than one distinct `schema_id` across its participants can never
+/// interoperate, so it is reported as a `ContractSchemaMismatch`. Contracts are
+/// already materialized (component templates expanded); any topic still carrying a
+/// placeholder is skipped (it was reported as unresolved upstream).
+fn schema_mismatches(participants: &[ParticipantApis]) -> Vec<Problem> {
+    let mut by_contract: BTreeMap<(String, String), BTreeMap<String, BTreeSet<String>>> =
+        BTreeMap::new();
+    for p in participants {
+        for c in &p.contracts {
+            if is_template_topic(&c.topic) {
+                continue;
+            }
+            by_contract
+                .entry((c.family.clone(), c.topic.clone()))
+                .or_default()
+                .entry(c.schema_id.clone())
+                .or_default()
+                .insert(p.participant_id.clone());
+        }
+    }
+
+    by_contract
+        .into_iter()
+        .filter(|(_, schema_ids)| schema_ids.len() > 1)
+        .map(
+            |((family, topic), schema_ids)| Problem::ContractSchemaMismatch {
+                family,
+                topic,
+                schema_ids: schema_ids
+                    .into_iter()
+                    .map(|(schema_id, participants)| {
+                        (schema_id, participants.into_iter().collect())
+                    })
+                    .collect(),
+            },
+        )
+        .collect()
+}
+
 impl Direction {
     #[must_use]
     pub const fn required_consumer(self) -> Option<Self> {
@@ -352,7 +401,7 @@ fn is_template_topic(topic: &str) -> bool {
 /// deterministic regardless of the order problems were appended.
 fn problem_sort_key(problem: &Problem) -> (u8, String, String) {
     match problem {
-        Problem::ApiVersionMismatch { artifact_id, .. } => (0, artifact_id.clone(), String::new()),
+        Problem::ContractSchemaMismatch { family, topic, .. } => (0, family.clone(), topic.clone()),
         Problem::MissingProducer { family, topic, .. } => (1, family.clone(), topic.clone()),
         Problem::MissingConsumer { family, topic, .. } => (2, family.clone(), topic.clone()),
         Problem::InvalidConfig { runtime_id, .. } => (3, runtime_id.clone(), String::new()),
@@ -442,6 +491,7 @@ fn materialize_contract(
                 .replace("{instance}", &capability.instance)
                 .replace("{capability}", &capability.capability),
             direction: contract.direction,
+            schema_id: contract.schema_id.clone(),
         })
         .collect::<Vec<_>>();
     materialized.sort_by(|a, b| a.topic.cmp(&b.topic).then(a.direction.cmp(&b.direction)));
@@ -497,10 +547,20 @@ mod tests {
     use super::*;
 
     fn contract(family: &str, topic: &str, direction: Direction) -> Contract {
+        contract_with_schema(family, topic, direction, "deadbeef")
+    }
+
+    fn contract_with_schema(
+        family: &str,
+        topic: &str,
+        direction: Direction,
+        schema_id: &str,
+    ) -> Contract {
         Contract {
             family: family.to_string(),
             topic: topic.to_string(),
             direction,
+            schema_id: schema_id.to_string(),
         }
     }
 
@@ -605,7 +665,7 @@ mod tests {
                 )],
             ),
         ];
-        assert!(check_graph(&graph, "y2026_1").is_ok());
+        assert!(check_graph(&graph).is_ok());
     }
 
     #[test]
@@ -629,24 +689,77 @@ mod tests {
                 ],
             ),
         ];
-        assert!(check_graph(&graph, "y2026_1").is_ok());
+        assert!(check_graph(&graph).is_ok());
     }
 
     #[test]
-    fn api_version_mismatch_is_reported_per_artifact() {
+    fn contract_schema_mismatch_is_reported_per_contract() {
+        // Two participants share a `(family, topic)` contract but report DIFFERENT
+        // `schema_id`s -> one `ContractSchemaMismatch` naming each disagreeing id
+        // and who reports it. Mixed api_versions on their own are allowed.
         let graph = vec![
-            participant("drive", "y2026_1", vec![]),
-            participant("battery", "y2026_2", vec![]),
+            participant(
+                "mission",
+                "y2026_1",
+                vec![contract_with_schema(
+                    "drive::Target",
+                    "drive/target",
+                    Direction::Publish,
+                    "aaaa",
+                )],
+            ),
+            participant(
+                "drive",
+                "y2026_2",
+                vec![contract_with_schema(
+                    "drive::Target",
+                    "drive/target",
+                    Direction::Subscribe,
+                    "bbbb",
+                )],
+            ),
         ];
-        let report = check_graph(&graph, "y2026_1");
+        let report = check_graph(&graph);
         assert_eq!(
             report.problems,
-            vec![Problem::ApiVersionMismatch {
-                artifact_id: "battery".to_string(),
-                expected: "y2026_1".to_string(),
-                found: "y2026_2".to_string(),
+            vec![Problem::ContractSchemaMismatch {
+                family: "drive::Target".to_string(),
+                topic: "drive/target".to_string(),
+                schema_ids: vec![
+                    ("aaaa".to_string(), vec!["mission".to_string()]),
+                    ("bbbb".to_string(), vec!["drive".to_string()]),
+                ],
             }]
         );
+    }
+
+    #[test]
+    fn matching_contract_schema_ids_pass_even_with_mixed_api_versions() {
+        // Same `(family, topic)` and same `schema_id` on both sides -> no problem,
+        // even though the two participants report different api_versions.
+        let graph = vec![
+            participant(
+                "mission",
+                "y2026_1",
+                vec![contract_with_schema(
+                    "drive::Target",
+                    "drive/target",
+                    Direction::Publish,
+                    "cafe",
+                )],
+            ),
+            participant(
+                "drive",
+                "y2026_2",
+                vec![contract_with_schema(
+                    "drive::Target",
+                    "drive/target",
+                    Direction::Subscribe,
+                    "cafe",
+                )],
+            ),
+        ];
+        assert!(check_graph(&graph).is_ok());
     }
 
     #[test]
@@ -660,7 +773,7 @@ mod tests {
                 Direction::Subscribe,
             )],
         )];
-        let report = check_graph(&graph, "y2026_1");
+        let report = check_graph(&graph);
         assert_eq!(
             report.problems,
             vec![Problem::MissingProducer {
@@ -682,7 +795,7 @@ mod tests {
                 Direction::Publish,
             )],
         )];
-        let report = check_graph(&graph, "y2026_1");
+        let report = check_graph(&graph);
 
         assert!(report.problems.is_empty());
         assert_eq!(
@@ -706,7 +819,7 @@ mod tests {
                 Direction::QueryRequest,
             )],
         )];
-        let report = check_graph(&graph, "y2026_1");
+        let report = check_graph(&graph);
         assert_eq!(report.problems.len(), 1);
         assert!(matches!(
             &report.problems[0],
@@ -725,7 +838,7 @@ mod tests {
                 contract("asset::GetResponse", "asset/get", Direction::ServerResponse),
             ],
         )];
-        let report = check_graph(&graph, "y2026_1");
+        let report = check_graph(&graph);
 
         assert_eq!(
             report.problems,
@@ -768,7 +881,7 @@ mod tests {
             ),
         ];
 
-        let report = check_graph_with_topology(&participants, "y2026_1", &robot_graph());
+        let report = check_graph_with_topology(&participants, &robot_graph());
 
         assert!(report.problems.is_empty());
         assert_eq!(
@@ -804,7 +917,7 @@ mod tests {
             ),
         ];
 
-        let report = check_graph_with_topology(&participants, "y2026_1", &robot_graph());
+        let report = check_graph_with_topology(&participants, &robot_graph());
 
         assert_eq!(
             report.problems,
@@ -844,7 +957,7 @@ mod tests {
         ];
 
         // Empty robot graph: no component instances/capabilities exist.
-        let report = check_graph_with_topology(&participants, "y2026_1", &RobotGraph::default());
+        let report = check_graph_with_topology(&participants, &RobotGraph::default());
 
         // The literal placeholder topic must never appear as a satisfied edge,
         // and must never be reported as a missing producer/consumer either.
@@ -895,7 +1008,7 @@ mod tests {
             )],
         )];
 
-        let report = check_graph_with_topology(&participants, "y2026_1", &graph);
+        let report = check_graph_with_topology(&participants, &graph);
 
         assert_eq!(
             report.problems,
@@ -917,7 +1030,7 @@ mod tests {
             participant("map", "y2026_1", vec![consume()]),
             participant("localize", "y2026_1", vec![consume(), consume()]),
         ];
-        let report = check_graph(&graph, "y2026_1");
+        let report = check_graph(&graph);
         assert_eq!(
             report.problems,
             vec![Problem::MissingProducer {
@@ -959,7 +1072,7 @@ mod tests {
                 )],
             ),
         ];
-        assert!(check_graph(&graph, "y2026_1").is_ok());
+        assert!(check_graph(&graph).is_ok());
     }
 
     #[test]
@@ -980,7 +1093,7 @@ mod tests {
                 vec![contract("x::Body", "x/topic", Direction::QueryRequest)],
             ),
         ];
-        let report = check_graph(&graph, "y2026_1");
+        let report = check_graph(&graph);
         assert_eq!(
             report.problems,
             vec![Problem::MissingProducer {
@@ -993,6 +1106,6 @@ mod tests {
 
     #[test]
     fn empty_graph_is_ok() {
-        assert!(check_graph(&[], "y2026_1").is_ok());
+        assert!(check_graph(&[]).is_ok());
     }
 }

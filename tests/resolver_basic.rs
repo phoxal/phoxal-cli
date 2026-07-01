@@ -56,7 +56,7 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
             .find(|runtime| runtime.name == "drive")
             .expect("drive runtime")
             .tag_ref(),
-        "ghcr.io/phoxal/runtime-drive:y2026_1-stable"
+        "ghcr.io/phoxal/service-drive:y2026_1-stable"
     );
 
     Ok(())
@@ -112,8 +112,8 @@ fn resolves_known_api_to_its_official_set() -> anyhow::Result<()> {
 #[test]
 fn image_override_for_official_runtime_is_preserved() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
-        "phoxal_runtimes:\n  channel: stable",
-        "phoxal_runtimes:\n  channel: latest\n  images:\n    drive: ghcr.io/phoxal/runtime-drive:y2026_1-v0.13.0",
+        "phoxal_participants:\n  channel: stable",
+        "phoxal_participants:\n  channel: latest\n  images:\n    drive: ghcr.io/phoxal/service-drive:y2026_1-v0.13.0",
     ))?;
     let resolved = resolve(
         &robot,
@@ -129,14 +129,14 @@ fn image_override_for_official_runtime_is_preserved() -> anyhow::Result<()> {
         .expect("drive runtime");
     assert_eq!(
         drive.tag_ref(),
-        "ghcr.io/phoxal/runtime-drive:y2026_1-v0.13.0"
+        "ghcr.io/phoxal/service-drive:y2026_1-v0.13.0"
     );
     let map = resolved
         .platform_runtimes
         .iter()
         .find(|runtime| runtime.name == "map")
         .expect("map runtime");
-    assert_eq!(map.tag_ref(), "ghcr.io/phoxal/runtime-map:y2026_1-latest");
+    assert_eq!(map.tag_ref(), "ghcr.io/phoxal/service-map:y2026_1-latest");
 
     Ok(())
 }
@@ -144,8 +144,8 @@ fn image_override_for_official_runtime_is_preserved() -> anyhow::Result<()> {
 #[test]
 fn unknown_platform_image_key_fails_for_api() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
-        "phoxal_runtimes:\n  channel: stable",
-        "phoxal_runtimes:\n  channel: stable\n  images:\n    diagnostics: ghcr.io/phoxal/runtime-diagnostics:y2026_1-stable",
+        "phoxal_participants:\n  channel: stable",
+        "phoxal_participants:\n  channel: stable\n  images:\n    diagnostics: ghcr.io/phoxal/service-diagnostics:y2026_1-stable",
     ))?;
 
     let error = resolve(
@@ -155,7 +155,7 @@ fn unknown_platform_image_key_fails_for_api() -> anyhow::Result<()> {
         offline_options(),
     )
     .expect_err("image key outside the API set should fail");
-    assert!(error.to_string().contains("not a platform runtime"));
+    assert!(error.to_string().contains("not a platform participant"));
 
     Ok(())
 }
@@ -163,8 +163,8 @@ fn unknown_platform_image_key_fails_for_api() -> anyhow::Result<()> {
 #[test]
 fn user_runtime_shadowing_platform_fails_for_api() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
-        "phoxal_runtimes:\n  channel: stable",
-        "phoxal_runtimes:\n  channel: stable\n\nuser_runtimes:\n  drive:\n    path: ./runtimes/drive",
+        "phoxal_participants:\n  channel: stable",
+        "phoxal_participants:\n  channel: stable\n\nuser_participants:\n  drive:\n    path: ./runtimes/drive",
     ))?;
 
     let error = resolve(
@@ -174,7 +174,7 @@ fn user_runtime_shadowing_platform_fails_for_api() -> anyhow::Result<()> {
         offline_options(),
     )
     .expect_err("shadowing should fail");
-    assert!(error.to_string().contains("shadows a platform runtime"));
+    assert!(error.to_string().contains("shadows a platform participant"));
 
     Ok(())
 }
@@ -299,8 +299,8 @@ fn tools_resolve_from_explicit_independent_versions() -> anyhow::Result<()> {
 #[test]
 fn tool_version_override_is_preserved_for_any_known_tool() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
-        "phoxal_runtimes:\n  channel: stable",
-        "phoxal_runtimes:\n  channel: stable\n\ntools:\n  joypad:\n    version: \"0.9.9\"",
+        "phoxal_participants:\n  channel: stable",
+        "phoxal_participants:\n  channel: stable\n\ntools:\n  joypad:\n    version: \"0.9.9\"",
     ))?;
     let resolved = resolve(
         &robot,
@@ -336,7 +336,7 @@ identity:
 
 structure: structure.urdf
 
-phoxal_runtimes:
+phoxal_participants:
   channel: stable
 
 motion:
@@ -366,8 +366,8 @@ components:
 
 fn robot_with_user_runtime(user_runtimes: &str) -> String {
     minimal_robot_yaml("y2026_1").replace(
-        "phoxal_runtimes:\n  channel: stable",
-        &format!("phoxal_runtimes:\n  channel: stable\n\nuser_runtimes:\n{user_runtimes}"),
+        "phoxal_participants:\n  channel: stable",
+        &format!("phoxal_participants:\n  channel: stable\n\nuser_participants:\n{user_runtimes}"),
     )
 }
 

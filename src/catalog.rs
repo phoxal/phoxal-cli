@@ -54,13 +54,13 @@ pub fn lookup_tool_version(name: &str) -> Option<&'static ToolVersion> {
 }
 
 pub const CATALOG: PlatformRuntimeCatalog = PlatformRuntimeCatalog {
-    // The default image repo for each runtime is derived from its name
-    // (`ghcr.io/phoxal/runtime-<name>`, see `PlatformRuntimeEntry::image_repo`),
+    // The default image repo for each service is derived from its name
+    // (`ghcr.io/phoxal/service-<name>`, see `PlatformRuntimeEntry::image_repo`),
     // so the catalog carries only the name, API availability, and topology flags.
-    // A robot may still override the full image ref per runtime via
-    // `phoxal_runtimes.images.<name>`.
+    // A robot may still override the full image ref per participant via
+    // `phoxal_participants.images.<name>`.
     //
-    // The runtime NAMES here must mirror the `runtime/<name>` crate directories
+    // The service NAMES here must mirror the `service/<name>` crate directories
     // in `phoxal/framework`; that cross-repo invariant is enforced in framework
     // release CI, not here (the framework tree isn't present at CLI build time).
     entries: &[
@@ -100,10 +100,10 @@ const fn entry(
 }
 
 impl PlatformRuntimeEntry {
-    /// Default GHCR repo for this runtime, derived from its name. A per-robot
+    /// Default GHCR repo for this service, derived from its name. A per-robot
     /// `images.<name>` full image ref takes precedence over this in the resolver.
     pub fn image_repo(&self) -> String {
-        format!("ghcr.io/phoxal/runtime-{}", self.name)
+        format!("ghcr.io/phoxal/service-{}", self.name)
     }
 }
 
@@ -259,7 +259,7 @@ mod tests {
         for entry in CATALOG.entries {
             assert_eq!(
                 entry.image_repo(),
-                format!("ghcr.io/phoxal/runtime-{}", entry.name)
+                format!("ghcr.io/phoxal/service-{}", entry.name)
             );
         }
     }
