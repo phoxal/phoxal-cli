@@ -32,8 +32,8 @@ pub(crate) fn ensure_platform_images(
 
 pub(crate) fn pull_platform_image_refs(runtime_refs: &[(String, String)]) -> Result<()> {
     for (runtime_name, image) in runtime_refs {
-        // `deploy_ref` is a real digest pin or an honest tag ref — never a
-        // fabricated `sha256:` — so this can't attempt to pull a fake digest.
+        // `deploy_ref` is a real digest pin or an honest tag ref - never a
+        // fabricated `sha256:` - so this can't attempt to pull a fake digest.
         shell::run_status("docker", ["pull", image.as_str()], None).with_context(|| {
             if image.contains("@sha256:") {
                 format!("failed to pull pinned runtime image {image}")

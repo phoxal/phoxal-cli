@@ -9,9 +9,11 @@
 //!
 //! The command surface (see [`commands`]) is:
 //!
-//! - `check` - validate the resolved graph's per-contract wire-shape (`schema_id`)
-//!   agreement and topology via `emit-apis`; cached official images (`--pull` to refresh), git component
-//!   commits resolved live unless pinned to a commit SHA in `robot.yaml`.
+//! - `check` - collect each participant's `emit-apis` metadata, then validate
+//!   per-contract wire-shape (`schema_id`) agreement and topology with the shared
+//!   [`phoxal::check`] graph core; cached official images (`--pull` to refresh),
+//!   git component commits resolved live unless pinned to a commit SHA in
+//!   `robot.yaml`.
 //! - `simulate <world>` - resolve, generate the run bundle, and launch the
 //!   Webots simulation stack.
 //! - `deploy build` - produce an immutable, digest-pinned deployment artifact.
@@ -30,7 +32,6 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod catalog;
-pub mod check;
 pub mod commands;
 pub(crate) mod component_driver;
 pub mod compose;

@@ -38,7 +38,7 @@ pub fn stage_webots_artifacts(
     let source_world_path = world_path.to_path_buf();
     let source_world = fs::read_to_string(&source_world_path).with_context(|| {
         format!(
-            "world source missing at {} — copy a world template (e.g. phoxal/framework/fixture/world/ArenaWorld.wbt) to that path",
+            "world source missing at {} - copy a world template (e.g. phoxal/framework/fixture/world/ArenaWorld.wbt) to that path",
             world_path.display()
         )
     })?;

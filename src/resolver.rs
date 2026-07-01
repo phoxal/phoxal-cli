@@ -139,7 +139,7 @@ const DEFAULT_BUS_PROFILE_NAME: &str = "default";
 ///
 /// A [`ImagePin::Digest`] is a reproducible OCI content pin obtained from the
 /// registry (via `docker buildx imagetools inspect`). [`ImagePin::Unpinned`]
-/// means no digest was resolved — the image is deployed by its selected tag
+/// means no digest was resolved - the image is deployed by its selected tag
 /// tag. We never fabricate a digest: an unpinned image is deployed by tag,
 /// which is the honest pre-publish-recovery behavior and is still a real,
 /// pullable reference (it just isn't content-addressed).
@@ -167,7 +167,7 @@ impl ResolvedPlatformRuntime {
 
     /// The reference Docker should pull and compose should embed: a real
     /// digest pin when one was resolved, otherwise the selected image ref.
-    /// Never a fabricated digest — so live `simulate` can never attempt to
+    /// Never a fabricated digest - so live `simulate` can never attempt to
     /// pull a fake `ref@sha256:…`.
     #[must_use]
     pub fn deploy_ref(&self) -> String {
@@ -679,7 +679,7 @@ pub fn resolve(
 ///
 /// This requires `docker buildx imagetools inspect`, which reports the actual
 /// registry index digest. We deliberately do **not** fall back to hashing a
-/// `docker manifest inspect` body — fabricating a `sha256:` from manifest JSON
+/// `docker manifest inspect` body - fabricating a `sha256:` from manifest JSON
 /// produces a string that looks like an OCI pin but can never be pulled. If
 /// buildx cannot reach the image, fail loudly with guidance instead.
 pub fn resolve_image_digest(image_ref: &str) -> Result<String> {
@@ -698,7 +698,7 @@ pub fn resolve_image_digest(image_ref: &str) -> Result<String> {
     .with_context(|| {
         format!(
             "could not resolve a real image digest for {image_ref}. \
-             `docker buildx imagetools inspect` failed — install Docker with buildx and ensure \
+             `docker buildx imagetools inspect` failed - install Docker with buildx and ensure \
              the daemon can reach the registry. If the phoxal/framework GHCR runtime images are \
              not published yet, deploy by tag (`simulate`/`check` resolve no digests) until they \
              are published."
@@ -1025,7 +1025,7 @@ fn buildx_imagetools_manifest_digest(output: &str) -> Result<String> {
 }
 
 /// Deterministic non-cryptographic stand-in hash for **tool asset** entries
-/// during offline resolution. Never used for OCI image digests — image pins
+/// during offline resolution. Never used for OCI image digests - image pins
 /// are either a real registry digest or an honest tag ref (see [`ImagePin`]).
 fn fake_sha(seed: &str) -> String {
     let mut hasher = Sha256::new();
@@ -1482,7 +1482,7 @@ components:
     #[test]
     fn buildx_imagetools_digest_rejects_non_sha256_digest() {
         // A registry that reports a non-sha256 digest must not be accepted as a
-        // pin — we never coerce a bogus value into a `sha256:` string.
+        // pin - we never coerce a bogus value into a `sha256:` string.
         let output = r#"{"digest": "md5:deadbeef"}"#;
         assert!(buildx_imagetools_manifest_digest(output).is_err());
     }
@@ -1502,7 +1502,7 @@ components:
             runtime.tag_ref(),
             "ghcr.io/phoxal/service-asset:y2026_1-stable"
         );
-        // The deploy ref is the tag — no `@sha256:` is ever invented.
+        // The deploy ref is the tag - no `@sha256:` is ever invented.
         assert_eq!(
             runtime.deploy_ref(),
             "ghcr.io/phoxal/service-asset:y2026_1-stable"
