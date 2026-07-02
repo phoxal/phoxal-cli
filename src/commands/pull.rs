@@ -24,8 +24,11 @@ pub struct Pull {
 pub struct PullSummary {
     pub api_version: String,
     pub channel: String,
-    pub platform_service_count: usize,
     pub tool_count: usize,
+    /// Official native service artifacts cannot be fetched yet; the generated
+    /// catalog + native-asset pipeline lands with the native distribution work
+    /// (phoxal/organization tmp/framework-rewrite follow-up 06).
+    pub official_services_pending: bool,
 }
 
 impl Pull {
@@ -39,11 +42,11 @@ impl Pull {
             &summary,
             || {
                 println!(
-                    "pulled {} official services and {} tools for api_version {} (channel {})",
-                    summary.platform_service_count,
-                    summary.tool_count,
-                    summary.api_version,
-                    summary.channel
+                    "refreshed {} host tools for api_version {} (channel {})",
+                    summary.tool_count, summary.api_version, summary.channel
+                );
+                println!(
+                    "official native service artifacts are pending (native distribution work 06)"
                 );
                 Ok(())
             },
@@ -64,23 +67,18 @@ pub fn run(project_start: &Path, ui: &crate::Ui) -> Result<PullSummary> {
         project_root,
         &CATALOG,
         ResolveOptions {
-            // pull refreshes official images + host tools only; it never reads
-            // component commits, so it stays off the network for git refs.
+            // pull refreshes official artifacts and host tools only; it never
+            // reads component commits, so it stays off the network for git refs.
             resolve_external_artifacts: false,
             resolve_source_commits: false,
         },
     )?;
-    let platform_refs = resolved
-        .platform_runtimes
-        .iter()
-        .map(|runtime| (runtime.name.clone(), runtime.tag_ref()))
-        .collect::<Vec<_>>();
-    crate::local_build::pull_platform_image_refs(&platform_refs)?;
     let tool_names = resolved
         .tools
         .iter()
         .map(|tool| tool.name.as_str())
         .collect::<Vec<_>>();
+    let tool_count = tool_names.len();
     crate::tool_provisioning::ensure_tool_binaries_with_mode(
         ui,
         &resolved,
@@ -88,10 +86,14 @@ pub fn run(project_start: &Path, ui: &crate::Ui) -> Result<PullSummary> {
         crate::tool_provisioning::ProvisioningMode::Refresh,
     )?;
 
+    // Host tools are native host binaries and refresh today; official service
+    // artifacts need the generated catalog + native-asset pipeline (06), which
+    // is not built yet. Report that honestly rather than erroring after the
+    // tool refresh already ran.
     Ok(PullSummary {
-        api_version: resolved.api_version,
+        api_version: resolved.api_version.clone(),
         channel: resolved.channel.to_string(),
-        platform_service_count: resolved.platform_runtimes.len(),
-        tool_count: resolved.tools.len(),
+        tool_count,
+        official_services_pending: true,
     })
 }

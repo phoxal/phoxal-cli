@@ -53,29 +53,6 @@ fn parses_service_run() {
 }
 
 #[test]
-fn parses_service_image_with_json_output() {
-    let cli = Cli::try_parse_from([
-        "phoxal-cli",
-        "service",
-        "image",
-        "avoid-obstacles",
-        "--message-format",
-        "json",
-    ])
-    .expect("service image command should parse");
-
-    let RootCommand::Service(command) = cli.command else {
-        panic!("expected service command");
-    };
-    let service::ServiceSubcommand::Image(image) = command.command else {
-        panic!("expected service image command");
-    };
-
-    assert_eq!(image.name.as_deref(), Some("avoid-obstacles"));
-    assert_eq!(image.message_format, MessageFormat::Json);
-}
-
-#[test]
 fn parses_service_catalog_json_output() {
     let cli = Cli::try_parse_from([
         "phoxal-cli",
@@ -137,7 +114,7 @@ fn parses_simulate_pull() {
 }
 
 #[test]
-fn parses_deploy_build_defaults_to_compose() {
+fn parses_deploy_build() {
     let cli = Cli::try_parse_from(["phoxal-cli", "deploy", "build"])
         .expect("deploy build command should parse");
 
@@ -146,8 +123,7 @@ fn parses_deploy_build_defaults_to_compose() {
     };
     let deploy::DeploySubcommand::Build(build) = command.command;
 
-    assert_eq!(build.target, deploy::DeployTarget::Compose);
-    assert!(build.output.is_none());
+    assert!(build.env.is_empty());
 }
 
 #[test]

@@ -201,20 +201,11 @@ fn print_text_report(robot: &Robot) {
     println!("channel: {}", robot.phoxal_participants.channel);
     println!("platform_services:");
     for runtime in CATALOG.entries_for_api(&robot.api_version) {
-        let image_ref = robot
-            .phoxal_participants
-            .images
-            .get(runtime.name)
-            .cloned()
-            .unwrap_or_else(|| {
-                format!(
-                    "{}:{}-{}",
-                    runtime.image_repo(),
-                    robot.api_version,
-                    robot.phoxal_participants.channel
-                )
-            });
-        println!("  - {} -> {}", runtime.name, image_ref);
+        let artifact_ref = format!(
+            "service-{}:{}-{}",
+            runtime.name, robot.api_version, robot.phoxal_participants.channel
+        );
+        println!("  - {} -> {}", runtime.name, artifact_ref);
     }
     println!("user_participants:");
     for (name, runtime) in &robot.user_participants {
@@ -240,23 +231,14 @@ fn print_json_report(robot: &Robot) -> Result<()> {
         "api_version": robot.api_version,
         "channel": robot.phoxal_participants.channel,
         "platform_services": CATALOG.entries_for_api(&robot.api_version).map(|runtime| {
-            let image_ref = robot
-                .phoxal_participants
-                .images
-                .get(runtime.name)
-                .cloned()
-                .unwrap_or_else(|| {
-                    format!(
-                        "{}:{}-{}",
-                        runtime.image_repo(),
-                        robot.api_version,
-                        robot.phoxal_participants.channel
-                    )
-                });
+            let artifact_ref = format!(
+                "service-{}:{}-{}",
+                runtime.name, robot.api_version, robot.phoxal_participants.channel
+            );
             serde_json::json!({
                 "name": runtime.name,
                 "api_versions": runtime.api_versions,
-                "image_ref": image_ref,
+                "artifact_ref": artifact_ref,
             })
         }).collect::<Vec<_>>(),
         "user_participants": robot.user_participants.iter().map(|(name, runtime)| {

@@ -1,27 +1,20 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
 
 use crate::AppContext;
 use crate::catalog::CATALOG;
 use crate::commands::MessageFormat;
-use crate::compose::LaunchClock;
 use crate::resolver::{ResolveOptions, ResolvedRobot, RobotManifestExtras, resolve};
 use crate::world;
 
-const SIMULATOR_WEBOTS_CONTROLLER: &str = "simulator_webots_controller";
-const SIMULATOR_WEBOTS_SUPERVISOR: &str = "simulator_webots_supervisor";
+const DEFAULT_BUS_CONNECT: &str = "tcp/127.0.0.1:7447";
 const JOYPAD: &str = "joypad";
 
 #[derive(Debug, Args)]
-#[command(
-    after_help = "Lifecycle note:\n  phoxal simulate starts the singleton phoxal-local-zenoh container and joins it to the phoxal-link network.\n  Running two simulations concurrently is unsupported: whichever run tears down first will stop that shared container.\n  A future phoxal local up/down command will provide explicit lifecycle control."
-)]
 pub struct Simulate {
     #[arg(
         value_name = "WORLD",
@@ -30,14 +23,14 @@ pub struct Simulate {
     pub world: String,
     #[arg(
         long,
-        help = "Resolve and write run artifacts without starting containers or processes."
+        help = "Resolve and write run artifacts without starting simulation processes."
     )]
     pub dry_run: bool,
     #[arg(long, help = "Launch joypad from the cached Phoxal tool binaries.")]
     pub joypad: bool,
     #[arg(
         long,
-        help = "Refresh official service images and host tools instead of reusing compatible cached artifacts."
+        help = "Refresh native service artifacts and host tools instead of reusing compatible cached artifacts."
     )]
     pub pull: bool,
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
@@ -63,12 +56,10 @@ pub struct SimulatePlan {
     pub robot_path: PathBuf,
     pub project_root: PathBuf,
     pub run_dir: PathBuf,
-    pub compose_path: PathBuf,
     pub state_path: PathBuf,
     pub bus_connect: String,
     pub written_files: Vec<PathBuf>,
     pub native_tools: Vec<String>,
-    pub compose_services: Vec<String>,
     pub resolved: ResolvedRobot,
 }
 
@@ -83,8 +74,6 @@ struct ResolvedSimulation {
 #[derive(Debug, Serialize)]
 struct DryRunState {
     mode: &'static str,
-    compose_file: PathBuf,
-    services: Vec<String>,
     processes: Vec<DryRunProcess>,
 }
 
@@ -127,54 +116,17 @@ pub async fn run(
             Ok(plan)
         }
         SimulateMode::Live => {
-            // The Webots controller/supervisor are host-native binaries that
-            // phoxal/framework publishes only for x86_64 Linux and arm64 macOS.
-            // Reject any other host up front (Intel macOS, Linux ARM, Windows, …)
-            // rather than letting provisioning fail later with an opaque "release
-            // asset not found".
-            let host_target = crate::resolver::host_target_triple();
-            const SIMULATOR_HOST_TARGETS: [&str; 2] =
-                ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"];
-            if !SIMULATOR_HOST_TARGETS.contains(&host_target.as_str()) {
-                anyhow::bail!(
-                    "phoxal-cli simulate is not supported on host target {host_target}: \
-                     the Webots simulator binaries are published only for {}",
-                    SIMULATOR_HOST_TARGETS.join(" and ")
-                );
-            }
-            crate::host_doctor::preflight()?;
-            let project_root = app.project.root().to_path_buf();
-            let resolve_options = options.clone();
-            let resolved = tokio::task::spawn_blocking(move || {
-                resolve_project(&project_root, resolve_options, SimulateMode::Live)
-            })
-            .await
-            .context("simulate resolver worker failed")??;
-            crate::local_build::ensure_platform_images(app, &resolved.resolved, options.pull)?;
-            crate::tool_provisioning::ensure_tool_binaries_with_mode(
-                &app.ui,
-                &resolved.resolved,
-                requested_tool_names(&options),
-                crate::tool_provisioning::ProvisioningMode::from_pull(options.pull),
-            )?;
-            let user_images = crate::local_build::build_user_runtimes(
-                &resolved.project_root,
-                &resolved.resolved,
-            )?;
-            crate::local_build::build_component_drivers(
-                &resolved.project_root,
-                &resolved.resolved,
-            )?;
-            let plan = write_simulation_files(resolved, options, &user_images, SimulateMode::Live)?;
-            execute_plan(&plan).await?;
-            Ok(plan)
+            let _ = (app, options);
+            Err(crate::native_pending::error(
+                "native simulation launch (10)",
+            ))
         }
     }
 }
 
 pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<SimulatePlan> {
     let resolved = resolve_project(project_start, options.clone(), SimulateMode::DryRun)?;
-    write_simulation_files(resolved, options, &BTreeMap::new(), SimulateMode::DryRun)
+    write_simulation_files(resolved, options)
 }
 
 fn resolve_project(
@@ -193,12 +145,11 @@ fn resolve_project(
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
 
-    // Always resolve live: simulate never pins registry/tool digests (deploy
-    // handles digest pinning), but it does resolve git component commits so
-    // component drivers can be staged. A path-only / official-only graph needs
-    // no network; a git component pinned to a commit SHA resolves offline; a
-    // tag/branch ref is resolved live via `git ls-remote` (with an actionable
-    // error if the network is unavailable).
+    // Always resolve live: simulate does not pin tool checksums, but it does
+    // resolve git component commits so component drivers can be staged. A
+    // path-only / official-only graph needs no network; a git component pinned
+    // to a commit SHA resolves offline; a tag/branch ref is resolved live via
+    // `git ls-remote` (with an actionable error if the network is unavailable).
     let resolved = resolve(
         &robot,
         &project_root,
@@ -220,15 +171,12 @@ fn resolve_project(
 fn write_simulation_files(
     resolved: ResolvedSimulation,
     options: SimulateOptions,
-    user_images: &BTreeMap<String, String>,
-    mode: SimulateMode,
 ) -> Result<SimulatePlan> {
     let run_dir = resolved.project_root.join(".phoxal").join("run");
     crate::run_view::assemble(&resolved.project_root, &resolved.resolved, &run_dir)?;
-    let default_connect = format!("tcp/127.0.0.1:{}", crate::local_zenoh::LOCAL_ZENOH_PORT);
     let bus_profile = resolved
         .manifest_extras
-        .materialized_bus_profile(&default_connect);
+        .materialized_bus_profile(DEFAULT_BUS_CONNECT);
     crate::simulator_staging::stage_webots_artifacts(
         &resolved.project_root,
         &resolved.resolved,
@@ -237,45 +185,20 @@ fn write_simulation_files(
         &bus_profile.connect,
     )?;
     let native_tools = native_tool_labels(options);
-    let compose_path = run_dir.join("docker-compose.yml");
-    fs::write(
-        &compose_path,
-        crate::compose::generate(
-            &resolved.resolved,
-            &CATALOG,
-            &run_dir,
-            user_images,
-            &native_tools,
-            &resolved.manifest_extras,
-            LaunchClock::Simulation,
-        )?,
-    )
-    .with_context(|| format!("failed to write {}", compose_path.display()))?;
 
     let state_path = resolved
         .project_root
         .join(".phoxal")
         .join("cache")
         .join("state.yaml");
-    let compose_services = compose_service_names(&resolved.resolved);
-    if mode == SimulateMode::DryRun {
-        write_dry_run_state(
-            &state_path,
-            &compose_path,
-            &compose_services,
-            &native_tools,
-            &resolved,
-        )?;
-    }
+    write_dry_run_state(&state_path, &native_tools, &resolved)?;
 
-    let mut written_files = crate::local_build::collect_files_under(&run_dir)?;
+    let mut written_files = collect_files_under(&run_dir)?;
     let webots_dir = resolved.project_root.join(".phoxal").join("webots");
     if webots_dir.is_dir() {
-        written_files.extend(crate::local_build::collect_files_under(&webots_dir)?);
+        written_files.extend(collect_files_under(&webots_dir)?);
     }
-    if mode == SimulateMode::DryRun {
-        written_files.push(state_path.clone());
-    }
+    written_files.push(state_path.clone());
     written_files.sort();
     written_files.dedup();
 
@@ -283,20 +206,16 @@ fn write_simulation_files(
         robot_path: resolved.robot_path,
         project_root: resolved.project_root,
         run_dir,
-        compose_path,
         state_path,
         bus_connect: bus_profile.connect,
         written_files,
         native_tools,
-        compose_services,
         resolved: resolved.resolved,
     })
 }
 
 fn write_dry_run_state(
     state_path: &Path,
-    compose_path: &Path,
-    compose_services: &[String],
     native_tools: &[String],
     resolved: &ResolvedSimulation,
 ) -> Result<()> {
@@ -317,8 +236,6 @@ fn write_dry_run_state(
         .collect();
     let state = DryRunState {
         mode: "dry-run",
-        compose_file: compose_path.to_path_buf(),
-        services: compose_services.to_vec(),
         processes,
     };
     fs::write(state_path, serde_yaml::to_string(&state)?)
@@ -330,11 +247,9 @@ fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Resul
         mode: "dry-run",
         api_version: plan.resolved.api_version.clone(),
         channel: plan.resolved.channel.to_string(),
-        compose_file: plan.compose_path.clone(),
         written_files: plan.written_files.clone(),
         platform_service_count: plan.resolved.platform_runtimes.len(),
         native_tools: plan.native_tools.clone(),
-        compose_services: plan.compose_services.clone(),
     };
     crate::commands::print_message(
         &output,
@@ -351,10 +266,9 @@ fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Resul
                 plan.resolved.platform_runtimes.len()
             );
             for runtime in &plan.resolved.platform_runtimes {
-                println!("  - {} -> {}", runtime.name, runtime.tag_ref());
+                println!("  - {} -> {}", runtime.name, runtime.artifact_ref());
             }
-            println!("compose file: {}", plan.compose_path.display());
-            println!("dry-run - no containers or processes started");
+            println!("dry-run - no simulation processes started");
             Ok(())
         },
         message_format,
@@ -366,70 +280,9 @@ struct SimulateDryRunOutput {
     mode: &'static str,
     api_version: String,
     channel: String,
-    compose_file: PathBuf,
     written_files: Vec<PathBuf>,
     platform_service_count: usize,
     native_tools: Vec<String>,
-    compose_services: Vec<String>,
-}
-
-async fn execute_plan(plan: &SimulatePlan) -> Result<()> {
-    crate::docker_stack::bring_up_stack(&plan.compose_path)?;
-
-    let mut processes = crate::process::SpawnedProcesses::new();
-    if plan.native_tools.iter().any(|tool| tool == JOYPAD) {
-        spawn_cached_tool(&plan.resolved, JOYPAD, &plan.bus_connect, &mut processes)?;
-    }
-    spawn_webots(&plan.project_root, &plan.resolved, &mut processes)?;
-    processes.write_state(&plan.state_path)?;
-
-    tokio::signal::ctrl_c()
-        .await
-        .context("failed to listen for Ctrl-C")?;
-    drop(processes);
-    crate::docker_stack::tear_down_stack(&plan.compose_path)?;
-    Ok(())
-}
-
-fn spawn_cached_tool(
-    resolved: &ResolvedRobot,
-    tool_name: &str,
-    router_endpoint: &str,
-    processes: &mut crate::process::SpawnedProcesses,
-) -> Result<()> {
-    let tool = resolved
-        .tools
-        .iter()
-        .find(|tool| tool.name == tool_name)
-        .with_context(|| {
-            format!("resolved tool {tool_name} is missing; cannot spawn requested native tool")
-        })?;
-    let binary =
-        crate::simulator_staging::cached_tool_path(&tool.name, &tool.resolved, &tool.binary_name)?;
-    if !binary.is_file() {
-        bail!(
-            "cached tool {} v{} is missing at {}; it has not been provisioned",
-            tool.name,
-            tool.resolved,
-            binary.display()
-        );
-    }
-    let mut command = ProcessCommand::new(binary);
-    command.env("ROBOT_ROUTER_ENDPOINT", router_endpoint);
-    command.env("ROBOT_ID", &resolved.robot.identity.id);
-    command.env("ROBOT_NAMESPACE", &resolved.robot.identity.namespace);
-    processes.spawn(tool_name, &mut command)
-}
-
-fn spawn_webots(
-    project_root: &Path,
-    _resolved: &ResolvedRobot,
-    processes: &mut crate::process::SpawnedProcesses,
-) -> Result<()> {
-    let world = staged_webots_world_path(project_root);
-    let mut command = ProcessCommand::new(crate::host_doctor::webots_executable_path()?);
-    command.arg(world);
-    processes.spawn("webots", &mut command)
 }
 
 fn staged_webots_world_path(project_root: &Path) -> PathBuf {
@@ -452,31 +305,25 @@ fn native_tool_labels(options: SimulateOptions) -> Vec<String> {
     labels
 }
 
-fn requested_tool_names(options: &SimulateOptions) -> Vec<&'static str> {
-    let mut tools = vec![SIMULATOR_WEBOTS_CONTROLLER, SIMULATOR_WEBOTS_SUPERVISOR];
-    if options.joypad {
-        tools.push(JOYPAD);
-    }
-    tools
+fn collect_files_under(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_files_under_inner(root, &mut files)?;
+    Ok(files)
 }
 
-fn compose_service_names(resolved: &ResolvedRobot) -> Vec<String> {
-    let mut services = std::iter::once("router".to_string())
-        .chain(
-            resolved
-                .platform_runtimes
-                .iter()
-                .map(|runtime| runtime.name.clone()),
-        )
-        .chain(
-            resolved
-                .user_runtimes
-                .iter()
-                .map(|runtime| format!("user-{}", runtime.name)),
-        )
-        .collect::<Vec<_>>();
-    services.sort();
-    services
+fn collect_files_under_inner(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    if path.is_file() {
+        files.push(path.to_path_buf());
+        return Ok(());
+    }
+    if !path.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))? {
+        let entry = entry.with_context(|| format!("failed to read entry in {}", path.display()))?;
+        collect_files_under_inner(&entry.path(), files)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

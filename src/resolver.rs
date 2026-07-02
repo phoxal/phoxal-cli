@@ -20,8 +20,8 @@ const ROBOT_FILE: &str = "robot.yaml";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolveOptions {
-    /// Resolve external artifact digests/checksums from the network
-    /// (registry image digests, tool asset sha256). Off for offline flows.
+    /// Resolve external artifact checksums from the network (tool asset sha256).
+    /// Off for offline flows.
     pub resolve_external_artifacts: bool,
     /// Resolve git component `tag` → `commit`. A `tag` that is already a full
     /// commit SHA resolves with no network; a tag/branch ref is resolved live
@@ -67,13 +67,6 @@ impl RobotManifestExtras {
     }
 
     #[must_use]
-    pub fn user_runtime_image(&self, runtime_name: &str) -> Option<&str> {
-        self.user_runtimes
-            .get(runtime_name)
-            .and_then(|runtime| runtime.image.as_deref())
-    }
-
-    #[must_use]
     pub fn materialized_bus_profile(&self, default_connect: &str) -> MaterializedBusProfile {
         self.bus.materialize(default_connect)
     }
@@ -81,7 +74,6 @@ impl RobotManifestExtras {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UserRuntimeManifestExtras {
-    pub image: Option<String>,
     pub config: Option<Value>,
 }
 
@@ -135,59 +127,17 @@ pub struct LoadedRobot {
 
 const DEFAULT_BUS_PROFILE_NAME: &str = "default";
 
-/// How an official service image is referenced for deployment.
-///
-/// A [`ImagePin::Digest`] is a reproducible OCI content pin obtained from the
-/// registry (via `docker buildx imagetools inspect`). [`ImagePin::Unpinned`]
-/// means no digest was resolved - the image is deployed by its selected tag
-/// tag. We never fabricate a digest: an unpinned image is deployed by tag,
-/// which is the honest pre-publish-recovery behavior and is still a real,
-/// pullable reference (it just isn't content-addressed).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ImagePin {
-    /// A real registry-reported content digest, e.g. `sha256:…`.
-    Digest(String),
-    /// No digest resolved; deploy by `repo:version` tag.
-    Unpinned,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPlatformRuntime {
     pub name: String,
-    pub image_ref: String,
-    pub pin: ImagePin,
+    pub artifact_ref: String,
 }
 
 impl ResolvedPlatformRuntime {
-    /// The selected image reference, e.g. `ghcr.io/phoxal/service-drive:y2026_1-stable`.
+    /// The selected official service artifact identifier.
     #[must_use]
-    pub fn tag_ref(&self) -> String {
-        self.image_ref.clone()
-    }
-
-    /// The reference Docker should pull and compose should embed: a real
-    /// digest pin when one was resolved, otherwise the selected image ref.
-    /// Never a fabricated digest - so live `simulate` can never attempt to
-    /// pull a fake `ref@sha256:…`.
-    #[must_use]
-    pub fn deploy_ref(&self) -> String {
-        if image_ref_digest(&self.image_ref).is_some() {
-            return self.image_ref.clone();
-        }
-        match &self.pin {
-            ImagePin::Digest(digest) => format!("{}@{}", self.image_ref, digest),
-            ImagePin::Unpinned => self.image_ref.clone(),
-        }
-    }
-
-    /// The real content digest, if one was resolved. `None` during
-    /// pre-publish recovery (deploy-by-tag).
-    #[must_use]
-    pub fn digest_pin(&self) -> Option<&str> {
-        match &self.pin {
-            ImagePin::Digest(digest) => Some(digest.as_str()),
-            ImagePin::Unpinned => None,
-        }
+    pub fn artifact_ref(&self) -> &str {
+        &self.artifact_ref
     }
 }
 
@@ -196,18 +146,7 @@ pub struct ResolvedUserRuntime {
     pub name: String,
     pub path: PathBuf,
     pub framework: String,
-    pub build: Option<ResolvedUserRuntimeBuild>,
     pub source_hash: String,
-    pub image: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResolvedUserRuntimeBuild {
-    pub context: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dockerfile: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,10 +206,10 @@ pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
 
 pub fn load_robot(path: &Path) -> Result<Robot> {
     // Delegate to the extras-aware loader so EVERY command tolerates the
-    // `user_participants.<name>.image`/`config` keys as a CLI-side side channel:
-    // they are stripped before the typed parse and threaded through
-    // `RobotManifestExtras`. Commands that don't need the extras
-    // (check/validate/update/service add) just discard them.
+    // `user_participants.<name>.config` keys as a CLI-side side channel: they
+    // are stripped before the typed parse and threaded through
+    // `RobotManifestExtras`. Commands that don't need the extras just discard
+    // them.
     load_robot_with_extras(path).map(|loaded| loaded.robot)
 }
 
@@ -394,20 +333,8 @@ fn take_manifest_extras(
         let Some(runtime) = runtime.as_mapping_mut() else {
             continue;
         };
-        let image = runtime.remove("image");
         let config = runtime.remove("config");
-        stripped_extras |= image.is_some() || config.is_some();
-
-        let image = image
-            .map(|image| {
-                image.as_str().map(ToString::to_string).ok_or_else(|| {
-                    anyhow!(
-                        "user_participants.{name}.image in {} must be a string",
-                        robot_path.display()
-                    )
-                })
-            })
-            .transpose()?;
+        stripped_extras |= config.is_some();
         let config = config
             .map(|config| {
                 serde_json::to_value(config).with_context(|| {
@@ -416,11 +343,10 @@ fn take_manifest_extras(
             })
             .transpose()?;
 
-        if image.is_some() || config.is_some() {
-            extras.user_runtimes.insert(
-                name.to_string(),
-                UserRuntimeManifestExtras { image, config },
-            );
+        if config.is_some() {
+            extras
+                .user_runtimes
+                .insert(name.to_string(), UserRuntimeManifestExtras { config });
         }
     }
 
@@ -609,52 +535,30 @@ pub fn resolve(
     robot
         .validate_with(&platform_names)
         .map_err(|errors| anyhow!("Robot errors:\n{}", join_errors(errors)))?;
+    if !robot.phoxal_participants.images.is_empty() {
+        bail!(
+            "phoxal_participants.images is no longer supported: official artifacts now ship as native release assets"
+        );
+    }
 
     let mut platform_runtimes = Vec::new();
     for entry in catalog.entries_for_api(&api_version) {
-        let image_ref = robot
-            .phoxal_participants
-            .images
-            .get(entry.name)
-            .cloned()
-            .unwrap_or_else(|| {
-                format!(
-                    "{}:{}-{}",
-                    entry.image_repo(),
-                    api_version,
-                    channel.as_str()
-                )
-            });
-        // Only attempt registry digest resolution when the flow asks for it
-        // (`resolve_external_artifacts`, e.g. `deploy build`). Otherwise stay
-        // unpinned and deploy by tag - we never synthesize a placeholder
-        // `sha256:` that would later be mistaken for a real OCI pin.
-        let pin = if let Some(digest) = image_ref_digest(&image_ref) {
-            ImagePin::Digest(digest.to_string())
-        } else if options.resolve_external_artifacts {
-            ImagePin::Digest(resolve_image_digest(&image_ref)?)
-        } else {
-            ImagePin::Unpinned
-        };
+        let artifact_ref = format!(
+            "service-{}:{}-{}",
+            entry.name,
+            api_version,
+            channel.as_str()
+        );
         platform_runtimes.push(ResolvedPlatformRuntime {
             name: entry.name.to_string(),
-            image_ref,
-            pin,
+            artifact_ref,
         });
     }
 
     let user_runtimes = robot
         .user_participants
         .iter()
-        .map(|(name, runtime)| {
-            resolve_user_runtime(
-                project_root,
-                &robot.identity.id,
-                &api_version,
-                name,
-                runtime,
-            )
-        })
+        .map(|(name, runtime)| resolve_user_runtime(project_root, &api_version, name, runtime))
         .collect::<Result<Vec<_>>>()?;
 
     // Git ref → commit SHA resolution: when `resolve_source_commits` is set, a
@@ -672,40 +576,6 @@ pub fn resolve(
         user_runtimes,
         components,
         tools,
-    })
-}
-
-/// Resolve a real OCI content digest for `image_ref` from the registry.
-///
-/// This requires `docker buildx imagetools inspect`, which reports the actual
-/// registry index digest. We deliberately do **not** fall back to hashing a
-/// `docker manifest inspect` body - fabricating a `sha256:` from manifest JSON
-/// produces a string that looks like an OCI pin but can never be pulled. If
-/// buildx cannot reach the image, fail loudly with guidance instead.
-pub fn resolve_image_digest(image_ref: &str) -> Result<String> {
-    let output = shell::run_stdout(
-        "docker",
-        [
-            "buildx",
-            "imagetools",
-            "inspect",
-            image_ref,
-            "--format",
-            "{{json .Manifest}}",
-        ],
-        None,
-    )
-    .with_context(|| {
-        format!(
-            "could not resolve a real image digest for {image_ref}. \
-             `docker buildx imagetools inspect` failed - install Docker with buildx and ensure \
-             the daemon can reach the registry. If the phoxal/framework GHCR service images are \
-             not published yet, deploy by tag (`simulate`/`check` resolve no digests) until they \
-             are published."
-        )
-    })?;
-    buildx_imagetools_manifest_digest(&output).with_context(|| {
-        format!("docker buildx imagetools inspect did not report an index digest for {image_ref}")
     })
 }
 
@@ -768,7 +638,6 @@ pub fn host_target_triple() -> String {
 
 fn resolve_user_runtime(
     project_root: &Path,
-    robot_id: &str,
     api_version: &str,
     name: &str,
     runtime: &UserParticipant,
@@ -787,27 +656,12 @@ fn resolve_user_runtime(
             runtime_dir.display()
         )
     })?;
-    let image = format!("phoxal.local/{robot_id}/user-service/{name}:dev");
-    let build = runtime
-        .build
-        .as_ref()
-        .map(mirror_user_runtime_build)
-        .transpose()?;
-
     Ok(ResolvedUserRuntime {
         name: name.to_string(),
         path: runtime.path.clone(),
         framework,
-        build,
         source_hash,
-        image,
     })
-}
-
-fn mirror_user_runtime_build(build: &impl Serialize) -> Result<ResolvedUserRuntimeBuild> {
-    let value =
-        serde_yaml::to_value(build).context("failed to serialize user service build recipe")?;
-    serde_yaml::from_value(value).context("failed to mirror user service build recipe")
 }
 
 pub(crate) fn resolve_user_runtime_framework(
@@ -1005,28 +859,8 @@ fn is_unpublished_placeholder(version: &str) -> bool {
     version == "0.0.0-dev"
 }
 
-fn image_ref_digest(image_ref: &str) -> Option<&str> {
-    image_ref
-        .rsplit_once('@')
-        .map(|(_, digest)| digest)
-        .filter(|digest| digest.starts_with("sha256:"))
-}
-
-fn buildx_imagetools_manifest_digest(output: &str) -> Result<String> {
-    let value: Value =
-        serde_json::from_str(output).context("docker buildx imagetools output was not JSON")?;
-    value
-        .as_object()
-        .and_then(|object| object.get("digest").or_else(|| object.get("Digest")))
-        .and_then(Value::as_str)
-        .filter(|digest| digest.starts_with("sha256:"))
-        .map(ToString::to_string)
-        .ok_or_else(|| anyhow!("manifest index digest not found"))
-}
-
 /// Deterministic non-cryptographic stand-in hash for **tool asset** entries
-/// during offline resolution. Never used for OCI image digests - image pins
-/// are either a real registry digest or an honest tag ref (see [`ImagePin`]).
+/// during offline resolution.
 fn fake_sha(seed: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(seed.as_bytes());
@@ -1060,27 +894,8 @@ fn format_unavailable_api_version_error(
         .find(|candidate| *candidate != api_version);
 
     let mut message = format!(
-        "API version {api_version} is not available on channel {channel}: this CLI has no complete official service image set for that API version"
+        "API version {api_version} is not available on channel {channel}: this CLI has no complete official service set for that API version"
     );
-
-    // List the full expected official service ref set for the requested
-    // (api_version, channel), mirroring `format_missing_images_error` in
-    // check.rs. The catalog cannot resolve a complete set for the unavailable
-    // version, so the expected refs are every known official service name at
-    // the requested api/channel.
-    let mut expected_refs = catalog
-        .names()
-        .map(|name| format!("ghcr.io/phoxal/service-{name}:{api_version}-{channel}"))
-        .collect::<Vec<_>>();
-    expected_refs.sort_unstable();
-    expected_refs.dedup();
-    if !expected_refs.is_empty() {
-        message.push_str("\n\nExpected official service images:");
-        for image_ref in &expected_refs {
-            message.push_str("\n  - ");
-            message.push_str(image_ref);
-        }
-    }
 
     if !available.is_empty() {
         message.push_str("\n\nAvailable api_versions in this CLI: ");
@@ -1228,11 +1043,10 @@ components:
     }
 
     #[test]
-    fn load_robot_tolerates_user_runtime_image_and_config() -> anyhow::Result<()> {
-        // The CLI threads `user_participants.<name>.image`/`config` through
-        // `RobotManifestExtras` as a side channel; `load_robot` must strip them
-        // (like the extras-aware loader) so every command - not just
-        // deploy/simulate - accepts a manifest that declares them.
+    fn load_robot_tolerates_user_runtime_config() -> anyhow::Result<()> {
+        // The CLI threads `user_participants.<name>.config` through
+        // `RobotManifestExtras` as a side channel; `load_robot` must strip it
+        // so every command accepts a manifest that declares typed config.
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("robot.yaml");
         std::fs::write(
@@ -1248,7 +1062,6 @@ phoxal_participants:
 user_participants:
   brain:
     path: runtimes/brain
-    image: ghcr.io/acme/brain@sha256:abc
     config:
       gain: 0.5
 motion:
@@ -1266,14 +1079,17 @@ components:
 "#,
         )?;
 
-        // Plain load_robot (used by check/validate/update/service add) must parse it
-        // despite the image/config keys the typed model does not know about.
+        // Plain load_robot must parse it despite the config key the typed model
+        // does not know about.
         let robot = load_robot(&path)?;
         assert!(robot.user_participants.contains_key("brain"));
 
-        // The extras-aware loader still parses it too.
         let loaded = load_robot_with_extras(&path)?;
         assert!(loaded.robot.user_participants.contains_key("brain"));
+        assert_eq!(
+            loaded.extras.user_runtime_config("brain"),
+            Some(&serde_json::json!({ "gain": 0.5 }))
+        );
 
         Ok(())
     }
@@ -1449,89 +1265,12 @@ components:
     }
 
     #[test]
-    fn buildx_imagetools_digest_uses_index_digest_not_platform_leaf() -> anyhow::Result<()> {
-        let output = r#"{
-  "mediaType": "application/vnd.oci.image.index.v1+json",
-  "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "manifests": [
-    {
-      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "platform": {
-        "architecture": "amd64",
-        "os": "linux"
-      }
-    },
-    {
-      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "platform": {
-        "architecture": "arm64",
-        "os": "linux"
-      }
-    }
-  ]
-}"#;
-
-        assert_eq!(
-            buildx_imagetools_manifest_digest(output)?,
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn buildx_imagetools_digest_rejects_non_sha256_digest() {
-        // A registry that reports a non-sha256 digest must not be accepted as a
-        // pin - we never coerce a bogus value into a `sha256:` string.
-        let output = r#"{"digest": "md5:deadbeef"}"#;
-        assert!(buildx_imagetools_manifest_digest(output).is_err());
-    }
-
-    fn runtime(pin: ImagePin) -> ResolvedPlatformRuntime {
-        ResolvedPlatformRuntime {
-            name: "asset".to_string(),
-            image_ref: "ghcr.io/phoxal/service-asset:y2026_1-stable".to_string(),
-            pin,
-        }
-    }
-
-    #[test]
-    fn unpinned_runtime_deploys_by_tag_not_fabricated_digest() {
-        let runtime = runtime(ImagePin::Unpinned);
-        assert_eq!(
-            runtime.tag_ref(),
-            "ghcr.io/phoxal/service-asset:y2026_1-stable"
-        );
-        // The deploy ref is the tag - no `@sha256:` is ever invented.
-        assert_eq!(
-            runtime.deploy_ref(),
-            "ghcr.io/phoxal/service-asset:y2026_1-stable"
-        );
-        assert!(!runtime.deploy_ref().contains('@'));
-        assert_eq!(runtime.digest_pin(), None);
-    }
-
-    #[test]
-    fn pinned_runtime_deploys_by_digest() {
-        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let runtime = runtime(ImagePin::Digest(digest.to_string()));
-        assert_eq!(
-            runtime.deploy_ref(),
-            format!("ghcr.io/phoxal/service-asset:y2026_1-stable@{digest}")
-        );
-        assert_eq!(runtime.digest_pin(), Some(digest));
-    }
-
-    #[test]
-    fn digest_override_deploys_as_the_override_ref_without_double_pin() {
-        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    fn platform_runtime_exposes_native_artifact_ref() {
         let runtime = ResolvedPlatformRuntime {
             name: "asset".to_string(),
-            image_ref: format!("ghcr.io/phoxal/service-asset@{digest}"),
-            pin: ImagePin::Digest(digest.to_string()),
+            artifact_ref: "service-asset:y2026_1-stable".to_string(),
         };
 
-        assert_eq!(runtime.deploy_ref(), runtime.image_ref);
-        assert_eq!(runtime.digest_pin(), Some(digest));
+        assert_eq!(runtime.artifact_ref(), "service-asset:y2026_1-stable");
     }
 }

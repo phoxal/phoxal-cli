@@ -211,20 +211,11 @@ impl Project {
         self.dist_model_dir(robot_model).join("bundle")
     }
 
-    pub fn model_compose_path(&self, robot_model: &str) -> PathBuf {
-        self.dist_model_dir(robot_model).join("docker-compose.yml")
-    }
-
     pub fn dev_robot_dir(&self, robot_hostname: &str) -> PathBuf {
         self.workspace_root
             .join("dist")
             .join(DEFAULT_ROBOT_NAMESPACE)
             .join(robot_hostname)
-    }
-
-    pub fn dev_compose_path(&self, robot_hostname: &str) -> PathBuf {
-        self.dev_robot_dir(robot_hostname)
-            .join("docker-compose.yml")
     }
 
     pub fn dev_log_dir(&self, robot_hostname: &str) -> PathBuf {

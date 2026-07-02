@@ -27,7 +27,7 @@ use crate::utils::{cargo_binary_name, resolve_project_path};
 pub struct CheckCmd {
     #[arg(
         long,
-        help = "Refresh official service images and host tools before running emit-apis."
+        help = "Refresh native artifacts and host tools before running emit-apis."
     )]
     pub pull: bool,
     #[arg(
@@ -131,7 +131,7 @@ impl CheckCmd {
             eprintln!("warning: {}", format_warning(warning));
         }
         eprintln!(
-            "warning: v0 is pre-stable: artifacts built at different times may not interoperate; pin digests with phoxal-cli deploy build"
+            "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
         );
 
         ensure_check_outcome_ok(&result.api_version, &result.channel, &result.outcome)?;
@@ -188,7 +188,7 @@ fn run(
     let loaded = load_robot_with_extras(&robot_path)?;
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
-    // `check` resolves live: it never pins registry/tool digests
+    // `check` resolves live: it never pins tool checksums
     // (`resolve_external_artifacts: false`), but it does resolve git component
     // commits (`resolve_source_commits: true`) so component drivers can be
     // located and staged. A path-only / official-only graph needs no network; a
@@ -207,11 +207,8 @@ fn run(
     let platform_refs = resolved
         .platform_runtimes
         .iter()
-        .map(|runtime| (runtime.name.clone(), runtime.tag_ref()))
+        .map(|runtime| (runtime.name.clone(), runtime.artifact_ref().to_string()))
         .collect::<Vec<_>>();
-    if options.pull {
-        crate::local_build::pull_platform_image_refs(&platform_refs)?;
-    }
     let tool_names = resolved
         .tools
         .iter()
@@ -223,6 +220,18 @@ fn run(
         tool_names,
         crate::tool_provisioning::ProvisioningMode::from_pull(options.pull),
     )?;
+    if options.pull {
+        // `--pull` refreshed the host tools above. Official native service
+        // artifacts cannot be refreshed yet (the generated catalog + native-asset
+        // pipeline lands with the native distribution work, 06). Note what was
+        // refreshed and continue: the check then behaves exactly like a plain
+        // `check` (it completes for local/--service graphs and surfaces the
+        // official-artifact native_pending for a full graph) instead of
+        // hard-erroring here after the tool refresh already ran.
+        ui.warn(
+            "official native service artifacts cannot be refreshed yet (native distribution work 06); refreshed host tools only",
+        );
+    }
     let tool_participants = tool_participants_from_resolved(&resolved)?;
     let all_source_participants =
         source_participants_from_resolved(project_root, &resolved, component_crate_dir)?;
@@ -231,18 +240,23 @@ fn run(
     }
     let source_participants =
         source_participants_for_service(&all_source_participants, options.service.as_deref());
+    let platform_refs = if options.service.is_some() {
+        &[][..]
+    } else {
+        platform_refs.as_slice()
+    };
     let participant_count =
         platform_refs.len() + tool_participants.len() + source_participants.len();
     let robot_graph = robot_graph_from_resolved(&resolved);
     let outcome = run_check_with_context(
-        &platform_refs,
+        platform_refs,
         &tool_participants,
         &source_participants,
         CheckGraphContext {
             robot_graph: &robot_graph,
             manifest_extras: &manifest_extras,
         },
-        fetch_emit_apis_from_docker,
+        fetch_emit_apis_from_native_artifact,
         fetch_emit_apis_from_tool,
         build_emit_apis_from_source,
     )?;
@@ -759,92 +773,10 @@ fn validate_json_schema(schema: &Value, value: &Value, path: &str) -> Vec<String
         .collect()
 }
 
-pub(crate) fn fetch_emit_apis_from_docker(image_ref: &str) -> Result<RawEmitApis> {
-    let output = crate::shell::run_output("docker", ["run", "--rm", image_ref, "emit-apis"], None)
-        .with_context(|| format!("failed to start docker emit-apis for {image_ref}"))?;
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let cause = classify_docker_emit_apis_failure(image_ref, &stdout, &stderr);
-        return match cause {
-            DockerEmitApisFailure::MissingImage(message) => {
-                Err(MissingImageError::new(anyhow!(message)).into())
-            }
-            DockerEmitApisFailure::Hard(message) => {
-                bail!("docker emit-apis for {image_ref} failed: {message}")
-            }
-        };
-    }
-    let output = String::from_utf8(output.stdout)
-        .with_context(|| format!("docker emit-apis output for {image_ref} was not UTF-8"))?;
-    serde_json::from_str(&output)
-        .with_context(|| format!("docker emit-apis output for {image_ref} was not valid JSON"))
-}
-
-enum DockerEmitApisFailure {
-    MissingImage(String),
-    Hard(String),
-}
-
-fn classify_docker_emit_apis_failure(
-    image_ref: &str,
-    stdout: &str,
-    stderr: &str,
-) -> DockerEmitApisFailure {
-    let combined = format!("{stdout}\n{stderr}");
-    let lower = combined.to_ascii_lowercase();
-    if is_missing_image_failure(&lower) {
-        return DockerEmitApisFailure::MissingImage(format!(
-            "official service image {image_ref} is not available: {}",
-            first_nonempty_line(&combined)
-        ));
-    }
-    let cause = if lower.contains("cannot connect to the docker daemon")
-        || lower.contains("is the docker daemon running")
-    {
-        "Docker daemon is not running".to_string()
-    } else if lower.contains("unauthorized")
-        || lower.contains("authentication required")
-        || lower.contains("access denied")
-        || lower.contains("requested access to the resource is denied")
-    {
-        "registry authentication or authorization failed".to_string()
-    } else if lower.contains("executable file not found")
-        || lower.contains("unknown command")
-        || lower.contains("no such file or directory")
-    {
-        "artifact does not expose a runnable top-level `emit-apis` command".to_string()
-    } else {
-        format!(
-            "container exited while running `emit-apis`: {}",
-            first_nonempty_line(&combined)
-        )
-    };
-    DockerEmitApisFailure::Hard(cause)
-}
-
-fn is_missing_image_failure(lower: &str) -> bool {
-    if lower.contains("unauthorized")
-        || lower.contains("authentication required")
-        || lower.contains("requested access to the resource is denied")
-        || lower.contains("executable file not found")
-    {
-        return false;
-    }
-    lower.contains("manifest unknown")
-        || lower.contains("no matching manifest")
-        || lower.contains("manifest for")
-        || lower.contains("repository does not exist")
-        || (lower.contains("not found") && lower.contains("manifest"))
-}
-
-fn first_nonempty_line(output: &str) -> String {
-    output
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no stdout/stderr")
-        .to_string()
+pub(crate) fn fetch_emit_apis_from_native_artifact(_artifact_ref: &str) -> Result<RawEmitApis> {
+    Err(crate::native_pending::error(
+        "reading official artifact metadata (packaged emit-apis 02 + generated catalog 06)",
+    ))
 }
 
 pub(crate) fn fetch_emit_apis_from_tool(binary_path: &Path) -> Result<RawEmitApis> {
@@ -1067,7 +999,7 @@ fn format_missing_images_error(
     missing_images: &[String],
 ) -> String {
     let mut message = format!("API version {api_version} is not available on channel {channel}");
-    message.push_str("\n\nMissing official service images:");
+    message.push_str("\n\nMissing official service artifacts:");
     for image_ref in missing_images {
         message.push_str("\n  - ");
         message.push_str(image_ref);
@@ -1207,7 +1139,7 @@ impl MissingImageError {
 
 impl fmt::Display for MissingImageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("official service image could not be obtained")
+        formatter.write_str("official service artifact could not be obtained")
     }
 }
 
@@ -1537,7 +1469,7 @@ mod tests {
             |_| bail!("no tools should be fetched"),
             |_| bail!("no source services should be built"),
         )
-        .expect_err("swapped official service image should abort check");
+        .expect_err("swapped official service artifact should abort check");
 
         let message = error.to_string();
         assert!(
@@ -2141,7 +2073,7 @@ mod tests {
             ("mission".to_string(), "mission:ok".to_string()),
             (
                 "drive".to_string(),
-                "ghcr.io/phoxal/service-drive:y2026_1-stable".to_string(),
+                "service-drive:y2026_1-stable".to_string(),
             ),
         ];
 
@@ -2151,7 +2083,7 @@ mod tests {
             &[],
             |image_ref| match image_ref {
                 "mission:ok" => Ok(raw("mission", "y2026_1", &[])),
-                "ghcr.io/phoxal/service-drive:y2026_1-stable" => {
+                "service-drive:y2026_1-stable" => {
                     Err(MissingImageError::new(anyhow!("not found")).into())
                 }
                 unexpected => bail!("unexpected image {unexpected}"),
@@ -2162,7 +2094,7 @@ mod tests {
 
         assert_eq!(
             outcome.missing_images,
-            vec!["ghcr.io/phoxal/service-drive:y2026_1-stable".to_string()]
+            vec!["service-drive:y2026_1-stable".to_string()]
         );
         assert!(!outcome.is_ok());
         Ok(())
@@ -2273,7 +2205,6 @@ mod tests {
             user_runtimes: BTreeMap::from([(
                 "avoid".to_string(),
                 crate::resolver::UserRuntimeManifestExtras {
-                    image: None,
                     config: Some(serde_json::json!({ "gain": "fast" })),
                 },
             )]),
@@ -2325,7 +2256,6 @@ mod tests {
             user_runtimes: BTreeMap::from([(
                 "avoid".to_string(),
                 crate::resolver::UserRuntimeManifestExtras {
-                    image: None,
                     config: Some(serde_json::json!({
                         "gains": [0.25, 5.5],
                         "mode": "FAST",
@@ -2401,30 +2331,6 @@ mod tests {
             "{errors:?}"
         );
         Ok(())
-    }
-
-    #[test]
-    fn docker_emit_apis_classifier_only_treats_manifest_absence_as_missing() {
-        let missing = classify_docker_emit_apis_failure(
-            "ghcr.io/phoxal/service-drive:y2026_2-stable",
-            "",
-            "manifest unknown: manifest unknown",
-        );
-        assert!(matches!(missing, DockerEmitApisFailure::MissingImage(_)));
-
-        let missing_subcommand = classify_docker_emit_apis_failure(
-            "ghcr.io/phoxal/service-drive:y2026_1-stable",
-            "",
-            r#"exec: "emit-apis": executable file not found in $PATH"#,
-        );
-        assert!(matches!(missing_subcommand, DockerEmitApisFailure::Hard(_)));
-
-        let auth_failure = classify_docker_emit_apis_failure(
-            "ghcr.io/phoxal/service-drive:y2026_1-stable",
-            "",
-            "unauthorized: authentication required",
-        );
-        assert!(matches!(auth_failure, DockerEmitApisFailure::Hard(_)));
     }
 
     fn raw(id: &str, api_version: &str, contracts: &[(&str, &str, &str)]) -> RawEmitApis {

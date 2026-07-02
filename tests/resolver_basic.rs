@@ -44,10 +44,9 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
         ]
     );
     assert!(resolved.platform_runtimes.iter().all(|runtime| {
-        runtime.digest_pin().is_none()
-            && runtime
-                .deploy_ref()
-                .ends_with(&format!(":y2026_1-{}", resolved.channel))
+        runtime
+            .artifact_ref()
+            .ends_with(&format!(":y2026_1-{}", resolved.channel))
     }));
     assert_eq!(
         resolved
@@ -55,8 +54,8 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
             .iter()
             .find(|runtime| runtime.name == "drive")
             .expect("drive runtime")
-            .tag_ref(),
-        "ghcr.io/phoxal/service-drive:y2026_1-stable"
+            .artifact_ref(),
+        "service-drive:y2026_1-stable"
     );
 
     Ok(())
@@ -103,40 +102,31 @@ fn resolves_known_api_to_its_official_set() -> anyhow::Result<()> {
         resolved
             .platform_runtimes
             .iter()
-            .all(|runtime| runtime.tag_ref().ends_with(":y2026_1-stable"))
+            .all(|runtime| runtime.artifact_ref().ends_with(":y2026_1-stable"))
     );
 
     Ok(())
 }
 
 #[test]
-fn image_override_for_official_runtime_is_preserved() -> anyhow::Result<()> {
+fn image_override_for_official_runtime_is_rejected() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
         "phoxal_participants:\n  channel: stable",
-        "phoxal_participants:\n  channel: latest\n  images:\n    drive: ghcr.io/phoxal/service-drive:y2026_1-v0.13.0",
+        "phoxal_participants:\n  channel: latest\n  images:\n    drive: service-drive:y2026_1-v0.13.0",
     ))?;
-    let resolved = resolve(
+
+    let error = resolve(
         &robot,
         std::path::Path::new("."),
         &CATALOG,
         offline_options(),
-    )?;
-
-    let drive = resolved
-        .platform_runtimes
-        .iter()
-        .find(|runtime| runtime.name == "drive")
-        .expect("drive runtime");
-    assert_eq!(
-        drive.tag_ref(),
-        "ghcr.io/phoxal/service-drive:y2026_1-v0.13.0"
+    )
+    .expect_err("image overrides should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("phoxal_participants.images is no longer supported")
     );
-    let map = resolved
-        .platform_runtimes
-        .iter()
-        .find(|runtime| runtime.name == "map")
-        .expect("map runtime");
-    assert_eq!(map.tag_ref(), "ghcr.io/phoxal/service-map:y2026_1-latest");
 
     Ok(())
 }
@@ -145,7 +135,7 @@ fn image_override_for_official_runtime_is_preserved() -> anyhow::Result<()> {
 fn unknown_platform_image_key_fails_for_api() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
         "phoxal_participants:\n  channel: stable",
-        "phoxal_participants:\n  channel: stable\n  images:\n    diagnostics: ghcr.io/phoxal/service-diagnostics:y2026_1-stable",
+        "phoxal_participants:\n  channel: stable\n  images:\n    diagnostics: service-diagnostics:y2026_1-stable",
     ))?;
 
     let error = resolve(
@@ -180,9 +170,9 @@ fn user_runtime_shadowing_platform_fails_for_api() -> anyhow::Result<()> {
 }
 
 #[test]
-fn user_runtime_match_platform_resolves_to_api_version_hash_and_image() -> anyhow::Result<()> {
+fn user_runtime_match_platform_resolves_to_api_version_and_hash() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
-    write_runtime_source(temp.path(), "runtimes/autonomy", "FROM scratch\n")?;
+    write_runtime_source(temp.path(), "runtimes/autonomy", "fn main() {}\n")?;
     let robot = Robot::parse_from_string(&robot_with_user_runtime(
         r#"
   autonomy:
@@ -201,10 +191,6 @@ fn user_runtime_match_platform_resolves_to_api_version_hash_and_image() -> anyho
     assert_eq!(runtime.path, std::path::PathBuf::from("runtimes/autonomy"));
     assert_eq!(runtime.framework, "y2026_1");
     assert_eq!(runtime.source_hash.len(), 16);
-    assert_eq!(
-        runtime.image,
-        "phoxal.local/testbot/user-service/autonomy:dev"
-    );
     assert_eq!(second.user_runtimes[0].source_hash, runtime.source_hash);
 
     Ok(())
@@ -213,7 +199,7 @@ fn user_runtime_match_platform_resolves_to_api_version_hash_and_image() -> anyho
 #[test]
 fn user_runtime_explicit_matching_framework_is_preserved() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
-    write_runtime_source(temp.path(), "runtimes/autonomy", "FROM scratch\n")?;
+    write_runtime_source(temp.path(), "runtimes/autonomy", "fn main() {}\n")?;
     let robot = Robot::parse_from_string(&robot_with_user_runtime(
         r#"
   autonomy:
@@ -231,7 +217,7 @@ fn user_runtime_explicit_matching_framework_is_preserved() -> anyhow::Result<()>
 #[test]
 fn user_runtime_explicit_mismatched_framework_fails() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
-    write_runtime_source(temp.path(), "runtimes/autonomy", "FROM scratch\n")?;
+    write_runtime_source(temp.path(), "runtimes/autonomy", "fn main() {}\n")?;
     let robot = Robot::parse_from_string(&robot_with_user_runtime(
         r#"
   autonomy:
@@ -374,6 +360,6 @@ fn robot_with_user_runtime(user_runtimes: &str) -> String {
 fn write_runtime_source(root: &std::path::Path, path: &str, contents: &str) -> anyhow::Result<()> {
     let dir = root.join(path);
     fs::create_dir_all(&dir)?;
-    fs::write(dir.join("Dockerfile"), contents)?;
+    fs::write(dir.join("main.rs"), contents)?;
     Ok(())
 }

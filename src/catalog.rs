@@ -1,11 +1,11 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlatformRuntimeEntry {
     pub name: &'static str,
-    /// API versions for which this service's official image set is published.
+    /// API versions for which this service's official artifact set is available.
     ///
     /// Add another API version here only after the framework side has rebuilt
-    /// and published the service's official images for that API; API
-    /// inheritance alone does not make an image available.
+    /// and published the service's official artifacts for that API; API
+    /// inheritance alone does not make an artifact available.
     pub api_versions: &'static [&'static str],
     pub uses_supervisor_api: bool,
     pub wires_to_router: bool,
@@ -54,12 +54,6 @@ pub fn lookup_tool_version(name: &str) -> Option<&'static ToolVersion> {
 }
 
 pub const CATALOG: PlatformRuntimeCatalog = PlatformRuntimeCatalog {
-    // The default image repo for each service is derived from its name
-    // (`ghcr.io/phoxal/service-<name>`, see `PlatformRuntimeEntry::image_repo`),
-    // so the catalog carries only the name, API availability, and topology flags.
-    // A robot may still override the full image ref per participant via
-    // `phoxal_participants.images.<name>`.
-    //
     // The service NAMES here must mirror the `service/<name>` crate directories
     // in `phoxal/framework`; that cross-repo invariant is enforced in framework
     // release CI, not here (the framework tree isn't present at CLI build time).
@@ -99,21 +93,13 @@ const fn entry(
     }
 }
 
-impl PlatformRuntimeEntry {
-    /// Default GHCR repo for this service, derived from its name. A per-robot
-    /// `images.<name>` full image ref takes precedence over this in the resolver.
-    pub fn image_repo(&self) -> String {
-        format!("ghcr.io/phoxal/service-{}", self.name)
-    }
-}
-
 impl PlatformRuntimeCatalog {
     /// Iterate the official service entries published for `api_version`.
     ///
     /// This is the CLI-side availability gate: an API version is considered
     /// selectable only when the compiled-in catalog exposes the complete
     /// official service set for that version. The resolver then combines these
-    /// entries with the selected channel to form API-scoped image refs.
+    /// entries with the selected channel to form API-scoped artifact refs.
     pub fn entries_for_api<'a>(
         &'a self,
         api_version: &'a str,
@@ -131,9 +117,9 @@ impl PlatformRuntimeCatalog {
 
     /// Return the official service names available for `api_version`.
     ///
-    /// An empty result means this CLI cannot resolve a complete official image
-    /// set for that API version; callers should fail with availability guidance
-    /// instead of trying to synthesize image refs.
+    /// An empty result means this CLI cannot resolve a complete official
+    /// service set for that API version; callers should fail with availability
+    /// guidance instead of synthesizing native artifact metadata.
     pub fn names_for_api(&self, api_version: &str) -> Vec<&'static str> {
         self.entries_for_api(api_version)
             .map(|entry| entry.name)
@@ -151,9 +137,8 @@ impl PlatformRuntimeCatalog {
 
     /// Look up a service by catalog name.
     ///
-    /// Compose/deploy generation uses this to recover topology flags for an
-    /// already-resolved service. It does not by itself prove API availability;
-    /// use [`Self::entries_for_api`] or [`Self::names_for_api`] for that gate.
+    /// This does not by itself prove API availability; use
+    /// [`Self::entries_for_api`] or [`Self::names_for_api`] for that gate.
     pub fn lookup(&self, name: &str) -> Option<&PlatformRuntimeEntry> {
         self.entries.iter().find(|entry| entry.name == name)
     }
@@ -252,15 +237,5 @@ mod tests {
         assert!(catalog.has_complete_api_set("y2026_1"));
         assert!(!catalog.has_complete_api_set("y2026_2"));
         assert_eq!(catalog.names_for_api("y2026_2"), Vec::<&'static str>::new());
-    }
-
-    #[test]
-    fn image_repo_is_derived_from_name() {
-        for entry in CATALOG.entries {
-            assert_eq!(
-                entry.image_repo(),
-                format!("ghcr.io/phoxal/service-{}", entry.name)
-            );
-        }
     }
 }
