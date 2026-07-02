@@ -16,9 +16,6 @@ pub enum ProbeStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostErrorCode {
-    DockerCliMissing,
-    DockerDaemonDown,
-    ComposeMissing,
     WebotsMissing,
     WebotsHomeUnresolved,
 }
@@ -26,9 +23,6 @@ pub enum HostErrorCode {
 impl HostErrorCode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::DockerCliMissing => "PHOXAL-E-HOST-DOCKER-CLI-MISSING",
-            Self::DockerDaemonDown => "PHOXAL-E-HOST-DOCKER-DAEMON-DOWN",
-            Self::ComposeMissing => "PHOXAL-E-HOST-COMPOSE-MISSING",
             Self::WebotsMissing => "PHOXAL-E-HOST-WEBOTS-MISSING",
             Self::WebotsHomeUnresolved => "PHOXAL-E-HOST-WEBOTS-HOME-UNRESOLVED",
         }
@@ -95,9 +89,6 @@ struct WebotsHome {
 pub fn report(app: &AppContext) {
     for status in [
         probe_version(),
-        probe_docker_cli(),
-        probe_docker_daemon(),
-        probe_docker_compose(),
         probe_rust_tools(),
         probe_webots_executable(),
         probe_webots_home(),
@@ -108,9 +99,7 @@ pub fn report(app: &AppContext) {
 }
 
 pub fn preflight() -> Result<(), HostError> {
-    require_ok(probe_docker_cli())?;
-    require_ok(probe_docker_daemon())?;
-    require_ok(probe_docker_compose())?;
+    require_ok(probe_rust_tools())?;
     require_ok(probe_webots_executable())?;
     require_ok(probe_webots_home())?;
     require_ok(probe_webots_controller_lib_dir())
@@ -122,30 +111,6 @@ pub fn webots_executable_path() -> Result<PathBuf, HostError> {
 
 pub fn probe_version() -> ProbeStatus {
     ProbeStatus::Ok(format!("phoxal-cli {}", env!("CARGO_PKG_VERSION")))
-}
-
-pub fn probe_docker_cli() -> ProbeStatus {
-    match shell::run_stdout("docker", ["--version"], None) {
-        Ok(stdout) => ProbeStatus::Ok(format!("Docker CLI: {}", first_line(&stdout, "installed"))),
-        Err(_) => ProbeStatus::Fail(docker_cli_missing()),
-    }
-}
-
-pub fn probe_docker_daemon() -> ProbeStatus {
-    match shell::run_status("docker", ["info"], None) {
-        Ok(()) => ProbeStatus::Ok("Docker daemon is running".to_string()),
-        Err(_) => ProbeStatus::Fail(docker_daemon_down()),
-    }
-}
-
-pub fn probe_docker_compose() -> ProbeStatus {
-    match shell::run_stdout("docker", ["compose", "version"], None) {
-        Ok(stdout) => ProbeStatus::Ok(format!(
-            "Docker Compose: {}",
-            first_line(&stdout, "installed")
-        )),
-        Err(_) => ProbeStatus::Fail(compose_missing()),
-    }
 }
 
 pub fn probe_rust_tools() -> ProbeStatus {
@@ -447,42 +412,6 @@ fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         }
     }
     deduped
-}
-
-fn docker_cli_missing() -> HostError {
-    HostError::new(
-        HostErrorCode::DockerCliMissing,
-        "Docker CLI is required so live simulate can pull service images, build local images, and manage containers.",
-        [
-            "Install Docker Desktop or Docker Engine.",
-            "Make sure the docker command is on PATH.",
-        ],
-        Some(DRY_RUN_FALLBACK),
-    )
-}
-
-fn docker_daemon_down() -> HostError {
-    HostError::new(
-        HostErrorCode::DockerDaemonDown,
-        "Docker daemon must be running before live simulate can pull images, build user services, and start containers.",
-        [
-            "Start Docker Desktop or the Docker Engine service.",
-            "Run docker info and confirm it succeeds.",
-        ],
-        Some(DRY_RUN_FALLBACK),
-    )
-}
-
-fn compose_missing() -> HostError {
-    HostError::new(
-        HostErrorCode::ComposeMissing,
-        "Docker Compose v2 is required so live simulate can start the generated simulation stack.",
-        [
-            "Install or update Docker so docker compose version succeeds.",
-            "Make sure the Docker Compose plugin is available to the docker CLI.",
-        ],
-        Some(DRY_RUN_FALLBACK),
-    )
 }
 
 fn webots_missing() -> HostError {

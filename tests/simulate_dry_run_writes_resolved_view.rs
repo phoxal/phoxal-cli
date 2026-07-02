@@ -1,7 +1,6 @@
 use std::fs;
 
 use phoxal_cli::commands::simulate::{SimulateOptions, prepare};
-use serde_yaml::{Mapping, Value};
 
 #[test]
 fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
@@ -42,75 +41,42 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
             .join(".phoxal/webots/controllers/phoxal-simulator-webots-controller/phoxal-simulator-webots-controller")
             .is_file()
     );
-    assert!(plan.compose_path.is_file());
     assert!(plan.state_path.is_file());
-    assert!(
-        plan.written_files
-            .iter()
-            .any(|path| path.ends_with(".phoxal/run/docker-compose.yml"))
+    let mut run_files = fs::read_dir(temp.path().join(".phoxal/run"))?
+        .map(|entry| {
+            entry.map(|entry| {
+                entry
+                    .path()
+                    .file_name()
+                    .expect("file name")
+                    .to_string_lossy()
+                    .to_string()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    run_files.sort();
+    assert_eq!(
+        run_files,
+        vec!["components", "robot.yaml", "structure.urdf"]
     );
     assert!(
         plan.written_files
             .iter()
             .any(|path| path.ends_with(".phoxal/webots/worlds/default.wbt"))
     );
-
-    let compose = fs::read_to_string(&plan.compose_path)?;
-    assert!(compose.starts_with("name: testbot\n"));
-    assert!(compose.contains("x-phoxal-native-tools"));
-    assert!(compose.contains("joypad"));
-    let compose_yaml: Value = serde_yaml::from_str(&compose)?;
-    let services = mapping(
-        compose_yaml
-            .as_mapping()
-            .and_then(|root| root.get(key("services")))
-            .expect("services"),
-        "services",
-    )?;
-    let drive = mapping(
-        services.get(key("drive")).expect("drive service"),
-        "drive service",
-    )?;
-    let environment = mapping(
-        drive.get(key("environment")).expect("drive environment"),
-        "drive environment",
-    )?;
-    assert_eq!(environment.get(key("PHOXAL_NAMESPACE")), Some(&key("test")));
+    let run_robot = fs::read_to_string(temp.path().join(".phoxal/run/robot.yaml"))?;
+    assert!(run_robot.contains("api_version: y2026_1"));
+    assert!(run_robot.contains("channel: stable"));
+    assert_eq!(plan.bus_connect, "tcp/127.0.0.1:7447");
     assert_eq!(
-        environment.get(key("PHOXAL_ROBOT_ID")),
-        Some(&key("testbot"))
+        plan.resolved
+            .platform_runtimes
+            .iter()
+            .find(|runtime| runtime.name == "drive")
+            .expect("drive runtime")
+            .artifact_ref(),
+        "service-drive:y2026_1-stable"
     );
-    assert_eq!(
-        environment.get(key("PHOXAL_BUNDLE_ROOT")),
-        Some(&key("/robot"))
-    );
-    assert_eq!(
-        environment.get(key("PHOXAL_CONNECT")),
-        Some(&key("tcp/router:7447"))
-    );
-    assert_eq!(
-        environment.get(key("PHOXAL_CLOCK")),
-        Some(&key("simulation"))
-    );
-    assert!(environment.get(key("ROBOT_CONFIG")).is_none());
-    assert!(environment.get(key("ROBOT_ID")).is_none());
-    assert!(environment.get(key("ROBOT_NAMESPACE")).is_none());
-    assert!(environment.get(key("ROBOT_ROUTER_ENDPOINT")).is_none());
-    assert!(environment.get(key("ROBOT_SIMULATION")).is_none());
-    // Offline dry-run must not embed a fabricated service image digest: every
-    // official service image is a `repo:version` tag ref, so a later live
-    // `simulate` can never try to `docker pull repo@sha256:<fake>`. (The zenoh
-    // router image is a real, published digest pin and is intentionally exempt.)
-    assert!(compose.contains("ghcr.io/phoxal/service-"));
-    assert!(compose.contains("ghcr.io/phoxal/service-drive:y2026_1-stable"));
-    for line in compose.lines() {
-        if line.contains("ghcr.io/phoxal/service-") {
-            assert!(
-                !line.contains("@sha256:"),
-                "official service image must be a tag ref during offline dry-run, got: {line}"
-            );
-        }
-    }
 
     let state = fs::read_to_string(&plan.state_path)?;
     assert!(state.contains("mode: dry-run"));
@@ -168,14 +134,4 @@ components:
   sources: {}
   instances: {}
 "#
-}
-
-fn mapping<'a>(value: &'a Value, label: &str) -> anyhow::Result<&'a Mapping> {
-    value
-        .as_mapping()
-        .ok_or_else(|| anyhow::anyhow!("{label} is not a mapping"))
-}
-
-fn key(value: &str) -> Value {
-    Value::String(value.to_string())
 }

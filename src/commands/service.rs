@@ -1,6 +1,8 @@
 use std::fs;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
@@ -19,6 +21,8 @@ use crate::resolver::{
 };
 use crate::utils::{cargo_binary_name, resolve_project_path};
 
+const DEFAULT_BUS_CONNECT: &str = "tcp/127.0.0.1:7447";
+
 #[derive(Debug, Args)]
 pub struct Service {
     #[command(subcommand)]
@@ -36,11 +40,9 @@ pub enum ServiceSubcommand {
     #[command(
         about = "Build and run one user service host-native against the dev bus.",
         long_about = "Build and run one user service host-native against the dev bus.\n\n\
-                      Generates the dev bundle, starts the local Zenoh container if absent, builds the named user service, and runs only it on the host. Does not start Webots, official services, or component drivers."
+                      Generates the dev bundle, verifies the selected Zenoh endpoint is reachable, builds the named user service, and runs only it on the host. Does not start Webots, official services, or component drivers."
     )]
     Run(Run),
-    #[command(about = "Build a local deployment image for one or all user services.")]
-    Image(Image),
     #[command(about = "Print the compiled-in official service catalog.")]
     Catalog(Catalog),
 }
@@ -55,19 +57,6 @@ pub struct Add {
 pub struct Run {
     #[arg(help = "User service id from user_participants.")]
     pub name: String,
-}
-
-#[derive(Debug, Args)]
-pub struct Image {
-    #[arg(help = "User service id from user_participants. Omit to build all user services.")]
-    pub name: Option<String>,
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = MessageFormat::Human,
-        help = "Output format for the built image list."
-    )]
-    pub message_format: MessageFormat,
 }
 
 #[derive(Debug, Args)]
@@ -90,17 +79,6 @@ pub struct AddServiceOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ServiceImageSummary {
-    pub images: Vec<ServiceImageRef>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ServiceImageRef {
-    pub name: String,
-    pub image: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ServiceCatalogSummary {
     pub entries: Vec<ServiceCatalogEntry>,
 }
@@ -108,7 +86,7 @@ pub struct ServiceCatalogSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ServiceCatalogEntry {
     pub id: String,
-    pub image: String,
+    pub api_versions: Vec<String>,
     pub participant_kind: &'static str,
 }
 
@@ -120,6 +98,7 @@ struct ServiceRunPlan {
     run_dir: PathBuf,
     crate_dir: PathBuf,
     binary_name: String,
+    bus_connect: String,
     env: Vec<(String, String)>,
 }
 
@@ -128,7 +107,6 @@ impl Service {
         match &self.command {
             ServiceSubcommand::Add(command) => command.run(app).await,
             ServiceSubcommand::Run(command) => command.run(app).await,
-            ServiceSubcommand::Image(command) => command.run(app).await,
             ServiceSubcommand::Catalog(command) => command.run(app).await,
         }
     }
@@ -155,6 +133,11 @@ impl Run {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let plan = service_run_plan(app.project.root(), &self.name)?;
 
+        // Probe the router before the (potentially slow) build, so an
+        // unreachable/unsupported endpoint fails fast instead of after a
+        // wasted `cargo build`.
+        ensure_zenoh_router_reachable(&plan.bus_connect)?;
+
         app.ui.step(format!("building {}", plan.name), || {
             build_user_service_host_native(&plan, &app.ui)
         })?;
@@ -165,32 +148,8 @@ impl Run {
         ));
         app.ui
             .info(format!("using dev bundle {}", plan.run_dir.display()));
-        crate::docker_stack::ensure_link_network()?;
-        crate::local_zenoh::start_if_absent()?;
         let status = run_user_service_host_native(&plan, &app.ui)?;
         forward_service_exit_status(&plan.name, status)
-    }
-}
-
-impl Image {
-    pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let project_root = app.project.root().to_path_buf();
-        let name = self.name.clone();
-        let summary = tokio::task::spawn_blocking(move || {
-            build_service_images(&project_root, name.as_deref())
-        })
-        .await
-        .context("service image worker failed")??;
-        crate::commands::print_message(
-            &summary,
-            || {
-                for image in &summary.images {
-                    println!("{} -> {}", image.name, image.image);
-                }
-                Ok(())
-            },
-            self.message_format,
-        )
     }
 }
 
@@ -202,8 +161,10 @@ impl Catalog {
             || {
                 for entry in &summary.entries {
                     println!(
-                        "{} -> {} ({})",
-                        entry.id, entry.image, entry.participant_kind
+                        "{} -> api_versions [{}] ({})",
+                        entry.id,
+                        entry.api_versions.join(", "),
+                        entry.participant_kind
                     );
                 }
                 Ok(())
@@ -220,7 +181,11 @@ pub fn service_catalog_summary() -> ServiceCatalogSummary {
             .iter()
             .map(|entry| ServiceCatalogEntry {
                 id: entry.name.to_string(),
-                image: entry.image_repo(),
+                api_versions: entry
+                    .api_versions
+                    .iter()
+                    .map(|version| (*version).to_string())
+                    .collect(),
                 participant_kind: "service",
             })
             .collect(),
@@ -281,8 +246,7 @@ fn service_run_plan(project_start: &Path, name: &str) -> Result<ServiceRunPlan> 
         .context("robot.yaml did not have a parent directory")?;
     let loaded = load_robot_with_extras(&robot_path)?;
     let config = loaded.extras.user_runtime_config(name).cloned();
-    let default_connect = format!("tcp/127.0.0.1:{}", crate::local_zenoh::LOCAL_ZENOH_PORT);
-    let bus_profile = loaded.extras.materialized_bus_profile(&default_connect);
+    let bus_profile = loaded.extras.materialized_bus_profile(DEFAULT_BUS_CONNECT);
     let robot = loaded.robot;
 
     if CATALOG
@@ -290,7 +254,7 @@ fn service_run_plan(project_start: &Path, name: &str) -> Result<ServiceRunPlan> 
         .any(|entry| entry.name == name)
     {
         bail!(
-            "'{name}' is an official service for api_version {}; official services are images, not host-native user services",
+            "'{name}' is an official service for api_version {}; official services are not host-native user services",
             robot.api_version
         );
     }
@@ -350,59 +314,30 @@ fn service_run_plan(project_start: &Path, name: &str) -> Result<ServiceRunPlan> 
         run_dir,
         crate_dir,
         binary_name,
+        bus_connect: bus_profile.connect.clone(),
         env,
     })
 }
 
-pub fn build_service_images(
-    project_start: &Path,
-    name: Option<&str>,
-) -> Result<ServiceImageSummary> {
-    let robot_path = discover_robot_yaml(project_start)
-        .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
-    let project_root = robot_path
-        .parent()
-        .context("robot.yaml did not have a parent directory")?;
-    let robot = load_robot(&robot_path)?;
-    // Building user service images never reads component commits, so this stays
-    // fully offline (`resolve_source_commits: false`).
-    let mut resolved = resolve(
-        &robot,
-        project_root,
-        &CATALOG,
-        ResolveOptions {
-            resolve_external_artifacts: false,
-            resolve_source_commits: false,
-        },
-    )?;
-    if let Some(name) = name {
-        if !resolved
-            .user_runtimes
-            .iter()
-            .any(|runtime| runtime.name == name)
-        {
-            let available = resolved
-                .user_runtimes
-                .iter()
-                .map(|runtime| runtime.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            if available.is_empty() {
-                bail!("user service '{name}' is not defined in user_participants");
-            }
-            bail!(
-                "user service '{name}' is not defined in user_participants; available: {available}"
-            );
-        }
-        resolved
-            .user_runtimes
-            .retain(|runtime| runtime.name == name);
-    }
-    let images = crate::local_build::build_user_runtimes(project_root, &resolved)?
-        .into_iter()
-        .map(|(name, image)| ServiceImageRef { name, image })
-        .collect();
-    Ok(ServiceImageSummary { images })
+fn ensure_zenoh_router_reachable(endpoint: &str) -> Result<()> {
+    let Some(address) = endpoint.strip_prefix("tcp/") else {
+        bail!("{}", zenoh_unreachable_message(endpoint));
+    };
+    let mut addresses = address
+        .to_socket_addrs()
+        .with_context(|| zenoh_unreachable_message(endpoint))?;
+    let Some(address) = addresses.next() else {
+        bail!("{}", zenoh_unreachable_message(endpoint));
+    };
+    TcpStream::connect_timeout(&address, Duration::from_millis(500))
+        .map(|_| ())
+        .with_context(|| zenoh_unreachable_message(endpoint))
+}
+
+fn zenoh_unreachable_message(endpoint: &str) -> String {
+    format!(
+        "no reachable Zenoh router at {endpoint}; start one (e.g. `zenohd --listen tcp/127.0.0.1:7447`) or select a bus profile - managed router startup returns with the native deploy work (03)"
+    )
 }
 
 pub(crate) fn run_env(
@@ -855,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn add_service_preserves_other_user_participant_image_and_config_extras() -> Result<()> {
+    fn add_service_preserves_other_user_participant_config_extras() -> Result<()> {
         let temp = tempfile::tempdir()?;
         fs::write(
             temp.path().join("robot.yaml"),
@@ -863,7 +798,6 @@ mod tests {
                 "brain",
                 r#"
     path: runtimes/brain
-    image: ghcr.io/acme/brain@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     config:
       planner:
         gain: 0.7
@@ -884,13 +818,6 @@ mod tests {
             .get(YamlValue::String("brain".to_string()))
             .and_then(YamlValue::as_mapping)
             .expect("existing user participant should survive");
-        assert_eq!(
-            brain.get(YamlValue::String("image".to_string())),
-            Some(&YamlValue::String(
-                "ghcr.io/acme/brain@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .to_string()
-            ))
-        );
         let labels = brain
             .get(YamlValue::String("config".to_string()))
             .and_then(|config| config.get("planner"))
@@ -916,10 +843,13 @@ mod tests {
 
         let loaded = load_robot_with_extras(&temp.path().join("robot.yaml"))?;
         assert_eq!(
-            loaded.extras.user_runtime_image("brain"),
-            Some(
-                "ghcr.io/acme/brain@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            )
+            loaded.extras.user_runtime_config("brain"),
+            Some(&serde_json::json!({
+                "planner": {
+                    "gain": 0.7,
+                    "labels": ["left", "right"],
+                }
+            }))
         );
         assert!(
             loaded

@@ -66,7 +66,7 @@ impl New {
             .await
             .context("robot new worker failed")??;
         eprintln!(
-            "warning: v0 is pre-stable: artifacts built at different times may not interoperate; pin digests with phoxal-cli deploy build"
+            "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
         );
         crate::commands::print_message(
             &summary,

@@ -1,9 +1,9 @@
 //! Host-native tool provisioning.
 //!
 //! Webots controllers, joypad, and future host-native tools ship as release
-//! tarballs rather than Docker images. The resolver records each tool's
-//! explicit version plus expected asset/binary names; this module performs the
-//! download + extraction into the tool cache before commands run the binaries.
+//! tarballs. The resolver records each tool's explicit version plus expected
+//! asset/binary names; this module performs the download + extraction into the
+//! tool cache before commands run the binaries.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -172,18 +172,6 @@ pub(crate) fn cached_tool_asset_path(repo: &str, version: &str, asset: &str) -> 
         .join(repo)
         .join(version)
         .join(asset))
-}
-
-pub(crate) fn cached_tool_asset_sha256(tool: &ResolvedTool) -> Result<Option<String>> {
-    let asset_path = cached_tool_asset_path(&tool.repo, &tool.resolved, &tool.asset)?;
-    if !asset_path.is_file() {
-        return Ok(None);
-    }
-    Ok(Some(hex::encode(Sha256::digest(
-        fs::read(&asset_path).with_context(|| {
-            format!("failed to read cached tool asset {}", asset_path.display())
-        })?,
-    ))))
 }
 
 fn write_cached_tool_asset(path: &Path, bytes: &[u8]) -> Result<()> {
