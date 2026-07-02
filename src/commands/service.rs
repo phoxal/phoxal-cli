@@ -20,46 +20,46 @@ use crate::resolver::{
 use crate::utils::{cargo_binary_name, resolve_project_path};
 
 #[derive(Debug, Args)]
-pub struct Runtime {
+pub struct Service {
     #[command(subcommand)]
-    pub command: RuntimeSubcommand,
+    pub command: ServiceSubcommand,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum RuntimeSubcommand {
+pub enum ServiceSubcommand {
     #[command(
-        about = "Scaffold a user runtime crate and register it in robot.yaml.",
-        long_about = "Scaffold a user runtime crate and register it in robot.yaml.\n\n\
-                      Generates runtimes/<name>/ with a #[derive(phoxal::Runtime)] crate (mandatory #[setup], a typed Config, and a blocking phoxal::run) and adds a user_participants.<name> entry to robot.yaml."
+        about = "Scaffold a user service crate and register it in robot.yaml.",
+        long_about = "Scaffold a user service crate and register it in robot.yaml.\n\n\
+                      Generates runtimes/<name>/ with a #[derive(phoxal::Service)] crate (mandatory #[setup], a #[step], and a blocking phoxal::run) and adds a user_participants.<name> entry to robot.yaml."
     )]
     Add(Add),
     #[command(
-        about = "Build and run one user runtime host-native against the dev bus.",
-        long_about = "Build and run one user runtime host-native against the dev bus.\n\n\
-                      Generates the dev bundle, starts the local Zenoh container if absent, builds the named user runtime, and runs only it on the host. Does not start Webots, official runtimes, or component drivers."
+        about = "Build and run one user service host-native against the dev bus.",
+        long_about = "Build and run one user service host-native against the dev bus.\n\n\
+                      Generates the dev bundle, starts the local Zenoh container if absent, builds the named user service, and runs only it on the host. Does not start Webots, official services, or component drivers."
     )]
     Run(Run),
-    #[command(about = "Build a local deployment image for one or all user runtimes.")]
+    #[command(about = "Build a local deployment image for one or all user services.")]
     Image(Image),
-    #[command(about = "Print the compiled-in official runtime catalog.")]
+    #[command(about = "Print the compiled-in official service catalog.")]
     Catalog(Catalog),
 }
 
 #[derive(Debug, Args)]
 pub struct Add {
-    #[arg(help = "Runtime id; kebab-case, used as the crate name and user_participants key.")]
+    #[arg(help = "Service id; kebab-case, used as the crate name and user_participants key.")]
     pub name: String,
 }
 
 #[derive(Debug, Args)]
 pub struct Run {
-    #[arg(help = "User runtime id from user_participants.")]
+    #[arg(help = "User service id from user_participants.")]
     pub name: String,
 }
 
 #[derive(Debug, Args)]
 pub struct Image {
-    #[arg(help = "User runtime id from user_participants. Omit to build all user runtimes.")]
+    #[arg(help = "User service id from user_participants. Omit to build all user services.")]
     pub name: Option<String>,
     #[arg(
         long,
@@ -82,7 +82,7 @@ pub struct Catalog {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AddRuntimeOutcome {
+pub struct AddServiceOutcome {
     pub name: String,
     pub api_version: String,
     pub crate_dir: PathBuf,
@@ -90,30 +90,30 @@ pub struct AddRuntimeOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RuntimeImageSummary {
-    pub images: Vec<RuntimeImageRef>,
+pub struct ServiceImageSummary {
+    pub images: Vec<ServiceImageRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RuntimeImageRef {
+pub struct ServiceImageRef {
     pub name: String,
     pub image: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RuntimeCatalogSummary {
-    pub entries: Vec<RuntimeCatalogEntry>,
+pub struct ServiceCatalogSummary {
+    pub entries: Vec<ServiceCatalogEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RuntimeCatalogEntry {
+pub struct ServiceCatalogEntry {
     pub id: String,
     pub image: String,
     pub participant_kind: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeRunPlan {
+struct ServiceRunPlan {
     name: String,
     robot_id: String,
     namespace: String,
@@ -123,28 +123,28 @@ struct RuntimeRunPlan {
     env: Vec<(String, String)>,
 }
 
-impl Runtime {
+impl Service {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match &self.command {
-            RuntimeSubcommand::Add(command) => command.run(app).await,
-            RuntimeSubcommand::Run(command) => command.run(app).await,
-            RuntimeSubcommand::Image(command) => command.run(app).await,
-            RuntimeSubcommand::Catalog(command) => command.run(app).await,
+            ServiceSubcommand::Add(command) => command.run(app).await,
+            ServiceSubcommand::Run(command) => command.run(app).await,
+            ServiceSubcommand::Image(command) => command.run(app).await,
+            ServiceSubcommand::Catalog(command) => command.run(app).await,
         }
     }
 }
 
 impl Add {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let outcome = add_runtime(app.project.root(), &self.name)?;
-        println!("created runtime crate: {}", outcome.crate_dir.display());
+        let outcome = add_service(app.project.root(), &self.name)?;
+        println!("created service crate: {}", outcome.crate_dir.display());
         println!(
             "registered manifest entry: user_participants.{} = {{ path: \"{}\" }}",
             outcome.name,
             outcome.manifest_path.display()
         );
         println!(
-            "next: run `phoxal-cli check`; later `phoxal-cli runtime run {}`",
+            "next: run `phoxal-cli check`; later `phoxal-cli service run {}`",
             outcome.name
         );
         Ok(())
@@ -153,10 +153,10 @@ impl Add {
 
 impl Run {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let plan = runtime_run_plan(app.project.root(), &self.name)?;
+        let plan = service_run_plan(app.project.root(), &self.name)?;
 
         app.ui.step(format!("building {}", plan.name), || {
-            build_user_runtime_host_native(&plan, &app.ui)
+            build_user_service_host_native(&plan, &app.ui)
         })?;
 
         app.ui.info(format!(
@@ -167,8 +167,8 @@ impl Run {
             .info(format!("using dev bundle {}", plan.run_dir.display()));
         crate::docker_stack::ensure_link_network()?;
         crate::local_zenoh::start_if_absent()?;
-        let status = run_user_runtime_host_native(&plan, &app.ui)?;
-        forward_runtime_exit_status(&plan.name, status)
+        let status = run_user_service_host_native(&plan, &app.ui)?;
+        forward_service_exit_status(&plan.name, status)
     }
 }
 
@@ -177,10 +177,10 @@ impl Image {
         let project_root = app.project.root().to_path_buf();
         let name = self.name.clone();
         let summary = tokio::task::spawn_blocking(move || {
-            build_runtime_images(&project_root, name.as_deref())
+            build_service_images(&project_root, name.as_deref())
         })
         .await
-        .context("runtime image worker failed")??;
+        .context("service image worker failed")??;
         crate::commands::print_message(
             &summary,
             || {
@@ -196,7 +196,7 @@ impl Image {
 
 impl Catalog {
     pub async fn run(&self, _app: &AppContext) -> Result<()> {
-        let summary = runtime_catalog_summary();
+        let summary = service_catalog_summary();
         crate::commands::print_message(
             &summary,
             || {
@@ -213,22 +213,22 @@ impl Catalog {
     }
 }
 
-pub fn runtime_catalog_summary() -> RuntimeCatalogSummary {
-    RuntimeCatalogSummary {
+pub fn service_catalog_summary() -> ServiceCatalogSummary {
+    ServiceCatalogSummary {
         entries: CATALOG
             .entries
             .iter()
-            .map(|entry| RuntimeCatalogEntry {
+            .map(|entry| ServiceCatalogEntry {
                 id: entry.name.to_string(),
                 image: entry.image_repo(),
-                participant_kind: "runtime",
+                participant_kind: "service",
             })
             .collect(),
     }
 }
 
-pub fn add_runtime(project_start: &Path, name: &str) -> Result<AddRuntimeOutcome> {
-    let name = validate_runtime_name(name)?;
+pub fn add_service(project_start: &Path, name: &str) -> Result<AddServiceOutcome> {
+    let name = validate_service_name(name)?;
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
     let project_root = robot_path
@@ -242,7 +242,7 @@ pub fn add_runtime(project_start: &Path, name: &str) -> Result<AddRuntimeOutcome
 
     if crate_dir.exists() {
         bail!(
-            "runtime crate directory already exists: {}",
+            "service crate directory already exists: {}",
             crate_dir.display()
         );
     }
@@ -254,11 +254,18 @@ pub fn add_runtime(project_start: &Path, name: &str) -> Result<AddRuntimeOutcome
     }
 
     let phoxal_version = cli_phoxal_dependency_major_minor()?;
-    scaffold_runtime_crate(&crate_dir, name, &api_version, &phoxal_version)?;
-    insert_user_runtime_manifest_entry(&mut robot_yaml, name, &manifest_path)?;
+    let phoxal_api_version = cli_phoxal_api_scaffold_version()?;
+    scaffold_service_crate(
+        &crate_dir,
+        name,
+        &api_version,
+        &phoxal_version,
+        &phoxal_api_version,
+    )?;
+    insert_user_service_manifest_entry(&mut robot_yaml, name, &manifest_path)?;
     write_robot_yaml(&robot_path, &robot_yaml)?;
 
-    Ok(AddRuntimeOutcome {
+    Ok(AddServiceOutcome {
         name: name.to_string(),
         api_version,
         crate_dir,
@@ -266,7 +273,7 @@ pub fn add_runtime(project_start: &Path, name: &str) -> Result<AddRuntimeOutcome
     })
 }
 
-fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> {
+fn service_run_plan(project_start: &Path, name: &str) -> Result<ServiceRunPlan> {
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
     let project_root = robot_path
@@ -283,12 +290,12 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
         .any(|entry| entry.name == name)
     {
         bail!(
-            "'{name}' is a platform runtime for api_version {}; platform runtimes are images, not host-native user runtimes",
+            "'{name}' is an official service for api_version {}; official services are images, not host-native user services",
             robot.api_version
         );
     }
 
-    let manifest_runtime = robot.user_participants.get(name).ok_or_else(|| {
+    let manifest_service = robot.user_participants.get(name).ok_or_else(|| {
         let available = robot
             .user_participants
             .keys()
@@ -296,17 +303,17 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
             .collect::<Vec<_>>()
             .join(", ");
         if available.is_empty() {
-            anyhow!("user runtime '{name}' is not defined in user_participants")
+            anyhow!("user service '{name}' is not defined in user_participants")
         } else {
             anyhow!(
-                "user runtime '{name}' is not defined in user_participants; available: {available}"
+                "user service '{name}' is not defined in user_participants; available: {available}"
             )
         }
     })?;
-    let crate_dir = resolve_project_path(project_root, &manifest_runtime.path);
+    let crate_dir = resolve_project_path(project_root, &manifest_service.path);
     if !crate_dir.is_dir() {
         bail!(
-            "user runtime '{name}' source dir {} does not exist",
+            "user service '{name}' source dir {} does not exist",
             crate_dir.display()
         );
     }
@@ -326,7 +333,7 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
     )?;
     let run_dir = project_root.join(".phoxal").join("run");
     crate::run_view::assemble(project_root, &resolved, &run_dir)?;
-    let binary_name = runtime_binary_name(&crate_dir, name)?;
+    let binary_name = service_binary_name(&crate_dir, name)?;
     let env = run_env(
         name,
         &robot.identity.id,
@@ -336,7 +343,7 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
         &run_dir,
     );
 
-    Ok(RuntimeRunPlan {
+    Ok(ServiceRunPlan {
         name: name.to_string(),
         robot_id: robot.identity.id,
         namespace: robot.identity.namespace,
@@ -347,17 +354,17 @@ fn runtime_run_plan(project_start: &Path, name: &str) -> Result<RuntimeRunPlan> 
     })
 }
 
-pub fn build_runtime_images(
+pub fn build_service_images(
     project_start: &Path,
     name: Option<&str>,
-) -> Result<RuntimeImageSummary> {
+) -> Result<ServiceImageSummary> {
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
     let robot = load_robot(&robot_path)?;
-    // Building user-runtime images never reads component commits, so this stays
+    // Building user service images never reads component commits, so this stays
     // fully offline (`resolve_source_commits: false`).
     let mut resolved = resolve(
         &robot,
@@ -381,10 +388,10 @@ pub fn build_runtime_images(
                 .collect::<Vec<_>>()
                 .join(", ");
             if available.is_empty() {
-                bail!("user runtime '{name}' is not defined in user_participants");
+                bail!("user service '{name}' is not defined in user_participants");
             }
             bail!(
-                "user runtime '{name}' is not defined in user_participants; available: {available}"
+                "user service '{name}' is not defined in user_participants; available: {available}"
             );
         }
         resolved
@@ -393,9 +400,9 @@ pub fn build_runtime_images(
     }
     let images = crate::local_build::build_user_runtimes(project_root, &resolved)?
         .into_iter()
-        .map(|(name, image)| RuntimeImageRef { name, image })
+        .map(|(name, image)| ServiceImageRef { name, image })
         .collect();
-    Ok(RuntimeImageSummary { images })
+    Ok(ServiceImageSummary { images })
 }
 
 pub(crate) fn run_env(
@@ -417,22 +424,19 @@ pub(crate) fn run_env(
         ("PHOXAL_CONNECT".to_string(), bus_connect.to_string()),
         ("PHOXAL_CLOCK".to_string(), "real".to_string()),
     ];
-    // A scaffolded user runtime always declares `config = Config`, so the runner
-    // deserializes its typed config from PHOXAL_CONFIG. When the manifest has no
-    // config block, pass an empty object `{}` (not nothing → the runner would see
-    // `null` and reject a struct): an empty/all-default `Config` then deserializes
-    // cleanly, and a `Config` with required fields fails with a clear "missing
-    // field" error instead of a confusing "invalid type: null".
+    // Services that opt into `config = Type` deserialize their typed config from
+    // PHOXAL_CONFIG. When the manifest has no config block, pass an empty object
+    // `{}` so an empty/defaultable config type deserializes cleanly.
     let config_json = config.map_or_else(|| "{}".to_string(), JsonValue::to_string);
     env.push(("PHOXAL_CONFIG".to_string(), config_json));
     env
 }
 
-fn runtime_binary_name(crate_dir: &Path, runtime_name: &str) -> Result<String> {
-    cargo_binary_name(crate_dir, Some(runtime_name))
+fn service_binary_name(crate_dir: &Path, service_name: &str) -> Result<String> {
+    cargo_binary_name(crate_dir, Some(service_name))
 }
 
-fn build_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Result<()> {
+fn build_user_service_host_native(plan: &ServiceRunPlan, ui: &crate::Ui) -> Result<()> {
     let mut command = Command::new("cargo");
     command
         .arg("build")
@@ -441,7 +445,7 @@ fn build_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Resu
         .current_dir(&plan.crate_dir);
     let status = ui.command_status(&mut command).with_context(|| {
         format!(
-            "failed to start cargo build for user runtime '{}' ({}) in {}",
+            "failed to start cargo build for user service '{}' ({}) in {}",
             plan.name,
             plan.binary_name,
             plan.crate_dir.display()
@@ -449,7 +453,7 @@ fn build_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Resu
     })?;
     if !status.success() {
         bail!(
-            "cargo build failed for user runtime '{}' in {} with status {status}",
+            "cargo build failed for user service '{}' in {} with status {status}",
             plan.name,
             plan.crate_dir.display()
         );
@@ -457,7 +461,7 @@ fn build_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Resu
     Ok(())
 }
 
-fn run_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Result<ExitStatus> {
+fn run_user_service_host_native(plan: &ServiceRunPlan, ui: &crate::Ui) -> Result<ExitStatus> {
     let mut command = Command::new("cargo");
     command
         .arg("run")
@@ -474,7 +478,7 @@ fn run_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Result
         .envs(plan.env.iter().map(|(key, value)| (key, value)));
     let mut child = ui.command_spawn(&mut command).with_context(|| {
         format!(
-            "failed to spawn `cargo run --bin {}` for user runtime '{}' in {}",
+            "failed to spawn `cargo run --bin {}` for user service '{}' in {}",
             plan.binary_name,
             plan.name,
             plan.crate_dir.display()
@@ -482,10 +486,10 @@ fn run_user_runtime_host_native(plan: &RuntimeRunPlan, ui: &crate::Ui) -> Result
     })?;
     child
         .wait()
-        .with_context(|| format!("failed to wait for user runtime '{}'", plan.name))
+        .with_context(|| format!("failed to wait for user service '{}'", plan.name))
 }
 
-fn forward_runtime_exit_status(runtime_name: &str, status: ExitStatus) -> Result<()> {
+fn forward_service_exit_status(service_name: &str, status: ExitStatus) -> Result<()> {
     if status.success() {
         return Ok(());
     }
@@ -499,7 +503,7 @@ fn forward_runtime_exit_status(runtime_name: &str, status: ExitStatus) -> Result
             std::process::exit(128 + signal);
         }
     }
-    bail!("user runtime '{runtime_name}' terminated without an exit code: {status}")
+    bail!("user service '{service_name}' terminated without an exit code: {status}")
 }
 
 fn read_robot_yaml(path: &Path) -> Result<YamlValue> {
@@ -515,7 +519,7 @@ fn write_robot_yaml(path: &Path, yaml: &YamlValue) -> Result<()> {
     fs::write(path, contents).with_context(|| format!("failed to update {}", path.display()))
 }
 
-fn insert_user_runtime_manifest_entry(
+fn insert_user_service_manifest_entry(
     yaml: &mut YamlValue,
     name: &str,
     manifest_path: &Path,
@@ -523,32 +527,32 @@ fn insert_user_runtime_manifest_entry(
     let root = yaml
         .as_mapping_mut()
         .ok_or_else(|| anyhow!("robot.yaml root must be a mapping"))?;
-    let user_runtimes_key = YamlValue::String("user_participants".to_string());
-    if root.get(&user_runtimes_key).is_none() {
+    let user_participants_key = YamlValue::String("user_participants".to_string());
+    if root.get(&user_participants_key).is_none() {
         root.insert(
-            user_runtimes_key.clone(),
+            user_participants_key.clone(),
             YamlValue::Mapping(YamlMapping::new()),
         );
     }
-    let user_runtimes = root
-        .get_mut(&user_runtimes_key)
+    let user_participants = root
+        .get_mut(&user_participants_key)
         .and_then(YamlValue::as_mapping_mut)
         .ok_or_else(|| anyhow!("robot.yaml user_participants must be a mapping"))?;
-    let runtime_key = YamlValue::String(name.to_string());
-    if user_runtimes.contains_key(&runtime_key) {
+    let service_key = YamlValue::String(name.to_string());
+    if user_participants.contains_key(&service_key) {
         bail!("user_participants.{name} already exists in robot.yaml");
     }
 
-    let mut runtime = YamlMapping::new();
-    runtime.insert(
+    let mut service = YamlMapping::new();
+    service.insert(
         YamlValue::String("path".to_string()),
         YamlValue::String(manifest_path_string(manifest_path)),
     );
-    runtime.insert(
+    service.insert(
         YamlValue::String("framework".to_string()),
         YamlValue::String("match-platform".to_string()),
     );
-    user_runtimes.insert(runtime_key, YamlValue::Mapping(runtime));
+    user_participants.insert(service_key, YamlValue::Mapping(service));
     Ok(())
 }
 
@@ -559,23 +563,23 @@ fn manifest_path_string(path: &Path) -> String {
         .join("/")
 }
 
-fn validate_runtime_name(name: &str) -> Result<&str> {
+fn validate_service_name(name: &str) -> Result<&str> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
-        bail!("runtime name must not be empty");
+        bail!("service name must not be empty");
     }
     if trimmed != name {
-        bail!("runtime name '{name}' must not contain leading or trailing whitespace");
+        bail!("service name '{name}' must not contain leading or trailing whitespace");
     }
-    if !is_valid_runtime_name(name) {
+    if !is_valid_service_name(name) {
         bail!(
-            "runtime name '{name}' must be kebab-case: start with a lowercase ASCII letter, then use lowercase letters, digits, and single hyphens"
+            "service name '{name}' must be kebab-case: start with a lowercase ASCII letter, then use lowercase letters, digits, and single hyphens"
         );
     }
     Ok(name)
 }
 
-fn is_valid_runtime_name(name: &str) -> bool {
+fn is_valid_service_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     let Some((&first, rest)) = bytes.split_first() else {
         return false;
@@ -601,29 +605,30 @@ fn is_valid_runtime_name(name: &str) -> bool {
     !previous_was_hyphen
 }
 
-fn scaffold_runtime_crate(
+fn scaffold_service_crate(
     crate_dir: &Path,
     name: &str,
     api_version: &str,
     phoxal_version: &str,
+    phoxal_api_version: &str,
 ) -> Result<()> {
     let src_dir = crate_dir.join("src");
     fs::create_dir_all(&src_dir)
         .with_context(|| format!("failed to create {}", src_dir.display()))?;
     fs::write(
         crate_dir.join("Cargo.toml"),
-        runtime_cargo_toml(name, phoxal_version),
+        service_cargo_toml(name, phoxal_version, phoxal_api_version),
     )
     .with_context(|| format!("failed to write {}", crate_dir.join("Cargo.toml").display()))?;
     fs::write(
         src_dir.join("main.rs"),
-        runtime_main_rs(name, api_version, &name.to_upper_camel_case()),
+        service_main_rs(name, api_version, &name.to_upper_camel_case()),
     )
     .with_context(|| format!("failed to write {}", src_dir.join("main.rs").display()))?;
     Ok(())
 }
 
-fn runtime_cargo_toml(name: &str, phoxal_version: &str) -> String {
+fn service_cargo_toml(name: &str, phoxal_version: &str, phoxal_api_version: &str) -> String {
     format!(
         r#"[package]
 name = "{name}"
@@ -632,7 +637,7 @@ edition = "2024"
 
 [dependencies]
 phoxal = "{phoxal_version}"
-phoxal-api = "{phoxal_version}"
+phoxal-api = "{phoxal_api_version}"
 anyhow = "1"
 serde = {{ version = "1", features = ["derive"] }}
 
@@ -643,31 +648,25 @@ path = "src/main.rs"
     )
 }
 
-fn runtime_main_rs(name: &str, api_version: &str, pascal_name: &str) -> String {
+fn service_main_rs(name: &str, api_version: &str, pascal_name: &str) -> String {
     format!(
-        r#"// `api` is your one API version (D59). Remove this `allow` once you use it
+        r#"use phoxal::prelude::*;
+// `api` is your one API version (D59). Remove this `allow` once you use it
 // in a handle field below (e.g. `Publisher<api::drive::Target>`).
 #[allow(unused_imports)]
 use phoxal_api::{api_version} as api;
-use phoxal::prelude::*;
 
-/// Typed config for this runtime (validated by `phoxal-cli check`).
-#[derive(Debug, serde::Deserialize)]
-pub struct Config {{
-    // Add config fields here.
-}}
-
-#[derive(phoxal::Runtime)]
-#[phoxal(id = "{name}", api = {api_version}, config = Config)]
+#[derive(phoxal::Service)]
+#[phoxal(id = "{name}", api = {api_version})]
 struct {pascal_name} {{
-    // TODO: declare typed handle fields and use Config in setup when needed.
+    // TODO: declare typed handle fields here.
     // target: Publisher<api::drive::Target>,
 }}
 
-#[phoxal::runtime]
+#[phoxal::behavior]
 impl {pascal_name} {{
     #[setup]
-    async fn setup(_ctx: &mut SetupContext<Self>, _config: Self::Config) -> Result<Self> {{
+    async fn setup(_ctx: &mut SetupContext<Self>) -> Result<Self> {{
         Ok(Self {{}})
     }}
 
@@ -685,19 +684,36 @@ fn main() -> phoxal::Result<()> {{
 }
 
 fn cli_phoxal_dependency_major_minor() -> Result<String> {
-    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-    let contents = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let manifest = toml::from_str::<TomlValue>(&contents)
-        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let (manifest_path, manifest) = read_cli_manifest()?;
     let version = phoxal_dependency_version(&manifest).with_context(|| {
         format!(
             "failed to find phoxal dependency version in {}",
             manifest_path.display()
         )
     })?;
-    let version = parse_dependency_version(&version)?;
+    let version = parse_dependency_version("phoxal dependency", &version)?;
     Ok(format!("{}.{}", version.major, version.minor))
+}
+
+fn cli_phoxal_api_scaffold_version() -> Result<String> {
+    let (manifest_path, manifest) = read_cli_manifest()?;
+    let version = phoxal_api_scaffold_version(&manifest).with_context(|| {
+        format!(
+            "invalid package.metadata.scaffold.phoxal-api in {}",
+            manifest_path.display()
+        )
+    })?;
+    let version = parse_dependency_version("package.metadata.scaffold.phoxal-api", &version)?;
+    Ok(format!("{}.{}", version.major, version.minor))
+}
+
+fn read_cli_manifest() -> Result<(PathBuf, TomlValue)> {
+    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let contents = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest = toml::from_str::<TomlValue>(&contents)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    Ok((manifest_path, manifest))
 }
 
 fn phoxal_dependency_version(manifest: &TomlValue) -> Option<String> {
@@ -728,6 +744,19 @@ fn dependency_version(dependency: &TomlValue) -> Option<String> {
         .map(str::to_string)
 }
 
+fn phoxal_api_scaffold_version(manifest: &TomlValue) -> Result<String> {
+    let value = manifest
+        .get("package")
+        .and_then(|package| package.get("metadata"))
+        .and_then(|metadata| metadata.get("scaffold"))
+        .and_then(|scaffold| scaffold.get("phoxal-api"))
+        .context("missing package.metadata.scaffold.phoxal-api")?;
+    value
+        .as_str()
+        .map(str::to_string)
+        .context("package.metadata.scaffold.phoxal-api must be a string")
+}
+
 fn is_workspace_dependency(dependency: &TomlValue) -> bool {
     dependency
         .as_table()
@@ -736,7 +765,7 @@ fn is_workspace_dependency(dependency: &TomlValue) -> bool {
         .unwrap_or(false)
 }
 
-fn parse_dependency_version(version: &str) -> Result<Version> {
+fn parse_dependency_version(label: &str, version: &str) -> Result<Version> {
     let trimmed = version
         .trim()
         .trim_start_matches('^')
@@ -745,7 +774,7 @@ fn parse_dependency_version(version: &str) -> Result<Version> {
         .trim_start_matches('v');
     Version::parse(trimmed)
         .or_else(|_| Version::parse(&format!("{trimmed}.0")))
-        .with_context(|| format!("phoxal dependency version '{version}' is not a semver version"))
+        .with_context(|| format!("{label} version '{version}' is not a semver version"))
 }
 
 #[cfg(test)]
@@ -760,11 +789,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn add_runtime_scaffolds_crate_and_registers_manifest() -> Result<()> {
+    fn add_service_scaffolds_crate_and_registers_manifest() -> Result<()> {
         let temp = tempfile::tempdir()?;
         fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
 
-        let outcome = add_runtime(temp.path(), "avoid-obstacles")?;
+        let outcome = add_service(temp.path(), "avoid-obstacles")?;
         assert_eq!(outcome.name, "avoid-obstacles");
         assert_eq!(outcome.api_version, "y2026_1");
         assert_eq!(
@@ -788,7 +817,12 @@ mod tests {
 
         let main = fs::read_to_string(main_rs)?;
         assert!(main.contains(r#"#[phoxal(id = "avoid-obstacles", api = y2026_1"#));
+        assert!(main.contains("#[derive(phoxal::Service)]"));
+        assert!(main.contains("#[phoxal::behavior]"));
+        assert!(main.contains("async fn setup(_ctx: &mut SetupContext<Self>) -> Result<Self>"));
         assert!(main.contains("phoxal::run::<AvoidObstacles>()"));
+        assert!(!main.contains("phoxal::Runtime"));
+        assert!(!main.contains("#[phoxal::runtime]"));
         // Scaffolds author against the published api crate (DoD #313): the API
         // version comes through `phoxal_api::y2026_1`, not the removed
         // `phoxal::api` facade.
@@ -796,35 +830,36 @@ mod tests {
         assert!(!main.contains("phoxal::api"));
 
         // The generated manifest depends on both `phoxal` and the api crate it
-        // imports, pinned to the same major.minor the CLI itself uses.
+        // imports, pinned to their independent major.minor release lines.
         let cargo = fs::read_to_string(&cargo_toml)?;
         let phoxal_version = cli_phoxal_dependency_major_minor()?;
+        let phoxal_api_version = cli_phoxal_api_scaffold_version()?;
         assert!(cargo.contains(&format!("phoxal = \"{phoxal_version}\"")));
-        assert!(cargo.contains(&format!("phoxal-api = \"{phoxal_version}\"")));
+        assert!(cargo.contains(&format!("phoxal-api = \"{phoxal_api_version}\"")));
 
         let robot = Robot::read_from_dir(temp.path())?;
-        let runtime = robot
+        let service = robot
             .user_participants
             .get("avoid-obstacles")
-            .expect("runtime should be registered");
+            .expect("service should be registered");
         assert_eq!(
-            runtime.path,
+            service.path,
             PathBuf::from("runtimes").join("avoid-obstacles")
         );
 
-        let error = add_runtime(temp.path(), "avoid-obstacles")
-            .expect_err("adding the same runtime twice should fail");
+        let error = add_service(temp.path(), "avoid-obstacles")
+            .expect_err("adding the same service twice should fail");
         assert!(error.to_string().contains("already exists"));
 
         Ok(())
     }
 
     #[test]
-    fn add_runtime_preserves_other_runtime_image_and_config_extras() -> Result<()> {
+    fn add_service_preserves_other_user_participant_image_and_config_extras() -> Result<()> {
         let temp = tempfile::tempdir()?;
         fs::write(
             temp.path().join("robot.yaml"),
-            minimal_robot_yaml_with_user_runtime(
+            minimal_robot_yaml_with_user_participant(
                 "brain",
                 r#"
     path: runtimes/brain
@@ -837,18 +872,18 @@ mod tests {
             ),
         )?;
 
-        add_runtime(temp.path(), "avoid-obstacles")?;
+        add_service(temp.path(), "avoid-obstacles")?;
 
         let robot_yaml = fs::read_to_string(temp.path().join("robot.yaml"))?;
         let yaml: YamlValue = serde_yaml::from_str(&robot_yaml)?;
-        let user_runtimes = yaml
+        let user_participants = yaml
             .get("user_participants")
             .and_then(YamlValue::as_mapping)
             .expect("user_participants should remain a mapping");
-        let brain = user_runtimes
+        let brain = user_participants
             .get(YamlValue::String("brain".to_string()))
             .and_then(YamlValue::as_mapping)
-            .expect("existing runtime should survive");
+            .expect("existing user participant should survive");
         assert_eq!(
             brain.get(YamlValue::String("image".to_string())),
             Some(&YamlValue::String(
@@ -870,10 +905,10 @@ mod tests {
             ]
         );
 
-        let avoid = user_runtimes
+        let avoid = user_participants
             .get(YamlValue::String("avoid-obstacles".to_string()))
             .and_then(YamlValue::as_mapping)
-            .expect("new runtime should be registered");
+            .expect("new service should be registered");
         assert_eq!(
             avoid.get(YamlValue::String("path".to_string())),
             Some(&YamlValue::String("runtimes/avoid-obstacles".to_string()))
@@ -897,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_runtime_names_are_rejected() {
+    fn invalid_service_names_are_rejected() {
         for name in [
             "",
             "AvoidObstacles",
@@ -907,12 +942,12 @@ mod tests {
             "avoid--it",
         ] {
             assert!(
-                validate_runtime_name(name).is_err(),
+                validate_service_name(name).is_err(),
                 "{name:?} should be rejected"
             );
         }
         assert_eq!(
-            validate_runtime_name("avoid-obstacles").unwrap(),
+            validate_service_name("avoid-obstacles").unwrap(),
             "avoid-obstacles"
         );
     }
@@ -966,7 +1001,7 @@ mod tests {
             Some("real")
         );
         // With no manifest config block, PHOXAL_CONFIG defaults to an empty object
-        // so the runtime's typed `Config` deserializes (it would reject `null`).
+        // so services that opt into a typed config can deserialize cleanly.
         assert_eq!(
             env.iter()
                 .find(|(k, _)| k == "PHOXAL_CONFIG")
@@ -1020,28 +1055,28 @@ mod tests {
     }
 
     #[test]
-    fn runtime_run_unknown_runtime_errors_before_building() -> Result<()> {
+    fn service_run_unknown_service_errors_before_building() -> Result<()> {
         let temp = tempfile::tempdir()?;
         fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
 
-        let error = runtime_run_plan(temp.path(), "missing")
-            .expect_err("unknown runtime should fail before cargo build");
+        let error = service_run_plan(temp.path(), "missing")
+            .expect_err("unknown service should fail before cargo build");
 
         assert!(
             error
                 .to_string()
-                .contains("user runtime 'missing' is not defined in user_participants"),
+                .contains("user service 'missing' is not defined in user_participants"),
             "{error:#}"
         );
         Ok(())
     }
 
     #[test]
-    fn runtime_run_platform_runtime_name_errors_before_building() -> Result<()> {
+    fn service_run_official_service_name_errors_before_building() -> Result<()> {
         let temp = tempfile::tempdir()?;
         fs::write(
             temp.path().join("robot.yaml"),
-            minimal_robot_yaml_with_user_runtime(
+            minimal_robot_yaml_with_user_participant(
                 "drive",
                 r#"
     path: runtimes/drive
@@ -1049,18 +1084,18 @@ mod tests {
             ),
         )?;
 
-        let error = runtime_run_plan(temp.path(), "drive")
-            .expect_err("platform runtime name should fail before cargo build");
+        let error = service_run_plan(temp.path(), "drive")
+            .expect_err("official service name should fail before cargo build");
 
         assert!(
-            error.to_string().contains("'drive' is a platform runtime"),
+            error.to_string().contains("'drive' is an official service"),
             "{error:#}"
         );
         Ok(())
     }
 
     #[test]
-    fn runtime_run_plan_serializes_manifest_config() -> Result<()> {
+    fn service_run_plan_serializes_manifest_config() -> Result<()> {
         let temp = tempfile::tempdir()?;
         fs::create_dir_all(temp.path().join("runtimes").join("avoid-obstacles"))?;
         fs::write(
@@ -1068,11 +1103,11 @@ mod tests {
                 .join("runtimes")
                 .join("avoid-obstacles")
                 .join("Cargo.toml"),
-            runtime_cargo_toml("avoid-obstacles", "0.15"),
+            service_cargo_toml("avoid-obstacles", "0.15", "0.14"),
         )?;
         fs::write(
             temp.path().join("robot.yaml"),
-            minimal_robot_yaml_with_user_runtime(
+            minimal_robot_yaml_with_user_participant(
                 "avoid-obstacles",
                 r#"
     path: runtimes/avoid-obstacles
@@ -1087,7 +1122,7 @@ mod tests {
             r#"<robot name="testbot"><link name="base_link"/></robot>"#,
         )?;
 
-        let plan = runtime_run_plan(temp.path(), "avoid-obstacles")?;
+        let plan = service_run_plan(temp.path(), "avoid-obstacles")?;
         let config_json = plan
             .env
             .iter()
@@ -1106,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_run_plan_uses_selected_bus_profile_connect() -> Result<()> {
+    fn service_run_plan_uses_selected_bus_profile_connect() -> Result<()> {
         let temp = tempfile::tempdir()?;
         fs::create_dir_all(temp.path().join("runtimes").join("avoid-obstacles"))?;
         fs::write(
@@ -1114,9 +1149,9 @@ mod tests {
                 .join("runtimes")
                 .join("avoid-obstacles")
                 .join("Cargo.toml"),
-            runtime_cargo_toml("avoid-obstacles", "0.15"),
+            service_cargo_toml("avoid-obstacles", "0.15", "0.14"),
         )?;
-        let robot_yaml = minimal_robot_yaml_with_user_runtime(
+        let robot_yaml = minimal_robot_yaml_with_user_participant(
             "avoid-obstacles",
             r#"
     path: runtimes/avoid-obstacles
@@ -1132,7 +1167,7 @@ mod tests {
             r#"<robot name="testbot"><link name="base_link"/></robot>"#,
         )?;
 
-        let plan = runtime_run_plan(temp.path(), "avoid-obstacles")?;
+        let plan = service_run_plan(temp.path(), "avoid-obstacles")?;
 
         assert_eq!(
             plan.env
@@ -1173,10 +1208,10 @@ components:
 "#
     }
 
-    fn minimal_robot_yaml_with_user_runtime(name: &str, runtime_yaml: &str) -> String {
+    fn minimal_robot_yaml_with_user_participant(name: &str, participant_yaml: &str) -> String {
         minimal_robot_yaml().replace(
             "\ncomponents:\n",
-            &format!("\nuser_participants:\n  {name}:{runtime_yaml}\ncomponents:\n"),
+            &format!("\nuser_participants:\n  {name}:{participant_yaml}\ncomponents:\n"),
         )
     }
 }

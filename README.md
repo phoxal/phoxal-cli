@@ -1,7 +1,7 @@
 # phoxal-cli
 
 Consumer CLI for the Phoxal robot framework.
-You run it from a robot project: it reads `robot.yaml`, resolves the graph against its compiled-in official runtime catalog, and drives the develop, simulate, and deploy loop.
+You run it from a robot project: it reads `robot.yaml`, resolves the graph against its compiled-in official service catalog, and drives the develop, simulate, and deploy loop.
 It owns the resolver and `robot.yaml` discovery.
 There is no lockfile: versions, image digests, and component commits resolve live from GitHub releases, Docker/GHCR, and `git ls-remote` on every run.
 Production reproducibility is the `deploy build` digest-pinned (`@sha256`) bundle.
@@ -13,8 +13,8 @@ phoxal-cli robot new rover        # scaffold a robot project
 cd rover
 
 phoxal-cli check                  # validate the graph's api_version + topology via emit-apis
-phoxal-cli runtime add brain      # scaffold a user runtime crate, register it in robot.yaml
-phoxal-cli runtime run brain      # build and run that runtime host-native against the dev bus
+phoxal-cli service add brain      # scaffold a user service crate, register it in robot.yaml
+phoxal-cli service run brain      # build and run that service host-native against the dev bus
 phoxal-cli simulate default       # launch the Webots simulation stack
 
 phoxal-cli pull                   # refresh cached official images + host tools
@@ -25,12 +25,12 @@ phoxal-cli deploy build           # write an immutable, digest-pinned deployment
 | Command | What it does |
 |---|---|
 | `robot new <name>` | Scaffold a robot project (`robot.yaml`, `structure.urdf`, default world, `runtimes/`). |
-| `check` | Resolve `robot.yaml`, then run each participant's `emit-apis` and fail if participants sharing a contract disagree on its `schema_id` (wire shape) or the producer/consumer topology is unsatisfied (mixed `api_version`s are allowed as long as shared contracts' `schema_id`s agree). Uses cached official images (pulled only when missing); git component commits resolve live unless pinned to a commit SHA in `robot.yaml`. `--pull` refreshes official images first; `--runtime <name>` scopes the build to one user runtime. |
-| `simulate <world>` | Resolve, generate the run bundle, and launch the Webots stack (router, official runtimes, user runtimes, component drivers). |
-| `runtime add\|run\|image\|catalog` | Scaffold a user runtime, run one host-native, build local deployment images, or print the official runtime catalog. |
+| `check` | Resolve `robot.yaml`, then run each participant's `emit-apis` and fail if participants sharing a contract disagree on its `schema_id` (wire shape) or the producer/consumer topology is unsatisfied (mixed `api_version`s are allowed as long as shared contracts' `schema_id`s agree). Uses cached official images (pulled only when missing); git component commits resolve live unless pinned to a commit SHA in `robot.yaml`. `--pull` refreshes official images first; `--service <name>` scopes the build to one user service. |
+| `simulate <world>` | Resolve, generate the run bundle, and launch the Webots stack (router, official services, user services, component drivers). |
+| `service add\|run\|image\|catalog` | Scaffold a user service, run one host-native, build local deployment images, or print the official service catalog. |
 | `pull` / `outdated` | Refresh, or report drift in, cached official images and host tools for the selected `(api_version, channel)`. |
 | `deploy build` | Re-run the static check on a pulled set and write a compose artifact whose image refs are all immutable (`repository@sha256:digest`). This digest-pinned bundle is the production reproducibility boundary. |
-| `validate` | Lower-level `robot.yaml` structure and user-runtime phoxal-dependency checks that back `check`. |
+| `validate` | Lower-level `robot.yaml` structure and user-service phoxal-dependency checks that back `check`. |
 | `doctor` | Check host prerequisites (Docker, Webots) without changing anything. |
 | `self upgrade` | Update the CLI binary itself. |
 
@@ -82,9 +82,9 @@ Example: `phoxal-cli simulate default` finds `worlds/default.wbt` in the project
 `scripts/live-simulate-gate.sh` is the documented gate that proves the
 separated repos run together end to end: `robot.yaml` -> `phoxal-cli` -> live
 resolution (GHCR images, git component commits, GitHub release tools) ->
-generated `.phoxal/run/` -> router -> Webots -> the mandatory API/channel runtime
+generated `.phoxal/run/` -> router -> Webots -> the mandatory API/channel service
 set. It is the live counterpart to recovery Gates 8-9 in
-`phoxal/organization`'s `REPOSITORIES.md`, and depends on a published runtime
+`phoxal/organization`'s `REPOSITORIES.md`, and depends on a published service
 image set (`phoxal/framework#31`).
 
 ```sh
@@ -95,13 +95,13 @@ scripts/live-simulate-gate.sh --live     # full live run (needs Docker daemon + 
 
 The smoke phase runs `simulate default --dry-run` to resolve live and generate
 the compose, then asserts the compose references the mandatory
-`ghcr.io/phoxal/runtime-` services. It needs no Docker daemon. The `--live` phase
+`ghcr.io/phoxal/service-` images. It needs no Docker daemon. The `--live` phase
 additionally requires a running Docker daemon and Webots on `PATH`, then runs
-`simulate default --pull` so you can confirm the router, the GHCR runtime
+`simulate default --pull` so you can confirm the router, the GHCR service
 services, Webots, and bus connectivity (`tcp/router:7447`, host tools via
 `tcp/127.0.0.1:7447`). Failures are reported with the actionable cause
 (unresolvable git ref, missing image, Docker not running, Webots missing,
-runtime startup, or bus connection).
+service startup, or bus connection).
 
 ## Host layout
 

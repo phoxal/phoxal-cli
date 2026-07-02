@@ -197,13 +197,13 @@ fn user_runtime_match_platform_resolves_to_api_version_hash_and_image() -> anyho
         .user_runtimes
         .iter()
         .find(|runtime| runtime.name == "autonomy")
-        .expect("user runtime resolved");
+        .expect("user service resolved");
     assert_eq!(runtime.path, std::path::PathBuf::from("runtimes/autonomy"));
     assert_eq!(runtime.framework, "y2026_1");
     assert_eq!(runtime.source_hash.len(), 16);
     assert_eq!(
         runtime.image,
-        "phoxal.local/testbot/user-runtime/autonomy:dev"
+        "phoxal.local/testbot/user-service/autonomy:dev"
     );
     assert_eq!(second.user_runtimes[0].source_hash, runtime.source_hash);
 
@@ -245,7 +245,7 @@ fn user_runtime_explicit_mismatched_framework_fails() -> anyhow::Result<()> {
 
     assert_eq!(
         error.to_string(),
-        "user runtime 'autonomy': framework 'y2026_2' must be \"match-platform\" or the graph api_version 'y2026_1'"
+        "user service 'autonomy': framework 'y2026_2' must be \"match-platform\" or the graph api_version 'y2026_1'"
     );
     Ok(())
 }

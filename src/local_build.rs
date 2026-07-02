@@ -30,18 +30,18 @@ pub(crate) fn ensure_platform_images(
     Ok(())
 }
 
-pub(crate) fn pull_platform_image_refs(runtime_refs: &[(String, String)]) -> Result<()> {
-    for (runtime_name, image) in runtime_refs {
+pub(crate) fn pull_platform_image_refs(service_refs: &[(String, String)]) -> Result<()> {
+    for (service_name, image) in service_refs {
         // `deploy_ref` is a real digest pin or an honest tag ref - never a
         // fabricated `sha256:` - so this can't attempt to pull a fake digest.
         shell::run_status("docker", ["pull", image.as_str()], None).with_context(|| {
             if image.contains("@sha256:") {
-                format!("failed to pull pinned runtime image {image}")
+                format!("failed to pull pinned service image {image}")
             } else {
                 format!(
-                    "failed to pull runtime image {runtime_name} ({image}) by tag. The phoxal/framework GHCR \
-                     runtime images may not be published for this API/channel yet. Publish the \
-                     runtime images, then re-run. Production deployments pin real digests via \
+                    "failed to pull service image {service_name} ({image}) by tag. The phoxal/framework GHCR \
+                     service images may not be published for this API/channel yet. Publish the \
+                     service images, then re-run. Production deployments pin real digests via \
                      `phoxal-cli deploy build`."
                 )
             }
@@ -98,7 +98,7 @@ fn build_user_runtimes_with_ref_mode(
             UserRuntimeImageRefMode::Immutable => immutable_local_image_ref(&runtime.image)
                 .with_context(|| {
                     format!(
-                        "failed to resolve immutable image id for user runtime {}",
+                        "failed to resolve immutable image id for user service {}",
                         runtime.name
                     )
                 })?,
@@ -205,11 +205,11 @@ mod tests {
     #[test]
     fn docker_build_args_use_default_context_without_recipe() {
         assert_eq!(
-            docker_build_args("phoxal.local/test/user-runtime/drive:dev", None),
+            docker_build_args("phoxal.local/test/user-service/drive:dev", None),
             os_args([
                 "build",
                 "-t",
-                "phoxal.local/test/user-runtime/drive:dev",
+                "phoxal.local/test/user-service/drive:dev",
                 "."
             ])
         );
@@ -224,11 +224,11 @@ mod tests {
         };
 
         assert_eq!(
-            docker_build_args("phoxal.local/test/user-runtime/drive:dev", Some(&build)),
+            docker_build_args("phoxal.local/test/user-service/drive:dev", Some(&build)),
             os_args([
                 "build",
                 "-t",
-                "phoxal.local/test/user-runtime/drive:dev",
+                "phoxal.local/test/user-service/drive:dev",
                 "-f",
                 "container/Dockerfile.runtime",
                 "--target",

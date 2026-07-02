@@ -83,8 +83,8 @@ pub struct BuildSummary {
     pub output_path: PathBuf,
     pub bundle_dir: PathBuf,
     pub metadata_path: PathBuf,
-    pub platform_runtime_count: usize,
-    pub user_runtime_count: usize,
+    pub platform_service_count: usize,
+    pub user_service_count: usize,
     pub applied_overlays: Vec<String>,
 }
 
@@ -118,7 +118,7 @@ impl Build {
                 println!("wrote deploy metadata: {}", summary.metadata_path.display());
                 println!("wrote compose artifact: {}", summary.output_path.display());
                 println!(
-                    "note: local compose deploys use immutable local Docker image IDs for user runtimes; production registry targets require pushed repository@sha256:digest refs"
+                    "note: local compose deploys use immutable local Docker image IDs for user services; production registry targets require pushed repository@sha256:digest refs"
                 );
                 Ok(())
             },
@@ -133,7 +133,7 @@ pub fn run(project_start: &Path, options: BuildOptions) -> Result<BuildSummary> 
     // help (so we don't pretend the flag doesn't exist), but it returns a clear
     // "not yet implemented" error instead of silently succeeding via the compose
     // path. TODO(phoxal-cli#balena): build the Balena deployment adapter; the
-    // `resolve_production_user_runtime_images` / `pin_image_ref` helpers below
+    // `resolve_production_user_service_images` / `pin_image_ref` helpers below
     // are the digest-pinning scaffolding that adapter will reuse.
     if options.target == DeployTarget::Balena {
         bail!(
@@ -205,8 +205,8 @@ pub fn run(project_start: &Path, options: BuildOptions) -> Result<BuildSummary> 
         output_path,
         bundle_dir,
         metadata_path,
-        platform_runtime_count: resolved.platform_runtimes.len(),
-        user_runtime_count: resolved.user_runtimes.len(),
+        platform_service_count: resolved.platform_runtimes.len(),
+        user_service_count: resolved.user_runtimes.len(),
         applied_overlays: options.env,
     })
 }
@@ -239,19 +239,19 @@ fn run_pinned_graph_check(
         .iter()
         .map(|runtime| {
             let image_ref = user_runtime_images.get(&runtime.name).with_context(|| {
-                format!("missing built image ref for user runtime {}", runtime.name)
+                format!("missing built image ref for user service {}", runtime.name)
             })?;
-            Ok(check::UserRuntimeImageParticipant {
+            Ok(check::UserServiceImageParticipant {
                 name: runtime.name.clone(),
                 image_ref: image_ref.clone(),
             })
         })
         .collect::<Result<Vec<_>>>()?;
     let robot_graph = check::robot_graph_from_resolved(resolved);
-    let outcome = check::run_check_with_deployed_user_runtime_images(
+    let outcome = check::run_check_with_deployed_user_service_images(
         check::CheckParticipants {
             platform_image_refs: &platform_refs,
-            user_runtime_images: &user_runtime_image_participants,
+            user_service_images: &user_runtime_image_participants,
             tool_participants: &tool_participants,
             source_participants: &source_participants,
         },
@@ -270,8 +270,8 @@ fn run_pinned_graph_check(
     )
 }
 
-// NOTE: the production user-runtime image resolution + digest pinning that the
-// Balena target needs (resolve each user runtime to a pullable ref, then pin it
+// NOTE: the production user-service image resolution + digest pinning that the
+// Balena target needs (resolve each user service to a pullable ref, then pin it
 // to an immutable `@sha256:` digest) is intentionally NOT implemented in this
 // pass. See the tracked Balena follow-up referenced in `run()`. When that
 // adapter lands it can reuse `ensure_all_compose_image_refs_are_immutable` /
@@ -453,7 +453,7 @@ services:
         let temp = tempfile::tempdir()?;
         let robot_path = temp.path().join("robot.yaml");
         fs::write(&robot_path, MINIMAL_ROBOT)?;
-        let mut resolved = resolved_robot("phoxal.local/testbot/user-runtime/avoid:dev")?;
+        let mut resolved = resolved_robot("phoxal.local/testbot/user-service/avoid:dev")?;
         resolved.tools.push(ResolvedTool {
             name: "joypad".to_string(),
             requested: "0.14.0".to_string(),

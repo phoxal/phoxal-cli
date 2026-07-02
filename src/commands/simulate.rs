@@ -37,7 +37,7 @@ pub struct Simulate {
     pub joypad: bool,
     #[arg(
         long,
-        help = "Refresh official runtime images and host tools instead of reusing compatible cached artifacts."
+        help = "Refresh official service images and host tools instead of reusing compatible cached artifacts."
     )]
     pub pull: bool,
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
@@ -332,7 +332,7 @@ fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Resul
         channel: plan.resolved.channel.to_string(),
         compose_file: plan.compose_path.clone(),
         written_files: plan.written_files.clone(),
-        platform_runtime_count: plan.resolved.platform_runtimes.len(),
+        platform_service_count: plan.resolved.platform_runtimes.len(),
         native_tools: plan.native_tools.clone(),
         compose_services: plan.compose_services.clone(),
     };
@@ -347,7 +347,7 @@ fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Resul
                 plan.resolved.api_version, plan.resolved.channel
             );
             println!(
-                "platform runtimes ({}):",
+                "official services ({}):",
                 plan.resolved.platform_runtimes.len()
             );
             for runtime in &plan.resolved.platform_runtimes {
@@ -368,7 +368,7 @@ struct SimulateDryRunOutput {
     channel: String,
     compose_file: PathBuf,
     written_files: Vec<PathBuf>,
-    platform_runtime_count: usize,
+    platform_service_count: usize,
     native_tools: Vec<String>,
     compose_services: Vec<String>,
 }

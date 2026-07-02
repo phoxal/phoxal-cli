@@ -12,7 +12,7 @@ use crate::catalog::CATALOG;
 
 #[derive(Debug, Args)]
 pub struct Validate {
-    #[arg(long, help = "Print the derived runtime/component graph.")]
+    #[arg(long, help = "Print the derived service/component graph.")]
     pub report: bool,
     #[arg(
         long,
@@ -23,9 +23,9 @@ pub struct Validate {
     pub report_format: ReportFormat,
     #[arg(
         long,
-        help = "Downgrade user-runtime framework mismatches from errors to warnings (local dev only)."
+        help = "Downgrade user-service framework mismatches from errors to warnings (local dev only)."
     )]
-    pub allow_user_runtime_drift: bool,
+    pub allow_user_service_drift: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -41,28 +41,28 @@ impl Validate {
         let platform_names = CATALOG.names_for_api(&robot.api_version);
         if platform_names.is_empty() {
             return Err(anyhow!(
-                "API version {} is not available in the compiled-in platform runtime catalog",
+                "API version {} is not available in the compiled-in platform service catalog",
                 robot.api_version
             ));
         }
         robot
             .validate_with(&platform_names)
             .map_err(|errors| anyhow!("Robot errors:\n{}", join_errors(errors)))?;
-        let user_runtime_problems = check_user_runtime_deps(app, &robot_path, &robot)?;
-        if !user_runtime_problems.is_empty() {
-            if self.allow_user_runtime_drift {
-                for problem in user_runtime_problems {
+        let user_service_problems = check_user_service_deps(app, &robot_path, &robot)?;
+        if !user_service_problems.is_empty() {
+            if self.allow_user_service_drift {
+                for problem in user_service_problems {
                     app.ui.warn(problem);
                 }
             } else {
                 return Err(anyhow!(
-                    "User runtime framework dependency check failed:\n{}\n\nFix these user runtime Cargo.toml files or rerun with --allow-user-runtime-drift for local dev only.",
-                    user_runtime_problems.join("\n")
+                    "User service framework dependency check failed:\n{}\n\nFix these user service Cargo.toml files or rerun with --allow-user-service-drift for local dev only.",
+                    user_service_problems.join("\n")
                 ));
             }
         }
         app.ui.success(format!(
-            "validated {} with {} platform runtimes",
+            "validated {} with {} official services",
             robot_path.display(),
             platform_names.len()
         ));
@@ -76,7 +76,7 @@ impl Validate {
     }
 }
 
-fn check_user_runtime_deps(
+fn check_user_service_deps(
     app: &AppContext,
     robot_path: &Path,
     robot: &Robot,
@@ -84,7 +84,7 @@ fn check_user_runtime_deps(
     let robot_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let report = collect_user_runtime_dependency_report(robot_root, robot, &robot.api_version);
+    let report = collect_user_service_dependency_report(robot_root, robot, &robot.api_version);
     for success in report.successes {
         app.ui.success(success);
     }
@@ -92,26 +92,26 @@ fn check_user_runtime_deps(
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct UserRuntimeDependencyReport {
+struct UserServiceDependencyReport {
     problems: Vec<String>,
     successes: Vec<String>,
 }
 
 #[cfg(test)]
-fn collect_user_runtime_problems(
+fn collect_user_service_problems(
     robot_root: &Path,
     robot: &Robot,
     expected_api_version: &str,
 ) -> Vec<String> {
-    collect_user_runtime_dependency_report(robot_root, robot, expected_api_version).problems
+    collect_user_service_dependency_report(robot_root, robot, expected_api_version).problems
 }
 
-fn collect_user_runtime_dependency_report(
+fn collect_user_service_dependency_report(
     robot_root: &Path,
     robot: &Robot,
     expected_api_version: &str,
-) -> UserRuntimeDependencyReport {
-    let mut report = UserRuntimeDependencyReport::default();
+) -> UserServiceDependencyReport {
+    let mut report = UserServiceDependencyReport::default();
     for (name, runtime) in &robot.user_participants {
         if let Err(error) = crate::resolver::validate_user_runtime_framework_selector(
             name,
@@ -124,14 +124,14 @@ fn collect_user_runtime_dependency_report(
         let manifest_path = runtime_dir.join("Cargo.toml");
         let Ok(contents) = fs::read_to_string(&manifest_path) else {
             report.problems.push(format!(
-                "user runtime '{name}' has no readable Cargo.toml at {}; cannot check phoxal dependency",
+                "user service '{name}' has no readable Cargo.toml at {}; cannot check phoxal dependency",
                 manifest_path.display()
             ));
             continue;
         };
         let Ok(manifest) = toml::from_str::<TomlValue>(&contents) else {
             report.problems.push(format!(
-                "user runtime '{name}' has an unparsable Cargo.toml at {}; cannot check phoxal dependency",
+                "user service '{name}' has an unparsable Cargo.toml at {}; cannot check phoxal dependency",
                 manifest_path.display()
             ));
             continue;
@@ -141,20 +141,20 @@ fn collect_user_runtime_dependency_report(
             .and_then(|dependencies| dependencies.get("phoxal"))
         else {
             report.problems.push(format!(
-                "user runtime '{name}' is missing a phoxal dependency; add a phoxal dependency built for API {expected_api_version}"
+                "user service '{name}' is missing a phoxal dependency; add a phoxal dependency built for API {expected_api_version}"
             ));
             continue;
         };
 
         match phoxal_dependency(dep) {
             PhoxalDependency::Branch(branch) => report.problems.push(format!(
-                "user runtime '{name}' floats on branch '{branch}'; pin it to a phoxal release or tag built for API {expected_api_version}"
+                "user service '{name}' floats on branch '{branch}'; pin it to a phoxal release or tag built for API {expected_api_version}"
             )),
             PhoxalDependency::Pinned(version) => report.successes.push(format!(
-                "user runtime '{name}' declares phoxal dependency {version}; expected graph API {expected_api_version}"
+                "user service '{name}' declares phoxal dependency {version}; expected graph API {expected_api_version}"
             )),
             PhoxalDependency::Unparsable => report.problems.push(format!(
-                "user runtime '{name}' has an unparsable phoxal dependency; pin it to a phoxal release or tag built for API {expected_api_version}"
+                "user service '{name}' has an unparsable phoxal dependency; pin it to a phoxal release or tag built for API {expected_api_version}"
             )),
         }
     }
@@ -199,7 +199,7 @@ fn print_text_report(robot: &Robot) {
     println!("robot: {}", robot.identity.id);
     println!("api_version: {}", robot.api_version);
     println!("channel: {}", robot.phoxal_participants.channel);
-    println!("platform_runtimes:");
+    println!("platform_services:");
     for runtime in CATALOG.entries_for_api(&robot.api_version) {
         let image_ref = robot
             .phoxal_participants
@@ -239,7 +239,7 @@ fn print_json_report(robot: &Robot) -> Result<()> {
         "robot": robot.identity.id,
         "api_version": robot.api_version,
         "channel": robot.phoxal_participants.channel,
-        "platform_runtimes": CATALOG.entries_for_api(&robot.api_version).map(|runtime| {
+        "platform_services": CATALOG.entries_for_api(&robot.api_version).map(|runtime| {
             let image_ref = robot
                 .phoxal_participants
                 .images
@@ -326,7 +326,7 @@ branch = { git = "https://github.com/phoxal/framework", branch = "main" }
     }
 
     #[test]
-    fn pinned_user_runtime_phoxal_dep_collects_no_problems() -> anyhow::Result<()> {
+    fn pinned_user_service_phoxal_dep_collects_no_problems() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtimes/drive");
         write_manifest(
@@ -341,16 +341,16 @@ edition = "2024"
 phoxal = "0.14.0"
 "#,
         )?;
-        let robot = robot_with_user_runtime("runtimes/drive")?;
+        let robot = robot_with_user_service("runtimes/drive")?;
 
-        let problems = collect_user_runtime_problems(temp.path(), &robot, "y2026_1");
+        let problems = collect_user_service_problems(temp.path(), &robot, "y2026_1");
 
         assert!(problems.is_empty(), "unexpected problems: {problems:?}");
         Ok(())
     }
 
     #[test]
-    fn branch_user_runtime_phoxal_dep_collects_problem() -> anyhow::Result<()> {
+    fn branch_user_service_phoxal_dep_collects_problem() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtimes/drive");
         write_manifest(
@@ -365,14 +365,14 @@ edition = "2024"
 phoxal = { git = "https://github.com/phoxal/framework", branch = "main" }
 "#,
         )?;
-        let robot = robot_with_user_runtime("runtimes/drive")?;
+        let robot = robot_with_user_service("runtimes/drive")?;
 
-        let problems = collect_user_runtime_problems(temp.path(), &robot, "y2026_1");
+        let problems = collect_user_service_problems(temp.path(), &robot, "y2026_1");
 
         assert_eq!(
             problems,
             vec![
-                "user runtime 'drive' floats on branch 'main'; pin it to a phoxal release or tag built for API y2026_1"
+                "user service 'drive' floats on branch 'main'; pin it to a phoxal release or tag built for API y2026_1"
                     .to_string()
             ]
         );
@@ -380,7 +380,7 @@ phoxal = { git = "https://github.com/phoxal/framework", branch = "main" }
     }
 
     #[test]
-    fn missing_user_runtime_phoxal_dep_collects_problem() -> anyhow::Result<()> {
+    fn missing_user_service_phoxal_dep_collects_problem() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtimes/drive");
         write_manifest(
@@ -395,14 +395,14 @@ edition = "2024"
 serde = "1"
 "#,
         )?;
-        let robot = robot_with_user_runtime("runtimes/drive")?;
+        let robot = robot_with_user_service("runtimes/drive")?;
 
-        let problems = collect_user_runtime_problems(temp.path(), &robot, "y2026_1");
+        let problems = collect_user_service_problems(temp.path(), &robot, "y2026_1");
 
         assert_eq!(
             problems,
             vec![
-                "user runtime 'drive' is missing a phoxal dependency; add a phoxal dependency built for API y2026_1"
+                "user service 'drive' is missing a phoxal dependency; add a phoxal dependency built for API y2026_1"
                     .to_string()
             ]
         );
@@ -410,17 +410,17 @@ serde = "1"
     }
 
     #[test]
-    fn missing_user_runtime_manifest_collects_problem() -> anyhow::Result<()> {
+    fn missing_user_service_manifest_collects_problem() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtimes/drive");
-        let robot = robot_with_user_runtime("runtimes/drive")?;
+        let robot = robot_with_user_service("runtimes/drive")?;
 
-        let problems = collect_user_runtime_problems(temp.path(), &robot, "y2026_1");
+        let problems = collect_user_service_problems(temp.path(), &robot, "y2026_1");
 
         assert_eq!(
             problems,
             vec![format!(
-                "user runtime 'drive' has no readable Cargo.toml at {}; cannot check phoxal dependency",
+                "user service 'drive' has no readable Cargo.toml at {}; cannot check phoxal dependency",
                 runtime_dir.join("Cargo.toml").display()
             )]
         );
@@ -428,7 +428,7 @@ serde = "1"
     }
 
     #[test]
-    fn empty_user_runtime_framework_collects_problem() -> anyhow::Result<()> {
+    fn empty_user_service_framework_collects_problem() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtimes/drive");
         write_manifest(
@@ -477,12 +477,12 @@ components:
 "#,
         )?;
 
-        let problems = collect_user_runtime_problems(temp.path(), &robot, "y2026_1");
+        let problems = collect_user_service_problems(temp.path(), &robot, "y2026_1");
 
         assert_eq!(
             problems,
             vec![
-                "user runtime 'drive': framework '' must be \"match-platform\" or the graph api_version 'y2026_1'"
+                "user service 'drive': framework '' must be \"match-platform\" or the graph api_version 'y2026_1'"
                     .to_string()
             ]
         );
@@ -495,7 +495,7 @@ components:
         Ok(())
     }
 
-    fn robot_with_user_runtime(runtime_path: &str) -> anyhow::Result<Robot> {
+    fn robot_with_user_service(runtime_path: &str) -> anyhow::Result<Robot> {
         Robot::parse_from_string(&format!(
             r#"schema: v0
 api_version: y2026_1
