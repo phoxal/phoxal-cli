@@ -44,7 +44,7 @@ async fn run() -> Result<()> {
             workspace_root.display()
         )
     })?;
-    let app = AppContext::new(workspace_root)?;
+    let app = AppContext::new(workspace_root, cli.catalog_source.clone())?;
 
     phoxal_cli::commands::dispatch(cli, &app).await
 }

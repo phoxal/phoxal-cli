@@ -14,10 +14,10 @@ use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use toml::Value as TomlValue;
 
 use crate::AppContext;
-use crate::catalog::CATALOG;
 use crate::commands::MessageFormat;
 use crate::resolver::{
-    ResolveOptions, discover_robot_yaml, load_robot, load_robot_with_extras, resolve,
+    ResolveOptions, discover_robot_yaml, load_robot_with_extras, resolve,
+    target_generation_for_robot,
 };
 use crate::utils::{cargo_binary_name, resolve_project_path};
 
@@ -43,7 +43,7 @@ pub enum ServiceSubcommand {
                       Generates the dev bundle, verifies the selected Zenoh endpoint is reachable, builds the named user service, and runs only it on the host. Does not start Webots, official services, or component drivers."
     )]
     Run(Run),
-    #[command(about = "Print the compiled-in official service catalog.")]
+    #[command(about = "Print official services from the configured artifact catalog.")]
     Catalog(Catalog),
 }
 
@@ -73,7 +73,7 @@ pub struct Catalog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddServiceOutcome {
     pub name: String,
-    pub api_version: String,
+    pub target_generation: String,
     pub crate_dir: PathBuf,
     pub manifest_path: PathBuf,
 }
@@ -86,7 +86,7 @@ pub struct ServiceCatalogSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ServiceCatalogEntry {
     pub id: String,
-    pub api_versions: Vec<String>,
+    pub api_generations: Vec<String>,
     pub participant_kind: &'static str,
 }
 
@@ -114,7 +114,7 @@ impl Service {
 
 impl Add {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let outcome = add_service(app.project.root(), &self.name)?;
+        let outcome = add_service(app.project.root(), &self.name, app.catalog_source.clone())?;
         println!("created service crate: {}", outcome.crate_dir.display());
         println!(
             "registered manifest entry: user_participants.{} = {{ path: \"{}\" }}",
@@ -131,7 +131,7 @@ impl Add {
 
 impl Run {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let plan = service_run_plan(app.project.root(), &self.name)?;
+        let plan = service_run_plan(app.project.root(), &self.name, app.catalog_source.clone())?;
 
         // Probe the router before the (potentially slow) build, so an
         // unreachable/unsupported endpoint fails fast instead of after a
@@ -154,16 +154,16 @@ impl Run {
 }
 
 impl Catalog {
-    pub async fn run(&self, _app: &AppContext) -> Result<()> {
-        let summary = service_catalog_summary();
+    pub async fn run(&self, app: &AppContext) -> Result<()> {
+        let summary = service_catalog_summary(app.project.root(), app.catalog_source.clone())?;
         crate::commands::print_message(
             &summary,
             || {
                 for entry in &summary.entries {
                     println!(
-                        "{} -> api_versions [{}] ({})",
+                        "{} -> api_generations [{}] ({})",
                         entry.id,
-                        entry.api_versions.join(", "),
+                        entry.api_generations.join(", "),
                         entry.participant_kind
                     );
                 }
@@ -174,25 +174,42 @@ impl Catalog {
     }
 }
 
-pub fn service_catalog_summary() -> ServiceCatalogSummary {
-    ServiceCatalogSummary {
-        entries: CATALOG
+pub fn service_catalog_summary(
+    project_start: &Path,
+    catalog_source: Option<String>,
+) -> Result<ServiceCatalogSummary> {
+    let robot_path = discover_robot_yaml(project_start)
+        .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
+    let project_root = robot_path
+        .parent()
+        .context("robot.yaml did not have a parent directory")?;
+    let loaded = load_robot_with_extras(&robot_path)?;
+    let catalog = crate::commands::load_catalog_for_robot_from_source(
+        catalog_source,
+        project_root,
+        &loaded.extras,
+        false,
+    )?
+    .ok_or_else(crate::catalog::unavailable_catalog_error)?;
+    Ok(ServiceCatalogSummary {
+        entries: catalog
             .entries
             .iter()
+            .filter(|entry| entry.kind == crate::catalog::ArtifactKind::Service)
             .map(|entry| ServiceCatalogEntry {
-                id: entry.name.to_string(),
-                api_versions: entry
-                    .api_versions
-                    .iter()
-                    .map(|version| (*version).to_string())
-                    .collect(),
+                id: entry.artifact_id.clone(),
+                api_generations: vec![entry.api_generation.clone()],
                 participant_kind: "service",
             })
             .collect(),
-    }
+    })
 }
 
-pub fn add_service(project_start: &Path, name: &str) -> Result<AddServiceOutcome> {
+pub fn add_service(
+    project_start: &Path,
+    name: &str,
+    catalog_source: Option<String>,
+) -> Result<AddServiceOutcome> {
     let name = validate_service_name(name)?;
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
@@ -200,8 +217,15 @@ pub fn add_service(project_start: &Path, name: &str) -> Result<AddServiceOutcome
         .parent()
         .context("robot.yaml did not have a parent directory")?;
     let mut robot_yaml = read_robot_yaml(&robot_path)?;
-    let robot = load_robot(&robot_path)?;
-    let api_version = robot.api_version.clone();
+    let loaded = load_robot_with_extras(&robot_path)?;
+    let robot = loaded.robot;
+    let catalog = crate::commands::load_catalog_for_robot_from_source(
+        catalog_source,
+        project_root,
+        &loaded.extras,
+        false,
+    )?;
+    let target_generation = target_generation_for_robot(&robot, catalog.as_ref())?;
     let manifest_path = PathBuf::from("runtimes").join(name);
     let crate_dir = project_root.join(&manifest_path);
 
@@ -223,7 +247,7 @@ pub fn add_service(project_start: &Path, name: &str) -> Result<AddServiceOutcome
     scaffold_service_crate(
         &crate_dir,
         name,
-        &api_version,
+        &target_generation,
         &phoxal_version,
         &phoxal_api_version,
     )?;
@@ -232,13 +256,17 @@ pub fn add_service(project_start: &Path, name: &str) -> Result<AddServiceOutcome
 
     Ok(AddServiceOutcome {
         name: name.to_string(),
-        api_version,
+        target_generation,
         crate_dir,
         manifest_path,
     })
 }
 
-fn service_run_plan(project_start: &Path, name: &str) -> Result<ServiceRunPlan> {
+fn service_run_plan(
+    project_start: &Path,
+    name: &str,
+    catalog_source: Option<String>,
+) -> Result<ServiceRunPlan> {
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
     let project_root = robot_path
@@ -248,14 +276,19 @@ fn service_run_plan(project_start: &Path, name: &str) -> Result<ServiceRunPlan> 
     let config = loaded.extras.user_runtime_config(name).cloned();
     let bus_profile = loaded.extras.materialized_bus_profile(DEFAULT_BUS_CONNECT);
     let robot = loaded.robot;
+    let catalog = crate::commands::load_catalog_for_robot_from_source(
+        catalog_source,
+        project_root,
+        &loaded.extras,
+        false,
+    )?;
 
-    if CATALOG
-        .entries_for_api(&robot.api_version)
-        .any(|entry| entry.name == name)
+    if catalog
+        .as_ref()
+        .is_some_and(|catalog| catalog.service_names().iter().any(|entry| entry == name))
     {
         bail!(
-            "'{name}' is an official service for api_version {}; official services are not host-native user services",
-            robot.api_version
+            "'{name}' is an official service in the artifact catalog; official services are not host-native user services"
         );
     }
 
@@ -289,7 +322,7 @@ fn service_run_plan(project_start: &Path, name: &str) -> Result<ServiceRunPlan> 
     let resolved = resolve(
         &robot,
         project_root,
-        &CATALOG,
+        catalog.as_ref(),
         ResolveOptions {
             resolve_external_artifacts: false,
             resolve_source_commits: true,
@@ -672,9 +705,28 @@ fn dependency_version(dependency: &TomlValue) -> Option<String> {
     if let Some(version) = dependency.as_str() {
         return Some(version.to_string());
     }
-    dependency
-        .as_table()
-        .and_then(|table| table.get("version"))
+    let table = dependency.as_table()?;
+    if let Some(version) = table.get("version").and_then(TomlValue::as_str) {
+        return Some(version.to_string());
+    }
+    table
+        .get("path")
+        .and_then(TomlValue::as_str)
+        .and_then(path_dependency_package_version)
+}
+
+fn path_dependency_package_version(path: &str) -> Option<String> {
+    let path = Path::new(path);
+    let dependency_root = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
+    };
+    let manifest = fs::read_to_string(dependency_root.join("Cargo.toml")).ok()?;
+    let manifest = toml::from_str::<TomlValue>(&manifest).ok()?;
+    manifest
+        .get("package")
+        .and_then(|package| package.get("version"))
         .and_then(TomlValue::as_str)
         .map(str::to_string)
 }
@@ -722,15 +774,19 @@ mod tests {
     use phoxal::model::robot::RobotV1 as Robot;
 
     use super::*;
+    use crate::catalog::{
+        ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
+        fixture_contract_for_tests, fixture_service_entry_for_tests,
+    };
 
     #[test]
     fn add_service_scaffolds_crate_and_registers_manifest() -> Result<()> {
         let temp = tempfile::tempdir()?;
         fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
 
-        let outcome = add_service(temp.path(), "avoid-obstacles")?;
+        let outcome = add_service(temp.path(), "avoid-obstacles", None)?;
         assert_eq!(outcome.name, "avoid-obstacles");
-        assert_eq!(outcome.api_version, "y2026_1");
+        assert_eq!(outcome.target_generation, "y2026_1");
         assert_eq!(
             outcome.crate_dir,
             temp.path().join("runtimes").join("avoid-obstacles")
@@ -782,7 +838,7 @@ mod tests {
             PathBuf::from("runtimes").join("avoid-obstacles")
         );
 
-        let error = add_service(temp.path(), "avoid-obstacles")
+        let error = add_service(temp.path(), "avoid-obstacles", None)
             .expect_err("adding the same service twice should fail");
         assert!(error.to_string().contains("already exists"));
 
@@ -806,7 +862,7 @@ mod tests {
             ),
         )?;
 
-        add_service(temp.path(), "avoid-obstacles")?;
+        add_service(temp.path(), "avoid-obstacles", None)?;
 
         let robot_yaml = fs::read_to_string(temp.path().join("robot.yaml"))?;
         let yaml: YamlValue = serde_yaml::from_str(&robot_yaml)?;
@@ -989,7 +1045,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
 
-        let error = service_run_plan(temp.path(), "missing")
+        let error = service_run_plan(temp.path(), "missing", None)
             .expect_err("unknown service should fail before cargo build");
 
         assert!(
@@ -1006,15 +1062,17 @@ mod tests {
         let temp = tempfile::tempdir()?;
         fs::write(
             temp.path().join("robot.yaml"),
-            minimal_robot_yaml_with_user_participant(
-                "drive",
-                r#"
+            minimal_robot_yaml_with_catalog(&write_service_catalog(temp.path())?).replace(
+                "\ncomponents:\n",
+                &format!(
+                    "\nuser_participants:\n  drive:{}\ncomponents:\n",
+                    r#"
     path: runtimes/drive
-"#,
+"#
+                ),
             ),
         )?;
-
-        let error = service_run_plan(temp.path(), "drive")
+        let error = service_run_plan(temp.path(), "drive", None)
             .expect_err("official service name should fail before cargo build");
 
         assert!(
@@ -1052,7 +1110,7 @@ mod tests {
             r#"<robot name="testbot"><link name="base_link"/></robot>"#,
         )?;
 
-        let plan = service_run_plan(temp.path(), "avoid-obstacles")?;
+        let plan = service_run_plan(temp.path(), "avoid-obstacles", None)?;
         let config_json = plan
             .env
             .iter()
@@ -1088,8 +1146,8 @@ mod tests {
 "#,
         )
         .replace(
-            "\nphoxal_participants:\n",
-            "\nbus:\n  selected: lab\n  profiles:\n    lab:\n      connect: tcp/lab-router:7447\n\nphoxal_participants:\n",
+            "\nphoxal_artifacts:\n",
+            "\nbus:\n  selected: lab\n  profiles:\n    lab:\n      connect: tcp/lab-router:7447\n\nphoxal_artifacts:\n",
         );
         fs::write(temp.path().join("robot.yaml"), robot_yaml)?;
         fs::write(
@@ -1097,7 +1155,7 @@ mod tests {
             r#"<robot name="testbot"><link name="base_link"/></robot>"#,
         )?;
 
-        let plan = service_run_plan(temp.path(), "avoid-obstacles")?;
+        let plan = service_run_plan(temp.path(), "avoid-obstacles", None)?;
 
         assert_eq!(
             plan.env
@@ -1119,8 +1177,9 @@ identity:
 
 structure: structure.urdf
 
-phoxal_participants:
+phoxal_artifacts:
   channel: stable
+phoxal_participants: {}
 
 motion:
   kinematic:
@@ -1138,10 +1197,40 @@ components:
 "#
     }
 
+    fn minimal_robot_yaml_with_catalog(catalog_path: &Path) -> String {
+        minimal_robot_yaml().replace(
+            "phoxal_artifacts:\n  channel: stable",
+            &format!(
+                "phoxal_artifacts:\n  channel: stable\n  catalog: {}",
+                catalog_path.display()
+            ),
+        )
+    }
+
     fn minimal_robot_yaml_with_user_participant(name: &str, participant_yaml: &str) -> String {
         minimal_robot_yaml().replace(
             "\ncomponents:\n",
             &format!("\nuser_participants:\n  {name}:{participant_yaml}\ncomponents:\n"),
         )
+    }
+
+    fn write_service_catalog(root: &Path) -> Result<PathBuf> {
+        let path = root.join("catalog.json");
+        let catalog = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
+            "drive",
+            "y2026_1",
+            "0.1.0",
+            CatalogChannel::Stable,
+            &crate::resolver::host_target_triple(),
+            ArtifactStatus::Pending,
+            vec![fixture_contract_for_tests(
+                "drive::Target",
+                "drive/target",
+                "publish",
+                "0123456789abcdef",
+            )],
+        )]);
+        fs::write(&path, serde_json::to_string_pretty(&catalog)?)?;
+        Ok(path)
     }
 }

@@ -19,7 +19,7 @@ pub enum RobotSubcommand {
     #[command(
         about = "Scaffold a new robot project.",
         long_about = "Scaffold a new robot project.\n\n\
-                      Creates <name>/ with robot.yaml (root schema + api_version, default stable channel), structure.urdf, a default world, and a runtimes/ directory. Prints the v0 pre-stable warning."
+                      Creates <name>/ with robot.yaml (root schema, optional phoxal_artifacts hints), structure.urdf, a default world, and a runtimes/ directory. Prints the v0 pre-stable warning."
     )]
     New(New),
 }
@@ -46,7 +46,7 @@ pub struct NewRobotSummary {
     pub robot_path: PathBuf,
     pub structure_path: PathBuf,
     pub world_path: PathBuf,
-    pub api_version: String,
+    pub target_generation: Option<String>,
     pub channel: String,
 }
 
@@ -116,7 +116,7 @@ pub fn new_robot(parent: &Path, name: &str) -> Result<NewRobotSummary> {
         robot_path,
         structure_path,
         world_path,
-        api_version: "y2026_1".to_string(),
+        target_generation: None,
         channel: "stable".to_string(),
     })
 }
@@ -171,7 +171,6 @@ fn robot_yaml(name: &str) -> String {
     // a real component source + `driver:` block when wiring up hardware.
     format!(
         r#"schema: v0
-api_version: y2026_1
 
 identity:
   id: {name}
@@ -179,8 +178,13 @@ identity:
 
 structure: structure.urdf
 
-phoxal_participants:
-  channel: stable
+# phoxal_artifacts:
+#   channel: stable
+#   target: aarch64-unknown-linux-gnu
+#   generation: y2026_1
+#   catalog: ../framework/target/xtask/catalog/phoxal-artifact-catalog.json
+
+phoxal_participants: {{}}
 
 motion:
   kinematic:
@@ -238,7 +242,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let summary = new_robot(temp.path(), "rover-one")?;
 
-        assert_eq!(summary.api_version, "y2026_1");
+        assert_eq!(summary.target_generation, None);
         assert!(summary.robot_path.is_file());
         assert!(summary.structure_path.is_file());
         assert!(summary.world_path.is_file());
@@ -246,8 +250,10 @@ mod tests {
 
         let robot = fs::read_to_string(summary.robot_path)?;
         assert!(robot.contains("schema: v0"));
-        assert!(robot.contains("api_version: y2026_1"));
-        assert!(robot.contains("channel: stable"));
+        assert!(!robot.contains("\napi_version:"));
+        assert!(robot.contains("# phoxal_artifacts:"));
+        assert!(robot.contains("#   channel: stable"));
+        assert!(robot.contains("phoxal_participants: {}"));
         assert!(robot.contains("namespace: dev"));
 
         let error = new_robot(temp.path(), "rover-one")

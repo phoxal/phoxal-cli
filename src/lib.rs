@@ -1,11 +1,11 @@
 //! The consumer-facing Phoxal CLI (`phoxal-cli`).
 //!
 //! `phoxal-cli` is the tool a robot developer runs from a robot project. It
-//! reads `robot.yaml`, resolves the graph against its compiled-in official
-//! service catalog ([`catalog`]), and drives the local develop/simulate/deploy
-//! loop. The CLI ships with no framework workspace: its authority over the
-//! official service set is the compiled-in catalog, with native distribution
-//! metadata landing in the follow-up work.
+//! reads `robot.yaml`, resolves the graph against a verified generated artifact
+//! catalog ([`catalog`]) when official artifacts are needed, and drives the
+//! local develop/simulate/deploy loop. The only compiled-in catalog remnant is
+//! the small host-tool version table; official service and driver names come
+//! from the configured catalog or the robot workspace.
 //!
 //! The command surface (see [`commands`]) is:
 //!
@@ -18,11 +18,12 @@
 //! - `deploy build` - reserved for the native systemd deployment bundle.
 //! - `robot new <name>` - scaffold a robot project.
 //! - `service add|run|catalog` - manage user service crates.
-//! - `pull` / `outdated` - reserved for native release asset distribution.
+//! - `generations status` - inspect catalog readiness for the robot target.
+//! - `pull` / `outdated` - refresh or inspect catalog and native asset state.
 //! - `doctor` - check host prerequisites; `self upgrade` - update the CLI.
 //!
-//! There is no lockfile: tool versions and component commits resolve live from
-//! GitHub releases and `git ls-remote` when a command needs them. `validate`
+//! There is no lockfile: catalog revisions, tool versions, and component commits
+//! resolve live or from the local cache when a command needs them. `validate`
 //! remains as the lower-level structural/dependency predecessor of `check`.
 
 #![allow(clippy::module_name_repetitions)]

@@ -5,9 +5,8 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::AppContext;
-use crate::catalog::CATALOG;
 use crate::commands::MessageFormat;
-use crate::resolver::{ResolveOptions, discover_robot_yaml, load_robot, resolve};
+use crate::resolver::{ResolveOptions, discover_robot_yaml, load_robot_with_extras, resolve};
 
 #[derive(Debug, Args)]
 pub struct Pull {
@@ -22,8 +21,9 @@ pub struct Pull {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PullSummary {
-    pub api_version: String,
+    pub target_generation: String,
     pub channel: String,
+    pub catalog_revision: Option<String>,
     pub tool_count: usize,
     /// Official native service artifacts cannot be fetched yet; the generated
     /// catalog + native-asset pipeline lands with the native distribution work
@@ -34,17 +34,21 @@ pub struct PullSummary {
 impl Pull {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let project_root = app.project.root().to_path_buf();
+        let catalog_source = app.catalog_source.clone();
         let ui = app.ui;
-        let summary = tokio::task::spawn_blocking(move || run(&project_root, &ui))
+        let summary = tokio::task::spawn_blocking(move || run(&project_root, catalog_source, &ui))
             .await
             .context("pull worker failed")??;
         crate::commands::print_message(
             &summary,
             || {
                 println!(
-                    "refreshed {} host tools for api_version {} (channel {})",
-                    summary.tool_count, summary.api_version, summary.channel
+                    "refreshed catalog and {} host tools for target generation {} (channel {})",
+                    summary.tool_count, summary.target_generation, summary.channel
                 );
+                if let Some(revision) = &summary.catalog_revision {
+                    println!("catalog revision: {revision}");
+                }
                 println!(
                     "official native service artifacts are pending (native distribution work 06)"
                 );
@@ -55,17 +59,33 @@ impl Pull {
     }
 }
 
-pub fn run(project_start: &Path, ui: &crate::Ui) -> Result<PullSummary> {
+pub fn run(
+    project_start: &Path,
+    catalog_source: Option<String>,
+    ui: &crate::Ui,
+) -> Result<PullSummary> {
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let robot = load_robot(&robot_path)?;
+    let loaded = load_robot_with_extras(&robot_path)?;
+    let robot = loaded.robot;
+    let catalog = crate::catalog::load_catalog(crate::catalog::CatalogLoadOptions {
+        refresh: true,
+        cli_source: catalog_source,
+        robot_source: loaded.extras.catalog_source.as_ref().map(|source| {
+            if source.is_absolute() {
+                source.clone()
+            } else {
+                project_root.join(source)
+            }
+        }),
+    })?;
     let resolved = resolve(
         &robot,
         project_root,
-        &CATALOG,
+        catalog.as_ref(),
         ResolveOptions {
             // pull refreshes official artifacts and host tools only; it never
             // reads component commits, so it stays off the network for git refs.
@@ -91,8 +111,9 @@ pub fn run(project_start: &Path, ui: &crate::Ui) -> Result<PullSummary> {
     // is not built yet. Report that honestly rather than erroring after the
     // tool refresh already ran.
     Ok(PullSummary {
-        api_version: resolved.api_version.clone(),
+        target_generation: resolved.target_generation.clone(),
         channel: resolved.channel.to_string(),
+        catalog_revision: resolved.catalog_revision.clone(),
         tool_count,
         official_services_pending: true,
     })

@@ -7,8 +7,9 @@ identity:
 
 structure: structure.urdf
 
-phoxal_participants:
+phoxal_artifacts:
   channel: stable
+phoxal_participants: {}
 
 user_participants:
   mission_behavior:

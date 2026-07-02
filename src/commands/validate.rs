@@ -8,8 +8,6 @@ use toml::Value as TomlValue;
 
 use crate::AppContext;
 
-use crate::catalog::CATALOG;
-
 #[derive(Debug, Args)]
 pub struct Validate {
     #[arg(long, help = "Print the derived service/component graph.")]
@@ -37,18 +35,27 @@ pub enum ReportFormat {
 impl Validate {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let robot_path = crate::resolver::discover_robot_yaml(app.project.root())?;
-        let robot = crate::resolver::load_robot(&robot_path)?;
-        let platform_names = CATALOG.names_for_api(&robot.api_version);
-        if platform_names.is_empty() {
-            return Err(anyhow!(
-                "API version {} is not available in the compiled-in platform service catalog",
-                robot.api_version
-            ));
-        }
+        let project_root = robot_path
+            .parent()
+            .context("robot.yaml did not have a parent directory")?;
+        let loaded = crate::resolver::load_robot_with_extras(&robot_path)?;
+        let robot = loaded.robot;
+        let catalog =
+            crate::commands::load_catalog_for_robot(app, project_root, &loaded.extras, false)?;
+        let platform_names = catalog
+            .as_ref()
+            .map(crate::catalog::CatalogRevision::service_names)
+            .unwrap_or_default();
+        let platform_name_refs = platform_names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let target_generation = target_generation_for_validate(&robot, catalog.as_ref());
         robot
-            .validate_with(&platform_names)
+            .validate_with(&platform_name_refs)
             .map_err(|errors| anyhow!("Robot errors:\n{}", join_errors(errors)))?;
-        let user_service_problems = check_user_service_deps(app, &robot_path, &robot)?;
+        let user_service_problems =
+            check_user_service_deps(app, &robot_path, &robot, &target_generation)?;
         if !user_service_problems.is_empty() {
             if self.allow_user_service_drift {
                 for problem in user_service_problems {
@@ -68,23 +75,53 @@ impl Validate {
         ));
         if self.report {
             match self.report_format {
-                ReportFormat::Text => print_text_report(&robot),
-                ReportFormat::Json => print_json_report(&robot)?,
+                ReportFormat::Text => {
+                    print_text_report(&robot, &target_generation, catalog.as_ref())
+                }
+                ReportFormat::Json => {
+                    print_json_report(&robot, &target_generation, catalog.as_ref())?
+                }
             }
         }
         Ok(())
     }
 }
 
+fn target_generation_for_validate(
+    robot: &Robot,
+    catalog: Option<&crate::catalog::CatalogRevision>,
+) -> String {
+    let target = robot
+        .phoxal_artifacts
+        .target
+        .clone()
+        .unwrap_or_else(crate::resolver::host_target_triple);
+    robot
+        .phoxal_artifacts
+        .generation
+        .clone()
+        .or_else(|| robot.api_version.clone())
+        .or_else(|| {
+            catalog.and_then(|catalog| {
+                catalog.newest_generation_on_channel(
+                    crate::catalog::Channel::from(robot.phoxal_artifacts.channel),
+                    &target,
+                )
+            })
+        })
+        .unwrap_or_else(|| "source".to_string())
+}
+
 fn check_user_service_deps(
     app: &AppContext,
     robot_path: &Path,
     robot: &Robot,
+    expected_generation: &str,
 ) -> Result<Vec<String>> {
     let robot_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let report = collect_user_service_dependency_report(robot_root, robot, &robot.api_version);
+    let report = collect_user_service_dependency_report(robot_root, robot, expected_generation);
     for success in report.successes {
         app.ui.success(success);
     }
@@ -101,22 +138,22 @@ struct UserServiceDependencyReport {
 fn collect_user_service_problems(
     robot_root: &Path,
     robot: &Robot,
-    expected_api_version: &str,
+    expected_generation: &str,
 ) -> Vec<String> {
-    collect_user_service_dependency_report(robot_root, robot, expected_api_version).problems
+    collect_user_service_dependency_report(robot_root, robot, expected_generation).problems
 }
 
 fn collect_user_service_dependency_report(
     robot_root: &Path,
     robot: &Robot,
-    expected_api_version: &str,
+    expected_generation: &str,
 ) -> UserServiceDependencyReport {
     let mut report = UserServiceDependencyReport::default();
     for (name, runtime) in &robot.user_participants {
         if let Err(error) = crate::resolver::validate_user_runtime_framework_selector(
             name,
             &runtime.framework,
-            expected_api_version,
+            expected_generation,
         ) {
             report.problems.push(error.to_string());
         }
@@ -141,20 +178,20 @@ fn collect_user_service_dependency_report(
             .and_then(|dependencies| dependencies.get("phoxal"))
         else {
             report.problems.push(format!(
-                "user service '{name}' is missing a phoxal dependency; add a phoxal dependency built for API {expected_api_version}"
+                "user service '{name}' is missing a phoxal dependency; add a phoxal dependency built for target generation {expected_generation}"
             ));
             continue;
         };
 
         match phoxal_dependency(dep) {
             PhoxalDependency::Branch(branch) => report.problems.push(format!(
-                "user service '{name}' floats on branch '{branch}'; pin it to a phoxal release or tag built for API {expected_api_version}"
+                "user service '{name}' floats on branch '{branch}'; pin it to a phoxal release or tag built for target generation {expected_generation}"
             )),
             PhoxalDependency::Pinned(version) => report.successes.push(format!(
-                "user service '{name}' declares phoxal dependency {version}; expected graph API {expected_api_version}"
+                "user service '{name}' declares phoxal dependency {version}; expected target generation {expected_generation}"
             )),
             PhoxalDependency::Unparsable => report.problems.push(format!(
-                "user service '{name}' has an unparsable phoxal dependency; pin it to a phoxal release or tag built for API {expected_api_version}"
+                "user service '{name}' has an unparsable phoxal dependency; pin it to a phoxal release or tag built for target generation {expected_generation}"
             )),
         }
     }
@@ -195,17 +232,25 @@ fn phoxal_dependency(dep: &TomlValue) -> PhoxalDependency {
     PhoxalDependency::Unparsable
 }
 
-fn print_text_report(robot: &Robot) {
+fn print_text_report(
+    robot: &Robot,
+    target_generation: &str,
+    catalog: Option<&crate::catalog::CatalogRevision>,
+) {
     println!("robot: {}", robot.identity.id);
-    println!("api_version: {}", robot.api_version);
-    println!("channel: {}", robot.phoxal_participants.channel);
+    println!("target_generation: {target_generation}");
+    println!("channel: {}", robot.phoxal_artifacts.channel);
     println!("platform_services:");
-    for runtime in CATALOG.entries_for_api(&robot.api_version) {
+    for runtime in catalog
+        .into_iter()
+        .flat_map(|catalog| catalog.entries.iter())
+        .filter(|entry| entry.kind == crate::catalog::ArtifactKind::Service)
+    {
         let artifact_ref = format!(
-            "service-{}:{}-{}",
-            runtime.name, robot.api_version, robot.phoxal_participants.channel
+            "{}:{}-{}",
+            runtime.artifact_id, runtime.api_generation, robot.phoxal_artifacts.channel
         );
-        println!("  - {} -> {}", runtime.name, artifact_ref);
+        println!("  - {} -> {}", runtime.artifact_id, artifact_ref);
     }
     println!("user_participants:");
     for (name, runtime) in &robot.user_participants {
@@ -225,19 +270,23 @@ fn print_text_report(robot: &Robot) {
     }
 }
 
-fn print_json_report(robot: &Robot) -> Result<()> {
+fn print_json_report(
+    robot: &Robot,
+    target_generation: &str,
+    catalog: Option<&crate::catalog::CatalogRevision>,
+) -> Result<()> {
     let report = serde_json::json!({
         "robot": robot.identity.id,
-        "api_version": robot.api_version,
-        "channel": robot.phoxal_participants.channel,
-        "platform_services": CATALOG.entries_for_api(&robot.api_version).map(|runtime| {
+        "target_generation": target_generation,
+        "channel": robot.phoxal_artifacts.channel,
+        "platform_services": catalog.into_iter().flat_map(|catalog| catalog.entries.iter()).filter(|entry| entry.kind == crate::catalog::ArtifactKind::Service).map(|runtime| {
             let artifact_ref = format!(
-                "service-{}:{}-{}",
-                runtime.name, robot.api_version, robot.phoxal_participants.channel
+                "{}:{}-{}",
+                runtime.artifact_id, runtime.api_generation, robot.phoxal_artifacts.channel
             );
             serde_json::json!({
-                "name": runtime.name,
-                "api_versions": runtime.api_versions,
+                "name": runtime.artifact_id,
+                "api_generation": runtime.api_generation,
                 "artifact_ref": artifact_ref,
             })
         }).collect::<Vec<_>>(),
@@ -354,7 +403,7 @@ phoxal = { git = "https://github.com/phoxal/framework", branch = "main" }
         assert_eq!(
             problems,
             vec![
-                "user service 'drive' floats on branch 'main'; pin it to a phoxal release or tag built for API y2026_1"
+                "user service 'drive' floats on branch 'main'; pin it to a phoxal release or tag built for target generation y2026_1"
                     .to_string()
             ]
         );
@@ -384,7 +433,7 @@ serde = "1"
         assert_eq!(
             problems,
             vec![
-                "user service 'drive' is missing a phoxal dependency; add a phoxal dependency built for API y2026_1"
+                "user service 'drive' is missing a phoxal dependency; add a phoxal dependency built for target generation y2026_1"
                     .to_string()
             ]
         );
@@ -435,8 +484,9 @@ identity:
 
 structure: structure.urdf
 
-phoxal_participants:
+phoxal_artifacts:
   channel: stable
+phoxal_participants: {}
 
 user_participants:
   drive:
@@ -464,7 +514,7 @@ components:
         assert_eq!(
             problems,
             vec![
-                "user service 'drive': framework '' must be \"match-platform\" or the graph api_version 'y2026_1'"
+                "user service 'drive': framework '' must be \"match-platform\" or the target generation 'y2026_1'"
                     .to_string()
             ]
         );
@@ -488,8 +538,9 @@ identity:
 
 structure: structure.urdf
 
-phoxal_participants:
+phoxal_artifacts:
   channel: stable
+phoxal_participants: {{}}
 
 user_participants:
   drive:

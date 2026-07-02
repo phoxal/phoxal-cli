@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::AppContext;
-use crate::catalog::CATALOG;
+use crate::catalog::ArtifactKind;
 use crate::commands::MessageFormat;
 use crate::component_driver::component_crate_dir;
 use crate::resolver::{
@@ -49,6 +49,7 @@ pub struct CheckCmd {
 pub struct CheckOptions {
     pub pull: bool,
     pub service: Option<String>,
+    pub catalog_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -99,7 +100,7 @@ pub struct CheckGraphContext<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct CheckParticipants<'a> {
-    pub platform_image_refs: &'a [(String, String)],
+    pub platform_artifact_refs: &'a [PlatformArtifactRef],
     pub user_service_images: &'a [UserServiceImageParticipant],
     pub tool_participants: &'a [ToolParticipant],
     pub source_participants: &'a [SourceParticipant],
@@ -118,6 +119,7 @@ impl CheckCmd {
         let options = CheckOptions {
             pull: self.pull,
             service: self.service.clone(),
+            catalog_source: app.catalog_source.clone(),
         };
         let ui = app.ui;
         let result = tokio::task::spawn_blocking(move || run(&project_root, options, &ui))
@@ -134,12 +136,13 @@ impl CheckCmd {
             "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
         );
 
-        ensure_check_outcome_ok(&result.api_version, &result.channel, &result.outcome)?;
+        ensure_check_outcome_ok(&result.target_generation, &result.channel, &result.outcome)?;
 
         let output = CheckOutput {
             status: "ok",
-            api_version: result.api_version.clone(),
+            target_generation: result.target_generation.clone(),
             channel: result.channel.clone(),
+            catalog_revision: result.catalog_revision.clone(),
             participant_count: result.participant_count,
             warning_count: result.outcome.report.warnings.len(),
         };
@@ -147,9 +150,12 @@ impl CheckCmd {
             &output,
             || {
                 println!(
-                    "ok: {} participants validated against api_version {} (channel {})",
-                    result.participant_count, result.api_version, result.channel
+                    "ok: {} participants validated against target generation {} (channel {})",
+                    result.participant_count, result.target_generation, result.channel
                 );
+                if let Some(revision) = &result.catalog_revision {
+                    println!("catalog revision: {revision}");
+                }
                 Ok(())
             },
             self.message_format,
@@ -161,18 +167,38 @@ impl CheckCmd {
 #[derive(Debug, Serialize)]
 struct CheckOutput {
     status: &'static str,
-    api_version: String,
+    target_generation: String,
     channel: String,
+    catalog_revision: Option<String>,
     participant_count: usize,
     warning_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CheckRunResult {
-    api_version: String,
+    target_generation: String,
     channel: String,
+    catalog_revision: Option<String>,
     participant_count: usize,
     outcome: CheckOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformArtifactRef {
+    pub name: String,
+    pub kind: ArtifactKind,
+    pub artifact_ref: String,
+}
+
+impl PlatformArtifactRef {
+    fn kind_label(&self) -> &'static str {
+        match self.kind {
+            ArtifactKind::Service => "official service",
+            ArtifactKind::Driver => "official driver",
+            ArtifactKind::Tool => "official tool",
+            ArtifactKind::Simulator => "official simulator",
+        }
+    }
 }
 
 fn run(
@@ -188,6 +214,17 @@ fn run(
     let loaded = load_robot_with_extras(&robot_path)?;
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
+    let catalog = crate::catalog::load_catalog(crate::catalog::CatalogLoadOptions {
+        refresh: options.pull,
+        cli_source: options.catalog_source.clone(),
+        robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
+            if source.is_absolute() {
+                source.clone()
+            } else {
+                project_root.join(source)
+            }
+        }),
+    })?;
     // `check` resolves live: it never pins tool checksums
     // (`resolve_external_artifacts: false`), but it does resolve git component
     // commits (`resolve_source_commits: true`) so component drivers can be
@@ -198,17 +235,13 @@ fn run(
     let resolved = resolve(
         &robot,
         project_root,
-        &CATALOG,
+        catalog.as_ref(),
         ResolveOptions {
             resolve_external_artifacts: false,
             resolve_source_commits: true,
         },
     )?;
-    let platform_refs = resolved
-        .platform_runtimes
-        .iter()
-        .map(|runtime| (runtime.name.clone(), runtime.artifact_ref().to_string()))
-        .collect::<Vec<_>>();
+    let platform_refs = platform_artifact_refs_from_resolved(&resolved);
     let tool_names = resolved
         .tools
         .iter()
@@ -221,20 +254,17 @@ fn run(
         crate::tool_provisioning::ProvisioningMode::from_pull(options.pull),
     )?;
     if options.pull {
-        // `--pull` refreshed the host tools above. Official native service
-        // artifacts cannot be refreshed yet (the generated catalog + native-asset
-        // pipeline lands with the native distribution work, 06). Note what was
-        // refreshed and continue: the check then behaves exactly like a plain
-        // `check` (it completes for local/--service graphs and surfaces the
-        // official-artifact native_pending for a full graph) instead of
-        // hard-erroring here after the tool refresh already ran.
         ui.warn(
-            "official native service artifacts cannot be refreshed yet (native distribution work 06); refreshed host tools only",
+            "refreshed the artifact catalog and host tools; native official artifact downloads remain pending until release assets publish",
         );
     }
+    ensure_catalog_availability(&resolved)?;
     let tool_participants = tool_participants_from_resolved(&resolved)?;
     let all_source_participants =
         source_participants_from_resolved(project_root, &resolved, component_crate_dir)?;
+    if let Some(catalog) = catalog.as_ref() {
+        ensure_no_promoted_preview_features(&all_source_participants, catalog)?;
+    }
     if let Some(service_name) = options.service.as_deref() {
         ensure_user_service_exists(&resolved, service_name)?;
     }
@@ -262,8 +292,9 @@ fn run(
     )?;
 
     Ok(CheckRunResult {
-        api_version: resolved.api_version,
+        target_generation: resolved.target_generation,
         channel: resolved.channel.to_string(),
+        catalog_revision: resolved.catalog_revision,
         participant_count,
         outcome,
     })
@@ -369,6 +400,20 @@ pub(crate) fn tool_participants_from_resolved(
         .collect()
 }
 
+pub(crate) fn platform_artifact_refs_from_resolved(
+    resolved: &ResolvedRobot,
+) -> Vec<PlatformArtifactRef> {
+    resolved
+        .platform_runtimes
+        .iter()
+        .map(|runtime| PlatformArtifactRef {
+            name: runtime.name.clone(),
+            kind: runtime.kind,
+            artifact_ref: runtime.artifact_ref().to_string(),
+        })
+        .collect()
+}
+
 pub(crate) fn source_participants_from_resolved(
     project_root: &Path,
     resolved: &ResolvedRobot,
@@ -428,6 +473,90 @@ fn ensure_user_service_exists(resolved: &ResolvedRobot, service_name: &str) -> R
     Ok(())
 }
 
+fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()> {
+    let unavailable = resolved
+        .platform_runtimes
+        .iter()
+        .filter(|runtime| !runtime.changed_contracts.is_empty())
+        .filter(|runtime| runtime.target_status != Some(crate::catalog::ArtifactStatus::Released))
+        .collect::<Vec<_>>();
+    if unavailable.is_empty() {
+        return Ok(());
+    }
+
+    let mut message = format!(
+        "NotYetAvailable: {} is not deployable for target generation {} on {}",
+        resolved.robot.identity.id, resolved.target_generation, resolved.target
+    );
+    if let Some(revision) = &resolved.catalog_revision {
+        message.push_str("\n\ncatalog revision: ");
+        message.push_str(revision);
+    }
+    message.push_str("\n\nRequired changed-contract artifacts not released:");
+    for runtime in unavailable {
+        let status = runtime
+            .target_status
+            .map(|status| status.to_string())
+            .unwrap_or_else(|| "missing".to_string());
+        message.push_str("\n  - ");
+        message.push_str(&runtime.artifact_id);
+        message.push_str(" (");
+        message.push_str(&runtime.changed_contracts.join(", "));
+        message.push_str(") is ");
+        message.push_str(&status);
+        message.push_str(" for ");
+        message.push_str(&resolved.target);
+        if !runtime.per_triple_status.is_empty() {
+            let triples = runtime
+                .per_triple_status
+                .iter()
+                .map(|(triple, status)| format!("{triple}: {status}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            message.push_str("; per-triple status: ");
+            message.push_str(&triples);
+        }
+    }
+    message.push_str(
+        "\n\nFix: wait for the listed official artifacts to publish, or pin phoxal_artifacts.generation to an older generation whose changed contracts you do not need.",
+    );
+    bail!("{message}")
+}
+
+fn ensure_no_promoted_preview_features(
+    participants: &[SourceParticipant],
+    catalog: &crate::catalog::CatalogRevision,
+) -> Result<()> {
+    let mut promoted = Vec::new();
+    for participant in participants {
+        let manifest_path = participant.crate_dir.join("Cargo.toml");
+        if manifest_path.is_file() {
+            promoted.extend(crate::catalog::promoted_preview_features(
+                &manifest_path,
+                catalog,
+            )?);
+        }
+    }
+    if promoted.is_empty() {
+        return Ok(());
+    }
+
+    let mut message = String::from("PromotedGeneration: remove stale preview generation features");
+    for feature in promoted {
+        message.push_str("\n  - ");
+        message.push_str(&feature.manifest_path.display().to_string());
+        message.push(':');
+        message.push_str(&feature.line_number.to_string());
+        message.push_str(" targets promoted generation ");
+        message.push_str(&feature.generation);
+        message.push_str("; delete this line or remove the `preview-");
+        message.push_str(&feature.generation);
+        message.push_str("` feature: ");
+        message.push_str(&feature.line);
+    }
+    bail!("{message}")
+}
+
 /// Apply a `check --service <name>` build scope to the source participants.
 ///
 /// Every participant stays in the returned set so the full graph is still
@@ -469,8 +598,9 @@ pub fn run_check(
 ) -> Result<CheckOutcome> {
     let robot_graph = graph_check::RobotGraph::default();
     let manifest_extras = RobotManifestExtras::default();
+    let platform_artifact_refs = service_platform_artifact_refs(resolved_platform_image_refs);
     run_check_with_context(
-        resolved_platform_image_refs,
+        &platform_artifact_refs,
         tool_participants,
         source_participants,
         CheckGraphContext {
@@ -484,7 +614,7 @@ pub fn run_check(
 }
 
 pub fn run_check_with_context(
-    resolved_platform_image_refs: &[(String, String)],
+    resolved_platform_artifact_refs: &[PlatformArtifactRef],
     tool_participants: &[ToolParticipant],
     source_participants: &[SourceParticipant],
     context: CheckGraphContext<'_>,
@@ -494,7 +624,7 @@ pub fn run_check_with_context(
 ) -> Result<CheckOutcome> {
     run_check_with_deployed_user_service_images(
         CheckParticipants {
-            platform_image_refs: resolved_platform_image_refs,
+            platform_artifact_refs: resolved_platform_artifact_refs,
             user_service_images: &[],
             tool_participants,
             source_participants,
@@ -504,6 +634,19 @@ pub fn run_check_with_context(
         fetch_tool,
         build,
     )
+}
+
+fn service_platform_artifact_refs(
+    resolved_platform_image_refs: &[(String, String)],
+) -> Vec<PlatformArtifactRef> {
+    resolved_platform_image_refs
+        .iter()
+        .map(|(name, artifact_ref)| PlatformArtifactRef {
+            name: name.clone(),
+            kind: ArtifactKind::Service,
+            artifact_ref: artifact_ref.clone(),
+        })
+        .collect()
 }
 
 pub fn run_check_with_deployed_user_service_images(
@@ -517,7 +660,8 @@ pub fn run_check_with_deployed_user_service_images(
     let mut participants = Vec::new();
     let mut config_problems = Vec::new();
 
-    for (service_name, image_ref) in inputs.platform_image_refs {
+    for artifact in inputs.platform_artifact_refs {
+        let image_ref = &artifact.artifact_ref;
         let raw = match fetch(image_ref) {
             Ok(raw) => raw,
             Err(error) if error.downcast_ref::<MissingImageError>().is_some() => {
@@ -527,15 +671,24 @@ pub fn run_check_with_deployed_user_service_images(
             Err(error) => {
                 return Err(error).with_context(|| {
                     format!(
-                        "failed to obtain emit-apis for official service {service_name} ({image_ref})"
+                        "failed to obtain emit-apis for {} {} ({image_ref})",
+                        artifact.kind_label(),
+                        artifact.name
                     )
                 });
             }
         };
-        validate_artifact_identity("official service", service_name, "service", &raw)?;
+        validate_artifact_identity(
+            artifact.kind_label(),
+            &artifact.name,
+            artifact.kind.emit_apis_kind(),
+            &raw,
+        )?;
         let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
             format!(
-                "failed to interpret emit-apis for official service {service_name} ({image_ref})"
+                "failed to interpret emit-apis for {} {} ({image_ref})",
+                artifact.kind_label(),
+                artifact.name
             )
         })?;
         participants.push(participant);
@@ -994,44 +1147,25 @@ pub(crate) fn ensure_check_outcome_ok(
 }
 
 fn format_missing_images_error(
-    api_version: &str,
+    target_generation: &str,
     channel: &str,
     missing_images: &[String],
 ) -> String {
-    let mut message = format!("API version {api_version} is not available on channel {channel}");
-    message.push_str("\n\nMissing official service artifacts:");
+    let mut message =
+        format!("target generation {target_generation} is not available on channel {channel}");
+    message.push_str("\n\nMissing official artifacts:");
     for image_ref in missing_images {
         message.push_str("\n  - ");
         message.push_str(image_ref);
     }
     message.push_str("\n\nFix:");
-    if let Some(api) = suggested_available_api_version(api_version) {
-        message.push_str("\n  - use api_version: ");
-        message.push_str(api);
-    } else {
-        message.push_str("\n  - use an api_version listed by `phoxal-cli version`");
-    }
-    message.push_str(
-        "\n  - or use phoxal_participants.channel: edge if this API version is intentionally experimental",
-    );
+    message.push_str("\n  - refresh or override the generated artifact catalog with `phoxal-cli --catalog <path> check`");
     message.push_str("\n  - or wait until Phoxal publishes the complete ");
-    message.push_str(api_version);
+    message.push_str(target_generation);
     message.push('-');
     message.push_str(channel);
-    message.push_str(" official service set");
+    message.push_str(" official artifact set");
     message
-}
-
-fn suggested_available_api_version(requested: &str) -> Option<&'static str> {
-    let mut versions = CATALOG
-        .entries
-        .iter()
-        .flat_map(|entry| entry.api_versions.iter().copied())
-        .filter(|api| *api != requested)
-        .collect::<Vec<_>>();
-    versions.sort_unstable();
-    versions.dedup();
-    versions.pop()
 }
 
 fn format_report_error(report: &graph_check::Report) -> String {
@@ -1139,7 +1273,7 @@ impl MissingImageError {
 
 impl fmt::Display for MissingImageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("official service artifact could not be obtained")
+        formatter.write_str("official artifact could not be obtained")
     }
 }
 
@@ -1349,7 +1483,7 @@ mod tests {
         let mut built_sources = Vec::new();
         let outcome = run_check_with_deployed_user_service_images(
             CheckParticipants {
-                platform_image_refs: &[],
+                platform_artifact_refs: &[],
                 user_service_images: &user_images,
                 tool_participants: &[],
                 source_participants: &sources,
@@ -1475,6 +1609,41 @@ mod tests {
         assert!(
             message.contains("official service emit-apis artifact.id 'mission'")
                 && message.contains("expected artifact id 'drive'"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn official_driver_artifact_identity_uses_driver_label() {
+        let artifacts = vec![PlatformArtifactRef {
+            name: "bno085".to_string(),
+            kind: ArtifactKind::Driver,
+            artifact_ref: "driver-bno085:swapped".to_string(),
+        }];
+        let robot_graph = graph_check::RobotGraph::default();
+        let extras = RobotManifestExtras::default();
+
+        let error = run_check_with_context(
+            &artifacts,
+            &[],
+            &[],
+            CheckGraphContext {
+                robot_graph: &robot_graph,
+                manifest_extras: &extras,
+            },
+            |artifact_ref| match artifact_ref {
+                "driver-bno085:swapped" => Ok(raw_kind("service", "bno085", "y2026_1", &[])),
+                unexpected => bail!("unexpected artifact {unexpected}"),
+            },
+            |_| bail!("no tools should be fetched"),
+            |_| bail!("no source services should be built"),
+        )
+        .expect_err("wrong official driver kind should abort check");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("official driver emit-apis artifact.kind 'service'")
+                && message.contains("expected kind 'driver'"),
             "{message}"
         );
     }
@@ -2418,8 +2587,10 @@ mod tests {
     fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<ResolvedRobot> {
         Ok(ResolvedRobot {
             robot: Robot::parse_from_string(MINIMAL_ROBOT)?,
-            api_version: "y2026_1".to_string(),
+            target_generation: "y2026_1".to_string(),
             channel: Channel::Stable,
+            target: crate::resolver::host_target_triple(),
+            catalog_revision: None,
             platform_runtimes: Vec::new(),
             user_runtimes: Vec::new(),
             components,
@@ -2436,8 +2607,9 @@ identity:
 
 structure: structure.urdf
 
-phoxal_participants:
+phoxal_artifacts:
   channel: stable
+phoxal_participants: {}
 
 motion:
   kinematic:
