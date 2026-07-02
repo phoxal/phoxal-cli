@@ -1,5 +1,5 @@
 use clap::{CommandFactory, Parser};
-use phoxal_cli::commands::{Cli, MessageFormat, RootCommand, deploy, robot, runtime, self_cmd};
+use phoxal_cli::commands::{Cli, MessageFormat, RootCommand, deploy, robot, self_cmd, service};
 
 #[test]
 fn clap_definition_is_valid() {
@@ -23,52 +23,52 @@ fn parses_self_upgrade_with_normalized_version() {
 }
 
 #[test]
-fn parses_runtime_add() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "runtime", "add", "avoid-obstacles"])
-        .expect("runtime add command should parse");
+fn parses_service_add() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "service", "add", "avoid-obstacles"])
+        .expect("service add command should parse");
 
-    let RootCommand::Runtime(command) = cli.command else {
-        panic!("expected runtime command");
+    let RootCommand::Service(command) = cli.command else {
+        panic!("expected service command");
     };
-    let runtime::RuntimeSubcommand::Add(add) = command.command else {
-        panic!("expected runtime add command");
+    let service::ServiceSubcommand::Add(add) = command.command else {
+        panic!("expected service add command");
     };
 
     assert_eq!(add.name, "avoid-obstacles");
 }
 
 #[test]
-fn parses_runtime_run() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "runtime", "run", "avoid-obstacles"])
-        .expect("runtime run command should parse");
+fn parses_service_run() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "service", "run", "avoid-obstacles"])
+        .expect("service run command should parse");
 
-    let RootCommand::Runtime(command) = cli.command else {
-        panic!("expected runtime command");
+    let RootCommand::Service(command) = cli.command else {
+        panic!("expected service command");
     };
-    let runtime::RuntimeSubcommand::Run(run) = command.command else {
-        panic!("expected runtime run command");
+    let service::ServiceSubcommand::Run(run) = command.command else {
+        panic!("expected service run command");
     };
 
     assert_eq!(run.name, "avoid-obstacles");
 }
 
 #[test]
-fn parses_runtime_image_with_json_output() {
+fn parses_service_image_with_json_output() {
     let cli = Cli::try_parse_from([
         "phoxal-cli",
-        "runtime",
+        "service",
         "image",
         "avoid-obstacles",
         "--message-format",
         "json",
     ])
-    .expect("runtime image command should parse");
+    .expect("service image command should parse");
 
-    let RootCommand::Runtime(command) = cli.command else {
-        panic!("expected runtime command");
+    let RootCommand::Service(command) = cli.command else {
+        panic!("expected service command");
     };
-    let runtime::RuntimeSubcommand::Image(image) = command.command else {
-        panic!("expected runtime image command");
+    let service::ServiceSubcommand::Image(image) = command.command else {
+        panic!("expected service image command");
     };
 
     assert_eq!(image.name.as_deref(), Some("avoid-obstacles"));
@@ -76,33 +76,39 @@ fn parses_runtime_image_with_json_output() {
 }
 
 #[test]
-fn parses_runtime_catalog_json_output() {
+fn parses_service_catalog_json_output() {
     let cli = Cli::try_parse_from([
         "phoxal-cli",
-        "runtime",
+        "service",
         "catalog",
         "--message-format",
         "json",
     ])
-    .expect("runtime catalog command should parse");
+    .expect("service catalog command should parse");
 
-    let RootCommand::Runtime(command) = cli.command else {
-        panic!("expected runtime command");
+    let RootCommand::Service(command) = cli.command else {
+        panic!("expected service command");
     };
-    let runtime::RuntimeSubcommand::Catalog(catalog) = command.command else {
-        panic!("expected runtime catalog command");
+    let service::ServiceSubcommand::Catalog(catalog) = command.command else {
+        panic!("expected service catalog command");
     };
 
     assert_eq!(catalog.message_format, MessageFormat::Json);
 }
 
 #[test]
-fn parses_check_pull_runtime_and_json_output() {
+fn runtime_surface_is_removed() {
+    assert!(Cli::try_parse_from(["phoxal-cli", "runtime", "add", "avoid-obstacles"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal-cli", "check", "--runtime", "avoid-obstacles",]).is_err());
+}
+
+#[test]
+fn parses_check_pull_service_and_json_output() {
     let cli = Cli::try_parse_from([
         "phoxal-cli",
         "check",
         "--pull",
-        "--runtime",
+        "--service",
         "avoid-obstacles",
         "--message-format",
         "json",
@@ -114,7 +120,7 @@ fn parses_check_pull_runtime_and_json_output() {
     };
 
     assert!(command.pull);
-    assert_eq!(command.runtime.as_deref(), Some("avoid-obstacles"));
+    assert_eq!(command.service.as_deref(), Some("avoid-obstacles"));
     assert_eq!(command.message_format, MessageFormat::Json);
 }
 

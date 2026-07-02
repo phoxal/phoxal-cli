@@ -26,7 +26,7 @@ pub struct ResolveOptions {
     /// Resolve git component `tag` → `commit`. A `tag` that is already a full
     /// commit SHA resolves with no network; a tag/branch ref is resolved live
     /// via `git ls-remote`. Flows that need to locate/stage component driver
-    /// sources (`check`, `runtime run`, simulate, `deploy build`) set this;
+    /// sources (`check`, `service run`, simulate, `deploy build`) set this;
     /// flows that never read component commits (`pull`, `outdated`) leave it
     /// off so they stay fully offline.
     pub resolve_source_commits: bool,
@@ -135,7 +135,7 @@ pub struct LoadedRobot {
 
 const DEFAULT_BUS_PROFILE_NAME: &str = "default";
 
-/// How a platform runtime image is referenced for deployment.
+/// How an official service image is referenced for deployment.
 ///
 /// A [`ImagePin::Digest`] is a reproducible OCI content pin obtained from the
 /// registry (via `docker buildx imagetools inspect`). [`ImagePin::Unpinned`]
@@ -270,7 +270,7 @@ pub fn load_robot(path: &Path) -> Result<Robot> {
     // `user_participants.<name>.image`/`config` keys as a CLI-side side channel:
     // they are stripped before the typed parse and threaded through
     // `RobotManifestExtras`. Commands that don't need the extras
-    // (check/validate/update/runtime add) just discard them.
+    // (check/validate/update/service add) just discard them.
     load_robot_with_extras(path).map(|loaded| loaded.robot)
 }
 
@@ -699,7 +699,7 @@ pub fn resolve_image_digest(image_ref: &str) -> Result<String> {
         format!(
             "could not resolve a real image digest for {image_ref}. \
              `docker buildx imagetools inspect` failed - install Docker with buildx and ensure \
-             the daemon can reach the registry. If the phoxal/framework GHCR runtime images are \
+             the daemon can reach the registry. If the phoxal/framework GHCR service images are \
              not published yet, deploy by tag (`simulate`/`check` resolve no digests) until they \
              are published."
         )
@@ -776,18 +776,18 @@ fn resolve_user_runtime(
     let runtime_dir = resolve_project_path(project_root, &runtime.path);
     if !runtime_dir.is_dir() {
         bail!(
-            "user runtime '{name}' source dir {} does not exist; user runtimes must have an on-disk source directory to hash/build",
+            "user service '{name}' source dir {} does not exist; user services must have an on-disk source directory to hash/build",
             runtime_dir.display()
         );
     }
     let framework = resolve_user_runtime_framework(name, &runtime.framework, api_version)?;
     let source_hash = hash_tree(&runtime_dir).with_context(|| {
         format!(
-            "failed to hash user runtime '{name}' source tree at {}",
+            "failed to hash user service '{name}' source tree at {}",
             runtime_dir.display()
         )
     })?;
-    let image = format!("phoxal.local/{robot_id}/user-runtime/{name}:dev");
+    let image = format!("phoxal.local/{robot_id}/user-service/{name}:dev");
     let build = runtime
         .build
         .as_ref()
@@ -806,8 +806,8 @@ fn resolve_user_runtime(
 
 fn mirror_user_runtime_build(build: &impl Serialize) -> Result<ResolvedUserRuntimeBuild> {
     let value =
-        serde_yaml::to_value(build).context("failed to serialize user runtime build recipe")?;
-    serde_yaml::from_value(value).context("failed to mirror user runtime build recipe")
+        serde_yaml::to_value(build).context("failed to serialize user service build recipe")?;
+    serde_yaml::from_value(value).context("failed to mirror user service build recipe")
 }
 
 pub(crate) fn resolve_user_runtime_framework(
@@ -831,7 +831,7 @@ pub(crate) fn validate_user_runtime_framework_selector(
         return Ok(());
     }
     bail!(
-        "user runtime '{runtime_name}': framework '{selector}' must be \"match-platform\" or the graph api_version '{api_version}'"
+        "user service '{runtime_name}': framework '{selector}' must be \"match-platform\" or the graph api_version '{api_version}'"
     )
 }
 
@@ -1060,13 +1060,13 @@ fn format_unavailable_api_version_error(
         .find(|candidate| *candidate != api_version);
 
     let mut message = format!(
-        "API version {api_version} is not available on channel {channel}: this CLI has no complete official runtime image set for that API version"
+        "API version {api_version} is not available on channel {channel}: this CLI has no complete official service image set for that API version"
     );
 
-    // List the full expected official runtime ref set for the requested
+    // List the full expected official service ref set for the requested
     // (api_version, channel), mirroring `format_missing_images_error` in
     // check.rs. The catalog cannot resolve a complete set for the unavailable
-    // version, so the expected refs are every known official runtime name at
+    // version, so the expected refs are every known official service name at
     // the requested api/channel.
     let mut expected_refs = catalog
         .names()
@@ -1075,7 +1075,7 @@ fn format_unavailable_api_version_error(
     expected_refs.sort_unstable();
     expected_refs.dedup();
     if !expected_refs.is_empty() {
-        message.push_str("\n\nExpected official runtime images:");
+        message.push_str("\n\nExpected official service images:");
         for image_ref in &expected_refs {
             message.push_str("\n  - ");
             message.push_str(image_ref);
@@ -1100,7 +1100,7 @@ fn format_unavailable_api_version_error(
     message.push_str(api_version);
     message.push('-');
     message.push_str(channel);
-    message.push_str(" official runtime set");
+    message.push_str(" official service set");
     message
 }
 
@@ -1165,9 +1165,9 @@ motion:
 components:
   sources:
     ddsm115:
-      git: https://github.com/phoxal/components
+      git: https://github.com/phoxal/framework
       tag: main
-      directory: ddsm115
+      directory: component/ddsm115
   instances:
     left_drive:
       component: ddsm115
@@ -1266,7 +1266,7 @@ components:
 "#,
         )?;
 
-        // Plain load_robot (used by check/validate/update/runtime add) must parse it
+        // Plain load_robot (used by check/validate/update/service add) must parse it
         // despite the image/config keys the typed model does not know about.
         let robot = load_robot(&path)?;
         assert!(robot.user_participants.contains_key("brain"));

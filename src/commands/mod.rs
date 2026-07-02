@@ -12,8 +12,8 @@ pub mod doctor;
 pub mod outdated;
 pub mod pull;
 pub mod robot;
-pub mod runtime;
 pub mod self_cmd;
+pub mod service;
 pub mod simulate;
 pub mod validate;
 
@@ -60,7 +60,7 @@ pub fn long_version() -> &'static str {
     version = long_version(),
     about = "Build, check, simulate, and deploy Phoxal robot projects.",
     long_about = "Build, check, simulate, and deploy Phoxal robot projects.\n\n\
-                  phoxal-cli reads robot.yaml, resolves the graph against its compiled-in official runtime catalog, and drives the develop/simulate/deploy loop. Start with `robot new`, then `check`, `simulate`, and `deploy build`."
+                  phoxal-cli reads robot.yaml, resolves the graph against its compiled-in official service catalog, and drives the develop/simulate/deploy loop. Start with `robot new`, then `check`, `simulate`, and `deploy build`."
 )]
 pub struct Cli {
     #[arg(
@@ -79,10 +79,10 @@ pub enum RootCommand {
     #[command(
         about = "Check the robot graph's per-contract wire-shape agreement and topology via emit-apis.",
         long_about = "Check the robot graph's per-contract wire-shape agreement and topology via emit-apis.\n\n\
-                      Resolves robot.yaml, then runs each participant's emit-apis (official images, host tools, and locally built user runtimes/component drivers) and validates the graph with phoxal::check. It fails if participants sharing a contract disagree on its schema_id (wire shape) or if the producer/consumer topology is unsatisfied. Mixed api_versions are allowed as long as shared contracts' schema_ids agree. Cached official images are used and pulled only when missing (pass --pull to refresh first); git component commits resolve live unless pinned to a commit SHA in robot.yaml."
+                      Resolves robot.yaml, then runs each participant's emit-apis (official images, host tools, and locally built user services/component drivers) and validates the graph with phoxal::check. It fails if participants sharing a contract disagree on its schema_id (wire shape) or if the producer/consumer topology is unsatisfied. Mixed api_versions are allowed as long as shared contracts' schema_ids agree. Cached official images are used and pulled only when missing (pass --pull to refresh first); git component commits resolve live unless pinned to a commit SHA in robot.yaml."
     )]
     Check(check::CheckCmd),
-    #[command(about = "Validate robot.yaml structure and user-runtime phoxal dependencies.")]
+    #[command(about = "Validate robot.yaml structure and user-service phoxal dependencies.")]
     Validate(validate::Validate),
     #[command(about = "Resolve, generate the run bundle, and launch the Webots simulation stack.")]
     Simulate(simulate::Simulate),
@@ -90,14 +90,14 @@ pub enum RootCommand {
     Deploy(deploy::Deploy),
     #[command(about = "Scaffold and manage robot projects.")]
     Robot(robot::Robot),
-    #[command(about = "Refresh cached official runtime images and host tools.")]
+    #[command(about = "Refresh cached official service images and host tools.")]
     Pull(pull::Pull),
     #[command(about = "Report cached official images/tools that have newer remote digests.")]
     Outdated(outdated::Outdated),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
-    #[command(about = "Scaffold and run user runtime crates.")]
-    Runtime(runtime::Runtime),
+    #[command(about = "Scaffold and run user service crates.")]
+    Service(service::Service),
     #[command(about = "Print the phoxal-cli version and supported api_versions.")]
     Version,
     #[command(name = "self", about = "Manage this phoxal-cli installation.")]
@@ -115,7 +115,7 @@ impl RootCommand {
             Self::Pull(command) => command.run(app).await,
             Self::Outdated(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
-            Self::Runtime(command) => command.run(app).await,
+            Self::Service(command) => command.run(app).await,
             Self::Version => {
                 println!("phoxal-cli {}", long_version());
                 let mut api_versions = crate::catalog::CATALOG
@@ -125,7 +125,7 @@ impl RootCommand {
                     .collect::<Vec<_>>();
                 api_versions.sort_unstable();
                 api_versions.dedup();
-                println!("official runtime API versions: {}", api_versions.join(", "));
+                println!("official service API versions: {}", api_versions.join(", "));
                 Ok(())
             }
             Self::SelfCmd(command) => command.run(app).await,

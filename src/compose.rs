@@ -501,7 +501,7 @@ mod tests {
                 framework: "y2026_1".to_string(),
                 build: None,
                 source_hash: "abc123".to_string(),
-                image: "phoxal.local/testbot/user-runtime/avoid:dev".to_string(),
+                image: "phoxal.local/testbot/user-service/avoid:dev".to_string(),
             }],
             components: Vec::new(),
             tools: Vec::new(),

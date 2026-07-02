@@ -166,7 +166,7 @@ pub fn probe_rust_tools() -> ProbeStatus {
                 missing.push("cargo");
             }
             ProbeStatus::Warn(format!(
-                "{} missing; user runtime and driver builds may fail - install Rust from https://rustup.rs and ensure rustup and cargo are on PATH",
+                "{} missing; user service and driver builds may fail - install Rust from https://rustup.rs and ensure rustup and cargo are on PATH",
                 missing.join(" and ")
             ))
         }
@@ -452,7 +452,7 @@ fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 fn docker_cli_missing() -> HostError {
     HostError::new(
         HostErrorCode::DockerCliMissing,
-        "Docker CLI is required so live simulate can pull runtime images, build local images, and manage containers.",
+        "Docker CLI is required so live simulate can pull service images, build local images, and manage containers.",
         [
             "Install Docker Desktop or Docker Engine.",
             "Make sure the docker command is on PATH.",
@@ -464,7 +464,7 @@ fn docker_cli_missing() -> HostError {
 fn docker_daemon_down() -> HostError {
     HostError::new(
         HostErrorCode::DockerDaemonDown,
-        "Docker daemon must be running before live simulate can pull images, build user runtimes, and start containers.",
+        "Docker daemon must be running before live simulate can pull images, build user services, and start containers.",
         [
             "Start Docker Desktop or the Docker Engine service.",
             "Run docker info and confirm it succeeds.",

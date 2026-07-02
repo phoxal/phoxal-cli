@@ -27,15 +27,15 @@ use crate::utils::{cargo_binary_name, resolve_project_path};
 pub struct CheckCmd {
     #[arg(
         long,
-        help = "Refresh official runtime images and host tools before running emit-apis."
+        help = "Refresh official service images and host tools before running emit-apis."
     )]
     pub pull: bool,
     #[arg(
         long,
         value_name = "NAME",
-        help = "Only build/check the named user runtime crate after resolving the full project."
+        help = "Only build/check the named user service crate after resolving the full project."
     )]
-    pub runtime: Option<String>,
+    pub service: Option<String>,
     #[arg(
         long,
         value_enum,
@@ -48,7 +48,7 @@ pub struct CheckCmd {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CheckOptions {
     pub pull: bool,
-    pub runtime: Option<String>,
+    pub service: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -100,7 +100,7 @@ pub struct CheckGraphContext<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct CheckParticipants<'a> {
     pub platform_image_refs: &'a [(String, String)],
-    pub user_runtime_images: &'a [UserRuntimeImageParticipant],
+    pub user_service_images: &'a [UserServiceImageParticipant],
     pub tool_participants: &'a [ToolParticipant],
     pub source_participants: &'a [SourceParticipant],
 }
@@ -117,7 +117,7 @@ impl CheckCmd {
         let project_root = app.project.root().to_path_buf();
         let options = CheckOptions {
             pull: self.pull,
-            runtime: self.runtime.clone(),
+            service: self.service.clone(),
         };
         let ui = app.ui;
         let result = tokio::task::spawn_blocking(move || run(&project_root, options, &ui))
@@ -226,11 +226,11 @@ fn run(
     let tool_participants = tool_participants_from_resolved(&resolved)?;
     let all_source_participants =
         source_participants_from_resolved(project_root, &resolved, component_crate_dir)?;
-    if let Some(runtime_name) = options.runtime.as_deref() {
-        ensure_user_runtime_exists(&resolved, runtime_name)?;
+    if let Some(service_name) = options.service.as_deref() {
+        ensure_user_service_exists(&resolved, service_name)?;
     }
     let source_participants =
-        source_participants_for_runtime(&all_source_participants, options.runtime.as_deref());
+        source_participants_for_service(&all_source_participants, options.service.as_deref());
     let participant_count =
         platform_refs.len() + tool_participants.len() + source_participants.len();
     let robot_graph = robot_graph_from_resolved(&resolved);
@@ -262,21 +262,21 @@ pub struct SourceParticipant {
     pub crate_dir: PathBuf,
     pub kind: SourceParticipantKind,
     /// Whether `check` should run the expensive build for this participant or
-    /// reuse already-emitted metadata. `check --runtime <name>` scopes the
-    /// build to the named user runtime (`Build`) while keeping every other
+    /// reuse already-emitted metadata. `check --service <name>` scopes the
+    /// build to the named user service (`Build`) while keeping every other
     /// participant in the graph via cached metadata (`UseCached`).
     pub build_mode: SourceBuildMode,
 }
 
 impl SourceParticipant {
     #[must_use]
-    pub fn user_runtime(name: impl Into<String>, crate_dir: PathBuf) -> Self {
+    pub fn user_service(name: impl Into<String>, crate_dir: PathBuf) -> Self {
         let name = name.into();
         Self {
             expected_artifact_id: name.clone(),
             name,
             crate_dir,
-            kind: SourceParticipantKind::UserRuntime,
+            kind: SourceParticipantKind::UserService,
             build_mode: SourceBuildMode::Build,
         }
     }
@@ -304,7 +304,7 @@ impl SourceParticipant {
 
     fn kind_label(&self) -> &'static str {
         match self.kind {
-            SourceParticipantKind::UserRuntime => "user runtime",
+            SourceParticipantKind::UserService => "user service",
             SourceParticipantKind::ComponentDriver => "component driver",
         }
     }
@@ -312,7 +312,7 @@ impl SourceParticipant {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceParticipantKind {
-    UserRuntime,
+    UserService,
     ComponentDriver,
 }
 
@@ -322,7 +322,7 @@ pub enum SourceBuildMode {
     /// Build the crate and run `emit-apis` on the fresh binary (expensive).
     Build,
     /// Reuse already-emitted metadata instead of rebuilding. Used for the
-    /// participants outside a `check --runtime <name>` build scope so the full
+    /// participants outside a `check --service <name>` build scope so the full
     /// graph is still validated without rebuilding (or being failed by) crates
     /// the user did not ask to build.
     UseCached,
@@ -335,7 +335,7 @@ pub struct ToolParticipant {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UserRuntimeImageParticipant {
+pub struct UserServiceImageParticipant {
     pub name: String,
     pub image_ref: String,
 }
@@ -364,7 +364,7 @@ pub(crate) fn source_participants_from_resolved(
         .user_runtimes
         .iter()
         .map(|runtime| {
-            SourceParticipant::user_runtime(
+            SourceParticipant::user_service(
                 runtime.name.clone(),
                 resolve_project_path(project_root, &runtime.path),
             )
@@ -392,11 +392,11 @@ pub(crate) fn source_participants_from_resolved(
     Ok(participants)
 }
 
-fn ensure_user_runtime_exists(resolved: &ResolvedRobot, runtime_name: &str) -> Result<()> {
+fn ensure_user_service_exists(resolved: &ResolvedRobot, service_name: &str) -> Result<()> {
     if !resolved
         .user_runtimes
         .iter()
-        .any(|runtime| runtime.name == runtime_name)
+        .any(|runtime| runtime.name == service_name)
     {
         let available = resolved
             .user_runtimes
@@ -405,34 +405,34 @@ fn ensure_user_runtime_exists(resolved: &ResolvedRobot, runtime_name: &str) -> R
             .collect::<Vec<_>>()
             .join(", ");
         if available.is_empty() {
-            bail!("user runtime '{runtime_name}' is not defined in user_participants");
+            bail!("user service '{service_name}' is not defined in user_participants");
         }
         bail!(
-            "user runtime '{runtime_name}' is not defined in user_participants; available: {available}"
+            "user service '{service_name}' is not defined in user_participants; available: {available}"
         );
     }
     Ok(())
 }
 
-/// Apply a `check --runtime <name>` build scope to the source participants.
+/// Apply a `check --service <name>` build scope to the source participants.
 ///
 /// Every participant stays in the returned set so the full graph is still
-/// validated for topology/api consistency. When `runtime_name` is `Some`, only
-/// the named user runtime is marked `Build`; every other source participant is
+/// validated for topology/api consistency. When `service_name` is `Some`, only
+/// the named user service is marked `Build`; every other source participant is
 /// marked `UseCached` so the expensive build is scoped to the one crate the
 /// user asked about, while broken or unrelated crates still contribute their
 /// already-emitted metadata to the graph. With no scope, everything builds.
-fn source_participants_for_runtime(
+fn source_participants_for_service(
     source_participants: &[SourceParticipant],
-    runtime_name: Option<&str>,
+    service_name: Option<&str>,
 ) -> Vec<SourceParticipant> {
     source_participants
         .iter()
         .map(|participant| {
             let mut participant = participant.clone();
-            participant.build_mode = match runtime_name {
+            participant.build_mode = match service_name {
                 Some(name)
-                    if participant.kind == SourceParticipantKind::UserRuntime
+                    if participant.kind == SourceParticipantKind::UserService
                         && participant.name == name =>
                 {
                     SourceBuildMode::Build
@@ -478,10 +478,10 @@ pub fn run_check_with_context(
     fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
     build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
 ) -> Result<CheckOutcome> {
-    run_check_with_deployed_user_runtime_images(
+    run_check_with_deployed_user_service_images(
         CheckParticipants {
             platform_image_refs: resolved_platform_image_refs,
-            user_runtime_images: &[],
+            user_service_images: &[],
             tool_participants,
             source_participants,
         },
@@ -492,7 +492,7 @@ pub fn run_check_with_context(
     )
 }
 
-pub fn run_check_with_deployed_user_runtime_images(
+pub fn run_check_with_deployed_user_service_images(
     inputs: CheckParticipants<'_>,
     context: CheckGraphContext<'_>,
     mut fetch: impl FnMut(&str) -> Result<RawEmitApis>,
@@ -503,7 +503,7 @@ pub fn run_check_with_deployed_user_runtime_images(
     let mut participants = Vec::new();
     let mut config_problems = Vec::new();
 
-    for (runtime_name, image_ref) in inputs.platform_image_refs {
+    for (service_name, image_ref) in inputs.platform_image_refs {
         let raw = match fetch(image_ref) {
             Ok(raw) => raw,
             Err(error) if error.downcast_ref::<MissingImageError>().is_some() => {
@@ -512,33 +512,37 @@ pub fn run_check_with_deployed_user_runtime_images(
             }
             Err(error) => {
                 return Err(error).with_context(|| {
-                    format!("failed to obtain emit-apis for runtime {runtime_name} ({image_ref})")
+                    format!(
+                        "failed to obtain emit-apis for official service {service_name} ({image_ref})"
+                    )
                 });
             }
         };
-        validate_artifact_identity("official service", runtime_name, "service", &raw)?;
+        validate_artifact_identity("official service", service_name, "service", &raw)?;
         let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
-            format!("failed to interpret emit-apis for runtime {runtime_name} ({image_ref})")
+            format!(
+                "failed to interpret emit-apis for official service {service_name} ({image_ref})"
+            )
         })?;
         participants.push(participant);
     }
 
-    for runtime in inputs.user_runtime_images {
-        let raw = fetch(&runtime.image_ref).with_context(|| {
+    for service in inputs.user_service_images {
+        let raw = fetch(&service.image_ref).with_context(|| {
             format!(
-                "failed to obtain emit-apis for user runtime {} ({})",
-                runtime.name, runtime.image_ref
+                "failed to obtain emit-apis for user service {} ({})",
+                service.name, service.image_ref
             )
         })?;
-        validate_runtime_artifact_identity("user runtime", &runtime.name, &raw)?;
+        validate_service_artifact_identity("user service", &service.name, &raw)?;
         let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
             format!(
-                "failed to interpret emit-apis for user runtime {} ({})",
-                runtime.name, runtime.image_ref
+                "failed to interpret emit-apis for user service {} ({})",
+                service.name, service.image_ref
             )
         })?;
-        if let Some(problem) = validate_user_runtime_config(
-            &runtime.name,
+        if let Some(problem) = validate_user_service_config(
+            &service.name,
             participant.config_schema.as_ref(),
             context.manifest_extras,
         ) {
@@ -593,8 +597,8 @@ pub fn run_check_with_deployed_user_runtime_images(
             participant_apis.participant_id = participant.name.clone();
             participant_apis.scope =
                 graph_check::ParticipantScope::ComponentInstance(participant.name.clone());
-        } else if participant.kind == SourceParticipantKind::UserRuntime
-            && let Some(problem) = validate_user_runtime_config(
+        } else if participant.kind == SourceParticipantKind::UserService
+            && let Some(problem) = validate_user_service_config(
                 &participant.name,
                 participant_apis.config_schema.as_ref(),
                 context.manifest_extras,
@@ -706,26 +710,26 @@ fn collect_motion_capabilities(
     }
 }
 
-fn validate_user_runtime_config(
-    runtime_id: &str,
+fn validate_user_service_config(
+    service_id: &str,
     schema: Option<&Value>,
     manifest_extras: &RobotManifestExtras,
 ) -> Option<graph_check::Problem> {
     let schema = schema?;
     let config = manifest_extras
-        .user_runtime_config(runtime_id)
+        .user_runtime_config(service_id)
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
     let errors = validate_json_schema(
         schema,
         &config,
-        &format!("user_participants.{runtime_id}.config"),
+        &format!("user_participants.{service_id}.config"),
     );
     if errors.is_empty() {
         None
     } else {
         Some(graph_check::Problem::InvalidConfig {
-            runtime_id: runtime_id.to_string(),
+            runtime_id: service_id.to_string(),
             errors,
         })
     }
@@ -791,7 +795,7 @@ fn classify_docker_emit_apis_failure(
     let lower = combined.to_ascii_lowercase();
     if is_missing_image_failure(&lower) {
         return DockerEmitApisFailure::MissingImage(format!(
-            "official runtime image {image_ref} is not available: {}",
+            "official service image {image_ref} is not available: {}",
             first_nonempty_line(&combined)
         ));
     }
@@ -859,7 +863,7 @@ pub(crate) fn build_emit_apis_from_source(participant: &SourceParticipant) -> Re
         SourceBuildMode::Build => {
             let raw = build_emit_apis_by_building(&participant.crate_dir)?;
             // Cache the freshly-emitted metadata keyed by the source tree so a
-            // later `check --runtime <other>` can reuse it without rebuilding.
+            // later `check --service <other>` can reuse it without rebuilding.
             if let Err(error) = write_source_emit_apis_cache(&participant.crate_dir, &raw) {
                 tracing::debug!(
                     "failed to cache emit-apis for {}: {error:#}",
@@ -871,9 +875,9 @@ pub(crate) fn build_emit_apis_from_source(participant: &SourceParticipant) -> Re
         SourceBuildMode::UseCached => read_source_emit_apis_cache(&participant.crate_dir)
             .with_context(|| {
                 format!(
-                    "no cached emit-apis for {} {} ({}); run `phoxal check` once (no --runtime) \
+                    "no cached emit-apis for {} {} ({}); run `phoxal check` once (no --service) \
                      to build every participant and populate the cache, then re-run \
-                     `phoxal check --runtime <name>`",
+                     `phoxal check --service <name>`",
                     participant.kind_label(),
                     participant.name,
                     participant.crate_dir.display()
@@ -888,8 +892,8 @@ fn build_emit_apis_by_building(dir: &Path) -> Result<RawEmitApis> {
         .with_context(|| format!("failed to canonicalize source crate {}", dir.display()))?;
     let binary_name = cargo_binary_name(&crate_dir, None)?;
     // Build + run via `cargo run` rather than locating the binary by hand: a crate
-    // that is a workspace member (e.g. a `phoxal/components` driver) compiles into the
-    // *workspace-root* `target/`, not `<crate_dir>/target/`, so a fixed
+    // that is a workspace member (e.g. a phoxal/framework `component/<name>` driver)
+    // compiles into the *workspace-root* `target/`, not `<crate_dir>/target/`, so a fixed
     // `<crate_dir>/target/debug/<bin>` path would miss it. `cargo run` resolves the
     // location workspace-aware, and `--quiet` keeps stdout to just the binary's
     // `emit-apis` JSON (cargo's own progress goes to stderr).
@@ -914,7 +918,7 @@ fn build_emit_apis_by_building(dir: &Path) -> Result<RawEmitApis> {
 
 /// Cache file for a source crate's last-built `emit-apis`, keyed by the source
 /// tree hash so cached metadata always matches the current source. A scoped
-/// `check --runtime <name>` reads this for the participants it does not rebuild.
+/// `check --service <name>` reads this for the participants it does not rebuild.
 fn source_emit_apis_cache_path(crate_dir: &Path) -> Result<PathBuf> {
     let source_hash = crate::utils::hash_tree(crate_dir).with_context(|| {
         format!(
@@ -947,7 +951,7 @@ fn read_source_emit_apis_cache(crate_dir: &Path) -> Result<RawEmitApis> {
         .with_context(|| format!("cached emit-apis {} was not valid JSON", path.display()))
 }
 
-fn validate_runtime_artifact_identity(
+fn validate_service_artifact_identity(
     label: &str,
     expected_id: &str,
     raw: &RawEmitApis,
@@ -960,7 +964,7 @@ fn validate_source_artifact_identity(
     raw: &RawEmitApis,
 ) -> Result<()> {
     let expected_kind = match participant.kind {
-        SourceParticipantKind::UserRuntime => "service",
+        SourceParticipantKind::UserService => "service",
         SourceParticipantKind::ComponentDriver => "driver",
     };
     validate_artifact_identity(
@@ -984,14 +988,9 @@ fn validate_artifact_identity(
             expected_id
         );
     }
-    // Keep accepting the legacy universal kind until the cross-repo migration
-    // lands. phoxal/components drivers, and any tools still on phoxal 0.19 with
-    // `#[derive(Runtime)]`, emit `kind = "runtime"`. Exact `service`/`driver`/
-    // `tool` enforcement is deferred until the components and tools crates move
-    // to phoxal 0.20+ true kinds.
-    if raw.artifact.kind != expected_kind && raw.artifact.kind != "runtime" {
+    if raw.artifact.kind != expected_kind {
         bail!(
-            "{label} emit-apis artifact.kind '{}' is neither the expected kind '{}' nor the tolerated legacy 'runtime'",
+            "{label} emit-apis artifact.kind '{}' does not match the expected kind '{}'",
             raw.artifact.kind,
             expected_kind
         );
@@ -1068,7 +1067,7 @@ fn format_missing_images_error(
     missing_images: &[String],
 ) -> String {
     let mut message = format!("API version {api_version} is not available on channel {channel}");
-    message.push_str("\n\nMissing official runtime images:");
+    message.push_str("\n\nMissing official service images:");
     for image_ref in missing_images {
         message.push_str("\n  - ");
         message.push_str(image_ref);
@@ -1087,7 +1086,7 @@ fn format_missing_images_error(
     message.push_str(api_version);
     message.push('-');
     message.push_str(channel);
-    message.push_str(" official runtime set");
+    message.push_str(" official service set");
     message
 }
 
@@ -1163,7 +1162,7 @@ fn format_problem(problem: &graph_check::Problem) -> String {
         }
         graph_check::Problem::InvalidConfig { runtime_id, errors } => {
             format!(
-                "invalid config for user runtime {runtime_id}: {}",
+                "invalid config for user service {runtime_id}: {}",
                 errors.join("; ")
             )
         }
@@ -1208,7 +1207,7 @@ impl MissingImageError {
 
 impl fmt::Display for MissingImageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("official runtime image could not be obtained")
+        formatter.write_str("official service image could not be obtained")
     }
 }
 
@@ -1229,7 +1228,7 @@ mod tests {
     #[test]
     fn healthy_graph_passes_with_fake_emit_apis() -> Result<()> {
         let images = vec![("mission".to_string(), "mission:ok".to_string())];
-        let sources = vec![SourceParticipant::user_runtime(
+        let sources = vec![SourceParticipant::user_service(
             "drive".to_string(),
             PathBuf::from("/fake/project/runtimes/drive"),
         )];
@@ -1312,7 +1311,7 @@ mod tests {
             name: "joypad".to_string(),
             binary_path: PathBuf::from("/fake/cache/joypad"),
         }];
-        let sources = vec![SourceParticipant::user_runtime(
+        let sources = vec![SourceParticipant::user_service(
             "drive".to_string(),
             PathBuf::from("/fake/project/runtimes/drive"),
         )];
@@ -1391,7 +1390,7 @@ mod tests {
                     bail!("unexpected tool path {}", path.display())
                 }
             },
-            |_| bail!("no source runtimes should be built"),
+            |_| bail!("no source services should be built"),
         )?;
 
         assert!(outcome.report.problems.is_empty());
@@ -1400,8 +1399,8 @@ mod tests {
     }
 
     #[test]
-    fn deployed_user_runtime_images_are_checked_from_image_refs() -> Result<()> {
-        let user_images = vec![UserRuntimeImageParticipant {
+    fn deployed_user_service_images_are_checked_from_image_refs() -> Result<()> {
+        let user_images = vec![UserServiceImageParticipant {
             name: "avoid".to_string(),
             image_ref: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_string(),
@@ -1416,10 +1415,10 @@ mod tests {
 
         let mut fetched_images = Vec::new();
         let mut built_sources = Vec::new();
-        let outcome = run_check_with_deployed_user_runtime_images(
+        let outcome = run_check_with_deployed_user_service_images(
             CheckParticipants {
                 platform_image_refs: &[],
-                user_runtime_images: &user_images,
+                user_service_images: &user_images,
                 tool_participants: &[],
                 source_participants: &sources,
             },
@@ -1456,7 +1455,7 @@ mod tests {
         // A platform publisher and a source subscriber share `drive/target` but
         // report different `schema_id`s -> one `ContractSchemaMismatch`.
         let images = vec![("mission".to_string(), "mission:ok".to_string())];
-        let sources = vec![SourceParticipant::user_runtime(
+        let sources = vec![SourceParticipant::user_service(
             "drive".to_string(),
             PathBuf::from("/fake/project/runtimes/drive"),
         )];
@@ -1499,8 +1498,8 @@ mod tests {
     }
 
     #[test]
-    fn user_runtime_artifact_id_must_match_manifest_key() {
-        let sources = vec![SourceParticipant::user_runtime(
+    fn user_service_artifact_id_must_match_manifest_key() {
+        let sources = vec![SourceParticipant::user_service(
             "avoid".to_string(),
             PathBuf::from("/fake/project/runtimes/avoid"),
         )];
@@ -1513,7 +1512,7 @@ mod tests {
             |_| bail!("no tools should be fetched"),
             |_| Ok(raw("surprise", "y2026_1", &[])),
         )
-        .expect_err("mismatched user runtime artifact id should abort check");
+        .expect_err("mismatched user service artifact id should abort check");
 
         let message = error.to_string();
         assert!(
@@ -1536,7 +1535,7 @@ mod tests {
                 unexpected => bail!("unexpected image {unexpected}"),
             },
             |_| bail!("no tools should be fetched"),
-            |_| bail!("no source runtimes should be built"),
+            |_| bail!("no source services should be built"),
         )
         .expect_err("swapped official service image should abort check");
 
@@ -1573,7 +1572,7 @@ mod tests {
                     bail!("unexpected tool path {}", path.display())
                 }
             },
-            |_| bail!("no source runtimes should be built"),
+            |_| bail!("no source services should be built"),
         )
         .expect_err("swapped tool binary should abort check");
 
@@ -1586,13 +1585,45 @@ mod tests {
     }
 
     #[test]
-    fn tool_artifact_kind_legacy_runtime_is_tolerated() -> Result<()> {
+    fn tool_artifact_kind_true_kind_is_accepted() -> Result<()> {
         let tools = vec![ToolParticipant {
             name: "joypad".to_string(),
             binary_path: PathBuf::from("/fake/cache/joypad"),
         }];
 
         let outcome = run_check(
+            &[],
+            &tools,
+            &[],
+            |_| bail!("no platform images should be fetched"),
+            |path| {
+                if path == Path::new("/fake/cache/joypad") {
+                    Ok(raw_kind_class(
+                        "tool",
+                        "joypad",
+                        "y2026_1",
+                        &[],
+                        "privileged",
+                    ))
+                } else {
+                    bail!("unexpected tool path {}", path.display())
+                }
+            },
+            |_| bail!("no source services should be built"),
+        )?;
+
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn tool_artifact_kind_legacy_runtime_is_rejected() {
+        let tools = vec![ToolParticipant {
+            name: "joypad".to_string(),
+            binary_path: PathBuf::from("/fake/cache/joypad"),
+        }];
+
+        let error = run_check(
             &[],
             &tools,
             &[],
@@ -1610,15 +1641,21 @@ mod tests {
                     bail!("unexpected tool path {}", path.display())
                 }
             },
-            |_| bail!("no source runtimes should be built"),
-        )?;
+            |_| bail!("no source services should be built"),
+        )
+        .expect_err("tool binary reporting legacy runtime kind should abort check");
 
-        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
-        Ok(())
+        let message = error.to_string();
+        assert!(
+            message.contains(
+                "tool emit-apis artifact.kind 'runtime' does not match the expected kind 'tool'"
+            ),
+            "{message}"
+        );
     }
 
     #[test]
-    fn component_driver_artifact_kind_legacy_runtime_is_tolerated() -> Result<()> {
+    fn component_driver_artifact_kind_true_kind_is_accepted() -> Result<()> {
         let sources = vec![SourceParticipant::component_driver_with_artifact_id(
             "left_motor",
             "ddsm115",
@@ -1633,7 +1670,7 @@ mod tests {
             |_| bail!("no tools should be fetched"),
             |_| {
                 Ok(raw_kind_class(
-                    "runtime",
+                    "driver",
                     "ddsm115",
                     "y2026_1",
                     &[],
@@ -1644,6 +1681,41 @@ mod tests {
 
         assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
         Ok(())
+    }
+
+    #[test]
+    fn component_driver_artifact_kind_legacy_runtime_is_rejected() {
+        let sources = vec![SourceParticipant::component_driver_with_artifact_id(
+            "left_motor",
+            "ddsm115",
+            PathBuf::from("/fake/project/components/ddsm115"),
+        )];
+
+        let error = run_check(
+            &[],
+            &[],
+            &sources,
+            |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
+            |_| {
+                Ok(raw_kind_class(
+                    "runtime",
+                    "ddsm115",
+                    "y2026_1",
+                    &[],
+                    "checked",
+                ))
+            },
+        )
+        .expect_err("component driver reporting legacy runtime kind should abort check");
+
+        let message = error.to_string();
+        assert!(
+            message.contains(
+                "component driver emit-apis artifact.kind 'runtime' does not match the expected kind 'driver'"
+            ),
+            "{message}"
+        );
     }
 
     #[test]
@@ -1671,7 +1743,7 @@ mod tests {
                     bail!("unexpected tool path {}", path.display())
                 }
             },
-            |_| bail!("no source runtimes should be built"),
+            |_| bail!("no source services should be built"),
         )
         .expect_err("tool binary reporting a garbage kind should abort check");
 
@@ -1684,16 +1756,16 @@ mod tests {
     }
 
     #[test]
-    fn scoped_runtime_check_only_builds_the_named_runtime() -> Result<()> {
-        // `check --runtime other` keeps every source participant in the graph
+    fn scoped_service_check_only_builds_the_named_service() -> Result<()> {
+        // `check --service other` keeps every source participant in the graph
         // (so topology is still validated) but scopes the expensive BUILD to the
-        // named user runtime; every other participant is marked `UseCached`.
+        // named user service; every other participant is marked `UseCached`.
         let all_sources = vec![
-            SourceParticipant::user_runtime(
+            SourceParticipant::user_service(
                 "bad".to_string(),
                 PathBuf::from("/fake/project/runtimes/bad"),
             ),
-            SourceParticipant::user_runtime(
+            SourceParticipant::user_service(
                 "other".to_string(),
                 PathBuf::from("/fake/project/runtimes/other"),
             ),
@@ -1703,7 +1775,7 @@ mod tests {
                 PathBuf::from("/fake/project/components/ddsm115"),
             ),
         ];
-        let sources = source_participants_for_runtime(&all_sources, Some("other"));
+        let sources = source_participants_for_service(&all_sources, Some("other"));
 
         assert_eq!(
             sources
@@ -1748,27 +1820,27 @@ mod tests {
         )?;
 
         assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
-        // Only the named runtime crate is actually built.
+        // Only the named service crate is actually built.
         assert_eq!(built, vec![PathBuf::from("/fake/project/runtimes/other")]);
         Ok(())
     }
 
     #[test]
-    fn scoped_runtime_check_ignores_unrelated_build_failures_but_keeps_topology() -> Result<()> {
-        // `check --runtime other`: an unrelated user runtime that fails to BUILD
+    fn scoped_service_check_ignores_unrelated_build_failures_but_keeps_topology() -> Result<()> {
+        // `check --service other`: an unrelated user service that fails to BUILD
         // must NOT fail the scoped check (its metadata comes from cache), yet a
         // topology problem contributed by another participant is still detected.
         let all_sources = vec![
-            SourceParticipant::user_runtime(
+            SourceParticipant::user_service(
                 "bad".to_string(),
                 PathBuf::from("/fake/project/runtimes/bad"),
             ),
-            SourceParticipant::user_runtime(
+            SourceParticipant::user_service(
                 "other".to_string(),
                 PathBuf::from("/fake/project/runtimes/other"),
             ),
         ];
-        let sources = source_participants_for_runtime(&all_sources, Some("other"));
+        let sources = source_participants_for_service(&all_sources, Some("other"));
 
         let outcome = run_check(
             &[],
@@ -1784,7 +1856,7 @@ mod tests {
                         assert_eq!(dir, Path::new("/fake/project/runtimes/other"));
                         Ok(raw("other", "y2026_1", &[]))
                     }
-                    // Cached metadata for the unrelated `bad` runtime: it would
+                    // Cached metadata for the unrelated `bad` service: it would
                     // fail to BUILD, but the scoped check reads cache instead and
                     // still folds its (broken topology) contract into the graph.
                     SourceBuildMode::UseCached => {
@@ -1809,9 +1881,9 @@ mod tests {
     }
 
     #[test]
-    fn scoped_runtime_check_detects_component_driver_topology_problems() -> Result<()> {
+    fn scoped_service_check_detects_component_driver_topology_problems() -> Result<()> {
         let all_sources = vec![
-            SourceParticipant::user_runtime(
+            SourceParticipant::user_service(
                 "other".to_string(),
                 PathBuf::from("/fake/project/runtimes/other"),
             ),
@@ -1821,7 +1893,7 @@ mod tests {
                 PathBuf::from("/fake/project/components/ddsm115"),
             ),
         ];
-        let sources = source_participants_for_runtime(&all_sources, Some("other"));
+        let sources = source_participants_for_service(&all_sources, Some("other"));
 
         let outcome = run_check(
             &[],
@@ -1855,18 +1927,18 @@ mod tests {
     }
 
     #[test]
-    fn scoped_runtime_check_detects_other_user_runtime_topology_problems() -> Result<()> {
+    fn scoped_service_check_detects_other_user_service_topology_problems() -> Result<()> {
         let all_sources = vec![
-            SourceParticipant::user_runtime(
+            SourceParticipant::user_service(
                 "bad".to_string(),
                 PathBuf::from("/fake/project/runtimes/bad"),
             ),
-            SourceParticipant::user_runtime(
+            SourceParticipant::user_service(
                 "other".to_string(),
                 PathBuf::from("/fake/project/runtimes/other"),
             ),
         ];
-        let sources = source_participants_for_runtime(&all_sources, Some("other"));
+        let sources = source_participants_for_service(&all_sources, Some("other"));
 
         let outcome = run_check(
             &[],
@@ -1952,7 +2024,7 @@ mod tests {
 
     #[test]
     fn source_build_error_is_a_hard_error() {
-        let sources = vec![SourceParticipant::user_runtime(
+        let sources = vec![SourceParticipant::user_service(
             "drive".to_string(),
             PathBuf::from("/fake/project/runtimes/drive"),
         )];
@@ -1969,7 +2041,7 @@ mod tests {
 
         let message = format!("{error:#}");
         assert!(
-            message.contains("failed to obtain emit-apis for user runtime drive"),
+            message.contains("failed to obtain emit-apis for user service drive"),
             "{message}"
         );
         assert!(message.contains("source build failed"), "{message}");
@@ -2085,7 +2157,7 @@ mod tests {
                 unexpected => bail!("unexpected image {unexpected}"),
             },
             |_| bail!("no tools should be fetched"),
-            |_| bail!("no source runtimes should be built"),
+            |_| bail!("no source services should be built"),
         )?;
 
         assert_eq!(
@@ -2192,8 +2264,8 @@ mod tests {
     }
 
     #[test]
-    fn user_runtime_config_is_validated_against_emitted_schema() -> Result<()> {
-        let sources = vec![SourceParticipant::user_runtime(
+    fn user_service_config_is_validated_against_emitted_schema() -> Result<()> {
+        let sources = vec![SourceParticipant::user_service(
             "avoid".to_string(),
             PathBuf::from("/fake/project/runtimes/avoid"),
         )];
@@ -2244,8 +2316,8 @@ mod tests {
     }
 
     #[test]
-    fn user_runtime_config_uses_full_json_schema_keywords() -> Result<()> {
-        let sources = vec![SourceParticipant::user_runtime(
+    fn user_service_config_uses_full_json_schema_keywords() -> Result<()> {
+        let sources = vec![SourceParticipant::user_service(
             "avoid".to_string(),
             PathBuf::from("/fake/project/runtimes/avoid"),
         )];

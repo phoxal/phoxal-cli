@@ -30,7 +30,7 @@ pub struct Outdated {
 pub struct OutdatedSummary {
     pub api_version: String,
     pub channel: String,
-    pub platform_runtimes: Vec<ImageOutdatedEntry>,
+    pub platform_services: Vec<ImageOutdatedEntry>,
     pub tools: Vec<ToolOutdatedEntry>,
 }
 
@@ -90,13 +90,13 @@ pub fn run(project_start: &Path) -> Result<OutdatedSummary> {
         },
     )?;
 
-    let mut platform_runtimes = Vec::new();
+    let mut platform_services = Vec::new();
     for runtime in &resolved.platform_runtimes {
         let local_digest = local_image_digest(&runtime.image_ref)?;
         let remote_digest = crate::resolver::resolve_image_digest(&runtime.image_ref)
             .with_context(|| {
                 format!(
-                    "failed to resolve remote digest for runtime {} ({})",
+                    "failed to resolve remote digest for service {} ({})",
                     runtime.name, runtime.image_ref
                 )
             })?;
@@ -105,7 +105,7 @@ pub fn run(project_start: &Path) -> Result<OutdatedSummary> {
             Some(local) if local == remote_digest => OutdatedStatus::Current,
             Some(_) => OutdatedStatus::Outdated,
         };
-        platform_runtimes.push(ImageOutdatedEntry {
+        platform_services.push(ImageOutdatedEntry {
             name: runtime.name.clone(),
             image_ref: runtime.image_ref.clone(),
             local_digest,
@@ -122,7 +122,7 @@ pub fn run(project_start: &Path) -> Result<OutdatedSummary> {
     Ok(OutdatedSummary {
         api_version: resolved.api_version,
         channel: resolved.channel.to_string(),
-        platform_runtimes,
+        platform_services,
         tools,
     })
 }
@@ -133,8 +133,8 @@ fn print_human(summary: &OutdatedSummary) -> Result<()> {
         "api_version: {} (channel {})",
         summary.api_version, summary.channel
     );
-    println!("platform runtimes:");
-    for runtime in &summary.platform_runtimes {
+    println!("official services:");
+    for runtime in &summary.platform_services {
         any_outdated |= runtime.status != OutdatedStatus::Current;
         println!(
             "  - {}: {:?} local={} remote={}",

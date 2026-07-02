@@ -5,7 +5,7 @@
 #
 #   robot.yaml -> phoxal-cli -> live resolution (GHCR images, git component
 #             commits, GitHub release tools) -> generated .phoxal/run/ -> router
-#             -> Webots -> mandatory runtime set
+#             -> Webots -> mandatory service set
 #
 # There is NO lockfile: every run resolves live. Production reproducibility is
 # the `phoxal-cli deploy build` digest-pinned (@sha256) bundle, exercised
@@ -15,7 +15,7 @@
 #
 #   Smoke (default) -- no Docker daemon, no Webots needed:
 #     1. phoxal-cli simulate default --dry-run   (live resolve + compose generation)
-#     2. assert the generated compose references the mandatory runtime services
+#     2. assert the generated compose references the mandatory official services
 #
 #   Live (--live) -- needs a running Docker daemon + Webots on PATH:
 #     3. phoxal-cli simulate default --pull       (the full live gate)
@@ -78,14 +78,14 @@ compose="${robot_dir}/.phoxal/run/docker-compose.yml"
 [[ -f "${compose}" ]] || fail "compose not generated at ${compose}"
 ok "compose generated from live resolution"
 
-# --- 2. assert the mandatory runtime services are present ------------------
+# --- 2. assert the mandatory official services are present -----------------
 
-step "Gate -- generated compose references the mandatory runtime set"
-if grep -q 'ghcr.io/phoxal/runtime-' "${compose}"; then
-  pins="$(grep -c 'ghcr.io/phoxal/runtime-' "${compose}")"
-  ok "compose references ${pins} official runtime images"
+step "Gate -- generated compose references the mandatory service set"
+if grep -q 'ghcr.io/phoxal/service-' "${compose}"; then
+  pins="$(grep -c 'ghcr.io/phoxal/service-' "${compose}")"
+  ok "compose references ${pins} official service images"
 else
-  fail "generated compose references no ghcr.io/phoxal/runtime- images"
+  fail "generated compose references no ghcr.io/phoxal/service- images"
 fi
 
 if [[ "${live}" -eq 0 ]]; then
@@ -99,9 +99,9 @@ To run the full LIVE gate (needs a running Docker daemon + Webots on PATH):
 The live run (phoxal-cli simulate ${WORLD} --pull) should show:
   - phoxal-local-zenoh singleton starts or is safely reused;
   - the generated compose starts the per-robot router;
-  - all mandatory runtime services start from the GHCR images;
+  - all mandatory official services start from the GHCR images;
   - Webots launches the staged world;
-  - runtimes connect to tcp/router:7447 and read /robot;
+  - services connect to tcp/router:7447 and read /robot;
   - host tools (joypad, when requested) connect via tcp/127.0.0.1:7447.
 EOF
   exit 0
@@ -119,8 +119,8 @@ ok "host diagnosis complete; live simulate will enforce required preflight"
 
 step "Live gate -- phoxal-cli simulate ${WORLD} --pull"
 warn "this is the interactive live gate; it runs until you stop it (Ctrl-C)."
-warn "watch for: router healthy, every runtime service Up from its GHCR image,"
-warn "Webots window with the staged world, and runtimes reading /robot over the bus."
+warn "watch for: router healthy, every official service Up from its GHCR image,"
+warn "Webots window with the staged world, and services reading /robot over the bus."
 (cd "${robot_dir}" && "${CLI_BIN}" simulate "${WORLD}" --pull) \
-  || fail "live simulate failed -- see logs above (image pull, runtime startup, or bus connection)."
+  || fail "live simulate failed -- see logs above (image pull, service startup, or bus connection)."
 printf "\n${green}Live gate completed.${reset}\n"

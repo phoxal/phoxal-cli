@@ -2,9 +2,9 @@
 //!
 //! `phoxal-cli` is the tool a robot developer runs from a robot project. It
 //! reads `robot.yaml`, resolves the graph against its compiled-in official
-//! runtime catalog ([`catalog`]), and drives the local develop/simulate/deploy
+//! service catalog ([`catalog`]), and drives the local develop/simulate/deploy
 //! loop. The CLI ships with no framework workspace: its authority over the
-//! official runtime set is the compiled-in catalog, and compatibility is proven
+//! official service set is the compiled-in catalog, and compatibility is proven
 //! by running each artifact's `emit-apis` rather than by trusting a descriptor.
 //!
 //! The command surface (see [`commands`]) is:
@@ -18,7 +18,7 @@
 //!   Webots simulation stack.
 //! - `deploy build` - produce an immutable, digest-pinned deployment artifact.
 //! - `robot new <name>` - scaffold a robot project.
-//! - `runtime add|run|image|catalog` - manage user runtime crates.
+//! - `service add|run|image|catalog` - manage user service crates.
 //! - `pull` / `outdated` - refresh, or report drift in, cached official images
 //!   and host tools.
 //! - `doctor` - check host prerequisites; `self upgrade` - update the CLI.

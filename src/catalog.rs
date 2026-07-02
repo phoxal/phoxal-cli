@@ -1,10 +1,10 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlatformRuntimeEntry {
     pub name: &'static str,
-    /// API versions for which this runtime's official image set is published.
+    /// API versions for which this service's official image set is published.
     ///
     /// Add another API version here only after the framework side has rebuilt
-    /// and published the runtime's official images for that API; API
+    /// and published the service's official images for that API; API
     /// inheritance alone does not make an image available.
     pub api_versions: &'static [&'static str],
     pub uses_supervisor_api: bool,
@@ -108,11 +108,11 @@ impl PlatformRuntimeEntry {
 }
 
 impl PlatformRuntimeCatalog {
-    /// Iterate the official runtime entries published for `api_version`.
+    /// Iterate the official service entries published for `api_version`.
     ///
     /// This is the CLI-side availability gate: an API version is considered
     /// selectable only when the compiled-in catalog exposes the complete
-    /// official runtime set for that version. The resolver then combines these
+    /// official service set for that version. The resolver then combines these
     /// entries with the selected channel to form API-scoped image refs.
     pub fn entries_for_api<'a>(
         &'a self,
@@ -124,12 +124,12 @@ impl PlatformRuntimeCatalog {
             .filter(move |entry| complete && entry.api_versions.contains(&api_version))
     }
 
-    /// Iterate every official runtime name known to this CLI release.
+    /// Iterate every official service name known to this CLI release.
     pub fn names(&self) -> impl Iterator<Item = &'static str> {
         self.entries.iter().map(|entry| entry.name)
     }
 
-    /// Return the official runtime names available for `api_version`.
+    /// Return the official service names available for `api_version`.
     ///
     /// An empty result means this CLI cannot resolve a complete official image
     /// set for that API version; callers should fail with availability guidance
@@ -149,16 +149,16 @@ impl PlatformRuntimeCatalog {
                 .all(|entry| entry.api_versions.contains(&api_version))
     }
 
-    /// Look up a runtime by catalog name.
+    /// Look up a service by catalog name.
     ///
     /// Compose/deploy generation uses this to recover topology flags for an
-    /// already-resolved runtime. It does not by itself prove API availability;
+    /// already-resolved service. It does not by itself prove API availability;
     /// use [`Self::entries_for_api`] or [`Self::names_for_api`] for that gate.
     pub fn lookup(&self, name: &str) -> Option<&PlatformRuntimeEntry> {
         self.entries.iter().find(|entry| entry.name == name)
     }
 
-    /// Return all official runtime names known to this CLI release.
+    /// Return all official service names known to this CLI release.
     pub fn names_vec(&self) -> Vec<&'static str> {
         self.names().collect()
     }
@@ -170,12 +170,12 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn catalog_runtime_names_are_unique_lowercase_tokens() {
+    fn catalog_service_names_are_unique_lowercase_tokens() {
         let mut seen = BTreeSet::new();
         for entry in CATALOG.entries {
             assert!(
                 seen.insert(entry.name),
-                "duplicate runtime name in catalog: {}",
+                "duplicate service name in catalog: {}",
                 entry.name
             );
             assert!(
@@ -184,18 +184,18 @@ mod tests {
                         || c.is_ascii_digit()
                         || c == '_'
                         || c == '-'),
-                "runtime name must be a lowercase token: {}",
+                "service name must be a lowercase token: {}",
                 entry.name
             );
             assert!(
                 !entry.api_versions.is_empty(),
-                "runtime {} must declare at least one api_version",
+                "service {} must declare at least one api_version",
                 entry.name
             );
             for api_version in entry.api_versions {
                 assert!(
                     !api_version.is_empty(),
-                    "runtime {} must not declare an empty api_version",
+                    "service {} must not declare an empty api_version",
                     entry.name
                 );
             }

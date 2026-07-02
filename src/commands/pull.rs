@@ -24,7 +24,7 @@ pub struct Pull {
 pub struct PullSummary {
     pub api_version: String,
     pub channel: String,
-    pub platform_runtime_count: usize,
+    pub platform_service_count: usize,
     pub tool_count: usize,
 }
 
@@ -39,8 +39,8 @@ impl Pull {
             &summary,
             || {
                 println!(
-                    "pulled {} platform runtimes and {} tools for api_version {} (channel {})",
-                    summary.platform_runtime_count,
+                    "pulled {} official services and {} tools for api_version {} (channel {})",
+                    summary.platform_service_count,
                     summary.tool_count,
                     summary.api_version,
                     summary.channel
@@ -91,7 +91,7 @@ pub fn run(project_start: &Path, ui: &crate::Ui) -> Result<PullSummary> {
     Ok(PullSummary {
         api_version: resolved.api_version,
         channel: resolved.channel.to_string(),
-        platform_runtime_count: resolved.platform_runtimes.len(),
+        platform_service_count: resolved.platform_runtimes.len(),
         tool_count: resolved.tools.len(),
     })
 }

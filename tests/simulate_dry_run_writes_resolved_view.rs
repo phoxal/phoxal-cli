@@ -97,8 +97,8 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
     assert!(environment.get(key("ROBOT_NAMESPACE")).is_none());
     assert!(environment.get(key("ROBOT_ROUTER_ENDPOINT")).is_none());
     assert!(environment.get(key("ROBOT_SIMULATION")).is_none());
-    // Offline dry-run must not embed a fabricated runtime image digest: every
-    // platform runtime image is a `repo:version` tag ref, so a later live
+    // Offline dry-run must not embed a fabricated service image digest: every
+    // official service image is a `repo:version` tag ref, so a later live
     // `simulate` can never try to `docker pull repo@sha256:<fake>`. (The zenoh
     // router image is a real, published digest pin and is intentionally exempt.)
     assert!(compose.contains("ghcr.io/phoxal/service-"));
@@ -107,7 +107,7 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
         if line.contains("ghcr.io/phoxal/service-") {
             assert!(
                 !line.contains("@sha256:"),
-                "platform runtime image must be a tag ref during offline dry-run, got: {line}"
+                "official service image must be a tag ref during offline dry-run, got: {line}"
             );
         }
     }
