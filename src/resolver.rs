@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::catalog::{DEFAULT_TOOL_VERSIONS, PlatformRuntimeCatalog, lookup_tool_version};
+use crate::catalog::{
+    ArtifactKind, ArtifactStatus, CatalogEntry, CatalogRevision, Channel as CatalogChannel,
+    ContractUse, DEFAULT_TOOL_VERSIONS, compare_generations, lookup_tool_version,
+};
 use crate::shell;
 use crate::utils::{hash_tree, resolve_project_path};
 
@@ -44,8 +47,10 @@ impl Default for ResolveOptions {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedRobot {
     pub robot: Robot,
-    pub api_version: String,
+    pub target_generation: String,
     pub channel: Channel,
+    pub target: String,
+    pub catalog_revision: Option<String>,
     pub platform_runtimes: Vec<ResolvedPlatformRuntime>,
     pub user_runtimes: Vec<ResolvedUserRuntime>,
     pub components: Vec<ResolvedComponent>,
@@ -54,6 +59,7 @@ pub struct ResolvedRobot {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RobotManifestExtras {
+    pub catalog_source: Option<PathBuf>,
     pub user_runtimes: BTreeMap<String, UserRuntimeManifestExtras>,
     pub bus: BusManifestExtras,
 }
@@ -130,7 +136,15 @@ const DEFAULT_BUS_PROFILE_NAME: &str = "default";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPlatformRuntime {
     pub name: String,
+    pub artifact_id: String,
+    pub kind: ArtifactKind,
+    pub generation: String,
+    pub version: String,
     pub artifact_ref: String,
+    pub target_status: Option<ArtifactStatus>,
+    pub per_triple_status: BTreeMap<String, ArtifactStatus>,
+    pub changed_contracts: Vec<String>,
+    pub contract_uses: Vec<ContractUse>,
 }
 
 impl ResolvedPlatformRuntime {
@@ -312,6 +326,15 @@ fn take_manifest_extras(
     let mut stripped_extras = false;
 
     if let Some(root) = yaml.as_mapping_mut()
+        && let Some(artifacts) = root.get_mut("phoxal_artifacts")
+        && let Some(artifacts) = artifacts.as_mapping_mut()
+        && let Some(catalog) = artifacts.remove("catalog")
+    {
+        extras.catalog_source = Some(parse_catalog_source_extra(&catalog, robot_path)?);
+        stripped_extras = true;
+    }
+
+    if let Some(root) = yaml.as_mapping_mut()
         && let Some(bus) = root.remove("bus")
     {
         extras.bus = parse_bus_manifest_extras(&bus, robot_path)?;
@@ -351,6 +374,22 @@ fn take_manifest_extras(
     }
 
     Ok((extras, stripped_extras))
+}
+
+fn parse_catalog_source_extra(value: &serde_yaml::Value, robot_path: &Path) -> Result<PathBuf> {
+    let Some(source) = value.as_str() else {
+        bail!(
+            "phoxal_artifacts.catalog in {} must be a local path string",
+            robot_path.display()
+        );
+    };
+    if source.trim().is_empty() {
+        bail!(
+            "phoxal_artifacts.catalog in {} must not be empty",
+            robot_path.display()
+        );
+    }
+    Ok(PathBuf::from(source))
 }
 
 fn parse_bus_manifest_extras(
@@ -520,18 +559,24 @@ fn validate_bus_profile_name(name: &str) -> Result<()> {
 pub fn resolve(
     robot: &Robot,
     project_root: &Path,
-    catalog: &PlatformRuntimeCatalog,
+    catalog: Option<&CatalogRevision>,
     options: ResolveOptions,
 ) -> Result<ResolvedRobot> {
-    let api_version = robot.api_version.clone();
-    let channel = robot.phoxal_participants.channel;
-    let platform_names = catalog.names_for_api(&api_version);
-    if platform_names.is_empty() {
-        bail!(
-            "{}",
-            format_unavailable_api_version_error(catalog, &api_version, channel.as_str())
-        );
-    }
+    let channel = robot.phoxal_artifacts.channel;
+    let catalog_channel = CatalogChannel::from(channel);
+    let target = robot
+        .phoxal_artifacts
+        .target
+        .clone()
+        .unwrap_or_else(host_target_triple);
+    let target_generation = target_generation(robot, catalog, catalog_channel, &target)?;
+    let platform_names = catalog
+        .map(CatalogRevision::service_names)
+        .unwrap_or_default();
+    let platform_names = platform_names
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     robot
         .validate_with(&platform_names)
         .map_err(|errors| anyhow!("Robot errors:\n{}", join_errors(errors)))?;
@@ -541,24 +586,19 @@ pub fn resolve(
         );
     }
 
-    let mut platform_runtimes = Vec::new();
-    for entry in catalog.entries_for_api(&api_version) {
-        let artifact_ref = format!(
-            "service-{}:{}-{}",
-            entry.name,
-            api_version,
-            channel.as_str()
-        );
-        platform_runtimes.push(ResolvedPlatformRuntime {
-            name: entry.name.to_string(),
-            artifact_ref,
-        });
-    }
+    let platform_runtimes = catalog
+        .map(|catalog| {
+            resolve_catalog_entries(catalog, catalog_channel, &target, &target_generation)
+        })
+        .transpose()?
+        .unwrap_or_default();
 
     let user_runtimes = robot
         .user_participants
         .iter()
-        .map(|(name, runtime)| resolve_user_runtime(project_root, &api_version, name, runtime))
+        .map(|(name, runtime)| {
+            resolve_user_runtime(project_root, &target_generation, name, runtime)
+        })
         .collect::<Result<Vec<_>>>()?;
 
     // Git ref → commit SHA resolution: when `resolve_source_commits` is set, a
@@ -570,13 +610,179 @@ pub fn resolve(
 
     Ok(ResolvedRobot {
         robot: robot.clone(),
-        api_version,
+        target_generation,
         channel,
+        target,
+        catalog_revision: catalog.map(|catalog| catalog.revision.clone()),
         platform_runtimes,
         user_runtimes,
         components,
         tools,
     })
+}
+
+fn target_generation(
+    robot: &Robot,
+    catalog: Option<&CatalogRevision>,
+    channel: CatalogChannel,
+    target: &str,
+) -> Result<String> {
+    if let Some(generation) = robot.phoxal_artifacts.generation.as_deref() {
+        validate_generation_pin(robot.api_version.as_deref(), generation)?;
+        return Ok(generation.to_string());
+    }
+    if let Some(generation) = robot.api_version.as_deref() {
+        return Ok(generation.to_string());
+    }
+    if let Some(catalog) = catalog
+        && let Some(generation) = catalog.newest_generation_on_channel(channel, target)
+    {
+        return Ok(generation);
+    }
+    if robot.user_participants.is_empty()
+        && robot
+            .components
+            .instances
+            .values()
+            .all(|component| component.driver.is_none())
+    {
+        bail!("{}", crate::catalog::unavailable_catalog_error());
+    }
+    Ok("source".to_string())
+}
+
+pub(crate) fn target_generation_for_robot(
+    robot: &Robot,
+    catalog: Option<&CatalogRevision>,
+) -> Result<String> {
+    let target = robot
+        .phoxal_artifacts
+        .target
+        .clone()
+        .unwrap_or_else(host_target_triple);
+    target_generation(
+        robot,
+        catalog,
+        CatalogChannel::from(robot.phoxal_artifacts.channel),
+        &target,
+    )
+}
+
+fn validate_generation_pin(root_api_version: Option<&str>, generation: &str) -> Result<()> {
+    if let Some(root_api_version) = root_api_version
+        && root_api_version != generation
+    {
+        bail!(
+            "robot.yaml declares api_version {root_api_version} but phoxal_artifacts.generation {generation}; remove the root api_version or make both generations match"
+        );
+    }
+    Ok(())
+}
+
+fn resolve_catalog_entries(
+    catalog: &CatalogRevision,
+    channel: CatalogChannel,
+    target: &str,
+    target_generation: &str,
+) -> Result<Vec<ResolvedPlatformRuntime>> {
+    let mut selected = BTreeMap::<String, &CatalogEntry>::new();
+    for entry in &catalog.entries {
+        if entry.kind != ArtifactKind::Service {
+            continue;
+        }
+        if !entry.channels.contains_key(&channel) {
+            continue;
+        }
+        if !entry.target_triples.iter().any(|triple| triple == target) {
+            continue;
+        }
+        if compare_generations(&entry.api_generation, target_generation).is_gt() {
+            continue;
+        }
+        selected
+            .entry(entry.artifact_id.clone())
+            .and_modify(|existing| {
+                if compare_catalog_entries(entry, existing).is_gt() {
+                    *existing = entry;
+                }
+            })
+            .or_insert(entry);
+    }
+
+    ensure_catalog_schema_agreement(selected.values().copied())?;
+
+    selected
+        .into_values()
+        .map(|entry| {
+            let name = entry
+                .artifact_name()
+                .ok_or_else(|| anyhow!("{} does not match kind {}", entry.artifact_id, entry.kind))?
+                .to_string();
+            let artifact_ref = entry
+                .release_assets
+                .get(target)
+                .map(|asset| asset.asset.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}:{}-{}-{}-{}",
+                        entry.artifact_id, entry.version, entry.api_generation, channel, target
+                    )
+                });
+            Ok(ResolvedPlatformRuntime {
+                name,
+                artifact_id: entry.artifact_id.clone(),
+                kind: entry.kind,
+                generation: entry.api_generation.clone(),
+                version: entry.version.clone(),
+                artifact_ref,
+                target_status: entry.status_for(target),
+                per_triple_status: entry.status.clone(),
+                changed_contracts: entry.changed_contracts.clone(),
+                contract_uses: entry.contract_uses.clone(),
+            })
+        })
+        .collect()
+}
+
+fn compare_catalog_entries(left: &CatalogEntry, right: &CatalogEntry) -> std::cmp::Ordering {
+    compare_generations(&left.api_generation, &right.api_generation).then_with(|| {
+        match (
+            semver::Version::parse(&left.version),
+            semver::Version::parse(&right.version),
+        ) {
+            (Ok(left), Ok(right)) => left.cmp(&right),
+            _ => left.version.cmp(&right.version),
+        }
+    })
+}
+
+fn ensure_catalog_schema_agreement<'a>(
+    entries: impl IntoIterator<Item = &'a CatalogEntry>,
+) -> Result<()> {
+    let mut schemas = BTreeMap::<(&str, &str), BTreeMap<&str, Vec<&str>>>::new();
+    for entry in entries {
+        for contract in &entry.contract_uses {
+            schemas
+                .entry((&contract.family, &contract.topic_template))
+                .or_default()
+                .entry(&contract.schema_id)
+                .or_default()
+                .push(&entry.artifact_id);
+        }
+    }
+    for ((family, topic), schema_ids) in schemas {
+        if schema_ids.len() > 1 {
+            let reporters = schema_ids
+                .into_iter()
+                .map(|(schema_id, artifacts)| format!("{schema_id} ({})", artifacts.join(", ")))
+                .collect::<Vec<_>>()
+                .join("; ");
+            bail!(
+                "artifact catalog cannot resolve one schema_id for {family} ({topic}): {reporters}"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Resolve a git component `tag` to a concrete commit SHA.
@@ -679,13 +885,13 @@ pub(crate) fn resolve_user_runtime_framework(
 pub(crate) fn validate_user_runtime_framework_selector(
     runtime_name: &str,
     selector: &str,
-    api_version: &str,
+    target_generation: &str,
 ) -> Result<()> {
-    if selector == "match-platform" || selector == api_version {
+    if selector == "match-platform" || selector == target_generation {
         return Ok(());
     }
     bail!(
-        "user service '{runtime_name}': framework '{selector}' must be \"match-platform\" or the graph api_version '{api_version}'"
+        "user service '{runtime_name}': framework '{selector}' must be \"match-platform\" or the target generation '{target_generation}'"
     )
 }
 
@@ -875,54 +1081,30 @@ fn join_errors(errors: Vec<phoxal::model::robot::ValidationError>) -> String {
         .join("\n")
 }
 
-fn format_unavailable_api_version_error(
-    catalog: &PlatformRuntimeCatalog,
-    api_version: &str,
-    channel: &str,
-) -> String {
-    let mut available = catalog
-        .entries
-        .iter()
-        .flat_map(|entry| entry.api_versions.iter().copied())
-        .collect::<Vec<_>>();
-    available.sort_unstable();
-    available.dedup();
-    let suggested = available
-        .iter()
-        .rev()
-        .copied()
-        .find(|candidate| *candidate != api_version);
-
-    let mut message = format!(
-        "API version {api_version} is not available on channel {channel}: this CLI has no complete official service set for that API version"
-    );
-
-    if !available.is_empty() {
-        message.push_str("\n\nAvailable api_versions in this CLI: ");
-        message.push_str(&available.join(", "));
-    }
-    message.push_str("\n\nFix:");
-    if let Some(suggested) = suggested {
-        message.push_str("\n  - use api_version: ");
-        message.push_str(suggested);
-    } else {
-        message.push_str("\n  - use an api_version listed by `phoxal-cli version`");
-    }
-    message.push_str(
-        "\n  - or use phoxal_participants.channel: edge if this API version is intentionally experimental",
-    );
-    message.push_str("\n  - or wait until Phoxal publishes the complete ");
-    message.push_str(api_version);
-    message.push('-');
-    message.push_str(channel);
-    message.push_str(" official service set");
-    message
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::CATALOG;
+    use crate::catalog::{
+        ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
+        fixture_contract_for_tests, fixture_service_entry_for_tests,
+    };
+
+    fn test_catalog() -> CatalogRevision {
+        fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
+            "drive",
+            "y2026_1",
+            "0.1.0",
+            CatalogChannel::Stable,
+            &host_target_triple(),
+            ArtifactStatus::Pending,
+            vec![fixture_contract_for_tests(
+                "drive::Target",
+                "drive/target",
+                "publish",
+                "0123456789abcdef",
+            )],
+        )])
+    }
 
     #[test]
     fn resolve_without_source_commits_leaves_git_component_commits_empty() -> anyhow::Result<()> {
@@ -932,10 +1114,11 @@ mod tests {
         // to reach the network it would either hang or fail, so an empty commit
         // proves no ls-remote was attempted.
         let robot = Robot::parse_from_string(GIT_COMPONENT_ROBOT)?;
+        let catalog = test_catalog();
         let resolved = resolve(
             &robot,
             std::path::Path::new("."),
-            &CATALOG,
+            Some(&catalog),
             ResolveOptions {
                 resolve_external_artifacts: false,
                 resolve_source_commits: false,
@@ -966,8 +1149,9 @@ identity:
   id: testbot
   namespace: test
 structure: structure.urdf
-phoxal_participants:
+phoxal_artifacts:
   channel: stable
+phoxal_participants: {}
 motion:
   kinematic:
     kind: differential
@@ -1001,10 +1185,11 @@ components:
         let robot = Robot::parse_from_string(
             &GIT_COMPONENT_ROBOT.replace("tag: main", &format!("tag: {sha}")),
         )?;
+        let catalog = test_catalog();
         let resolved = resolve(
             &robot,
             std::path::Path::new("."),
-            &CATALOG,
+            Some(&catalog),
             ResolveOptions {
                 resolve_external_artifacts: false,
                 resolve_source_commits: true,
@@ -1057,8 +1242,9 @@ identity:
   id: bot
   namespace: dev
 structure: structure.urdf
-phoxal_participants:
+phoxal_artifacts:
   channel: stable
+phoxal_participants: {}
 user_participants:
   brain:
     path: runtimes/brain
@@ -1113,8 +1299,9 @@ bus:
   profiles:
     lab:
       connect: tcp/lab-router:7447
-phoxal_participants:
+phoxal_artifacts:
   channel: stable
+phoxal_participants: {}
 motion:
   kinematic:
     kind: differential
@@ -1152,8 +1339,9 @@ identity:
   id: bot
   namespace: dev
 structure: structure.urdf
-phoxal_participants:
+phoxal_artifacts:
   channel: stable
+phoxal_participants: {}
 motion:
   kinematic:
     kind: differential
@@ -1195,8 +1383,9 @@ bus:
     lab:
       connect: tcp/lab-router:7447
       listen: tcp/0.0.0.0:7448
-phoxal_participants:
+phoxal_artifacts:
   channel: stable
+phoxal_participants: {}
 motion:
   kinematic:
     kind: differential
@@ -1238,8 +1427,9 @@ bus:
   profiles:
     lab:
       connect: tcp/lab-router:7447
-phoxal_participants:
+phoxal_artifacts:
   channel: stable
+phoxal_participants: {}
 motion:
   kinematic:
     kind: differential
@@ -1268,7 +1458,15 @@ components:
     fn platform_runtime_exposes_native_artifact_ref() {
         let runtime = ResolvedPlatformRuntime {
             name: "asset".to_string(),
+            artifact_id: "service-asset".to_string(),
+            kind: ArtifactKind::Service,
+            generation: "y2026_1".to_string(),
+            version: "0.1.0".to_string(),
             artifact_ref: "service-asset:y2026_1-stable".to_string(),
+            target_status: Some(ArtifactStatus::Pending),
+            per_triple_status: BTreeMap::new(),
+            changed_contracts: Vec::new(),
+            contract_uses: Vec::new(),
         };
 
         assert_eq!(runtime.artifact_ref(), "service-asset:y2026_1-stable");

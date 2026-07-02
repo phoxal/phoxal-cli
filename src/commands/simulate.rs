@@ -6,7 +6,6 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::AppContext;
-use crate::catalog::CATALOG;
 use crate::commands::MessageFormat;
 use crate::resolver::{ResolveOptions, ResolvedRobot, RobotManifestExtras, resolve};
 use crate::world;
@@ -48,6 +47,7 @@ pub struct SimulateOptions {
     pub world: String,
     pub joypad: bool,
     pub pull: bool,
+    pub catalog_source: Option<String>,
     pub message_format: MessageFormat,
 }
 
@@ -89,6 +89,7 @@ impl Simulate {
             world: self.world.clone(),
             joypad: self.joypad,
             pull: self.pull,
+            catalog_source: app.catalog_source.clone(),
             message_format: self.message_format,
         };
         let mode = if self.dry_run {
@@ -144,6 +145,17 @@ fn resolve_project(
     let loaded = crate::resolver::load_robot_with_extras(&robot_path)?;
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
+    let catalog = crate::catalog::load_catalog(crate::catalog::CatalogLoadOptions {
+        refresh: options.pull,
+        cli_source: options.catalog_source.clone(),
+        robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
+            if source.is_absolute() {
+                source.clone()
+            } else {
+                project_root.join(source)
+            }
+        }),
+    })?;
 
     // Always resolve live: simulate does not pin tool checksums, but it does
     // resolve git component commits so component drivers can be staged. A
@@ -153,7 +165,7 @@ fn resolve_project(
     let resolved = resolve(
         &robot,
         &project_root,
-        &CATALOG,
+        catalog.as_ref(),
         ResolveOptions {
             resolve_external_artifacts: false,
             resolve_source_commits: true,
@@ -245,8 +257,9 @@ fn write_dry_run_state(
 fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Result<()> {
     let output = SimulateDryRunOutput {
         mode: "dry-run",
-        api_version: plan.resolved.api_version.clone(),
+        target_generation: plan.resolved.target_generation.clone(),
         channel: plan.resolved.channel.to_string(),
+        catalog_revision: plan.resolved.catalog_revision.clone(),
         written_files: plan.written_files.clone(),
         platform_service_count: plan.resolved.platform_runtimes.len(),
         native_tools: plan.native_tools.clone(),
@@ -258,9 +271,12 @@ fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Resul
                 println!("wrote {}", path.display());
             }
             println!(
-                "api_version: {} (channel {})",
-                plan.resolved.api_version, plan.resolved.channel
+                "target_generation: {} (channel {})",
+                plan.resolved.target_generation, plan.resolved.channel
             );
+            if let Some(revision) = &plan.resolved.catalog_revision {
+                println!("catalog revision: {revision}");
+            }
             println!(
                 "official services ({}):",
                 plan.resolved.platform_runtimes.len()
@@ -278,8 +294,9 @@ fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Resul
 #[derive(Debug, Serialize)]
 struct SimulateDryRunOutput {
     mode: &'static str,
-    api_version: String,
+    target_generation: String,
     channel: String,
+    catalog_revision: Option<String>,
     written_files: Vec<PathBuf>,
     platform_service_count: usize,
     native_tools: Vec<String>,
@@ -347,7 +364,7 @@ mod tests {
             SimulateMode::Live,
         )?;
 
-        assert_eq!(resolved.resolved.api_version, "y2026_1");
+        assert_eq!(resolved.resolved.target_generation, "y2026_1");
         assert!(resolved.resolved.components.is_empty());
         Ok(())
     }
@@ -366,7 +383,7 @@ mod tests {
             SimulateMode::DryRun,
         )?;
 
-        assert_eq!(resolved.resolved.api_version, "y2026_1");
+        assert_eq!(resolved.resolved.target_generation, "y2026_1");
         Ok(())
     }
 
@@ -394,8 +411,9 @@ identity:
 
 structure: structure.urdf
 
-phoxal_participants:
+phoxal_artifacts:
   channel: stable
+phoxal_participants: {}
 
 motion:
   kinematic:

@@ -1,17 +1,24 @@
 use std::fs;
 
+use phoxal_cli::catalog::{
+    ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
+    fixture_contract_for_tests, fixture_service_entry_for_tests,
+};
 use phoxal_cli::commands::simulate::{SimulateOptions, prepare};
+use phoxal_cli::resolver::host_target_triple;
 
 #[test]
 fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     write_robot_project(temp.path())?;
+    let catalog_path = write_catalog(temp.path())?;
 
     let plan = prepare(
         temp.path(),
         SimulateOptions {
             world: "test".to_string(),
             joypad: true,
+            catalog_source: Some(catalog_path.display().to_string()),
             ..SimulateOptions::default()
         },
     )?;
@@ -65,8 +72,10 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
             .any(|path| path.ends_with(".phoxal/webots/worlds/default.wbt"))
     );
     let run_robot = fs::read_to_string(temp.path().join(".phoxal/run/robot.yaml"))?;
-    assert!(run_robot.contains("api_version: y2026_1"));
+    assert!(!run_robot.contains("\napi_version:"));
+    assert!(run_robot.contains("phoxal_artifacts:"));
     assert!(run_robot.contains("channel: stable"));
+    assert!(run_robot.contains("generation: y2026_1"));
     assert_eq!(plan.bus_connect, "tcp/127.0.0.1:7447");
     assert_eq!(
         plan.resolved
@@ -75,7 +84,10 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
             .find(|runtime| runtime.name == "drive")
             .expect("drive runtime")
             .artifact_ref(),
-        "service-drive:y2026_1-stable"
+        format!(
+            "service-drive:0.1.0-y2026_1-stable-{}",
+            host_target_triple()
+        )
     );
 
     let state = fs::read_to_string(&plan.state_path)?;
@@ -109,7 +121,6 @@ fn write_robot_project(root: &std::path::Path) -> anyhow::Result<()> {
 
 fn minimal_robot_yaml() -> &'static str {
     r#"schema: v0
-api_version: y2026_1
 
 identity:
   id: testbot
@@ -117,8 +128,10 @@ identity:
 
 structure: structure.urdf
 
-phoxal_participants:
+phoxal_artifacts:
   channel: stable
+  generation: y2026_1
+phoxal_participants: {}
 
 motion:
   kinematic:
@@ -134,4 +147,24 @@ components:
   sources: {}
   instances: {}
 "#
+}
+
+fn write_catalog(root: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let path = root.join("catalog.json");
+    let catalog = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
+        "drive",
+        "y2026_1",
+        "0.1.0",
+        CatalogChannel::Stable,
+        &host_target_triple(),
+        ArtifactStatus::Pending,
+        vec![fixture_contract_for_tests(
+            "drive::Target",
+            "drive/target",
+            "publish",
+            "0123456789abcdef",
+        )],
+    )]);
+    fs::write(&path, serde_json::to_string_pretty(&catalog)?)?;
+    Ok(path)
 }
