@@ -86,6 +86,7 @@ pathdiff = { workspace = true }
 tar = { workspace = true }
 
 phoxal = { workspace = true }
+phoxal-api = "0.19"
 tokio = { workspace = true, features = ["full"] }
 dotenvy = "0.15.7"
 tempfile = { workspace = true }

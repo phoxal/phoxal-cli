@@ -42,6 +42,7 @@ pub mod project;
 pub mod resolver;
 pub mod shell;
 pub mod simulator_staging;
+pub mod supervisor;
 pub mod tool_provisioning;
 pub mod ui;
 pub mod utils;

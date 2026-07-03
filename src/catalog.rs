@@ -524,7 +524,10 @@ fn validate_entries(entries: &[CatalogEntry]) -> Result<()> {
                 entry.kind
             );
         }
-        if entry.contract_uses.is_empty() {
+        // Privileged tools may declare no typed contracts (tool-router is pure
+        // infrastructure) - the framework-side catalog validators carry the same
+        // kind-scoped exception. Every checked kind must declare its contracts.
+        if entry.contract_uses.is_empty() && entry.kind != ArtifactKind::Tool {
             bail!("{} contract_uses must not be empty", entry.artifact_id);
         }
         for contract in &entry.contract_uses {

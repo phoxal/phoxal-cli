@@ -2889,6 +2889,7 @@ dependencies = [
  "nalgebra",
  "pathdiff",
  "phoxal",
+ "phoxal-api",
  "reqwest",
  "self-replace",
  "semver",
