@@ -11,12 +11,15 @@ pub mod check;
 pub mod deploy;
 pub mod doctor;
 pub mod generations;
+pub mod logs;
 pub mod outdated;
 pub mod pull;
 pub mod robot;
+pub mod run;
 pub mod self_cmd;
 pub mod service;
 pub mod simulate;
+pub mod status;
 pub mod validate;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -130,6 +133,12 @@ pub enum RootCommand {
     Validate(validate::Validate),
     #[command(about = "Resolve and report a Webots simulation launch plan.")]
     Simulate(simulate::Simulate),
+    #[command(about = "Run the resolved robot graph with the host-native supervisor.")]
+    Run(run::Run),
+    #[command(about = "Stream participant bus logs from a reachable robot.")]
+    Logs(logs::Logs),
+    #[command(about = "Show the local supervisor board snapshot.")]
+    Status(status::Status),
     #[command(about = "Build a native deployment release artifact.")]
     Deploy(deploy::Deploy),
     #[command(about = "Scaffold and manage robot projects.")]
@@ -156,6 +165,9 @@ impl RootCommand {
             Self::Check(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
             Self::Simulate(command) => command.run(app).await,
+            Self::Run(command) => command.run(app).await,
+            Self::Logs(command) => command.run(app).await,
+            Self::Status(command) => command.run(app).await,
             Self::Deploy(command) => command.run(app).await,
             Self::Robot(command) => command.run(app).await,
             Self::Pull(command) => command.run(app).await,
