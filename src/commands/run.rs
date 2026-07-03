@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::AppContext;
 use crate::commands::check::{
-    CheckGraphContext, RawArtifact, RawContract, RawEmitApis, build_emit_apis_from_source,
+    CheckGraphContext, build_emit_apis_from_source, official_emit_apis_from_catalog_metadata,
     platform_artifact_refs_from_resolved, robot_graph_from_resolved, run_check_with_context,
     source_participants_from_resolved,
 };
@@ -202,7 +202,12 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
             robot_graph: &robot_graph,
             manifest_extras: &loaded.extras,
         },
-        |artifact_ref| official_emit_apis(&official_by_ref, artifact_ref),
+        |artifact_ref| {
+            let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
+                anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
+            })?;
+            Ok(official_emit_apis_from_catalog_metadata(runtime))
+        },
         |_| unreachable!("run does not check site tools as graph participants"),
         build_emit_apis_from_source,
     )?;
@@ -224,6 +229,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
             resolved: &resolved,
             manifest_extras: &loaded.extras,
             checked_participants: &outcome.checked_participants,
+            accepted_substitutions: &[],
             source_participants: &source_participants,
         }],
     )?;
@@ -257,48 +263,20 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     })
 }
 
-/// STOPGAP until plan #01 publishes per-asset `.emit-apis.json` sidecars: the
-/// official check input is synthesized from the verified catalog revision's
-/// `contract_uses` (itself generated from real emit-apis runs in framework CI
-/// and integrity-checksummed). Once packaged metadata ships beside release
-/// assets, the CLI must prefer it and this synthesis dies - the catalog is an
-/// index, never the compatibility oracle (plan #06 trust rules).
-fn official_emit_apis(
-    official_by_ref: &BTreeMap<String, &ResolvedPlatformRuntime>,
-    artifact_ref: &str,
-) -> Result<RawEmitApis> {
-    let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
-        anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
-    })?;
-    Ok(RawEmitApis {
-        artifact: RawArtifact {
-            kind: runtime.kind.emit_apis_kind().to_string(),
-            id: runtime.name.clone(),
-        },
-        participant_class: "checked".to_string(),
-        api_version: runtime.generation.clone(),
-        bus_abi: None,
-        required_contracts: runtime
-            .contract_uses
-            .iter()
-            .map(|contract| RawContract {
-                family: contract.family.clone(),
-                topic: contract.topic_template.clone(),
-                direction: contract.direction.clone(),
-                schema_id: contract.schema_id.clone(),
-            })
-            .collect(),
-        config_schema: None,
-    })
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DriverPolicy {
+pub(crate) struct DriverPolicy {
     mode: DriversMode,
     subset: BTreeSet<String>,
 }
 
 impl DriverPolicy {
+    pub(crate) fn drivers_off_for_sim() -> Self {
+        Self {
+            mode: DriversMode::Off,
+            subset: BTreeSet::new(),
+        }
+    }
+
     fn from_options(options: &RunOptions, plan: &LaunchPlan) -> Result<Self> {
         let available = plan
             .robots
@@ -353,7 +331,7 @@ enum DriverDecision {
     Degraded(String),
 }
 
-fn prepare_site_tools(
+pub(crate) fn prepare_site_tools(
     plan: &LaunchPlan,
     resolved: &ResolvedRobot,
     board: &BoardBackend,
@@ -408,7 +386,7 @@ fn prepare_site_tools(
     Ok(())
 }
 
-fn prepare_robot_participants(
+pub(crate) fn prepare_robot_participants(
     plan: &LaunchPlan,
     resolved: &ResolvedRobot,
     _project_root: &Path,

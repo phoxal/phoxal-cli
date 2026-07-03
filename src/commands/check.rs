@@ -17,8 +17,8 @@ use crate::catalog::ArtifactKind;
 use crate::commands::MessageFormat;
 use crate::component_driver::component_crate_dir;
 use crate::resolver::{
-    ResolveOptions, ResolvedComponent, ResolvedRobot, RobotManifestExtras, discover_robot_yaml,
-    load_robot_with_extras, resolve,
+    ResolveOptions, ResolvedComponent, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras,
+    discover_robot_yaml, load_robot_with_extras, resolve,
 };
 use crate::simulator_staging::cached_tool_path;
 use crate::utils::{cargo_binary_name, resolve_project_path};
@@ -939,6 +939,37 @@ pub(crate) fn fetch_emit_apis_from_native_artifact(_artifact_ref: &str) -> Resul
     ))
 }
 
+/// STOPGAP until plan #01 publishes per-asset `.emit-apis.json` sidecars: the
+/// official check input is synthesized from the verified catalog revision's
+/// `contract_uses` (itself generated from real emit-apis runs in framework CI
+/// and integrity-checksummed). Once packaged metadata ships beside release
+/// assets, the CLI must prefer it and this synthesis dies - the catalog is an
+/// index, never the compatibility oracle (plan #06 trust rules).
+pub(crate) fn official_emit_apis_from_catalog_metadata(
+    runtime: &ResolvedPlatformRuntime,
+) -> RawEmitApis {
+    RawEmitApis {
+        artifact: RawArtifact {
+            kind: runtime.kind.emit_apis_kind().to_string(),
+            id: runtime.name.clone(),
+        },
+        participant_class: "checked".to_string(),
+        api_version: runtime.generation.clone(),
+        bus_abi: None,
+        required_contracts: runtime
+            .contract_uses
+            .iter()
+            .map(|contract| RawContract {
+                family: contract.family.clone(),
+                topic: contract.topic_template.clone(),
+                direction: contract.direction.clone(),
+                schema_id: contract.schema_id.clone(),
+            })
+            .collect(),
+        config_schema: None,
+    }
+}
+
 pub(crate) fn fetch_emit_apis_from_tool(binary_path: &Path) -> Result<RawEmitApis> {
     let executable = binary_path.to_string_lossy();
     let output = crate::shell::run_stdout(executable.as_ref(), ["emit-apis"], None)?;
@@ -1095,6 +1126,7 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
 
     fn try_from(raw: RawEmitApis) -> Result<Self> {
         let artifact_id = raw.artifact.id;
+        let participant_kind = graph_check::ParticipantKind::parse(&raw.artifact.kind);
         let participant_class =
             graph_check::ParticipantClass::parse(&raw.participant_class).unwrap_or_default();
         let contracts = raw
@@ -1124,6 +1156,7 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
             // concrete instance id below.
             participant_id: artifact_id.clone(),
             artifact_id,
+            participant_kind,
             participant_class,
             api_version: raw.api_version,
             bus_abi: raw.bus_abi,
@@ -1186,6 +1219,56 @@ fn format_report_error(report: &graph_check::Report) -> String {
 
 fn format_problem(problem: &graph_check::Problem) -> String {
     match problem {
+        graph_check::Problem::SubstitutionNotAllowed {
+            mode,
+            component_instance,
+            provider_participant_id,
+        } => {
+            format!(
+                "substitution for component {component_instance} by {provider_participant_id} is not allowed in {} plans; substitutions are sim-only",
+                mode.as_str()
+            )
+        }
+        graph_check::Problem::SubstitutionProviderMissing {
+            component_instance,
+            provider_participant_id,
+        } => {
+            format!(
+                "NoSimulatorProvider: sim plan substitutes component {component_instance} with {provider_participant_id}, but no checked simulator-kind participant is present in the plan. The Webots Simulator artifact is not published yet; add a simulator participant to the checked sim plan once that artifact exists."
+            )
+        }
+        graph_check::Problem::SubstitutionProviderWrongKind {
+            component_instance,
+            provider_participant_id,
+            provider_kind,
+        } => {
+            format!(
+                "substitution provider {provider_participant_id} for component {component_instance} has kind '{}', but substitutions require artifact.kind 'simulator'",
+                provider_kind.as_str()
+            )
+        }
+        graph_check::Problem::SubstitutionProviderNotChecked {
+            component_instance,
+            provider_participant_id,
+        } => {
+            format!(
+                "substitution provider {provider_participant_id} for component {component_instance} is privileged and cannot satisfy checked topology"
+            )
+        }
+        graph_check::Problem::IncompleteSubstitution {
+            component_instance,
+            provider_participant_id,
+            missing_contracts,
+        } => {
+            let missing = missing_contracts
+                .iter()
+                .map(format_contract)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "simulator substitution for component {component_instance} by {provider_participant_id} is incomplete; missing contracts: {missing}"
+            )
+        }
         graph_check::Problem::ContractSchemaMismatch {
             family,
             topic,
@@ -1249,6 +1332,27 @@ fn format_problem(problem: &graph_check::Problem) -> String {
                 "unresolved component template for {artifact_id}: {family} ({template}) expands to no concrete topic ({missing})"
             )
         }
+    }
+}
+
+fn format_contract(contract: &graph_check::Contract) -> String {
+    format!(
+        "{} ({}, {}, schema_id {})",
+        contract.family,
+        contract.topic,
+        format_direction(contract.direction),
+        contract.schema_id
+    )
+}
+
+pub(crate) const fn format_direction(direction: graph_check::Direction) -> &'static str {
+    match direction {
+        graph_check::Direction::Publish => "publish",
+        graph_check::Direction::Subscribe => "subscribe",
+        graph_check::Direction::QueryRequest => "query_request",
+        graph_check::Direction::QueryResponse => "query_response",
+        graph_check::Direction::ServerRequest => "server_request",
+        graph_check::Direction::ServerResponse => "server_response",
     }
 }
 
