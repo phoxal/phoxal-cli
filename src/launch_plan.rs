@@ -66,6 +66,8 @@ pub enum ParticipantExecution {
 pub struct SubstitutionRecord {
     pub component_instance: String,
     pub provider_participant_id: String,
+    pub provider_artifact_id: String,
+    pub provider_kind: String,
     pub contracts: Vec<SubstitutedContract>,
 }
 
@@ -83,6 +85,7 @@ pub struct CheckedRobotLaunchInput<'a> {
     pub resolved: &'a ResolvedRobot,
     pub manifest_extras: &'a RobotManifestExtras,
     pub checked_participants: &'a [graph_check::ParticipantApis],
+    pub accepted_substitutions: &'a [graph_check::AcceptedSubstitution],
     pub source_participants: &'a [SourceParticipant],
 }
 
@@ -219,7 +222,7 @@ fn build_robot_launch(
     mode: LaunchMode,
     input: &CheckedRobotLaunchInput<'_>,
 ) -> Result<RobotLaunch> {
-    ensure_launch_set_parity(input)?;
+    ensure_launch_set_parity(mode, input)?;
     let source_participants = input
         .source_participants
         .iter()
@@ -236,7 +239,7 @@ fn build_robot_launch(
     for checked in input
         .checked_participants
         .iter()
-        .filter(|participant| participant.participant_class.is_checked())
+        .filter(|participant| is_robot_launch_participant(mode, participant))
     {
         let execution = participant_execution(checked, &source_participants, &official_artifacts)?;
         let launch = participant_launch(mode, input, checked);
@@ -257,8 +260,49 @@ fn build_robot_launch(
         id: input.resolved.robot.identity.id.clone(),
         namespace: input.resolved.robot.identity.namespace.clone(),
         participants,
-        substitutions: Vec::new(),
+        substitutions: input
+            .accepted_substitutions
+            .iter()
+            .map(substitution_record)
+            .collect(),
     })
+}
+
+fn is_robot_launch_participant(
+    mode: LaunchMode,
+    participant: &graph_check::ParticipantApis,
+) -> bool {
+    if !participant.participant_class.is_checked() {
+        return false;
+    }
+    if mode == LaunchMode::Sim
+        && matches!(
+            participant.participant_kind,
+            graph_check::ParticipantKind::Driver | graph_check::ParticipantKind::Simulator
+        )
+    {
+        return false;
+    }
+    true
+}
+
+fn substitution_record(accepted: &graph_check::AcceptedSubstitution) -> SubstitutionRecord {
+    SubstitutionRecord {
+        component_instance: accepted.component_instance.clone(),
+        provider_participant_id: accepted.provider_participant_id.clone(),
+        provider_artifact_id: accepted.provider_artifact_id.clone(),
+        provider_kind: accepted.provider_kind.as_str().to_string(),
+        contracts: accepted
+            .contracts
+            .iter()
+            .map(|contract| SubstitutedContract {
+                family: contract.family.clone(),
+                topic: contract.topic.clone(),
+                direction: crate::commands::check::format_direction(contract.direction).to_string(),
+                schema_id: contract.schema_id.clone(),
+            })
+            .collect(),
+    }
 }
 
 fn participant_execution(
@@ -324,12 +368,12 @@ fn robot_root_for_mode(mode: LaunchMode, project_root: &Path) -> PathBuf {
     }
 }
 
-fn ensure_launch_set_parity(input: &CheckedRobotLaunchInput<'_>) -> Result<()> {
-    let expected = expected_checked_participant_ids(input.resolved);
+fn ensure_launch_set_parity(mode: LaunchMode, input: &CheckedRobotLaunchInput<'_>) -> Result<()> {
+    let expected = expected_checked_participant_ids(mode, input.resolved);
     let checked = input
         .checked_participants
         .iter()
-        .filter(|participant| participant.participant_class.is_checked())
+        .filter(|participant| is_robot_launch_participant(mode, participant))
         .map(|participant| participant.participant_id.clone())
         .collect::<BTreeSet<_>>();
 
@@ -357,7 +401,10 @@ fn ensure_launch_set_parity(input: &CheckedRobotLaunchInput<'_>) -> Result<()> {
     Ok(())
 }
 
-fn expected_checked_participant_ids(resolved: &ResolvedRobot) -> BTreeSet<String> {
+fn expected_checked_participant_ids(
+    mode: LaunchMode,
+    resolved: &ResolvedRobot,
+) -> BTreeSet<String> {
     let mut expected = BTreeSet::new();
     expected.extend(
         resolved
@@ -371,13 +418,15 @@ fn expected_checked_participant_ids(resolved: &ResolvedRobot) -> BTreeSet<String
             .iter()
             .map(|runtime| runtime.name.clone()),
     );
-    expected.extend(
-        resolved
-            .components
-            .iter()
-            .filter(|component| component.has_driver)
-            .map(|component| component.instance.clone()),
-    );
+    if mode != LaunchMode::Sim {
+        expected.extend(
+            resolved
+                .components
+                .iter()
+                .filter(|component| component.has_driver)
+                .map(|component| component.instance.clone()),
+        );
+    }
     expected
 }
 
@@ -490,6 +539,7 @@ mod tests {
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &outcome.checked_participants,
+                accepted_substitutions: &[],
                 source_participants: &source_participants,
             }],
         )?;
@@ -632,6 +682,7 @@ mod tests {
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &checked,
+                accepted_substitutions: &[],
                 source_participants: &sources,
             }],
         )
@@ -650,6 +701,7 @@ mod tests {
         graph_check::ParticipantApis {
             participant_id: participant_id.to_string(),
             artifact_id: artifact_id.to_string(),
+            participant_kind: graph_check::ParticipantKind::Service,
             participant_class: graph_check::ParticipantClass::Checked,
             api_version: "y2026_1".to_string(),
             bus_abi: None,
@@ -683,6 +735,7 @@ mod tests {
             resolved,
             manifest_extras,
             checked_participants: &[],
+            accepted_substitutions: &[],
             source_participants: &[],
         }
     }

@@ -2818,9 +2818,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal"
-version = "0.23.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "346e4c69c3064717f78661ca76487d9822b45a4b9ebeb1e5b262799e4b17f8f7"
+checksum = "d71b459d6279b8995179ed7e2c356dcdbb9cee933fd754ee941630da328a8f5e"
 dependencies = [
  "anyhow",
  "arc-swap",
