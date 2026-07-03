@@ -90,6 +90,7 @@ pub struct RawContract {
 pub struct CheckOutcome {
     pub missing_images: Vec<String>,
     pub report: graph_check::Report,
+    pub checked_participants: Vec<graph_check::ParticipantApis>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -726,7 +727,8 @@ pub fn run_check_with_deployed_user_service_images(
                 tool.binary_path.display()
             )
         })?;
-        validate_artifact_identity("tool", &tool.name, "tool", &raw)?;
+        let expected_id = tool_emit_apis_id(&tool.name);
+        validate_artifact_identity("tool", expected_id, "tool", &raw)?;
         let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
             format!(
                 "failed to interpret emit-apis for tool {} ({})",
@@ -781,7 +783,12 @@ pub fn run_check_with_deployed_user_service_images(
     Ok(CheckOutcome {
         missing_images,
         report,
+        checked_participants: participants,
     })
+}
+
+fn tool_emit_apis_id(tool_name: &str) -> &str {
+    tool_name.strip_prefix("tool-").unwrap_or(tool_name)
 }
 
 pub(crate) fn robot_graph_from_resolved(resolved: &ResolvedRobot) -> graph_check::RobotGraph {

@@ -207,10 +207,6 @@ impl Project {
             .join(selector)
     }
 
-    pub fn bundle_dir(&self, robot_model: &str) -> PathBuf {
-        self.dist_model_dir(robot_model).join("bundle")
-    }
-
     pub fn dev_robot_dir(&self, robot_hostname: &str) -> PathBuf {
         self.workspace_root
             .join("dist")

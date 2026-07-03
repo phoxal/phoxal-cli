@@ -308,9 +308,10 @@ fn tools_resolve_from_explicit_independent_versions() -> anyhow::Result<()> {
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
 
     for tool_name in [
+        "tool-router",
+        "tool-joypad",
         "simulator_webots_controller",
         "simulator_webots_supervisor",
-        "joypad",
     ] {
         let tool = resolved
             .tools
@@ -318,7 +319,12 @@ fn tools_resolve_from_explicit_independent_versions() -> anyhow::Result<()> {
             .find(|tool| tool.name == tool_name)
             .unwrap_or_else(|| panic!("{tool_name} resolved"));
         assert_eq!(tool.repo, "phoxal/framework", "{tool_name} repo");
-        assert_eq!(tool.resolved, "0.14.0", "{tool_name} version");
+        let expected_version = if tool_name.starts_with("tool-") {
+            "0.1.0"
+        } else {
+            "0.14.0"
+        };
+        assert_eq!(tool.resolved, expected_version, "{tool_name} version");
     }
 
     Ok(())
@@ -328,13 +334,13 @@ fn tools_resolve_from_explicit_independent_versions() -> anyhow::Result<()> {
 fn tool_version_override_is_preserved_for_any_known_tool() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
         "phoxal_participants: {}",
-        "phoxal_participants: {}\n\ntools:\n  joypad:\n    version: \"0.9.9\"",
+        "phoxal_participants: {}\n\ntools:\n  tool-joypad:\n    version: \"0.9.9\"",
     ))?;
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
     let joypad = resolved
         .tools
         .iter()
-        .find(|tool| tool.name == "joypad")
+        .find(|tool| tool.name == "tool-joypad")
         .expect("joypad resolved");
     assert_eq!(joypad.resolved, "0.9.9");
 

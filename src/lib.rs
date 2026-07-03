@@ -13,9 +13,9 @@
 //!   per-contract wire-shape (`schema_id`) agreement and topology with the shared
 //!   [`phoxal::check`] graph core; git component commits resolve live unless
 //!   pinned to a commit SHA in `robot.yaml`.
-//! - `simulate <world>` - resolve and stage the run bundle. Live native launch
-//!   lands in the native distribution work.
-//! - `deploy build` - reserved for the native systemd deployment bundle.
+//! - `simulate <world>` - resolve and print the host-native launch plan. Live
+//!   native launch lands in the native distribution work.
+//! - `deploy build` - reserved for the native systemd deployment release artifact.
 //! - `robot new <name>` - scaffold a robot project.
 //! - `service add|run|catalog` - manage user service crates.
 //! - `generations status` - inspect catalog readiness for the robot target.
@@ -34,11 +34,12 @@ pub(crate) mod component_driver;
 pub mod context;
 pub mod host_doctor;
 pub mod host_paths;
+pub mod launch_env;
+pub mod launch_plan;
 pub mod native_pending;
 pub mod process;
 pub mod project;
 pub mod resolver;
-pub mod run_view;
 pub mod shell;
 pub mod simulator_staging;
 pub mod tool_provisioning;

@@ -8,7 +8,7 @@ use phoxal_cli::commands::simulate::{SimulateOptions, prepare};
 use phoxal_cli::resolver::host_target_triple;
 
 #[test]
-fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
+fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     write_robot_project(temp.path())?;
     let catalog_path = write_catalog(temp.path())?;
@@ -17,66 +17,28 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
         temp.path(),
         SimulateOptions {
             world: "test".to_string(),
-            joypad: true,
             catalog_source: Some(catalog_path.display().to_string()),
             ..SimulateOptions::default()
         },
     )?;
 
-    assert!(temp.path().join(".phoxal/run/robot.yaml").is_file());
-    // There is no lockfile: dry-run resolves live and writes none.
+    assert!(!temp.path().join(".phoxal/run").exists());
+    assert!(!temp.path().join(".phoxal/webots").exists());
+    assert!(!temp.path().join(".phoxal/cache/state.yaml").exists());
     assert!(!temp.path().join("phoxal.sources.lock").exists());
-    assert!(temp.path().join(".phoxal/run/structure.urdf").is_file());
-    assert!(
-        temp.path()
-            .join(".phoxal/webots/protos/Testbot.proto")
-            .is_file()
-    );
-    assert!(
-        temp.path()
-            .join(".phoxal/webots/protos/components")
-            .is_dir()
-    );
-    assert!(
-        temp.path()
-            .join(".phoxal/webots/worlds/default.wbt")
-            .is_file()
-    );
-    assert!(
-        !temp
-            .path()
-            .join(".phoxal/webots/controllers/phoxal-simulator-webots-controller/phoxal-simulator-webots-controller")
-            .is_file()
-    );
-    assert!(plan.state_path.is_file());
-    let mut run_files = fs::read_dir(temp.path().join(".phoxal/run"))?
-        .map(|entry| {
-            entry.map(|entry| {
-                entry
-                    .path()
-                    .file_name()
-                    .expect("file name")
-                    .to_string_lossy()
-                    .to_string()
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    run_files.sort();
     assert_eq!(
-        run_files,
-        vec!["components", "robot.yaml", "structure.urdf"]
+        plan.bus_connect,
+        phoxal_cli::launch_plan::DEFAULT_ROUTER_CONNECT
     );
-    assert!(
-        plan.written_files
-            .iter()
-            .any(|path| path.ends_with(".phoxal/webots/worlds/default.wbt"))
+    assert_eq!(plan.world_path, temp.path().join("worlds/test.wbt"));
+    assert_eq!(
+        plan.native_tools,
+        vec![
+            phoxal_cli::launch_plan::SITE_TOOL_ROUTER.to_string(),
+            phoxal_cli::launch_plan::SITE_TOOL_JOYPAD.to_string(),
+            "webots".to_string(),
+        ]
     );
-    let run_robot = fs::read_to_string(temp.path().join(".phoxal/run/robot.yaml"))?;
-    assert!(!run_robot.contains("\napi_version:"));
-    assert!(run_robot.contains("phoxal_artifacts:"));
-    assert!(run_robot.contains("channel: stable"));
-    assert!(run_robot.contains("generation: y2026_1"));
-    assert_eq!(plan.bus_connect, "tcp/127.0.0.1:7447");
     assert_eq!(
         plan.resolved
             .platform_runtimes
@@ -89,18 +51,6 @@ fn simulate_dry_run_writes_resolved_view_and_state() -> anyhow::Result<()> {
             host_target_triple()
         )
     );
-
-    let state = fs::read_to_string(&plan.state_path)?;
-    assert!(state.contains("mode: dry-run"));
-    assert!(!state.contains("simulator_webots_controller"));
-    assert!(!state.contains("simulator_webots_supervisor"));
-    assert!(state.contains("joypad"));
-    assert!(state.contains("webots"));
-
-    let world = fs::read_to_string(temp.path().join(".phoxal/webots/worlds/default.wbt"))?;
-    assert!(world.contains("controller \"phoxal-simulator-webots-controller\""));
-    assert!(world.contains("controller \"phoxal-simulator-webots-supervisor\""));
-    assert!(world.contains("controllerArgs"));
 
     Ok(())
 }

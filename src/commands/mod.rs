@@ -128,9 +128,9 @@ pub enum RootCommand {
     Check(check::CheckCmd),
     #[command(about = "Validate robot.yaml structure and user-service phoxal dependencies.")]
     Validate(validate::Validate),
-    #[command(about = "Resolve and stage a Webots simulation run.")]
+    #[command(about = "Resolve and report a Webots simulation launch plan.")]
     Simulate(simulate::Simulate),
-    #[command(about = "Build a native deployment bundle.")]
+    #[command(about = "Build a native deployment release artifact.")]
     Deploy(deploy::Deploy),
     #[command(about = "Scaffold and manage robot projects.")]
     Robot(robot::Robot),
