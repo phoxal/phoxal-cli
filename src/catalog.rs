@@ -232,6 +232,20 @@ pub struct ToolVersion {
 
 pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
     ToolVersion {
+        name: "tool-router",
+        default_version: "0.1.0",
+        repo: "phoxal/framework",
+        artifact_template: "phoxal-tool-router-{version}-{target}.tar.gz",
+        binary_template: "phoxal-tool-router-{target}",
+    },
+    ToolVersion {
+        name: "tool-joypad",
+        default_version: "0.1.0",
+        repo: "phoxal/framework",
+        artifact_template: "phoxal-tool-joypad-{version}-{target}.tar.gz",
+        binary_template: "phoxal-tool-joypad-{target}",
+    },
+    ToolVersion {
         name: "simulator_webots_controller",
         default_version: "0.14.0",
         repo: "phoxal/framework",
@@ -244,13 +258,6 @@ pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
         repo: "phoxal/framework",
         artifact_template: "phoxal-simulator-{version}-{target}.tar.gz",
         binary_template: "phoxal-simulator-webots-supervisor-{target}",
-    },
-    ToolVersion {
-        name: "joypad",
-        default_version: "0.14.0",
-        repo: "phoxal/framework",
-        artifact_template: "phoxal-joypad-{version}-{target}.tar.gz",
-        binary_template: "phoxal-joypad-{target}",
     },
 ];
 

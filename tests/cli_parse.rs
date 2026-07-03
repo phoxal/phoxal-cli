@@ -24,7 +24,7 @@ fn parses_self_upgrade_with_normalized_version() {
 
 #[test]
 fn parses_service_add() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "service", "add", "avoid-obstacles"])
+    let cli = Cli::try_parse_from(["phoxal-cli", "service", "add", "avoid_obstacles"])
         .expect("service add command should parse");
 
     let RootCommand::Service(command) = cli.command else {
@@ -34,12 +34,12 @@ fn parses_service_add() {
         panic!("expected service add command");
     };
 
-    assert_eq!(add.name, "avoid-obstacles");
+    assert_eq!(add.name, "avoid_obstacles");
 }
 
 #[test]
 fn parses_service_run() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "service", "run", "avoid-obstacles"])
+    let cli = Cli::try_parse_from(["phoxal-cli", "service", "run", "avoid_obstacles"])
         .expect("service run command should parse");
 
     let RootCommand::Service(command) = cli.command else {
@@ -49,7 +49,7 @@ fn parses_service_run() {
         panic!("expected service run command");
     };
 
-    assert_eq!(run.name, "avoid-obstacles");
+    assert_eq!(run.name, "avoid_obstacles");
 }
 
 #[test]
@@ -75,8 +75,8 @@ fn parses_service_catalog_json_output() {
 
 #[test]
 fn runtime_surface_is_removed() {
-    assert!(Cli::try_parse_from(["phoxal-cli", "runtime", "add", "avoid-obstacles"]).is_err());
-    assert!(Cli::try_parse_from(["phoxal-cli", "check", "--runtime", "avoid-obstacles",]).is_err());
+    assert!(Cli::try_parse_from(["phoxal-cli", "runtime", "add", "avoid_obstacles"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal-cli", "check", "--runtime", "avoid_obstacles",]).is_err());
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn parses_check_pull_service_and_json_output() {
         "check",
         "--pull",
         "--service",
-        "avoid-obstacles",
+        "avoid_obstacles",
         "--message-format",
         "json",
     ])
@@ -97,7 +97,7 @@ fn parses_check_pull_service_and_json_output() {
     };
 
     assert!(command.pull);
-    assert_eq!(command.service.as_deref(), Some("avoid-obstacles"));
+    assert_eq!(command.service.as_deref(), Some("avoid_obstacles"));
     assert_eq!(command.message_format, MessageFormat::Json);
 }
 

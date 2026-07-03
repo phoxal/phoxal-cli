@@ -145,9 +145,9 @@ checksum = "3d62b7694a562cdf5a74227903507c56ab2cc8bdd1f781ed5cb4cf9c9f810bfc"
 
 [[package]]
 name = "arrayvec"
-version = "0.7.7"
+version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f02882884d3e1bc524fb12c79f107f6ad0e1cfd498c536ffb494301740995dfe"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "asn1-rs"
@@ -1587,9 +1587,9 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "humantime"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
+checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
 
 [[package]]
 name = "hybrid-array"
@@ -2103,9 +2103,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.46.8"
+version = "0.46.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24fc8535da347b994f6d2fab0a84b74e3b31ad08ebe4204d95f3e755db7af49b"
+checksum = "1d865ca7ca04445fcaa1d751fda3dc43b0113ba2fcddc65d5a0fcb474a7c3bba"
 dependencies = [
  "ahash",
  "bytecount",
@@ -2116,16 +2116,25 @@ dependencies = [
  "getrandom 0.3.4",
  "idna",
  "itoa",
+ "jsonschema-regex",
  "num-cmp",
  "num-traits",
  "percent-encoding",
  "referencing",
  "regex",
- "regex-syntax",
  "serde",
  "serde_json",
  "unicode-general-category",
  "uuid-simd",
+]
+
+[[package]]
+name = "jsonschema-regex"
+version = "0.46.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b7fc96cd6677cc81b00607d43477327d719419937ef1c44b3556a40f517d54c"
+dependencies = [
+ "regex-syntax",
 ]
 
 [[package]]
@@ -2433,9 +2442,9 @@ dependencies = [
 
 [[package]]
 name = "num-bigint"
-version = "0.4.6"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
+checksum = "c863e9ab5e7bf9c99ba75e1050f1e4d624ae87ed3532d6238ffbdc7b585dbbe6"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -2809,9 +2818,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal"
-version = "0.22.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e02508f503e8ef9fa345e51656de48afb00013a04822fb1494820ab66fc588a5"
+checksum = "346e4c69c3064717f78661ca76487d9822b45a4b9ebeb1e5b262799e4b17f8f7"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2819,6 +2828,7 @@ dependencies = [
  "derive-new",
  "dotenvy",
  "nalgebra",
+ "phoxal-api",
  "phoxal-bus",
  "phoxal-macros",
  "rmp-serde",
@@ -2833,6 +2843,18 @@ dependencies = [
  "tracing-subscriber",
  "urdf-rs",
  "zenoh",
+]
+
+[[package]]
+name = "phoxal-api"
+version = "0.19.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c97ce23fd2bcb30d19b0cd0993b70f76eecba235ecd0f164c3ca7c06a47d56d6"
+dependencies = [
+ "phoxal-bus",
+ "phoxal-macros",
+ "serde",
+ "serde_bytes",
 ]
 
 [[package]]
@@ -2886,9 +2908,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-macros"
-version = "0.19.4"
+version = "0.19.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e531e8d1481ec8b84782512934dc0ff239ccba5d7804c39fd96377b1cf33ac0e"
+checksum = "310d02c3a7f3aa898ae057952cb6854c196d23008a6de54dc4d066f3c1edf79a"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3237,9 +3259,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.46.8"
+version = "0.46.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c8dceb372b46fecd006be48ca335468b49ad887a7f0150cabd6098fa4fc500f"
+checksum = "77954d81b2e1c5e8ab889f9f597a92f852ab073255de9e37ee3fb443efd57051"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -3409,9 +3431,9 @@ dependencies = [
 
 [[package]]
 name = "rustc-hash"
-version = "2.1.2"
+version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rustc_version"

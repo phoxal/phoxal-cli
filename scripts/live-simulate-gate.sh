@@ -1,28 +1,26 @@
 #!/usr/bin/env bash
 # Live split-recovery gate: robot-v1 simulate default (phoxal/phoxal-cli#11).
 #
-# Proves the separated repos run together end to end:
+# Proves the separated repos still resolve together:
 #
-#   robot.yaml -> phoxal-cli -> live resolution (GHCR images, git component
-#             commits, GitHub release tools) -> generated .phoxal/run/ -> router
-#             -> Webots -> mandatory service set
+#   robot.yaml -> phoxal-cli -> live resolution (native artifact catalog, git
+#             component commits, host tools) -> dry-run launch report
 #
-# There is NO lockfile: every run resolves live. Production reproducibility is
-# the `phoxal-cli deploy build` digest-pinned (@sha256) bundle, exercised
-# separately. This gate exercises live resolve + compose generation + simulate.
+# There is NO lockfile: every run resolves live. Production reproducibility
+# belongs to the native deploy release artifact, exercised separately. This gate
+# exercises live resolve without writing local launch directories.
 #
 # Two phases:
 #
-#   Smoke (default) -- no Docker daemon, no Webots needed:
-#     1. phoxal-cli simulate default --dry-run   (live resolve + compose generation)
-#     2. assert the generated compose references the mandatory official services
+#   Smoke (default):
+#     1. phoxal-cli simulate default --dry-run   (live resolve + no writes)
+#     2. assert no .phoxal/run or .phoxal/webots directory was generated
 #
-#   Live (--live) -- needs a running Docker daemon + Webots on PATH:
-#     3. phoxal-cli simulate default --pull       (the full live gate)
+#   Live (--live):
+#     native supervisor launch is pending follow-up 04.
 #
-# The smoke phase is CI-safe and proves the resolver + compose plumbing line up
-# with the published image set (phoxal/framework#31). The live phase is the
-# manual integration gate.
+# The smoke phase is CI-safe and proves the resolver still lines up with the
+# configured artifact catalog.
 #
 # Usage:
 #   scripts/live-simulate-gate.sh [--live] [ROBOT_DIR]
@@ -65,62 +63,31 @@ if [[ ! -x "${CLI_BIN}" ]]; then
   (cd "${CLI_REPO}" && cargo build --quiet -p phoxal-cli) || fail "phoxal-cli build failed"
 fi
 
-# --- 1. live dry-run (resolve + compose generation) ------------------------
+# --- 1. live dry-run (resolve, no launch-directory writes) ------------------
 
 step "Gate -- robot-v1: phoxal-cli simulate ${WORLD} --dry-run (live resolve)"
-if ! (cd "${robot_dir}" && rm -rf .phoxal/run .phoxal/cache \
+if ! (cd "${robot_dir}" && rm -rf .phoxal/run .phoxal/webots .phoxal/cache \
         && "${CLI_BIN}" simulate "${WORLD}" --dry-run >/dev/null); then
   fail "simulate ${WORLD} --dry-run failed (live resolution, or missing world
   ${WORLD}.wbt). If a git component ref cannot be resolved offline, pin it to a
   commit SHA in robot.yaml or run with network access."
 fi
-compose="${robot_dir}/.phoxal/run/docker-compose.yml"
-[[ -f "${compose}" ]] || fail "compose not generated at ${compose}"
-ok "compose generated from live resolution"
-
-# --- 2. assert the mandatory official services are present -----------------
-
-step "Gate -- generated compose references the mandatory service set"
-if grep -q 'ghcr.io/phoxal/service-' "${compose}"; then
-  pins="$(grep -c 'ghcr.io/phoxal/service-' "${compose}")"
-  ok "compose references ${pins} official service images"
-else
-  fail "generated compose references no ghcr.io/phoxal/service- images"
-fi
+[[ ! -e "${robot_dir}/.phoxal/run" ]] || fail "dry-run wrote .phoxal/run"
+[[ ! -e "${robot_dir}/.phoxal/webots" ]] || fail "dry-run wrote .phoxal/webots"
+ok "dry-run resolved without local launch-directory writes"
 
 if [[ "${live}" -eq 0 ]]; then
-  printf "\n${green}Smoke gate green.${reset} Live resolve + compose generation verified.\n"
+  printf "\n${green}Smoke gate green.${reset} Live resolve dry-run verified.\n"
   cat <<EOF
 
-To run the full LIVE gate (needs a running Docker daemon + Webots on PATH):
+The full live supervisor run is pending follow-up 04:
 
   ${BASH_SOURCE[0]} --live ${robot_dir}
-
-The live run (phoxal-cli simulate ${WORLD} --pull) should show:
-  - phoxal-local-zenoh singleton starts or is safely reused;
-  - the generated compose starts the per-robot router;
-  - all mandatory official services start from the GHCR images;
-  - Webots launches the staged world;
-  - services connect to tcp/router:7447 and read /robot;
-  - host tools (joypad, when requested) connect via tcp/127.0.0.1:7447.
 EOF
   exit 0
 fi
 
 # --- 3. live gate ----------------------------------------------------------
 
-command -v docker >/dev/null 2>&1 \
-  || fail "docker is required for the live gate -- install Docker and start the daemon"
-
-step "Live host diagnosis"
-"${CLI_BIN}" doctor >/dev/null 2>&1 \
-  || fail "phoxal-cli doctor failed unexpectedly"
-ok "host diagnosis complete; live simulate will enforce required preflight"
-
-step "Live gate -- phoxal-cli simulate ${WORLD} --pull"
-warn "this is the interactive live gate; it runs until you stop it (Ctrl-C)."
-warn "watch for: router healthy, every official service Up from its GHCR image,"
-warn "Webots window with the staged world, and services reading /robot over the bus."
-(cd "${robot_dir}" && "${CLI_BIN}" simulate "${WORLD}" --pull) \
-  || fail "live simulate failed -- see logs above (image pull, service startup, or bus connection)."
-printf "\n${green}Live gate completed.${reset}\n"
+warn "native simulate supervision is pending follow-up 04; this slice only resolves and reports the plan"
+exit 2

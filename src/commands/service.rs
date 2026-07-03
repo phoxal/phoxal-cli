@@ -15,13 +15,12 @@ use toml::Value as TomlValue;
 
 use crate::AppContext;
 use crate::commands::MessageFormat;
+use crate::launch_plan::DEFAULT_ROUTER_CONNECT;
 use crate::resolver::{
     ResolveOptions, discover_robot_yaml, load_robot_with_extras, resolve,
     target_generation_for_robot,
 };
 use crate::utils::{cargo_binary_name, resolve_project_path};
-
-const DEFAULT_BUS_CONNECT: &str = "tcp/127.0.0.1:7447";
 
 #[derive(Debug, Args)]
 pub struct Service {
@@ -40,7 +39,7 @@ pub enum ServiceSubcommand {
     #[command(
         about = "Build and run one user service host-native against the dev bus.",
         long_about = "Build and run one user service host-native against the dev bus.\n\n\
-                      Generates the dev bundle, verifies the selected Zenoh endpoint is reachable, builds the named user service, and runs only it on the host. Does not start Webots, official services, or component drivers."
+                      Verifies the local router endpoint is reachable, builds the named user service, and runs only it on the host. Does not start Webots, official services, or component drivers."
     )]
     Run(Run),
     #[command(about = "Print official services from the configured artifact catalog.")]
@@ -49,7 +48,7 @@ pub enum ServiceSubcommand {
 
 #[derive(Debug, Args)]
 pub struct Add {
-    #[arg(help = "Service id; kebab-case, used as the crate name and user_participants key.")]
+    #[arg(help = "Service id; use [a-z0-9_], used as the crate name and user_participants key.")]
     pub name: String,
 }
 
@@ -95,7 +94,7 @@ struct ServiceRunPlan {
     name: String,
     robot_id: String,
     namespace: String,
-    run_dir: PathBuf,
+    robot_root: PathBuf,
     crate_dir: PathBuf,
     binary_name: String,
     bus_connect: String,
@@ -146,8 +145,10 @@ impl Run {
             "running {} in namespace {}",
             plan.name, plan.namespace
         ));
-        app.ui
-            .info(format!("using dev bundle {}", plan.run_dir.display()));
+        app.ui.info(format!(
+            "using robot model root {}",
+            plan.robot_root.display()
+        ));
         let status = run_user_service_host_native(&plan, &app.ui)?;
         forward_service_exit_status(&plan.name, status)
     }
@@ -274,7 +275,6 @@ fn service_run_plan(
         .context("robot.yaml did not have a parent directory")?;
     let loaded = load_robot_with_extras(&robot_path)?;
     let config = loaded.extras.user_runtime_config(name).cloned();
-    let bus_profile = loaded.extras.materialized_bus_profile(DEFAULT_BUS_CONNECT);
     let robot = loaded.robot;
     let catalog = crate::commands::load_catalog_for_robot_from_source(
         catalog_source,
@@ -315,11 +315,10 @@ fn service_run_plan(
         );
     }
 
-    // Resolve git component commits live so the run view can be assembled. A
-    // path-only graph needs no network; a git component pinned to a commit SHA
-    // resolves offline; a tag/branch ref is resolved via `git ls-remote` (with
-    // an actionable error if the network is unavailable).
-    let resolved = resolve(
+    // Resolve git component commits live so local service runs validate the same
+    // project facts as check before spawning a process. A path-only graph needs
+    // no network; a git component pinned to a commit SHA resolves offline.
+    let _resolved = resolve(
         &robot,
         project_root,
         catalog.as_ref(),
@@ -328,26 +327,25 @@ fn service_run_plan(
             resolve_source_commits: true,
         },
     )?;
-    let run_dir = project_root.join(".phoxal").join("run");
-    crate::run_view::assemble(project_root, &resolved, &run_dir)?;
     let binary_name = service_binary_name(&crate_dir, name)?;
+    let robot_root = project_root.to_path_buf();
     let env = run_env(
         name,
         &robot.identity.id,
         &robot.identity.namespace,
         config.as_ref(),
-        &bus_profile.connect,
-        &run_dir,
-    );
+        DEFAULT_ROUTER_CONNECT,
+        &robot_root,
+    )?;
 
     Ok(ServiceRunPlan {
         name: name.to_string(),
         robot_id: robot.identity.id,
         namespace: robot.identity.namespace,
-        run_dir,
+        robot_root,
         crate_dir,
         binary_name,
-        bus_connect: bus_profile.connect.clone(),
+        bus_connect: DEFAULT_ROUTER_CONNECT.to_string(),
         env,
     })
 }
@@ -369,7 +367,7 @@ fn ensure_zenoh_router_reachable(endpoint: &str) -> Result<()> {
 
 fn zenoh_unreachable_message(endpoint: &str) -> String {
     format!(
-        "no reachable Zenoh router at {endpoint}; start one (e.g. `zenohd --listen tcp/127.0.0.1:7447`) or select a bus profile - managed router startup returns with the native deploy work (03)"
+        "no reachable Phoxal router at {endpoint}; start tool-router or run under the native supervisor once it lands (04)"
     )
 }
 
@@ -379,25 +377,22 @@ pub(crate) fn run_env(
     namespace: &str,
     config: Option<&JsonValue>,
     bus_connect: &str,
-    bundle_root: &Path,
-) -> Vec<(String, String)> {
-    let mut env = vec![
-        ("PHOXAL_PARTICIPANT_ID".to_string(), name.to_string()),
-        ("PHOXAL_ROBOT_ID".to_string(), robot_id.to_string()),
-        ("PHOXAL_NAMESPACE".to_string(), namespace.to_string()),
-        (
-            "PHOXAL_BUNDLE_ROOT".to_string(),
-            bundle_root.display().to_string(),
-        ),
-        ("PHOXAL_CONNECT".to_string(), bus_connect.to_string()),
-        ("PHOXAL_CLOCK".to_string(), "real".to_string()),
-    ];
-    // Services that opt into `config = Type` deserialize their typed config from
-    // PHOXAL_CONFIG. When the manifest has no config block, pass an empty object
-    // `{}` so an empty/defaultable config type deserializes cleanly.
-    let config_json = config.map_or_else(|| "{}".to_string(), JsonValue::to_string);
-    env.push(("PHOXAL_CONFIG".to_string(), config_json));
-    env
+    robot_root: &Path,
+) -> Result<Vec<(String, String)>> {
+    let launch = phoxal::participant::launch::ParticipantLaunch {
+        participant_id: name.to_string(),
+        namespace: namespace.to_string(),
+        robot_id: robot_id.to_string(),
+        bus: phoxal::participant::launch::BusProfile {
+            connect_endpoints: vec![bus_connect.to_string()],
+        },
+        clock: phoxal::participant::launch::ClockMode::Real,
+        config: config.cloned(),
+        robot_root: Some(robot_root.to_path_buf()),
+        component_instance: None,
+        shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
+    };
+    crate::launch_env::encode_participant_env(&launch).map(|env| env.spawn_env())
 }
 
 fn service_binary_name(crate_dir: &Path, service_name: &str) -> Result<String> {
@@ -440,7 +435,7 @@ fn run_user_service_host_native(plan: &ServiceRunPlan, ui: &crate::Ui) -> Result
         .current_dir(&plan.crate_dir)
         .env_remove("PHOXAL_CONNECT")
         .env_remove("PHOXAL_CONFIG")
-        .env_remove("PHOXAL_BUNDLE_ROOT")
+        .env_remove("PHOXAL_ROBOT_ROOT")
         .env_remove("PHOXAL_COMPONENT_INSTANCE")
         .env_remove("PHOXAL_CLOCK")
         .envs(plan.env.iter().map(|(key, value)| (key, value)));
@@ -541,36 +536,14 @@ fn validate_service_name(name: &str) -> Result<&str> {
     }
     if !is_valid_service_name(name) {
         bail!(
-            "service name '{name}' must be kebab-case: start with a lowercase ASCII letter, then use lowercase letters, digits, and single hyphens"
+            "service name '{name}' must use only lowercase ASCII letters, digits, and underscores; '-' is reserved as a launch separator"
         );
     }
     Ok(name)
 }
 
 fn is_valid_service_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    let Some((&first, rest)) = bytes.split_first() else {
-        return false;
-    };
-    if !first.is_ascii_lowercase() {
-        return false;
-    }
-
-    let mut previous_was_hyphen = false;
-    for &byte in rest {
-        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
-            previous_was_hyphen = false;
-        } else if byte == b'-' {
-            if previous_was_hyphen {
-                return false;
-            }
-            previous_was_hyphen = true;
-        } else {
-            return false;
-        }
-    }
-
-    !previous_was_hyphen
+    crate::resolver::is_launch_id(name)
 }
 
 fn scaffold_service_crate(
@@ -784,30 +757,30 @@ mod tests {
         let temp = tempfile::tempdir()?;
         fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
 
-        let outcome = add_service(temp.path(), "avoid-obstacles", None)?;
-        assert_eq!(outcome.name, "avoid-obstacles");
+        let outcome = add_service(temp.path(), "avoid_obstacles", None)?;
+        assert_eq!(outcome.name, "avoid_obstacles");
         assert_eq!(outcome.target_generation, "y2026_1");
         assert_eq!(
             outcome.crate_dir,
-            temp.path().join("runtimes").join("avoid-obstacles")
+            temp.path().join("runtimes").join("avoid_obstacles")
         );
 
         let cargo_toml = temp
             .path()
             .join("runtimes")
-            .join("avoid-obstacles")
+            .join("avoid_obstacles")
             .join("Cargo.toml");
         let main_rs = temp
             .path()
             .join("runtimes")
-            .join("avoid-obstacles")
+            .join("avoid_obstacles")
             .join("src")
             .join("main.rs");
         assert!(cargo_toml.is_file());
         assert!(main_rs.is_file());
 
         let main = fs::read_to_string(main_rs)?;
-        assert!(main.contains(r#"#[phoxal(id = "avoid-obstacles", api = y2026_1"#));
+        assert!(main.contains(r#"#[phoxal(id = "avoid_obstacles", api = y2026_1"#));
         assert!(main.contains("#[derive(phoxal::Service)]"));
         assert!(main.contains("#[phoxal::behavior]"));
         assert!(main.contains("async fn setup(_ctx: &mut SetupContext<Self>) -> Result<Self>"));
@@ -831,14 +804,14 @@ mod tests {
         let robot = Robot::read_from_dir(temp.path())?;
         let service = robot
             .user_participants
-            .get("avoid-obstacles")
+            .get("avoid_obstacles")
             .expect("service should be registered");
         assert_eq!(
             service.path,
-            PathBuf::from("runtimes").join("avoid-obstacles")
+            PathBuf::from("runtimes").join("avoid_obstacles")
         );
 
-        let error = add_service(temp.path(), "avoid-obstacles", None)
+        let error = add_service(temp.path(), "avoid_obstacles", None)
             .expect_err("adding the same service twice should fail");
         assert!(error.to_string().contains("already exists"));
 
@@ -862,7 +835,7 @@ mod tests {
             ),
         )?;
 
-        add_service(temp.path(), "avoid-obstacles", None)?;
+        add_service(temp.path(), "avoid_obstacles", None)?;
 
         let robot_yaml = fs::read_to_string(temp.path().join("robot.yaml"))?;
         let yaml: YamlValue = serde_yaml::from_str(&robot_yaml)?;
@@ -889,12 +862,12 @@ mod tests {
         );
 
         let avoid = user_participants
-            .get(YamlValue::String("avoid-obstacles".to_string()))
+            .get(YamlValue::String("avoid_obstacles".to_string()))
             .and_then(YamlValue::as_mapping)
             .expect("new service should be registered");
         assert_eq!(
             avoid.get(YamlValue::String("path".to_string())),
-            Some(&YamlValue::String("runtimes/avoid-obstacles".to_string()))
+            Some(&YamlValue::String("runtimes/avoid_obstacles".to_string()))
         );
 
         let loaded = load_robot_with_extras(&temp.path().join("robot.yaml"))?;
@@ -911,7 +884,7 @@ mod tests {
             loaded
                 .robot
                 .user_participants
-                .contains_key("avoid-obstacles")
+                .contains_key("avoid_obstacles")
         );
 
         Ok(())
@@ -922,7 +895,7 @@ mod tests {
         for name in [
             "",
             "AvoidObstacles",
-            "avoid_obstacles",
+            "avoid-obstacles",
             "-avoid",
             "avoid-",
             "avoid--it",
@@ -933,28 +906,28 @@ mod tests {
             );
         }
         assert_eq!(
-            validate_service_name("avoid-obstacles").unwrap(),
-            "avoid-obstacles"
+            validate_service_name("avoid_obstacles").unwrap(),
+            "avoid_obstacles"
         );
     }
 
     #[test]
-    fn run_env_sets_launch_contract_without_config() {
-        let bundle_root = PathBuf::from("/tmp/phoxal/run");
+    fn run_env_sets_launch_contract_without_config() -> Result<()> {
+        let robot_root = PathBuf::from("/tmp/phoxal/robot");
         let env = run_env(
-            "avoid-obstacles",
+            "avoid_obstacles",
             "testbot",
             "dev",
             None,
             "tcp/127.0.0.1:7447",
-            &bundle_root,
-        );
+            &robot_root,
+        )?;
 
         assert_eq!(
             env.iter()
                 .find(|(k, _)| k == "PHOXAL_PARTICIPANT_ID")
                 .map(|(_, v)| v.as_str()),
-            Some("avoid-obstacles")
+            Some("avoid_obstacles")
         );
         assert_eq!(
             env.iter()
@@ -970,9 +943,9 @@ mod tests {
         );
         assert_eq!(
             env.iter()
-                .find(|(k, _)| k == "PHOXAL_BUNDLE_ROOT")
+                .find(|(k, _)| k == "PHOXAL_ROBOT_ROOT")
                 .map(|(_, v)| v.as_str()),
-            Some("/tmp/phoxal/run")
+            Some("/tmp/phoxal/robot")
         );
         assert_eq!(
             env.iter()
@@ -994,28 +967,29 @@ mod tests {
                 .map(|(_, v)| v.as_str()),
             Some("{}")
         );
+        Ok(())
     }
 
     #[test]
-    fn run_env_sets_config_when_present() {
+    fn run_env_sets_config_when_present() -> Result<()> {
         let config = json!({
             "gain": 0.7,
             "labels": ["left", "right"],
         });
         let env = run_env(
-            "avoid-obstacles",
+            "avoid_obstacles",
             "testbot",
             "test",
             Some(&config),
             "tcp/127.0.0.1:7447",
-            &PathBuf::from("/tmp/phoxal/run"),
-        );
+            &PathBuf::from("/tmp/phoxal/robot"),
+        )?;
 
         assert_eq!(
             env.iter()
                 .find(|(key, _)| key == "PHOXAL_PARTICIPANT_ID")
                 .map(|(_, value)| value.as_str()),
-            Some("avoid-obstacles")
+            Some("avoid_obstacles")
         );
         assert_eq!(
             env.iter()
@@ -1038,6 +1012,7 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(config_json).unwrap(),
             config
         );
+        Ok(())
     }
 
     #[test]
@@ -1085,20 +1060,20 @@ mod tests {
     #[test]
     fn service_run_plan_serializes_manifest_config() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        fs::create_dir_all(temp.path().join("runtimes").join("avoid-obstacles"))?;
+        fs::create_dir_all(temp.path().join("runtimes").join("avoid_obstacles"))?;
         fs::write(
             temp.path()
                 .join("runtimes")
-                .join("avoid-obstacles")
+                .join("avoid_obstacles")
                 .join("Cargo.toml"),
-            service_cargo_toml("avoid-obstacles", "0.15", "0.14"),
+            service_cargo_toml("avoid_obstacles", "0.15", "0.14"),
         )?;
         fs::write(
             temp.path().join("robot.yaml"),
             minimal_robot_yaml_with_user_participant(
-                "avoid-obstacles",
+                "avoid_obstacles",
                 r#"
-    path: runtimes/avoid-obstacles
+    path: runtimes/avoid_obstacles
     config:
       gain: 0.7
       labels: [left, right]
@@ -1110,7 +1085,7 @@ mod tests {
             r#"<robot name="testbot"><link name="base_link"/></robot>"#,
         )?;
 
-        let plan = service_run_plan(temp.path(), "avoid-obstacles", None)?;
+        let plan = service_run_plan(temp.path(), "avoid_obstacles", None)?;
         let config_json = plan
             .env
             .iter()
@@ -1129,25 +1104,21 @@ mod tests {
     }
 
     #[test]
-    fn service_run_plan_uses_selected_bus_profile_connect() -> Result<()> {
+    fn service_run_plan_uses_default_router_connect() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        fs::create_dir_all(temp.path().join("runtimes").join("avoid-obstacles"))?;
+        fs::create_dir_all(temp.path().join("runtimes").join("avoid_obstacles"))?;
         fs::write(
             temp.path()
                 .join("runtimes")
-                .join("avoid-obstacles")
+                .join("avoid_obstacles")
                 .join("Cargo.toml"),
-            service_cargo_toml("avoid-obstacles", "0.15", "0.14"),
+            service_cargo_toml("avoid_obstacles", "0.15", "0.14"),
         )?;
         let robot_yaml = minimal_robot_yaml_with_user_participant(
-            "avoid-obstacles",
+            "avoid_obstacles",
             r#"
-    path: runtimes/avoid-obstacles
+    path: runtimes/avoid_obstacles
 "#,
-        )
-        .replace(
-            "\nphoxal_artifacts:\n",
-            "\nbus:\n  selected: lab\n  profiles:\n    lab:\n      connect: tcp/lab-router:7447\n\nphoxal_artifacts:\n",
         );
         fs::write(temp.path().join("robot.yaml"), robot_yaml)?;
         fs::write(
@@ -1155,14 +1126,14 @@ mod tests {
             r#"<robot name="testbot"><link name="base_link"/></robot>"#,
         )?;
 
-        let plan = service_run_plan(temp.path(), "avoid-obstacles", None)?;
+        let plan = service_run_plan(temp.path(), "avoid_obstacles", None)?;
 
         assert_eq!(
             plan.env
                 .iter()
                 .find(|(key, _)| key == "PHOXAL_CONNECT")
                 .map(|(_, value)| value.as_str()),
-            Some("tcp/lab-router:7447")
+            Some(crate::launch_plan::DEFAULT_ROUTER_CONNECT)
         );
         Ok(())
     }

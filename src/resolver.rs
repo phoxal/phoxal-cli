@@ -8,7 +8,7 @@ use phoxal::model::robot::{
     RobotV1 as Robot,
     v1::{Channel, ComponentSource, UserParticipant},
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -61,7 +61,6 @@ pub struct ResolvedRobot {
 pub struct RobotManifestExtras {
     pub catalog_source: Option<PathBuf>,
     pub user_runtimes: BTreeMap<String, UserRuntimeManifestExtras>,
-    pub bus: BusManifestExtras,
 }
 
 impl RobotManifestExtras {
@@ -71,11 +70,6 @@ impl RobotManifestExtras {
             .get(runtime_name)
             .and_then(|runtime| runtime.config.as_ref())
     }
-
-    #[must_use]
-    pub fn materialized_bus_profile(&self, default_connect: &str) -> MaterializedBusProfile {
-        self.bus.materialize(default_connect)
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -83,55 +77,11 @@ pub struct UserRuntimeManifestExtras {
     pub config: Option<Value>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct BusManifestExtras {
-    pub selected_profile: Option<String>,
-    pub profiles: BTreeMap<String, BusProfileConfig>,
-}
-
-impl BusManifestExtras {
-    #[must_use]
-    pub fn selected_profile_name(&self) -> &str {
-        self.selected_profile
-            .as_deref()
-            .unwrap_or(DEFAULT_BUS_PROFILE_NAME)
-    }
-
-    #[must_use]
-    pub fn materialize(&self, default_connect: &str) -> MaterializedBusProfile {
-        let selected_profile = self.selected_profile_name().to_string();
-        let configured = self.profiles.get(&selected_profile);
-        MaterializedBusProfile {
-            selected_profile,
-            connect: configured
-                .and_then(|profile| profile.connect.clone())
-                .unwrap_or_else(|| default_connect.to_string()),
-        }
-    }
-}
-
-/// A manifest bus profile. Per the transport spec a profile is just
-/// `{ connect: <endpoint> }`; the router-binding `listen` endpoint is deploy
-/// infra (a CLI-side default), not a manifest profile field.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct BusProfileConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connect: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MaterializedBusProfile {
-    pub selected_profile: String,
-    pub connect: String,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedRobot {
     pub robot: Robot,
     pub extras: RobotManifestExtras,
 }
-
-const DEFAULT_BUS_PROFILE_NAME: &str = "default";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPlatformRuntime {
@@ -262,8 +212,46 @@ fn parse_robot_value_with_extras(yaml: &mut serde_yaml::Value, path: &Path) -> R
     let sanitized = serde_yaml::to_string(&yaml)
         .with_context(|| format!("failed to prepare {}", path.display()))?;
     let robot = Robot::read_from_string(&sanitized)?;
+    validate_launch_participant_ids(&robot, path)?;
 
     Ok(LoadedRobot { robot, extras })
+}
+
+fn validate_launch_participant_ids(robot: &Robot, path: &Path) -> Result<()> {
+    let mut errors = Vec::new();
+    for name in robot.user_participants.keys() {
+        if !is_launch_id(name) {
+            errors.push(format!(
+                "user_participants.{name} in {} must use only [a-z0-9_]; '-' is reserved as a launch separator",
+                path.display()
+            ));
+        }
+    }
+    for instance in robot.components.instances.keys() {
+        if !is_launch_id(instance) {
+            errors.push(format!(
+                "components.instances.{instance} in {} must use only [a-z0-9_]; '-' is reserved as a launch separator",
+                path.display()
+            ));
+        }
+        if robot.user_participants.contains_key(instance) {
+            errors.push(format!(
+                "user_participants.{instance} collides with components.instances.{instance}; participant ids must be unique",
+            ));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("Robot launch id errors:\n{}", errors.join("\n"))
+    }
+}
+
+pub(crate) fn is_launch_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn validate_overlay_name(name: &str) -> Result<()> {
@@ -334,13 +322,6 @@ fn take_manifest_extras(
         stripped_extras = true;
     }
 
-    if let Some(root) = yaml.as_mapping_mut()
-        && let Some(bus) = root.remove("bus")
-    {
-        extras.bus = parse_bus_manifest_extras(&bus, robot_path)?;
-        stripped_extras = true;
-    }
-
     let Some(user_runtimes) = yaml
         .as_mapping_mut()
         .and_then(|mapping| mapping.get_mut("user_participants"))
@@ -390,170 +371,6 @@ fn parse_catalog_source_extra(value: &serde_yaml::Value, robot_path: &Path) -> R
         );
     }
     Ok(PathBuf::from(source))
-}
-
-fn parse_bus_manifest_extras(
-    bus: &serde_yaml::Value,
-    robot_path: &Path,
-) -> Result<BusManifestExtras> {
-    let bus = bus.as_mapping().ok_or_else(|| {
-        anyhow!(
-            "bus in {} must be a mapping with profiles",
-            robot_path.display()
-        )
-    })?;
-    for key in bus.keys().filter_map(serde_yaml::Value::as_str) {
-        if !matches!(
-            key,
-            "profiles" | "selected" | "profile" | "default" | "default_profile"
-        ) {
-            bail!("bus.{key} in {} is not supported", robot_path.display());
-        }
-    }
-
-    // `bus.profiles` is optional: the `default` profile (local Zenoh) is
-    // implicit, so a manifest may declare only non-default profiles, or omit
-    // the block entirely. Declare only what differs from the implicit default.
-    let profiles = match bus.get("profiles") {
-        Some(profiles_value) => parse_bus_profiles(profiles_value, robot_path)?,
-        None => BTreeMap::new(),
-    };
-    let selected_profile = parse_selected_bus_profile(bus, robot_path)?;
-    // Only an explicitly named, non-default selected profile must exist: the
-    // implicit `default` never needs to be declared in bus.profiles.
-    if let Some(selected_name) = selected_profile.as_deref()
-        && selected_name != DEFAULT_BUS_PROFILE_NAME
-        && !profiles.contains_key(selected_name)
-    {
-        let available = profiles.keys().cloned().collect::<Vec<_>>().join(", ");
-        bail!(
-            "bus selected profile '{selected_name}' in {} is not defined in bus.profiles; available: {available}",
-            robot_path.display()
-        );
-    }
-
-    Ok(BusManifestExtras {
-        selected_profile,
-        profiles,
-    })
-}
-
-fn parse_bus_profiles(
-    profiles: &serde_yaml::Value,
-    robot_path: &Path,
-) -> Result<BTreeMap<String, BusProfileConfig>> {
-    let profiles = profiles.as_mapping().ok_or_else(|| {
-        anyhow!(
-            "bus.profiles in {} must be a mapping of profile names",
-            robot_path.display()
-        )
-    })?;
-    if profiles.is_empty() {
-        bail!(
-            "bus.profiles in {} must define at least one profile",
-            robot_path.display()
-        );
-    }
-
-    let mut parsed = BTreeMap::new();
-    for (name, profile) in profiles {
-        let Some(name) = name.as_str() else {
-            continue;
-        };
-        validate_bus_profile_name(name)?;
-        let profile = parse_bus_profile_config(name, profile, robot_path)?;
-        parsed.insert(name.to_string(), profile);
-    }
-    Ok(parsed)
-}
-
-fn parse_bus_profile_config(
-    name: &str,
-    profile: &serde_yaml::Value,
-    robot_path: &Path,
-) -> Result<BusProfileConfig> {
-    let profile = profile.as_mapping().ok_or_else(|| {
-        anyhow!(
-            "bus.profiles.{name} in {} must be a mapping",
-            robot_path.display()
-        )
-    })?;
-    for key in profile.keys().filter_map(serde_yaml::Value::as_str) {
-        // A profile is just `{ connect }` per the transport spec; `listen` is
-        // router-binding deploy infra, not a manifest profile field.
-        if key != "connect" {
-            bail!(
-                "bus.profiles.{name}.{key} in {} is not supported",
-                robot_path.display()
-            );
-        }
-    }
-    Ok(BusProfileConfig {
-        connect: profile
-            .get("connect")
-            .map(|value| parse_bus_endpoint(name, "connect", value, robot_path))
-            .transpose()?,
-    })
-}
-
-fn parse_bus_endpoint(
-    profile_name: &str,
-    field: &str,
-    value: &serde_yaml::Value,
-    robot_path: &Path,
-) -> Result<String> {
-    let Some(endpoint) = value.as_str() else {
-        bail!(
-            "bus.profiles.{profile_name}.{field} in {} must be a string",
-            robot_path.display()
-        );
-    };
-    if endpoint.trim().is_empty() {
-        bail!(
-            "bus.profiles.{profile_name}.{field} in {} must not be empty",
-            robot_path.display()
-        );
-    }
-    Ok(endpoint.to_string())
-}
-
-fn parse_selected_bus_profile(
-    bus: &serde_yaml::Mapping,
-    robot_path: &Path,
-) -> Result<Option<String>> {
-    let mut selected = None;
-    for key in ["selected", "profile", "default", "default_profile"] {
-        let Some(value) = bus.get(key) else {
-            continue;
-        };
-        let Some(name) = value.as_str() else {
-            bail!("bus.{key} in {} must be a string", robot_path.display());
-        };
-        validate_bus_profile_name(name)?;
-        if let Some(existing) = &selected
-            && existing != name
-        {
-            bail!(
-                "bus profile selectors in {} disagree: '{existing}' and '{name}'",
-                robot_path.display()
-            );
-        }
-        selected = Some(name.to_string());
-    }
-    Ok(selected)
-}
-
-fn validate_bus_profile_name(name: &str) -> Result<()> {
-    if name.is_empty()
-        || name.contains('/')
-        || name.contains('\\')
-        || name == "."
-        || name == ".."
-        || name.chars().any(char::is_whitespace)
-    {
-        bail!("bus profile name '{name}' is invalid; use a simple name such as `default` or `dev`");
-    }
-    Ok(())
 }
 
 pub fn resolve(
@@ -1281,9 +1098,7 @@ components:
     }
 
     #[test]
-    fn load_robot_extracts_bus_profiles() -> anyhow::Result<()> {
-        // Per the transport spec the `default` profile is implicit and a
-        // profile is just `{ connect }`; declare only the non-default profile.
+    fn load_robot_keeps_typed_bus_section() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("robot.yaml");
         std::fs::write(
@@ -1295,10 +1110,18 @@ identity:
   namespace: dev
 structure: structure.urdf
 bus:
-  selected: lab
-  profiles:
-    lab:
-      connect: tcp/lab-router:7447
+  listen:
+    - tcp/127.0.0.1:7448
+    - serial//dev/ttyUSB0?baudrate=115200
+  uplink:
+    connect: tls/cloud.phoxal.example:7447
+    auth:
+      ca: identity/ca.pem
+      cert: identity/robot.pem
+      key: identity/robot.key
+    retry:
+      initial_ms: 2000
+      max_ms: 10000
 phoxal_artifacts:
   channel: stable
 phoxal_participants: {}
@@ -1318,100 +1141,26 @@ components:
         )?;
 
         let loaded = load_robot_with_extras(&path)?;
-        let materialized = loaded.extras.materialized_bus_profile("tcp/router:7447");
-
-        assert_eq!(materialized.selected_profile, "lab");
-        assert_eq!(materialized.connect, "tcp/lab-router:7447");
-        Ok(())
-    }
-
-    #[test]
-    fn load_robot_implicit_default_profile_needs_no_declaration() -> anyhow::Result<()> {
-        // No `bus` block at all: the implicit `default` profile materializes to
-        // the CLI-provided default connect endpoint.
-        let temp = tempfile::tempdir()?;
-        let path = temp.path().join("robot.yaml");
-        std::fs::write(
-            &path,
-            r#"schema: v0
-api_version: y2026_1
-identity:
-  id: bot
-  namespace: dev
-structure: structure.urdf
-phoxal_artifacts:
-  channel: stable
-phoxal_participants: {}
-motion:
-  kinematic:
-    kind: differential
-    left_actuators: [l.motor]
-    right_actuators: [r.motor]
-    left_encoders: [l.encoder]
-    right_encoders: [r.encoder]
-    wheel_radius_m: 0.1
-    wheel_base_m: 0.5
-components:
-  sources: {}
-  instances: {}
-"#,
-        )?;
-
-        let loaded = load_robot_with_extras(&path)?;
-        let materialized = loaded.extras.materialized_bus_profile("tcp/router:7447");
-
-        assert_eq!(materialized.selected_profile, "default");
-        assert_eq!(materialized.connect, "tcp/router:7447");
-        Ok(())
-    }
-
-    #[test]
-    fn load_robot_rejects_listen_as_profile_field() -> anyhow::Result<()> {
-        // `listen` is router-binding deploy infra, not a manifest profile field.
-        let temp = tempfile::tempdir()?;
-        let path = temp.path().join("robot.yaml");
-        std::fs::write(
-            &path,
-            r#"schema: v0
-api_version: y2026_1
-identity:
-  id: bot
-  namespace: dev
-structure: structure.urdf
-bus:
-  profiles:
-    lab:
-      connect: tcp/lab-router:7447
-      listen: tcp/0.0.0.0:7448
-phoxal_artifacts:
-  channel: stable
-phoxal_participants: {}
-motion:
-  kinematic:
-    kind: differential
-    left_actuators: [l.motor]
-    right_actuators: [r.motor]
-    left_encoders: [l.encoder]
-    right_encoders: [r.encoder]
-    wheel_radius_m: 0.1
-    wheel_base_m: 0.5
-components:
-  sources: {}
-  instances: {}
-"#,
-        )?;
-
-        let error =
-            load_robot_with_extras(&path).expect_err("listen is not a manifest profile field");
-        assert!(
-            error.to_string().contains("bus.profiles.lab.listen"),
-            "{error:#}"
+        assert_eq!(
+            loaded.robot.bus.listen,
+            vec![
+                "tcp/127.0.0.1:7448".to_string(),
+                "serial//dev/ttyUSB0?baudrate=115200".to_string(),
+            ]
+        );
+        let uplink = loaded.robot.bus.uplink.expect("uplink parsed");
+        assert_eq!(uplink.connect, "tls/cloud.phoxal.example:7447");
+        assert_eq!(uplink.retry.initial_ms, 2000);
+        assert_eq!(uplink.retry.max_ms, 10000);
+        assert_eq!(
+            uplink.auth.expect("auth").cert,
+            PathBuf::from("identity/robot.pem")
         );
         Ok(())
     }
 
     #[test]
-    fn load_robot_rejects_missing_selected_bus_profile() -> anyhow::Result<()> {
+    fn load_robot_rejects_invalid_launch_ids_and_collisions() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("robot.yaml");
         std::fs::write(
@@ -1422,35 +1171,38 @@ identity:
   id: bot
   namespace: dev
 structure: structure.urdf
-bus:
-  selected: missing
-  profiles:
-    lab:
-      connect: tcp/lab-router:7447
 phoxal_artifacts:
   channel: stable
 phoxal_participants: {}
+user_participants:
+  mission-service:
+    path: runtimes/mission
+  left_drive:
+    path: runtimes/left_drive
 motion:
   kinematic:
     kind: differential
-    left_actuators: [l.motor]
-    right_actuators: [r.motor]
-    left_encoders: [l.encoder]
-    right_encoders: [r.encoder]
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.encoder]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
 components:
-  sources: {}
-  instances: {}
+  sources:
+    ddsm115:
+      path: components/ddsm115
+  instances:
+    left_drive:
+      component: ddsm115
+      mount_link: left
 "#,
         )?;
 
-        let error =
-            load_robot_with_extras(&path).expect_err("selected profile must exist in bus.profiles");
-        assert!(
-            error.to_string().contains("bus selected profile 'missing'"),
-            "{error:#}"
-        );
+        let error = load_robot_with_extras(&path).expect_err("launch ids should be checked");
+        let message = error.to_string();
+        assert!(message.contains("mission-service"), "{message}");
+        assert!(message.contains("collides"), "{message}");
         Ok(())
     }
 

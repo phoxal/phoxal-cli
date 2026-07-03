@@ -15,9 +15,9 @@ pub struct Deploy {
 #[derive(Debug, Subcommand)]
 pub enum DeploySubcommand {
     #[command(
-        about = "Build a native deployment bundle.",
-        long_about = "Build a native deployment bundle.\n\n\
-                      This surface is reserved for the native systemd deployment bundle."
+        about = "Build a native deployment release artifact.",
+        long_about = "Build a native deployment release artifact.\n\n\
+                      This surface is reserved for the native systemd release renderer."
     )]
     Build(Build),
 }
@@ -56,7 +56,7 @@ impl Build {
 
 pub fn run(_project_start: &Path, _env: &[String]) -> Result<()> {
     Err(crate::native_pending::error(
-        "the systemd deploy bundle (03)",
+        "the systemd release renderer (03)",
     ))
 }
 
@@ -67,6 +67,10 @@ mod tests {
     #[test]
     fn deploy_build_returns_native_pending() {
         let error = run(Path::new("."), &[]).expect_err("deploy build should be pending");
-        assert!(error.to_string().contains("the systemd deploy bundle (03)"));
+        assert!(
+            error
+                .to_string()
+                .contains("the systemd release renderer (03)")
+        );
     }
 }

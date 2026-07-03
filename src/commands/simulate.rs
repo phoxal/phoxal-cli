@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -7,11 +6,9 @@ use serde::Serialize;
 
 use crate::AppContext;
 use crate::commands::MessageFormat;
-use crate::resolver::{ResolveOptions, ResolvedRobot, RobotManifestExtras, resolve};
+use crate::launch_plan::{DEFAULT_ROUTER_CONNECT, SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER};
+use crate::resolver::{ResolveOptions, ResolvedRobot, resolve};
 use crate::world;
-
-const DEFAULT_BUS_CONNECT: &str = "tcp/127.0.0.1:7447";
-const JOYPAD: &str = "joypad";
 
 #[derive(Debug, Args)]
 pub struct Simulate {
@@ -25,7 +22,7 @@ pub struct Simulate {
         help = "Resolve and write run artifacts without starting simulation processes."
     )]
     pub dry_run: bool,
-    #[arg(long, help = "Launch joypad from the cached Phoxal tool binaries.")]
+    #[arg(long, hide = true)]
     pub joypad: bool,
     #[arg(
         long,
@@ -55,10 +52,8 @@ pub struct SimulateOptions {
 pub struct SimulatePlan {
     pub robot_path: PathBuf,
     pub project_root: PathBuf,
-    pub run_dir: PathBuf,
-    pub state_path: PathBuf,
+    pub world_path: PathBuf,
     pub bus_connect: String,
-    pub written_files: Vec<PathBuf>,
     pub native_tools: Vec<String>,
     pub resolved: ResolvedRobot,
 }
@@ -68,19 +63,6 @@ struct ResolvedSimulation {
     project_root: PathBuf,
     world_path: PathBuf,
     resolved: ResolvedRobot,
-    manifest_extras: RobotManifestExtras,
-}
-
-#[derive(Debug, Serialize)]
-struct DryRunState {
-    mode: &'static str,
-    processes: Vec<DryRunProcess>,
-}
-
-#[derive(Debug, Serialize)]
-struct DryRunProcess {
-    label: String,
-    command: String,
 }
 
 impl Simulate {
@@ -127,7 +109,14 @@ pub async fn run(
 
 pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<SimulatePlan> {
     let resolved = resolve_project(project_start, options.clone(), SimulateMode::DryRun)?;
-    write_simulation_files(resolved, options)
+    Ok(SimulatePlan {
+        robot_path: resolved.robot_path,
+        project_root: resolved.project_root,
+        world_path: resolved.world_path,
+        bus_connect: DEFAULT_ROUTER_CONNECT.to_string(),
+        native_tools: native_tool_labels(options),
+        resolved: resolved.resolved,
+    })
 }
 
 fn resolve_project(
@@ -176,82 +165,7 @@ fn resolve_project(
         project_root,
         world_path,
         resolved,
-        manifest_extras,
     })
-}
-
-fn write_simulation_files(
-    resolved: ResolvedSimulation,
-    options: SimulateOptions,
-) -> Result<SimulatePlan> {
-    let run_dir = resolved.project_root.join(".phoxal").join("run");
-    crate::run_view::assemble(&resolved.project_root, &resolved.resolved, &run_dir)?;
-    let bus_profile = resolved
-        .manifest_extras
-        .materialized_bus_profile(DEFAULT_BUS_CONNECT);
-    crate::simulator_staging::stage_webots_artifacts(
-        &resolved.project_root,
-        &resolved.resolved,
-        &run_dir,
-        &resolved.world_path,
-        &bus_profile.connect,
-    )?;
-    let native_tools = native_tool_labels(options);
-
-    let state_path = resolved
-        .project_root
-        .join(".phoxal")
-        .join("cache")
-        .join("state.yaml");
-    write_dry_run_state(&state_path, &native_tools, &resolved)?;
-
-    let mut written_files = collect_files_under(&run_dir)?;
-    let webots_dir = resolved.project_root.join(".phoxal").join("webots");
-    if webots_dir.is_dir() {
-        written_files.extend(collect_files_under(&webots_dir)?);
-    }
-    written_files.push(state_path.clone());
-    written_files.sort();
-    written_files.dedup();
-
-    Ok(SimulatePlan {
-        robot_path: resolved.robot_path,
-        project_root: resolved.project_root,
-        run_dir,
-        state_path,
-        bus_connect: bus_profile.connect,
-        written_files,
-        native_tools,
-        resolved: resolved.resolved,
-    })
-}
-
-fn write_dry_run_state(
-    state_path: &Path,
-    native_tools: &[String],
-    resolved: &ResolvedSimulation,
-) -> Result<()> {
-    if let Some(parent) = state_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let world = staged_webots_world_path(&resolved.project_root);
-    let processes = native_tools
-        .iter()
-        .map(|label| DryRunProcess {
-            label: label.clone(),
-            command: match label.as_str() {
-                "webots" => format!("webots {}", world.display()),
-                other => format!("cached-tool {other}"),
-            },
-        })
-        .collect();
-    let state = DryRunState {
-        mode: "dry-run",
-        processes,
-    };
-    fs::write(state_path, serde_yaml::to_string(&state)?)
-        .with_context(|| format!("failed to write {}", state_path.display()))
 }
 
 fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Result<()> {
@@ -260,16 +174,14 @@ fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Resul
         target_generation: plan.resolved.target_generation.clone(),
         channel: plan.resolved.channel.to_string(),
         catalog_revision: plan.resolved.catalog_revision.clone(),
-        written_files: plan.written_files.clone(),
+        world_path: plan.world_path.clone(),
+        bus_connect: plan.bus_connect.clone(),
         platform_service_count: plan.resolved.platform_runtimes.len(),
         native_tools: plan.native_tools.clone(),
     };
     crate::commands::print_message(
         &output,
         || {
-            for path in &plan.written_files {
-                println!("wrote {}", path.display());
-            }
             println!(
                 "target_generation: {} (channel {})",
                 plan.resolved.target_generation, plan.resolved.channel
@@ -284,7 +196,13 @@ fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Resul
             for runtime in &plan.resolved.platform_runtimes {
                 println!("  - {} -> {}", runtime.name, runtime.artifact_ref());
             }
-            println!("dry-run - no simulation processes started");
+            println!("world: {}", plan.world_path.display());
+            println!("router: {}", plan.bus_connect);
+            println!("site tools:");
+            for tool in &plan.native_tools {
+                println!("  - {tool}");
+            }
+            println!("dry-run - no files written and no simulation processes started");
             Ok(())
         },
         message_format,
@@ -297,55 +215,23 @@ struct SimulateDryRunOutput {
     target_generation: String,
     channel: String,
     catalog_revision: Option<String>,
-    written_files: Vec<PathBuf>,
+    world_path: PathBuf,
+    bus_connect: String,
     platform_service_count: usize,
     native_tools: Vec<String>,
 }
 
-fn staged_webots_world_path(project_root: &Path) -> PathBuf {
-    project_root
-        .join(".phoxal")
-        .join("webots")
-        .join("worlds")
-        .join("default.wbt")
-}
-
 fn native_tool_labels(options: SimulateOptions) -> Vec<String> {
-    // Webots owns simulator controller/supervisor processes via
-    // `.phoxal/webots/controllers/<name>/<name>`, so state.yaml only records
-    // processes phoxal-cli starts directly.
-    let mut labels = Vec::new();
-    if options.joypad {
-        labels.push(JOYPAD.to_string());
-    }
+    let _ = options;
+    let mut labels = vec![SITE_TOOL_ROUTER.to_string(), SITE_TOOL_JOYPAD.to_string()];
     labels.push("webots".to_string());
     labels
-}
-
-fn collect_files_under(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    collect_files_under_inner(root, &mut files)?;
-    Ok(files)
-}
-
-fn collect_files_under_inner(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    if path.is_file() {
-        files.push(path.to_path_buf());
-        return Ok(());
-    }
-    if !path.is_dir() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))? {
-        let entry = entry.with_context(|| format!("failed to read entry in {}", path.display()))?;
-        collect_files_under_inner(&entry.path(), files)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn live_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {

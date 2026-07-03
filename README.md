@@ -4,7 +4,7 @@ Consumer CLI for the Phoxal robot framework.
 You run it from a robot project: it reads `robot.yaml`, resolves the graph against a verified generated artifact catalog when official artifacts are needed, and drives the develop, simulate, and deploy loop.
 It owns the resolver and `robot.yaml` discovery.
 There is no lockfile: catalog revisions, host-tool versions, and component commits resolve live or from the local cache on every run.
-Production reproducibility is the `deploy build` digest-pinned (`@sha256`) bundle.
+Production reproducibility belongs to the future `deploy build` release artifact.
 
 ## Commands
 
@@ -16,7 +16,7 @@ phoxal-cli check                  # validate target generation + topology via em
 phoxal-cli generations status     # inspect catalog readiness for the robot target
 phoxal-cli service add brain      # scaffold a user service crate, register it in robot.yaml
 phoxal-cli service run brain      # build and run that service host-native against the dev bus
-phoxal-cli simulate default       # launch the Webots simulation stack
+phoxal-cli simulate default       # resolve and report the simulation launch plan
 
 phoxal-cli pull                   # refresh the artifact catalog cache + host tools
 phoxal-cli outdated               # report cached artifacts with newer remote digests
@@ -28,10 +28,10 @@ phoxal-cli deploy build           # write an immutable, digest-pinned deployment
 | `robot new <name>` | Scaffold a D5 robot project (`robot.yaml`, `structure.urdf`, default world, `runtimes/`). New manifests omit root `api_version`; optional `phoxal_artifacts.generation` pins the target generation. |
 | `check` | Resolve `robot.yaml`, then run each participant's `emit-apis` and fail if participants sharing a contract disagree on its `schema_id` (wire shape) or the producer/consumer topology is unsatisfied. Mixed participant `api_version`s are allowed as long as shared contracts' `schema_id`s agree. Official artifact readiness comes from the generated catalog; git component commits resolve live unless pinned to a commit SHA in `robot.yaml`. `--pull` refreshes the catalog and host tools first; `--service <name>` scopes the build to one user service. |
 | `generations status` | Report readiness for a catalog generation on the robot target, including changed contracts and per-target artifact status. Use `--generation <g>` to inspect a specific generation. |
-| `simulate <world>` | Resolve, generate the run bundle, and launch the Webots stack (router, official services, user services, component drivers). |
+| `simulate <world>` | Resolve the robot and report the host-native simulation launch plan without writing a local launch directory. |
 | `service add\|run\|catalog` | Scaffold a user service, run one host-native, or print official services from the configured artifact catalog. |
 | `pull` / `outdated` | Refresh, or report drift in, cached artifact metadata and host tools for the selected `(target_generation, channel)`. |
-| `deploy build` | Re-run the static check on a pulled set and write a compose artifact whose image refs are all immutable (`repository@sha256:digest`). This digest-pinned bundle is the production reproducibility boundary. |
+| `deploy build` | Reserved for the native systemd release artifact. |
 | `validate` | Lower-level `robot.yaml` structure and user-service phoxal-dependency checks that back `check`. |
 | `doctor` | Check host prerequisites (Docker, Webots) without changing anything. |
 | `self upgrade` | Update the CLI binary itself. |
@@ -96,17 +96,17 @@ catalog from the framework checkout and pass it with `--catalog` or
 
 ```sh
 # from the phoxal-cli checkout; ROBOT_DIR defaults to ../robot-v1
-scripts/live-simulate-gate.sh            # smoke: live resolve + compose generation (CI-safe)
+scripts/live-simulate-gate.sh            # smoke: live resolve + dry-run report (CI-safe)
 scripts/live-simulate-gate.sh --live     # full live run (needs Docker daemon + Webots)
 ```
 
-The smoke phase runs `simulate default --dry-run` to resolve and generate the
-run bundle. It needs no Docker daemon. The `--live` phase additionally requires
-a running Docker daemon and Webots on `PATH`, then runs `simulate default
---pull` so you can confirm the router, Webots, host tools, and bus connectivity
-(`tcp/router:7447`, host tools via `tcp/127.0.0.1:7447`). Until native release
-assets publish, official-service launch failures should surface as catalog or
-native-pending diagnostics rather than as missing static catalog entries.
+The smoke phase runs `simulate default --dry-run` to resolve and report the
+planned local launch without writing `.phoxal/run` or a release directory. It
+needs no Docker daemon. The `--live` phase additionally requires Webots on
+`PATH`, then runs `simulate default --pull` so you can confirm the router,
+Webots, host tools, and bus connectivity. Until native release assets publish,
+official-service launch failures should surface as catalog or native-pending
+diagnostics rather than as missing static catalog entries.
 
 ## Host layout
 
@@ -116,8 +116,7 @@ native-pending diagnostics rather than as missing static catalog entries.
 ~/.phoxal/worlds/                   Optional fallback for shared world files (see Simulate above).
 ~/.phoxal/config.yaml               Optional. Today only `zenoh_image: <ref>` replaces the compiled default.
 
-<project>/.phoxal/run/              Generated compose + staged robot view (regenerated each simulate).
-<project>/.phoxal/webots/           Generated Webots controllers + protos.
+<project>/.phoxal/                  Reserved for caches and future generated simulation assets.
 <project>/.phoxal/cache/state.yaml  Per-project process lifecycle ledger.
 ```
 
