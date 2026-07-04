@@ -4,12 +4,15 @@ use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail};
 
+const SUDO_PASSWORD_ENV: &str = "PHOXAL_SUDO_PASSWORD";
+
 pub fn run_output(
     executable: &str,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
     cwd: Option<&Path>,
 ) -> Result<Output> {
     let mut command = Command::new(executable);
+    command.env_remove(SUDO_PASSWORD_ENV);
     command.args(args);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);

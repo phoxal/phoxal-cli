@@ -2865,6 +2865,7 @@ dependencies = [
  "heck",
  "hex",
  "jsonschema",
+ "libc",
  "nalgebra",
  "pathdiff",
  "phoxal",
@@ -2884,6 +2885,7 @@ dependencies = [
  "tracing-subscriber",
  "urdf-rs",
  "webots-proto",
+ "zeroize",
 ]
 
 [[package]]

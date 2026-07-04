@@ -1,19 +1,24 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
+use std::path::{Component as PathComponent, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
-use phoxal::model::robot::v1::{ConnectionConfig, Robot};
+use phoxal::model::robot::v1::{ComponentSource as RobotComponentSource, ConnectionConfig, Robot};
 use phoxal::participant::launch::env;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::AppContext;
 use crate::catalog::{ArtifactKind, ArtifactStatus};
@@ -43,7 +48,11 @@ const SYSTEMD_DIR: &str = "/etc/systemd/system";
 const IDENTITY_DIR: &str = "/var/lib/phoxal/identity";
 const HELPER_PATH: &str = "/usr/local/sbin/phoxal-systemd-helper";
 const SUDOERS_PATH: &str = "/etc/sudoers.d/phoxal-deploy";
+const PAYLOAD_STAGING_PREFIX: &str = "/tmp/phoxal-payload-";
+const UNIT_STAGING_PREFIX: &str = "/tmp/phoxal-units-";
 const RELEASE_SCHEMA: &str = "phoxal.release/v0";
+const SUDO_PASSWORD_ENV: &str = "PHOXAL_SUDO_PASSWORD";
+const COMPONENT_FILE: &str = "component.yaml";
 const WATCHDOG_SEC: u64 = 10;
 const CARGO_ZIGBUILD_VERSION: &str = "0.23.0";
 #[cfg(not(test))]
@@ -162,11 +171,93 @@ pub struct HealthUnitReport {
 pub(crate) struct RemoteProbe {
     pub arch: String,
     pub bootstrap_required: bool,
+    /// The account `ssh <host>` lands as; sudoers grants are written for this
+    /// user, since it is the one that runs `sudo phoxal-systemd-helper`.
+    pub remote_user: String,
+    /// `sudo -n true` succeeded: any root work can run fully non-interactively.
+    pub sudo_noninteractive: bool,
+    /// A non-interactive `sudo phoxal-systemd-helper` call is authorized for
+    /// this user - either through blanket passwordless sudo or through the
+    /// installed sudoers fragment. `sudo -n true` tests blanket sudo only;
+    /// the fragment grant is per-command, so it gets its own probe.
+    pub helper_grant: bool,
+    /// The installed helper differs from this build's expected script.
+    pub helper_stale: bool,
+}
+
+impl RemoteProbe {
+    /// Root work is needed when the host was never bootstrapped, or when the
+    /// installed helper/sudoers grant does not cover the deploying user (a
+    /// stale grant - e.g. the host was bootstrapped by a different user), or
+    /// when the helper script itself is stale. Re-running the bootstrap script
+    /// is the repair: it rewrites the helper and the fragment idempotently.
+    fn root_work_required(&self) -> bool {
+        self.bootstrap_required || !self.helper_grant || self.helper_stale
+    }
+}
+
+pub(crate) struct SudoPassword {
+    bytes: Vec<u8>,
+}
+
+impl SudoPassword {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+
+    fn push(&mut self, byte: u8) {
+        self.bytes.push(byte);
+    }
+
+    fn write_with_newline(&self, writer: &mut impl Write) -> Result<()> {
+        writer
+            .write_all(&self.bytes)
+            .context("failed to write sudo password to child stdin")?;
+        writer
+            .write_all(b"\n")
+            .context("failed to write sudo password newline to child stdin")
+    }
+}
+
+impl Zeroize for SudoPassword {
+    fn zeroize(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for SudoPassword {}
+
+impl Drop for SudoPassword {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+trait SudoPasswordSource {
+    fn password_from_env(&mut self) -> Option<SudoPassword>;
+    fn read_password(&mut self, prompt: &str) -> Result<SudoPassword>;
+}
+
+struct LocalSudoPasswordSource;
+
+impl SudoPasswordSource for LocalSudoPasswordSource {
+    fn password_from_env(&mut self) -> Option<SudoPassword> {
+        sudo_password_from_env()
+    }
+
+    fn read_password(&mut self, prompt: &str) -> Result<SudoPassword> {
+        read_password_from_tty(prompt)
+    }
 }
 
 pub(crate) trait DeployTransport {
     fn probe(&mut self) -> Result<RemoteProbe>;
-    fn bootstrap(&mut self, helper: &BootstrapScripts) -> Result<()>;
+    fn validate_sudo_password(&mut self, password: &SudoPassword) -> Result<bool>;
+    fn bootstrap(
+        &mut self,
+        helper: &BootstrapScripts,
+        sudo_password: Option<&SudoPassword>,
+    ) -> Result<()>;
     fn list_installed_units(&mut self) -> Result<Vec<String>>;
     fn sync_payload(&mut self, payload: &RenderedPayload) -> Result<()>;
     fn install_units(&mut self, payload: &RenderedPayload, stale_units: &[String]) -> Result<()>;
@@ -271,7 +362,14 @@ pub(crate) fn run(
                 .as_deref()
                 .context("--dry-run requires --target <arch>")?,
         )?;
-        let payload = prepare_deploy(project_start, &options, target, false, ui)?;
+        let payload = prepare_deploy(
+            project_start,
+            &options,
+            target,
+            false,
+            DRY_RUN_REMOTE_USER,
+            ui,
+        )?;
         return Ok(report_from_payload("dry-run", payload, None));
     }
 
@@ -280,25 +378,62 @@ pub(crate) fn run(
         .as_deref()
         .context("deploy requires <user@host> unless --dry-run is set")?;
     let mut transport = SshTransport::new(host.to_string(), *ui);
-    deploy_with_transport(project_start, &options, &mut transport, ui)
+    deploy_with_transport(
+        project_start,
+        &options,
+        &mut transport,
+        local_tty_available(),
+        ui,
+    )
 }
 
 pub(crate) fn deploy_with_transport<T: DeployTransport>(
     project_start: &Path,
     options: &DeployOptions,
     transport: &mut T,
+    local_tty_available: bool,
     ui: &crate::Ui,
 ) -> Result<DeployReport> {
+    let mut sudo_passwords = LocalSudoPasswordSource;
+    deploy_with_transport_with_sudo(
+        project_start,
+        options,
+        transport,
+        local_tty_available,
+        &mut sudo_passwords,
+        ui,
+    )
+}
+
+fn deploy_with_transport_with_sudo<T, S>(
+    project_start: &Path,
+    options: &DeployOptions,
+    transport: &mut T,
+    local_tty_available: bool,
+    sudo_passwords: &mut S,
+    ui: &crate::Ui,
+) -> Result<DeployReport>
+where
+    T: DeployTransport,
+    S: SudoPasswordSource + ?Sized,
+{
     validate_deploy_options(options)?;
     let probe = transport.probe().context("failed to probe deploy host")?;
     let target = target_from_uname_arch(&probe.arch)?;
-    let mut payload = prepare_deploy(project_start, options, target, true, ui)?;
+    let host = options
+        .host
+        .as_deref()
+        .context("deploy requires <user@host> unless --dry-run is set")?;
+    let sudo_password =
+        ensure_sudo_will_succeed(host, &probe, local_tty_available, sudo_passwords, transport)?;
+    let mut payload = prepare_deploy(project_start, options, target, true, &probe.remote_user, ui)?;
 
-    if probe.bootstrap_required {
+    if probe.root_work_required() {
         transport
-            .bootstrap(&payload.bootstrap)
+            .bootstrap(&payload.bootstrap, sudo_password.as_ref())
             .context("failed to bootstrap remote phoxal install")?;
     }
+    drop(sudo_password);
     let installed = transport
         .list_installed_units()
         .context("failed to list installed phoxal units")?;
@@ -321,6 +456,206 @@ pub(crate) fn deploy_with_transport<T: DeployTransport>(
         bail!("{}", format_health_failure(&health));
     }
     Ok(report_from_payload("deploy", payload, Some(health)))
+}
+
+/// Fail before cross-building/packaging/rsyncing anything if sudo on the
+/// target will never succeed. Decision table:
+///
+/// 1. `sudo -n true` works (blanket NOPASSWD or a cached credential):
+///    proceed - bootstrap or grant repair can run non-interactively.
+/// 2. No blanket sudo, but the helper is installed and its per-command
+///    sudoers grant covers this user (`helper_grant`), and the helper hash
+///    matches this build: proceed - the steady-state deploy needs no root
+///    work; every `run_helper` call goes through the fragment.
+/// 3. Root work is required (first bootstrap, a stale/missing grant, or a
+///    stale helper that the bootstrap script repairs) and `PHOXAL_SUDO_PASSWORD`
+///    is set or local `/dev/tty` is available: validate a password now, then
+///    proceed and feed it to bootstrap over child stdin.
+/// 4. Root work is required and there is no password env var and no local
+///    `/dev/tty`: fail now, before doing any work, with all remedies.
+fn ensure_sudo_will_succeed<T, S>(
+    host: &str,
+    probe: &RemoteProbe,
+    local_tty_available: bool,
+    sudo_passwords: &mut S,
+    transport: &mut T,
+) -> Result<Option<SudoPassword>>
+where
+    T: DeployTransport,
+    S: SudoPasswordSource + ?Sized,
+{
+    if probe.sudo_noninteractive {
+        return Ok(None);
+    }
+    if !probe.root_work_required() {
+        return Ok(None);
+    }
+    if let Some(password) = sudo_passwords.password_from_env() {
+        if transport
+            .validate_sudo_password(&password)
+            .with_context(|| format!("failed to validate sudo password on {host}"))?
+        {
+            return Ok(Some(password));
+        }
+        bail!(
+            "DeploySudoPasswordRejected: {SUDO_PASSWORD_ENV} did not validate for {user} on {host}.",
+            user = probe.remote_user,
+        );
+    }
+    if local_tty_available {
+        let prompt = sudo_password_prompt(&probe.remote_user, host);
+        for _ in 0..2 {
+            let password = sudo_passwords.read_password(&prompt).with_context(|| {
+                format!(
+                    "failed to read sudo password for {user} on {host}",
+                    user = probe.remote_user
+                )
+            })?;
+            if transport
+                .validate_sudo_password(&password)
+                .with_context(|| format!("failed to validate sudo password on {host}"))?
+            {
+                return Ok(Some(password));
+            }
+        }
+        bail!(
+            "DeploySudoPasswordRejected: sudo password validation failed for {user} on {host} after 2 attempts.",
+            user = probe.remote_user,
+        );
+    }
+    let root_work = if probe.bootstrap_required {
+        "needs root once (first deploy: install /opt/phoxal, the phoxal-systemd-helper, and its sudoers grant)"
+    } else if probe.helper_stale {
+        "needs root once (repair: the installed phoxal-systemd-helper is stale for this phoxal-cli build, so the deploy must rewrite the helper and its sudoers grant)"
+    } else {
+        "needs root once (repair: the phoxal-systemd-helper is installed but its sudoers grant does not cover this user, so the deploy must rewrite the grant)"
+    };
+    bail!(
+        "DeploySudoRequiresPassword: {host} {root_work} and sudo is not passwordless for {user}. Fix: rerun `phoxal-cli deploy` interactively (from a real TTY so phoxal-cli can read /dev/tty), pre-authorize {user} on {host} with a NOPASSWD sudoers entry, or for automation set {SUDO_PASSWORD_ENV} for this command (NOPASSWD or an interactive run is preferred).",
+        user = probe.remote_user,
+    )
+}
+
+fn sudo_password_prompt(user: &str, host: &str) -> String {
+    format!("[sudo] password for {user} on {host}:")
+}
+
+#[cfg(unix)]
+fn sudo_password_from_env() -> Option<SudoPassword> {
+    std::env::var_os(SUDO_PASSWORD_ENV).map(|password| SudoPassword::new(password.into_vec()))
+}
+
+#[cfg(not(unix))]
+fn sudo_password_from_env() -> Option<SudoPassword> {
+    std::env::var_os(SUDO_PASSWORD_ENV)
+        .map(|password| SudoPassword::new(password.to_string_lossy().into_owned().into_bytes()))
+}
+
+fn local_tty_available() -> bool {
+    open_tty().is_ok()
+}
+
+#[cfg(unix)]
+fn open_tty() -> std::io::Result<fs::File> {
+    OpenOptions::new().read(true).write(true).open("/dev/tty")
+}
+
+#[cfg(not(unix))]
+fn open_tty() -> std::io::Result<fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "/dev/tty is not available on this platform",
+    ))
+}
+
+fn read_password_from_tty(prompt: &str) -> Result<SudoPassword> {
+    let mut tty = open_tty().context("failed to open /dev/tty for sudo password prompt")?;
+    tty.write_all(prompt.as_bytes())
+        .context("failed to write sudo password prompt to /dev/tty")?;
+    tty.flush()
+        .context("failed to flush sudo password prompt to /dev/tty")?;
+    let mut password = SudoPassword::new(Vec::new());
+    {
+        let _echo_guard = TtyEchoGuard::disable(&tty).context("failed to disable /dev/tty echo")?;
+        loop {
+            let mut byte = [0_u8; 1];
+            let read = tty
+                .read(&mut byte)
+                .context("failed to read sudo password from /dev/tty")?;
+            if read == 0 {
+                bail!("failed to read sudo password from /dev/tty: EOF");
+            }
+            match byte[0] {
+                b'\n' | b'\r' => break,
+                value => password.push(value),
+            }
+        }
+    }
+    tty.write_all(b"\n")
+        .context("failed to finish sudo password prompt on /dev/tty")?;
+    Ok(password)
+}
+
+#[cfg(unix)]
+struct TtyEchoGuard {
+    fd: RawFd,
+    original: libc::termios,
+}
+
+#[cfg(unix)]
+impl TtyEchoGuard {
+    fn disable(tty: &fs::File) -> Result<Self> {
+        let fd = tty.as_raw_fd();
+        let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+        if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("tcgetattr failed");
+        }
+        let original = unsafe { original.assume_init() };
+        let mut no_echo = original;
+        no_echo.c_lflag &= !(libc::ECHO as libc::tcflag_t);
+        if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &no_echo) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("tcsetattr failed");
+        }
+        Ok(Self { fd, original })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TtyEchoGuard {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.original) };
+    }
+}
+
+#[cfg(not(unix))]
+struct TtyEchoGuard;
+
+#[cfg(not(unix))]
+impl TtyEchoGuard {
+    fn disable(_tty: &fs::File) -> Result<Self> {
+        bail!("/dev/tty password prompting is only supported on Unix platforms")
+    }
+}
+
+fn deploy_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    command.env_remove(SUDO_PASSWORD_ENV);
+    command
+}
+
+// The prompt must be a single non-empty token: these argv vectors travel over
+// `ssh <host> <args...>`, which flattens them into one shell line - an empty
+// `-p ""` argument vanishes and `-p` then swallows the next token as the
+// prompt (turning the script path into the command). The prompt itself only
+// goes to the remote stderr; the password always arrives via stdin (-S).
+const SUDO_STDIN_PROMPT: &str = "phoxal-sudo-password:";
+
+fn sudo_validate_args() -> [&'static str; 5] {
+    ["sudo", "-S", "-p", SUDO_STDIN_PROMPT, "-v"]
+}
+
+fn sudo_bootstrap_args(remote_path: &str) -> Vec<&str> {
+    vec!["sudo", "-S", "-p", SUDO_STDIN_PROMPT, "sh", remote_path]
 }
 
 fn validate_deploy_options(options: &DeployOptions) -> Result<()> {
@@ -405,11 +740,17 @@ fn target_for_arch(arch: &str) -> TargetTriples {
     }
 }
 
+/// Placeholder sudoers grantee for `--dry-run`, which renders no host and so
+/// never probes a real remote user. The rendered fragment is inspectable but
+/// is never installed anywhere, since dry-run never contacts a host.
+const DRY_RUN_REMOTE_USER: &str = "<deploy-user>";
+
 fn prepare_deploy(
     project_start: &Path,
     options: &DeployOptions,
     target: TargetTriples,
     require_official_binaries: bool,
+    remote_user: &str,
     ui: &crate::Ui,
 ) -> Result<RenderedPayload> {
     let robot_path = discover_robot_yaml(project_start)
@@ -502,6 +843,7 @@ fn prepare_deploy(
         target,
         health_timeout: options.health_timeout,
         require_official_binaries,
+        remote_user,
         ui,
     })
 }
@@ -515,6 +857,7 @@ struct RenderPayloadInput<'a> {
     target: TargetTriples,
     health_timeout: Duration,
     require_official_binaries: bool,
+    remote_user: &'a str,
     ui: &'a crate::Ui,
 }
 
@@ -528,6 +871,7 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
         target,
         health_timeout,
         require_official_binaries,
+        remote_user,
         ui,
     } = input;
     let root = tempfile::tempdir().context("failed to create deploy payload directory")?;
@@ -535,7 +879,7 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
 
     let bootstrap = BootstrapScripts {
         helper_script: helper_script(),
-        sudoers_fragment: sudoers_fragment(),
+        sudoers_fragment: sudoers_fragment(remote_user),
     };
 
     let source_builds = stage_source_artifacts(
@@ -565,6 +909,7 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
     )?;
 
     write_robot_yaml(root.path(), robot)?;
+    let metadata_files = stage_payload_metadata(project_root, root.path(), robot)?;
 
     let release = release_record(resolved, plan, &source_builds, &official_plans)?;
     let release_json_text =
@@ -579,14 +924,20 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
         .values()
         .filter_map(|artifact| artifact.missing_label.clone())
         .collect::<Vec<_>>();
+    let mut direct_writes = vec![
+        format!("{OPT_ROOT}/robot.yaml"),
+        format!("{OPT_ROOT}/phoxal-release.json"),
+    ];
+    direct_writes.extend(metadata_files);
     let install_plan = InstallPlan {
         helper_path: HELPER_PATH.to_string(),
         sudoers_path: SUDOERS_PATH.to_string(),
-        scoped_delete: vec![format!("{OPT_BIN}/"), format!("{OPT_ENV}/")],
-        direct_writes: vec![
-            format!("{OPT_ROOT}/robot.yaml"),
-            format!("{OPT_ROOT}/phoxal-release.json"),
+        scoped_delete: vec![
+            format!("{OPT_BIN}/"),
+            format!("{OPT_ENV}/"),
+            format!("{OPT_ROOT}/components/"),
         ],
+        direct_writes,
         identity_files,
         units: unit_names.clone(),
         stale_units_to_remove: Vec::new(),
@@ -901,13 +1252,23 @@ fn collect_dependency_names(value: &toml::Value, names: &mut Vec<String>) {
 
 #[cfg(not(test))]
 fn ensure_rust_target(target: &str, ui: &crate::Ui) -> Result<()> {
-    let installed = crate::shell::run_stdout("rustup", ["target", "list", "--installed"], None)
+    let output = deploy_command("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
         .context("CrossBuildUnsupported: rustup is required to manage deploy cross targets")?;
+    if !output.status.success() {
+        bail!(
+            "CrossBuildUnsupported: rustup is required to manage deploy cross targets and `rustup target list --installed` failed with status {}.",
+            output.status
+        );
+    }
+    let installed = String::from_utf8(output.stdout)
+        .context("CrossBuildUnsupported: rustup wrote non-UTF8 stdout")?;
     if installed.lines().any(|line| line.trim() == target) {
         return Ok(());
     }
     ui.info(format!("provisioning Rust target {target} with rustup"));
-    let status = Command::new("rustup")
+    let status = deploy_command("rustup")
         .args(["target", "add", target])
         .status()
         .context("failed to start rustup target add")?;
@@ -1025,7 +1386,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    Command::new(program)
+    deploy_command(program.as_os_str())
         .args(args)
         .env("PATH", search_path)
         .output()
@@ -1069,7 +1430,7 @@ fn provision_zig(
             zig_root.display()
         ));
         let partial = archive.with_extension("partial");
-        let output = Command::new("curl")
+        let output = deploy_command("curl")
             .args([
                 "--fail",
                 "--location",
@@ -1101,7 +1462,7 @@ fn provision_zig(
     let extracted = zig_root.join(descriptor.archive_name);
     let zig_binary = extracted.join("zig");
     if !zig_binary.is_file() {
-        let output = Command::new("tar")
+        let output = deploy_command("tar")
             .arg("-xf")
             .arg(&archive)
             .arg("-C")
@@ -1190,7 +1551,7 @@ fn provision_cargo_zigbuild(
         "provisioning cargo-zigbuild {CARGO_ZIGBUILD_VERSION} into {}",
         tool_root.display()
     ));
-    let output = Command::new(cargo)
+    let output = deploy_command(cargo.as_os_str())
         .args([
             "install",
             "cargo-zigbuild",
@@ -1266,7 +1627,7 @@ fn cross_build_source_binary(
     ui.info(format!(
         "cross-building {preferred_name} for {target} with cargo zigbuild --release"
     ));
-    let mut command = Command::new("cargo");
+    let mut command = deploy_command("cargo");
     command
         .arg("zigbuild")
         .arg("--release")
@@ -1320,7 +1681,7 @@ fn cross_build_source_binary(
     ui.info(format!(
         "test-building deploy participant {preferred_name} with cargo build --release"
     ));
-    let status = Command::new("cargo")
+    let status = deploy_command("cargo")
         .arg("build")
         .arg("--release")
         .arg("--bin")
@@ -1346,11 +1707,20 @@ fn cross_build_source_binary(
 
 #[cfg(test)]
 fn cargo_target_dir(crate_dir: &Path) -> Result<PathBuf> {
-    let output = crate::shell::run_stdout(
-        "cargo",
-        ["metadata", "--format-version", "1", "--no-deps"],
-        Some(crate_dir),
-    )?;
+    let output = deploy_command("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(crate_dir)
+        .output()
+        .context("failed to run `cargo`")?;
+    if !output.status.success() {
+        bail!(
+            "`cargo` failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let output = String::from_utf8(output.stdout).context("`cargo` wrote non-UTF8 stdout")?;
     let json: Value = serde_json::from_str(&output).context("cargo metadata was not JSON")?;
     json.get("target_directory")
         .and_then(Value::as_str)
@@ -1619,12 +1989,20 @@ fn locate_tool_binary(tool: &ResolvedTool) -> Result<Option<PathBuf>> {
             return Ok(Some(path));
         }
     }
-    let Some(descriptor) = crate::native_artifacts::NativeArtifactDescriptor::from_tool(tool)?
-    else {
-        return Ok(None);
-    };
-    let cache = crate::native_artifacts::artifact_binary_path(&descriptor)?;
-    Ok(cache.is_file().then_some(cache))
+    // Tools never go through the graph check's emit-apis fetch (which stages
+    // runtime assets as a side effect), so stage the target-triple asset
+    // explicitly here.
+    crate::native_artifacts::stage_tool(
+        None,
+        tool,
+        crate::native_artifacts::ProvisioningMode::MissingOnly,
+    )
+    .with_context(|| {
+        format!(
+            "failed to stage official tool {} from the catalog",
+            tool.name
+        )
+    })
 }
 
 fn env_path_override(prefix: &str, id: &str) -> Option<PathBuf> {
@@ -1834,7 +2212,7 @@ fn target_unit() -> String {
 
 fn router_unit(binary: &str) -> String {
     format!(
-        "[Unit]\nDescription=Phoxal Zenoh router\nAfter=network-online.target\nWants=network-online.target\nPartOf=phoxal.target\n\n[Service]\nType=notify\nEnvironmentFile={OPT_ENV}/router.env\nExecStart={OPT_BIN}/{binary}\nRestart=on-failure\nRestartSec=2s\nStartLimitIntervalSec={}\nStartLimitBurst={START_LIMIT_BURST}\nWatchdogSec={WATCHDOG_SEC}s\nUser=phoxal\nGroup=phoxal\nNoNewPrivileges=true\n\n[Install]\nWantedBy=phoxal.target\n",
+        "[Unit]\nDescription=Phoxal Zenoh router\nAfter=network-online.target\nWants=network-online.target\nPartOf=phoxal.target\nStartLimitIntervalSec={}\nStartLimitBurst={START_LIMIT_BURST}\n\n[Service]\nType=notify\nEnvironmentFile={OPT_ENV}/router.env\nExecStart={OPT_BIN}/{binary}\nRestart=on-failure\nRestartSec=2s\nWatchdogSec={WATCHDOG_SEC}s\nUser=phoxal\nGroup=phoxal\nNoNewPrivileges=true\n\n[Install]\nWantedBy=phoxal.target\n",
         START_LIMIT_INTERVAL.as_secs()
     )
 }
@@ -1846,7 +2224,7 @@ fn participant_unit(
 ) -> String {
     let id = &participant.launch.participant_id;
     let mut unit = format!(
-        "[Unit]\nDescription=Phoxal participant {id}\nAfter=network-online.target phoxal-router.service\nWants=network-online.target\nPartOf=phoxal.target\n\n[Service]\nType=notify\nEnvironmentFile={OPT_ENV}/{id}.env\nExecStart={OPT_BIN}/{binary}\n\nRestart=on-failure\nRestartSec=2s\nStartLimitIntervalSec={}\nStartLimitBurst={START_LIMIT_BURST}\nTimeoutStopSec=5s\nStateDirectory=phoxal\nWatchdogSec={WATCHDOG_SEC}s\n\nUser=phoxal\nGroup=phoxal\nNoNewPrivileges=true\n",
+        "[Unit]\nDescription=Phoxal participant {id}\nAfter=network-online.target phoxal-router.service\nWants=network-online.target\nPartOf=phoxal.target\nStartLimitIntervalSec={}\nStartLimitBurst={START_LIMIT_BURST}\n\n[Service]\nType=notify\nEnvironmentFile={OPT_ENV}/{id}.env\nExecStart={OPT_BIN}/{binary}\n\nRestart=on-failure\nRestartSec=2s\nTimeoutStopSec=5s\nStateDirectory=phoxal\nWatchdogSec={WATCHDOG_SEC}s\n\nUser=phoxal\nGroup=phoxal\nNoNewPrivileges=true\n",
         START_LIMIT_INTERVAL.as_secs()
     );
     if !privileges.supplementary_groups.is_empty() {
@@ -2006,8 +2384,125 @@ impl UnitPrivileges {
 }
 
 fn write_robot_yaml(root: &Path, robot: &Robot) -> Result<()> {
-    let yaml = serde_yaml::to_string(robot).context("failed to serialize resolved robot.yaml")?;
+    // Serialize through the version dispatcher so the payload keeps the
+    // `schema: v0` tag - on-target consumers (tool-router, participants)
+    // parse via the dispatcher and reject an untagged manifest.
+    let yaml = serde_yaml::to_string(&phoxal::model::robot::Robot::V1(robot.clone()))
+        .context("failed to serialize resolved robot.yaml")?;
     write_text(&payload_opt(root).join("robot.yaml"), &yaml)
+}
+
+#[derive(Debug, Deserialize)]
+struct ComponentMetadataReference {
+    #[serde(default)]
+    structure: Option<PathBuf>,
+}
+
+fn stage_payload_metadata(project_root: &Path, root: &Path, robot: &Robot) -> Result<Vec<String>> {
+    let mut staged_files = Vec::new();
+    staged_files.push(stage_declared_metadata_file(
+        project_root,
+        &payload_opt(root),
+        &robot.structure,
+        "robot structure",
+    )?);
+
+    for (source_id, source) in &robot.components.sources {
+        let RobotComponentSource::Path(source) = source else {
+            continue;
+        };
+        let field = format!("components.sources.{source_id}.path");
+        validate_payload_relative_path(&source.path, &field)?;
+        let source_dir = crate::utils::resolve_project_path(project_root, &source.path);
+        let payload_dir = payload_opt(root).join(&source.path);
+        let component_file = source_dir.join(COMPONENT_FILE);
+        copy_metadata_file(
+            &component_file,
+            &payload_dir.join(COMPONENT_FILE),
+            &format!("component metadata for '{source_id}'"),
+        )?;
+        staged_files.push(opt_remote_path(&source.path.join(COMPONENT_FILE)));
+
+        if let Some(structure) = component_structure_reference(&component_file)? {
+            let structure_field = format!("components.sources.{source_id}.structure");
+            validate_payload_relative_path(&structure, &structure_field)?;
+            copy_metadata_file(
+                &source_dir.join(&structure),
+                &payload_dir.join(&structure),
+                &format!("component structure for '{source_id}'"),
+            )?;
+            staged_files.push(opt_remote_path(&source.path.join(structure)));
+        }
+    }
+
+    Ok(staged_files)
+}
+
+fn stage_declared_metadata_file(
+    project_root: &Path,
+    payload_root: &Path,
+    relative_path: &Path,
+    label: &str,
+) -> Result<String> {
+    validate_payload_relative_path(relative_path, label)?;
+    let source = crate::utils::resolve_project_path(project_root, relative_path);
+    copy_metadata_file(&source, &payload_root.join(relative_path), label)?;
+    Ok(opt_remote_path(relative_path))
+}
+
+fn component_structure_reference(component_file: &Path) -> Result<Option<PathBuf>> {
+    let contents = fs::read_to_string(component_file)
+        .with_context(|| format!("failed to read {}", component_file.display()))?;
+    let metadata =
+        serde_yaml::from_str::<ComponentMetadataReference>(&contents).with_context(|| {
+            format!(
+                "failed to parse metadata references from {}",
+                component_file.display()
+            )
+        })?;
+    Ok(metadata.structure)
+}
+
+fn validate_payload_relative_path(path: &Path, field: &str) -> Result<()> {
+    if path.as_os_str().is_empty() {
+        bail!("{field} must not be empty");
+    }
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                PathComponent::ParentDir | PathComponent::RootDir | PathComponent::Prefix(_)
+            )
+        })
+    {
+        bail!(
+            "{field} path '{}' must stay within {OPT_ROOT}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn copy_metadata_file(source: &Path, dest: &Path, label: &str) -> Result<()> {
+    if !source.is_file() {
+        bail!("{label} file {} does not exist", source.display());
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::copy(source, dest).with_context(|| {
+        format!(
+            "failed to stage {label} {} to {}",
+            source.display(),
+            dest.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn opt_remote_path(relative_path: &Path) -> String {
+    format!("{OPT_ROOT}/{}", relative_path.display())
 }
 
 fn release_record(
@@ -2140,6 +2635,10 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
+fn helper_script_sha256() -> String {
+    hex::encode(Sha256::digest(helper_script().as_bytes()))
+}
+
 fn write_text(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -2153,6 +2652,9 @@ fn helper_script() -> String {
         r#"#!/bin/sh
 set -eu
 unit_dir="{SYSTEMD_DIR}"
+opt_root="{OPT_ROOT}"
+opt_bin="{OPT_BIN}"
+opt_env="{OPT_ENV}"
 
 valid_unit() {{
   case "$1" in
@@ -2165,12 +2667,122 @@ valid_unit() {{
   return 0
 }}
 
+valid_stage_suffix() {{
+  case "$1" in
+    ""|*[!A-Za-z0-9_.@-]*) return 1 ;;
+  esac
+  return 0
+}}
+
+valid_unit_source() {{
+  case "$1" in
+    {UNIT_STAGING_PREFIX}*/*) ;;
+    *) return 1 ;;
+  esac
+  dir="${{1%/*}}"
+  suffix="${{dir#{UNIT_STAGING_PREFIX}}}"
+  valid_stage_suffix "$suffix"
+}}
+
+valid_payload_source() {{
+  case "$1" in
+    {PAYLOAD_STAGING_PREFIX}*) ;;
+    *) return 1 ;;
+  esac
+  suffix="${{1#{PAYLOAD_STAGING_PREFIX}}}"
+  valid_stage_suffix "$suffix"
+}}
+
+sync_payload_dir() {{
+  local src dest mode entry name
+  src="$1"
+  dest="$2"
+  mode="$3"
+  install -d -o phoxal -g phoxal -m 0755 "$dest"
+  for entry in "$dest"/* "$dest"/.[!.]* "$dest"/..?*; do
+    [ -e "$entry" ] || continue
+    name="${{entry##*/}}"
+    if [ ! -e "$src/$name" ]; then
+      rm -rf "$entry"
+    fi
+  done
+  if [ -d "$src" ]; then
+    for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
+      [ -e "$entry" ] || continue
+      name="${{entry##*/}}"
+      test -f "$entry"
+      install -o phoxal -g phoxal -m "$mode" "$entry" "$dest/$name"
+    done
+  fi
+}}
+
+sync_payload_tree() {{
+  # local is load-bearing: this function recurses, and without it the
+  # recursive call clobbers the caller's loop state (only the first
+  # component subtree would ever be installed).
+  local src dest mode entry name
+  src="$1"
+  dest="$2"
+  mode="$3"
+  install -d -o phoxal -g phoxal -m 0755 "$dest"
+  for entry in "$dest"/* "$dest"/.[!.]* "$dest"/..?*; do
+    [ -e "$entry" ] || continue
+    name="${{entry##*/}}"
+    if [ ! -e "$src/$name" ]; then
+      rm -rf "$entry"
+    fi
+  done
+  if [ -d "$src" ]; then
+    for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
+      [ -e "$entry" ] || continue
+      name="${{entry##*/}}"
+      if [ -d "$entry" ]; then
+        sync_payload_tree "$entry" "$dest/$name" "$mode"
+      else
+        test -f "$entry"
+        install -o phoxal -g phoxal -m "$mode" "$entry" "$dest/$name"
+      fi
+    done
+  fi
+}}
+
+sync_payload_root_metadata() {{
+  local src dest entry name
+  src="$1"
+  dest="$2"
+  for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
+    [ -e "$entry" ] || continue
+    name="${{entry##*/}}"
+    case "$name" in
+      bin|env|components|robot.yaml|phoxal-release.json) continue ;;
+    esac
+    if [ -d "$entry" ]; then
+      sync_payload_tree "$entry" "$dest/$name" 0644
+    else
+      test -f "$entry"
+      install -o phoxal -g phoxal -m 0644 "$entry" "$dest/$name"
+    fi
+  done
+}}
+
 case "${{1:-}}" in
+  install-payload)
+    source="${{2:-}}"
+    valid_payload_source "$source" || exit 64
+    test -d "$source"
+    install -d -o phoxal -g phoxal -m 0755 "$opt_root" "$opt_bin" "$opt_env"
+    sync_payload_dir "$source/bin" "$opt_bin" 0755
+    sync_payload_dir "$source/env" "$opt_env" 0644
+    sync_payload_tree "$source/components" "$opt_root/components" 0644
+    sync_payload_root_metadata "$source" "$opt_root"
+    install -o phoxal -g phoxal -m 0644 "$source/robot.yaml" "$opt_root/robot.yaml"
+    install -o phoxal -g phoxal -m 0644 "$source/phoxal-release.json" "$opt_root/phoxal-release.json"
+    ;;
   install-unit)
     unit="${{2:-}}"
     source="${{3:-}}"
     valid_unit "$unit"
-    case "$source" in /tmp/phoxal-units-*/*) ;; *) exit 64 ;; esac
+    valid_unit_source "$source" || exit 64
     test -f "$source"
     install -o root -g root -m 0644 "$source" "$unit_dir/$unit"
     ;;
@@ -2193,6 +2805,7 @@ case "${{1:-}}" in
     systemctl daemon-reload
     ;;
   restart-target)
+    systemctl reset-failed 'phoxal*' || true
     systemctl restart phoxal.target
     ;;
   *)
@@ -2203,8 +2816,8 @@ esac
     )
 }
 
-fn sudoers_fragment() -> String {
-    format!("phoxal ALL=(root) NOPASSWD: {HELPER_PATH} *\n")
+fn sudoers_fragment(remote_user: &str) -> String {
+    format!("{remote_user} ALL=(root) NOPASSWD: {HELPER_PATH} *\n")
 }
 
 fn bootstrap_script(scripts: &BootstrapScripts) -> String {
@@ -2355,11 +2968,41 @@ impl SshTransport {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut command = Command::new("ssh");
+        let mut command = deploy_command("ssh");
         command.arg(&self.host).args(args);
         command
             .output()
             .with_context(|| format!("failed to run ssh {}", self.host))
+    }
+
+    fn ssh_output_with_password<I, S>(
+        &self,
+        args: I,
+        password: &SudoPassword,
+    ) -> Result<std::process::Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = deploy_command("ssh");
+        command
+            .arg(&self.host)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to run ssh {}", self.host))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("sudo validation child stdin was not available")?;
+        password.write_with_newline(&mut stdin)?;
+        drop(stdin);
+        child
+            .wait_with_output()
+            .with_context(|| format!("failed to wait for ssh {}", self.host))
     }
 
     fn ssh_status<I, S>(&self, args: I) -> Result<()>
@@ -2404,7 +3047,7 @@ impl SshTransport {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut command = Command::new("rsync");
+        let mut command = deploy_command("rsync");
         command.args(args);
         let status = self.ui.command_status(&mut command)?;
         if status.success() {
@@ -2419,6 +3062,124 @@ impl SshTransport {
         command.extend_from_slice(args);
         self.ssh_status(command)
     }
+
+    /// `sudo -n true` tests blanket sudo, but the sudoers fragment grant is
+    /// per-command - so probe the helper grant itself. Running the installed
+    /// helper with no arguments hits its unknown-verb branch and exits 64,
+    /// so exit 0 or 64 proves sudo authorized this user for the helper; a
+    /// sudo password failure exits 1 without ever running the helper.
+    fn probe_helper_grant(&self) -> bool {
+        let helper_installed = self
+            .ssh_output(["test", "-x", HELPER_PATH])
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !helper_installed {
+            return false;
+        }
+        self.ssh_output(["sudo", "-n", HELPER_PATH])
+            .map(|output| matches!(output.status.code(), Some(0) | Some(64)))
+            .unwrap_or(false)
+    }
+
+    fn probe_helper_stale(&self) -> bool {
+        let expected = helper_script_sha256();
+        match self.ssh_stdout(["sha256sum", HELPER_PATH]) {
+            Ok(output) => output.split_whitespace().next() != Some(expected.as_str()),
+            Err(_) => true,
+        }
+    }
+}
+
+trait PayloadSyncRemote {
+    fn remote_host(&self) -> &str;
+
+    fn run_ssh_status<I, S>(&mut self, args: I) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>;
+
+    fn run_rsync<I, S>(&mut self, args: I) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>;
+
+    fn run_helper(&mut self, args: &[&str]) -> Result<()>;
+}
+
+impl PayloadSyncRemote for SshTransport {
+    fn remote_host(&self) -> &str {
+        &self.host
+    }
+
+    fn run_ssh_status<I, S>(&mut self, args: I) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        SshTransport::ssh_status(self, args)
+    }
+
+    fn run_rsync<I, S>(&mut self, args: I) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        SshTransport::rsync(self, args)
+    }
+
+    fn run_helper(&mut self, args: &[&str]) -> Result<()> {
+        SshTransport::run_helper(self, args)
+    }
+}
+
+fn remote_staging_dir(prefix: &str) -> String {
+    format!("{prefix}{}", std::process::id())
+}
+
+fn sync_payload_via_helper<R>(
+    remote: &mut R,
+    payload: &RenderedPayload,
+    remote_tmp: &str,
+) -> Result<()>
+where
+    R: PayloadSyncRemote,
+{
+    remote.run_ssh_status(["rm", "-rf", remote_tmp])?;
+    let install_result = (|| -> Result<()> {
+        remote.run_ssh_status(["mkdir", "-p", remote_tmp])?;
+        let remote_dest = OsString::from(format!("{}:{remote_tmp}/", remote.remote_host()));
+        remote.run_rsync(vec![
+            OsString::from("-az"),
+            OsString::from("--delete"),
+            payload_opt(payload.root.path()).join("").into_os_string(),
+            remote_dest,
+        ])?;
+        remote.run_helper(&["install-payload", remote_tmp])?;
+        Ok(())
+    })();
+    let _ = remote.run_ssh_status(["rm", "-rf", remote_tmp]);
+    install_result?;
+    sync_identity_files(remote, payload)
+}
+
+fn sync_identity_files<R>(remote: &mut R, payload: &RenderedPayload) -> Result<()>
+where
+    R: PayloadSyncRemote,
+{
+    if !payload.install_plan.identity_files.is_empty() {
+        remote.run_ssh_status(["install", "-d", "-m", "0700", IDENTITY_DIR])?;
+    }
+    for identity in &payload.install_plan.identity_files {
+        let remote_dest =
+            OsString::from(format!("{}:{}", remote.remote_host(), identity.remote_path));
+        remote.run_rsync(vec![
+            OsString::from("-az"),
+            identity.local_path.clone().into_os_string(),
+            remote_dest,
+        ])?;
+        remote.run_ssh_status(["chmod", "0600", identity.remote_path.as_str()])?;
+    }
+    Ok(())
 }
 
 impl DeployTransport for SshTransport {
@@ -2428,45 +3189,123 @@ impl DeployTransport for SshTransport {
             .ssh_output(["test", "-d", OPT_ROOT])
             .map(|output| !output.status.success())
             .unwrap_or(true);
+        let remote_user = self.ssh_stdout(["whoami"])?.trim().to_string();
+        let sudo_noninteractive = self
+            .ssh_output(["sudo", "-n", "true"])
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        let helper_stale = self.probe_helper_stale();
+        let helper_grant = if sudo_noninteractive {
+            // Blanket passwordless sudo covers every helper call.
+            true
+        } else {
+            self.probe_helper_grant()
+        };
         Ok(RemoteProbe {
             arch,
             bootstrap_required,
+            remote_user,
+            sudo_noninteractive,
+            helper_grant,
+            helper_stale,
         })
     }
 
-    fn bootstrap(&mut self, helper: &BootstrapScripts) -> Result<()> {
+    fn validate_sudo_password(&mut self, password: &SudoPassword) -> Result<bool> {
+        self.ssh_output_with_password(sudo_validate_args(), password)
+            .map(|output| output.status.success())
+    }
+
+    fn bootstrap(
+        &mut self,
+        helper: &BootstrapScripts,
+        sudo_password: Option<&SudoPassword>,
+    ) -> Result<()> {
         let script = bootstrap_script(helper);
-        let mut child = Command::new("ssh")
+        let remote_path = format!("/tmp/phoxal-bootstrap.{}.sh", std::process::id());
+
+        // Transfer the script over a plain (non-sudo) ssh first. The sudo
+        // password, when needed, is reserved for the script execution stdin.
+        let mut upload_command = deploy_command("ssh");
+        upload_command
             .arg(&self.host)
-            .arg("sudo")
-            .arg("sh")
-            .arg("-s")
-            .stdin(Stdio::piped())
+            .arg(format!("cat > {remote_path}"))
+            .stdin(Stdio::piped());
+        let mut upload = upload_command
             .spawn()
-            .with_context(|| format!("failed to start bootstrap ssh {}", self.host))?;
-        child
+            .with_context(|| format!("failed to start bootstrap upload ssh {}", self.host))?;
+        let mut upload_stdin = upload
             .stdin
-            .as_mut()
-            .context("bootstrap child stdin was not available")?
+            .take()
+            .context("bootstrap upload child stdin was not available")?;
+        upload_stdin
             .write_all(script.as_bytes())
             .context("failed to write bootstrap script")?;
-        let status = child.wait().context("failed to wait for bootstrap ssh")?;
-        if status.success() {
+        drop(upload_stdin);
+        let upload_status = upload
+            .wait()
+            .context("failed to wait for bootstrap upload ssh")?;
+        if !upload_status.success() {
+            bail!(
+                "failed to upload bootstrap script to {}: status {upload_status}",
+                self.host
+            );
+        }
+
+        let mut run = deploy_command("ssh");
+        run.arg(&self.host).args(sudo_bootstrap_args(&remote_path));
+        if sudo_password.is_some() {
+            run.stdin(Stdio::piped());
+        } else {
+            run.stdin(Stdio::null());
+        }
+        let mut child = self
+            .ui
+            .command_spawn(&mut run)
+            .with_context(|| format!("failed to run bootstrap script on {}", self.host))?;
+        if let Some(password) = sudo_password {
+            let mut stdin = child
+                .stdin
+                .take()
+                .context("bootstrap child stdin was not available")?;
+            password.write_with_newline(&mut stdin)?;
+            drop(stdin);
+        }
+        let run_status = child
+            .wait()
+            .with_context(|| format!("failed to wait for bootstrap script on {}", self.host))?;
+
+        // Best-effort cleanup: report bootstrap's own failure first, since
+        // that's the actionable error; a stray temp file is not.
+        let _ = self.ssh_status(["rm", "-f", &remote_path]);
+
+        if run_status.success() {
             Ok(())
         } else {
-            bail!("remote bootstrap failed with status {status}")
+            bail!("remote bootstrap failed with status {run_status}")
         }
     }
 
     fn list_installed_units(&mut self) -> Result<Vec<String>> {
-        let output = self.ssh_stdout([
+        let output = self.ssh_output([
             "systemctl",
             "list-unit-files",
             "phoxal*",
             "--no-legend",
             "--no-pager",
         ])?;
-        Ok(output
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // systemctl list-unit-files exits 1 with empty output when the pattern
+        // matches nothing - the normal state of a freshly bootstrapped host.
+        if !output.status.success() && (!stdout.trim().is_empty() || !stderr.trim().is_empty()) {
+            bail!(
+                "failed to list installed phoxal units: ssh {} failed with status {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                self.host,
+                output.status
+            );
+        }
+        Ok(stdout
             .lines()
             .filter_map(|line| line.split_whitespace().next().map(str::to_string))
             .filter(|unit| managed_unit_name(unit))
@@ -2474,48 +3313,12 @@ impl DeployTransport for SshTransport {
     }
 
     fn sync_payload(&mut self, payload: &RenderedPayload) -> Result<()> {
-        self.rsync(vec![
-            OsString::from("-az"),
-            OsString::from("--delete"),
-            payload_bin(payload.root.path()).join("").into_os_string(),
-            OsString::from(format!("{}:{OPT_BIN}/", self.host)),
-        ])?;
-        self.rsync(vec![
-            OsString::from("-az"),
-            OsString::from("--delete"),
-            payload_env(payload.root.path()).join("").into_os_string(),
-            OsString::from(format!("{}:{OPT_ENV}/", self.host)),
-        ])?;
-        self.rsync(vec![
-            OsString::from("-az"),
-            payload_opt(payload.root.path())
-                .join("robot.yaml")
-                .into_os_string(),
-            OsString::from(format!("{}:{OPT_ROOT}/robot.yaml", self.host)),
-        ])?;
-        self.rsync(vec![
-            OsString::from("-az"),
-            payload_opt(payload.root.path())
-                .join("phoxal-release.json")
-                .into_os_string(),
-            OsString::from(format!("{}:{OPT_ROOT}/phoxal-release.json", self.host)),
-        ])?;
-        if !payload.install_plan.identity_files.is_empty() {
-            self.ssh_status(["install", "-d", "-m", "0700", IDENTITY_DIR])?;
-        }
-        for identity in &payload.install_plan.identity_files {
-            self.rsync(vec![
-                OsString::from("-az"),
-                identity.local_path.clone().into_os_string(),
-                OsString::from(format!("{}:{}", self.host, identity.remote_path)),
-            ])?;
-            self.ssh_status(["chmod", "0600", &identity.remote_path])?;
-        }
-        Ok(())
+        let remote_tmp = remote_staging_dir(PAYLOAD_STAGING_PREFIX);
+        sync_payload_via_helper(self, payload, &remote_tmp)
     }
 
     fn install_units(&mut self, payload: &RenderedPayload, stale_units: &[String]) -> Result<()> {
-        let remote_tmp = format!("/tmp/phoxal-units-{}", std::process::id());
+        let remote_tmp = remote_staging_dir(UNIT_STAGING_PREFIX);
         self.ssh_status(["rm", "-rf", &remote_tmp])?;
         self.ssh_status(["mkdir", "-p", &remote_tmp])?;
         self.rsync(vec![
@@ -2625,54 +3428,99 @@ fn participant_from_unit(unit: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
     use clap::Parser;
     use phoxal_cli_test_support::write_basic_project;
 
     mod phoxal_cli_test_support {
         use super::*;
         use crate::catalog::{
-            ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
-            fixture_tool_entry_for_tests,
+            ArtifactStatus, Channel as CatalogChannel, fixture_tool_entry_for_tests,
         };
 
         pub fn write_basic_project(root: &Path) -> Result<()> {
+            write_fixture_catalog(root)?;
             fs::write(root.join("robot.yaml"), basic_robot_yaml())?;
-            write_catalog(root)?;
-            write_service_crate(root, "mission", "service", "mission")?;
+            write_robot_structure(root)?;
+            write_service_crate(root, "navtask", "service", "navtask")?;
+            write_component_metadata(root, "ddsm115")?;
             Ok(())
         }
 
         pub fn write_driver_project(root: &Path) -> Result<()> {
+            write_fixture_catalog(root)?;
             fs::write(root.join("robot.yaml"), driver_robot_yaml())?;
-            write_catalog(root)?;
-            write_service_crate(root, "mission", "service", "mission")?;
+            write_robot_structure(root)?;
+            write_service_crate(root, "navtask", "service", "navtask")?;
             write_driver_crate(root, "ddsm115", "driver-ddsm115")?;
+            write_component_metadata(root, "ddsm115")?;
+            Ok(())
+        }
+
+        pub fn write_bench_camera_project(root: &Path) -> Result<()> {
+            write_fixture_catalog(root)?;
+            fs::write(root.join("robot.yaml"), bench_camera_robot_yaml())?;
+            write_robot_structure(root)?;
+            write_component_metadata(root, "bench_camera")?;
+            let component_dir = root.join("components").join("bench_camera");
+            fs::create_dir_all(component_dir.join("src"))?;
+            fs::create_dir_all(component_dir.join("target/debug"))?;
+            fs::write(
+                component_dir.join("Cargo.toml"),
+                "[package]\nname = \"bench-camera\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            )?;
+            fs::write(component_dir.join("src/main.rs"), "fn main() {}\n")?;
+            fs::write(component_dir.join("target/debug/ignored"), "ignored\n")?;
+            Ok(())
+        }
+
+        pub fn write_catalog_only_project(root: &Path) -> Result<()> {
+            write_fixture_catalog(root)?;
+            fs::write(root.join("robot.yaml"), catalog_only_robot_yaml())?;
+            write_robot_structure(root)?;
             Ok(())
         }
 
         pub fn write_native_dep_project(root: &Path) -> Result<()> {
+            write_fixture_catalog(root)?;
             fs::write(root.join("robot.yaml"), basic_robot_yaml())?;
-            write_catalog(root)?;
-            let dir = root.join("runtimes/mission");
+            let dir = root.join("runtimes/navtask");
             fs::create_dir_all(dir.join("src"))?;
             fs::write(
                 dir.join("Cargo.toml"),
-                "[package]\nname = \"mission\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nopencv = \"0.1\"\n",
+                "[package]\nname = \"navtask\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nopencv = \"0.1\"\n",
             )?;
-            fs::write(dir.join("src/main.rs"), service_main("service", "mission"))?;
+            fs::write(dir.join("src/main.rs"), service_main("service", "navtask"))?;
             Ok(())
         }
 
-        fn write_catalog(root: &Path) -> Result<()> {
-            let catalog = fixture_catalog_for_tests(vec![fixture_tool_entry_for_tests(
-                "router",
-                "y2026_1",
-                "0.1.0",
-                CatalogChannel::Stable,
-                "aarch64-unknown-linux-gnu",
-                ArtifactStatus::Pending,
-                Vec::new(),
-            )]);
+        fn write_fixture_catalog(root: &Path) -> Result<()> {
+            let catalog = crate::catalog::fixture_catalog_for_tests(vec![
+                crate::catalog::fixture_service_entry_for_tests(
+                    "fixture_only",
+                    "y2026_1",
+                    "0.1.0",
+                    crate::catalog::Channel::Stable,
+                    "test-only-target",
+                    ArtifactStatus::Pending,
+                    vec![crate::catalog::fixture_contract_for_tests(
+                        "fixture::Only",
+                        "fixture/only",
+                        "publish",
+                        "0123456789abcdef",
+                    )],
+                ),
+                fixture_tool_entry_for_tests(
+                    "router",
+                    "y2026_1",
+                    "0.1.0",
+                    CatalogChannel::Stable,
+                    "aarch64-unknown-linux-gnu",
+                    ArtifactStatus::Pending,
+                    Vec::new(),
+                ),
+            ]);
             fs::write(
                 root.join("catalog.json"),
                 serde_json::to_string_pretty(&catalog)?,
@@ -2709,6 +3557,19 @@ mod tests {
             Ok(())
         }
 
+        fn write_robot_structure(root: &Path) -> Result<()> {
+            fs::write(root.join("structure.urdf"), robot_structure_urdf())?;
+            Ok(())
+        }
+
+        fn write_component_metadata(root: &Path, name: &str) -> Result<()> {
+            let dir = root.join("components").join(name);
+            fs::create_dir_all(&dir)?;
+            fs::write(dir.join("component.yaml"), component_yaml())?;
+            fs::write(dir.join("structure.urdf"), component_structure_urdf(name))?;
+            Ok(())
+        }
+
         fn service_main(kind: &str, artifact_id: &str) -> String {
             format!(
                 "fn main() {{\n    if std::env::args().nth(1).as_deref() == Some(\"emit-apis\") {{\n        println!(\"{{}}\", r#\"{{\"artifact\":{{\"kind\":\"{kind}\",\"id\":\"{artifact_id}\"}},\"participant_class\":\"checked\",\"api_version\":\"source\",\"required_contracts\":[]}}\"#);\n    }}\n}}\n"
@@ -2727,8 +3588,8 @@ phoxal_artifacts:
   catalog: catalog.json
 phoxal_participants: {}
 user_participants:
-  mission:
-    path: runtimes/mission
+  navtask:
+    path: runtimes/navtask
 motion:
   kinematic:
     kind: differential
@@ -2752,6 +3613,61 @@ components:
 "#
         }
 
+        fn bench_camera_robot_yaml() -> &'static str {
+            r#"schema: v0
+identity:
+  id: benchbot
+  namespace: dev
+structure: structure.urdf
+phoxal_artifacts:
+  channel: stable
+  generation: y2026_1
+  catalog: catalog.json
+phoxal_participants: {}
+motion:
+  kinematic:
+    kind: omnidirectional
+    actuators: [front_camera.motor]
+    encoders: [front_camera.encoder]
+components:
+  sources:
+    bench_camera:
+      path: components/bench_camera
+  instances:
+    front_camera:
+      component: bench_camera
+      mount_link: camera_mount
+"#
+        }
+
+        fn catalog_only_robot_yaml() -> &'static str {
+            r#"schema: v0
+identity:
+  id: catalogbot
+  namespace: dev
+structure: structure.urdf
+phoxal_artifacts:
+  channel: stable
+  generation: y2026_1
+  catalog: catalog.json
+phoxal_participants: {}
+motion:
+  kinematic:
+    kind: omnidirectional
+    actuators: [catalog_drive.motor]
+    encoders: [catalog_drive.encoder]
+components:
+  sources:
+    catalog_motor:
+      git: https://github.com/phoxal/framework
+      tag: 0123456789abcdef0123456789abcdef01234567
+  instances:
+    catalog_drive:
+      component: catalog_motor
+      mount_link: left_wheel
+"#
+        }
+
         fn driver_robot_yaml() -> &'static str {
             r#"schema: v0
 identity:
@@ -2764,8 +3680,8 @@ phoxal_artifacts:
   catalog: catalog.json
 phoxal_participants: {}
 user_participants:
-  mission:
-    path: runtimes/mission
+  navtask:
+    path: runtimes/navtask
 motion:
   kinematic:
     kind: differential
@@ -2792,6 +3708,71 @@ components:
         connection: { type: i2c, bus: 1, address: 16 }
 "#
         }
+
+        fn robot_structure_urdf() -> &'static str {
+            r#"<robot name="testbot">
+  <link name="base_footprint" />
+  <link name="base_link" />
+  <link name="left_wheel" />
+  <link name="right_wheel" />
+  <link name="camera_mount" />
+  <joint name="root" type="fixed">
+    <parent link="base_footprint" />
+    <child link="base_link" />
+  </joint>
+  <joint name="left_mount" type="fixed">
+    <parent link="base_link" />
+    <child link="left_wheel" />
+  </joint>
+  <joint name="right_mount" type="fixed">
+    <parent link="base_link" />
+    <child link="right_wheel" />
+  </joint>
+  <joint name="camera_mount_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="camera_mount" />
+  </joint>
+</robot>
+"#
+        }
+
+        fn component_yaml() -> &'static str {
+            r#"version: v1
+structure: structure.urdf
+capabilities:
+  motor:
+    kind: motor
+    target: { kind: joint, id: wheel_joint }
+    command: velocity
+    gear_ratio: 1.0
+  encoder:
+    kind: encoder
+    target: { kind: joint, id: wheel_joint }
+    publish_rate_hz: 50.0
+    gear_ratio: 1.0
+  rgb:
+    kind: camera
+    target: { kind: link, id: camera_link }
+    mode: rgb
+    publish_rate_hz: 30.0
+    width_px: 640
+    height_px: 480
+"#
+        }
+
+        fn component_structure_urdf(name: &str) -> String {
+            format!(
+                r#"<robot name="{name}">
+  <link name="camera_link" />
+  <link name="wheel_link" />
+  <joint name="wheel_joint" type="continuous">
+    <parent link="camera_link" />
+    <child link="wheel_link" />
+  </joint>
+</robot>
+"#
+            )
+        }
     }
 
     #[derive(Debug)]
@@ -2800,6 +3781,11 @@ components:
         installed_units: Vec<String>,
         health: HealthReport,
         bootstrapped: bool,
+        bootstrap_fragment_seen: Option<String>,
+        validation_results: VecDeque<bool>,
+        validation_password_stdin: Vec<Vec<u8>>,
+        bootstrap_sudo_command_seen: Option<Vec<String>>,
+        bootstrap_password_stdin: Vec<Vec<u8>>,
         synced: bool,
         stale_removed: Vec<String>,
         restarted: bool,
@@ -2811,10 +3797,19 @@ components:
                 probe: RemoteProbe {
                     arch: "aarch64".to_string(),
                     bootstrap_required: true,
+                    remote_user: "robot".to_string(),
+                    sudo_noninteractive: true,
+                    helper_grant: true,
+                    helper_stale: false,
                 },
                 installed_units: Vec::new(),
                 health: HealthReport { units: Vec::new() },
                 bootstrapped: false,
+                bootstrap_fragment_seen: None,
+                validation_results: VecDeque::from([true]),
+                validation_password_stdin: Vec::new(),
+                bootstrap_sudo_command_seen: None,
+                bootstrap_password_stdin: Vec::new(),
                 synced: false,
                 stale_removed: Vec::new(),
                 restarted: false,
@@ -2827,8 +3822,28 @@ components:
             Ok(self.probe.clone())
         }
 
-        fn bootstrap(&mut self, _helper: &BootstrapScripts) -> Result<()> {
+        fn validate_sudo_password(&mut self, password: &SudoPassword) -> Result<bool> {
+            let mut stdin = Vec::new();
+            password.write_with_newline(&mut stdin)?;
+            self.validation_password_stdin.push(stdin);
+            Ok(self.validation_results.pop_front().unwrap_or(true))
+        }
+
+        fn bootstrap(
+            &mut self,
+            helper: &BootstrapScripts,
+            sudo_password: Option<&SudoPassword>,
+        ) -> Result<()> {
             self.bootstrapped = true;
+            self.bootstrap_fragment_seen = Some(helper.sudoers_fragment.clone());
+            self.bootstrap_sudo_command_seen = Some(args_to_strings(sudo_bootstrap_args(
+                "/tmp/phoxal-bootstrap.TEST.sh",
+            )));
+            if let Some(password) = sudo_password {
+                let mut stdin = Vec::new();
+                password.write_with_newline(&mut stdin)?;
+                self.bootstrap_password_stdin.push(stdin);
+            }
             Ok(())
         }
 
@@ -2874,6 +3889,140 @@ components:
                 Ok(self.health.clone())
             }
         }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedSudoPasswordSource {
+        env_password: Option<Vec<u8>>,
+        prompt_passwords: VecDeque<Vec<u8>>,
+        env_calls: usize,
+        prompt_calls: usize,
+        prompts_seen: Vec<String>,
+    }
+
+    impl ScriptedSudoPasswordSource {
+        fn none() -> Self {
+            Self {
+                env_password: None,
+                prompt_passwords: VecDeque::new(),
+                env_calls: 0,
+                prompt_calls: 0,
+                prompts_seen: Vec::new(),
+            }
+        }
+
+        fn with_env(password: &str) -> Self {
+            let mut source = Self::none();
+            source.env_password = Some(password.as_bytes().to_vec());
+            source
+        }
+
+        fn with_prompts(passwords: &[&str]) -> Self {
+            let mut source = Self::none();
+            source.prompt_passwords = passwords
+                .iter()
+                .map(|password| password.as_bytes().to_vec())
+                .collect();
+            source
+        }
+    }
+
+    impl SudoPasswordSource for ScriptedSudoPasswordSource {
+        fn password_from_env(&mut self) -> Option<SudoPassword> {
+            self.env_calls += 1;
+            self.env_password.take().map(SudoPassword::new)
+        }
+
+        fn read_password(&mut self, prompt: &str) -> Result<SudoPassword> {
+            self.prompt_calls += 1;
+            self.prompts_seen.push(prompt.to_string());
+            self.prompt_passwords
+                .pop_front()
+                .map(SudoPassword::new)
+                .context("scripted sudo password source was exhausted")
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakePayloadRemote {
+        host: String,
+        ssh_statuses: Vec<Vec<String>>,
+        rsyncs: Vec<Vec<String>>,
+        helper_calls: Vec<Vec<String>>,
+    }
+
+    impl FakePayloadRemote {
+        fn new(host: &str) -> Self {
+            Self {
+                host: host.to_string(),
+                ssh_statuses: Vec::new(),
+                rsyncs: Vec::new(),
+                helper_calls: Vec::new(),
+            }
+        }
+    }
+
+    impl PayloadSyncRemote for FakePayloadRemote {
+        fn remote_host(&self) -> &str {
+            &self.host
+        }
+
+        fn run_ssh_status<I, S>(&mut self, args: I) -> Result<()>
+        where
+            I: IntoIterator<Item = S>,
+            S: AsRef<OsStr>,
+        {
+            self.ssh_statuses.push(args_to_strings(args));
+            Ok(())
+        }
+
+        fn run_rsync<I, S>(&mut self, args: I) -> Result<()>
+        where
+            I: IntoIterator<Item = S>,
+            S: AsRef<OsStr>,
+        {
+            self.rsyncs.push(args_to_strings(args));
+            Ok(())
+        }
+
+        fn run_helper(&mut self, args: &[&str]) -> Result<()> {
+            self.helper_calls
+                .push(args.iter().map(|arg| (*arg).to_string()).collect());
+            Ok(())
+        }
+    }
+
+    fn args_to_strings<I, S>(args: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        args.into_iter()
+            .map(|arg| arg.as_ref().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn payload_relative_files(root: &Path) -> Result<Vec<String>> {
+        let opt = payload_opt(root);
+        let mut files = Vec::new();
+        collect_relative_files(&opt, &opt, &mut files)?;
+        files.sort();
+        Ok(files)
+    }
+
+    fn collect_relative_files(base: &Path, dir: &Path, files: &mut Vec<String>) -> Result<()> {
+        for entry in
+            fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                collect_relative_files(base, &path, files)?;
+            } else if path.is_file() {
+                files.push(path.strip_prefix(base)?.to_string_lossy().into_owned());
+            }
+        }
+        Ok(())
     }
 
     fn dry_options() -> DeployOptions {
@@ -2951,6 +4100,7 @@ components:
             &dry_options(),
             target_for_arch("aarch64"),
             false,
+            DRY_RUN_REMOTE_USER,
             &crate::Ui,
         )?;
         assert!(
@@ -2965,15 +4115,24 @@ components:
         );
         let participant_unit = payload
             .rendered_units
-            .get("/etc/systemd/system/phoxal-participant-mission.service")
-            .expect("mission unit rendered");
+            .get("/etc/systemd/system/phoxal-participant-navtask.service")
+            .expect("navtask unit rendered");
         assert!(participant_unit.contains("Type=notify"));
+
+        let payload_robot =
+            std::fs::read_to_string(payload_opt(payload.root.path()).join("robot.yaml"))?;
+        assert!(
+            payload_robot.starts_with("schema: v0"),
+            "payload robot.yaml must keep the schema tag:\n{payload_robot}"
+        );
+        phoxal::model::robot::Robot::parse_from_string(&payload_robot)
+            .expect("payload robot.yaml must round-trip through the version dispatcher");
         assert!(participant_unit.contains("WatchdogSec=10s"));
-        assert!(participant_unit.contains("ExecStart=/opt/phoxal/bin/mission"));
+        assert!(participant_unit.contains("ExecStart=/opt/phoxal/bin/navtask"));
         assert!(
             payload
                 .env_files
-                .contains_key("/opt/phoxal/env/mission.env")
+                .contains_key("/opt/phoxal/env/navtask.env")
         );
         assert_eq!(payload.release_json["schema"], RELEASE_SCHEMA);
         assert!(
@@ -2986,9 +4145,203 @@ components:
             payload
                 .install_plan
                 .units
-                .contains(&"phoxal-participant-mission.service".to_string())
+                .contains(&"phoxal-participant-navtask.service".to_string())
         );
         Ok(())
+    }
+
+    #[test]
+    fn payload_stages_path_component_metadata_and_structures() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        phoxal_cli_test_support::write_bench_camera_project(temp.path())?;
+        let payload = prepare_deploy(
+            temp.path(),
+            &dry_options(),
+            target_for_arch("aarch64"),
+            false,
+            DRY_RUN_REMOTE_USER,
+            &crate::Ui,
+        )?;
+        let opt = payload_opt(payload.root.path());
+        let metadata_files = payload_relative_files(payload.root.path())?
+            .into_iter()
+            .filter(|path| path == "structure.urdf" || path.starts_with("components/"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            metadata_files,
+            vec![
+                "components/bench_camera/component.yaml".to_string(),
+                "components/bench_camera/structure.urdf".to_string(),
+                "structure.urdf".to_string(),
+            ]
+        );
+        assert!(!opt.join("components/bench_camera/Cargo.toml").exists());
+        assert!(!opt.join("components/bench_camera/src").exists());
+        assert!(!opt.join("components/bench_camera/target").exists());
+        assert!(
+            payload
+                .install_plan
+                .direct_writes
+                .contains(&"/opt/phoxal/structure.urdf".to_string())
+        );
+        assert!(
+            payload
+                .install_plan
+                .direct_writes
+                .contains(&"/opt/phoxal/components/bench_camera/component.yaml".to_string())
+        );
+        assert!(
+            payload
+                .install_plan
+                .direct_writes
+                .contains(&"/opt/phoxal/components/bench_camera/structure.urdf".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn payload_without_path_components_has_no_components_dir() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        phoxal_cli_test_support::write_catalog_only_project(temp.path())?;
+        let payload = prepare_deploy(
+            temp.path(),
+            &dry_options(),
+            target_for_arch("aarch64"),
+            false,
+            DRY_RUN_REMOTE_USER,
+            &crate::Ui,
+        )?;
+
+        assert!(!payload_opt(payload.root.path()).join("components").exists());
+        assert!(
+            payload_opt(payload.root.path())
+                .join("structure.urdf")
+                .is_file()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sync_payload_stages_opt_tree_and_invokes_install_payload_helper() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_basic_project(temp.path())?;
+        let payload = prepare_deploy(
+            temp.path(),
+            &dry_options(),
+            target_for_arch("aarch64"),
+            false,
+            DRY_RUN_REMOTE_USER,
+            &crate::Ui,
+        )?;
+        let remote_tmp = remote_staging_dir(PAYLOAD_STAGING_PREFIX);
+        let mut remote = FakePayloadRemote::new("robot@test");
+
+        sync_payload_via_helper(&mut remote, &payload, &remote_tmp)?;
+
+        assert!(remote_tmp.starts_with(PAYLOAD_STAGING_PREFIX));
+        assert_eq!(
+            remote.ssh_statuses,
+            vec![
+                vec!["rm".to_string(), "-rf".to_string(), remote_tmp.clone()],
+                vec!["mkdir".to_string(), "-p".to_string(), remote_tmp.clone()],
+                vec!["rm".to_string(), "-rf".to_string(), remote_tmp.clone()],
+            ]
+        );
+        assert_eq!(remote.rsyncs.len(), 1);
+        let rsync = &remote.rsyncs[0];
+        assert_eq!(rsync[0], "-az");
+        assert_eq!(rsync[1], "--delete");
+        assert_eq!(
+            rsync[2],
+            payload_opt(payload.root.path())
+                .join("")
+                .to_string_lossy()
+                .into_owned()
+        );
+        assert_eq!(rsync[3], format!("robot@test:{remote_tmp}/"));
+        assert_eq!(
+            remote.helper_calls,
+            vec![vec!["install-payload".to_string(), remote_tmp]]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn helper_script_install_payload_rejects_unsafe_staging_sources() {
+        let script = helper_script();
+
+        assert!(script.contains("install-payload)"), "{script}");
+        assert!(
+            script.contains("valid_payload_source \"$source\" || exit 64"),
+            "{script}"
+        );
+        assert!(script.contains("/tmp/phoxal-payload-*"), "{script}");
+        assert!(
+            script.contains("\"\"|*[!A-Za-z0-9_.@-]*) return 1 ;;"),
+            "{script}"
+        );
+        assert!(
+            script.contains("suffix=\"${1#/tmp/phoxal-payload-}\""),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn helper_script_install_payload_copies_chowns_and_deletes_opt_payload() {
+        let script = helper_script();
+
+        assert!(
+            script.contains("sync_payload_dir \"$source/bin\" \"$opt_bin\" 0755"),
+            "{script}"
+        );
+        assert!(
+            script.contains("sync_payload_dir \"$source/env\" \"$opt_env\" 0644"),
+            "{script}"
+        );
+        assert!(
+            script
+                .contains("sync_payload_tree \"$source/components\" \"$opt_root/components\" 0644"),
+            "{script}"
+        );
+        assert!(
+            script.contains("sync_payload_root_metadata \"$source\" \"$opt_root\""),
+            "{script}"
+        );
+        assert!(
+            script.contains("sync_payload_tree \"$entry\" \"$dest/$name\" \"$mode\""),
+            "{script}"
+        );
+        assert!(
+            script.contains("install -o phoxal -g phoxal -m \"$mode\" \"$entry\" \"$dest/$name\""),
+            "{script}"
+        );
+        assert!(script.contains("rm -rf \"$entry\""), "{script}");
+        assert!(
+            script.contains(
+                "install -o phoxal -g phoxal -m 0644 \"$source/robot.yaml\" \"$opt_root/robot.yaml\""
+            ),
+            "{script}"
+        );
+        assert!(
+            script.contains(
+                "install -o phoxal -g phoxal -m 0644 \"$source/phoxal-release.json\" \"$opt_root/phoxal-release.json\""
+            ),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn helper_script_restart_target_resets_failed_units_before_restart() {
+        let script = helper_script();
+        let reset = script
+            .find("systemctl reset-failed 'phoxal*' || true")
+            .expect("restart-target should reset failed phoxal units");
+        let restart = script
+            .find("systemctl restart phoxal.target")
+            .expect("restart-target should restart phoxal.target");
+
+        assert!(reset < restart, "{script}");
     }
 
     #[test]
@@ -3000,6 +4353,7 @@ components:
             &dry_options(),
             target_for_arch("aarch64"),
             false,
+            DRY_RUN_REMOTE_USER,
             &crate::Ui,
         )?;
         let left = payload
@@ -3028,6 +4382,7 @@ components:
             &dry_options(),
             target_for_arch("aarch64"),
             false,
+            DRY_RUN_REMOTE_USER,
             &crate::Ui,
         )?;
         assert!(
@@ -3053,6 +4408,7 @@ components:
             &dry_options(),
             target_for_arch("aarch64"),
             false,
+            DRY_RUN_REMOTE_USER,
             &crate::Ui,
         )
         .expect_err("native C deps should be rejected before raw linker spew");
@@ -3134,8 +4490,13 @@ components:
             "phoxal-router.service".to_string(),
             "phoxal-participant-old.service".to_string(),
         ];
-        let report =
-            deploy_with_transport(temp.path(), &live_options(), &mut transport, &crate::Ui)?;
+        let report = deploy_with_transport(
+            temp.path(),
+            &live_options(),
+            &mut transport,
+            false,
+            &crate::Ui,
+        )?;
         assert_eq!(
             transport.stale_removed,
             vec!["phoxal-participant-old.service"]
@@ -3159,6 +4520,334 @@ components:
         Ok(())
     }
 
+    fn probe(
+        bootstrap_required: bool,
+        sudo_noninteractive: bool,
+        helper_grant: bool,
+    ) -> RemoteProbe {
+        probe_with_helper_stale(bootstrap_required, sudo_noninteractive, helper_grant, false)
+    }
+
+    fn probe_with_helper_stale(
+        bootstrap_required: bool,
+        sudo_noninteractive: bool,
+        helper_grant: bool,
+        helper_stale: bool,
+    ) -> RemoteProbe {
+        RemoteProbe {
+            arch: "aarch64".to_string(),
+            bootstrap_required,
+            remote_user: "robot".to_string(),
+            sudo_noninteractive,
+            helper_grant,
+            helper_stale,
+        }
+    }
+
+    #[test]
+    fn sudo_probe_row1_noninteractive_sudo_always_proceeds() {
+        // sudo -n true works: proceed regardless of bootstrap/grant state or
+        // local tty - any root work runs non-interactively and no password
+        // source is touched.
+        for probe in [
+            probe(true, true, true),
+            probe(false, true, true),
+            probe(false, true, false),
+        ] {
+            let mut transport = FakeTransport::healthy();
+            let mut source = ScriptedSudoPasswordSource::none();
+            let password = ensure_sudo_will_succeed(
+                "robot@jetson",
+                &probe,
+                false,
+                &mut source,
+                &mut transport,
+            )
+            .expect("row 1 should proceed");
+            assert!(password.is_none());
+            assert_eq!(source.env_calls, 0);
+            assert_eq!(source.prompt_calls, 0);
+            assert!(transport.validation_password_stdin.is_empty());
+        }
+    }
+
+    #[test]
+    fn sudo_probe_row2_helper_grant_for_this_user_proceeds_without_tty() {
+        // No blanket sudo, but the installed helper's per-command grant
+        // covers this user and the helper hash matches: steady-state deploy,
+        // no root work needed and no password source is touched.
+        let probe = probe(false, false, true);
+        let mut transport = FakeTransport::healthy();
+        let mut source = ScriptedSudoPasswordSource::none();
+        let password =
+            ensure_sudo_will_succeed("robot@jetson", &probe, false, &mut source, &mut transport)
+                .expect("row 2 should proceed");
+        assert!(password.is_none());
+        assert_eq!(source.env_calls, 0);
+        assert_eq!(source.prompt_calls, 0);
+        assert!(transport.validation_password_stdin.is_empty());
+    }
+
+    #[test]
+    fn sudo_probe_row3_root_work_with_tty_prompts_and_validates() {
+        // Root work required (first bootstrap, or stale grant repair) and
+        // local /dev/tty is available: read one password and validate it now.
+        let probe = probe(true, false, false);
+        let mut transport = FakeTransport::healthy();
+        let mut source = ScriptedSudoPasswordSource::with_prompts(&["secret"]);
+        let password =
+            ensure_sudo_will_succeed("robot@jetson", &probe, true, &mut source, &mut transport)
+                .expect("row 3 should proceed after a valid password");
+
+        assert!(password.is_some());
+        assert_eq!(source.env_calls, 1);
+        assert_eq!(source.prompt_calls, 1);
+        assert_eq!(
+            source.prompts_seen,
+            vec!["[sudo] password for robot on robot@jetson:".to_string()]
+        );
+        assert_eq!(
+            transport.validation_password_stdin,
+            vec![b"secret\n".to_vec()]
+        );
+    }
+
+    #[test]
+    fn sudo_probe_validation_failure_retries_once_then_errors() {
+        let probe = probe(true, false, false);
+        let mut transport = FakeTransport::healthy();
+        transport.validation_results = VecDeque::from([false, false]);
+        let mut source = ScriptedSudoPasswordSource::with_prompts(&["bad", "still-bad"]);
+
+        let error =
+            ensure_sudo_will_succeed("robot@jetson", &probe, true, &mut source, &mut transport)
+                .err()
+                .expect("two failed sudo validations should stop deploy");
+        let message = error.to_string();
+
+        assert!(message.contains("DeploySudoPasswordRejected"), "{message}");
+        assert!(message.contains("robot@jetson"), "{message}");
+        assert_eq!(source.prompt_calls, 2);
+        assert_eq!(
+            transport.validation_password_stdin,
+            vec![b"bad\n".to_vec(), b"still-bad\n".to_vec()]
+        );
+        assert!(!transport.bootstrapped);
+    }
+
+    #[test]
+    fn sudo_probe_env_password_without_tty_proceeds() {
+        let probe = probe(true, false, false);
+        let mut transport = FakeTransport::healthy();
+        let mut source = ScriptedSudoPasswordSource::with_env("env-secret");
+        let password =
+            ensure_sudo_will_succeed("robot@jetson", &probe, false, &mut source, &mut transport)
+                .expect("env password should satisfy root work without a tty");
+
+        assert!(password.is_some());
+        assert_eq!(source.env_calls, 1);
+        assert_eq!(source.prompt_calls, 0);
+        assert_eq!(
+            transport.validation_password_stdin,
+            vec![b"env-secret\n".to_vec()]
+        );
+    }
+
+    #[test]
+    fn row3_deploy_bootstrap_uses_sudo_s_and_writes_password_once() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_basic_project(temp.path())?;
+        let mut transport = FakeTransport::healthy();
+        transport.probe.sudo_noninteractive = false;
+        transport.probe.helper_grant = false;
+        let mut source = ScriptedSudoPasswordSource::with_prompts(&["secret"]);
+
+        deploy_with_transport_with_sudo(
+            temp.path(),
+            &live_options(),
+            &mut transport,
+            true,
+            &mut source,
+            &crate::Ui,
+        )?;
+
+        assert!(transport.bootstrapped);
+        assert_eq!(source.prompt_calls, 1);
+        assert_eq!(
+            transport.validation_password_stdin,
+            vec![b"secret\n".to_vec()]
+        );
+        assert_eq!(
+            transport.bootstrap_sudo_command_seen,
+            Some(vec![
+                "sudo".to_string(),
+                "-S".to_string(),
+                "-p".to_string(),
+                SUDO_STDIN_PROMPT.to_string(),
+                "sh".to_string(),
+                "/tmp/phoxal-bootstrap.TEST.sh".to_string(),
+            ])
+        );
+        assert_eq!(
+            transport.bootstrap_password_stdin,
+            vec![b"secret\n".to_vec()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sudo_probe_row4_root_work_without_tty_fails_fast() {
+        // Root work required and no local tty: fail before building
+        // anything, naming the host and all remedies.
+        let probe = probe(true, false, false);
+        let mut transport = FakeTransport::healthy();
+        let mut source = ScriptedSudoPasswordSource::none();
+        let error =
+            ensure_sudo_will_succeed("robot@jetson", &probe, false, &mut source, &mut transport)
+                .err()
+                .expect("non-interactive sudo with required bootstrap must fail fast");
+        let message = error.to_string();
+        assert!(message.contains("DeploySudoRequiresPassword"), "{message}");
+        assert!(message.contains("robot@jetson"), "{message}");
+        assert!(message.contains("robot"), "{message}");
+        assert!(message.contains("first deploy"), "{message}");
+        assert!(message.contains("interactively"), "{message}");
+        assert!(message.contains("NOPASSWD"), "{message}");
+        assert!(message.contains(SUDO_PASSWORD_ENV), "{message}");
+    }
+
+    #[test]
+    fn sudo_probe_row4_stale_grant_without_tty_fails_fast_naming_repair() {
+        // Bootstrapped host, but the grant covers a different user (`sudo -n
+        // true` fails and the helper grant probe fails): blanket-sudo success
+        // must not be inferred from the helper being installed - fail fast
+        // and name the grant repair rather than the first install.
+        let probe = probe(false, false, false);
+        let mut transport = FakeTransport::healthy();
+        let mut source = ScriptedSudoPasswordSource::none();
+        let error =
+            ensure_sudo_will_succeed("robot@jetson", &probe, false, &mut source, &mut transport)
+                .err()
+                .expect("stale helper grant without a tty must fail fast, not die mid-flight");
+        let message = error.to_string();
+        assert!(message.contains("DeploySudoRequiresPassword"), "{message}");
+        assert!(message.contains("robot@jetson"), "{message}");
+        assert!(message.contains("does not cover this user"), "{message}");
+        assert!(!message.contains("first deploy"), "{message}");
+        assert!(message.contains("NOPASSWD"), "{message}");
+    }
+
+    #[test]
+    fn sudo_probe_row4_stale_helper_without_tty_fails_fast_naming_repair() {
+        let probe = probe_with_helper_stale(false, false, true, true);
+        let mut transport = FakeTransport::healthy();
+        let mut source = ScriptedSudoPasswordSource::none();
+        let error =
+            ensure_sudo_will_succeed("robot@jetson", &probe, false, &mut source, &mut transport)
+                .err()
+                .expect("stale helper without a tty must fail fast");
+        let message = error.to_string();
+        assert!(message.contains("DeploySudoRequiresPassword"), "{message}");
+        assert!(message.contains("stale"), "{message}");
+        assert!(message.contains("rewrite the helper"), "{message}");
+        assert!(!message.contains("first deploy"), "{message}");
+    }
+
+    #[test]
+    fn sudoers_fragment_names_the_probed_remote_user() {
+        let fragment = sudoers_fragment("jure");
+        assert_eq!(
+            fragment,
+            "jure ALL=(root) NOPASSWD: /usr/local/sbin/phoxal-systemd-helper *\n"
+        );
+    }
+
+    #[test]
+    fn deploy_with_transport_renders_fragment_for_probed_user() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_basic_project(temp.path())?;
+        let mut transport = FakeTransport::healthy();
+        transport.probe.remote_user = "jetson-op".to_string();
+        deploy_with_transport(
+            temp.path(),
+            &live_options(),
+            &mut transport,
+            false,
+            &crate::Ui,
+        )?;
+        assert!(transport.bootstrapped);
+        let fragment = transport
+            .bootstrap_fragment_seen
+            .expect("bootstrap should have been called with a fragment");
+        assert_eq!(
+            fragment,
+            "jetson-op ALL=(root) NOPASSWD: /usr/local/sbin/phoxal-systemd-helper *\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_helper_grant_triggers_bootstrap_repair_over_tty() -> Result<()> {
+        // Bootstrapped host (bootstrap_required false), but the grant probe
+        // failed - e.g. user A bootstrapped and user B deploys. With a local
+        // tty the deploy must re-run the bootstrap script (it rewrites the
+        // helper and the fragment idempotently) and the rewritten fragment
+        // must name the new deploying user.
+        let temp = tempfile::tempdir()?;
+        write_basic_project(temp.path())?;
+        let mut transport = FakeTransport::healthy();
+        transport.probe.bootstrap_required = false;
+        transport.probe.sudo_noninteractive = false;
+        transport.probe.helper_grant = false;
+        transport.probe.remote_user = "user-b".to_string();
+        let mut source = ScriptedSudoPasswordSource::with_prompts(&["secret"]);
+        deploy_with_transport_with_sudo(
+            temp.path(),
+            &live_options(),
+            &mut transport,
+            true,
+            &mut source,
+            &crate::Ui,
+        )?;
+        assert!(
+            transport.bootstrapped,
+            "a stale grant must re-run bootstrap even though /opt/phoxal exists"
+        );
+        let fragment = transport
+            .bootstrap_fragment_seen
+            .expect("bootstrap should have been called with a fragment");
+        assert_eq!(
+            fragment,
+            "user-b ALL=(root) NOPASSWD: /usr/local/sbin/phoxal-systemd-helper *\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_helper_hash_triggers_bootstrap_repair_with_existing_grant() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_basic_project(temp.path())?;
+        let mut transport = FakeTransport::healthy();
+        transport.probe.bootstrap_required = false;
+        transport.probe.sudo_noninteractive = false;
+        transport.probe.helper_grant = true;
+        transport.probe.helper_stale = true;
+        let mut source = ScriptedSudoPasswordSource::with_prompts(&["secret"]);
+        deploy_with_transport_with_sudo(
+            temp.path(),
+            &live_options(),
+            &mut transport,
+            true,
+            &mut source,
+            &crate::Ui,
+        )?;
+        assert!(
+            transport.bootstrapped,
+            "a stale helper must re-run bootstrap even when the helper grant is valid"
+        );
+        Ok(())
+    }
+
     #[test]
     fn failed_health_push_exits_nonzero_with_diagnosis() -> Result<()> {
         let temp = tempfile::tempdir()?;
@@ -3166,19 +4855,25 @@ components:
         let mut transport = FakeTransport::healthy();
         transport.health = HealthReport {
             units: vec![HealthUnitReport {
-                unit: "phoxal-participant-mission.service".to_string(),
-                participant: Some("mission".to_string()),
+                unit: "phoxal-participant-navtask.service".to_string(),
+                participant: Some("navtask".to_string()),
                 ready: false,
                 active_state: "failed".to_string(),
                 sub_state: "failed".to_string(),
                 journal_excerpt: vec!["boom".to_string()],
             }],
         };
-        let error = deploy_with_transport(temp.path(), &live_options(), &mut transport, &crate::Ui)
-            .expect_err("health failure should fail deploy");
+        let error = deploy_with_transport(
+            temp.path(),
+            &live_options(),
+            &mut transport,
+            false,
+            &crate::Ui,
+        )
+        .expect_err("health failure should fail deploy");
         let message = error.to_string();
         assert!(message.contains("HealthReportFailed"), "{message}");
-        assert!(message.contains("mission"), "{message}");
+        assert!(message.contains("navtask"), "{message}");
         assert!(message.contains("boom"), "{message}");
         Ok(())
     }
