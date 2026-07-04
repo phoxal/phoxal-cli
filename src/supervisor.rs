@@ -14,6 +14,7 @@ use phoxal_api::y2026_1 as api;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, timeout};
 
@@ -21,6 +22,7 @@ use crate::launch_plan::DEFAULT_ROUTER_CONNECT;
 
 pub const SUPERVISOR_LOCK_FILE: &str = "supervisor.lock";
 pub const SUPERVISOR_STATE_FILE: &str = "supervisor-state.json";
+pub const SUPERVISOR_ACTIONS_FILE: &str = "supervisor-actions.jsonl";
 pub const RESTART_SEC: Duration = Duration::from_secs(2);
 pub const START_LIMIT_INTERVAL: Duration = Duration::from_secs(60);
 pub const START_LIMIT_BURST: usize = 5;
@@ -54,6 +56,7 @@ pub enum ParticipantState {
     Degraded,
     Failed,
     Restarting,
+    Released,
 }
 
 impl ParticipantState {
@@ -65,8 +68,15 @@ impl ParticipantState {
             Self::Degraded => "degraded",
             Self::Failed => "failed",
             Self::Restarting => "restarting",
+            Self::Released => "released",
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParticipantLaunchCommand {
+    pub command_line: String,
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -78,6 +88,7 @@ pub struct ParticipantStatus {
     pub note: Option<String>,
     pub last_log_line: Option<String>,
     pub last_log_lines: Vec<String>,
+    pub launch_command: Option<ParticipantLaunchCommand>,
 }
 
 impl ParticipantStatus {
@@ -91,6 +102,7 @@ impl ParticipantStatus {
             note: None,
             last_log_line: None,
             last_log_lines: Vec::new(),
+            launch_command: None,
         }
     }
 }
@@ -137,7 +149,7 @@ impl BoardSnapshot {
                 participant.kind.label(),
                 participant.state.label(),
                 participant.restart_count,
-                trim_cell(note, 28),
+                trim_cell(note, 44),
                 trim_cell(last, 72),
             ));
         }
@@ -185,6 +197,21 @@ impl BoardBackend {
         }
     }
 
+    pub fn set_note(&self, id: &str, note: impl Into<String>) {
+        let mut snapshot = self.inner.lock().expect("board mutex poisoned");
+        let status = snapshot
+            .participants
+            .entry(id.to_string())
+            .or_insert_with(|| {
+                ParticipantStatus::new(
+                    id,
+                    ParticipantKind::OfficialArtifact,
+                    ParticipantState::Ready,
+                )
+            });
+        status.note = Some(note.into());
+    }
+
     pub fn set_restart_count(&self, id: &str, count: u32) {
         let mut snapshot = self.inner.lock().expect("board mutex poisoned");
         if let Some(status) = snapshot.participants.get_mut(id) {
@@ -211,6 +238,13 @@ impl BoardBackend {
         if status.last_log_lines.len() > MAX_LAST_LINES {
             let drop_count = status.last_log_lines.len() - MAX_LAST_LINES;
             status.last_log_lines.drain(0..drop_count);
+        }
+    }
+
+    pub fn set_launch_command(&self, id: &str, command: ParticipantLaunchCommand) {
+        let mut snapshot = self.inner.lock().expect("board mutex poisoned");
+        if let Some(status) = snapshot.participants.get_mut(id) {
+            status.launch_command = Some(command);
         }
     }
 
@@ -249,6 +283,55 @@ impl ParticipantSpec {
         parts.extend(self.args.clone());
         parts.join(" ")
     }
+
+    #[must_use]
+    pub fn launch_command(&self) -> ParticipantLaunchCommand {
+        ParticipantLaunchCommand {
+            command_line: render_manual_command_line(self),
+            env: self.env.iter().cloned().collect(),
+        }
+    }
+}
+
+fn render_manual_command_line(spec: &ParticipantSpec) -> String {
+    let env = spec.env.iter().cloned().collect::<BTreeMap<_, _>>();
+    let mut parts = vec![shell_quote(&spec.executable.display().to_string())];
+    parts.extend(spec.args.iter().map(|arg| shell_quote(arg)));
+    for (env_key, flag) in [
+        (
+            phoxal::participant::launch::env::PARTICIPANT_ID,
+            "--participant-id",
+        ),
+        (phoxal::participant::launch::env::ROBOT_ID, "--robot-id"),
+        (phoxal::participant::launch::env::NAMESPACE, "--namespace"),
+        (phoxal::participant::launch::env::ROBOT_ROOT, "--robot-root"),
+        (
+            phoxal::participant::launch::env::COMPONENT_INSTANCE,
+            "--component-instance",
+        ),
+        (phoxal::participant::launch::env::CONNECT, "--connect"),
+        (phoxal::participant::launch::env::CONFIG, "--config"),
+        (phoxal::participant::launch::env::CLOCK, "--clock"),
+    ] {
+        if let Some(value) = env.get(env_key) {
+            parts.push(flag.to_string());
+            parts.push(shell_quote(value));
+        }
+    }
+    parts.join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'/' | b'.' | b'-' | b'_' | b':' | b',' | b'=' | b'@')
+        })
+    {
+        return value.to_string();
+    }
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{escaped}'")
 }
 
 #[derive(Debug, Clone)]
@@ -268,10 +351,12 @@ impl Default for RestartPolicy {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SupervisorOptions {
     pub restart_policy: RestartPolicy,
     pub state_file: Option<PathBuf>,
+    pub action_file: Option<PathBuf>,
+    pub action_rx: Option<mpsc::Receiver<SupervisorAction>>,
     pub render_board: bool,
 }
 
@@ -280,9 +365,33 @@ impl Default for SupervisorOptions {
         Self {
             restart_policy: RestartPolicy::default(),
             state_file: None,
+            action_file: None,
+            action_rx: None,
             render_board: true,
         }
     }
+}
+
+#[derive(Debug)]
+pub enum SupervisorAction {
+    Swap {
+        id: String,
+        spec: ParticipantSpec,
+        note: String,
+    },
+    Release {
+        id: String,
+    },
+    Resume {
+        id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum SupervisorActionRequest {
+    Release { participant: String },
+    Resume { participant: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,6 +416,7 @@ struct RunningParticipant {
     restart_count: u32,
     restart_at: Option<Instant>,
     failed: bool,
+    released: bool,
 }
 
 impl RunningParticipant {
@@ -320,6 +430,7 @@ impl RunningParticipant {
             restart_count: 0,
             restart_at: None,
             failed: false,
+            released: false,
         };
         running.spawn_child(board).await?;
         Ok(running)
@@ -345,6 +456,7 @@ impl RunningParticipant {
             .with_context(|| format!("failed to spawn {}", self.spec.command_line()))?;
         let pid = child.id().unwrap_or_default();
         board.append_log(&self.spec.id, format!("supervisor: spawned pid {pid}"));
+        board.set_launch_command(&self.spec.id, self.spec.launch_command());
         if let Some(stdout) = child.stdout.take() {
             self.stdout_task = Some(spawn_output_reader(
                 board.clone(),
@@ -371,7 +483,7 @@ impl RunningParticipant {
     }
 
     async fn poll(&mut self, board: &BoardBackend, policy: &RestartPolicy) -> Result<()> {
-        if self.failed {
+        if self.failed || self.released {
             return Ok(());
         }
         if let Some(restart_at) = self.restart_at {
@@ -442,7 +554,66 @@ impl RunningParticipant {
     }
 
     fn is_active(&self) -> bool {
-        !self.failed && (self.child.is_some() || self.restart_at.is_some())
+        !self.failed && !self.released && (self.child.is_some() || self.restart_at.is_some())
+    }
+
+    async fn stop_current(&mut self, board: &BoardBackend) -> Result<()> {
+        if let Some(mut child) = self.child.take() {
+            board.append_log(&self.spec.id, "supervisor: stopping");
+            stop_child(&mut child, self.spec.shutdown_grace).await?;
+        }
+        join_reader(self.stdout_task.take()).await;
+        join_reader(self.stderr_task.take()).await;
+        Ok(())
+    }
+
+    async fn swap(
+        &mut self,
+        spec: ParticipantSpec,
+        board: &BoardBackend,
+        note: String,
+    ) -> Result<()> {
+        self.stop_current(board).await?;
+        self.spec = spec;
+        self.failed = false;
+        self.released = false;
+        self.restart_at = None;
+        self.spawn_child(board).await?;
+        board.set_state(&self.spec.id, ParticipantState::Ready, Some(note));
+        Ok(())
+    }
+
+    async fn release(&mut self, board: &BoardBackend) -> Result<()> {
+        if self.released {
+            board.set_state(
+                &self.spec.id,
+                ParticipantState::Released,
+                Some("released for manual run".to_string()),
+            );
+            return Ok(());
+        }
+        self.stop_current(board).await?;
+        self.released = true;
+        self.failed = false;
+        self.restart_at = None;
+        board.set_state(
+            &self.spec.id,
+            ParticipantState::Released,
+            Some("released for manual run".to_string()),
+        );
+        Ok(())
+    }
+
+    async fn resume(&mut self, board: &BoardBackend) -> Result<()> {
+        if !self.released {
+            board.set_note(&self.spec.id, "already supervised");
+            return Ok(());
+        }
+        self.released = false;
+        self.failed = false;
+        self.restart_at = None;
+        self.spawn_child(board).await?;
+        Ok(())
     }
 }
 
@@ -479,7 +650,7 @@ async fn join_reader(task: Option<JoinHandle<()>>) {
 pub async fn supervise_until_shutdown(
     specs: Vec<ParticipantSpec>,
     board: BoardBackend,
-    options: SupervisorOptions,
+    mut options: SupervisorOptions,
 ) -> Result<SupervisorOutcome> {
     let mut running = Vec::new();
     for spec in specs {
@@ -500,13 +671,24 @@ pub async fn supervise_until_shutdown(
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut clean_shutdown = false;
     let mut board_ticks = 0_u64;
+    let mut action_rx = options.action_rx.take();
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 clean_shutdown = true;
                 break;
             }
+            action = recv_action(&mut action_rx) => {
+                if let Some(action) = action {
+                    handle_action(&mut running, &board, action).await?;
+                }
+            }
             _ = ticker.tick() => {
+                if let Some(action_file) = &options.action_file {
+                    for action in drain_action_file(action_file)? {
+                        handle_action(&mut running, &board, action).await?;
+                    }
+                }
                 for participant in &mut running {
                     participant.poll(&board, &options.restart_policy).await?;
                 }
@@ -532,6 +714,93 @@ pub async fn supervise_until_shutdown(
         clean_shutdown,
         failed_participants: board.snapshot().failed_participants(),
     })
+}
+
+async fn recv_action(
+    action_rx: &mut Option<mpsc::Receiver<SupervisorAction>>,
+) -> Option<SupervisorAction> {
+    match action_rx {
+        Some(action_rx) => action_rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn handle_action(
+    running: &mut [RunningParticipant],
+    board: &BoardBackend,
+    action: SupervisorAction,
+) -> Result<()> {
+    match action {
+        SupervisorAction::Swap { id, spec, note } => {
+            let Some(participant) = running
+                .iter_mut()
+                .find(|participant| participant.spec.id == id)
+            else {
+                board.append_log(&id, "supervisor: swap requested for unknown participant");
+                return Ok(());
+            };
+            participant.swap(spec, board, note).await
+        }
+        SupervisorAction::Release { id } => {
+            let Some(participant) = running
+                .iter_mut()
+                .find(|participant| participant.spec.id == id)
+            else {
+                board.append_log(&id, "supervisor: release requested for unknown participant");
+                return Ok(());
+            };
+            participant.release(board).await
+        }
+        SupervisorAction::Resume { id } => {
+            let Some(participant) = running
+                .iter_mut()
+                .find(|participant| participant.spec.id == id)
+            else {
+                board.append_log(&id, "supervisor: resume requested for unknown participant");
+                return Ok(());
+            };
+            participant.resume(board).await
+        }
+    }
+}
+
+fn drain_action_file(path: &Path) -> Result<Vec<SupervisorAction>> {
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let processing = path.with_extension("processing");
+    match fs::rename(path, &processing) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to drain supervisor action file {}", path.display())
+            });
+        }
+    }
+    let contents = fs::read_to_string(&processing).with_context(|| {
+        format!(
+            "failed to read supervisor action file {}",
+            processing.display()
+        )
+    })?;
+    let _ = fs::remove_file(&processing);
+    contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let request = serde_json::from_str::<SupervisorActionRequest>(line)
+                .context("supervisor action JSON was invalid")?;
+            Ok(match request {
+                SupervisorActionRequest::Release { participant } => {
+                    SupervisorAction::Release { id: participant }
+                }
+                SupervisorActionRequest::Resume { participant } => {
+                    SupervisorAction::Resume { id: participant }
+                }
+            })
+        })
+        .collect()
 }
 
 async fn shutdown_all(running: &mut [RunningParticipant], board: &BoardBackend) {
@@ -687,11 +956,31 @@ pub fn supervisor_state_path() -> Result<PathBuf> {
     Ok(crate::host_paths::run_dir()?.join(SUPERVISOR_STATE_FILE))
 }
 
+pub fn supervisor_actions_path() -> Result<PathBuf> {
+    Ok(crate::host_paths::run_dir()?.join(SUPERVISOR_ACTIONS_FILE))
+}
+
 pub fn read_supervisor_state(path: &Path) -> Result<BoardSnapshot> {
     let text =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     serde_json::from_str(&text)
         .with_context(|| format!("{} is not valid supervisor status JSON", path.display()))
+}
+
+pub fn request_supervisor_action(request: SupervisorActionRequest) -> Result<()> {
+    let path = supervisor_actions_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("failed to open supervisor action file {}", path.display()))?;
+    serde_json::to_writer(&mut file, &request)
+        .with_context(|| format!("failed to encode supervisor action {}", path.display()))?;
+    writeln!(file).with_context(|| format!("failed to write {}", path.display()))
 }
 
 pub fn start_bus_log_subscriber(
@@ -775,6 +1064,19 @@ mod tests {
         }
     }
 
+    fn sleep_spec(id: &str) -> ParticipantSpec {
+        ParticipantSpec {
+            id: id.to_string(),
+            kind: ParticipantKind::UserService,
+            executable: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_string(), "sleep 30".to_string()],
+            cwd: None,
+            env: Vec::new(),
+            shutdown_grace: Duration::from_millis(50),
+            note: None,
+        }
+    }
+
     #[test]
     fn router_ownership_distinguishes_external_from_managed() {
         assert_eq!(router_ownership(true), RouterOwnership::External);
@@ -788,6 +1090,106 @@ mod tests {
             teardown_order(&specs),
             vec!["mission", "tool-joypad", "tool-router"]
         );
+    }
+
+    #[test]
+    fn launch_command_prints_contract_flags_and_env() {
+        let mut spec = spec("mission");
+        spec.executable = PathBuf::from("/tmp/phoxal mission");
+        spec.env = vec![
+            (
+                phoxal::participant::launch::env::PARTICIPANT_ID.to_string(),
+                "mission".to_string(),
+            ),
+            (
+                phoxal::participant::launch::env::ROBOT_ID.to_string(),
+                "robot".to_string(),
+            ),
+            (
+                phoxal::participant::launch::env::CONNECT.to_string(),
+                "tcp/localhost:7447".to_string(),
+            ),
+        ];
+
+        let launch = spec.launch_command();
+        assert!(
+            launch
+                .command_line
+                .contains("'/tmp/phoxal mission' --participant-id mission"),
+            "{}",
+            launch.command_line
+        );
+        assert!(
+            launch.command_line.contains("--connect tcp/localhost:7447"),
+            "{}",
+            launch.command_line
+        );
+        assert_eq!(
+            launch
+                .env
+                .get(phoxal::participant::launch::env::PARTICIPANT_ID)
+                .map(String::as_str),
+            Some("mission")
+        );
+    }
+
+    #[tokio::test]
+    async fn release_and_resume_stop_and_respawn_the_managed_child() -> Result<()> {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "mission",
+            ParticipantKind::UserService,
+            ParticipantState::Starting,
+        ));
+        let mut participant = RunningParticipant::spawn(sleep_spec("mission"), &board).await?;
+
+        participant.release(&board).await?;
+        let released = board.snapshot();
+        let status = released.participants.get("mission").expect("mission");
+        assert_eq!(status.state, ParticipantState::Released);
+        assert!(!participant.is_active());
+
+        participant.resume(&board).await?;
+        let resumed = board.snapshot();
+        let status = resumed.participants.get("mission").expect("mission");
+        assert_eq!(status.state, ParticipantState::Ready);
+        assert!(participant.is_active());
+
+        participant.stop_current(&board).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_swap_does_not_consume_restart_budget() -> Result<()> {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "mission",
+            ParticipantKind::UserService,
+            ParticipantState::Starting,
+        ));
+        let mut participant = RunningParticipant::spawn(sleep_spec("mission"), &board).await?;
+        participant.restart_count = 4;
+        participant
+            .failure_times
+            .push_back(Instant::now() - Duration::from_secs(1));
+
+        participant
+            .swap(
+                sleep_spec("mission"),
+                &board,
+                "ok 0.1s, restarted".to_string(),
+            )
+            .await?;
+
+        assert_eq!(participant.restart_count, 4);
+        assert_eq!(participant.failure_times.len(), 1);
+        let snapshot = board.snapshot();
+        let status = snapshot.participants.get("mission").expect("mission");
+        assert_eq!(status.state, ParticipantState::Ready);
+        assert_eq!(status.note.as_deref(), Some("ok 0.1s, restarted"));
+
+        participant.stop_current(&board).await?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -818,6 +1220,8 @@ mod tests {
                     start_limit_burst: 3,
                 },
                 state_file: None,
+                action_file: None,
+                action_rx: None,
                 render_board: false,
             },
         )
@@ -865,6 +1269,8 @@ mod tests {
                     start_limit_burst: 1,
                 },
                 state_file: None,
+                action_file: None,
+                action_rx: None,
                 render_board: false,
             },
         )

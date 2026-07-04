@@ -8,9 +8,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
 use phoxal::model::robot::v1::ConnectionConfig;
 use phoxal::participant::launch::env;
+use serde::Serialize;
 use serde_json::Value;
+use tokio::sync::mpsc;
 
 use crate::AppContext;
+use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, build_emit_apis_from_source, official_emit_apis_from_catalog_metadata,
     platform_artifact_refs_from_resolved, robot_graph_from_resolved, run_check_with_context,
@@ -19,8 +22,8 @@ use crate::commands::check::{
 use crate::component_driver::component_crate_dir;
 use crate::launch_env::encode_participant_env;
 use crate::launch_plan::{
-    CheckedRobotLaunchInput, LaunchMode, LaunchPlan, ParticipantExecution, SITE_TOOL_JOYPAD,
-    SITE_TOOL_ROUTER, SiteLaunch, build_launch_plan,
+    CheckedRobotLaunchInput, LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
+    SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SiteLaunch, build_launch_plan,
 };
 use crate::resolver::{
     ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, discover_robot_yaml,
@@ -30,7 +33,7 @@ use crate::supervisor::{
     BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
     RouterOwnership, SupervisorLock, SupervisorOptions, default_connect_endpoint,
     local_router_reachable, router_ownership, start_bus_log_subscriber, supervise_until_shutdown,
-    supervisor_state_path,
+    supervisor_actions_path, supervisor_state_path,
 };
 use crate::utils::cargo_binary_name;
 
@@ -54,6 +57,19 @@ pub struct Run {
         help = "Driver launch policy."
     )]
     pub drivers: DriversMode,
+    #[arg(
+        long,
+        help = "Watch local source artifacts and hot-reload checked changes."
+    )]
+    pub watch: bool,
+    #[arg(
+        long = "env",
+        value_name = "ENV",
+        help = "Apply a robot.<env>.yaml overlay before running (repeatable). Path pins are only legal through overlays."
+    )]
+    pub env: Vec<String>,
+    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
+    pub message_format: MessageFormat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -68,10 +84,16 @@ pub struct RunOptions {
     pub drivers: DriversMode,
     pub drivers_subset: Vec<String>,
     pub catalog_source: Option<String>,
+    pub overlays: Vec<String>,
+    pub watch: bool,
+    pub message_format: MessageFormat,
 }
 
 #[derive(Debug)]
 struct PreparedRun {
+    project_root: PathBuf,
+    resolved: ResolvedRobot,
+    source_participants: Vec<crate::commands::check::SourceParticipant>,
     plan: LaunchPlan,
     board: BoardBackend,
     specs: Vec<ParticipantSpec>,
@@ -86,14 +108,21 @@ impl Run {
             drivers: self.drivers,
             drivers_subset: self.drivers_subset.clone(),
             catalog_source: app.catalog_source.clone(),
+            overlays: self.env.clone(),
+            watch: self.watch,
+            message_format: self.message_format,
         };
         if options.drivers == DriversMode::Off && !options.drivers_subset.is_empty() {
             bail!("--driver cannot be combined with --drivers off");
         }
+        let watch_enabled = options.watch;
+        let message_format = options.message_format;
+        let watch_options = options.clone();
 
         let run_dir = crate::host_paths::run_dir()?;
         let _lock = SupervisorLock::acquire(&run_dir)?;
         let state_file = supervisor_state_path()?;
+        let action_file = supervisor_actions_path()?;
         let project_root = app.project.root().to_path_buf();
         let ui = app.ui;
         let prepared =
@@ -110,6 +139,7 @@ impl Run {
             RouterOwnership::External => app.ui.info("reusing reachable external tool-router"),
             RouterOwnership::Managed => app.ui.info("tool-router will be managed by this session"),
         }
+        report_launch_commands(&prepared.specs, message_format)?;
 
         let _log_tasks = prepared
             .robot_log_targets
@@ -124,15 +154,42 @@ impl Run {
             })
             .collect::<Vec<_>>();
 
+        let (action_rx, watch_handle) = if watch_enabled {
+            let (action_tx, action_rx) = mpsc::channel(16);
+            let live_ids = prepared
+                .specs
+                .iter()
+                .map(|spec| spec.id.clone())
+                .collect::<BTreeSet<_>>();
+            let handle = crate::watch::spawn_run_watch(crate::watch::RunWatchConfig {
+                project_root: prepared.project_root.clone(),
+                options: watch_options,
+                resolved: prepared.resolved.clone(),
+                source_participants: prepared.source_participants.clone(),
+                live_ids,
+                board: prepared.board.clone(),
+                action_tx,
+            });
+            (Some(action_rx), Some(handle))
+        } else {
+            (None, None)
+        };
+
         let outcome = supervise_until_shutdown(
             prepared.specs,
             prepared.board.clone(),
             SupervisorOptions {
                 state_file: Some(state_file),
+                action_file: Some(action_file),
+                action_rx,
                 ..SupervisorOptions::default()
             },
         )
-        .await?;
+        .await;
+        if let Some(handle) = watch_handle {
+            handle.abort();
+        }
+        let outcome = outcome?;
 
         if !outcome.graph_healthy() {
             bail!(
@@ -150,7 +207,11 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let loaded = load_robot_with_extras(&robot_path)?;
+    let loaded = if options.overlays.is_empty() {
+        load_robot_with_extras(&robot_path)?
+    } else {
+        crate::resolver::load_robot_with_extras_and_overlays(&robot_path, &options.overlays)?
+    };
     let catalog = crate::commands::load_catalog_for_robot_from_source(
         options.catalog_source.clone(),
         project_root,
@@ -251,6 +312,9 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     )?;
 
     Ok(PreparedRun {
+        project_root: project_root.to_path_buf(),
+        resolved,
+        source_participants,
         robot_log_targets: plan
             .robots
             .iter()
@@ -261,6 +325,43 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         specs,
         router_ownership,
     })
+}
+
+#[derive(Debug, Serialize)]
+struct LaunchCommandReport {
+    participants: Vec<LaunchCommandEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct LaunchCommandEntry {
+    id: String,
+    kind: &'static str,
+    command_line: String,
+    env: BTreeMap<String, String>,
+}
+
+pub(crate) fn report_launch_commands(
+    specs: &[ParticipantSpec],
+    message_format: MessageFormat,
+) -> Result<()> {
+    if message_format != MessageFormat::Json {
+        return Ok(());
+    }
+    let output = LaunchCommandReport {
+        participants: specs
+            .iter()
+            .map(|spec| {
+                let launch = spec.launch_command();
+                LaunchCommandEntry {
+                    id: spec.id.clone(),
+                    kind: spec.kind.label(),
+                    command_line: launch.command_line,
+                    env: launch.env,
+                }
+            })
+            .collect(),
+    };
+    crate::commands::print_message(&output, || Ok(()), message_format)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,7 +378,7 @@ impl DriverPolicy {
         }
     }
 
-    fn from_options(options: &RunOptions, plan: &LaunchPlan) -> Result<Self> {
+    pub(crate) fn from_options(options: &RunOptions, plan: &LaunchPlan) -> Result<Self> {
         let available = plan
             .robots
             .iter()
@@ -450,6 +551,19 @@ pub(crate) fn prepare_robot_participants(
                         note: None,
                     });
                 }
+                ParticipantExecution::SourceArtifact { crate_dir, .. } => {
+                    let binary = build_source_binary(crate_dir, &id, ui)?;
+                    specs.push(ParticipantSpec {
+                        id,
+                        kind,
+                        executable: binary,
+                        args: Vec::new(),
+                        cwd: Some(crate_dir.clone()),
+                        env: encode_participant_env(&participant.launch)?.spawn_env(),
+                        shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
+                        note: None,
+                    });
+                }
                 ParticipantExecution::ComponentDriver { crate_dir } => {
                     match driver_policy.decision(&id) {
                         DriverDecision::Degraded(note) => {
@@ -492,8 +606,37 @@ fn participant_kind(execution: &ParticipantExecution) -> ParticipantKind {
     match execution {
         ParticipantExecution::OfficialArtifact { .. } => ParticipantKind::OfficialArtifact,
         ParticipantExecution::UserService { .. } => ParticipantKind::UserService,
+        ParticipantExecution::SourceArtifact { kind, .. } if kind == "service" => {
+            ParticipantKind::OfficialArtifact
+        }
+        ParticipantExecution::SourceArtifact { .. } => ParticipantKind::OfficialArtifact,
         ParticipantExecution::ComponentDriver { .. } => ParticipantKind::ComponentDriver,
     }
+}
+
+pub(crate) fn source_spec_from_launch_record(
+    participant: &ParticipantLaunchRecord,
+    ui: &crate::Ui,
+) -> Result<Option<ParticipantSpec>> {
+    let id = participant.launch.participant_id.clone();
+    let kind = participant_kind(&participant.execution);
+    let crate_dir = match &participant.execution {
+        ParticipantExecution::UserService { crate_dir }
+        | ParticipantExecution::SourceArtifact { crate_dir, .. }
+        | ParticipantExecution::ComponentDriver { crate_dir } => crate_dir,
+        ParticipantExecution::OfficialArtifact { .. } => return Ok(None),
+    };
+    let binary = build_source_binary(crate_dir, &id, ui)?;
+    Ok(Some(ParticipantSpec {
+        id,
+        kind,
+        executable: binary,
+        args: Vec::new(),
+        cwd: Some(crate_dir.clone()),
+        env: encode_participant_env(&participant.launch)?.spawn_env(),
+        shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
+        note: None,
+    }))
 }
 
 fn site_env(site: &SiteLaunch, namespace: &str, robot_id: &str) -> Result<Vec<(String, String)>> {
@@ -520,6 +663,9 @@ fn locate_tool_binary(resolved: &ResolvedRobot, name: &str) -> Result<Option<Pat
         .iter()
         .find(|tool| tool.name == name)
         .ok_or_else(|| anyhow!("resolved graph is missing site tool {name}"))?;
+    if let Some(path) = &tool.path_override {
+        return Ok(Some(build_source_binary(path, name, &crate::Ui)?));
+    }
     if let Some(path) = env_path_override("PHOXAL_TOOL", name) {
         return Ok(Some(path));
     }
@@ -618,7 +764,11 @@ fn native_pending_official_note(
     )
 }
 
-fn build_source_binary(crate_dir: &Path, preferred_name: &str, ui: &crate::Ui) -> Result<PathBuf> {
+pub(crate) fn build_source_binary(
+    crate_dir: &Path,
+    preferred_name: &str,
+    ui: &crate::Ui,
+) -> Result<PathBuf> {
     let crate_dir = crate_dir.canonicalize().with_context(|| {
         format!(
             "failed to canonicalize source crate {}",
@@ -795,6 +945,9 @@ mod tests {
                 drivers: DriversMode::On,
                 drivers_subset: vec!["imu".to_string()],
                 catalog_source: None,
+                overlays: Vec::new(),
+                watch: false,
+                message_format: MessageFormat::Human,
             },
             &plan,
         )?;
@@ -810,6 +963,9 @@ mod tests {
                 drivers: DriversMode::On,
                 drivers_subset: vec!["missing".to_string()],
                 catalog_source: None,
+                overlays: Vec::new(),
+                watch: false,
+                message_format: MessageFormat::Human,
             },
             &plan,
         )
@@ -827,6 +983,9 @@ mod tests {
                 drivers: DriversMode::Off,
                 drivers_subset: Vec::new(),
                 catalog_source: None,
+                overlays: Vec::new(),
+                watch: false,
+                message_format: MessageFormat::Human,
             },
             &plan,
         )?;

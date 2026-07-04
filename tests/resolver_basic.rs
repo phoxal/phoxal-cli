@@ -5,7 +5,10 @@ use phoxal_cli::catalog::{
     ArtifactStatus, CatalogRevision, Channel as CatalogChannel, fixture_catalog_for_tests,
     fixture_contract_for_tests, fixture_driver_entry_for_tests, fixture_service_entry_for_tests,
 };
-use phoxal_cli::resolver::{ResolveOptions, ResolvedRobot, host_target_triple, resolve};
+use phoxal_cli::resolver::{
+    ResolveOptions, ResolvedPathOverrideKind, ResolvedRobot, host_target_triple,
+    load_robot_with_extras, load_robot_with_extras_and_overlays, resolve,
+};
 
 #[test]
 fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
@@ -347,6 +350,95 @@ fn tool_version_override_is_preserved_for_any_known_tool() -> anyhow::Result<()>
     Ok(())
 }
 
+#[test]
+fn path_pin_with_unknown_prefix_is_rejected() -> anyhow::Result<()> {
+    let robot = Robot::parse_from_string(&robot_with_path_pin(
+        "runtime-drive",
+        "./framework/service/drive",
+    ))?;
+    let error = resolve_with_catalog(&robot, std::path::Path::new("."))
+        .expect_err("unknown path pin key should fail");
+
+    assert!(
+        error.to_string().contains("unknown artifact path pin"),
+        "{error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn unused_kind_qualified_path_pin_is_rejected() -> anyhow::Result<()> {
+    let robot = Robot::parse_from_string(&robot_with_path_pin(
+        "driver-bno085",
+        "./framework/component/bno085",
+    ))?;
+    let error = resolve_with_catalog(&robot, std::path::Path::new("."))
+        .expect_err("unused path pin key should fail");
+
+    assert!(
+        error.to_string().contains("unused artifact path pin"),
+        "{error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn path_pins_are_overlay_only() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let base_path = temp.path().join("robot.yaml");
+    fs::write(
+        &base_path,
+        robot_with_path_pin("service-drive", "../framework/service/drive"),
+    )?;
+    let error = load_robot_with_extras(&base_path).expect_err("base path pin should fail");
+    assert!(error.to_string().contains("dev-overlay only"), "{error:#}");
+
+    fs::write(&base_path, minimal_robot_yaml("y2026_1"))?;
+    fs::write(
+        temp.path().join("robot.dev.yaml"),
+        "phoxal_artifacts:\n  pins:\n    service-drive:\n      path: ../framework/service/drive\n",
+    )?;
+    let loaded = load_robot_with_extras_and_overlays(&base_path, &["dev".to_string()])?;
+    assert!(
+        loaded
+            .robot
+            .phoxal_artifacts
+            .pins
+            .contains_key("service-drive")
+    );
+    Ok(())
+}
+
+#[test]
+fn service_path_pin_replaces_catalog_artifact() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let robot = Robot::parse_from_string(&robot_with_path_pin(
+        "service-drive",
+        "../framework/service/drive",
+    ))?;
+    let resolved = resolve_with_catalog(&robot, temp.path())?;
+    let drive = resolved
+        .platform_runtimes
+        .iter()
+        .find(|runtime| runtime.name == "drive")
+        .expect("drive runtime");
+
+    assert_eq!(
+        drive.source_path(),
+        Some(temp.path().join("../framework/service/drive").as_path())
+    );
+    assert!(drive.artifact_ref().starts_with("path:"));
+    assert_eq!(
+        resolved
+            .path_overrides
+            .iter()
+            .find(|override_| override_.key == "service-drive")
+            .map(|override_| override_.kind),
+        Some(ResolvedPathOverrideKind::Service)
+    );
+    Ok(())
+}
+
 fn resolve_with_catalog(robot: &Robot, root: &std::path::Path) -> anyhow::Result<ResolvedRobot> {
     let catalog = test_catalog();
     resolve(robot, root, Some(&catalog), offline_options())
@@ -463,6 +555,13 @@ components:
       component: ddsm115
       mount_link: right_wheel_mount
 "#
+    )
+}
+
+fn robot_with_path_pin(key: &str, path: &str) -> String {
+    minimal_robot_yaml("y2026_1").replace(
+        "phoxal_artifacts:\n  channel: stable",
+        &format!("phoxal_artifacts:\n  channel: stable\n  pins:\n    {key}:\n      path: {path}"),
     )
 }
 

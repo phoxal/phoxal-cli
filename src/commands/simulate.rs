@@ -5,6 +5,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 use phoxal::check as graph_check;
 use serde::Serialize;
+use tokio::sync::mpsc;
 
 use crate::AppContext;
 use crate::catalog::{ArtifactKind, CatalogEntry, CatalogRevision, Channel as CatalogChannel};
@@ -13,7 +14,7 @@ use crate::commands::check::{
     CheckGraphContext, RawArtifact, RawContract, RawEmitApis, SourceParticipant,
     SourceParticipantKind, build_emit_apis_from_source, official_emit_apis_from_catalog_metadata,
     platform_artifact_refs_from_resolved, robot_graph_from_resolved, run_check_with_context,
-    source_participants_from_resolved,
+    source_participants_building_only_crate, source_participants_from_resolved,
 };
 use crate::component_driver::component_crate_dir;
 use crate::launch_plan::{
@@ -26,7 +27,8 @@ use crate::resolver::{
 use crate::supervisor::{
     BoardBackend, ParticipantKind, ParticipantState, ParticipantStatus, RouterOwnership,
     SupervisorLock, SupervisorOptions, default_connect_endpoint, local_router_reachable,
-    router_ownership, start_bus_log_subscriber, supervise_until_shutdown, supervisor_state_path,
+    router_ownership, start_bus_log_subscriber, supervise_until_shutdown, supervisor_actions_path,
+    supervisor_state_path,
 };
 use crate::world;
 
@@ -53,6 +55,17 @@ pub struct Simulate {
     pub pull: bool,
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
     pub message_format: MessageFormat,
+    #[arg(
+        long,
+        help = "Watch local source artifacts and hot-reload checked changes."
+    )]
+    pub watch: bool,
+    #[arg(
+        long = "env",
+        value_name = "ENV",
+        help = "Apply a robot.<env>.yaml overlay before simulating (repeatable). Path pins are only legal through overlays."
+    )]
+    pub env: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +81,8 @@ pub struct SimulateOptions {
     pub pull: bool,
     pub catalog_source: Option<String>,
     pub message_format: MessageFormat,
+    pub watch: bool,
+    pub overlays: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,15 +94,16 @@ pub struct SimulatePlan {
     pub native_tools: Vec<String>,
     pub resolved: ResolvedRobot,
     pub launch_plan: LaunchPlan,
+    pub source_participants: Vec<SourceParticipant>,
 }
 
-struct ResolvedSimulation {
-    robot_path: PathBuf,
-    project_root: PathBuf,
-    world_path: PathBuf,
-    resolved: ResolvedRobot,
-    manifest_extras: RobotManifestExtras,
-    catalog: Option<CatalogRevision>,
+pub(crate) struct ResolvedSimulation {
+    pub(crate) robot_path: PathBuf,
+    pub(crate) project_root: PathBuf,
+    pub(crate) world_path: PathBuf,
+    pub(crate) resolved: ResolvedRobot,
+    pub(crate) manifest_extras: RobotManifestExtras,
+    pub(crate) catalog: Option<CatalogRevision>,
 }
 
 impl Simulate {
@@ -98,6 +114,8 @@ impl Simulate {
             pull: self.pull,
             catalog_source: app.catalog_source.clone(),
             message_format: self.message_format,
+            watch: self.watch,
+            overlays: self.env.clone(),
         };
         let mode = if self.dry_run {
             SimulateMode::DryRun
@@ -135,6 +153,7 @@ pub async fn run(
             let run_dir = crate::host_paths::run_dir()?;
             let _lock = SupervisorLock::acquire(&run_dir)?;
             let state_file = supervisor_state_path()?;
+            let action_file = supervisor_actions_path()?;
             let board = BoardBackend::new();
             let router_ownership =
                 router_ownership(local_router_reachable(&default_connect_endpoint()));
@@ -169,6 +188,7 @@ pub async fn run(
                         .info("tool-router will be managed by this simulation session");
                 }
             }
+            crate::commands::run::report_launch_commands(&specs, options.message_format)?;
 
             let _log_tasks = plan
                 .launch_plan
@@ -184,15 +204,41 @@ pub async fn run(
                 })
                 .collect::<Vec<_>>();
 
+            let (action_rx, watch_handle) = if options.watch {
+                let (action_tx, action_rx) = mpsc::channel(16);
+                let live_ids = specs
+                    .iter()
+                    .map(|spec| spec.id.clone())
+                    .collect::<std::collections::BTreeSet<_>>();
+                let handle = crate::watch::spawn_sim_watch(crate::watch::SimWatchConfig {
+                    project_root: plan.project_root.clone(),
+                    options: options.clone(),
+                    resolved: plan.resolved.clone(),
+                    source_participants: plan.source_participants.clone(),
+                    live_ids,
+                    board: board.clone(),
+                    action_tx,
+                });
+                (Some(action_rx), Some(handle))
+            } else {
+                (None, None)
+            };
+
             let outcome = supervise_until_shutdown(
                 specs,
                 board.clone(),
                 SupervisorOptions {
                     state_file: Some(state_file),
+                    action_file: Some(action_file),
+                    action_rx,
                     ..SupervisorOptions::default()
                 },
             )
-            .await?;
+            .await;
+            if let Some(handle) = watch_handle {
+                handle.abort();
+            }
+            let outcome = outcome?;
 
             if !outcome.graph_healthy() {
                 bail!(
@@ -213,6 +259,11 @@ pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<Simulat
         &resolved.manifest_extras,
         resolved.catalog.as_ref(),
     )?;
+    let source_participants = sim_source_participants(
+        &resolved.project_root,
+        &resolved.resolved,
+        resolved.catalog.as_ref(),
+    )?;
     Ok(SimulatePlan {
         robot_path: resolved.robot_path,
         project_root: resolved.project_root,
@@ -221,10 +272,11 @@ pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<Simulat
         native_tools: native_tool_labels(options),
         resolved: resolved.resolved,
         launch_plan,
+        source_participants,
     })
 }
 
-fn resolve_project(
+pub(crate) fn resolve_project(
     project_start: &Path,
     options: SimulateOptions,
     _mode: SimulateMode,
@@ -236,7 +288,11 @@ fn resolve_project(
         .context("robot.yaml did not have a parent directory")?
         .to_path_buf();
     let world_path = world::resolve_world(&project_root, &options.world)?;
-    let loaded = crate::resolver::load_robot_with_extras(&robot_path)?;
+    let loaded = if options.overlays.is_empty() {
+        crate::resolver::load_robot_with_extras(&robot_path)?
+    } else {
+        crate::resolver::load_robot_with_extras_and_overlays(&robot_path, &options.overlays)?
+    };
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
     let catalog = crate::catalog::load_catalog(crate::catalog::CatalogLoadOptions {
@@ -275,15 +331,29 @@ fn resolve_project(
     })
 }
 
-fn build_checked_sim_launch_plan(
+pub(crate) fn build_checked_sim_launch_plan(
     project_root: &Path,
     resolved: &ResolvedRobot,
     manifest_extras: &RobotManifestExtras,
     catalog: Option<&CatalogRevision>,
 ) -> Result<LaunchPlan> {
+    build_checked_sim_launch_plan_with_scope(project_root, resolved, manifest_extras, catalog, None)
+}
+
+pub(crate) fn build_checked_sim_launch_plan_with_scope(
+    project_root: &Path,
+    resolved: &ResolvedRobot,
+    manifest_extras: &RobotManifestExtras,
+    catalog: Option<&CatalogRevision>,
+    build_only_crate: Option<&Path>,
+) -> Result<LaunchPlan> {
     let robot_graph = robot_graph_from_resolved(resolved);
-    let source_participants = sim_source_participants(project_root, resolved, catalog)
+    let mut source_participants = sim_source_participants(project_root, resolved, catalog)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
+    if let Some(crate_dir) = build_only_crate {
+        source_participants =
+            source_participants_building_only_crate(&source_participants, crate_dir);
+    }
     let platform_refs = platform_artifact_refs_from_resolved(resolved);
     let official_by_ref = resolved
         .platform_runtimes
@@ -359,7 +429,7 @@ fn build_checked_sim_launch_plan(
     )
 }
 
-fn sim_source_participants(
+pub(crate) fn sim_source_participants(
     project_root: &Path,
     resolved: &ResolvedRobot,
     catalog: Option<&CatalogRevision>,
@@ -423,6 +493,9 @@ fn catalog_driver_entry<'a>(
     component: &ResolvedComponent,
 ) -> Option<&'a CatalogEntry> {
     let catalog = catalog?;
+    if component.driver_path_override.is_some() {
+        return None;
+    }
     if !is_catalog_driver_source(component) {
         return None;
     }
@@ -1335,6 +1408,7 @@ components:
             user_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
+            path_overrides: Vec::new(),
         })
     }
 
@@ -1363,6 +1437,7 @@ components:
                     path: PathBuf::from("components/ddsm115"),
                 },
                 has_driver: true,
+                driver_path_override: None,
             });
         }
         Ok(resolved)
@@ -1386,6 +1461,7 @@ components:
             per_triple_status: BTreeMap::new(),
             changed_contracts: Vec::new(),
             contract_uses: contracts,
+            path_override: None,
         }
     }
 
@@ -1403,6 +1479,7 @@ components:
             asset: format!("{name}-0.1.0-{}.tar.gz", host_target_triple()),
             binary_name: name.to_string(),
             sha256: "0".repeat(64),
+            path_override: None,
         }
     }
 }

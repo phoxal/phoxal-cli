@@ -55,10 +55,11 @@ pub struct ParticipantLaunchRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "execution", rename_all = "snake_case")]
 pub enum ParticipantExecution {
     OfficialArtifact { artifact_ref: String },
     UserService { crate_dir: PathBuf },
+    SourceArtifact { kind: String, crate_dir: PathBuf },
     ComponentDriver { crate_dir: PathBuf },
 }
 
@@ -275,10 +276,16 @@ fn is_robot_launch_participant(
     if !participant.participant_class.is_checked() {
         return false;
     }
+    if matches!(
+        participant.participant_kind,
+        graph_check::ParticipantKind::Tool | graph_check::ParticipantKind::Simulator
+    ) {
+        return false;
+    }
     if mode == LaunchMode::Sim
         && matches!(
             participant.participant_kind,
-            graph_check::ParticipantKind::Driver | graph_check::ParticipantKind::Simulator
+            graph_check::ParticipantKind::Driver
         )
     {
         return false;
@@ -315,7 +322,19 @@ fn participant_execution(
             SourceParticipantKind::UserService => ParticipantExecution::UserService {
                 crate_dir: source.crate_dir.clone(),
             },
+            SourceParticipantKind::OfficialService => ParticipantExecution::SourceArtifact {
+                kind: "service".to_string(),
+                crate_dir: source.crate_dir.clone(),
+            },
             SourceParticipantKind::ComponentDriver => ParticipantExecution::ComponentDriver {
+                crate_dir: source.crate_dir.clone(),
+            },
+            SourceParticipantKind::Tool => ParticipantExecution::SourceArtifact {
+                kind: "tool".to_string(),
+                crate_dir: source.crate_dir.clone(),
+            },
+            SourceParticipantKind::Simulator => ParticipantExecution::SourceArtifact {
+                kind: "simulator".to_string(),
                 crate_dir: source.crate_dir.clone(),
             },
         });
@@ -528,6 +547,15 @@ mod tests {
                 SourceParticipantKind::UserService => Ok(raw_emit_apis("service", &source.name)),
                 SourceParticipantKind::ComponentDriver => {
                     Ok(raw_emit_apis("driver", &source.expected_artifact_id))
+                }
+                SourceParticipantKind::OfficialService => {
+                    Ok(raw_emit_apis("service", &source.expected_artifact_id))
+                }
+                SourceParticipantKind::Tool => {
+                    Ok(raw_emit_apis("tool", &source.expected_artifact_id))
+                }
+                SourceParticipantKind::Simulator => {
+                    Ok(raw_emit_apis("simulator", &source.expected_artifact_id))
                 }
             },
         )?;
@@ -771,6 +799,7 @@ components:
             user_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
+            path_overrides: Vec::new(),
         })
     }
 
@@ -788,6 +817,7 @@ components:
             asset: format!("{name}-0.1.0-{}.tar.gz", host_target_triple()),
             binary_name: name.to_string(),
             sha256: "0".repeat(64),
+            path_override: None,
         }
     }
 

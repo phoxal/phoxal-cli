@@ -15,7 +15,7 @@ cd rover
 phoxal-cli check                  # validate target generation + topology via emit-apis
 phoxal-cli generations status     # inspect catalog readiness for the robot target
 phoxal-cli service add brain      # scaffold a user service crate, register it in robot.yaml
-phoxal-cli service run brain      # build and run that service host-native against the dev bus
+phoxal-cli run --watch            # supervise the graph and hot-swap checked local edits
 phoxal-cli simulate default       # resolve and report the simulation launch plan
 
 phoxal-cli pull                   # refresh the artifact catalog cache + host tools
@@ -28,8 +28,10 @@ phoxal-cli deploy build           # write an immutable, digest-pinned deployment
 | `robot new <name>` | Scaffold a D5 robot project (`robot.yaml`, `structure.urdf`, default world, `runtimes/`). New manifests omit root `api_version`; optional `phoxal_artifacts.generation` pins the target generation. |
 | `check` | Resolve `robot.yaml`, then run each participant's `emit-apis` and fail if participants sharing a contract disagree on its `schema_id` (wire shape) or the producer/consumer topology is unsatisfied. Mixed participant `api_version`s are allowed as long as shared contracts' `schema_id`s agree. Official artifact readiness comes from the generated catalog; git component commits resolve live unless pinned to a commit SHA in `robot.yaml`. `--pull` refreshes the catalog and host tools first; `--service <name>` scopes the build to one user service. |
 | `generations status` | Report readiness for a catalog generation on the robot target, including changed contracts and per-target artifact status. Use `--generation <g>` to inspect a specific generation. |
-| `simulate <world>` | Resolve the robot and report the host-native simulation launch plan without writing a local launch directory. |
-| `service add\|run\|catalog` | Scaffold a user service, run one host-native, or print official services from the configured artifact catalog. |
+| `run` | Supervise the resolved host-native graph. `--watch` rebuilds changed local participants, re-runs the graph proof, and swaps the checked process in place. `--message-format json` prints exact participant launch command lines and env. |
+| `simulate <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` hot-swaps service edits and re-checks driver metadata/substitutions without launching drivers. |
+| `status [release|resume <participant>]` | Print the supervisor board, or explicitly release a managed child for manual/debugger execution and later resume it under supervision. |
+| `service add\|catalog` | Scaffold a user service, or print official services from the configured artifact catalog. `service run` is intentionally removed; use `run --watch` plus `status release/resume` for debugging. |
 | `pull` / `outdated` | Refresh, or report drift in, cached artifact metadata and host tools for the selected `(target_generation, channel)`. |
 | `deploy build` | Reserved for the native systemd release artifact. |
 | `validate` | Lower-level `robot.yaml` structure and user-service phoxal-dependency checks that back `check`. |
@@ -37,6 +39,21 @@ phoxal-cli deploy build           # write an immutable, digest-pinned deployment
 | `self upgrade` | Update the CLI binary itself. |
 
 Commands that emit machine-readable state accept `--message-format human|json`.
+
+### Dev Path Overrides
+
+Local artifact source overrides use `phoxal_artifacts.pins.<kind-qualified-id> = { path: ... }` and are legal only in dev overlays such as `robot.dev.yaml`:
+
+```yaml
+phoxal_artifacts:
+  pins:
+    service-drive:
+      path: ../framework/service/drive
+    driver-ddsm115:
+      path: ../framework/component/ddsm115
+```
+
+Load them with `--env dev`. Base `robot.yaml` is fail-closed for `{ path: ... }` pins so production manifests stay catalog/release based. Unknown or unused pin keys are errors.
 
 ## Artifact Catalog
 
