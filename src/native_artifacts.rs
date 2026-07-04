@@ -169,11 +169,20 @@ pub fn stage_descriptor(
     }
     let asset_path = cached_asset_path(descriptor)?;
     if mode == ProvisioningMode::Refresh || !asset_path.is_file() {
-        let bytes = download_release_asset(descriptor)?;
+        let bytes =
+            download_release_asset(&descriptor.tag(), &descriptor.asset, &descriptor.sha256)?;
         write_file_atomic(&asset_path, &bytes)?;
     }
     verify_file_sha256(&asset_path, &descriptor.sha256)?;
     unpack_asset(&asset_path, &root)?;
+    // The packaged emit-apis metadata ships as its own release asset next to
+    // the archive, not inside it.
+    let emit_apis_bytes = download_release_asset(
+        &descriptor.tag(),
+        &descriptor.metadata.emit_apis,
+        &descriptor.metadata.emit_apis_sha256,
+    )?;
+    write_file_atomic(&metadata, &emit_apis_bytes)?;
     verify_file_sha256(&metadata, &descriptor.metadata.emit_apis_sha256)?;
     if binary.is_file() {
         make_executable(&binary)?;
@@ -212,16 +221,12 @@ fn cached_asset_path(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
         .join(&descriptor.asset))
 }
 
-fn release_asset_url(descriptor: &NativeArtifactDescriptor) -> String {
-    format!(
-        "https://github.com/{FRAMEWORK_REPO}/releases/download/{}/{}",
-        descriptor.tag(),
-        descriptor.asset
-    )
+fn release_asset_url(tag: &str, asset: &str) -> String {
+    format!("https://github.com/{FRAMEWORK_REPO}/releases/download/{tag}/{asset}")
 }
 
-fn download_release_asset(descriptor: &NativeArtifactDescriptor) -> Result<Vec<u8>> {
-    let url = release_asset_url(descriptor);
+fn download_release_asset(tag: &str, asset: &str, expected_sha256: &str) -> Result<Vec<u8>> {
+    let url = release_asset_url(tag, asset);
     let client = reqwest::blocking::Client::builder()
         .user_agent("phoxal-cli")
         .timeout(Duration::from_secs(120))
@@ -235,23 +240,17 @@ fn download_release_asset(descriptor: &NativeArtifactDescriptor) -> Result<Vec<u
         .with_context(|| format!("failed to download {url}"))?;
     if !response.status().is_success() {
         bail!(
-            "download of {} from {} returned {}",
-            descriptor.asset,
-            descriptor.tag(),
+            "download of {asset} from {tag} returned {}",
             response.status()
         );
     }
     let bytes = response
         .bytes()
-        .with_context(|| format!("failed to read {} body", descriptor.asset))?
+        .with_context(|| format!("failed to read {asset} body"))?
         .to_vec();
     let actual = hex::encode(Sha256::digest(&bytes));
-    if actual != descriptor.sha256 {
-        bail!(
-            "sha256 mismatch for {}: expected {}, got {actual}",
-            descriptor.asset,
-            descriptor.sha256
-        );
+    if actual != expected_sha256 {
+        bail!("sha256 mismatch for {asset}: expected {expected_sha256}, got {actual}");
     }
     Ok(bytes)
 }

@@ -75,17 +75,21 @@ pub fn encode_participant_env(launch: &ParticipantLaunch) -> Result<EncodedParti
             launch.bus.connect_endpoints.join(","),
         );
     }
-    let config = compact_config_json(launch)?;
-    variables.insert(env::CONFIG.to_string(), config);
+    // The framework runner treats an absent (or empty) PHOXAL_CONFIG as "no
+    // config" and only deserializes when the variable is present - encoding
+    // `{}` for a config-less participant makes unit-config services fail with
+    // "invalid type: map, expected unit".
+    if let Some(config) = compact_config_json(launch)? {
+        variables.insert(env::CONFIG.to_string(), config);
+    }
     variables.insert(env::CLOCK.to_string(), launch.clock.to_string());
     Ok(EncodedParticipantEnv { variables })
 }
 
-fn compact_config_json(launch: &ParticipantLaunch) -> Result<String> {
-    let config = launch
-        .config
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({}));
+fn compact_config_json(launch: &ParticipantLaunch) -> Result<Option<String>> {
+    let Some(config) = launch.config.clone() else {
+        return Ok(None);
+    };
     let encoded = serde_json::to_string(&config).with_context(|| {
         format!(
             "failed to encode PHOXAL_CONFIG for participant {}",
@@ -99,7 +103,7 @@ fn compact_config_json(launch: &ParticipantLaunch) -> Result<String> {
             launch.participant_id
         );
     }
-    Ok(encoded)
+    Ok(Some(encoded))
 }
 
 fn escape_environment_file_value(value: &str) -> String {
