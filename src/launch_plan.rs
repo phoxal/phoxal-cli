@@ -115,20 +115,21 @@ fn build_site_launches(
     robots: &[CheckedRobotLaunchInput<'_>],
 ) -> Result<Vec<SiteLaunch>> {
     let router = merge_site_tool_artifact(SITE_TOOL_ROUTER, robots)?;
-    let joypad = merge_site_tool_artifact(SITE_TOOL_JOYPAD, robots)?;
     let router_config = router_config(mode, robots)?;
-    Ok(vec![
-        SiteLaunch {
-            id: SITE_TOOL_ROUTER.to_string(),
-            artifact_ref: router,
-            phoxal_config: router_config,
-        },
-        SiteLaunch {
+    let mut site = vec![SiteLaunch {
+        id: SITE_TOOL_ROUTER.to_string(),
+        artifact_ref: router,
+        phoxal_config: router_config,
+    }];
+    if mode != LaunchMode::Deploy {
+        let joypad = merge_site_tool_artifact(SITE_TOOL_JOYPAD, robots)?;
+        site.push(SiteLaunch {
             id: SITE_TOOL_JOYPAD.to_string(),
             artifact_ref: joypad,
             phoxal_config: serde_json::json!({}),
-        },
-    ])
+        });
+    }
+    Ok(site)
 }
 
 fn merge_site_tool_artifact(
@@ -383,7 +384,7 @@ fn participant_launch(
 fn robot_root_for_mode(mode: LaunchMode, project_root: &Path) -> PathBuf {
     match mode {
         LaunchMode::Run | LaunchMode::Sim => project_root.to_path_buf(),
-        LaunchMode::Deploy => PathBuf::from("manifest"),
+        LaunchMode::Deploy => PathBuf::from("/opt/phoxal"),
     }
 }
 
@@ -500,6 +501,7 @@ mod tests {
             ResolveOptions {
                 resolve_external_artifacts: false,
                 resolve_source_commits: false,
+                ..ResolveOptions::default()
             },
         )?;
         add_site_tools(&mut resolved);

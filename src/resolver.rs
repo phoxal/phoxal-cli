@@ -21,7 +21,7 @@ use crate::utils::{hash_tree, resolve_project_path};
 
 const ROBOT_FILE: &str = "robot.yaml";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolveOptions {
     /// Resolve external artifact checksums from the network (tool asset sha256).
     /// Off for offline flows.
@@ -29,10 +29,17 @@ pub struct ResolveOptions {
     /// Resolve git component `tag` → `commit`. A `tag` that is already a full
     /// commit SHA resolves with no network; a tag/branch ref is resolved live
     /// via `git ls-remote`. Flows that need to locate/stage component driver
-    /// sources (`check`, `run --watch`, simulate, `deploy build`) set this;
+    /// sources (`check`, `run --watch`, simulate, `deploy`) set this;
     /// flows that never read component commits (`pull`, `outdated`) leave it
     /// off so they stay fully offline.
     pub resolve_source_commits: bool,
+    /// Override the official service/driver target triple. Deploy probes the
+    /// robot arch and resolves catalog assets for that Linux triple instead of
+    /// the host.
+    pub official_target_triple: Option<String>,
+    /// Override native tool asset target triple. Host-native run/sim use the
+    /// host triple; deploy ships robot-native tools.
+    pub tool_target_triple: Option<String>,
 }
 
 impl Default for ResolveOptions {
@@ -40,6 +47,8 @@ impl Default for ResolveOptions {
         Self {
             resolve_external_artifacts: true,
             resolve_source_commits: true,
+            official_target_triple: None,
+            tool_target_triple: None,
         }
     }
 }
@@ -92,6 +101,7 @@ pub struct ResolvedPlatformRuntime {
     pub generation: String,
     pub version: String,
     pub artifact_ref: String,
+    pub sha256: Option<String>,
     pub target_status: Option<ArtifactStatus>,
     pub per_triple_status: BTreeMap<String, ArtifactStatus>,
     pub changed_contracts: Vec<String>,
@@ -451,10 +461,10 @@ pub fn resolve(
 ) -> Result<ResolvedRobot> {
     let channel = robot.phoxal_artifacts.channel;
     let catalog_channel = CatalogChannel::from(channel);
-    let target = robot
-        .phoxal_artifacts
-        .target
+    let target = options
+        .official_target_triple
         .clone()
+        .or_else(|| robot.phoxal_artifacts.target.clone())
         .unwrap_or_else(host_target_triple);
     let target_generation = target_generation(robot, catalog, catalog_channel, &target)?;
     let platform_names = catalog
@@ -493,7 +503,10 @@ pub fn resolve(
     // tag/branch ref is resolved live via `git ls-remote`. Flows that never read
     // component commits (`pull`, `outdated`) leave it off so they stay offline.
     let mut components = resolve_components(robot, options.resolve_source_commits)?;
-    let mut tools = resolve_tools(robot, options.resolve_external_artifacts)?;
+    let tool_target = options
+        .tool_target_triple
+        .unwrap_or_else(host_target_triple);
+    let mut tools = resolve_tools(robot, options.resolve_external_artifacts, &tool_target)?;
     let path_overrides = apply_path_pins(
         robot,
         project_root,
@@ -568,6 +581,7 @@ fn apply_service_path_pin(
     };
     runtime.path_override = Some(path.to_path_buf());
     runtime.artifact_ref = format!("path:{}", path.display());
+    runtime.sha256 = None;
     runtime.target_status = Some(ArtifactStatus::Released);
     runtime.changed_contracts.clear();
     overrides.push(ResolvedPathOverride {
@@ -692,21 +706,41 @@ fn target_generation(
     if let Some(generation) = robot.api_version.as_deref() {
         return Ok(generation.to_string());
     }
-    if let Some(catalog) = catalog
-        && let Some(generation) = catalog.newest_generation_on_channel(channel, target)
-    {
-        return Ok(generation);
+    if let Some(catalog) = catalog {
+        if let Some(generation) = catalog.newest_generation_on_channel(channel, target) {
+            return Ok(generation);
+        }
+        if robot_uses_only_catalog_artifacts(robot) {
+            bail!(
+                "{}",
+                catalog_target_generation_not_yet_available(catalog, channel, target)
+            );
+        }
     }
-    if robot.user_participants.is_empty()
+    if robot_uses_only_catalog_artifacts(robot) {
+        bail!("{}", crate::catalog::unavailable_catalog_error());
+    }
+    Ok("source".to_string())
+}
+
+fn robot_uses_only_catalog_artifacts(robot: &Robot) -> bool {
+    robot.user_participants.is_empty()
         && robot
             .components
             .instances
             .values()
             .all(|component| component.driver.is_none())
-    {
-        bail!("{}", crate::catalog::unavailable_catalog_error());
-    }
-    Ok("source".to_string())
+}
+
+fn catalog_target_generation_not_yet_available(
+    catalog: &CatalogRevision,
+    channel: CatalogChannel,
+    target: &str,
+) -> anyhow::Error {
+    anyhow!(
+        "NotYetAvailable: loaded artifact catalog revision {} has no released generation assets for target {target} on channel {channel}. Assets for this deploy triple arrive with plan #01; pass a catalog that includes released assets for {target}/{channel}, pin phoxal_artifacts.generation/api_version for source-only development, or deploy a target covered by this catalog.",
+        catalog.revision
+    )
 }
 
 pub(crate) fn target_generation_for_robot(
@@ -776,9 +810,8 @@ fn resolve_catalog_entries(
                 .artifact_name()
                 .ok_or_else(|| anyhow!("{} does not match kind {}", entry.artifact_id, entry.kind))?
                 .to_string();
-            let artifact_ref = entry
-                .release_assets
-                .get(target)
+            let release_asset = entry.release_assets.get(target);
+            let artifact_ref = release_asset
                 .map(|asset| asset.asset.clone())
                 .unwrap_or_else(|| {
                     format!(
@@ -793,6 +826,7 @@ fn resolve_catalog_entries(
                 generation: entry.api_generation.clone(),
                 version: entry.version.clone(),
                 artifact_ref,
+                sha256: release_asset.map(|asset| asset.sha256.clone()),
                 target_status: entry.status_for(target),
                 per_triple_status: entry.status.clone(),
                 changed_contracts: entry.changed_contracts.clone(),
@@ -1004,7 +1038,11 @@ fn resolve_components(
     Ok(components)
 }
 
-fn resolve_tools(robot: &Robot, resolve_external_artifacts: bool) -> Result<Vec<ResolvedTool>> {
+fn resolve_tools(
+    robot: &Robot,
+    resolve_external_artifacts: bool,
+    target: &str,
+) -> Result<Vec<ResolvedTool>> {
     // Reject robot.yaml tool selectors for unknown tools up front (previously a
     // robot.tools entry seeded the request map; now the catalog is the source of
     // truth and robot.yaml may only pin known tools to explicit versions).
@@ -1013,7 +1051,6 @@ fn resolve_tools(robot: &Robot, resolve_external_artifacts: bool) -> Result<Vec<
             bail!("unknown native tool '{name}'");
         }
     }
-    let target = host_target_triple();
     DEFAULT_TOOL_VERSIONS
         .iter()
         .map(|catalog_tool| {
@@ -1022,8 +1059,8 @@ fn resolve_tools(robot: &Robot, resolve_external_artifacts: bool) -> Result<Vec<
             let version = override_version
                 .unwrap_or(catalog_tool.default_version)
                 .to_string();
-            let asset = render_tool_template(catalog_tool.artifact_template, &version, &target);
-            let binary_name = render_tool_template(catalog_tool.binary_template, &version, &target);
+            let asset = render_tool_template(catalog_tool.artifact_template, &version, target);
+            let binary_name = render_tool_template(catalog_tool.binary_template, &version, target);
             let sha256 = if resolve_external_artifacts {
                 resolve_release_asset_sha256(catalog_tool.repo, &version, &asset)?
                     .unwrap_or_default()
@@ -1187,6 +1224,7 @@ mod tests {
             ResolveOptions {
                 resolve_external_artifacts: false,
                 resolve_source_commits: false,
+                ..ResolveOptions::default()
             },
         )?;
 
@@ -1258,6 +1296,7 @@ components:
             ResolveOptions {
                 resolve_external_artifacts: false,
                 resolve_source_commits: true,
+                ..ResolveOptions::default()
             },
         )?;
 
@@ -1463,6 +1502,7 @@ components:
             generation: "y2026_1".to_string(),
             version: "0.1.0".to_string(),
             artifact_ref: "service-asset:y2026_1-stable".to_string(),
+            sha256: None,
             target_status: Some(ArtifactStatus::Pending),
             per_triple_status: BTreeMap::new(),
             changed_contracts: Vec::new(),

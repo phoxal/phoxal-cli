@@ -225,6 +225,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         ResolveOptions {
             resolve_external_artifacts: false,
             resolve_source_commits: true,
+            ..ResolveOptions::default()
         },
     )?;
 

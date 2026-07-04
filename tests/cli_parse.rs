@@ -1,7 +1,5 @@
 use clap::{CommandFactory, Parser};
-use phoxal_cli::commands::{
-    Cli, MessageFormat, RootCommand, deploy, robot, self_cmd, service, status,
-};
+use phoxal_cli::commands::{Cli, MessageFormat, RootCommand, robot, self_cmd, service, status};
 
 #[test]
 fn clap_definition_is_valid() {
@@ -163,38 +161,39 @@ fn parses_status_release_resume_and_json() {
 }
 
 #[test]
-fn parses_deploy_build() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "deploy", "build"])
-        .expect("deploy build command should parse");
-
-    let RootCommand::Deploy(command) = cli.command else {
-        panic!("expected deploy command");
-    };
-    let deploy::DeploySubcommand::Build(build) = command.command;
-
-    assert!(build.env.is_empty());
-}
-
-#[test]
-fn parses_deploy_build_env_and_json_output() {
+fn parses_deploy_single_verb() {
     let cli = Cli::try_parse_from([
         "phoxal-cli",
         "deploy",
-        "build",
+        "robot@192.168.1.50",
         "--env",
         "prod",
         "--message-format",
         "json",
     ])
-    .expect("deploy build command should parse");
+    .expect("deploy command should parse");
 
     let RootCommand::Deploy(command) = cli.command else {
         panic!("expected deploy command");
     };
-    let deploy::DeploySubcommand::Build(build) = command.command;
 
-    assert_eq!(build.env, vec!["prod"]);
-    assert_eq!(build.message_format, MessageFormat::Json);
+    assert_eq!(command.host.as_deref(), Some("robot@192.168.1.50"));
+    assert_eq!(command.env, vec!["prod"]);
+    assert_eq!(command.message_format, MessageFormat::Json);
+}
+
+#[test]
+fn parses_deploy_dry_run_target_and_removes_build_pair() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "deploy", "--dry-run", "--target", "aarch64"])
+        .expect("deploy dry-run should parse");
+
+    let RootCommand::Deploy(command) = cli.command else {
+        panic!("expected deploy command");
+    };
+
+    assert!(command.dry_run);
+    assert_eq!(command.target.as_deref(), Some("aarch64"));
+    assert!(Cli::try_parse_from(["phoxal-cli", "deploy", "build"]).is_err());
 }
 
 #[test]
