@@ -18,7 +18,7 @@ use crate::commands::MessageFormat;
 use crate::component_driver::component_crate_dir;
 use crate::resolver::{
     ResolveOptions, ResolvedComponent, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras,
-    discover_robot_yaml, load_robot_with_extras, resolve,
+    discover_robot_yaml, load_robot_with_extras, resolve, tool_emit_apis_id,
 };
 use crate::simulator_staging::cached_tool_path;
 use crate::utils::{cargo_binary_name, resolve_project_path};
@@ -43,6 +43,12 @@ pub struct CheckCmd {
         help = "Output format for the check result."
     )]
     pub message_format: MessageFormat,
+    #[arg(
+        long = "env",
+        value_name = "ENV",
+        help = "Apply a robot.<env>.yaml overlay before checking (repeatable). Path pins are only legal through overlays."
+    )]
+    pub env: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -50,6 +56,7 @@ pub struct CheckOptions {
     pub pull: bool,
     pub service: Option<String>,
     pub catalog_source: Option<String>,
+    pub overlays: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -121,6 +128,7 @@ impl CheckCmd {
             pull: self.pull,
             service: self.service.clone(),
             catalog_source: app.catalog_source.clone(),
+            overlays: self.env.clone(),
         };
         let ui = app.ui;
         let result = tokio::task::spawn_blocking(move || run(&project_root, options, &ui))
@@ -212,7 +220,11 @@ fn run(
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let loaded = load_robot_with_extras(&robot_path)?;
+    let loaded = if options.overlays.is_empty() {
+        load_robot_with_extras(&robot_path)?
+    } else {
+        crate::resolver::load_robot_with_extras_and_overlays(&robot_path, &options.overlays)?
+    };
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
     let catalog = crate::catalog::load_catalog(crate::catalog::CatalogLoadOptions {
@@ -348,10 +360,58 @@ impl SourceParticipant {
         }
     }
 
-    fn kind_label(&self) -> &'static str {
+    #[must_use]
+    pub fn official_service(
+        name: impl Into<String>,
+        expected_artifact_id: impl Into<String>,
+        crate_dir: PathBuf,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            expected_artifact_id: expected_artifact_id.into(),
+            crate_dir,
+            kind: SourceParticipantKind::OfficialService,
+            build_mode: SourceBuildMode::Build,
+        }
+    }
+
+    #[must_use]
+    pub fn tool(
+        name: impl Into<String>,
+        expected_artifact_id: impl Into<String>,
+        crate_dir: PathBuf,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            expected_artifact_id: expected_artifact_id.into(),
+            crate_dir,
+            kind: SourceParticipantKind::Tool,
+            build_mode: SourceBuildMode::Build,
+        }
+    }
+
+    #[must_use]
+    pub fn simulator(
+        name: impl Into<String>,
+        expected_artifact_id: impl Into<String>,
+        crate_dir: PathBuf,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            expected_artifact_id: expected_artifact_id.into(),
+            crate_dir,
+            kind: SourceParticipantKind::Simulator,
+            build_mode: SourceBuildMode::Build,
+        }
+    }
+
+    pub(crate) fn kind_label(&self) -> &'static str {
         match self.kind {
             SourceParticipantKind::UserService => "user service",
+            SourceParticipantKind::OfficialService => "path-overridden official service",
             SourceParticipantKind::ComponentDriver => "component driver",
+            SourceParticipantKind::Tool => "path-overridden tool",
+            SourceParticipantKind::Simulator => "path-overridden simulator",
         }
     }
 }
@@ -359,7 +419,10 @@ impl SourceParticipant {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceParticipantKind {
     UserService,
+    OfficialService,
     ComponentDriver,
+    Tool,
+    Simulator,
 }
 
 /// How `check` obtains a source participant's `emit-apis` metadata.
@@ -392,6 +455,7 @@ pub(crate) fn tool_participants_from_resolved(
     resolved
         .tools
         .iter()
+        .filter(|tool| tool.path_override.is_none())
         .map(|tool| {
             Ok(ToolParticipant {
                 name: tool.name.clone(),
@@ -407,6 +471,7 @@ pub(crate) fn platform_artifact_refs_from_resolved(
     resolved
         .platform_runtimes
         .iter()
+        .filter(|runtime| runtime.source_path().is_none())
         .map(|runtime| PlatformArtifactRef {
             name: runtime.name.clone(),
             kind: runtime.kind,
@@ -421,32 +486,73 @@ pub(crate) fn source_participants_from_resolved(
     mut locate_component_crate: impl FnMut(&ResolvedComponent, &Path) -> Result<PathBuf>,
 ) -> Result<Vec<SourceParticipant>> {
     let mut participants = resolved
-        .user_runtimes
+        .platform_runtimes
         .iter()
-        .map(|runtime| {
-            SourceParticipant::user_service(
-                runtime.name.clone(),
-                resolve_project_path(project_root, &runtime.path),
-            )
+        .filter_map(|runtime| {
+            runtime.source_path().map(|path| {
+                SourceParticipant::official_service(
+                    runtime.name.clone(),
+                    runtime.name.clone(),
+                    path.to_path_buf(),
+                )
+            })
         })
         .collect::<Vec<_>>();
+
+    participants.extend(resolved.user_runtimes.iter().map(|runtime| {
+        SourceParticipant::user_service(
+            runtime.name.clone(),
+            resolve_project_path(project_root, &runtime.path),
+        )
+    }));
 
     for component in resolved
         .components
         .iter()
         .filter(|component| component.has_driver)
     {
-        let crate_dir = locate_component_crate(component, project_root).with_context(|| {
-            format!(
-                "failed to locate component driver {} source",
-                component.instance
-            )
-        })?;
+        let crate_dir = if let Some(path) = &component.driver_path_override {
+            path.clone()
+        } else {
+            locate_component_crate(component, project_root).with_context(|| {
+                format!(
+                    "failed to locate component driver {} source",
+                    component.instance
+                )
+            })?
+        };
         participants.push(SourceParticipant::component_driver_with_artifact_id(
             component.instance.clone(),
             component.source_name.clone(),
             crate_dir,
         ));
+    }
+
+    for tool in resolved.tools.iter().filter_map(|tool| {
+        tool.path_override.as_ref().map(|path| {
+            SourceParticipant::tool(
+                tool.name.clone(),
+                tool_emit_apis_id(&tool.name).to_string(),
+                path.clone(),
+            )
+        })
+    }) {
+        participants.push(tool);
+    }
+
+    for simulator in resolved
+        .path_overrides
+        .iter()
+        .filter(|override_| override_.kind == crate::resolver::ResolvedPathOverrideKind::Simulator)
+        .map(|override_| {
+            SourceParticipant::simulator(
+                override_.artifact_name.clone(),
+                override_.artifact_name.clone(),
+                override_.path.clone(),
+            )
+        })
+    {
+        participants.push(simulator);
     }
 
     Ok(participants)
@@ -478,6 +584,7 @@ fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()> {
     let unavailable = resolved
         .platform_runtimes
         .iter()
+        .filter(|runtime| runtime.source_path().is_none())
         .filter(|runtime| !runtime.changed_contracts.is_empty())
         .filter(|runtime| runtime.target_status != Some(crate::catalog::ArtifactStatus::Released))
         .collect::<Vec<_>>();
@@ -587,6 +694,32 @@ fn source_participants_for_service(
             participant
         })
         .collect()
+}
+
+pub(crate) fn source_participants_building_only_crate(
+    source_participants: &[SourceParticipant],
+    crate_dir: &Path,
+) -> Vec<SourceParticipant> {
+    let target = comparable_crate_dir(crate_dir);
+    let mut rebuilt_target = false;
+    source_participants
+        .iter()
+        .map(|participant| {
+            let mut participant = participant.clone();
+            let same_crate = comparable_crate_dir(&participant.crate_dir) == target;
+            participant.build_mode = if same_crate && !rebuilt_target {
+                rebuilt_target = true;
+                SourceBuildMode::Build
+            } else {
+                SourceBuildMode::UseCached
+            };
+            participant
+        })
+        .collect()
+}
+
+fn comparable_crate_dir(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 pub fn run_check(
@@ -785,10 +918,6 @@ pub fn run_check_with_deployed_user_service_images(
         report,
         checked_participants: participants,
     })
-}
-
-fn tool_emit_apis_id(tool_name: &str) -> &str {
-    tool_name.strip_prefix("tool-").unwrap_or(tool_name)
 }
 
 pub(crate) fn robot_graph_from_resolved(resolved: &ResolvedRobot) -> graph_check::RobotGraph {
@@ -1087,8 +1216,10 @@ fn validate_source_artifact_identity(
     raw: &RawEmitApis,
 ) -> Result<()> {
     let expected_kind = match participant.kind {
-        SourceParticipantKind::UserService => "service",
+        SourceParticipantKind::UserService | SourceParticipantKind::OfficialService => "service",
         SourceParticipantKind::ComponentDriver => "driver",
+        SourceParticipantKind::Tool => "tool",
+        SourceParticipantKind::Simulator => "simulator",
     };
     validate_artifact_identity(
         participant.kind_label(),
@@ -2296,6 +2427,7 @@ mod tests {
                     path: PathBuf::from("components/ddsm115"),
                 },
                 has_driver: true,
+                driver_path_override: None,
             },
             ResolvedComponent {
                 instance: "caster".to_string(),
@@ -2304,6 +2436,7 @@ mod tests {
                     path: PathBuf::from("components/passive_caster"),
                 },
                 has_driver: false,
+                driver_path_override: None,
             },
         ])?;
         let mut located = Vec::new();
@@ -2344,6 +2477,61 @@ mod tests {
 
         assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
         assert_eq!(built, vec![temp.path().join("component-crates/left_drive")]);
+        Ok(())
+    }
+
+    #[test]
+    fn path_overridden_service_enters_check_through_source_emit_apis() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut resolved = resolved_with_components(Vec::new())?;
+        resolved.platform_runtimes.push(ResolvedPlatformRuntime {
+            name: "drive".to_string(),
+            artifact_id: "service-drive".to_string(),
+            kind: crate::catalog::ArtifactKind::Service,
+            generation: "y2026_1".to_string(),
+            version: "0.1.0".to_string(),
+            artifact_ref: "path:framework/service/drive".to_string(),
+            target_status: Some(crate::catalog::ArtifactStatus::Released),
+            per_triple_status: BTreeMap::new(),
+            changed_contracts: Vec::new(),
+            contract_uses: Vec::new(),
+            path_override: Some(temp.path().join("framework/service/drive")),
+        });
+
+        let platform_refs = platform_artifact_refs_from_resolved(&resolved);
+        assert!(platform_refs.is_empty());
+
+        let source_participants =
+            source_participants_from_resolved(temp.path(), &resolved, |_component, _root| {
+                bail!("no components in this fixture")
+            })?;
+        assert_eq!(
+            source_participants,
+            vec![SourceParticipant::official_service(
+                "drive",
+                "drive",
+                temp.path().join("framework/service/drive"),
+            )]
+        );
+
+        let robot_graph = robot_graph_from_resolved(&resolved);
+        let extras = RobotManifestExtras::default();
+        let outcome = run_check_with_context(
+            &platform_refs,
+            &[],
+            &source_participants,
+            CheckGraphContext {
+                robot_graph: &robot_graph,
+                manifest_extras: &extras,
+            },
+            |_| bail!("path-overridden service should not read catalog metadata"),
+            |_| bail!("no tools in this fixture"),
+            |participant| {
+                assert_eq!(participant.kind, SourceParticipantKind::OfficialService);
+                Ok(raw_kind("service", "drive", "y2026_1", &[]))
+            },
+        )?;
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
         Ok(())
     }
 
@@ -2706,6 +2894,7 @@ mod tests {
             user_runtimes: Vec::new(),
             components,
             tools: Vec::new(),
+            path_overrides: Vec::new(),
         })
     }
 

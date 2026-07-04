@@ -1,26 +1,17 @@
 use std::fs;
-use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use heck::ToUpperCamelCase;
 use semver::Version;
 use serde::Serialize;
-use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use toml::Value as TomlValue;
 
 use crate::AppContext;
 use crate::commands::MessageFormat;
-use crate::launch_plan::DEFAULT_ROUTER_CONNECT;
-use crate::resolver::{
-    ResolveOptions, discover_robot_yaml, load_robot_with_extras, resolve,
-    target_generation_for_robot,
-};
-use crate::utils::{cargo_binary_name, resolve_project_path};
+use crate::resolver::{discover_robot_yaml, load_robot_with_extras, target_generation_for_robot};
 
 #[derive(Debug, Args)]
 pub struct Service {
@@ -36,12 +27,6 @@ pub enum ServiceSubcommand {
                       Generates runtimes/<name>/ with a #[derive(phoxal::Service)] crate (mandatory #[setup], a #[step], and a blocking phoxal::run) and adds a user_participants.<name> entry to robot.yaml."
     )]
     Add(Add),
-    #[command(
-        about = "Build and run one user service host-native against the dev bus.",
-        long_about = "Build and run one user service host-native against the dev bus.\n\n\
-                      Verifies the local router endpoint is reachable, builds the named user service, and runs only it on the host. Does not start Webots, official services, or component drivers."
-    )]
-    Run(Run),
     #[command(about = "Print official services from the configured artifact catalog.")]
     Catalog(Catalog),
 }
@@ -49,12 +34,6 @@ pub enum ServiceSubcommand {
 #[derive(Debug, Args)]
 pub struct Add {
     #[arg(help = "Service id; use [a-z0-9_], used as the crate name and user_participants key.")]
-    pub name: String,
-}
-
-#[derive(Debug, Args)]
-pub struct Run {
-    #[arg(help = "User service id from user_participants.")]
     pub name: String,
 }
 
@@ -89,23 +68,10 @@ pub struct ServiceCatalogEntry {
     pub participant_kind: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ServiceRunPlan {
-    name: String,
-    robot_id: String,
-    namespace: String,
-    robot_root: PathBuf,
-    crate_dir: PathBuf,
-    binary_name: String,
-    bus_connect: String,
-    env: Vec<(String, String)>,
-}
-
 impl Service {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match &self.command {
             ServiceSubcommand::Add(command) => command.run(app).await,
-            ServiceSubcommand::Run(command) => command.run(app).await,
             ServiceSubcommand::Catalog(command) => command.run(app).await,
         }
     }
@@ -121,36 +87,10 @@ impl Add {
             outcome.manifest_path.display()
         );
         println!(
-            "next: run `phoxal-cli check`; later `phoxal-cli service run {}`",
+            "next: run `phoxal-cli check`; later `phoxal-cli run --watch` to hot-swap {} inside the live graph",
             outcome.name
         );
         Ok(())
-    }
-}
-
-impl Run {
-    pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let plan = service_run_plan(app.project.root(), &self.name, app.catalog_source.clone())?;
-
-        // Probe the router before the (potentially slow) build, so an
-        // unreachable/unsupported endpoint fails fast instead of after a
-        // wasted `cargo build`.
-        ensure_zenoh_router_reachable(&plan.bus_connect)?;
-
-        app.ui.step(format!("building {}", plan.name), || {
-            build_user_service_host_native(&plan, &app.ui)
-        })?;
-
-        app.ui.info(format!(
-            "running {} in namespace {}",
-            plan.name, plan.namespace
-        ));
-        app.ui.info(format!(
-            "using robot model root {}",
-            plan.robot_root.display()
-        ));
-        let status = run_user_service_host_native(&plan, &app.ui)?;
-        forward_service_exit_status(&plan.name, status)
     }
 }
 
@@ -261,212 +201,6 @@ pub fn add_service(
         crate_dir,
         manifest_path,
     })
-}
-
-fn service_run_plan(
-    project_start: &Path,
-    name: &str,
-    catalog_source: Option<String>,
-) -> Result<ServiceRunPlan> {
-    let robot_path = discover_robot_yaml(project_start)
-        .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
-    let project_root = robot_path
-        .parent()
-        .context("robot.yaml did not have a parent directory")?;
-    let loaded = load_robot_with_extras(&robot_path)?;
-    let config = loaded.extras.user_runtime_config(name).cloned();
-    let robot = loaded.robot;
-    let catalog = crate::commands::load_catalog_for_robot_from_source(
-        catalog_source,
-        project_root,
-        &loaded.extras,
-        false,
-    )?;
-
-    if catalog
-        .as_ref()
-        .is_some_and(|catalog| catalog.service_names().iter().any(|entry| entry == name))
-    {
-        bail!(
-            "'{name}' is an official service in the artifact catalog; official services are not host-native user services"
-        );
-    }
-
-    let manifest_service = robot.user_participants.get(name).ok_or_else(|| {
-        let available = robot
-            .user_participants
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(", ");
-        if available.is_empty() {
-            anyhow!("user service '{name}' is not defined in user_participants")
-        } else {
-            anyhow!(
-                "user service '{name}' is not defined in user_participants; available: {available}"
-            )
-        }
-    })?;
-    let crate_dir = resolve_project_path(project_root, &manifest_service.path);
-    if !crate_dir.is_dir() {
-        bail!(
-            "user service '{name}' source dir {} does not exist",
-            crate_dir.display()
-        );
-    }
-
-    // Resolve git component commits live so local service runs validate the same
-    // project facts as check before spawning a process. A path-only graph needs
-    // no network; a git component pinned to a commit SHA resolves offline.
-    let _resolved = resolve(
-        &robot,
-        project_root,
-        catalog.as_ref(),
-        ResolveOptions {
-            resolve_external_artifacts: false,
-            resolve_source_commits: true,
-        },
-    )?;
-    let binary_name = service_binary_name(&crate_dir, name)?;
-    let robot_root = project_root.to_path_buf();
-    let env = run_env(
-        name,
-        &robot.identity.id,
-        &robot.identity.namespace,
-        config.as_ref(),
-        DEFAULT_ROUTER_CONNECT,
-        &robot_root,
-    )?;
-
-    Ok(ServiceRunPlan {
-        name: name.to_string(),
-        robot_id: robot.identity.id,
-        namespace: robot.identity.namespace,
-        robot_root,
-        crate_dir,
-        binary_name,
-        bus_connect: DEFAULT_ROUTER_CONNECT.to_string(),
-        env,
-    })
-}
-
-fn ensure_zenoh_router_reachable(endpoint: &str) -> Result<()> {
-    let Some(address) = endpoint.strip_prefix("tcp/") else {
-        bail!("{}", zenoh_unreachable_message(endpoint));
-    };
-    let mut addresses = address
-        .to_socket_addrs()
-        .with_context(|| zenoh_unreachable_message(endpoint))?;
-    let Some(address) = addresses.next() else {
-        bail!("{}", zenoh_unreachable_message(endpoint));
-    };
-    TcpStream::connect_timeout(&address, Duration::from_millis(500))
-        .map(|_| ())
-        .with_context(|| zenoh_unreachable_message(endpoint))
-}
-
-fn zenoh_unreachable_message(endpoint: &str) -> String {
-    format!(
-        "no reachable Phoxal router at {endpoint}; start tool-router or run under the native supervisor once it lands (04)"
-    )
-}
-
-pub(crate) fn run_env(
-    name: &str,
-    robot_id: &str,
-    namespace: &str,
-    config: Option<&JsonValue>,
-    bus_connect: &str,
-    robot_root: &Path,
-) -> Result<Vec<(String, String)>> {
-    let launch = phoxal::participant::launch::ParticipantLaunch {
-        participant_id: name.to_string(),
-        namespace: namespace.to_string(),
-        robot_id: robot_id.to_string(),
-        bus: phoxal::participant::launch::BusProfile {
-            connect_endpoints: vec![bus_connect.to_string()],
-        },
-        clock: phoxal::participant::launch::ClockMode::Real,
-        config: config.cloned(),
-        robot_root: Some(robot_root.to_path_buf()),
-        component_instance: None,
-        shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
-    };
-    crate::launch_env::encode_participant_env(&launch).map(|env| env.spawn_env())
-}
-
-fn service_binary_name(crate_dir: &Path, service_name: &str) -> Result<String> {
-    cargo_binary_name(crate_dir, Some(service_name))
-}
-
-fn build_user_service_host_native(plan: &ServiceRunPlan, ui: &crate::Ui) -> Result<()> {
-    let mut command = Command::new("cargo");
-    command
-        .arg("build")
-        .arg("--bin")
-        .arg(&plan.binary_name)
-        .current_dir(&plan.crate_dir);
-    let status = ui.command_status(&mut command).with_context(|| {
-        format!(
-            "failed to start cargo build for user service '{}' ({}) in {}",
-            plan.name,
-            plan.binary_name,
-            plan.crate_dir.display()
-        )
-    })?;
-    if !status.success() {
-        bail!(
-            "cargo build failed for user service '{}' in {} with status {status}",
-            plan.name,
-            plan.crate_dir.display()
-        );
-    }
-    Ok(())
-}
-
-fn run_user_service_host_native(plan: &ServiceRunPlan, ui: &crate::Ui) -> Result<ExitStatus> {
-    let mut command = Command::new("cargo");
-    command
-        .arg("run")
-        .arg("--quiet")
-        .arg("--bin")
-        .arg(&plan.binary_name)
-        .arg("--")
-        .current_dir(&plan.crate_dir)
-        .env_remove("PHOXAL_CONNECT")
-        .env_remove("PHOXAL_CONFIG")
-        .env_remove("PHOXAL_ROBOT_ROOT")
-        .env_remove("PHOXAL_COMPONENT_INSTANCE")
-        .env_remove("PHOXAL_CLOCK")
-        .envs(plan.env.iter().map(|(key, value)| (key, value)));
-    let mut child = ui.command_spawn(&mut command).with_context(|| {
-        format!(
-            "failed to spawn `cargo run --bin {}` for user service '{}' in {}",
-            plan.binary_name,
-            plan.name,
-            plan.crate_dir.display()
-        )
-    })?;
-    child
-        .wait()
-        .with_context(|| format!("failed to wait for user service '{}'", plan.name))
-}
-
-fn forward_service_exit_status(service_name: &str, status: ExitStatus) -> Result<()> {
-    if status.success() {
-        return Ok(());
-    }
-    if let Some(code) = status.code() {
-        std::process::exit(code);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(signal) = status.signal() {
-            std::process::exit(128 + signal);
-        }
-    }
-    bail!("user service '{service_name}' terminated without an exit code: {status}")
 }
 
 fn read_robot_yaml(path: &Path) -> Result<YamlValue> {
@@ -742,15 +476,9 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use serde_json::json;
-
     use phoxal::model::robot::RobotV1 as Robot;
 
     use super::*;
-    use crate::catalog::{
-        ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
-        fixture_contract_for_tests, fixture_service_entry_for_tests,
-    };
 
     #[test]
     fn add_service_scaffolds_crate_and_registers_manifest() -> Result<()> {
@@ -911,233 +639,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn run_env_sets_launch_contract_without_config() -> Result<()> {
-        let robot_root = PathBuf::from("/tmp/phoxal/robot");
-        let env = run_env(
-            "avoid_obstacles",
-            "testbot",
-            "dev",
-            None,
-            "tcp/127.0.0.1:7447",
-            &robot_root,
-        )?;
-
-        assert_eq!(
-            env.iter()
-                .find(|(k, _)| k == "PHOXAL_PARTICIPANT_ID")
-                .map(|(_, v)| v.as_str()),
-            Some("avoid_obstacles")
-        );
-        assert_eq!(
-            env.iter()
-                .find(|(k, _)| k == "PHOXAL_ROBOT_ID")
-                .map(|(_, v)| v.as_str()),
-            Some("testbot")
-        );
-        assert_eq!(
-            env.iter()
-                .find(|(k, _)| k == "PHOXAL_NAMESPACE")
-                .map(|(_, v)| v.as_str()),
-            Some("dev")
-        );
-        assert_eq!(
-            env.iter()
-                .find(|(k, _)| k == "PHOXAL_ROBOT_ROOT")
-                .map(|(_, v)| v.as_str()),
-            Some("/tmp/phoxal/robot")
-        );
-        assert_eq!(
-            env.iter()
-                .find(|(k, _)| k == "PHOXAL_CONNECT")
-                .map(|(_, v)| v.as_str()),
-            Some("tcp/127.0.0.1:7447")
-        );
-        assert_eq!(
-            env.iter()
-                .find(|(k, _)| k == "PHOXAL_CLOCK")
-                .map(|(_, v)| v.as_str()),
-            Some("real")
-        );
-        // With no manifest config block, PHOXAL_CONFIG defaults to an empty object
-        // so services that opt into a typed config can deserialize cleanly.
-        assert_eq!(
-            env.iter()
-                .find(|(k, _)| k == "PHOXAL_CONFIG")
-                .map(|(_, v)| v.as_str()),
-            Some("{}")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn run_env_sets_config_when_present() -> Result<()> {
-        let config = json!({
-            "gain": 0.7,
-            "labels": ["left", "right"],
-        });
-        let env = run_env(
-            "avoid_obstacles",
-            "testbot",
-            "test",
-            Some(&config),
-            "tcp/127.0.0.1:7447",
-            &PathBuf::from("/tmp/phoxal/robot"),
-        )?;
-
-        assert_eq!(
-            env.iter()
-                .find(|(key, _)| key == "PHOXAL_PARTICIPANT_ID")
-                .map(|(_, value)| value.as_str()),
-            Some("avoid_obstacles")
-        );
-        assert_eq!(
-            env.iter()
-                .find(|(key, _)| key == "PHOXAL_ROBOT_ID")
-                .map(|(_, value)| value.as_str()),
-            Some("testbot")
-        );
-        assert_eq!(
-            env.iter()
-                .find(|(key, _)| key == "PHOXAL_NAMESPACE")
-                .map(|(_, value)| value.as_str()),
-            Some("test")
-        );
-        let config_json = env
-            .iter()
-            .find(|(key, _)| key == "PHOXAL_CONFIG")
-            .map(|(_, value)| value)
-            .expect("PHOXAL_CONFIG should be set");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(config_json).unwrap(),
-            config
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn service_run_unknown_service_errors_before_building() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
-
-        let error = service_run_plan(temp.path(), "missing", None)
-            .expect_err("unknown service should fail before cargo build");
-
-        assert!(
-            error
-                .to_string()
-                .contains("user service 'missing' is not defined in user_participants"),
-            "{error:#}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn service_run_official_service_name_errors_before_building() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        fs::write(
-            temp.path().join("robot.yaml"),
-            minimal_robot_yaml_with_catalog(&write_service_catalog(temp.path())?).replace(
-                "\ncomponents:\n",
-                &format!(
-                    "\nuser_participants:\n  drive:{}\ncomponents:\n",
-                    r#"
-    path: runtimes/drive
-"#
-                ),
-            ),
-        )?;
-        let error = service_run_plan(temp.path(), "drive", None)
-            .expect_err("official service name should fail before cargo build");
-
-        assert!(
-            error.to_string().contains("'drive' is an official service"),
-            "{error:#}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn service_run_plan_serializes_manifest_config() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        fs::create_dir_all(temp.path().join("runtimes").join("avoid_obstacles"))?;
-        fs::write(
-            temp.path()
-                .join("runtimes")
-                .join("avoid_obstacles")
-                .join("Cargo.toml"),
-            service_cargo_toml("avoid_obstacles", "0.15", "0.14"),
-        )?;
-        fs::write(
-            temp.path().join("robot.yaml"),
-            minimal_robot_yaml_with_user_participant(
-                "avoid_obstacles",
-                r#"
-    path: runtimes/avoid_obstacles
-    config:
-      gain: 0.7
-      labels: [left, right]
-"#,
-            ),
-        )?;
-        fs::write(
-            temp.path().join("structure.urdf"),
-            r#"<robot name="testbot"><link name="base_link"/></robot>"#,
-        )?;
-
-        let plan = service_run_plan(temp.path(), "avoid_obstacles", None)?;
-        let config_json = plan
-            .env
-            .iter()
-            .find(|(key, _)| key == "PHOXAL_CONFIG")
-            .map(|(_, value)| value)
-            .expect("PHOXAL_CONFIG should be set");
-
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(config_json)?,
-            json!({
-                "gain": 0.7,
-                "labels": ["left", "right"],
-            })
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn service_run_plan_uses_default_router_connect() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        fs::create_dir_all(temp.path().join("runtimes").join("avoid_obstacles"))?;
-        fs::write(
-            temp.path()
-                .join("runtimes")
-                .join("avoid_obstacles")
-                .join("Cargo.toml"),
-            service_cargo_toml("avoid_obstacles", "0.15", "0.14"),
-        )?;
-        let robot_yaml = minimal_robot_yaml_with_user_participant(
-            "avoid_obstacles",
-            r#"
-    path: runtimes/avoid_obstacles
-"#,
-        );
-        fs::write(temp.path().join("robot.yaml"), robot_yaml)?;
-        fs::write(
-            temp.path().join("structure.urdf"),
-            r#"<robot name="testbot"><link name="base_link"/></robot>"#,
-        )?;
-
-        let plan = service_run_plan(temp.path(), "avoid_obstacles", None)?;
-
-        assert_eq!(
-            plan.env
-                .iter()
-                .find(|(key, _)| key == "PHOXAL_CONNECT")
-                .map(|(_, value)| value.as_str()),
-            Some(crate::launch_plan::DEFAULT_ROUTER_CONNECT)
-        );
-        Ok(())
-    }
-
     fn minimal_robot_yaml() -> &'static str {
         r#"schema: v0
 api_version: y2026_1
@@ -1168,40 +669,10 @@ components:
 "#
     }
 
-    fn minimal_robot_yaml_with_catalog(catalog_path: &Path) -> String {
-        minimal_robot_yaml().replace(
-            "phoxal_artifacts:\n  channel: stable",
-            &format!(
-                "phoxal_artifacts:\n  channel: stable\n  catalog: {}",
-                catalog_path.display()
-            ),
-        )
-    }
-
     fn minimal_robot_yaml_with_user_participant(name: &str, participant_yaml: &str) -> String {
         minimal_robot_yaml().replace(
             "\ncomponents:\n",
             &format!("\nuser_participants:\n  {name}:{participant_yaml}\ncomponents:\n"),
         )
-    }
-
-    fn write_service_catalog(root: &Path) -> Result<PathBuf> {
-        let path = root.join("catalog.json");
-        let catalog = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
-            "drive",
-            "y2026_1",
-            "0.1.0",
-            CatalogChannel::Stable,
-            &crate::resolver::host_target_triple(),
-            ArtifactStatus::Pending,
-            vec![fixture_contract_for_tests(
-                "drive::Target",
-                "drive/target",
-                "publish",
-                "0123456789abcdef",
-            )],
-        )]);
-        fs::write(&path, serde_json::to_string_pretty(&catalog)?)?;
-        Ok(path)
     }
 }

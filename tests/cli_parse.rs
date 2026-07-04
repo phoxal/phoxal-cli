@@ -1,5 +1,7 @@
 use clap::{CommandFactory, Parser};
-use phoxal_cli::commands::{Cli, MessageFormat, RootCommand, deploy, robot, self_cmd, service};
+use phoxal_cli::commands::{
+    Cli, MessageFormat, RootCommand, deploy, robot, self_cmd, service, status,
+};
 
 #[test]
 fn clap_definition_is_valid() {
@@ -38,18 +40,8 @@ fn parses_service_add() {
 }
 
 #[test]
-fn parses_service_run() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "service", "run", "avoid_obstacles"])
-        .expect("service run command should parse");
-
-    let RootCommand::Service(command) = cli.command else {
-        panic!("expected service command");
-    };
-    let service::ServiceSubcommand::Run(run) = command.command else {
-        panic!("expected service run command");
-    };
-
-    assert_eq!(run.name, "avoid_obstacles");
+fn service_run_is_removed() {
+    assert!(Cli::try_parse_from(["phoxal-cli", "service", "run", "avoid_obstacles"]).is_err());
 }
 
 #[test]
@@ -111,6 +103,63 @@ fn parses_simulate_pull() {
     };
 
     assert!(simulate.pull);
+}
+
+#[test]
+fn parses_watch_and_overlay_flags() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "run", "--watch", "--env", "dev"])
+        .expect("run watch should parse");
+    let RootCommand::Run(run) = cli.command else {
+        panic!("expected run command");
+    };
+    assert!(run.watch);
+    assert_eq!(run.env, vec!["dev"]);
+
+    let cli = Cli::try_parse_from([
+        "phoxal-cli",
+        "simulate",
+        "default",
+        "--watch",
+        "--env",
+        "dev",
+    ])
+    .expect("simulate watch should parse");
+    let RootCommand::Simulate(simulate) = cli.command else {
+        panic!("expected simulate command");
+    };
+    assert!(simulate.watch);
+    assert_eq!(simulate.env, vec!["dev"]);
+}
+
+#[test]
+fn parses_status_release_resume_and_json() {
+    let cli = Cli::try_parse_from([
+        "phoxal-cli",
+        "status",
+        "--message-format",
+        "json",
+        "release",
+        "mission",
+    ])
+    .expect("status release should parse");
+    let RootCommand::Status(command) = cli.command else {
+        panic!("expected status command");
+    };
+    assert_eq!(command.message_format, MessageFormat::Json);
+    let Some(status::StatusSubcommand::Release(arg)) = command.command else {
+        panic!("expected release subcommand");
+    };
+    assert_eq!(arg.participant, "mission");
+
+    let cli = Cli::try_parse_from(["phoxal-cli", "status", "resume", "mission"])
+        .expect("status resume should parse");
+    let RootCommand::Status(command) = cli.command else {
+        panic!("expected status command");
+    };
+    let Some(status::StatusSubcommand::Resume(arg)) = command.command else {
+        panic!("expected resume subcommand");
+    };
+    assert_eq!(arg.participant, "mission");
 }
 
 #[test]

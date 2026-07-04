@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal::model::robot::{
     RobotV1 as Robot,
-    v1::{Channel, ComponentSource, UserParticipant},
+    v1::{ArtifactPin, Channel, ComponentSource, UserParticipant},
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -29,7 +29,7 @@ pub struct ResolveOptions {
     /// Resolve git component `tag` → `commit`. A `tag` that is already a full
     /// commit SHA resolves with no network; a tag/branch ref is resolved live
     /// via `git ls-remote`. Flows that need to locate/stage component driver
-    /// sources (`check`, `service run`, simulate, `deploy build`) set this;
+    /// sources (`check`, `run --watch`, simulate, `deploy build`) set this;
     /// flows that never read component commits (`pull`, `outdated`) leave it
     /// off so they stay fully offline.
     pub resolve_source_commits: bool,
@@ -55,6 +55,7 @@ pub struct ResolvedRobot {
     pub user_runtimes: Vec<ResolvedUserRuntime>,
     pub components: Vec<ResolvedComponent>,
     pub tools: Vec<ResolvedTool>,
+    pub path_overrides: Vec<ResolvedPathOverride>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -95,6 +96,7 @@ pub struct ResolvedPlatformRuntime {
     pub per_triple_status: BTreeMap<String, ArtifactStatus>,
     pub changed_contracts: Vec<String>,
     pub contract_uses: Vec<ContractUse>,
+    pub path_override: Option<PathBuf>,
 }
 
 impl ResolvedPlatformRuntime {
@@ -102,6 +104,11 @@ impl ResolvedPlatformRuntime {
     #[must_use]
     pub fn artifact_ref(&self) -> &str {
         &self.artifact_ref
+    }
+
+    #[must_use]
+    pub fn source_path(&self) -> Option<&Path> {
+        self.path_override.as_deref()
     }
 }
 
@@ -119,6 +126,7 @@ pub struct ResolvedComponent {
     pub source_name: String,
     pub source: ResolvedComponentSource,
     pub has_driver: bool,
+    pub driver_path_override: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +153,35 @@ pub struct ResolvedTool {
     pub asset: String,
     pub binary_name: String,
     pub sha256: String,
+    pub path_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedPathOverrideKind {
+    Service,
+    Driver,
+    Tool,
+    Simulator,
+}
+
+impl ResolvedPathOverrideKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Service => "service",
+            Self::Driver => "driver",
+            Self::Tool => "tool",
+            Self::Simulator => "simulator",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPathOverride {
+    pub key: String,
+    pub kind: ResolvedPathOverrideKind,
+    pub artifact_name: String,
+    pub path: PathBuf,
 }
 
 pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
@@ -182,6 +219,7 @@ pub fn load_robot_with_extras(path: &Path) -> Result<LoadedRobot> {
         .with_context(|| format!("failed to read robot file {}", path.display()))?;
     let mut yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents)
         .with_context(|| format!("failed to parse robot file {}", path.display()))?;
+    ensure_no_base_path_pins(&yaml, path)?;
     parse_robot_value_with_extras(&mut yaml, path)
 }
 
@@ -193,6 +231,7 @@ pub fn load_robot_with_extras_and_overlays(
         .with_context(|| format!("failed to read robot file {}", path.display()))?;
     let mut yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents)
         .with_context(|| format!("failed to parse robot file {}", path.display()))?;
+    ensure_no_base_path_pins(&yaml, path)?;
 
     for overlay in overlays {
         validate_overlay_name(overlay)?;
@@ -205,6 +244,37 @@ pub fn load_robot_with_extras_and_overlays(
     }
 
     parse_robot_value_with_extras(&mut yaml, path)
+}
+
+fn ensure_no_base_path_pins(yaml: &serde_yaml::Value, path: &Path) -> Result<()> {
+    let Some(pins) = yaml
+        .as_mapping()
+        .and_then(|root| root.get("phoxal_artifacts"))
+        .and_then(serde_yaml::Value::as_mapping)
+        .and_then(|artifacts| artifacts.get("pins"))
+        .and_then(serde_yaml::Value::as_mapping)
+    else {
+        return Ok(());
+    };
+
+    let path_pins = pins
+        .iter()
+        .filter_map(|(key, value)| {
+            let path_key = serde_yaml::Value::String("path".to_string());
+            let has_path = value
+                .as_mapping()
+                .is_some_and(|mapping| mapping.contains_key(&path_key));
+            has_path.then(|| key.as_str().unwrap_or("<non-string>").to_string())
+        })
+        .collect::<Vec<_>>();
+    if path_pins.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "{path}: phoxal_artifacts.pins path overrides are dev-overlay only; move {} to robot.<env>.yaml and load it with --env <env>",
+        path_pins.join(", "),
+        path = path.display()
+    )
 }
 
 fn parse_robot_value_with_extras(yaml: &mut serde_yaml::Value, path: &Path) -> Result<LoadedRobot> {
@@ -403,7 +473,7 @@ pub fn resolve(
         );
     }
 
-    let platform_runtimes = catalog
+    let mut platform_runtimes = catalog
         .map(|catalog| {
             resolve_catalog_entries(catalog, catalog_channel, &target, &target_generation)
         })
@@ -422,8 +492,15 @@ pub fn resolve(
     // `tag` that is already a full commit SHA resolves with no network, while a
     // tag/branch ref is resolved live via `git ls-remote`. Flows that never read
     // component commits (`pull`, `outdated`) leave it off so they stay offline.
-    let components = resolve_components(robot, options.resolve_source_commits)?;
-    let tools = resolve_tools(robot, options.resolve_external_artifacts)?;
+    let mut components = resolve_components(robot, options.resolve_source_commits)?;
+    let mut tools = resolve_tools(robot, options.resolve_external_artifacts)?;
+    let path_overrides = apply_path_pins(
+        robot,
+        project_root,
+        &mut platform_runtimes,
+        &mut components,
+        &mut tools,
+    )?;
 
     Ok(ResolvedRobot {
         robot: robot.clone(),
@@ -435,7 +512,171 @@ pub fn resolve(
         user_runtimes,
         components,
         tools,
+        path_overrides,
     })
+}
+
+fn apply_path_pins(
+    robot: &Robot,
+    project_root: &Path,
+    platform_runtimes: &mut [ResolvedPlatformRuntime],
+    components: &mut [ResolvedComponent],
+    tools: &mut [ResolvedTool],
+) -> Result<Vec<ResolvedPathOverride>> {
+    let mut overrides = Vec::new();
+    for (key, pin) in &robot.phoxal_artifacts.pins {
+        let ArtifactPin::Path(pin) = pin;
+        let path = resolve_project_path(project_root, &pin.path);
+        if apply_service_path_pin(key, &path, platform_runtimes, &mut overrides) {
+            continue;
+        }
+        if apply_driver_path_pin(key, &path, components, &mut overrides) {
+            continue;
+        }
+        if apply_tool_path_pin(key, &path, tools, &mut overrides) {
+            continue;
+        }
+        if key == "simulator-webots" {
+            overrides.push(ResolvedPathOverride {
+                key: key.clone(),
+                kind: ResolvedPathOverrideKind::Simulator,
+                artifact_name: "webots".to_string(),
+                path,
+            });
+            continue;
+        }
+        bail!(
+            "{}",
+            unknown_path_pin_message(key, platform_runtimes, components, tools)
+        );
+    }
+    overrides.sort_by(|left, right| left.key.cmp(&right.key));
+    Ok(overrides)
+}
+
+fn apply_service_path_pin(
+    key: &str,
+    path: &Path,
+    platform_runtimes: &mut [ResolvedPlatformRuntime],
+    overrides: &mut Vec<ResolvedPathOverride>,
+) -> bool {
+    let Some(runtime) = platform_runtimes
+        .iter_mut()
+        .find(|runtime| runtime.kind == ArtifactKind::Service && runtime.artifact_id == key)
+    else {
+        return false;
+    };
+    runtime.path_override = Some(path.to_path_buf());
+    runtime.artifact_ref = format!("path:{}", path.display());
+    runtime.target_status = Some(ArtifactStatus::Released);
+    runtime.changed_contracts.clear();
+    overrides.push(ResolvedPathOverride {
+        key: key.to_string(),
+        kind: ResolvedPathOverrideKind::Service,
+        artifact_name: runtime.name.clone(),
+        path: path.to_path_buf(),
+    });
+    true
+}
+
+fn apply_driver_path_pin(
+    key: &str,
+    path: &Path,
+    components: &mut [ResolvedComponent],
+    overrides: &mut Vec<ResolvedPathOverride>,
+) -> bool {
+    let Some(driver_name) = key.strip_prefix("driver-") else {
+        return false;
+    };
+    let mut used = false;
+    for component in components
+        .iter_mut()
+        .filter(|component| component.has_driver && component.source_name == driver_name)
+    {
+        component.driver_path_override = Some(path.to_path_buf());
+        used = true;
+    }
+    if used {
+        overrides.push(ResolvedPathOverride {
+            key: key.to_string(),
+            kind: ResolvedPathOverrideKind::Driver,
+            artifact_name: driver_name.to_string(),
+            path: path.to_path_buf(),
+        });
+    }
+    used
+}
+
+fn apply_tool_path_pin(
+    key: &str,
+    path: &Path,
+    tools: &mut [ResolvedTool],
+    overrides: &mut Vec<ResolvedPathOverride>,
+) -> bool {
+    let Some(tool) = tools.iter_mut().find(|tool| tool.name == key) else {
+        return false;
+    };
+    tool.path_override = Some(path.to_path_buf());
+    tool.asset = format!("path:{}", path.display());
+    tool.sha256 = crate::utils::hash_tree(path).unwrap_or_default();
+    overrides.push(ResolvedPathOverride {
+        key: key.to_string(),
+        kind: ResolvedPathOverrideKind::Tool,
+        artifact_name: tool_emit_apis_id(key).to_string(),
+        path: path.to_path_buf(),
+    });
+    true
+}
+
+fn unknown_path_pin_message(
+    key: &str,
+    platform_runtimes: &[ResolvedPlatformRuntime],
+    components: &[ResolvedComponent],
+    tools: &[ResolvedTool],
+) -> String {
+    let used = used_path_pin_keys(platform_runtimes, components, tools);
+    let available = if used.is_empty() {
+        "<none>".to_string()
+    } else {
+        used.join(", ")
+    };
+    if matches!(
+        key.split_once('-').map(|(prefix, _)| prefix),
+        Some("service" | "driver" | "tool" | "simulator")
+    ) {
+        format!(
+            "unused artifact path pin '{key}': no artifact with that kind-qualified id is used by the resolved graph; available path-pin ids: {available}"
+        )
+    } else {
+        format!(
+            "unknown artifact path pin '{key}': pins must be kind-qualified ids (service-*, driver-*, tool-*, simulator-*); available path-pin ids: {available}"
+        )
+    }
+}
+
+fn used_path_pin_keys(
+    platform_runtimes: &[ResolvedPlatformRuntime],
+    components: &[ResolvedComponent],
+    tools: &[ResolvedTool],
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    keys.extend(
+        platform_runtimes
+            .iter()
+            .filter(|runtime| runtime.kind == ArtifactKind::Service)
+            .map(|runtime| runtime.artifact_id.clone()),
+    );
+    keys.extend(
+        components
+            .iter()
+            .filter(|component| component.has_driver)
+            .map(|component| format!("driver-{}", component.source_name)),
+    );
+    keys.extend(tools.iter().map(|tool| tool.name.clone()));
+    keys.push("simulator-webots".to_string());
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 fn target_generation(
@@ -556,6 +797,7 @@ fn resolve_catalog_entries(
                 per_triple_status: entry.status.clone(),
                 changed_contracts: entry.changed_contracts.clone(),
                 contract_uses: entry.contract_uses.clone(),
+                path_override: None,
             })
         })
         .collect()
@@ -756,6 +998,7 @@ fn resolve_components(
             source_name: instance.component.clone(),
             source,
             has_driver: instance.driver.is_some(),
+            driver_path_override: None,
         });
     }
     Ok(components)
@@ -795,9 +1038,14 @@ fn resolve_tools(robot: &Robot, resolve_external_artifacts: bool) -> Result<Vec<
                 asset,
                 binary_name,
                 sha256,
+                path_override: None,
             })
         })
         .collect()
+}
+
+pub(crate) fn tool_emit_apis_id(tool_name: &str) -> &str {
+    tool_name.strip_prefix("tool-").unwrap_or(tool_name)
 }
 
 fn render_tool_template(template: &str, version: &str, target: &str) -> String {
@@ -1219,6 +1467,7 @@ components:
             per_triple_status: BTreeMap::new(),
             changed_contracts: Vec::new(),
             contract_uses: Vec::new(),
+            path_override: None,
         };
 
         assert_eq!(runtime.artifact_ref(), "service-asset:y2026_1-stable");

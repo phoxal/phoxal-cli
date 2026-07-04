@@ -17,7 +17,7 @@
 //!   native launch lands in the native distribution work.
 //! - `deploy build` - reserved for the native systemd deployment release artifact.
 //! - `robot new <name>` - scaffold a robot project.
-//! - `service add|run|catalog` - manage user service crates.
+//! - `service add|catalog` - manage user service crates.
 //! - `generations status` - inspect catalog readiness for the robot target.
 //! - `pull` / `outdated` - refresh or inspect catalog and native asset state.
 //! - `doctor` - check host prerequisites; `self upgrade` - update the CLI.
@@ -46,6 +46,7 @@ pub mod supervisor;
 pub mod tool_provisioning;
 pub mod ui;
 pub mod utils;
+pub mod watch;
 pub mod webots_staging;
 pub mod world;
 
