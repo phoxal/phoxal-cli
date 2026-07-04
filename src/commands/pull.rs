@@ -25,10 +25,7 @@ pub struct PullSummary {
     pub channel: String,
     pub catalog_revision: Option<String>,
     pub tool_count: usize,
-    /// Official native service artifacts cannot be fetched yet; the generated
-    /// catalog + native-asset pipeline lands with the native distribution work
-    /// (phoxal/organization tmp/framework-rewrite follow-up 06).
-    pub official_services_pending: bool,
+    pub artifact_count: usize,
 }
 
 impl Pull {
@@ -43,15 +40,12 @@ impl Pull {
             &summary,
             || {
                 println!(
-                    "refreshed catalog and {} host tools for target generation {} (channel {})",
-                    summary.tool_count, summary.target_generation, summary.channel
+                    "refreshed catalog and {} native artifact(s) for target generation {} (channel {})",
+                    summary.artifact_count, summary.target_generation, summary.channel
                 );
                 if let Some(revision) = &summary.catalog_revision {
                     println!("catalog revision: {revision}");
                 }
-                println!(
-                    "official native service artifacts are pending (native distribution work 06)"
-                );
                 Ok(())
             },
             self.message_format,
@@ -89,7 +83,6 @@ pub fn run(
         ResolveOptions {
             // pull refreshes official artifacts and host tools only; it never
             // reads component commits, so it stays off the network for git refs.
-            resolve_external_artifacts: false,
             resolve_source_commits: false,
             ..ResolveOptions::default()
         },
@@ -100,22 +93,17 @@ pub fn run(
         .map(|tool| tool.name.as_str())
         .collect::<Vec<_>>();
     let tool_count = tool_names.len();
-    crate::tool_provisioning::ensure_tool_binaries_with_mode(
-        ui,
+    let artifact_count = crate::native_artifacts::stage_resolved_artifacts(
+        Some(ui),
         &resolved,
-        tool_names,
-        crate::tool_provisioning::ProvisioningMode::Refresh,
+        crate::native_artifacts::ProvisioningMode::Refresh,
     )?;
 
-    // Host tools are native host binaries and refresh today; official service
-    // artifacts need the generated catalog + native-asset pipeline (06), which
-    // is not built yet. Report that honestly rather than erroring after the
-    // tool refresh already ran.
     Ok(PullSummary {
         target_generation: resolved.target_generation.clone(),
         channel: resolved.channel.to_string(),
         catalog_revision: resolved.catalog_revision.clone(),
         tool_count,
-        official_services_pending: true,
+        artifact_count,
     })
 }

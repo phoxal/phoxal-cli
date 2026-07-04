@@ -1,20 +1,17 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal::model::robot::{
     RobotV1 as Robot,
     v1::{ArtifactPin, Channel, ComponentSource, UserParticipant},
 };
-use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::catalog::{
     ArtifactKind, ArtifactStatus, CatalogEntry, CatalogRevision, Channel as CatalogChannel,
-    ContractUse, DEFAULT_TOOL_VERSIONS, compare_generations, lookup_tool_version,
+    ContractUse, ReleaseAssetMetadata, compare_generations,
 };
 use crate::shell;
 use crate::utils::{hash_tree, resolve_project_path};
@@ -23,9 +20,6 @@ const ROBOT_FILE: &str = "robot.yaml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolveOptions {
-    /// Resolve external artifact checksums from the network (tool asset sha256).
-    /// Off for offline flows.
-    pub resolve_external_artifacts: bool,
     /// Resolve git component `tag` → `commit`. A `tag` that is already a full
     /// commit SHA resolves with no network; a tag/branch ref is resolved live
     /// via `git ls-remote`. Flows that need to locate/stage component driver
@@ -45,7 +39,6 @@ pub struct ResolveOptions {
 impl Default for ResolveOptions {
     fn default() -> Self {
         Self {
-            resolve_external_artifacts: true,
             resolve_source_commits: true,
             official_target_triple: None,
             tool_target_triple: None,
@@ -61,6 +54,7 @@ pub struct ResolvedRobot {
     pub target: String,
     pub catalog_revision: Option<String>,
     pub platform_runtimes: Vec<ResolvedPlatformRuntime>,
+    pub simulators: Vec<ResolvedPlatformRuntime>,
     pub user_runtimes: Vec<ResolvedUserRuntime>,
     pub components: Vec<ResolvedComponent>,
     pub tools: Vec<ResolvedTool>,
@@ -102,11 +96,18 @@ pub struct ResolvedPlatformRuntime {
     pub version: String,
     pub artifact_ref: String,
     pub sha256: Option<String>,
+    pub metadata: Option<ResolvedArtifactMetadata>,
     pub target_status: Option<ArtifactStatus>,
     pub per_triple_status: BTreeMap<String, ArtifactStatus>,
     pub changed_contracts: Vec<String>,
     pub contract_uses: Vec<ContractUse>,
     pub path_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedArtifactMetadata {
+    pub emit_apis: String,
+    pub emit_apis_sha256: String,
 }
 
 impl ResolvedPlatformRuntime {
@@ -163,6 +164,7 @@ pub struct ResolvedTool {
     pub asset: String,
     pub binary_name: String,
     pub sha256: String,
+    pub metadata: Option<ResolvedArtifactMetadata>,
     pub path_override: Option<PathBuf>,
 }
 
@@ -482,10 +484,19 @@ pub fn resolve(
             "phoxal_participants.images is no longer supported: official artifacts now ship as native release assets"
         );
     }
+    let tool_target = options
+        .tool_target_triple
+        .unwrap_or_else(host_target_triple);
 
     let mut platform_runtimes = catalog
         .map(|catalog| {
             resolve_catalog_entries(catalog, catalog_channel, &target, &target_generation)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut simulators = catalog
+        .map(|catalog| {
+            resolve_simulators(catalog, catalog_channel, &tool_target, &target_generation)
         })
         .transpose()?
         .unwrap_or_default();
@@ -503,14 +514,18 @@ pub fn resolve(
     // tag/branch ref is resolved live via `git ls-remote`. Flows that never read
     // component commits (`pull`, `outdated`) leave it off so they stay offline.
     let mut components = resolve_components(robot, options.resolve_source_commits)?;
-    let tool_target = options
-        .tool_target_triple
-        .unwrap_or_else(host_target_triple);
-    let mut tools = resolve_tools(robot, options.resolve_external_artifacts, &tool_target)?;
+    let mut tools = resolve_tools(
+        robot,
+        catalog,
+        catalog_channel,
+        &tool_target,
+        &target_generation,
+    )?;
     let path_overrides = apply_path_pins(
         robot,
         project_root,
         &mut platform_runtimes,
+        &mut simulators,
         &mut components,
         &mut tools,
     )?;
@@ -522,6 +537,7 @@ pub fn resolve(
         target,
         catalog_revision: catalog.map(|catalog| catalog.revision.clone()),
         platform_runtimes,
+        simulators,
         user_runtimes,
         components,
         tools,
@@ -533,6 +549,7 @@ fn apply_path_pins(
     robot: &Robot,
     project_root: &Path,
     platform_runtimes: &mut [ResolvedPlatformRuntime],
+    simulators: &mut [ResolvedPlatformRuntime],
     components: &mut [ResolvedComponent],
     tools: &mut [ResolvedTool],
 ) -> Result<Vec<ResolvedPathOverride>> {
@@ -549,6 +566,9 @@ fn apply_path_pins(
         if apply_tool_path_pin(key, &path, tools, &mut overrides) {
             continue;
         }
+        if apply_simulator_path_pin(key, &path, simulators, &mut overrides) {
+            continue;
+        }
         if key == "simulator-webots" {
             overrides.push(ResolvedPathOverride {
                 key: key.clone(),
@@ -560,7 +580,7 @@ fn apply_path_pins(
         }
         bail!(
             "{}",
-            unknown_path_pin_message(key, platform_runtimes, components, tools)
+            unknown_path_pin_message(key, platform_runtimes, simulators, components, tools)
         );
     }
     overrides.sort_by(|left, right| left.key.cmp(&right.key));
@@ -582,6 +602,7 @@ fn apply_service_path_pin(
     runtime.path_override = Some(path.to_path_buf());
     runtime.artifact_ref = format!("path:{}", path.display());
     runtime.sha256 = None;
+    runtime.metadata = None;
     runtime.target_status = Some(ArtifactStatus::Released);
     runtime.changed_contracts.clear();
     overrides.push(ResolvedPathOverride {
@@ -633,6 +654,7 @@ fn apply_tool_path_pin(
     tool.path_override = Some(path.to_path_buf());
     tool.asset = format!("path:{}", path.display());
     tool.sha256 = crate::utils::hash_tree(path).unwrap_or_default();
+    tool.metadata = None;
     overrides.push(ResolvedPathOverride {
         key: key.to_string(),
         kind: ResolvedPathOverrideKind::Tool,
@@ -642,13 +664,41 @@ fn apply_tool_path_pin(
     true
 }
 
+fn apply_simulator_path_pin(
+    key: &str,
+    path: &Path,
+    simulators: &mut [ResolvedPlatformRuntime],
+    overrides: &mut Vec<ResolvedPathOverride>,
+) -> bool {
+    let Some(runtime) = simulators
+        .iter_mut()
+        .find(|runtime| runtime.kind == ArtifactKind::Simulator && runtime.artifact_id == key)
+    else {
+        return false;
+    };
+    runtime.path_override = Some(path.to_path_buf());
+    runtime.artifact_ref = format!("path:{}", path.display());
+    runtime.sha256 = None;
+    runtime.metadata = None;
+    runtime.target_status = Some(ArtifactStatus::Released);
+    runtime.changed_contracts.clear();
+    overrides.push(ResolvedPathOverride {
+        key: key.to_string(),
+        kind: ResolvedPathOverrideKind::Simulator,
+        artifact_name: runtime.name.clone(),
+        path: path.to_path_buf(),
+    });
+    true
+}
+
 fn unknown_path_pin_message(
     key: &str,
     platform_runtimes: &[ResolvedPlatformRuntime],
+    simulators: &[ResolvedPlatformRuntime],
     components: &[ResolvedComponent],
     tools: &[ResolvedTool],
 ) -> String {
-    let used = used_path_pin_keys(platform_runtimes, components, tools);
+    let used = used_path_pin_keys(platform_runtimes, simulators, components, tools);
     let available = if used.is_empty() {
         "<none>".to_string()
     } else {
@@ -670,6 +720,7 @@ fn unknown_path_pin_message(
 
 fn used_path_pin_keys(
     platform_runtimes: &[ResolvedPlatformRuntime],
+    simulators: &[ResolvedPlatformRuntime],
     components: &[ResolvedComponent],
     tools: &[ResolvedTool],
 ) -> Vec<String> {
@@ -687,6 +738,11 @@ fn used_path_pin_keys(
             .map(|component| format!("driver-{}", component.source_name)),
     );
     keys.extend(tools.iter().map(|tool| tool.name.clone()));
+    keys.extend(
+        simulators
+            .iter()
+            .map(|simulator| simulator.artifact_id.clone()),
+    );
     keys.push("simulator-webots".to_string());
     keys.sort();
     keys.dedup();
@@ -738,7 +794,7 @@ fn catalog_target_generation_not_yet_available(
     target: &str,
 ) -> anyhow::Error {
     anyhow!(
-        "NotYetAvailable: loaded artifact catalog revision {} has no released generation assets for target {target} on channel {channel}. Assets for this deploy triple arrive with plan #01; pass a catalog that includes released assets for {target}/{channel}, pin phoxal_artifacts.generation/api_version for source-only development, or deploy a target covered by this catalog.",
+        "NotYetAvailable: loaded artifact catalog revision {} has no released generation assets for target {target} on channel {channel}. Pass a catalog that includes released assets for {target}/{channel}, pin phoxal_artifacts.generation/api_version for source-only development, or deploy a target covered by this catalog.",
         catalog.revision
     )
 }
@@ -827,6 +883,7 @@ fn resolve_catalog_entries(
                 version: entry.version.clone(),
                 artifact_ref,
                 sha256: release_asset.map(|asset| asset.sha256.clone()),
+                metadata: release_asset.map(|asset| resolved_metadata(&asset.metadata)),
                 target_status: entry.status_for(target),
                 per_triple_status: entry.status.clone(),
                 changed_contracts: entry.changed_contracts.clone(),
@@ -835,6 +892,99 @@ fn resolve_catalog_entries(
             })
         })
         .collect()
+}
+
+fn resolve_simulators(
+    catalog: &CatalogRevision,
+    channel: CatalogChannel,
+    target: &str,
+    target_generation: &str,
+) -> Result<Vec<ResolvedPlatformRuntime>> {
+    let selected = select_latest_entries(
+        catalog,
+        ArtifactKind::Simulator,
+        channel,
+        target,
+        target_generation,
+    );
+    selected
+        .into_values()
+        .map(|entry| resolved_runtime_from_entry(entry, target))
+        .collect()
+}
+
+fn select_latest_entries<'a>(
+    catalog: &'a CatalogRevision,
+    kind: ArtifactKind,
+    channel: CatalogChannel,
+    target: &str,
+    target_generation: &str,
+) -> BTreeMap<String, &'a CatalogEntry> {
+    let mut selected = BTreeMap::<String, &CatalogEntry>::new();
+    for entry in &catalog.entries {
+        if entry.kind != kind {
+            continue;
+        }
+        if !entry.channels.contains_key(&channel) {
+            continue;
+        }
+        if !entry.target_triples.iter().any(|triple| triple == target) {
+            continue;
+        }
+        if compare_generations(&entry.api_generation, target_generation).is_gt() {
+            continue;
+        }
+        selected
+            .entry(entry.artifact_id.clone())
+            .and_modify(|existing| {
+                if compare_catalog_entries(entry, existing).is_gt() {
+                    *existing = entry;
+                }
+            })
+            .or_insert(entry);
+    }
+    selected
+}
+
+pub(crate) fn resolved_runtime_from_entry(
+    entry: &CatalogEntry,
+    target: &str,
+) -> Result<ResolvedPlatformRuntime> {
+    let name = entry
+        .artifact_name()
+        .ok_or_else(|| anyhow!("{} does not match kind {}", entry.artifact_id, entry.kind))?
+        .to_string();
+    let release_asset = entry.release_assets.get(target);
+    let artifact_ref = release_asset
+        .map(|asset| asset.asset.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "{}:{}-{}-{}",
+                entry.artifact_id, entry.version, entry.api_generation, target
+            )
+        });
+    Ok(ResolvedPlatformRuntime {
+        name,
+        artifact_id: entry.artifact_id.clone(),
+        kind: entry.kind,
+        generation: entry.api_generation.clone(),
+        version: entry.version.clone(),
+        artifact_ref,
+        sha256: release_asset.map(|asset| asset.sha256.clone()),
+        metadata: release_asset.map(|asset| resolved_metadata(&asset.metadata)),
+        target_status: entry.status_for(target),
+        per_triple_status: entry.status.clone(),
+        changed_contracts: entry.changed_contracts.clone(),
+        contract_uses: entry.contract_uses.clone(),
+        path_override: None,
+    })
+}
+
+fn resolved_metadata(metadata: &ReleaseAssetMetadata) -> ResolvedArtifactMetadata {
+    ResolvedArtifactMetadata {
+        emit_apis: metadata.emit_apis.clone(),
+        emit_apis_sha256: metadata.emit_apis_sha256.clone(),
+    }
 }
 
 fn compare_catalog_entries(left: &CatalogEntry, right: &CatalogEntry) -> std::cmp::Ordering {
@@ -1040,41 +1190,90 @@ fn resolve_components(
 
 fn resolve_tools(
     robot: &Robot,
-    resolve_external_artifacts: bool,
+    catalog: Option<&CatalogRevision>,
+    channel: CatalogChannel,
     target: &str,
+    target_generation: &str,
 ) -> Result<Vec<ResolvedTool>> {
-    // Reject robot.yaml tool selectors for unknown tools up front (previously a
-    // robot.tools entry seeded the request map; now the catalog is the source of
-    // truth and robot.yaml may only pin known tools to explicit versions).
+    let Some(catalog) = catalog else {
+        if let Some(name) = robot.tools.keys().next() {
+            bail!("unknown native tool '{name}'");
+        }
+        return Ok(Vec::new());
+    };
+
+    let tool_entries = catalog
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == ArtifactKind::Tool)
+        .collect::<Vec<_>>();
     for name in robot.tools.keys() {
-        if lookup_tool_version(name).is_none() {
+        if !tool_entries.iter().any(|entry| entry.artifact_id == *name) {
             bail!("unknown native tool '{name}'");
         }
     }
-    DEFAULT_TOOL_VERSIONS
-        .iter()
-        .map(|catalog_tool| {
-            let name = catalog_tool.name;
-            let override_version = robot.tools.get(name).map(|tool| tool.version.as_str());
-            let version = override_version
-                .unwrap_or(catalog_tool.default_version)
-                .to_string();
-            let asset = render_tool_template(catalog_tool.artifact_template, &version, target);
-            let binary_name = render_tool_template(catalog_tool.binary_template, &version, target);
-            let sha256 = if resolve_external_artifacts {
-                resolve_release_asset_sha256(catalog_tool.repo, &version, &asset)?
-                    .unwrap_or_default()
-            } else {
-                fake_sha(&format!("{name}:{version}:{asset}"))
-            };
+
+    let mut selected = BTreeMap::<String, &CatalogEntry>::new();
+    for entry in tool_entries {
+        if !entry.target_triples.iter().any(|triple| triple == target) {
+            continue;
+        }
+        if compare_generations(&entry.api_generation, target_generation).is_gt() {
+            continue;
+        }
+        if let Some(pin) = robot.tools.get(&entry.artifact_id) {
+            if entry.version != pin.version {
+                continue;
+            }
+        } else if !entry.channels.contains_key(&channel) {
+            continue;
+        }
+        selected
+            .entry(entry.artifact_id.clone())
+            .and_modify(|existing| {
+                if compare_catalog_entries(entry, existing).is_gt() {
+                    *existing = entry;
+                }
+            })
+            .or_insert(entry);
+    }
+
+    for (name, pin) in &robot.tools {
+        if !selected.contains_key(name) {
+            bail!(
+                "native tool '{name}' version {} is not available in the artifact catalog for target {target}",
+                pin.version
+            );
+        }
+    }
+
+    selected
+        .into_values()
+        .map(|entry| {
+            let release_asset = entry.release_assets.get(target);
+            let asset = release_asset
+                .map(|asset| asset.asset.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}:{}-{}-{}",
+                        entry.artifact_id, entry.version, entry.api_generation, target
+                    )
+                });
             Ok(ResolvedTool {
-                name: name.to_string(),
-                requested: version.clone(),
-                resolved: version,
-                repo: catalog_tool.repo.to_string(),
+                name: entry.artifact_id.clone(),
+                requested: robot
+                    .tools
+                    .get(&entry.artifact_id)
+                    .map(|tool| tool.version.clone())
+                    .unwrap_or_else(|| entry.version.clone()),
+                resolved: entry.version.clone(),
+                repo: "phoxal/framework".to_string(),
                 asset,
-                binary_name,
-                sha256,
+                binary_name: official_binary_name(entry.kind, entry.artifact_name().unwrap_or("")),
+                sha256: release_asset
+                    .map(|asset| asset.sha256.clone())
+                    .unwrap_or_else(|| "0".repeat(64)),
+                metadata: release_asset.map(|asset| resolved_metadata(&asset.metadata)),
                 path_override: None,
             })
         })
@@ -1085,94 +1284,8 @@ pub(crate) fn tool_emit_apis_id(tool_name: &str) -> &str {
     tool_name.strip_prefix("tool-").unwrap_or(tool_name)
 }
 
-fn render_tool_template(template: &str, version: &str, target: &str) -> String {
-    template
-        .replace("{version}", version)
-        .replace("{target}", target)
-}
-
-pub(crate) fn resolve_release_asset_sha256(
-    repo: &str,
-    version: &str,
-    asset: &str,
-) -> Result<Option<String>> {
-    let url = format!("https://api.github.com/repos/{repo}/releases/tags/v{version}");
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("phoxal-cli")
-        .timeout(Duration::from_secs(15))
-        .build()?;
-    let mut req = client.get(&url);
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        req = req.bearer_auth(token);
-    }
-    let response = req
-        .send()
-        .with_context(|| format!("failed to fetch GitHub release {repo} v{version}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        if is_unpublished_placeholder(version) {
-            return Ok(None);
-        }
-        if status.as_u16() == 403 {
-            bail!(
-                "GitHub releases API returned 403 while resolving {repo} v{version} \
-                 (likely anonymous rate limit of 60/hour from this network - wait an hour, \
-                 or set GITHUB_TOKEN env var for 5000/hour)"
-            );
-        }
-        bail!("GitHub release lookup for {repo} v{version} returned {status}");
-    }
-
-    #[derive(Deserialize)]
-    struct GhAsset {
-        name: String,
-        digest: Option<String>,
-    }
-
-    #[derive(Deserialize)]
-    struct GhRelease {
-        assets: Vec<GhAsset>,
-    }
-
-    let release: GhRelease = response
-        .json()
-        .with_context(|| format!("failed to parse GitHub release {repo} v{version}"))?;
-    let Some(release_asset) = release
-        .assets
-        .iter()
-        .find(|candidate| candidate.name == asset)
-    else {
-        if is_unpublished_placeholder(version) {
-            return Ok(None);
-        }
-        bail!("GitHub release {repo} v{version} does not contain asset {asset}");
-    };
-    let Some(digest) = release_asset.digest.as_deref() else {
-        if is_unpublished_placeholder(version) {
-            return Ok(None);
-        }
-        bail!("GitHub release asset {repo} v{version} {asset} does not expose a digest");
-    };
-    let sha256 = digest.strip_prefix("sha256:").unwrap_or(digest);
-    if sha256.len() == 64 && sha256.chars().all(|value| value.is_ascii_hexdigit()) {
-        Ok(Some(sha256.to_ascii_lowercase()))
-    } else if is_unpublished_placeholder(version) {
-        Ok(None)
-    } else {
-        bail!("GitHub release asset {repo} v{version} {asset} has invalid sha256 digest {digest}")
-    }
-}
-
-fn is_unpublished_placeholder(version: &str) -> bool {
-    version == "0.0.0-dev"
-}
-
-/// Deterministic non-cryptographic stand-in hash for **tool asset** entries
-/// during offline resolution.
-fn fake_sha(seed: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(seed.as_bytes());
-    hex::encode(hasher.finalize())
+pub(crate) fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
+    format!("phoxal-{kind}-{name}")
 }
 
 fn join_errors(errors: Vec<phoxal::model::robot::ValidationError>) -> String {
@@ -1222,7 +1335,6 @@ mod tests {
             std::path::Path::new("."),
             Some(&catalog),
             ResolveOptions {
-                resolve_external_artifacts: false,
                 resolve_source_commits: false,
                 ..ResolveOptions::default()
             },
@@ -1294,7 +1406,6 @@ components:
             std::path::Path::new("."),
             Some(&catalog),
             ResolveOptions {
-                resolve_external_artifacts: false,
                 resolve_source_commits: true,
                 ..ResolveOptions::default()
             },
@@ -1503,6 +1614,7 @@ components:
             version: "0.1.0".to_string(),
             artifact_ref: "service-asset:y2026_1-stable".to_string(),
             sha256: None,
+            metadata: None,
             target_status: Some(ArtifactStatus::Pending),
             per_triple_status: BTreeMap::new(),
             changed_contracts: Vec::new(),

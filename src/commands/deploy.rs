@@ -20,7 +20,7 @@ use crate::catalog::{ArtifactKind, ArtifactStatus};
 use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
-    official_emit_apis_from_catalog_metadata, platform_artifact_refs_from_resolved,
+    fetch_emit_apis_from_native_artifact, platform_artifact_refs_from_resolved,
     robot_graph_from_resolved, run_check_with_context, source_participants_from_resolved,
 };
 use crate::component_driver::component_crate_dir;
@@ -433,7 +433,6 @@ fn prepare_deploy(
         project_root,
         catalog.as_ref(),
         ResolveOptions {
-            resolve_external_artifacts: false,
             resolve_source_commits: true,
             official_target_triple: Some(target.official_triple.clone()),
             tool_target_triple: Some(target.official_triple.clone()),
@@ -472,7 +471,7 @@ fn prepare_deploy(
             let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
                 anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
             })?;
-            Ok(official_emit_apis_from_catalog_metadata(runtime))
+            fetch_emit_apis_from_native_artifact(runtime)
         },
         |_| unreachable!("deploy does not check site tools as graph participants"),
         build_emit_apis_from_source,
@@ -1464,7 +1463,7 @@ fn stage_official_artifacts(
         let plan = official_runtime_plan(root, runtime)?;
         if require_binaries && plan.source_path.is_none() {
             bail!(
-                "NativePending: official artifact {} is not available locally for {}; set PHOXAL_ARTIFACT_{}_PATH or PHOXAL_ARTIFACT_DIR after plan #01 publishes assets",
+                "NativePending: official artifact {} is not available locally for {}; run `phoxal-cli pull`, set PHOXAL_ARTIFACT_{}_PATH, or set PHOXAL_ARTIFACT_DIR",
                 runtime.artifact_id,
                 resolved.target,
                 env_key(&runtime.artifact_id)
@@ -1481,7 +1480,7 @@ fn stage_official_artifacts(
         let plan = official_tool_plan(root, router)?;
         if require_binaries && plan.source_path.is_none() {
             bail!(
-                "NativePending: official artifact tool-router is not available locally for deploy; set PHOXAL_TOOL_ROUTER_PATH or PHOXAL_TOOL_DIR after plan #01 publishes assets"
+                "NativePending: official artifact tool-router is not available locally for deploy; run `phoxal-cli pull`, set PHOXAL_ARTIFACT_TOOL_ROUTER_PATH, set PHOXAL_ARTIFACT_DIR, set PHOXAL_TOOL_ROUTER_PATH, or set PHOXAL_TOOL_DIR"
             );
         }
         artifacts.insert(router.name.clone(), plan);
@@ -1578,22 +1577,37 @@ fn locate_official_runtime_binary(runtime: &ResolvedPlatformRuntime) -> Result<O
         return Ok(Some(path));
     }
     if let Ok(dir) = std::env::var("PHOXAL_ARTIFACT_DIR") {
-        let path = PathBuf::from(dir).join(&runtime.artifact_id);
-        if path.is_file() {
-            return Ok(Some(path));
+        for name in [
+            runtime.artifact_id.as_str(),
+            &crate::resolver::official_binary_name(runtime.kind, &runtime.name),
+        ] {
+            let path = PathBuf::from(&dir).join(name);
+            if path.is_file() {
+                return Ok(Some(path));
+            }
         }
     }
-    let cache = crate::host_paths::cache_dir()?
-        .join("artifacts")
-        .join(&runtime.artifact_id)
-        .join(sanitize_path_segment(runtime.artifact_ref()))
-        .join(&runtime.artifact_id);
+    let Some(descriptor) =
+        crate::native_artifacts::NativeArtifactDescriptor::from_runtime(runtime)?
+    else {
+        return Ok(None);
+    };
+    let cache = crate::native_artifacts::artifact_binary_path(&descriptor)?;
     Ok(cache.is_file().then_some(cache))
 }
 
 fn locate_tool_binary(tool: &ResolvedTool) -> Result<Option<PathBuf>> {
+    if let Some(path) = env_path_override("PHOXAL_ARTIFACT", &tool.name) {
+        return Ok(Some(path));
+    }
     if let Some(path) = env_path_override("PHOXAL_TOOL", &tool.name) {
         return Ok(Some(path));
+    }
+    if let Ok(dir) = std::env::var("PHOXAL_ARTIFACT_DIR") {
+        let path = PathBuf::from(&dir).join(&tool.binary_name);
+        if path.is_file() {
+            return Ok(Some(path));
+        }
     }
     if let Ok(dir) = std::env::var("PHOXAL_TOOL_DIR") {
         let path = PathBuf::from(&dir).join(&tool.name);
@@ -1605,8 +1619,11 @@ fn locate_tool_binary(tool: &ResolvedTool) -> Result<Option<PathBuf>> {
             return Ok(Some(path));
         }
     }
-    let cache =
-        crate::simulator_staging::cached_tool_path(&tool.name, &tool.resolved, &tool.binary_name)?;
+    let Some(descriptor) = crate::native_artifacts::NativeArtifactDescriptor::from_tool(tool)?
+    else {
+        return Ok(None);
+    };
+    let cache = crate::native_artifacts::artifact_binary_path(&descriptor)?;
     Ok(cache.is_file().then_some(cache))
 }
 
@@ -1623,19 +1640,6 @@ fn env_key(value: &str) -> String {
         .map(|ch| {
             if ch.is_ascii_alphanumeric() {
                 ch.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-fn sanitize_path_segment(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
-                ch
             } else {
                 '_'
             }
@@ -2626,15 +2630,21 @@ mod tests {
 
     mod phoxal_cli_test_support {
         use super::*;
+        use crate::catalog::{
+            ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
+            fixture_tool_entry_for_tests,
+        };
 
         pub fn write_basic_project(root: &Path) -> Result<()> {
             fs::write(root.join("robot.yaml"), basic_robot_yaml())?;
+            write_catalog(root)?;
             write_service_crate(root, "mission", "service", "mission")?;
             Ok(())
         }
 
         pub fn write_driver_project(root: &Path) -> Result<()> {
             fs::write(root.join("robot.yaml"), driver_robot_yaml())?;
+            write_catalog(root)?;
             write_service_crate(root, "mission", "service", "mission")?;
             write_driver_crate(root, "ddsm115", "driver-ddsm115")?;
             Ok(())
@@ -2642,6 +2652,7 @@ mod tests {
 
         pub fn write_native_dep_project(root: &Path) -> Result<()> {
             fs::write(root.join("robot.yaml"), basic_robot_yaml())?;
+            write_catalog(root)?;
             let dir = root.join("runtimes/mission");
             fs::create_dir_all(dir.join("src"))?;
             fs::write(
@@ -2649,6 +2660,23 @@ mod tests {
                 "[package]\nname = \"mission\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nopencv = \"0.1\"\n",
             )?;
             fs::write(dir.join("src/main.rs"), service_main("service", "mission"))?;
+            Ok(())
+        }
+
+        fn write_catalog(root: &Path) -> Result<()> {
+            let catalog = fixture_catalog_for_tests(vec![fixture_tool_entry_for_tests(
+                "router",
+                "y2026_1",
+                "0.1.0",
+                CatalogChannel::Stable,
+                "aarch64-unknown-linux-gnu",
+                ArtifactStatus::Pending,
+                Vec::new(),
+            )]);
+            fs::write(
+                root.join("catalog.json"),
+                serde_json::to_string_pretty(&catalog)?,
+            )?;
             Ok(())
         }
 
@@ -2693,6 +2721,10 @@ identity:
   id: testbot
   namespace: dev
 structure: structure.urdf
+phoxal_artifacts:
+  channel: stable
+  generation: y2026_1
+  catalog: catalog.json
 phoxal_participants: {}
 user_participants:
   mission:
@@ -2726,6 +2758,10 @@ identity:
   id: testbot
   namespace: dev
 structure: structure.urdf
+phoxal_artifacts:
+  channel: stable
+  generation: y2026_1
+  catalog: catalog.json
 phoxal_participants: {}
 user_participants:
   mission:

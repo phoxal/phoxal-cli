@@ -79,7 +79,13 @@ impl Service {
 
 impl Add {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let outcome = add_service(app.project.root(), &self.name, app.catalog_source.clone())?;
+        let root = app.project.root().to_path_buf();
+        let name = self.name.clone();
+        let catalog_source = app.catalog_source.clone();
+        let outcome =
+            tokio::task::spawn_blocking(move || add_service(&root, &name, catalog_source))
+                .await
+                .context("service add worker failed")??;
         println!("created service crate: {}", outcome.crate_dir.display());
         println!(
             "registered manifest entry: user_participants.{} = {{ path: \"{}\" }}",
@@ -96,7 +102,12 @@ impl Add {
 
 impl Catalog {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let summary = service_catalog_summary(app.project.root(), app.catalog_source.clone())?;
+        let root = app.project.root().to_path_buf();
+        let catalog_source = app.catalog_source.clone();
+        let summary =
+            tokio::task::spawn_blocking(move || service_catalog_summary(&root, catalog_source))
+                .await
+                .context("service catalog worker failed")??;
         crate::commands::print_message(
             &summary,
             || {
@@ -474,18 +485,23 @@ fn parse_dependency_version(label: &str, version: &str) -> Result<Version> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use phoxal::model::robot::RobotV1 as Robot;
 
     use super::*;
+    use crate::catalog::{
+        ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
+        fixture_contract_for_tests, fixture_service_entry_for_tests,
+    };
 
     #[test]
     fn add_service_scaffolds_crate_and_registers_manifest() -> Result<()> {
         let temp = tempfile::tempdir()?;
         fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
+        let catalog = write_catalog(temp.path())?;
 
-        let outcome = add_service(temp.path(), "avoid_obstacles", None)?;
+        let outcome = add_service(temp.path(), "avoid_obstacles", Some(catalog.clone()))?;
         assert_eq!(outcome.name, "avoid_obstacles");
         assert_eq!(outcome.target_generation, "y2026_1");
         assert_eq!(
@@ -539,7 +555,7 @@ mod tests {
             PathBuf::from("runtimes").join("avoid_obstacles")
         );
 
-        let error = add_service(temp.path(), "avoid_obstacles", None)
+        let error = add_service(temp.path(), "avoid_obstacles", Some(catalog))
             .expect_err("adding the same service twice should fail");
         assert!(error.to_string().contains("already exists"));
 
@@ -562,8 +578,9 @@ mod tests {
 "#,
             ),
         )?;
+        let catalog = write_catalog(temp.path())?;
 
-        add_service(temp.path(), "avoid_obstacles", None)?;
+        add_service(temp.path(), "avoid_obstacles", Some(catalog))?;
 
         let robot_yaml = fs::read_to_string(temp.path().join("robot.yaml"))?;
         let yaml: YamlValue = serde_yaml::from_str(&robot_yaml)?;
@@ -667,6 +684,26 @@ components:
   sources: {}
   instances: {}
 "#
+    }
+
+    fn write_catalog(root: &Path) -> Result<String> {
+        let catalog = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
+            "drive",
+            "y2026_1",
+            "0.1.0",
+            CatalogChannel::Stable,
+            &crate::resolver::host_target_triple(),
+            ArtifactStatus::Pending,
+            vec![fixture_contract_for_tests(
+                "drive::Target",
+                "drive/target",
+                "publish",
+                "0123456789abcdef",
+            )],
+        )]);
+        let path = root.join("catalog.json");
+        fs::write(&path, serde_json::to_string_pretty(&catalog)?)?;
+        Ok(path.display().to_string())
     }
 
     fn minimal_robot_yaml_with_user_participant(name: &str, participant_yaml: &str) -> String {

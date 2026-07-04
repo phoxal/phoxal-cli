@@ -11,8 +11,8 @@ use crate::AppContext;
 use crate::catalog::{ArtifactKind, CatalogEntry, CatalogRevision, Channel as CatalogChannel};
 use crate::commands::MessageFormat;
 use crate::commands::check::{
-    CheckGraphContext, RawArtifact, RawContract, RawEmitApis, SourceParticipant,
-    SourceParticipantKind, build_emit_apis_from_source, official_emit_apis_from_catalog_metadata,
+    CheckGraphContext, RawEmitApis, SourceParticipant, SourceParticipantKind,
+    build_emit_apis_from_source, fetch_emit_apis_from_native_artifact,
     platform_artifact_refs_from_resolved, robot_graph_from_resolved, run_check_with_context,
     source_participants_building_only_crate, source_participants_from_resolved,
 };
@@ -307,17 +307,16 @@ pub(crate) fn resolve_project(
         }),
     })?;
 
-    // Always resolve live: simulate does not pin tool checksums, but it does
-    // resolve git component commits so component drivers can be staged. A
-    // path-only / official-only graph needs no network; a git component pinned
-    // to a commit SHA resolves offline; a tag/branch ref is resolved live via
-    // `git ls-remote` (with an actionable error if the network is unavailable).
+    // Always resolve live git component commits so component drivers can be
+    // staged. A path-only / official-only graph needs no component network; a
+    // git component pinned to a commit SHA resolves offline; a tag/branch ref is
+    // resolved live via `git ls-remote` with an actionable error if the network
+    // is unavailable.
     let resolved = resolve(
         &robot,
         &project_root,
         catalog.as_ref(),
         ResolveOptions {
-            resolve_external_artifacts: false,
             resolve_source_commits: true,
             ..ResolveOptions::default()
         },
@@ -361,7 +360,7 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
         .iter()
         .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
         .collect::<BTreeMap<_, _>>();
-    let catalog_driver_raws = catalog_driver_raws_by_instance(resolved, catalog);
+    let catalog_driver_raws = catalog_driver_raws_by_instance(resolved, catalog)?;
 
     let metadata_outcome = run_check_with_context(
         &platform_refs,
@@ -375,7 +374,7 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
             let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
                 anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
             })?;
-            Ok(official_emit_apis_from_catalog_metadata(runtime))
+            fetch_emit_apis_from_native_artifact(runtime)
         },
         |_| unreachable!("simulate does not check site tools as graph participants"),
         |participant| {
@@ -390,11 +389,11 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
         },
     )?;
 
-    let substitutions = contract_substitutions_from_driver_metadata(
-        &metadata_outcome.checked_participants,
-        SIMULATOR_PROVIDER_ID,
-    );
-    let sim_participants = sim_checked_participants(&metadata_outcome.checked_participants);
+    let mut checked_participants = metadata_outcome.checked_participants.clone();
+    checked_participants.extend(official_simulator_participants(resolved)?);
+    let substitutions =
+        contract_substitutions_from_driver_metadata(&checked_participants, SIMULATOR_PROVIDER_ID);
+    let sim_participants = sim_checked_participants(&checked_participants);
     let report = graph_check::check_plan(graph_check::CheckInput {
         mode: graph_check::PlanMode::Sim,
         participants: &sim_participants,
@@ -430,6 +429,41 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
     )
 }
 
+fn official_simulator_participants(
+    resolved: &ResolvedRobot,
+) -> Result<Vec<graph_check::ParticipantApis>> {
+    let mut participants = Vec::new();
+    for runtime in resolved
+        .simulators
+        .iter()
+        .filter(|runtime| runtime.source_path().is_none())
+    {
+        let raw = fetch_emit_apis_from_native_artifact(runtime).with_context(|| {
+            format!(
+                "failed to read packaged emit-apis for simulator {}",
+                runtime.name
+            )
+        })?;
+        if raw.artifact.kind != "simulator" || raw.artifact.id != runtime.name {
+            bail!(
+                "official simulator emit-apis artifact {} '{}' does not match expected simulator '{}'",
+                raw.artifact.kind,
+                raw.artifact.id,
+                runtime.name
+            );
+        }
+        let mut participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
+            format!(
+                "failed to interpret emit-apis for simulator {}",
+                runtime.name
+            )
+        })?;
+        participant.participant_id = SIMULATOR_PROVIDER_ID.to_string();
+        participants.push(participant);
+    }
+    Ok(participants)
+}
+
 pub(crate) fn sim_source_participants(
     project_root: &Path,
     resolved: &ResolvedRobot,
@@ -453,39 +487,26 @@ pub(crate) fn sim_source_participants(
 fn catalog_driver_raws_by_instance(
     resolved: &ResolvedRobot,
     catalog: Option<&CatalogRevision>,
-) -> BTreeMap<String, RawEmitApis> {
-    resolved
+) -> Result<BTreeMap<String, RawEmitApis>> {
+    let mut raws = BTreeMap::new();
+    for component in resolved
         .components
         .iter()
         .filter(|component| component.has_driver)
-        .filter_map(|component| {
-            catalog_driver_entry(resolved, catalog, component).map(|entry| {
-                (
-                    component.instance.clone(),
-                    RawEmitApis {
-                        artifact: RawArtifact {
-                            kind: "driver".to_string(),
-                            id: component.source_name.clone(),
-                        },
-                        participant_class: "checked".to_string(),
-                        api_version: entry.api_generation.clone(),
-                        bus_abi: None,
-                        required_contracts: entry
-                            .contract_uses
-                            .iter()
-                            .map(|contract| RawContract {
-                                family: contract.family.clone(),
-                                topic: contract.topic_template.clone(),
-                                direction: contract.direction.clone(),
-                                schema_id: contract.schema_id.clone(),
-                            })
-                            .collect(),
-                        config_schema: None,
-                    },
-                )
-            })
-        })
-        .collect()
+    {
+        let Some(entry) = catalog_driver_entry(resolved, catalog, component) else {
+            continue;
+        };
+        let runtime = crate::resolver::resolved_runtime_from_entry(entry, &resolved.target)?;
+        let raw = fetch_emit_apis_from_native_artifact(&runtime).with_context(|| {
+            format!(
+                "failed to read packaged emit-apis for catalog driver {}",
+                component.source_name
+            )
+        })?;
+        raws.insert(component.instance.clone(), raw);
+    }
+    Ok(raws)
 }
 
 fn catalog_driver_entry<'a>(
@@ -513,6 +534,7 @@ fn catalog_driver_entry<'a>(
                 .iter()
                 .any(|target| target == &resolved.target)
         })
+        .filter(|entry| entry.release_assets.contains_key(&resolved.target))
         .filter(|entry| {
             !crate::catalog::compare_generations(&entry.api_generation, &resolved.target_generation)
                 .is_gt()
@@ -724,8 +746,7 @@ mod tests {
     use super::*;
     use crate::catalog::{
         ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
-        fixture_contract_for_tests, fixture_driver_entry_for_tests,
-        fixture_service_entry_for_tests,
+        fixture_contract_for_tests, fixture_tool_entry_for_tests,
     };
     use crate::resolver::{
         ResolvedComponent, ResolvedComponentSource, ResolvedPlatformRuntime, ResolvedTool,
@@ -1101,6 +1122,7 @@ mod tests {
 
     fn write_robot_project(root: &Path) -> Result<()> {
         fs::write(root.join("robot.yaml"), minimal_robot_yaml())?;
+        write_catalog_with_site_tools(root)?;
         fs::write(
             root.join("structure.urdf"),
             r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="base_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
@@ -1115,6 +1137,7 @@ mod tests {
 
     fn write_robot_project_with_custom_component(root: &Path) -> Result<()> {
         fs::write(root.join("robot.yaml"), robot_yaml_with_custom_component())?;
+        write_catalog_with_site_tools(root)?;
         fs::write(
             root.join("structure.urdf"),
             r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="base_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
@@ -1139,6 +1162,7 @@ structure: structure.urdf
 
 phoxal_artifacts:
   channel: stable
+  catalog: catalog.json
 phoxal_participants: {}
 
 motion:
@@ -1159,6 +1183,8 @@ components:
 
     fn write_robot_project_with_component(root: &Path) -> Result<()> {
         fs::write(root.join("robot.yaml"), robot_yaml_with_component())?;
+        write_catalog_with_site_tools(root)?;
+        write_driver_crate(root, "ddsm115")?;
         fs::write(
             root.join("structure.urdf"),
             r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="base_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
@@ -1183,6 +1209,7 @@ structure: structure.urdf
 phoxal_artifacts:
   channel: stable
   generation: y2026_1
+  catalog: catalog.json
 phoxal_participants: {}
 
 motion:
@@ -1194,9 +1221,7 @@ motion:
 components:
   sources:
     ddsm115:
-      git: https://github.com/phoxal/framework
-      tag: 0123456789012345678901234567890123456789
-      directory: component/ddsm115
+      path: components/ddsm115
   instances:
     left_drive:
       component: ddsm115
@@ -1221,6 +1246,7 @@ structure: structure.urdf
 phoxal_artifacts:
   channel: stable
   generation: y2026_1
+  catalog: catalog.json
 phoxal_participants: {}
 
 motion:
@@ -1246,39 +1272,51 @@ components:
     }
 
     fn write_catalog_with_driver(root: &Path) -> Result<PathBuf> {
+        write_catalog_with_site_tools(root)
+    }
+
+    fn write_catalog_with_site_tools(root: &Path) -> Result<PathBuf> {
         let path = root.join("catalog.json");
         let catalog = fixture_catalog_for_tests(vec![
-            fixture_service_entry_for_tests(
-                "drive",
+            fixture_tool_entry_for_tests(
+                "router",
                 "y2026_1",
                 "0.1.0",
                 CatalogChannel::Stable,
                 &host_target_triple(),
                 ArtifactStatus::Pending,
-                vec![fixture_contract_for_tests(
-                    "component::MotorCommand",
-                    "component/{instance}/motor/{capability}/command",
-                    "publish",
-                    "0123456789abcdef",
-                )],
+                Vec::new(),
             ),
-            fixture_driver_entry_for_tests(
-                "ddsm115",
+            fixture_tool_entry_for_tests(
+                "joypad",
                 "y2026_1",
                 "0.1.0",
                 CatalogChannel::Stable,
                 &host_target_triple(),
                 ArtifactStatus::Pending,
-                vec![fixture_contract_for_tests(
-                    "component::MotorCommand",
-                    "component/{instance}/motor/{capability}/command",
-                    "subscribe",
-                    "0123456789abcdef",
-                )],
+                Vec::new(),
             ),
         ]);
         fs::write(&path, serde_json::to_string_pretty(&catalog)?)?;
         Ok(path)
+    }
+
+    fn write_driver_crate(root: &Path, name: &str) -> Result<()> {
+        let dir = root.join("components").join(name);
+        fs::create_dir_all(dir.join("src"))?;
+        fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"driver-{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
+            ),
+        )?;
+        fs::write(
+            dir.join("src/main.rs"),
+            format!(
+                "fn main() {{\n    if std::env::args().nth(1).as_deref() == Some(\"emit-apis\") {{\n        println!(\"{{}}\", r#\"{{\"artifact\":{{\"kind\":\"driver\",\"id\":\"{name}\"}},\"participant_class\":\"checked\",\"api_version\":\"y2026_1\",\"required_contracts\":[{{\"family\":\"component::MotorCommand\",\"topic\":\"component/{{instance}}/motor/{{capability}}/command\",\"direction\":\"subscribe\",\"schema_id\":\"0123456789abcdef\"}}]}}\"#);\n    }}\n}}\n"
+            ),
+        )?;
+        Ok(())
     }
 
     fn participant_ids(plan: &LaunchPlan) -> Vec<&str> {
@@ -1406,6 +1444,7 @@ components:
             target: host_target_triple(),
             catalog_revision: None,
             platform_runtimes: Vec::new(),
+            simulators: Vec::new(),
             user_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
@@ -1459,6 +1498,7 @@ components:
                 host_target_triple()
             ),
             sha256: None,
+            metadata: None,
             target_status: Some(ArtifactStatus::Pending),
             per_triple_status: BTreeMap::new(),
             changed_contracts: Vec::new(),
@@ -1481,6 +1521,7 @@ components:
             asset: format!("{name}-0.1.0-{}.tar.gz", host_target_triple()),
             binary_name: name.to_string(),
             sha256: "0".repeat(64),
+            metadata: None,
             path_override: None,
         }
     }

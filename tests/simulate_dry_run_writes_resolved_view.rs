@@ -2,7 +2,7 @@ use std::fs;
 
 use phoxal_cli::catalog::{
     ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
-    fixture_contract_for_tests, fixture_service_entry_for_tests,
+    fixture_tool_entry_for_tests,
 };
 use phoxal_cli::commands::simulate::{SimulateOptions, prepare};
 use phoxal_cli::resolver::host_target_triple;
@@ -39,18 +39,7 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
             "webots".to_string(),
         ]
     );
-    assert_eq!(
-        plan.resolved
-            .platform_runtimes
-            .iter()
-            .find(|runtime| runtime.name == "drive")
-            .expect("drive runtime")
-            .artifact_ref(),
-        format!(
-            "service-drive:0.1.0-y2026_1-stable-{}",
-            host_target_triple()
-        )
-    );
+    assert!(plan.resolved.platform_runtimes.is_empty());
 
     Ok(())
 }
@@ -101,20 +90,26 @@ components:
 
 fn write_catalog(root: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let path = root.join("catalog.json");
-    let catalog = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
-        "drive",
-        "y2026_1",
-        "0.1.0",
-        CatalogChannel::Stable,
-        &host_target_triple(),
-        ArtifactStatus::Pending,
-        vec![fixture_contract_for_tests(
-            "drive::Target",
-            "drive/target",
-            "publish",
-            "0123456789abcdef",
-        )],
-    )]);
+    let catalog = fixture_catalog_for_tests(vec![
+        fixture_tool_entry_for_tests(
+            "router",
+            "y2026_1",
+            "0.1.0",
+            CatalogChannel::Stable,
+            &host_target_triple(),
+            ArtifactStatus::Pending,
+            Vec::new(),
+        ),
+        fixture_tool_entry_for_tests(
+            "joypad",
+            "y2026_1",
+            "0.1.0",
+            CatalogChannel::Stable,
+            &host_target_triple(),
+            ArtifactStatus::Pending,
+            Vec::new(),
+        ),
+    ]);
     fs::write(&path, serde_json::to_string_pretty(&catalog)?)?;
     Ok(path)
 }
