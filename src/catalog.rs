@@ -11,7 +11,7 @@ pub const CATALOG_SCHEMA: &str = "phoxal.artifact-catalog/v0";
 pub const CATALOG_FORMAT_VERSION: u32 = 1;
 pub const CHECKSUM_CANONICALIZATION: &str = "json-v1-empty-revision-and-integrity-sha256";
 pub const DEFAULT_CATALOG_URL: &str =
-    "https://catalog.phoxal.com/artifact-catalog/v0/stable/latest.json";
+    "https://raw.githubusercontent.com/phoxal/framework/artifact-catalog-v0-stable/latest.json";
 pub const CATALOG_SOURCE_ENV: &str = "PHOXAL_ARTIFACT_CATALOG";
 
 const CATALOG_CACHE_FILE: &str = "phoxal-artifact-catalog.json";
@@ -221,50 +221,6 @@ pub struct EngineVersions {
     pub zenoh: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ToolVersion {
-    pub name: &'static str,
-    pub default_version: &'static str,
-    pub repo: &'static str,
-    pub artifact_template: &'static str,
-    pub binary_template: &'static str,
-}
-
-pub const DEFAULT_TOOL_VERSIONS: &[ToolVersion] = &[
-    ToolVersion {
-        name: "tool-router",
-        default_version: "0.1.0",
-        repo: "phoxal/framework",
-        artifact_template: "phoxal-tool-router-{version}-{target}.tar.gz",
-        binary_template: "phoxal-tool-router-{target}",
-    },
-    ToolVersion {
-        name: "tool-joypad",
-        default_version: "0.1.0",
-        repo: "phoxal/framework",
-        artifact_template: "phoxal-tool-joypad-{version}-{target}.tar.gz",
-        binary_template: "phoxal-tool-joypad-{target}",
-    },
-    ToolVersion {
-        name: "simulator_webots_controller",
-        default_version: "0.14.0",
-        repo: "phoxal/framework",
-        artifact_template: "phoxal-simulator-{version}-{target}.tar.gz",
-        binary_template: "phoxal-simulator-webots-controller-{target}",
-    },
-    ToolVersion {
-        name: "simulator_webots_supervisor",
-        default_version: "0.14.0",
-        repo: "phoxal/framework",
-        artifact_template: "phoxal-simulator-{version}-{target}.tar.gz",
-        binary_template: "phoxal-simulator-webots-supervisor-{target}",
-    },
-];
-
-pub fn lookup_tool_version(name: &str) -> Option<&'static ToolVersion> {
-    DEFAULT_TOOL_VERSIONS.iter().find(|tool| tool.name == name)
-}
-
 pub fn load_catalog(options: CatalogLoadOptions) -> Result<Option<CatalogRevision>> {
     if let Some(source) = explicit_source(options.cli_source, options.robot_source) {
         let revision = read_source(&source, options.refresh)?;
@@ -273,11 +229,7 @@ pub fn load_catalog(options: CatalogLoadOptions) -> Result<Option<CatalogRevisio
 
     let cache_path = cache_path()?;
     if options.refresh {
-        let revision = fetch_https(DEFAULT_CATALOG_URL).map_err(|_| {
-            crate::native_pending::error(
-                "published artifact catalog revisions at the future default URL (06)",
-            )
-        })?;
+        let revision = fetch_default_catalog(&cache_path, true)?;
         write_cache(&cache_path, &revision)?;
         return Ok(Some(revision));
     }
@@ -286,7 +238,9 @@ pub fn load_catalog(options: CatalogLoadOptions) -> Result<Option<CatalogRevisio
         return read_catalog_path(&cache_path).map(Some);
     }
 
-    Ok(None)
+    let revision = fetch_default_catalog(&cache_path, false)?;
+    write_cache(&cache_path, &revision)?;
+    Ok(Some(revision))
 }
 
 fn explicit_source(cli_source: Option<String>, robot_source: Option<PathBuf>) -> Option<String> {
@@ -311,6 +265,18 @@ fn read_source(source: &str, refresh: bool) -> Result<CatalogRevision> {
     } else {
         read_catalog_path(Path::new(source))
     }
+}
+
+fn fetch_default_catalog(cache_path: &Path, refresh: bool) -> Result<CatalogRevision> {
+    let mut tried = Vec::new();
+    if refresh {
+        tried.push(format!("default catalog URL {DEFAULT_CATALOG_URL}"));
+    } else {
+        tried.push(format!("cached catalog {}", cache_path.display()));
+        tried.push(format!("default catalog URL {DEFAULT_CATALOG_URL}"));
+    }
+    fetch_https(DEFAULT_CATALOG_URL)
+        .map_err(|error| unavailable_catalog_error_with_attempts(&tried, error))
 }
 
 pub fn read_catalog_path(path: &Path) -> Result<CatalogRevision> {
@@ -763,6 +729,45 @@ pub fn fixture_driver_entry_for_tests(
     entry
 }
 
+pub fn fixture_tool_entry_for_tests(
+    name: &str,
+    generation: &str,
+    version: &str,
+    channel: Channel,
+    target: &str,
+    status: ArtifactStatus,
+    contracts: Vec<ContractUse>,
+) -> CatalogEntry {
+    let mut entry = fixture_service_entry_for_tests(
+        name, generation, version, channel, target, status, contracts,
+    );
+    entry.artifact_id = format!("tool-{name}");
+    entry.kind = ArtifactKind::Tool;
+    entry.package = format!("phoxal-tool-{name}");
+    entry.launch_facts.participant_kind = "tool".to_string();
+    entry.launch_facts.participant_class = "privileged".to_string();
+    entry
+}
+
+pub fn fixture_simulator_entry_for_tests(
+    name: &str,
+    generation: &str,
+    version: &str,
+    channel: Channel,
+    target: &str,
+    status: ArtifactStatus,
+    contracts: Vec<ContractUse>,
+) -> CatalogEntry {
+    let mut entry = fixture_service_entry_for_tests(
+        name, generation, version, channel, target, status, contracts,
+    );
+    entry.artifact_id = format!("simulator-{name}");
+    entry.kind = ArtifactKind::Simulator;
+    entry.package = format!("phoxal-simulator-{name}");
+    entry.launch_facts.participant_kind = "simulator".to_string();
+    entry
+}
+
 pub fn fixture_contract_for_tests(
     family: &str,
     topic_template: &str,
@@ -779,7 +784,17 @@ pub fn fixture_contract_for_tests(
 
 pub fn unavailable_catalog_error() -> anyhow::Error {
     anyhow!(
-        "no artifact catalog revision is available; pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add phoxal_artifacts.catalog in robot.yaml, or run `phoxal-cli pull --catalog <source>` to refresh the cache. The future default catalog URL is {DEFAULT_CATALOG_URL}."
+        "no artifact catalog revision is available; tried cached catalog and default catalog URL {DEFAULT_CATALOG_URL}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add phoxal_artifacts.catalog in robot.yaml, or run `phoxal-cli pull` with network access to refresh the cache."
+    )
+}
+
+fn unavailable_catalog_error_with_attempts(
+    tried: &[String],
+    source: anyhow::Error,
+) -> anyhow::Error {
+    anyhow!(
+        "no artifact catalog revision is available; tried {}. Default fetch failed: {source:#}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add phoxal_artifacts.catalog in robot.yaml, or run `phoxal-cli pull` with network access to refresh the cache.",
+        tried.join(", ")
     )
 }
 

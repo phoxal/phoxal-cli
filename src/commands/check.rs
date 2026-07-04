@@ -20,7 +20,6 @@ use crate::resolver::{
     ResolveOptions, ResolvedComponent, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras,
     discover_robot_yaml, load_robot_with_extras, resolve, tool_emit_apis_id,
 };
-use crate::simulator_staging::cached_tool_path;
 use crate::utils::{cargo_binary_name, resolve_project_path};
 
 #[derive(Debug, Args)]
@@ -238,39 +237,30 @@ fn run(
             }
         }),
     })?;
-    // `check` resolves live: it never pins tool checksums
-    // (`resolve_external_artifacts: false`), but it does resolve git component
-    // commits (`resolve_source_commits: true`) so component drivers can be
-    // located and staged. A path-only / official-only graph needs no network; a
-    // git component pinned to a commit SHA resolves offline; a tag/branch ref is
-    // resolved live via `git ls-remote` (with an actionable error if the network
-    // is unavailable).
+    // `check` resolves live git component refs so component drivers can be
+    // located and staged. A path-only / official-only graph needs no component
+    // network; a git component pinned to a commit SHA resolves offline; a
+    // tag/branch ref is resolved live via `git ls-remote` with an actionable
+    // error if the network is unavailable.
     let resolved = resolve(
         &robot,
         project_root,
         catalog.as_ref(),
         ResolveOptions {
-            resolve_external_artifacts: false,
             resolve_source_commits: true,
             ..ResolveOptions::default()
         },
     )?;
-    let platform_refs = platform_artifact_refs_from_resolved(&resolved);
-    let tool_names = resolved
-        .tools
-        .iter()
-        .map(|tool| tool.name.as_str())
-        .collect::<Vec<_>>();
-    crate::tool_provisioning::ensure_tool_binaries_with_mode(
-        ui,
-        &resolved,
-        tool_names,
-        crate::tool_provisioning::ProvisioningMode::from_pull(options.pull),
-    )?;
+    let platform_refs = check_artifact_refs_from_resolved(&resolved);
     if options.pull {
-        ui.warn(
-            "refreshed the artifact catalog and host tools; native official artifact downloads remain pending until release assets publish",
-        );
+        let count = crate::native_artifacts::stage_resolved_artifacts(
+            Some(ui),
+            &resolved,
+            crate::native_artifacts::ProvisioningMode::Refresh,
+        )?;
+        ui.info(format!(
+            "refreshed the artifact catalog and {count} native artifact(s)"
+        ));
     }
     ensure_catalog_availability(&resolved)?;
     let tool_participants = tool_participants_from_resolved(&resolved)?;
@@ -292,6 +282,16 @@ fn run(
     let participant_count =
         platform_refs.len() + tool_participants.len() + source_participants.len();
     let robot_graph = robot_graph_from_resolved(&resolved);
+    let official_by_ref = resolved
+        .platform_runtimes
+        .iter()
+        .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let tools_by_ref = resolved
+        .tools
+        .iter()
+        .map(|tool| (tool.asset.clone(), tool))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let outcome = run_check_with_context(
         platform_refs,
         &tool_participants,
@@ -300,7 +300,17 @@ fn run(
             robot_graph: &robot_graph,
             manifest_extras: &manifest_extras,
         },
-        fetch_emit_apis_from_native_artifact,
+        |artifact_ref| {
+            if let Some(runtime) = official_by_ref.get(artifact_ref) {
+                return fetch_emit_apis_from_native_artifact(runtime);
+            }
+            if let Some(tool) = tools_by_ref.get(artifact_ref) {
+                return fetch_emit_apis_from_native_tool(tool);
+            }
+            Err(anyhow!(
+                "resolved official artifact {artifact_ref} is not in the catalog"
+            ))
+        },
         fetch_emit_apis_from_tool,
         build_emit_apis_from_source,
     )?;
@@ -456,12 +466,17 @@ pub(crate) fn tool_participants_from_resolved(
     resolved
         .tools
         .iter()
-        .filter(|tool| tool.path_override.is_none())
-        .map(|tool| {
-            Ok(ToolParticipant {
-                name: tool.name.clone(),
-                binary_path: cached_tool_path(&tool.name, &tool.resolved, &tool.binary_name)?,
-            })
+        .filter_map(|tool| {
+            if tool.path_override.is_some() {
+                None
+            } else {
+                tool_env_override(tool).map(|path| {
+                    Ok(ToolParticipant {
+                        name: tool.name.clone(),
+                        binary_path: path,
+                    })
+                })
+            }
         })
         .collect()
 }
@@ -479,6 +494,23 @@ pub(crate) fn platform_artifact_refs_from_resolved(
             artifact_ref: runtime.artifact_ref().to_string(),
         })
         .collect()
+}
+
+fn check_artifact_refs_from_resolved(resolved: &ResolvedRobot) -> Vec<PlatformArtifactRef> {
+    let mut refs = platform_artifact_refs_from_resolved(resolved);
+    refs.extend(
+        resolved
+            .tools
+            .iter()
+            .filter(|tool| tool.path_override.is_none())
+            .filter(|tool| tool_env_override(tool).is_none())
+            .map(|tool| PlatformArtifactRef {
+                name: tool_emit_apis_id(&tool.name).to_string(),
+                kind: ArtifactKind::Tool,
+                artifact_ref: tool.asset.clone(),
+            }),
+    );
+    refs
 }
 
 pub(crate) fn source_participants_from_resolved(
@@ -1066,41 +1098,41 @@ fn validate_json_schema(schema: &Value, value: &Value, path: &str) -> Vec<String
         .collect()
 }
 
-pub(crate) fn fetch_emit_apis_from_native_artifact(_artifact_ref: &str) -> Result<RawEmitApis> {
-    Err(crate::native_pending::error(
-        "reading official artifact metadata (packaged emit-apis 02 + generated catalog 06)",
-    ))
+pub(crate) fn fetch_emit_apis_from_native_artifact(
+    runtime: &ResolvedPlatformRuntime,
+) -> Result<RawEmitApis> {
+    let descriptor = crate::native_artifacts::NativeArtifactDescriptor::from_runtime(runtime)?
+        .ok_or_else(|| {
+            anyhow!(
+                "{} {} has no packaged emit-apis metadata for {}",
+                runtime.kind,
+                runtime.name,
+                runtime.artifact_ref()
+            )
+        })?;
+    let json = crate::native_artifacts::read_packaged_emit_apis(&descriptor)?;
+    serde_json::from_str(&json).with_context(|| {
+        format!(
+            "packaged emit-apis for {} {} ({}) was not valid JSON",
+            runtime.kind,
+            runtime.name,
+            runtime.artifact_ref()
+        )
+    })
 }
 
-/// STOPGAP until plan #01 publishes per-asset `.emit-apis.json` sidecars: the
-/// official check input is synthesized from the verified catalog revision's
-/// `contract_uses` (itself generated from real emit-apis runs in framework CI
-/// and integrity-checksummed). Once packaged metadata ships beside release
-/// assets, the CLI must prefer it and this synthesis dies - the catalog is an
-/// index, never the compatibility oracle (plan #06 trust rules).
-pub(crate) fn official_emit_apis_from_catalog_metadata(
-    runtime: &ResolvedPlatformRuntime,
-) -> RawEmitApis {
-    RawEmitApis {
-        artifact: RawArtifact {
-            kind: runtime.kind.emit_apis_kind().to_string(),
-            id: runtime.name.clone(),
-        },
-        participant_class: "checked".to_string(),
-        api_version: runtime.generation.clone(),
-        bus_abi: None,
-        required_contracts: runtime
-            .contract_uses
-            .iter()
-            .map(|contract| RawContract {
-                family: contract.family.clone(),
-                topic: contract.topic_template.clone(),
-                direction: contract.direction.clone(),
-                schema_id: contract.schema_id.clone(),
-            })
-            .collect(),
-        config_schema: None,
-    }
+pub(crate) fn fetch_emit_apis_from_native_tool(
+    tool: &crate::resolver::ResolvedTool,
+) -> Result<RawEmitApis> {
+    let descriptor = crate::native_artifacts::NativeArtifactDescriptor::from_tool(tool)?
+        .ok_or_else(|| anyhow!("tool {} has no packaged emit-apis metadata", tool.name))?;
+    let json = crate::native_artifacts::read_packaged_emit_apis(&descriptor)?;
+    serde_json::from_str(&json).with_context(|| {
+        format!(
+            "packaged emit-apis for tool {} ({}) was not valid JSON",
+            tool.name, tool.asset
+        )
+    })
 }
 
 pub(crate) fn fetch_emit_apis_from_tool(binary_path: &Path) -> Result<RawEmitApis> {
@@ -1112,6 +1144,47 @@ pub(crate) fn fetch_emit_apis_from_tool(binary_path: &Path) -> Result<RawEmitApi
             binary_path.display()
         )
     })
+}
+
+fn tool_env_override(tool: &crate::resolver::ResolvedTool) -> Option<PathBuf> {
+    env_path_override("PHOXAL_ARTIFACT", &tool.name)
+        .or_else(|| env_path_override("PHOXAL_TOOL", &tool.name))
+        .or_else(|| {
+            std::env::var_os("PHOXAL_ARTIFACT_DIR")
+                .map(PathBuf::from)
+                .map(|dir| dir.join(&tool.binary_name))
+                .filter(|path| path.is_file())
+        })
+        .or_else(|| {
+            std::env::var_os("PHOXAL_TOOL_DIR")
+                .map(PathBuf::from)
+                .and_then(|dir| {
+                    [tool.name.as_str(), tool.binary_name.as_str()]
+                        .into_iter()
+                        .map(|name| dir.join(name))
+                        .find(|path| path.is_file())
+                })
+        })
+}
+
+fn env_path_override(prefix: &str, id: &str) -> Option<PathBuf> {
+    let key = format!("{prefix}_{}_PATH", env_key(id));
+    std::env::var_os(key)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+}
+
+fn env_key(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn build_emit_apis_from_source(participant: &SourceParticipant) -> Result<RawEmitApis> {
@@ -1369,7 +1442,7 @@ fn format_problem(problem: &graph_check::Problem) -> String {
             provider_participant_id,
         } => {
             format!(
-                "NoSimulatorProvider: sim plan substitutes component {component_instance} with {provider_participant_id}, but no checked simulator-kind participant is present in the plan. The Webots Simulator artifact is not published yet; add a simulator participant to the checked sim plan once that artifact exists."
+                "NoSimulatorProvider: sim plan substitutes component {component_instance} with {provider_participant_id}, but no checked simulator-kind participant is present in the plan. Add phoxal-simulator-webots from the artifact catalog, or add a simulator-webots path override for local simulator development."
             )
         }
         graph_check::Problem::SubstitutionProviderWrongKind {
@@ -2496,6 +2569,7 @@ mod tests {
             version: "0.1.0".to_string(),
             artifact_ref: "path:framework/service/drive".to_string(),
             sha256: None,
+            metadata: None,
             target_status: Some(crate::catalog::ArtifactStatus::Released),
             per_triple_status: BTreeMap::new(),
             changed_contracts: Vec::new(),
@@ -2980,6 +3054,7 @@ mod tests {
             target: crate::resolver::host_target_triple(),
             catalog_revision: None,
             platform_runtimes: Vec::new(),
+            simulators: Vec::new(),
             user_runtimes: Vec::new(),
             components,
             tools: Vec::new(),

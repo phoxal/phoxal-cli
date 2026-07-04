@@ -58,7 +58,7 @@ Load them with `--env dev`. Base `robot.yaml` is fail-closed for `{ path: ... }`
 
 ## Artifact Catalog
 
-`phoxal-cli` consumes the framework-generated `phoxal.artifact-catalog/v0` JSON catalog. Local development and tests use `--catalog <path>`, `PHOXAL_ARTIFACT_CATALOG=<path>`, or `phoxal_artifacts.catalog` in `robot.yaml`; local paths are read directly and verified on every run. HTTPS catalog sources and the future default stable URL shape, `https://catalog.phoxal.com/artifact-catalog/v0/stable/latest.json`, are cached at `~/.phoxal/cache/catalog/phoxal-artifact-catalog.json`.
+`phoxal-cli` consumes the framework-generated `phoxal.artifact-catalog/v0` JSON catalog. Local development and tests use `--catalog <path>`, `PHOXAL_ARTIFACT_CATALOG=<path>`, or `phoxal_artifacts.catalog` in `robot.yaml`; local paths are read directly and verified on every run. HTTPS catalog sources and the default stable URL, `https://raw.githubusercontent.com/phoxal/framework/artifact-catalog-v0-stable/latest.json`, are cached at `~/.phoxal/cache/catalog/phoxal-artifact-catalog.json`.
 
 Without `--pull`, commands use a verified local override or the last verified cache entry. `--pull` is the explicit refresh boundary. There are no published catalog revisions or native release assets yet, so commands that require the public catalog fail with the native-pending diagnostic unless you point them at a generated catalog, for example framework `cargo xtask catalog generate --metadata-only` output.
 

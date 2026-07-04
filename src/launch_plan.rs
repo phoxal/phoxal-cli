@@ -499,7 +499,6 @@ mod tests {
             temp.path(),
             Some(&catalog),
             ResolveOptions {
-                resolve_external_artifacts: false,
                 resolve_source_commits: false,
                 ..ResolveOptions::default()
             },
@@ -798,6 +797,7 @@ components:
             target: host_target_triple(),
             catalog_revision: None,
             platform_runtimes: Vec::new(),
+            simulators: Vec::new(),
             user_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
@@ -819,6 +819,7 @@ components:
             asset: format!("{name}-0.1.0-{}.tar.gz", host_target_triple()),
             binary_name: name.to_string(),
             sha256: "0".repeat(64),
+            metadata: None,
             path_override: None,
         }
     }

@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use crate::AppContext;
 use crate::commands::MessageFormat;
 use crate::commands::check::{
-    CheckGraphContext, build_emit_apis_from_source, official_emit_apis_from_catalog_metadata,
+    CheckGraphContext, build_emit_apis_from_source, fetch_emit_apis_from_native_artifact,
     platform_artifact_refs_from_resolved, robot_graph_from_resolved, run_check_with_context,
     source_participants_from_resolved,
 };
@@ -41,7 +41,7 @@ use crate::utils::cargo_binary_name;
 pub struct Run {
     #[arg(
         long,
-        help = "Refresh catalog and host tools before launch. Official service assets still require a cache/path override until native assets publish."
+        help = "Refresh the catalog and native artifact cache before launch."
     )]
     pub pull: bool,
     #[arg(
@@ -223,28 +223,21 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         project_root,
         catalog.as_ref(),
         ResolveOptions {
-            resolve_external_artifacts: false,
             resolve_source_commits: true,
             ..ResolveOptions::default()
         },
     )?;
 
-    if options.pull {
-        let tool_names = resolved
-            .tools
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<Vec<_>>();
-        if let Err(error) = crate::tool_provisioning::ensure_tool_binaries_with_mode(
-            ui,
+    if options.pull
+        && let Err(error) = crate::native_artifacts::stage_resolved_artifacts(
+            Some(ui),
             &resolved,
-            tool_names,
-            crate::tool_provisioning::ProvisioningMode::Refresh,
-        ) {
-            ui.warn(format!(
-                "host tool refresh failed; using cache/path overrides only: {error:#}"
-            ));
-        }
+            crate::native_artifacts::ProvisioningMode::Refresh,
+        )
+    {
+        ui.warn(format!(
+            "native artifact refresh failed; using cache/path overrides only: {error:#}"
+        ));
     }
 
     let source_participants =
@@ -268,7 +261,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
             let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
                 anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
             })?;
-            Ok(official_emit_apis_from_catalog_metadata(runtime))
+            fetch_emit_apis_from_native_artifact(runtime)
         },
         |_| unreachable!("run does not check site tools as graph participants"),
         build_emit_apis_from_source,
@@ -667,17 +660,31 @@ fn locate_tool_binary(resolved: &ResolvedRobot, name: &str) -> Result<Option<Pat
     if let Some(path) = &tool.path_override {
         return Ok(Some(build_source_binary(path, name, &crate::Ui)?));
     }
+    if let Some(path) = env_path_override("PHOXAL_ARTIFACT", name) {
+        return Ok(Some(path));
+    }
     if let Some(path) = env_path_override("PHOXAL_TOOL", name) {
         return Ok(Some(path));
     }
-    if let Ok(dir) = std::env::var("PHOXAL_TOOL_DIR") {
+    if let Ok(dir) = std::env::var("PHOXAL_ARTIFACT_DIR") {
         let path = PathBuf::from(dir).join(&tool.binary_name);
         if path.is_file() {
             return Ok(Some(path));
         }
     }
-    let cache =
-        crate::simulator_staging::cached_tool_path(&tool.name, &tool.resolved, &tool.binary_name)?;
+    if let Ok(dir) = std::env::var("PHOXAL_TOOL_DIR") {
+        for name in [&tool.name, &tool.binary_name] {
+            let path = PathBuf::from(&dir).join(name);
+            if path.is_file() {
+                return Ok(Some(path));
+            }
+        }
+    }
+    let Some(descriptor) = crate::native_artifacts::NativeArtifactDescriptor::from_tool(tool)?
+    else {
+        return Ok(None);
+    };
+    let cache = crate::native_artifacts::artifact_binary_path(&descriptor)?;
     Ok(cache.is_file().then_some(cache))
 }
 
@@ -698,13 +705,16 @@ fn locate_official_binary(
             return Ok(Some(path));
         }
     }
+    if let Some(runtime) = runtime
+        && let Some(descriptor) =
+            crate::native_artifacts::NativeArtifactDescriptor::from_runtime(runtime)?
+    {
+        let cache = crate::native_artifacts::artifact_binary_path(&descriptor)?;
+        return Ok(cache.is_file().then_some(cache));
+    }
     let cache = crate::host_paths::cache_dir()?
         .join("artifacts")
-        .join(
-            runtime
-                .map(|runtime| runtime.artifact_id.as_str())
-                .unwrap_or(participant_id),
-        )
+        .join(participant_id)
         .join(sanitize_path_segment(artifact_ref))
         .join(binary_name);
     Ok(cache.is_file().then_some(cache))
@@ -745,7 +755,8 @@ fn sanitize_path_segment(value: &str) -> String {
 
 fn native_pending_tool_note(name: &str) -> String {
     format!(
-        "NativePending: {name} binary is not in the host tool cache; set PHOXAL_TOOL_{}_PATH or PHOXAL_TOOL_DIR",
+        "NativePending: {name} binary is not in the artifact cache; set PHOXAL_ARTIFACT_{}_PATH, PHOXAL_ARTIFACT_DIR, PHOXAL_TOOL_{}_PATH, or PHOXAL_TOOL_DIR",
+        env_key(name),
         env_key(name)
     )
 }
@@ -760,7 +771,7 @@ fn native_pending_official_note(
         .unwrap_or_else(|| "missing".to_string());
     let target = host_target_triple();
     format!(
-        "NativePending: official artifact {participant_id} is {status} for {target} or not cached; set PHOXAL_ARTIFACT_{}_PATH or PHOXAL_ARTIFACT_DIR",
+        "NativePending: official artifact {participant_id} is {status} for {target} or not cached; run `phoxal-cli pull`, set PHOXAL_ARTIFACT_{}_PATH, or set PHOXAL_ARTIFACT_DIR",
         env_key(participant_id)
     )
 }

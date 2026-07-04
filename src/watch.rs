@@ -9,7 +9,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
-    official_emit_apis_from_catalog_metadata, platform_artifact_refs_from_resolved,
+    fetch_emit_apis_from_native_artifact, platform_artifact_refs_from_resolved,
     robot_graph_from_resolved, run_check_with_context, source_participants_building_only_crate,
     source_participants_from_resolved,
 };
@@ -390,7 +390,6 @@ fn recheck_run_target(
         project_root,
         catalog.as_ref(),
         ResolveOptions {
-            resolve_external_artifacts: false,
             resolve_source_commits: true,
             ..ResolveOptions::default()
         },
@@ -417,7 +416,7 @@ fn recheck_run_target(
             let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
                 anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
             })?;
-            Ok(official_emit_apis_from_catalog_metadata(runtime))
+            fetch_emit_apis_from_native_artifact(runtime)
         },
         |_| unreachable!("run watch does not check site tools as graph participants"),
         build_emit_apis_from_source,
@@ -752,6 +751,7 @@ motion:
             target: "host".to_string(),
             catalog_revision: None,
             platform_runtimes: Vec::new(),
+            simulators: Vec::new(),
             user_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),

@@ -4,6 +4,7 @@ use phoxal::model::robot::RobotV1 as Robot;
 use phoxal_cli::catalog::{
     ArtifactStatus, CatalogRevision, Channel as CatalogChannel, fixture_catalog_for_tests,
     fixture_contract_for_tests, fixture_driver_entry_for_tests, fixture_service_entry_for_tests,
+    fixture_simulator_entry_for_tests, fixture_tool_entry_for_tests,
 };
 use phoxal_cli::resolver::{
     ResolveOptions, ResolvedPathOverrideKind, ResolvedRobot, host_target_triple,
@@ -306,29 +307,28 @@ fn missing_instance_source_fails() -> anyhow::Result<()> {
 }
 
 #[test]
-fn tools_resolve_from_explicit_independent_versions() -> anyhow::Result<()> {
+fn tools_resolve_from_catalog_entries() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1"))?;
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
 
-    for tool_name in [
-        "tool-router",
-        "tool-joypad",
-        "simulator_webots_controller",
-        "simulator_webots_supervisor",
-    ] {
+    for tool_name in ["tool-router", "tool-joypad"] {
         let tool = resolved
             .tools
             .iter()
             .find(|tool| tool.name == tool_name)
             .unwrap_or_else(|| panic!("{tool_name} resolved"));
         assert_eq!(tool.repo, "phoxal/framework", "{tool_name} repo");
-        let expected_version = if tool_name.starts_with("tool-") {
-            "0.1.0"
-        } else {
-            "0.14.0"
-        };
-        assert_eq!(tool.resolved, expected_version, "{tool_name} version");
+        assert_eq!(tool.resolved, "0.1.0", "{tool_name} version");
+        assert_eq!(tool.binary_name, format!("phoxal-{}", tool_name));
     }
+    assert_eq!(
+        resolved
+            .simulators
+            .iter()
+            .map(|simulator| simulator.artifact_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["simulator-webots"]
+    );
 
     Ok(())
 }
@@ -406,7 +406,6 @@ fn loaded_catalog_without_target_generation_gets_not_yet_available_error() -> an
         Some(&catalog),
         ResolveOptions {
             official_target_triple: Some(target.to_string()),
-            resolve_external_artifacts: false,
             resolve_source_commits: false,
             ..ResolveOptions::default()
         },
@@ -422,7 +421,10 @@ fn loaded_catalog_without_target_generation_gets_not_yet_available_error() -> an
         message.contains("no released generation assets"),
         "{message}"
     );
-    assert!(message.contains("plan #01"), "{message}");
+    assert!(
+        message.contains("Pass a catalog that includes released assets"),
+        "{message}"
+    );
     Ok(())
 }
 
@@ -434,7 +436,6 @@ fn official_only_robot_without_catalog_keeps_no_catalog_error() -> anyhow::Resul
         std::path::Path::new("."),
         None,
         ResolveOptions {
-            resolve_external_artifacts: false,
             resolve_source_commits: false,
             ..ResolveOptions::default()
         },
@@ -549,6 +550,59 @@ fn test_catalog() -> CatalogRevision {
             )],
         )
     }));
+    entries.extend([
+        fixture_tool_entry_for_tests(
+            "router",
+            "y2026_1",
+            "0.1.0",
+            CatalogChannel::Stable,
+            &target,
+            ArtifactStatus::Pending,
+            Vec::new(),
+        ),
+        fixture_tool_entry_for_tests(
+            "joypad",
+            "y2026_1",
+            "0.1.0",
+            CatalogChannel::Stable,
+            &target,
+            ArtifactStatus::Pending,
+            vec![fixture_contract_for_tests(
+                "drive::Target",
+                "drive/target",
+                "subscribe",
+                "0123456789abcdef",
+            )],
+        ),
+        fixture_tool_entry_for_tests(
+            "joypad",
+            "y2026_1",
+            "0.9.9",
+            CatalogChannel::Preview,
+            &target,
+            ArtifactStatus::Pending,
+            vec![fixture_contract_for_tests(
+                "drive::Target",
+                "drive/target",
+                "subscribe",
+                "0123456789abcdef",
+            )],
+        ),
+        fixture_simulator_entry_for_tests(
+            "webots",
+            "y2026_1",
+            "0.14.0",
+            CatalogChannel::Stable,
+            &target,
+            ArtifactStatus::Pending,
+            vec![fixture_contract_for_tests(
+                "component::MotorCommand",
+                "component/{instance}/motor/{capability}/command",
+                "subscribe",
+                "fedcba9876543210",
+            )],
+        ),
+    ]);
     fixture_catalog_for_tests(entries)
 }
 
@@ -581,7 +635,6 @@ fn driver_names() -> Vec<&'static str> {
 
 fn offline_options() -> ResolveOptions {
     ResolveOptions {
-        resolve_external_artifacts: false,
         resolve_source_commits: false,
         ..ResolveOptions::default()
     }

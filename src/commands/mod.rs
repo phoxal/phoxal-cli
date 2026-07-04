@@ -143,7 +143,7 @@ pub enum RootCommand {
     Deploy(deploy::Deploy),
     #[command(about = "Scaffold and manage robot projects.")]
     Robot(robot::Robot),
-    #[command(about = "Refresh host tools; native service artifacts are pending.")]
+    #[command(about = "Refresh the catalog and native artifact cache.")]
     Pull(pull::Pull),
     #[command(about = "Report native artifact drift.")]
     Outdated(outdated::Outdated),

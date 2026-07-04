@@ -3,9 +3,8 @@
 //! `phoxal-cli` is the tool a robot developer runs from a robot project. It
 //! reads `robot.yaml`, resolves the graph against a verified generated artifact
 //! catalog ([`catalog`]) when official artifacts are needed, and drives the
-//! local develop/simulate/deploy loop. The only compiled-in catalog remnant is
-//! the small host-tool version table; official service and driver names come
-//! from the configured catalog or the robot workspace.
+//! local develop/simulate/deploy loop. Official services, drivers, tools, and
+//! simulators come from the configured catalog or local development overrides.
 //!
 //! The command surface (see [`commands`]) is:
 //!
@@ -36,14 +35,13 @@ pub mod host_doctor;
 pub mod host_paths;
 pub mod launch_env;
 pub mod launch_plan;
+pub mod native_artifacts;
 pub mod native_pending;
 pub mod process;
 pub mod project;
 pub mod resolver;
 pub mod shell;
-pub mod simulator_staging;
 pub mod supervisor;
-pub mod tool_provisioning;
 pub mod ui;
 pub mod utils;
 pub mod watch;
