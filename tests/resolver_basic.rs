@@ -383,6 +383,74 @@ fn unused_kind_qualified_path_pin_is_rejected() -> anyhow::Result<()> {
 }
 
 #[test]
+fn loaded_catalog_without_target_generation_gets_not_yet_available_error() -> anyhow::Result<()> {
+    let robot = Robot::parse_from_string(&minimal_robot_yaml_without_api())?;
+    let catalog = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
+        "drive",
+        "y2026_1",
+        "0.1.0",
+        CatalogChannel::Stable,
+        "x86_64-unknown-linux-gnu",
+        ArtifactStatus::Pending,
+        vec![fixture_contract_for_tests(
+            "drive::Target",
+            "drive/target",
+            "publish",
+            "0123456789abcdef",
+        )],
+    )]);
+    let target = "aarch64-unknown-linux-gnu";
+    let error = resolve(
+        &robot,
+        std::path::Path::new("."),
+        Some(&catalog),
+        ResolveOptions {
+            official_target_triple: Some(target.to_string()),
+            resolve_external_artifacts: false,
+            resolve_source_commits: false,
+            ..ResolveOptions::default()
+        },
+    )
+    .expect_err("catalog missing the requested deploy target should fail explicitly");
+    let message = error.to_string();
+
+    assert!(message.contains("NotYetAvailable"), "{message}");
+    assert!(message.contains(&catalog.revision), "{message}");
+    assert!(message.contains(target), "{message}");
+    assert!(message.contains("stable"), "{message}");
+    assert!(
+        message.contains("no released generation assets"),
+        "{message}"
+    );
+    assert!(message.contains("plan #01"), "{message}");
+    Ok(())
+}
+
+#[test]
+fn official_only_robot_without_catalog_keeps_no_catalog_error() -> anyhow::Result<()> {
+    let robot = Robot::parse_from_string(&minimal_robot_yaml_without_api())?;
+    let error = resolve(
+        &robot,
+        std::path::Path::new("."),
+        None,
+        ResolveOptions {
+            resolve_external_artifacts: false,
+            resolve_source_commits: false,
+            ..ResolveOptions::default()
+        },
+    )
+    .expect_err("no catalog should keep the catalog-unavailable diagnostic");
+    let message = error.to_string();
+
+    assert!(
+        message.contains("no artifact catalog revision is available"),
+        "{message}"
+    );
+    assert!(!message.contains("NotYetAvailable"), "{message}");
+    Ok(())
+}
+
+#[test]
 fn path_pins_are_overlay_only() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let base_path = temp.path().join("robot.yaml");
@@ -515,6 +583,7 @@ fn offline_options() -> ResolveOptions {
     ResolveOptions {
         resolve_external_artifacts: false,
         resolve_source_commits: false,
+        ..ResolveOptions::default()
     }
 }
 
@@ -556,6 +625,10 @@ components:
       mount_link: right_wheel_mount
 "#
     )
+}
+
+fn minimal_robot_yaml_without_api() -> String {
+    minimal_robot_yaml("y2026_1").replace("api_version: y2026_1\n\n", "")
 }
 
 fn robot_with_path_pin(key: &str, path: &str) -> String {

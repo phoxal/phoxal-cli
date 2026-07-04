@@ -99,7 +99,7 @@ pub fn long_version() -> &'static str {
     version = long_version(),
     about = "Build, check, simulate, and deploy Phoxal robot projects.",
     long_about = "Build, check, simulate, and deploy Phoxal robot projects.\n\n\
-                  phoxal-cli reads robot.yaml, resolves the graph against a verified generated artifact catalog when official native artifacts are needed, and drives the develop/simulate/deploy loop. Start with `robot new`, then `check`, `generations status`, `simulate`, and `deploy build`."
+                  phoxal-cli reads robot.yaml, resolves the graph against a verified generated artifact catalog when official native artifacts are needed, and drives the develop/simulate/deploy loop. Start with `robot new`, then `check`, `generations status`, `simulate`, and `deploy --dry-run --target aarch64`."
 )]
 pub struct Cli {
     #[arg(
@@ -139,7 +139,7 @@ pub enum RootCommand {
     Logs(logs::Logs),
     #[command(about = "Show the local supervisor board snapshot.")]
     Status(status::Status),
-    #[command(about = "Build a native deployment release artifact.")]
+    #[command(about = "Deploy the checked graph as a native systemd payload.")]
     Deploy(deploy::Deploy),
     #[command(about = "Scaffold and manage robot projects.")]
     Robot(robot::Robot),

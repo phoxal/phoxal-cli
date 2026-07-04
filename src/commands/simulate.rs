@@ -319,6 +319,7 @@ pub(crate) fn resolve_project(
         ResolveOptions {
             resolve_external_artifacts: false,
             resolve_source_commits: true,
+            ..ResolveOptions::default()
         },
     )?;
     Ok(ResolvedSimulation {
@@ -1457,6 +1458,7 @@ components:
                 "service-{name}:0.1.0-y2026_1-stable-{}",
                 host_target_triple()
             ),
+            sha256: None,
             target_status: Some(ArtifactStatus::Pending),
             per_triple_status: BTreeMap::new(),
             changed_contracts: Vec::new(),

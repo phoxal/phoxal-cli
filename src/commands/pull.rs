@@ -91,6 +91,7 @@ pub fn run(
             // reads component commits, so it stays off the network for git refs.
             resolve_external_artifacts: false,
             resolve_source_commits: false,
+            ..ResolveOptions::default()
         },
     )?;
     let tool_names = resolved

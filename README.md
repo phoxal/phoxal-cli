@@ -4,7 +4,7 @@ Consumer CLI for the Phoxal robot framework.
 You run it from a robot project: it reads `robot.yaml`, resolves the graph against a verified generated artifact catalog when official artifacts are needed, and drives the develop, simulate, and deploy loop.
 It owns the resolver and `robot.yaml` discovery.
 There is no lockfile: catalog revisions, host-tool versions, and component commits resolve live or from the local cache on every run.
-Production reproducibility belongs to the future `deploy build` release artifact.
+Production reproducibility comes from explicit `phoxal_artifacts.pins` plus the deployed `phoxal-release.json` record.
 
 ## Commands
 
@@ -20,7 +20,8 @@ phoxal-cli simulate default       # resolve and report the simulation launch pla
 
 phoxal-cli pull                   # refresh the artifact catalog cache + host tools
 phoxal-cli outdated               # report cached artifacts with newer remote digests
-phoxal-cli deploy build           # write an immutable, digest-pinned deployment artifact
+phoxal-cli deploy robot@host      # build, render, sync, restart, and report systemd health
+phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build validation
 ```
 
 | Command | What it does |
@@ -33,7 +34,7 @@ phoxal-cli deploy build           # write an immutable, digest-pinned deployment
 | `status [release|resume <participant>]` | Print the supervisor board, or explicitly release a managed child for manual/debugger execution and later resume it under supervision. |
 | `service add\|catalog` | Scaffold a user service, or print official services from the configured artifact catalog. `service run` is intentionally removed; use `run --watch` plus `status release/resume` for debugging. |
 | `pull` / `outdated` | Refresh, or report drift in, cached artifact metadata and host tools for the selected `(target_generation, channel)`. |
-| `deploy build` | Reserved for the native systemd release artifact. |
+| `deploy <user@host>` | Probe the robot arch, resolve/check the graph, cross-build local source artifacts for musl, render native systemd units/env/release record, sync to `/opt/phoxal` and `/etc/systemd/system`, restart `phoxal.target`, and report systemd readiness. `--dry-run --target <arch>` renders hostless for validation. |
 | `validate` | Lower-level `robot.yaml` structure and user-service phoxal-dependency checks that back `check`. |
 | `doctor` | Check host prerequisites (Docker, Webots) without changing anything. |
 | `self upgrade` | Update the CLI binary itself. |
@@ -62,7 +63,7 @@ Load them with `--env dev`. Base `robot.yaml` is fail-closed for `{ path: ... }`
 Without `--pull`, commands use a verified local override or the last verified cache entry. `--pull` is the explicit refresh boundary. There are no published catalog revisions or native release assets yet, so commands that require the public catalog fail with the native-pending diagnostic unless you point them at a generated catalog, for example framework `cargo xtask catalog generate --metadata-only` output.
 
 > `v0` is pre-stable: artifacts built at different times may not interoperate.
-> Pin digests with `phoxal-cli deploy build`.
+> Pin exact artifact versions in `robot.yaml` when you need to re-deploy a previously recorded `phoxal-release.json` set.
 
 ## Install
 

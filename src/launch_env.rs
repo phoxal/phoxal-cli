@@ -14,6 +14,11 @@ pub struct EncodedParticipantEnv {
 
 impl EncodedParticipantEnv {
     #[must_use]
+    pub(crate) fn from_variables(variables: BTreeMap<String, String>) -> Self {
+        Self { variables }
+    }
+
+    #[must_use]
     pub fn variables(&self) -> &BTreeMap<String, String> {
         &self.variables
     }

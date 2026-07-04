@@ -252,6 +252,7 @@ fn run(
         ResolveOptions {
             resolve_external_artifacts: false,
             resolve_source_commits: true,
+            ..ResolveOptions::default()
         },
     )?;
     let platform_refs = platform_artifact_refs_from_resolved(&resolved);
@@ -1019,10 +1020,13 @@ fn validate_user_service_config(
     manifest_extras: &RobotManifestExtras,
 ) -> Option<graph_check::Problem> {
     let schema = schema?;
+    // An absent manifest config is `null`, not `{}`: a no-config service's
+    // emitted schema requires null (so absent passes), while a service with a
+    // real object schema still fails correctly as config-required-but-missing.
     let config = manifest_extras
         .user_runtime_config(service_id)
         .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
+        .unwrap_or(Value::Null);
     let errors = validate_json_schema(
         schema,
         &config,
@@ -2491,6 +2495,7 @@ mod tests {
             generation: "y2026_1".to_string(),
             version: "0.1.0".to_string(),
             artifact_ref: "path:framework/service/drive".to_string(),
+            sha256: None,
             target_status: Some(crate::catalog::ArtifactStatus::Released),
             per_triple_status: BTreeMap::new(),
             changed_contracts: Vec::new(),
@@ -2710,6 +2715,90 @@ mod tests {
             Problem::InvalidConfig { runtime_id, errors }
                 if runtime_id == "avoid"
                     && errors.iter().any(|error| error.contains("gain"))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn absent_user_service_config_validates_as_null() -> Result<()> {
+        let sources = vec![SourceParticipant::user_service(
+            "optional".to_string(),
+            PathBuf::from("/fake/project/runtimes/optional"),
+        )];
+        let extras = RobotManifestExtras::default();
+        let robot_graph = graph_check::RobotGraph::default();
+
+        let outcome = run_check_with_context(
+            &[],
+            &[],
+            &sources,
+            CheckGraphContext {
+                robot_graph: &robot_graph,
+                manifest_extras: &extras,
+            },
+            |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
+            |_| {
+                let mut raw = raw("optional", "y2026_1", &[]);
+                raw.config_schema = Some(serde_json::json!({ "type": "null" }));
+                Ok(raw)
+            },
+        )?;
+
+        assert!(
+            outcome
+                .report
+                .problems
+                .iter()
+                .all(|problem| !matches!(problem, Problem::InvalidConfig { .. })),
+            "{:?}",
+            outcome.report.problems
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn absent_user_service_config_still_fails_required_object_schema() -> Result<()> {
+        let sources = vec![SourceParticipant::user_service(
+            "required".to_string(),
+            PathBuf::from("/fake/project/runtimes/required"),
+        )];
+        let extras = RobotManifestExtras::default();
+        let robot_graph = graph_check::RobotGraph::default();
+
+        let outcome = run_check_with_context(
+            &[],
+            &[],
+            &sources,
+            CheckGraphContext {
+                robot_graph: &robot_graph,
+                manifest_extras: &extras,
+            },
+            |_| bail!("no platform images should be fetched"),
+            |_| bail!("no tools should be fetched"),
+            |_| {
+                let mut raw = raw("required", "y2026_1", &[]);
+                raw.config_schema = Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["gain"],
+                    "properties": {
+                        "gain": { "type": "number" }
+                    },
+                    "additionalProperties": false
+                }));
+                Ok(raw)
+            },
+        )?;
+
+        assert!(matches!(
+            outcome
+                .report
+                .problems
+                .iter()
+                .find(|problem| matches!(problem, Problem::InvalidConfig { .. })),
+            Some(Problem::InvalidConfig { runtime_id, errors })
+                if runtime_id == "required"
+                    && errors.iter().any(|error| error.contains("null"))
         ));
         Ok(())
     }

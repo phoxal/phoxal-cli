@@ -392,6 +392,7 @@ fn recheck_run_target(
         ResolveOptions {
             resolve_external_artifacts: false,
             resolve_source_commits: true,
+            ..ResolveOptions::default()
         },
     )?;
     let source_participants =
