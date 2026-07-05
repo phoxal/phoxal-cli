@@ -327,7 +327,7 @@ fn tools_resolve_from_catalog_entries() -> anyhow::Result<()> {
             .iter()
             .map(|simulator| simulator.artifact_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["simulator-webots"]
+        vec!["simulator-webots-controller", "simulator-webots-supervisor"]
     );
 
     Ok(())
@@ -479,6 +479,72 @@ fn path_pins_are_overlay_only() -> anyhow::Result<()> {
 }
 
 #[test]
+fn simulator_path_pin_replaces_the_supervisor_or_controller_artifact() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let robot = Robot::parse_from_string(&robot_with_path_pin(
+        "simulator-webots-controller",
+        "../framework/simulator/webots-controller",
+    ))?;
+    let resolved = resolve_with_catalog(&robot, temp.path())?;
+    let controller = resolved
+        .simulators
+        .iter()
+        .find(|simulator| simulator.artifact_id == "simulator-webots-controller")
+        .expect("webots-controller simulator resolved");
+
+    assert_eq!(
+        controller.source_path(),
+        Some(
+            temp.path()
+                .join("../framework/simulator/webots-controller")
+                .as_path()
+        )
+    );
+    assert!(controller.artifact_ref().starts_with("path:"));
+    assert_eq!(
+        resolved
+            .path_overrides
+            .iter()
+            .find(|override_| override_.key == "simulator-webots-controller")
+            .map(|override_| override_.kind),
+        Some(ResolvedPathOverrideKind::Simulator)
+    );
+
+    // The supervisor entry is untouched: only the pinned artifact_id resolves
+    // to a path override.
+    let supervisor = resolved
+        .simulators
+        .iter()
+        .find(|simulator| simulator.artifact_id == "simulator-webots-supervisor")
+        .expect("webots-supervisor simulator resolved");
+    assert!(supervisor.source_path().is_none());
+
+    Ok(())
+}
+
+#[test]
+fn legacy_single_simulator_path_pin_key_is_rejected() -> anyhow::Result<()> {
+    // Part 6: the pre-split `simulator-webots` key is gone now that the
+    // simulator is two artifacts (`simulator-webots-supervisor`,
+    // `simulator-webots-controller`); a pin using the stale key must fail
+    // loudly rather than silently resolving to nothing.
+    let robot = Robot::parse_from_string(&robot_with_path_pin(
+        "simulator-webots",
+        "../framework/simulator/webots",
+    ))?;
+    let error = resolve_with_catalog(&robot, std::path::Path::new("."))
+        .expect_err("the stale pre-split simulator key should be rejected");
+    let message = error.to_string();
+    assert!(message.contains("unused artifact path pin"), "{message}");
+    assert!(
+        message.contains("simulator-webots-controller")
+            && message.contains("simulator-webots-supervisor"),
+        "{message}"
+    );
+    Ok(())
+}
+
+#[test]
 fn service_path_pin_replaces_catalog_artifact() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let robot = Robot::parse_from_string(&robot_with_path_pin(
@@ -589,7 +655,16 @@ fn test_catalog() -> CatalogRevision {
             )],
         ),
         fixture_simulator_entry_for_tests(
-            "webots",
+            "webots-supervisor",
+            "y2026_1",
+            "0.14.0",
+            CatalogChannel::Stable,
+            &target,
+            ArtifactStatus::Pending,
+            Vec::new(),
+        ),
+        fixture_simulator_entry_for_tests(
+            "webots-controller",
             "y2026_1",
             "0.14.0",
             CatalogChannel::Stable,

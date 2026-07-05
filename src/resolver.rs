@@ -569,15 +569,6 @@ fn apply_path_pins(
         if apply_simulator_path_pin(key, &path, simulators, &mut overrides) {
             continue;
         }
-        if key == "simulator-webots" {
-            overrides.push(ResolvedPathOverride {
-                key: key.clone(),
-                kind: ResolvedPathOverrideKind::Simulator,
-                artifact_name: "webots".to_string(),
-                path,
-            });
-            continue;
-        }
         bail!(
             "{}",
             unknown_path_pin_message(key, platform_runtimes, simulators, components, tools)
@@ -743,7 +734,6 @@ fn used_path_pin_keys(
             .iter()
             .map(|simulator| simulator.artifact_id.clone()),
     );
-    keys.push("simulator-webots".to_string());
     keys.sort();
     keys.dedup();
     keys

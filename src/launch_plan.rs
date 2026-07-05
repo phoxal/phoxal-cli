@@ -52,6 +52,23 @@ pub struct ParticipantLaunchRecord {
     pub artifact_id: String,
     pub execution: ParticipantExecution,
     pub launch: ParticipantLaunch,
+    #[serde(default)]
+    pub launch_ownership: LaunchOwnership,
+}
+
+/// Who owns a participant's process lifecycle. Orthogonal to `participant_kind`:
+/// most participants are `CliManaged` (the CLI supervisor spawns, restarts, and
+/// tears them down). A `SimulationManaged` participant still satisfies the
+/// graph proof and appears on the board via bus presence/logs (D23), but the
+/// CLI supervisor never spawns or restarts it - Webots (via the supervisor)
+/// owns its lifecycle. Both the Webots supervisor and each robot's controller
+/// are `SimulationManaged` in `Sim` mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchOwnership {
+    #[default]
+    CliManaged,
+    SimulationManaged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +251,7 @@ fn build_robot_launch(
         .resolved
         .platform_runtimes
         .iter()
+        .chain(input.resolved.simulators.iter())
         .map(|runtime| (runtime.name.as_str(), runtime.artifact_ref().to_string()))
         .collect::<BTreeMap<_, _>>();
 
@@ -245,10 +263,12 @@ fn build_robot_launch(
     {
         let execution = participant_execution(checked, &source_participants, &official_artifacts)?;
         let launch = participant_launch(mode, input, checked);
+        let launch_ownership = launch_ownership(mode, checked);
         participants.push(ParticipantLaunchRecord {
             artifact_id: checked.artifact_id.clone(),
             execution,
             launch,
+            launch_ownership,
         });
     }
     participants.sort_by(|left, right| {
@@ -277,11 +297,18 @@ fn is_robot_launch_participant(
     if !participant.participant_class.is_checked() {
         return false;
     }
-    if matches!(
-        participant.participant_kind,
-        graph_check::ParticipantKind::Tool | graph_check::ParticipantKind::Simulator
-    ) {
+    if participant.participant_kind == graph_check::ParticipantKind::Tool {
         return false;
+    }
+    if participant.participant_kind == graph_check::ParticipantKind::Simulator {
+        // Simulator participants (the Webots supervisor + each robot's
+        // controller) are launched by Webots itself, never by the CLI
+        // supervisor - but in Sim mode they still need a launch record for
+        // board presence and controllerArgs/spawn-descriptor rendering (Part
+        // 3/4). Outside Sim mode a simulator participant never appears in the
+        // checked set at all (substitutions are sim-only), so this only takes
+        // effect for Sim.
+        return mode == LaunchMode::Sim;
     }
     if mode == LaunchMode::Sim
         && matches!(
@@ -292,6 +319,24 @@ fn is_robot_launch_participant(
         return false;
     }
     true
+}
+
+/// Which launch-ownership a checked participant gets in this plan. Simulator
+/// participants (the Webots supervisor and each robot's controller) are
+/// `SimulationManaged` in `Sim` mode - the CLI supervisor never spawns or
+/// restarts them, Webots does. Every other participant (services, user
+/// runtimes, component drivers) is `CliManaged`.
+fn launch_ownership(
+    mode: LaunchMode,
+    participant: &graph_check::ParticipantApis,
+) -> LaunchOwnership {
+    if mode == LaunchMode::Sim
+        && participant.participant_kind == graph_check::ParticipantKind::Simulator
+    {
+        LaunchOwnership::SimulationManaged
+    } else {
+        LaunchOwnership::CliManaged
+    }
 }
 
 fn substitution_record(accepted: &graph_check::AcceptedSubstitution) -> SubstitutionRecord {
@@ -318,7 +363,16 @@ fn participant_execution(
     source_participants: &BTreeMap<&str, &SourceParticipant>,
     official_artifacts: &BTreeMap<&str, String>,
 ) -> Result<ParticipantExecution> {
-    if let Some(source) = source_participants.get(checked.participant_id.as_str()) {
+    let source = source_participants
+        .get(checked.participant_id.as_str())
+        .or_else(|| {
+            if checked.participant_kind == graph_check::ParticipantKind::Simulator {
+                source_participants.get(checked.artifact_id.as_str())
+            } else {
+                None
+            }
+        });
+    if let Some(source) = source {
         return Ok(match source.kind {
             SourceParticipantKind::UserService => ParticipantExecution::UserService {
                 crate_dir: source.crate_dir.clone(),
@@ -438,7 +492,9 @@ fn expected_checked_participant_ids(
             .iter()
             .map(|runtime| runtime.name.clone()),
     );
-    if mode != LaunchMode::Sim {
+    if mode == LaunchMode::Sim {
+        expected.extend(expected_simulator_participant_ids(resolved));
+    } else {
         expected.extend(
             resolved
                 .components
@@ -448,6 +504,23 @@ fn expected_checked_participant_ids(
         );
     }
     expected
+}
+
+/// The participant ids the Sim launch set must carry for the resolved
+/// simulator artifacts (the Webots supervisor plus this robot's controller),
+/// using the same world-scoped/robot-scoped id scheme
+/// `commands::simulate::official_simulator_participants` assigns.
+fn expected_simulator_participant_ids(resolved: &ResolvedRobot) -> BTreeSet<String> {
+    resolved
+        .simulators
+        .iter()
+        .filter_map(|runtime| {
+            crate::commands::simulate::simulator_participant_id_for_resolved_artifact(
+                &runtime.name,
+                &resolved.robot.identity.id,
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

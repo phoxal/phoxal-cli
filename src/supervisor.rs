@@ -297,24 +297,9 @@ fn render_manual_command_line(spec: &ParticipantSpec) -> String {
     let env = spec.env.iter().cloned().collect::<BTreeMap<_, _>>();
     let mut parts = vec![shell_quote(&spec.executable.display().to_string())];
     parts.extend(spec.args.iter().map(|arg| shell_quote(arg)));
-    for (env_key, flag) in [
-        (
-            phoxal::participant::launch::env::PARTICIPANT_ID,
-            "--participant-id",
-        ),
-        (phoxal::participant::launch::env::ROBOT_ID, "--robot-id"),
-        (phoxal::participant::launch::env::NAMESPACE, "--namespace"),
-        (phoxal::participant::launch::env::ROBOT_ROOT, "--robot-root"),
-        (
-            phoxal::participant::launch::env::COMPONENT_INSTANCE,
-            "--component-instance",
-        ),
-        (phoxal::participant::launch::env::CONNECT, "--connect"),
-        (phoxal::participant::launch::env::CONFIG, "--config"),
-        (phoxal::participant::launch::env::CLOCK, "--clock"),
-    ] {
-        if let Some(value) = env.get(env_key) {
-            parts.push(flag.to_string());
+    for (env_key, flag) in crate::launch_env::ENV_TO_FLAG {
+        if let Some(value) = env.get(*env_key) {
+            parts.push((*flag).to_string());
             parts.push(shell_quote(value));
         }
     }

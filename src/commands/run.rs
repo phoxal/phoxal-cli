@@ -22,8 +22,8 @@ use crate::commands::check::{
 use crate::component_driver::component_crate_dir;
 use crate::launch_env::encode_participant_env;
 use crate::launch_plan::{
-    CheckedRobotLaunchInput, LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
-    SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SiteLaunch, build_launch_plan,
+    CheckedRobotLaunchInput, LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution,
+    ParticipantLaunchRecord, SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SiteLaunch, build_launch_plan,
 };
 use crate::resolver::{
     ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, discover_robot_yaml,
@@ -499,6 +499,22 @@ pub(crate) fn prepare_robot_participants(
         for participant in &robot.participants {
             let id = participant.launch.participant_id.clone();
             let kind = participant_kind(&participant.execution);
+            if participant.launch_ownership == LaunchOwnership::SimulationManaged {
+                // Webots (via the supervisor) owns this participant's
+                // lifecycle - the CLI never spawns or restarts it. It still
+                // satisfies the graph proof and appears on the board; presence
+                // and health come from its own bus heartbeats (D23), same as
+                // any participant. `commands::simulate` renders its
+                // controllerArgs into the staged world instead of a
+                // `ParticipantSpec` (Part 5).
+                let mut status = ParticipantStatus::new(&id, kind, ParticipantState::Ready);
+                status.note = Some(
+                    "SimulationManaged: launched by Webots via the supervisor, not the CLI supervisor"
+                        .to_string(),
+                );
+                board.upsert(status);
+                continue;
+            }
             board.upsert(ParticipantStatus::new(
                 &id,
                 kind,
@@ -900,7 +916,7 @@ fn usb_missing(vendor_id: Option<u16>, product_id: Option<u16>) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launch_plan::ParticipantLaunchRecord;
+    use crate::launch_plan::{LaunchOwnership, ParticipantLaunchRecord};
     use phoxal::participant::launch::{
         BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
     };
@@ -922,6 +938,7 @@ mod tests {
                 component_instance: None,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
+            launch_ownership: LaunchOwnership::CliManaged,
         }
     }
 

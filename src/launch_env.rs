@@ -49,6 +49,51 @@ impl EncodedParticipantEnv {
     }
 }
 
+/// The `PHOXAL_*` env name paired with its equivalent `--flag`, in the exact
+/// order the framework runner's clap `LaunchCli` declares them (framework
+/// `phoxal/src/participant/launch.rs`). Shared by [`to_controller_args`] (the
+/// Webots `controllerArgs` argv renderer, Part 3) and
+/// `supervisor::render_manual_command_line` (the human-readable manual
+/// command line), so the flag/env pairing lives in exactly one place.
+pub const ENV_TO_FLAG: &[(&str, &str)] = &[
+    (env::PARTICIPANT_ID, "--participant-id"),
+    (env::ROBOT_ID, "--robot-id"),
+    (env::NAMESPACE, "--namespace"),
+    (env::ROBOT_ROOT, "--robot-root"),
+    (env::COMPONENT_INSTANCE, "--component-instance"),
+    (env::CONNECT, "--connect"),
+    (env::CONFIG, "--config"),
+    (env::CLOCK, "--clock"),
+];
+
+/// Render a participant's launch contract as the exact argv the framework
+/// runner's clap `LaunchCli` parses: `--participant-id`, `--robot-id`,
+/// `--namespace`, `--clock` are always emitted; `--robot-root`,
+/// `--component-instance`, `--connect` (`bus.connect_endpoints` joined with
+/// `,`), and `--config` (compact JSON, one argv element) only when present.
+///
+/// Webots controllers and the supervisor receive their whole launch contract
+/// this way, never via env: a Webots controller process inherits the Webots
+/// app's environment, so `PHOXAL_*` env vars would be shared across the
+/// supervisor and every controller. `controllerArgs` (argv) is per-node, so it
+/// is the only way to give each simulation participant its own contract.
+///
+/// Built on [`encode_participant_env`], so `--config` is capped by
+/// [`MAX_CONFIG_ENV_BYTES`] the same way (a supervisor's spawn list can grow
+/// large); exceeding it is an error naming the participant.
+pub fn to_controller_args(launch: &ParticipantLaunch) -> Result<Vec<String>> {
+    let encoded = encode_participant_env(launch)?;
+    let variables = encoded.variables();
+    let mut args = Vec::with_capacity(ENV_TO_FLAG.len() * 2);
+    for (env_key, flag) in ENV_TO_FLAG {
+        if let Some(value) = variables.get(*env_key) {
+            args.push((*flag).to_string());
+            args.push(value.clone());
+        }
+    }
+    Ok(args)
+}
+
 pub fn encode_participant_env(launch: &ParticipantLaunch) -> Result<EncodedParticipantEnv> {
     let mut variables = BTreeMap::new();
     variables.insert(
@@ -233,5 +278,143 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("bytes"), "{message}");
+    }
+
+    #[test]
+    fn to_controller_args_emits_the_exact_flag_set() -> anyhow::Result<()> {
+        let launch = ParticipantLaunch {
+            participant_id: "simulator-webots-controller-robot_v1".to_string(),
+            namespace: "dev".to_string(),
+            robot_id: "robot_v1".to_string(),
+            bus: BusProfile {
+                connect_endpoints: vec!["tcp/localhost:7447".to_string()],
+            },
+            clock: ClockMode::Simulation,
+            config: Some(serde_json::json!({"require_native": true})),
+            robot_root: Some(PathBuf::from("/tmp/phoxal/robot")),
+            component_instance: Some("left_drive".to_string()),
+            shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
+        };
+
+        let args = to_controller_args(&launch)?;
+
+        assert_eq!(
+            args,
+            vec![
+                "--participant-id".to_string(),
+                "simulator-webots-controller-robot_v1".to_string(),
+                "--robot-id".to_string(),
+                "robot_v1".to_string(),
+                "--namespace".to_string(),
+                "dev".to_string(),
+                "--robot-root".to_string(),
+                "/tmp/phoxal/robot".to_string(),
+                "--component-instance".to_string(),
+                "left_drive".to_string(),
+                "--connect".to_string(),
+                "tcp/localhost:7447".to_string(),
+                "--config".to_string(),
+                r#"{"require_native":true}"#.to_string(),
+                "--clock".to_string(),
+                "simulation".to_string(),
+            ]
+        );
+
+        // The framework runner's clap `LaunchCli` (phoxal::participant::launch)
+        // parses exactly this flag/value shape; its struct is private to the
+        // `phoxal` crate so it cannot be constructed here, but a clap parser
+        // with the identical long-flag surface (mirroring
+        // `render_manual_command_line` in supervisor.rs) proves the argv shape
+        // round-trips through clap's derive parsing the same way.
+        #[derive(clap::Parser)]
+        struct AssertLaunchCliShape {
+            #[arg(long)]
+            participant_id: String,
+            #[arg(long)]
+            robot_id: String,
+            #[arg(long)]
+            namespace: String,
+            #[arg(long)]
+            robot_root: Option<String>,
+            #[arg(long)]
+            component_instance: Option<String>,
+            #[arg(long)]
+            connect: Option<String>,
+            #[arg(long)]
+            config: Option<String>,
+            #[arg(long)]
+            clock: String,
+        }
+        use clap::Parser;
+        let mut argv = vec!["phoxal-simulator-webots-controller".to_string()];
+        argv.extend(args);
+        let parsed = AssertLaunchCliShape::try_parse_from(&argv)?;
+        assert_eq!(
+            parsed.participant_id,
+            "simulator-webots-controller-robot_v1"
+        );
+        assert_eq!(parsed.robot_id, "robot_v1");
+        assert_eq!(parsed.namespace, "dev");
+        assert_eq!(parsed.robot_root.as_deref(), Some("/tmp/phoxal/robot"));
+        assert_eq!(parsed.component_instance.as_deref(), Some("left_drive"));
+        assert_eq!(parsed.connect.as_deref(), Some("tcp/localhost:7447"));
+        assert_eq!(parsed.config.as_deref(), Some(r#"{"require_native":true}"#));
+        assert_eq!(parsed.clock, "simulation");
+        Ok(())
+    }
+
+    #[test]
+    fn to_controller_args_omits_absent_optional_fields() -> anyhow::Result<()> {
+        let launch = ParticipantLaunch {
+            participant_id: "simulator-webots-supervisor".to_string(),
+            namespace: "dev".to_string(),
+            robot_id: "robot_v1".to_string(),
+            bus: BusProfile::default(),
+            clock: ClockMode::Simulation,
+            config: None,
+            robot_root: None,
+            component_instance: None,
+            shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
+        };
+
+        let args = to_controller_args(&launch)?;
+
+        assert_eq!(
+            args,
+            vec![
+                "--participant-id".to_string(),
+                "simulator-webots-supervisor".to_string(),
+                "--robot-id".to_string(),
+                "robot_v1".to_string(),
+                "--namespace".to_string(),
+                "dev".to_string(),
+                "--clock".to_string(),
+                "simulation".to_string(),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn to_controller_args_rejects_oversized_config() {
+        let launch = ParticipantLaunch {
+            participant_id: "simulator-webots-supervisor".to_string(),
+            namespace: "dev".to_string(),
+            robot_id: "robot_v1".to_string(),
+            bus: BusProfile::default(),
+            clock: ClockMode::Simulation,
+            config: Some(serde_json::json!({"blob": "x".repeat(MAX_CONFIG_ENV_BYTES)})),
+            robot_root: None,
+            component_instance: None,
+            shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
+        };
+
+        let error = to_controller_args(&launch).expect_err("config should exceed the limit");
+        let message = error.to_string();
+        assert!(message.contains("simulator-webots-supervisor"), "{message}");
+        assert!(
+            message.contains(&MAX_CONFIG_ENV_BYTES.to_string()),
+            "{message}"
+        );
     }
 }
