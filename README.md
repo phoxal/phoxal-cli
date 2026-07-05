@@ -9,12 +9,13 @@ Production reproducibility comes from explicit `phoxal_artifacts.pins` plus the 
 ## Commands
 
 ```sh
-phoxal-cli robot new rover        # scaffold a robot project
+# Hand-author robot.yaml in a new project directory (see the framework repo's
+# examples/ and getting-started docs for a working starting point).
 cd rover
 
 phoxal-cli check                  # validate target generation + topology via emit-apis
 phoxal-cli generations status     # inspect catalog readiness for the robot target
-phoxal-cli service add brain      # scaffold a user service crate, register it in robot.yaml
+phoxal-cli service catalog        # print official services from the configured artifact catalog
 phoxal-cli run --watch            # supervise the graph and hot-swap checked local edits
 phoxal-cli simulate default       # resolve and report the simulation launch plan
 
@@ -26,15 +27,14 @@ phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build va
 
 | Command | What it does |
 |---|---|
-| `robot new <name>` | Scaffold a D5 robot project (`robot.yaml`, `structure.urdf`, default world, `runtimes/`). New manifests omit root `api_version`; optional `phoxal_artifacts.generation` pins the target generation. |
 | `check` | Resolve `robot.yaml`, then run each participant's `emit-apis` and fail if participants sharing a contract disagree on its `schema_id` (wire shape) or the producer/consumer topology is unsatisfied. Mixed participant `api_version`s are allowed as long as shared contracts' `schema_id`s agree. Official artifact readiness comes from the generated catalog; git component commits resolve live unless pinned to a commit SHA in `robot.yaml`. `--pull` refreshes the catalog and host tools first; `--service <name>` scopes the build to one user service. |
 | `generations status` | Report readiness for a catalog generation on the robot target, including changed contracts and per-target artifact status. Use `--generation <g>` to inspect a specific generation. |
 | `run` | Supervise the resolved host-native graph. `--watch` rebuilds changed local participants, re-runs the graph proof, and swaps the checked process in place. `--message-format json` prints exact participant launch command lines and env. |
 | `simulate <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` hot-swaps service edits and re-checks driver metadata/substitutions without launching drivers. |
 | `status [release|resume <participant>]` | Print the supervisor board, or explicitly release a managed child for manual/debugger execution and later resume it under supervision. |
-| `service add\|catalog` | Scaffold a user service, or print official services from the configured artifact catalog. `service run` is intentionally removed; use `run --watch` plus `status release/resume` for debugging. |
+| `service catalog` | Print official services from the configured artifact catalog. `service run` is intentionally removed; use `run --watch` plus `status release/resume` for debugging. |
 | `pull` / `outdated` | Refresh, or report drift in, cached artifact metadata and host tools for the selected `(target_generation, channel)`. |
-| `deploy <user@host>` | Probe the robot arch, resolve/check the graph, cross-build local source artifacts for musl, render native systemd units/env/release record, sync to `/opt/phoxal` and `/etc/systemd/system`, restart `phoxal.target`, and report systemd readiness. `--dry-run --target <arch>` renders hostless for validation. |
+| `deploy <user@host>` | Probe the robot arch, resolve/check the graph, cross-build local source artifacts for musl, render native systemd units/env/release record, sync to `/opt/phoxal` and `/etc/systemd/system`, restart `phoxal.target`, and report systemd readiness. Prints the v0 pre-stable warning. `--dry-run --target <arch>` renders hostless for validation. |
 | `validate` | Lower-level `robot.yaml` structure and user-service phoxal-dependency checks that back `check`. |
 | `doctor` | Check host prerequisites (Docker, Webots) without changing anything. |
 | `self upgrade` | Update the CLI binary itself. |

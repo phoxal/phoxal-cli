@@ -1,5 +1,5 @@
 use clap::{CommandFactory, Parser};
-use phoxal_cli::commands::{Cli, MessageFormat, RootCommand, robot, self_cmd, service, status};
+use phoxal_cli::commands::{Cli, MessageFormat, RootCommand, self_cmd, service, status};
 
 #[test]
 fn clap_definition_is_valid() {
@@ -53,18 +53,8 @@ fn parses_version_human_default_and_json_output() {
 }
 
 #[test]
-fn parses_service_add() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "service", "add", "avoid_obstacles"])
-        .expect("service add command should parse");
-
-    let RootCommand::Service(command) = cli.command else {
-        panic!("expected service command");
-    };
-    let service::ServiceSubcommand::Add(add) = command.command else {
-        panic!("expected service add command");
-    };
-
-    assert_eq!(add.name, "avoid_obstacles");
+fn service_add_is_removed() {
+    assert!(Cli::try_parse_from(["phoxal-cli", "service", "add", "avoid_obstacles"]).is_err());
 }
 
 #[test]
@@ -86,9 +76,7 @@ fn parses_service_catalog_json_output() {
     let RootCommand::Service(command) = cli.command else {
         panic!("expected service command");
     };
-    let service::ServiceSubcommand::Catalog(catalog) = command.command else {
-        panic!("expected service catalog command");
-    };
+    let service::ServiceSubcommand::Catalog(catalog) = command.command;
 
     assert_eq!(catalog.message_format, MessageFormat::Json);
 }
@@ -227,15 +215,13 @@ fn parses_deploy_dry_run_target_and_removes_build_pair() {
 }
 
 #[test]
-fn parses_robot_new_pull_and_outdated() {
-    let cli =
-        Cli::try_parse_from(["phoxal-cli", "robot", "new", "rover"]).expect("robot new parses");
-    let RootCommand::Robot(command) = cli.command else {
-        panic!("expected robot command");
-    };
-    let robot::RobotSubcommand::New(new) = command.command;
-    assert_eq!(new.name, "rover");
+fn robot_new_is_removed() {
+    assert!(Cli::try_parse_from(["phoxal-cli", "robot", "new", "rover"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal-cli", "robot"]).is_err());
+}
 
+#[test]
+fn parses_pull_and_outdated() {
     let cli = Cli::try_parse_from(["phoxal-cli", "pull"]).expect("pull parses");
     assert!(matches!(cli.command, RootCommand::Pull(_)));
 

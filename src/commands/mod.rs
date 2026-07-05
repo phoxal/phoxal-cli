@@ -15,7 +15,6 @@ pub mod generations;
 pub mod logs;
 pub mod outdated;
 pub mod pull;
-pub mod robot;
 pub mod run;
 pub mod self_cmd;
 pub mod service;
@@ -170,7 +169,7 @@ impl VersionArgs {
     version = long_version(),
     about = "Build, check, simulate, and deploy Phoxal robot projects.",
     long_about = "Build, check, simulate, and deploy Phoxal robot projects.\n\n\
-                  phoxal-cli reads robot.yaml, resolves the graph against a verified generated artifact catalog when official native artifacts are needed, and drives the develop/simulate/deploy loop. Start with `robot new`, then `check`, `generations status`, `simulate`, and `deploy --dry-run --target aarch64`."
+                  phoxal-cli reads robot.yaml, resolves the graph against a verified generated artifact catalog when official native artifacts are needed, and drives the develop/simulate/deploy loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `check`, `generations status`, `simulate`, and `deploy --dry-run --target aarch64`."
 )]
 pub struct Cli {
     #[arg(
@@ -212,8 +211,6 @@ pub enum RootCommand {
     Status(status::Status),
     #[command(about = "Deploy the checked graph as a native systemd payload.")]
     Deploy(deploy::Deploy),
-    #[command(about = "Scaffold and manage robot projects.")]
-    Robot(robot::Robot),
     #[command(about = "Refresh the catalog and native artifact cache.")]
     Pull(pull::Pull),
     #[command(about = "Report native artifact drift.")]
@@ -222,7 +219,7 @@ pub enum RootCommand {
     Generations(generations::Generations),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
-    #[command(about = "Scaffold and run user service crates.")]
+    #[command(about = "Inspect the user-service catalog.")]
     Service(service::Service),
     #[command(about = "Print the phoxal-cli version and catalog source defaults.")]
     Version(VersionArgs),
@@ -240,7 +237,6 @@ impl RootCommand {
             Self::Logs(command) => command.run(app).await,
             Self::Status(command) => command.run(app).await,
             Self::Deploy(command) => command.run(app).await,
-            Self::Robot(command) => command.run(app).await,
             Self::Pull(command) => command.run(app).await,
             Self::Outdated(command) => command.run(app).await,
             Self::Generations(command) => command.run(app).await,

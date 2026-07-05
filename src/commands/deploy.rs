@@ -345,6 +345,9 @@ impl Deploy {
         let result = tokio::task::spawn_blocking(move || run(&project_root, options, &ui))
             .await
             .context("deploy worker failed")??;
+        eprintln!(
+            "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
+        );
         report(result, self.message_format)
     }
 }
