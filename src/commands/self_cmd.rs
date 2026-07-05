@@ -15,7 +15,9 @@ use clap::{Args, Subcommand};
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use semver::Version;
+use serde::Serialize;
 
+use crate::commands::MessageFormat;
 use crate::{AppContext, Ui};
 
 const LATEST_RELEASE_URL: &str = "https://github.com/phoxal/phoxal-cli/releases/latest";
@@ -46,12 +48,42 @@ pub struct Upgrade {
     pub version: Option<Version>,
     #[arg(long, help = "Reinstall even when already on the target version.")]
     pub force: bool,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = MessageFormat::Human,
+        help = "Output format for the upgrade outcome."
+    )]
+    pub message_format: MessageFormat,
 }
 
 #[derive(Debug, Clone)]
 struct UpgradeOptions {
     requested_version: Option<Version>,
     force: bool,
+}
+
+/// How the requested version compares to the version already installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpgradeAction {
+    /// The requested version matched the running binary and `--force` was not set.
+    UpToDate,
+    /// The installed binary was replaced with an older release (`--version` pinned below current).
+    Switched,
+    /// The installed binary was replaced with a newer release.
+    Upgraded,
+}
+
+/// Structured outcome of `self upgrade`: what it did (or would report doing),
+/// shared by the human and JSON output paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UpgradeOutcome {
+    pub version_from: String,
+    pub version_to: String,
+    pub source: String,
+    pub upgraded: bool,
+    pub action: UpgradeAction,
 }
 
 impl SelfCmd {
@@ -65,13 +97,24 @@ impl SelfCmd {
 impl Upgrade {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let ui = app.ui;
+        let message_format = self.message_format;
         let options = UpgradeOptions {
             requested_version: self.version.clone(),
             force: self.force,
         };
-        tokio::task::spawn_blocking(move || run_upgrade(options, ui))
+        let outcome = tokio::task::spawn_blocking(move || run_upgrade(options, ui, message_format))
             .await
-            .context("self upgrade worker failed")?
+            .context("self upgrade worker failed")??;
+        crate::commands::print_message(
+            &outcome,
+            || {
+                // The upgrade worker already announced the outcome (progress
+                // lines on stderr, terminal line on stdout) as it ran; nothing
+                // further to print for the human path.
+                Ok(())
+            },
+            message_format,
+        )
     }
 }
 
@@ -80,23 +123,43 @@ pub fn parse_version_arg(raw: &str) -> std::result::Result<Version, String> {
     Version::parse(normalized).map_err(|error| format!("invalid version '{raw}': {error}"))
 }
 
-fn run_upgrade(options: UpgradeOptions, ui: Ui) -> Result<()> {
+fn run_upgrade(
+    options: UpgradeOptions,
+    ui: Ui,
+    message_format: MessageFormat,
+) -> Result<UpgradeOutcome> {
+    let human = message_format == MessageFormat::Human;
     let target = target_triple()?;
     let current_version =
         Version::parse(env!("CARGO_PKG_VERSION")).context("invalid CARGO_PKG_VERSION")?;
     let pinned = options.requested_version.is_some();
+    let source = if pinned {
+        "pinned tag".to_string()
+    } else {
+        "latest release".to_string()
+    };
     let client = build_client(false)?;
     let requested_version = match options.requested_version {
         Some(version) => version,
         None => {
-            ui.info("resolving latest phoxal-cli release");
+            if human {
+                ui.info("resolving latest phoxal-cli release");
+            }
             discover_latest_version(&client)?
         }
     };
 
     if requested_version == current_version && !options.force {
-        println!("already up to date (v{requested_version})");
-        return Ok(());
+        if human {
+            println!("already up to date (v{requested_version})");
+        }
+        return Ok(UpgradeOutcome {
+            version_from: current_version.to_string(),
+            version_to: requested_version.to_string(),
+            source,
+            upgraded: false,
+            action: UpgradeAction::UpToDate,
+        });
     }
 
     let asset = ReleaseAsset::new(&requested_version, target);
@@ -105,16 +168,24 @@ fn run_upgrade(options: UpgradeOptions, ui: Ui) -> Result<()> {
     let checksum_path = temp_dir.path().join(&asset.checksum_name);
     let download_client = build_client(true)?;
 
-    ui.info(format!("downloading {}", asset.archive_url));
+    if human {
+        ui.info(format!("downloading {}", asset.archive_url));
+    }
     download_asset(&download_client, &asset.archive_url, &archive_path)?
         .context("release archive was not found")?;
 
-    ui.info(format!("downloading {}", asset.checksum_url));
+    if human {
+        ui.info(format!("downloading {}", asset.checksum_url));
+    }
     match download_asset(&download_client, &asset.checksum_url, &checksum_path)? {
         Some(()) => verify_checksum(&archive_path, &checksum_path, &asset.archive_name)?,
-        None if options.force && pinned && requested_version < current_version => ui.warn(format!(
-            "release v{requested_version} has no checksum; continuing because --force pinned an older version"
-        )),
+        None if options.force && pinned && requested_version < current_version => {
+            if human {
+                ui.warn(format!(
+                    "release v{requested_version} has no checksum; continuing because --force pinned an older version"
+                ));
+            }
+        }
         None => bail!(
             "release v{requested_version} has no checksum asset {}; refusing to self-upgrade",
             asset.checksum_name
@@ -127,15 +198,28 @@ fn run_upgrade(options: UpgradeOptions, ui: Ui) -> Result<()> {
     refuse_managed_install(&current_exe)?;
     replace_current_executable(&new_binary_path)?;
 
-    let verb = if requested_version < current_version {
-        "switched"
+    let action = if requested_version < current_version {
+        UpgradeAction::Switched
     } else {
-        "upgraded"
+        UpgradeAction::Upgraded
     };
-    ui.success(format!(
-        "{verb} phoxal-cli v{current_version} -> v{requested_version}"
-    ));
-    Ok(())
+    if human {
+        let verb = match action {
+            UpgradeAction::Switched => "switched",
+            UpgradeAction::Upgraded => "upgraded",
+            UpgradeAction::UpToDate => unreachable!("UpToDate returns earlier"),
+        };
+        ui.success(format!(
+            "{verb} phoxal-cli v{current_version} -> v{requested_version}"
+        ));
+    }
+    Ok(UpgradeOutcome {
+        version_from: current_version.to_string(),
+        version_to: requested_version.to_string(),
+        source,
+        upgraded: true,
+        action,
+    })
 }
 
 fn normalize_version_tag(raw: &str) -> &str {
@@ -383,5 +467,92 @@ impl ReleaseAsset {
             archive_url,
             checksum_url,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn current_version() -> Version {
+        Version::parse(env!("CARGO_PKG_VERSION")).expect("CARGO_PKG_VERSION should be valid")
+    }
+
+    #[test]
+    fn up_to_date_pinned_version_reports_up_to_date_without_upgrading() -> Result<()> {
+        let options = UpgradeOptions {
+            requested_version: Some(current_version()),
+            force: false,
+        };
+        let outcome = run_upgrade(options, Ui::new(), MessageFormat::Human)?;
+
+        assert_eq!(outcome.version_from, current_version().to_string());
+        assert_eq!(outcome.version_to, current_version().to_string());
+        assert_eq!(outcome.source, "pinned tag");
+        assert!(!outcome.upgraded);
+        assert_eq!(outcome.action, UpgradeAction::UpToDate);
+        Ok(())
+    }
+
+    #[test]
+    fn up_to_date_outcome_is_identical_across_human_and_json_message_formats() -> Result<()> {
+        let human_outcome = run_upgrade(
+            UpgradeOptions {
+                requested_version: Some(current_version()),
+                force: false,
+            },
+            Ui::new(),
+            MessageFormat::Human,
+        )?;
+        let json_outcome = run_upgrade(
+            UpgradeOptions {
+                requested_version: Some(current_version()),
+                force: false,
+            },
+            Ui::new(),
+            MessageFormat::Json,
+        )?;
+
+        assert_eq!(human_outcome, json_outcome);
+        Ok(())
+    }
+
+    #[test]
+    fn upgrade_outcome_serializes_to_the_documented_json_shape() {
+        let outcome = UpgradeOutcome {
+            version_from: "0.5.0".to_string(),
+            version_to: "0.6.0".to_string(),
+            source: "latest release".to_string(),
+            upgraded: true,
+            action: UpgradeAction::Upgraded,
+        };
+
+        let value = serde_json::to_value(&outcome).expect("outcome should serialize");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "version_from": "0.5.0",
+                "version_to": "0.6.0",
+                "source": "latest release",
+                "upgraded": true,
+                "action": "upgraded",
+            })
+        );
+    }
+
+    #[test]
+    fn upgrade_action_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_value(UpgradeAction::UpToDate).unwrap(),
+            serde_json::json!("up_to_date")
+        );
+        assert_eq!(
+            serde_json::to_value(UpgradeAction::Switched).unwrap(),
+            serde_json::json!("switched")
+        );
+        assert_eq!(
+            serde_json::to_value(UpgradeAction::Upgraded).unwrap(),
+            serde_json::json!("upgraded")
+        );
     }
 }

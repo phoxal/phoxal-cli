@@ -20,6 +20,36 @@ fn parses_self_upgrade_with_normalized_version() {
         upgrade.version.expect("version should parse").to_string(),
         "0.4.0"
     );
+    assert_eq!(upgrade.message_format, MessageFormat::Human);
+}
+
+#[test]
+fn parses_self_upgrade_json_output() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "self", "upgrade", "--message-format", "json"])
+        .expect("self upgrade command should parse");
+
+    let RootCommand::SelfCmd(command) = cli.command else {
+        panic!("expected self command");
+    };
+    let self_cmd::SelfSubcommand::Upgrade(upgrade) = command.command;
+
+    assert_eq!(upgrade.message_format, MessageFormat::Json);
+}
+
+#[test]
+fn parses_version_human_default_and_json_output() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "version"]).expect("version command should parse");
+    let RootCommand::Version(command) = cli.command else {
+        panic!("expected version command");
+    };
+    assert_eq!(command.message_format, MessageFormat::Human);
+
+    let cli = Cli::try_parse_from(["phoxal-cli", "version", "--message-format", "json"])
+        .expect("version --message-format json should parse");
+    let RootCommand::Version(command) = cli.command else {
+        panic!("expected version command");
+    };
+    assert_eq!(command.message_format, MessageFormat::Json);
 }
 
 #[test]

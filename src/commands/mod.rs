@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use phoxal::bus::ApiVersion;
 use serde::Serialize;
 
 use crate::AppContext;
@@ -93,6 +94,76 @@ pub fn long_version() -> &'static str {
     })
 }
 
+#[derive(Debug, Args)]
+pub struct VersionArgs {
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = MessageFormat::Human,
+        help = "Output format for the version report."
+    )]
+    pub message_format: MessageFormat,
+}
+
+/// What the CLI itself supports, independent of any one robot graph.
+///
+/// `api_version` compatibility is per-contract (`schema_id`, see emit-apis), not
+/// a single graph-wide version, so this reports the CLI's own build identity
+/// instead: its version, the `bus_abi` wire envelope it links, the emit-apis
+/// metadata schema it understands, and the API generations it can resolve or
+/// check against a catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VersionSummary {
+    pub cli_version: &'static str,
+    pub framework_compatibility: FrameworkCompatibility,
+    pub metadata_schema: &'static str,
+    pub supported_generations: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FrameworkCompatibility {
+    pub bus_abi: &'static str,
+}
+
+/// The API generations this build can resolve/check against a catalog, i.e.
+/// the version modules compiled into the linked `phoxal-api`. Only `y2026_1`
+/// is published today; extend this list when the CLI links a `phoxal-api`
+/// with more generation modules compiled in.
+const SUPPORTED_GENERATIONS: &[&str] = &[phoxal_api::y2026_1::Api::ID];
+
+pub fn version_summary() -> VersionSummary {
+    VersionSummary {
+        cli_version: env!("CARGO_PKG_VERSION"),
+        framework_compatibility: FrameworkCompatibility {
+            bus_abi: phoxal::bus::BUS_ABI.id(),
+        },
+        metadata_schema: phoxal::participant::emit::EMIT_SCHEMA,
+        supported_generations: SUPPORTED_GENERATIONS.to_vec(),
+    }
+}
+
+impl VersionArgs {
+    pub fn run(&self) -> Result<()> {
+        let summary = version_summary();
+        print_message(
+            &summary,
+            || {
+                println!("phoxal-cli {}", long_version());
+                println!(
+                    "default catalog URL: {}",
+                    crate::catalog::DEFAULT_CATALOG_URL
+                );
+                println!(
+                    "catalog override env: {}",
+                    crate::catalog::CATALOG_SOURCE_ENV
+                );
+                Ok(())
+            },
+            self.message_format,
+        )
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "phoxal-cli",
@@ -154,7 +225,7 @@ pub enum RootCommand {
     #[command(about = "Scaffold and run user service crates.")]
     Service(service::Service),
     #[command(about = "Print the phoxal-cli version and catalog source defaults.")]
-    Version,
+    Version(VersionArgs),
     #[command(name = "self", about = "Manage this phoxal-cli installation.")]
     SelfCmd(self_cmd::SelfCmd),
 }
@@ -175,18 +246,7 @@ impl RootCommand {
             Self::Generations(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
             Self::Service(command) => command.run(app).await,
-            Self::Version => {
-                println!("phoxal-cli {}", long_version());
-                println!(
-                    "default catalog URL: {}",
-                    crate::catalog::DEFAULT_CATALOG_URL
-                );
-                println!(
-                    "catalog override env: {}",
-                    crate::catalog::CATALOG_SOURCE_ENV
-                );
-                Ok(())
-            }
+            Self::Version(command) => command.run(),
             Self::SelfCmd(command) => command.run(app).await,
         }
     }
@@ -194,4 +254,82 @@ impl RootCommand {
 
 pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
     cli.command.run(app).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_summary_reports_cli_support_not_a_graph_wide_api_version() {
+        let summary = version_summary();
+
+        assert_eq!(summary.cli_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            summary.framework_compatibility.bus_abi,
+            phoxal::bus::BUS_ABI.id()
+        );
+        assert_eq!(
+            summary.metadata_schema,
+            phoxal::participant::emit::EMIT_SCHEMA
+        );
+        assert_eq!(
+            summary.supported_generations,
+            vec![phoxal_api::y2026_1::Api::ID]
+        );
+    }
+
+    #[test]
+    fn version_summary_serializes_to_the_documented_json_shape() {
+        let summary = version_summary();
+
+        let value = serde_json::to_value(&summary).expect("summary should serialize");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "cli_version": env!("CARGO_PKG_VERSION"),
+                "framework_compatibility": { "bus_abi": phoxal::bus::BUS_ABI.id() },
+                "metadata_schema": phoxal::participant::emit::EMIT_SCHEMA,
+                "supported_generations": [phoxal_api::y2026_1::Api::ID],
+            })
+        );
+    }
+
+    #[test]
+    fn version_args_json_mode_prints_only_the_summary_document() -> Result<()> {
+        let args = VersionArgs {
+            message_format: MessageFormat::Json,
+        };
+        let summary = version_summary();
+        let mut printed = String::new();
+        print_message(
+            &summary,
+            || {
+                printed.push_str("human path should not run in json mode");
+                Ok(())
+            },
+            args.message_format,
+        )?;
+        assert!(printed.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn version_args_human_mode_runs_the_human_closure_not_json() -> Result<()> {
+        let args = VersionArgs {
+            message_format: MessageFormat::Human,
+        };
+        let summary = version_summary();
+        let mut ran_human = false;
+        print_message(
+            &summary,
+            || {
+                ran_human = true;
+                Ok(())
+            },
+            args.message_format,
+        )?;
+        assert!(ran_human);
+        Ok(())
+    }
 }
