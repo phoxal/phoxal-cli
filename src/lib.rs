@@ -15,8 +15,8 @@
 //! - `simulate <world>` - resolve and print or run the host-native simulation plan.
 //! - `deploy <user@host>` - render the checked launch plan into a native systemd
 //!   payload, sync it to the robot, restart `phoxal.target`, and report health.
-//! - `robot new <name>` - scaffold a robot project.
-//! - `service add|catalog` - manage user service crates.
+//!   Prints the v0 pre-stable warning.
+//! - `service catalog` - print official services from the configured artifact catalog.
 //! - `generations status` - inspect catalog readiness for the robot target.
 //! - `pull` / `outdated` - refresh or inspect catalog and native asset state.
 //! - `doctor` - check host prerequisites; `self upgrade` - update the CLI.
