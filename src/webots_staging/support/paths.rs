@@ -13,9 +13,15 @@ pub fn relative_path_for_asset(asset_path: &Path, reference_path: &Path) -> Resu
     let reference_parent = reference_path
         .parent()
         .ok_or_else(|| anyhow!("reference path has no parent directory"))?;
+    let reference_parent = reference_parent.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize reference directory {}",
+            reference_parent.display()
+        )
+    })?;
 
     let relative_path =
-        pathdiff::diff_paths(&asset_path, reference_parent).unwrap_or_else(|| asset_path.clone());
+        pathdiff::diff_paths(&asset_path, &reference_parent).unwrap_or_else(|| asset_path.clone());
     Ok(relative_path.to_string_lossy().replace('\\', "/"))
 }
 

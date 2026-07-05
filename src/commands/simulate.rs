@@ -24,15 +24,42 @@ use crate::launch_plan::{
 use crate::resolver::{
     ResolveOptions, ResolvedComponent, ResolvedRobot, RobotManifestExtras, resolve,
 };
+use crate::simulate_staging::{
+    ComponentTypeToStage, RobotToStage, StagedSimulationWorld, stage_simulation_world,
+};
 use crate::supervisor::{
-    BoardBackend, ParticipantKind, ParticipantState, ParticipantStatus, RouterOwnership,
-    SupervisorLock, SupervisorOptions, default_connect_endpoint, local_router_reachable,
-    router_ownership, start_bus_log_subscriber, supervise_until_shutdown, supervisor_actions_path,
-    supervisor_state_path,
+    BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
+    RouterOwnership, SupervisorLock, SupervisorOptions, default_connect_endpoint,
+    local_router_reachable, router_ownership, start_bus_log_subscriber, supervise_until_shutdown,
+    supervisor_actions_path, supervisor_state_path,
 };
 use crate::world;
 
-pub(crate) const SIMULATOR_PROVIDER_ID: &str = "Simulator";
+/// The world-scoped participant id for the Webots supervisor artifact
+/// (`phoxal-simulator-webots-supervisor`). One supervisor exists per
+/// world/session; it is the simulation world authority (clock, control,
+/// robot_pose, contact, and the runtime robot-spawn authority), never a
+/// component-driver substitution provider.
+pub(crate) const SIMULATOR_SUPERVISOR_PROVIDER_ID: &str = "simulator-webots-supervisor";
+
+/// The artifact name (post `simulator-` prefix strip) of the supervisor
+/// artifact, as reported by `resolved.simulators[].name` / `emit-apis`
+/// `artifact.id`.
+const SIMULATOR_SUPERVISOR_ARTIFACT_NAME: &str = "webots-supervisor";
+
+/// The artifact name (post `simulator-` prefix strip) of the controller
+/// artifact, as reported by `resolved.simulators[].name` / `emit-apis`
+/// `artifact.id`.
+const SIMULATOR_CONTROLLER_ARTIFACT_NAME: &str = "webots-controller";
+
+/// The robot-scoped participant id for the Webots controller artifact
+/// (`phoxal-simulator-webots-controller`) that substitutes `robot_id`'s
+/// component-driver contracts. One controller participant exists per robot;
+/// this scheme generalizes to a multi-robot plan (each robot gets its own
+/// controller id, so N robots keep N distinct substitution providers).
+pub(crate) fn simulator_controller_provider_id(robot_id: &str) -> String {
+    format!("simulator-webots-controller-{robot_id}")
+}
 
 #[derive(Debug, Args)]
 pub struct Simulate {
@@ -150,6 +177,10 @@ pub async fn run(
                     .await
                     .context("simulate preparation worker failed")??;
 
+            crate::host_doctor::preflight()
+                .map_err(|error| anyhow!("{error}"))
+                .context("Webots preflight failed; live simulate cannot launch the simulator")?;
+
             let run_dir = crate::host_paths::run_dir()?;
             let _lock = SupervisorLock::acquire(&run_dir)?;
             let state_file = supervisor_state_path()?;
@@ -175,6 +206,9 @@ pub async fn run(
                 &ui,
             )?;
             prepare_substitution_notes(&plan.launch_plan, &board);
+
+            let webots_spec = stage_and_prepare_webots_spec(app, &plan)?;
+            specs.push(webots_spec);
 
             app.ui.info(format!(
                 "simulation launch plan resolved: {} robot(s), {} site tool(s)",
@@ -390,9 +424,11 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
     )?;
 
     let mut checked_participants = metadata_outcome.checked_participants.clone();
+    remap_simulator_participant_ids(&mut checked_participants, &resolved.robot.identity.id)?;
     checked_participants.extend(official_simulator_participants(resolved)?);
+    let controller_provider_id = simulator_controller_provider_id(&resolved.robot.identity.id);
     let substitutions =
-        contract_substitutions_from_driver_metadata(&checked_participants, SIMULATOR_PROVIDER_ID);
+        contract_substitutions_from_driver_metadata(&checked_participants, &controller_provider_id);
     let sim_participants = sim_checked_participants(&checked_participants);
     let report = graph_check::check_plan(graph_check::CheckInput {
         mode: graph_check::PlanMode::Sim,
@@ -432,6 +468,7 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
 fn official_simulator_participants(
     resolved: &ResolvedRobot,
 ) -> Result<Vec<graph_check::ParticipantApis>> {
+    let robot_id = resolved.robot.identity.id.as_str();
     let mut participants = Vec::new();
     for runtime in resolved
         .simulators
@@ -458,10 +495,61 @@ fn official_simulator_participants(
                 runtime.name
             )
         })?;
-        participant.participant_id = SIMULATOR_PROVIDER_ID.to_string();
+        participant.participant_id =
+            simulator_participant_id_for_resolved_artifact(&runtime.name, robot_id).ok_or_else(
+                || {
+                    anyhow!(
+                        "unrecognized simulator artifact name '{}'; expected '{}' or '{}'",
+                        runtime.name,
+                        SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
+                        SIMULATOR_CONTROLLER_ARTIFACT_NAME
+                    )
+                },
+            )?;
         participants.push(participant);
     }
     Ok(participants)
+}
+
+fn remap_simulator_participant_ids(
+    participants: &mut [graph_check::ParticipantApis],
+    robot_id: &str,
+) -> Result<()> {
+    for participant in participants.iter_mut().filter(|participant| {
+        participant.participant_kind == graph_check::ParticipantKind::Simulator
+    }) {
+        participant.participant_id =
+            simulator_participant_id_for_resolved_artifact(&participant.artifact_id, robot_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "unrecognized simulator artifact name '{}'; expected '{}' or '{}'",
+                        participant.artifact_id,
+                        SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
+                        SIMULATOR_CONTROLLER_ARTIFACT_NAME
+                    )
+                })?;
+    }
+    Ok(())
+}
+
+/// Map a resolved simulator artifact name (`ResolvedPlatformRuntime::name`,
+/// e.g. `"webots-supervisor"` / `"webots-controller"`) to its participant id:
+/// the supervisor gets the stable world-scoped id, the controller gets the
+/// robot-scoped substitution-provider id. `None` for any other simulator
+/// artifact name - callers decide whether that is a hard error (constructing
+/// the participant) or simply "not one of the two known roles" (computing the
+/// expected id set for parity checks).
+pub(crate) fn simulator_participant_id_for_resolved_artifact(
+    artifact_name: &str,
+    robot_id: &str,
+) -> Option<String> {
+    if artifact_name == SIMULATOR_SUPERVISOR_ARTIFACT_NAME {
+        Some(SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string())
+    } else if artifact_name == SIMULATOR_CONTROLLER_ARTIFACT_NAME {
+        Some(simulator_controller_provider_id(robot_id))
+    } else {
+        None
+    }
 }
 
 pub(crate) fn sim_source_participants(
@@ -618,18 +706,7 @@ fn sim_checked_participants(
 }
 
 fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Result<()> {
-    let substitutions = substitution_lines(&plan.launch_plan);
-    let output = SimulateDryRunOutput {
-        mode: "dry-run",
-        target_generation: plan.resolved.target_generation.clone(),
-        channel: plan.resolved.channel.to_string(),
-        catalog_revision: plan.resolved.catalog_revision.clone(),
-        world_path: plan.world_path.clone(),
-        bus_connect: plan.bus_connect.clone(),
-        platform_service_count: plan.resolved.platform_runtimes.len(),
-        native_tools: plan.native_tools.clone(),
-        substitutions: substitutions.clone(),
-    };
+    let output = build_dry_run_output(plan);
     crate::commands::print_message(
         &output,
         || {
@@ -653,9 +730,25 @@ fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Resul
             for tool in &plan.native_tools {
                 println!("  - {tool}");
             }
-            if !substitutions.is_empty() {
+            println!(
+                "webots app (CLI-managed, id \"{WEBOTS_SITE_ID}\"): would launch pointed at staged world {}",
+                output.webots_app.intended_staged_world_path.display()
+            );
+            if !output.simulator_artifacts.is_empty() {
+                println!("simulator artifacts:");
+                for artifact in &output.simulator_artifacts {
+                    println!("  - {artifact}");
+                }
+            }
+            if !output.simulation_managed_participants.is_empty() {
+                println!("simulation-managed participants (launched by Webots, not the CLI):");
+                for participant in &output.simulation_managed_participants {
+                    println!("  - {participant}");
+                }
+            }
+            if !output.substitutions.is_empty() {
                 println!("substitutions:");
-                for substitution in &substitutions {
+                for substitution in &output.substitutions {
                     println!("  - {substitution}");
                 }
             }
@@ -664,6 +757,37 @@ fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Resul
         },
         message_format,
     )
+}
+
+/// Build the dry-run report body (Part 6): must show the Webots app as the
+/// CLI-managed child, both simulator artifacts (supervisor + controller) with
+/// their participant ids, and each simulator participant's SIMULATION-MANAGED
+/// ownership + the intended staged world path. Never stages or launches
+/// anything - the path is computed, not written.
+fn build_dry_run_output(plan: &SimulatePlan) -> SimulateDryRunOutput {
+    let substitutions = substitution_lines(&plan.launch_plan);
+    let simulator_artifacts = simulator_artifact_lines(&plan.resolved);
+    let simulation_managed = simulation_managed_lines(&plan.launch_plan);
+    let intended_staged_world_path =
+        intended_staged_world_path(&plan.project_root, &plan.world_path);
+    SimulateDryRunOutput {
+        mode: "dry-run",
+        target_generation: plan.resolved.target_generation.clone(),
+        channel: plan.resolved.channel.to_string(),
+        catalog_revision: plan.resolved.catalog_revision.clone(),
+        world_path: plan.world_path.clone(),
+        bus_connect: plan.bus_connect.clone(),
+        platform_service_count: plan.resolved.platform_runtimes.len(),
+        native_tools: plan.native_tools.clone(),
+        substitutions,
+        webots_app: WebotsAppSummary {
+            site_id: WEBOTS_SITE_ID.to_string(),
+            launch_ownership: "cli_managed".to_string(),
+            intended_staged_world_path,
+        },
+        simulator_artifacts,
+        simulation_managed_participants: simulation_managed,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -677,6 +801,66 @@ struct SimulateDryRunOutput {
     platform_service_count: usize,
     native_tools: Vec<String>,
     substitutions: Vec<String>,
+    webots_app: WebotsAppSummary,
+    simulator_artifacts: Vec<String>,
+    simulation_managed_participants: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WebotsAppSummary {
+    site_id: String,
+    launch_ownership: String,
+    intended_staged_world_path: PathBuf,
+}
+
+/// The staged world path `simulate --dry-run` would produce, without actually
+/// staging (Part 6: dry-run reports the intended path but never launches
+/// Webots or writes staged files).
+fn intended_staged_world_path(project_root: &Path, world_path: &Path) -> PathBuf {
+    let world_name = world_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("default");
+    crate::project::Project::new(project_root)
+        .map(|project| project.staged_webots_world(world_name))
+        .unwrap_or_else(|_| world_path.to_path_buf())
+}
+
+/// One line per resolved simulator artifact (supervisor + controller), naming
+/// the artifact and its participant id.
+fn simulator_artifact_lines(resolved: &ResolvedRobot) -> Vec<String> {
+    let robot_id = resolved.robot.identity.id.as_str();
+    resolved
+        .simulators
+        .iter()
+        .filter_map(|runtime| {
+            let participant_id =
+                simulator_participant_id_for_resolved_artifact(&runtime.name, robot_id)?;
+            Some(format!(
+                "{} (artifact {}, participant id {participant_id})",
+                runtime.name,
+                runtime.artifact_ref()
+            ))
+        })
+        .collect()
+}
+
+/// One line per SIMULATION-MANAGED participant in the plan: Webots (via the
+/// supervisor) owns its lifecycle, not the CLI supervisor.
+fn simulation_managed_lines(plan: &LaunchPlan) -> Vec<String> {
+    plan.robots
+        .iter()
+        .flat_map(|robot| &robot.participants)
+        .filter(|participant| {
+            participant.launch_ownership == crate::launch_plan::LaunchOwnership::SimulationManaged
+        })
+        .map(|participant| {
+            format!(
+                "{} (artifact {})",
+                participant.launch.participant_id, participant.artifact_id
+            )
+        })
+        .collect()
 }
 
 fn prepare_substitution_notes(plan: &LaunchPlan, board: &BoardBackend) {
@@ -741,6 +925,169 @@ fn native_tool_labels(options: SimulateOptions) -> Vec<String> {
     labels
 }
 
+/// The board id + `ParticipantKind` the CLI registers the Webots app under.
+/// Webots is the CLI's only simulator-side child (Part 5): the CLI launches
+/// it pointed at the staged world; everything downstream (the supervisor,
+/// each robot's controller) is Webots-spawned and SIMULATION-MANAGED instead.
+pub(crate) const WEBOTS_SITE_ID: &str = "webots";
+
+/// Stage the simulation world (Part 4) for the resolved robot and build the
+/// `ParticipantSpec` that launches the Webots app pointed at it - the CLI's
+/// only simulator-side child. The supervisor and controller participants are
+/// registered separately by `prepare_robot_participants` (SIMULATION-MANAGED,
+/// no spec of their own); this function only produces Webots's own spec.
+fn stage_and_prepare_webots_spec(app: &AppContext, plan: &SimulatePlan) -> Result<ParticipantSpec> {
+    let staged = stage_simulation_for_robot(
+        &plan.project_root,
+        &plan.world_path,
+        &plan.resolved,
+        &plan.launch_plan,
+    )?;
+    let webots_path = crate::host_doctor::webots_executable_path()
+        .map_err(|error| anyhow!("{error}"))
+        .context("failed to locate the Webots executable for live simulate")?;
+    app.ui.info(format!(
+        "staged simulation world at {}",
+        staged.staged_world_path.display()
+    ));
+    Ok(ParticipantSpec {
+        id: WEBOTS_SITE_ID.to_string(),
+        kind: ParticipantKind::SiteTool,
+        executable: webots_path,
+        args: vec![staged.staged_world_path.display().to_string()],
+        cwd: None,
+        env: Vec::new(),
+        shutdown_grace: std::time::Duration::from_secs(10),
+        note: None,
+    })
+}
+
+/// Stage a simulation world for the resolved robot: locate the controller and
+/// supervisor `ParticipantLaunch` records already built by `build_launch_plan`
+/// (Sim mode), load the robot's own structure + mounted component types, and
+/// call `simulate_staging::stage_simulation_world`.
+///
+/// `world_source_path` is the already-resolved authored `.wbt`
+/// (`world::resolve_world`, run during `prepare()`); staging copies and
+/// augments it, it is never mutated in place.
+pub(crate) fn stage_simulation_for_robot(
+    project_root: &Path,
+    world_source_path: &Path,
+    resolved: &ResolvedRobot,
+    launch_plan: &LaunchPlan,
+) -> Result<StagedSimulationWorld> {
+    let base_world_text = std::fs::read_to_string(world_source_path)
+        .with_context(|| format!("failed to read {}", world_source_path.display()))?;
+    let world_name = world_source_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .context("world source path has no file stem")?;
+
+    let robot = launch_plan
+        .robots
+        .first()
+        .context("sim launch plan has no robot")?;
+    let robot_id = &resolved.robot.identity.id;
+    let controller_id = simulator_controller_provider_id(robot_id);
+    let controller_launch = robot
+        .participants
+        .iter()
+        .find(|participant| participant.launch.participant_id == controller_id)
+        .map(|participant| participant.launch.clone())
+        .ok_or_else(|| {
+            anyhow!("sim launch plan is missing the controller participant '{controller_id}'")
+        })?;
+    let supervisor_launch = robot
+        .participants
+        .iter()
+        .find(|participant| participant.launch.participant_id == SIMULATOR_SUPERVISOR_PROVIDER_ID)
+        .map(|participant| participant.launch.clone())
+        .ok_or_else(|| {
+            anyhow!(
+                "sim launch plan is missing the supervisor participant '{SIMULATOR_SUPERVISOR_PROVIDER_ID}'"
+            )
+        })?;
+
+    let structure_path = project_root.join(&resolved.robot.structure);
+    let structure = phoxal::model::structure::Structure::read_from_file(&structure_path)
+        .with_context(|| {
+            format!(
+                "failed to read robot structure declared by robot.yaml structure: {}",
+                resolved.robot.structure.display()
+            )
+        })?;
+    structure
+        .validate()
+        .context("robot structure failed validation")?;
+
+    let mut components = BTreeMap::new();
+    let mut component_type_dirs = BTreeMap::new();
+    for component in &resolved.components {
+        if component_type_dirs.contains_key(&component.source_name) {
+            continue;
+        }
+        let crate_dir = component_crate_dir(component, project_root)?;
+        let component_model = phoxal::model::component::Component::read_from_dir(&crate_dir)
+            .with_context(|| {
+                format!(
+                    "failed to read component.yaml for component type '{}' from {}",
+                    component.source_name,
+                    crate_dir.display()
+                )
+            })?
+            .as_v1()
+            .context("Webots staging only supports component.yaml version v1")?
+            .clone();
+        components.insert(component.source_name.clone(), component_model);
+        component_type_dirs.insert(component.source_name.clone(), crate_dir);
+    }
+
+    let bundle = phoxal::model::v1::Robot {
+        manifest: resolved.robot.clone(),
+        components,
+        structure,
+    };
+    // Only stage a PROTO for component types that actually carry Webots
+    // simulation data - a component with no `simulation.yaml` has nothing for
+    // `generate_component_proto` to render and is not expected to be staged.
+    let component_types = component_type_dirs
+        .iter()
+        .filter(|(_, source_dir)| {
+            source_dir.join("simulation.yaml").is_file()
+                || source_dir.join("simulation.yml").is_file()
+        })
+        .map(|(component_type, source_dir)| ComponentTypeToStage {
+            component_type,
+            source_dir,
+        })
+        .collect::<Vec<_>>();
+
+    // `require_native` tells the supervisor whether it must resolve native
+    // (packaged) controller/component artifacts rather than accepting a local
+    // dev/path-overridden build; false whenever any simulator artifact is
+    // path-overridden for local simulator development.
+    let require_native = resolved
+        .simulators
+        .iter()
+        .all(|runtime| runtime.source_path().is_none());
+
+    let project = crate::project::Project::new(project_root)?;
+    stage_simulation_world(
+        &base_world_text,
+        &project.staged_webots_protos_dir(),
+        &project.staged_webots_meshes_dir(),
+        &project.staged_webots_world(world_name),
+        supervisor_launch,
+        require_native,
+        &[RobotToStage {
+            robot_id: robot_id.clone(),
+            bundle: &bundle,
+            component_types,
+            controller_launch,
+        }],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,8 +1096,9 @@ mod tests {
         fixture_contract_for_tests, fixture_tool_entry_for_tests,
     };
     use crate::resolver::{
-        ResolvedComponent, ResolvedComponentSource, ResolvedPlatformRuntime, ResolvedTool,
-        ResolvedUserRuntime, host_target_triple, target_generation_for_robot,
+        ResolvedComponent, ResolvedComponentSource, ResolvedPathOverride, ResolvedPathOverrideKind,
+        ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, host_target_triple,
+        target_generation_for_robot,
     };
     use std::fs;
 
@@ -858,6 +1206,7 @@ mod tests {
         let resolved = resolved_with_drive_components(&["left_drive"], false)?;
         let extras = RobotManifestExtras::default();
         let graph = component_graph(&["left_drive"]);
+        let controller_id = simulator_controller_provider_id("robot_v1");
         let checked = vec![
             service_participant(
                 "drive",
@@ -868,10 +1217,12 @@ mod tests {
                 "left_drive",
                 vec![motor_command(graph_check::Direction::Subscribe)],
             ),
-            simulator_participant(vec![motor_command(graph_check::Direction::Subscribe)]),
+            simulator_controller_participant(
+                &controller_id,
+                vec![motor_command(graph_check::Direction::Subscribe)],
+            ),
         ];
-        let substitutions =
-            contract_substitutions_from_driver_metadata(&checked, SIMULATOR_PROVIDER_ID);
+        let substitutions = contract_substitutions_from_driver_metadata(&checked, &controller_id);
         let sim_participants = sim_checked_participants(&checked);
         let report = graph_check::check_plan(graph_check::CheckInput {
             mode: graph_check::PlanMode::Sim,
@@ -895,15 +1246,24 @@ mod tests {
 
         assert_eq!(
             substitution_lines(&plan),
-            vec!["component/left_drive/* : satisfied by Simulator (webots)"]
+            vec![format!(
+                "component/left_drive/* : satisfied by {controller_id} (webots-controller)"
+            )]
         );
-        assert_eq!(participant_ids(&plan), vec!["drive"]);
+        // The controller is a SIMULATION-MANAGED robot launch participant: it
+        // appears here for board presence + controllerArgs rendering, but
+        // never gets a CLI-spawned process (Part 5).
+        assert_eq!(
+            participant_ids(&plan),
+            vec!["drive", controller_id.as_str()]
+        );
         Ok(())
     }
 
     #[test]
     fn two_identical_instances_get_disjoint_substitution_sets() {
         let graph = component_graph(&["left_drive", "right_drive"]);
+        let controller_id = simulator_controller_provider_id("robot_v1");
         let checked = vec![
             service_participant(
                 "drive",
@@ -919,10 +1279,12 @@ mod tests {
                 "right_drive",
                 vec![motor_command(graph_check::Direction::Subscribe)],
             ),
-            simulator_participant(vec![motor_command(graph_check::Direction::Subscribe)]),
+            simulator_controller_participant(
+                &controller_id,
+                vec![motor_command(graph_check::Direction::Subscribe)],
+            ),
         ];
-        let substitutions =
-            contract_substitutions_from_driver_metadata(&checked, SIMULATOR_PROVIDER_ID);
+        let substitutions = contract_substitutions_from_driver_metadata(&checked, &controller_id);
         let sim_participants = sim_checked_participants(&checked);
         let report = graph_check::check_plan(graph_check::CheckInput {
             mode: graph_check::PlanMode::Sim,
@@ -954,6 +1316,7 @@ mod tests {
     #[test]
     fn provider_not_covering_instance_surfaces_core_failure() {
         let graph = component_graph(&["left_drive", "right_drive"]);
+        let controller_id = simulator_controller_provider_id("robot_v1");
         let checked = vec![
             service_participant(
                 "drive",
@@ -969,13 +1332,15 @@ mod tests {
                 "right_drive",
                 vec![motor_command(graph_check::Direction::Subscribe)],
             ),
-            simulator_participant(vec![materialized_motor_command(
-                "left_drive",
-                graph_check::Direction::Subscribe,
-            )]),
+            simulator_controller_participant(
+                &controller_id,
+                vec![materialized_motor_command(
+                    "left_drive",
+                    graph_check::Direction::Subscribe,
+                )],
+            ),
         ];
-        let substitutions =
-            contract_substitutions_from_driver_metadata(&checked, SIMULATOR_PROVIDER_ID);
+        let substitutions = contract_substitutions_from_driver_metadata(&checked, &controller_id);
         let sim_participants = sim_checked_participants(&checked);
         let report = graph_check::check_plan(graph_check::CheckInput {
             mode: graph_check::PlanMode::Sim,
@@ -1001,7 +1366,7 @@ mod tests {
     fn deploy_plan_with_substitution_is_a_hard_error() {
         let substitution = graph_check::ContractSubstitution {
             component_instance: "left_drive".to_string(),
-            provider_participant_id: SIMULATOR_PROVIDER_ID.to_string(),
+            provider_participant_id: simulator_controller_provider_id("robot_v1"),
             contracts: vec![motor_command(graph_check::Direction::Subscribe)],
         };
         let report = graph_check::check_plan(graph_check::CheckInput {
@@ -1022,10 +1387,155 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_and_controller_get_distinct_stable_provider_ids() {
+        // Part 1 acceptance: the supervisor is world-scoped and stable; the
+        // controller is robot-scoped; the two never collide.
+        let supervisor_id = simulator_participant_id_for_resolved_artifact(
+            SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
+            "robot_v1",
+        )
+        .expect("supervisor artifact name should map to an id");
+        let controller_id = simulator_participant_id_for_resolved_artifact(
+            SIMULATOR_CONTROLLER_ARTIFACT_NAME,
+            "robot_v1",
+        )
+        .expect("controller artifact name should map to an id");
+
+        assert_eq!(supervisor_id, SIMULATOR_SUPERVISOR_PROVIDER_ID);
+        assert_eq!(controller_id, "simulator-webots-controller-robot_v1");
+        assert_ne!(supervisor_id, controller_id);
+
+        // The supervisor id is stable across robots (world-scoped); the
+        // controller id is not (robot-scoped), so it generalizes to a
+        // multi-robot plan without id collisions.
+        let supervisor_id_other_robot = simulator_participant_id_for_resolved_artifact(
+            SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
+            "robot_v2",
+        )
+        .expect("supervisor artifact name should map to an id");
+        let controller_id_other_robot = simulator_participant_id_for_resolved_artifact(
+            SIMULATOR_CONTROLLER_ARTIFACT_NAME,
+            "robot_v2",
+        )
+        .expect("controller artifact name should map to an id");
+        assert_eq!(supervisor_id, supervisor_id_other_robot);
+        assert_ne!(controller_id, controller_id_other_robot);
+    }
+
+    #[test]
+    fn path_overridden_simulators_use_the_same_provider_ids_as_official() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut resolved = resolved_with_drive_components(&[], false)?;
+        resolved.simulators.clear();
+
+        let supervisor_path = temp.path().join("framework/simulator/webots-supervisor");
+        let controller_path = temp.path().join("framework/simulator/webots-controller");
+        let mut supervisor = simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME);
+        supervisor.path_override = Some(supervisor_path.clone());
+        supervisor.artifact_ref = format!("path:{}", supervisor_path.display());
+        let mut controller = simulator_runtime(SIMULATOR_CONTROLLER_ARTIFACT_NAME);
+        controller.path_override = Some(controller_path.clone());
+        controller.artifact_ref = format!("path:{}", controller_path.display());
+        resolved.simulators.extend([supervisor, controller]);
+        resolved.path_overrides = vec![
+            ResolvedPathOverride {
+                key: "simulator-webots-supervisor".to_string(),
+                kind: ResolvedPathOverrideKind::Simulator,
+                artifact_name: SIMULATOR_SUPERVISOR_ARTIFACT_NAME.to_string(),
+                path: supervisor_path.clone(),
+            },
+            ResolvedPathOverride {
+                key: "simulator-webots-controller".to_string(),
+                kind: ResolvedPathOverrideKind::Simulator,
+                artifact_name: SIMULATOR_CONTROLLER_ARTIFACT_NAME.to_string(),
+                path: controller_path.clone(),
+            },
+        ];
+
+        let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
+        let controller_id = simulator_controller_provider_id("robot_v1");
+        let mut checked = vec![
+            service_participant("drive", Vec::new()),
+            graph_check::ParticipantApis {
+                participant_id: SIMULATOR_SUPERVISOR_ARTIFACT_NAME.to_string(),
+                artifact_id: SIMULATOR_SUPERVISOR_ARTIFACT_NAME.to_string(),
+                participant_kind: graph_check::ParticipantKind::Simulator,
+                participant_class: graph_check::ParticipantClass::Checked,
+                api_version: "y2026_1".to_string(),
+                bus_abi: None,
+                config_schema: None,
+                scope: graph_check::ParticipantScope::Graph,
+                contracts: Vec::new(),
+            },
+            simulator_controller_participant(SIMULATOR_CONTROLLER_ARTIFACT_NAME, Vec::new()),
+        ];
+        remap_simulator_participant_ids(&mut checked, &resolved.robot.identity.id)?;
+
+        assert!(checked.iter().any(|participant| {
+            participant.participant_id == supervisor_id
+                && participant.artifact_id == SIMULATOR_SUPERVISOR_ARTIFACT_NAME
+        }));
+        assert!(checked.iter().any(|participant| {
+            participant.participant_id == controller_id
+                && participant.artifact_id == SIMULATOR_CONTROLLER_ARTIFACT_NAME
+        }));
+
+        let extras = RobotManifestExtras::default();
+        let sources = sim_source_participants(temp.path(), &resolved, None)?;
+        let plan = build_launch_plan(
+            LaunchMode::Sim,
+            &[CheckedRobotLaunchInput {
+                project_root: temp.path(),
+                resolved: &resolved,
+                manifest_extras: &extras,
+                checked_participants: &checked,
+                accepted_substitutions: &[],
+                source_participants: &sources,
+            }],
+        )?;
+
+        assert_eq!(
+            participant_ids(&plan),
+            vec!["drive", controller_id.as_str(), supervisor_id.as_str()]
+        );
+        for id in [&controller_id, &supervisor_id] {
+            let participant = plan.robots[0]
+                .participants
+                .iter()
+                .find(|participant| participant.launch.participant_id == *id)
+                .expect("simulator participant should be present");
+            assert_eq!(
+                participant.launch_ownership,
+                crate::launch_plan::LaunchOwnership::SimulationManaged
+            );
+            assert!(matches!(
+                &participant.execution,
+                crate::launch_plan::ParticipantExecution::SourceArtifact { .. }
+            ));
+        }
+
+        let artifact_lines = simulator_artifact_lines(&resolved);
+        assert_eq!(artifact_lines.len(), 2);
+        assert!(
+            artifact_lines
+                .iter()
+                .any(|line| line.contains(&supervisor_id))
+        );
+        assert!(
+            artifact_lines
+                .iter()
+                .any(|line| line.contains(&controller_id))
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn sim_launch_set_matches_checked_robot_participants_without_drivers() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let resolved = resolved_with_drive_components(&["left_drive"], true)?;
         let extras = RobotManifestExtras::default();
+        let controller_id = simulator_controller_provider_id("robot_v1");
         let checked = vec![
             service_participant("drive", Vec::new()),
             service_participant("mission", Vec::new()),
@@ -1034,12 +1544,15 @@ mod tests {
                 "left_drive",
                 vec![motor_command(graph_check::Direction::Subscribe)],
             ),
-            simulator_participant(vec![motor_command(graph_check::Direction::Subscribe)]),
+            simulator_controller_participant(
+                &controller_id,
+                vec![motor_command(graph_check::Direction::Subscribe)],
+            ),
         ];
         let accepted = vec![graph_check::AcceptedSubstitution {
             component_instance: "left_drive".to_string(),
-            provider_participant_id: SIMULATOR_PROVIDER_ID.to_string(),
-            provider_artifact_id: "webots".to_string(),
+            provider_participant_id: controller_id.clone(),
+            provider_artifact_id: "webots-controller".to_string(),
             provider_kind: graph_check::ParticipantKind::Simulator,
             contracts: vec![materialized_motor_command(
                 "left_drive",
@@ -1063,7 +1576,10 @@ mod tests {
             }],
         )?;
 
-        assert_eq!(participant_ids(&plan), vec!["drive", "mission"]);
+        assert_eq!(
+            participant_ids(&plan),
+            vec!["drive", "mission", controller_id.as_str()]
+        );
         assert_eq!(
             plan.robots[0]
                 .substitutions
@@ -1072,6 +1588,397 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["left_drive"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn sim_plan_carries_both_supervisor_and_controller_under_distinct_ids() -> Result<()> {
+        // Part 1 acceptance (full): a sim launch plan for a robot with >=1
+        // component driver has (a) the supervisor present under the
+        // world-scoped id, (b) the driver substitution's
+        // provider_participant_id is the controller id, and (c) supervisor id
+        // != controller id.
+        let temp = tempfile::tempdir()?;
+        let mut resolved = resolved_with_drive_components(&["left_drive"], false)?;
+        resolved
+            .simulators
+            .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
+        let extras = RobotManifestExtras::default();
+        let graph = component_graph(&["left_drive"]);
+        let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
+        let controller_id = simulator_controller_provider_id("robot_v1");
+        let checked = vec![
+            service_participant(
+                "drive",
+                vec![motor_command(graph_check::Direction::Publish)],
+            ),
+            driver_participant(
+                "ddsm115",
+                "left_drive",
+                vec![motor_command(graph_check::Direction::Subscribe)],
+            ),
+            graph_check::ParticipantApis {
+                participant_id: supervisor_id.clone(),
+                artifact_id: "webots-supervisor".to_string(),
+                participant_kind: graph_check::ParticipantKind::Simulator,
+                participant_class: graph_check::ParticipantClass::Checked,
+                api_version: "y2026_1".to_string(),
+                bus_abi: None,
+                config_schema: None,
+                scope: graph_check::ParticipantScope::Graph,
+                contracts: Vec::new(),
+            },
+            simulator_controller_participant(
+                &controller_id,
+                vec![motor_command(graph_check::Direction::Subscribe)],
+            ),
+        ];
+        let substitutions = contract_substitutions_from_driver_metadata(&checked, &controller_id);
+        let sim_participants = sim_checked_participants(&checked);
+        let report = graph_check::check_plan(graph_check::CheckInput {
+            mode: graph_check::PlanMode::Sim,
+            participants: &sim_participants,
+            robot_graph: &graph,
+            substitutions: &substitutions,
+        });
+        assert!(report.is_ok(), "{report:?}");
+
+        let plan = build_launch_plan(
+            LaunchMode::Sim,
+            &[CheckedRobotLaunchInput {
+                project_root: temp.path(),
+                resolved: &resolved,
+                manifest_extras: &extras,
+                checked_participants: &sim_participants,
+                accepted_substitutions: &report.accepted_substitutions,
+                source_participants: &[],
+            }],
+        )?;
+
+        // (a) the supervisor is present under the world-scoped id.
+        assert!(participant_ids(&plan).contains(&supervisor_id.as_str()));
+        // (b) the driver substitution's provider is the controller id.
+        assert_eq!(
+            plan.robots[0].substitutions[0].provider_participant_id,
+            controller_id
+        );
+        // (c) supervisor id != controller id.
+        assert_ne!(supervisor_id, controller_id);
+        Ok(())
+    }
+
+    #[test]
+    fn stage_simulation_for_robot_produces_a_webots_free_staged_world() -> Result<()> {
+        // The Part 5 Live-path plumbing (`stage_and_prepare_webots_spec` ->
+        // `stage_simulation_for_robot`) end to end, without Webots: given a
+        // sim LaunchPlan carrying both the supervisor and controller
+        // participants, staging must write a `.wbt` declaring the robot's
+        // EXTERNPROTO and the supervisor's static node, with no static robot
+        // instance node.
+        let temp = tempfile::tempdir()?;
+        fs::write(
+            temp.path().join("structure.urdf"),
+            r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="base_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
+        )?;
+        fs::create_dir_all(temp.path().join("worlds"))?;
+        let world_source_path = temp.path().join("worlds/default.wbt");
+        fs::write(
+            &world_source_path,
+            "#VRML_SIM R2023b utf8\n\nWorldInfo {\n}\n",
+        )?;
+        write_driver_crate(temp.path(), "ddsm115")?;
+        fs::write(
+            temp.path().join("components/ddsm115/component.yaml"),
+            "version: v1\ncapabilities: {}\n",
+        )?;
+
+        let mut resolved = resolved_with_drive_components(&["left_drive"], false)?;
+        resolved
+            .simulators
+            .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
+        let extras = RobotManifestExtras::default();
+        let graph = component_graph(&["left_drive"]);
+        let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
+        let controller_id = simulator_controller_provider_id("robot_v1");
+        let checked = vec![
+            service_participant(
+                "drive",
+                vec![motor_command(graph_check::Direction::Publish)],
+            ),
+            driver_participant(
+                "ddsm115",
+                "left_drive",
+                vec![motor_command(graph_check::Direction::Subscribe)],
+            ),
+            graph_check::ParticipantApis {
+                participant_id: supervisor_id.clone(),
+                artifact_id: "webots-supervisor".to_string(),
+                participant_kind: graph_check::ParticipantKind::Simulator,
+                participant_class: graph_check::ParticipantClass::Checked,
+                api_version: "y2026_1".to_string(),
+                bus_abi: None,
+                config_schema: None,
+                scope: graph_check::ParticipantScope::Graph,
+                contracts: Vec::new(),
+            },
+            simulator_controller_participant(
+                &controller_id,
+                vec![motor_command(graph_check::Direction::Subscribe)],
+            ),
+        ];
+        let substitutions = contract_substitutions_from_driver_metadata(&checked, &controller_id);
+        let sim_participants = sim_checked_participants(&checked);
+        let report = graph_check::check_plan(graph_check::CheckInput {
+            mode: graph_check::PlanMode::Sim,
+            participants: &sim_participants,
+            robot_graph: &graph,
+            substitutions: &substitutions,
+        });
+        assert!(report.is_ok(), "{report:?}");
+
+        let plan = build_launch_plan(
+            LaunchMode::Sim,
+            &[CheckedRobotLaunchInput {
+                project_root: temp.path(),
+                resolved: &resolved,
+                manifest_extras: &extras,
+                checked_participants: &sim_participants,
+                accepted_substitutions: &report.accepted_substitutions,
+                source_participants: &[],
+            }],
+        )?;
+
+        let staged = stage_simulation_for_robot(temp.path(), &world_source_path, &resolved, &plan)?;
+
+        let staged_text = std::fs::read_to_string(&staged.staged_world_path)?;
+        assert!(
+            staged_text.contains("EXTERNPROTO"),
+            "staged world should declare the robot's EXTERNPROTO:\n{staged_text}"
+        );
+        assert!(
+            staged_text.contains("supervisor TRUE"),
+            "staged world should contain the supervisor node:\n{staged_text}"
+        );
+        assert!(
+            staged_text.contains("phoxal-simulator-webots-supervisor"),
+            "staged world should name the supervisor controller:\n{staged_text}"
+        );
+        assert_eq!(
+            staged_text.matches("Robot {").count(),
+            1,
+            "the staged world should contain exactly one root Robot node (the supervisor)"
+        );
+        assert_eq!(staged.spawn_descriptors.len(), 1);
+        assert_eq!(staged.spawn_descriptors[0].name, "robot_v1");
+        assert!(
+            staged.spawn_descriptors[0]
+                .node_string
+                .contains("phoxal-simulator-webots-controller")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn stage_simulation_for_robot_writes_world_with_supervisor_and_no_static_robot() -> Result<()> {
+        // Part 5 acceptance: the Live path's staging helper produces a real
+        // staged .wbt on disk with the supervisor node and no static robot
+        // instance node, using the controller/supervisor ParticipantLaunch
+        // records already carried by the Sim LaunchPlan.
+        let temp = tempfile::tempdir()?;
+        fs::write(
+            temp.path().join("structure.urdf"),
+            r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="base_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
+        )?;
+        fs::create_dir_all(temp.path().join("worlds"))?;
+        let world_source = temp.path().join("worlds/test.wbt");
+        fs::write(&world_source, "#VRML_SIM R2023b utf8\n\nWorldInfo {\n}\n")?;
+
+        let mut resolved = resolved_with_drive_components(&[], false)?;
+        resolved
+            .simulators
+            .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
+        resolved
+            .simulators
+            .push(simulator_runtime(SIMULATOR_CONTROLLER_ARTIFACT_NAME));
+        let extras = RobotManifestExtras::default();
+        let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
+        let controller_id = simulator_controller_provider_id("robot_v1");
+        let checked = vec![
+            service_participant(
+                "drive",
+                vec![motor_command(graph_check::Direction::Publish)],
+            ),
+            graph_check::ParticipantApis {
+                participant_id: supervisor_id.clone(),
+                artifact_id: "webots-supervisor".to_string(),
+                participant_kind: graph_check::ParticipantKind::Simulator,
+                participant_class: graph_check::ParticipantClass::Checked,
+                api_version: "y2026_1".to_string(),
+                bus_abi: None,
+                config_schema: None,
+                scope: graph_check::ParticipantScope::Graph,
+                contracts: Vec::new(),
+            },
+            graph_check::ParticipantApis {
+                participant_id: controller_id.clone(),
+                artifact_id: "webots-controller".to_string(),
+                participant_kind: graph_check::ParticipantKind::Simulator,
+                participant_class: graph_check::ParticipantClass::Checked,
+                api_version: "y2026_1".to_string(),
+                bus_abi: None,
+                config_schema: None,
+                scope: graph_check::ParticipantScope::Graph,
+                contracts: Vec::new(),
+            },
+        ];
+        let sim_participants = sim_checked_participants(&checked);
+
+        let plan = build_launch_plan(
+            LaunchMode::Sim,
+            &[CheckedRobotLaunchInput {
+                project_root: temp.path(),
+                resolved: &resolved,
+                manifest_extras: &extras,
+                checked_participants: &sim_participants,
+                accepted_substitutions: &[],
+                source_participants: &[],
+            }],
+        )?;
+
+        let staged = stage_simulation_for_robot(temp.path(), &world_source, &resolved, &plan)?;
+
+        assert!(staged.staged_world_path.is_file());
+        let staged_text = fs::read_to_string(&staged.staged_world_path)?;
+        assert!(
+            staged_text.contains("supervisor TRUE"),
+            "staged world should contain the supervisor node:\n{staged_text}"
+        );
+        assert!(
+            staged_text.contains("phoxal-simulator-webots-supervisor"),
+            "staged world should name the supervisor controller:\n{staged_text}"
+        );
+        assert_eq!(
+            staged_text.matches("Robot {").count(),
+            1,
+            "the staged world should have exactly one root Robot node (the supervisor):\n{staged_text}"
+        );
+        assert_eq!(staged.controller_launches.len(), 1);
+        assert_eq!(staged.controller_launches[0].0, "robot_v1");
+        Ok(())
+    }
+
+    #[test]
+    fn dry_run_output_shows_webots_supervisor_controller_and_ownership() -> Result<()> {
+        // Part 6 acceptance: `simulate --dry-run` must show, explicitly, the
+        // Webots app as the CLI-managed child, both simulator artifacts
+        // (supervisor + controller) with their ids, and each simulator
+        // participant's SIMULATION-MANAGED ownership + the staged world path
+        // - without staging or launching anything.
+        let temp = tempfile::tempdir()?;
+        // `resolved_with_drive_components` already registers a controller
+        // simulator runtime; add only the supervisor to get exactly one of
+        // each.
+        let mut resolved = resolved_with_drive_components(&[], false)?;
+        resolved
+            .simulators
+            .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
+        let extras = RobotManifestExtras::default();
+        let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
+        let controller_id = simulator_controller_provider_id("robot_v1");
+        let checked = vec![
+            service_participant(
+                "drive",
+                vec![motor_command(graph_check::Direction::Publish)],
+            ),
+            graph_check::ParticipantApis {
+                participant_id: supervisor_id.clone(),
+                artifact_id: "webots-supervisor".to_string(),
+                participant_kind: graph_check::ParticipantKind::Simulator,
+                participant_class: graph_check::ParticipantClass::Checked,
+                api_version: "y2026_1".to_string(),
+                bus_abi: None,
+                config_schema: None,
+                scope: graph_check::ParticipantScope::Graph,
+                contracts: Vec::new(),
+            },
+            graph_check::ParticipantApis {
+                participant_id: controller_id.clone(),
+                artifact_id: "webots-controller".to_string(),
+                participant_kind: graph_check::ParticipantKind::Simulator,
+                participant_class: graph_check::ParticipantClass::Checked,
+                api_version: "y2026_1".to_string(),
+                bus_abi: None,
+                config_schema: None,
+                scope: graph_check::ParticipantScope::Graph,
+                contracts: Vec::new(),
+            },
+        ];
+        let sim_participants = sim_checked_participants(&checked);
+
+        let launch_plan = build_launch_plan(
+            LaunchMode::Sim,
+            &[CheckedRobotLaunchInput {
+                project_root: temp.path(),
+                resolved: &resolved,
+                manifest_extras: &extras,
+                checked_participants: &sim_participants,
+                accepted_substitutions: &[],
+                source_participants: &[],
+            }],
+        )?;
+
+        let plan = SimulatePlan {
+            robot_path: temp.path().join("robot.yaml"),
+            project_root: temp.path().to_path_buf(),
+            world_path: temp.path().join("worlds/test.wbt"),
+            bus_connect: DEFAULT_ROUTER_CONNECT.to_string(),
+            native_tools: native_tool_labels(SimulateOptions::default()),
+            resolved,
+            launch_plan,
+            source_participants: Vec::new(),
+        };
+
+        let output = build_dry_run_output(&plan);
+
+        assert_eq!(output.webots_app.site_id, WEBOTS_SITE_ID);
+        assert_eq!(output.webots_app.launch_ownership, "cli_managed");
+        assert!(
+            output
+                .webots_app
+                .intended_staged_world_path
+                .to_string_lossy()
+                .contains("test.wbt")
+        );
+
+        assert_eq!(output.simulator_artifacts.len(), 2);
+        assert!(
+            output
+                .simulator_artifacts
+                .iter()
+                .any(|line| line.contains("webots-supervisor") && line.contains(&supervisor_id))
+        );
+        assert!(
+            output
+                .simulator_artifacts
+                .iter()
+                .any(|line| line.contains("webots-controller") && line.contains(&controller_id))
+        );
+
+        assert_eq!(output.simulation_managed_participants.len(), 2);
+        assert!(
+            output
+                .simulation_managed_participants
+                .iter()
+                .any(|line| line.contains(&supervisor_id))
+        );
+        assert!(
+            output
+                .simulation_managed_participants
+                .iter()
+                .any(|line| line.contains(&controller_id))
+        );
+
         Ok(())
     }
 
@@ -1093,7 +2000,10 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("NoSimulatorProvider"), "{message}");
         assert!(message.contains("left_drive"), "{message}");
-        assert!(message.contains("Simulator"), "{message}");
+        assert!(
+            message.contains("simulator-webots-controller-testbot"),
+            "{message}"
+        );
         Ok(())
     }
 
@@ -1362,12 +2272,13 @@ components:
         }
     }
 
-    fn simulator_participant(
+    fn simulator_controller_participant(
+        provider_participant_id: &str,
         contracts: Vec<graph_check::Contract>,
     ) -> graph_check::ParticipantApis {
         graph_check::ParticipantApis {
-            participant_id: SIMULATOR_PROVIDER_ID.to_string(),
-            artifact_id: "webots".to_string(),
+            participant_id: provider_participant_id.to_string(),
+            artifact_id: "webots-controller".to_string(),
             participant_kind: graph_check::ParticipantKind::Simulator,
             participant_class: graph_check::ParticipantClass::Checked,
             api_version: "y2026_1".to_string(),
@@ -1461,6 +2372,9 @@ components:
         resolved
             .platform_runtimes
             .push(platform_runtime("drive", Vec::new()));
+        resolved
+            .simulators
+            .push(simulator_runtime(SIMULATOR_CONTROLLER_ARTIFACT_NAME));
         if include_user {
             resolved.user_runtimes.push(ResolvedUserRuntime {
                 name: "mission".to_string(),
@@ -1503,6 +2417,27 @@ components:
             per_triple_status: BTreeMap::new(),
             changed_contracts: Vec::new(),
             contract_uses: contracts,
+            path_override: None,
+        }
+    }
+
+    fn simulator_runtime(name: &str) -> ResolvedPlatformRuntime {
+        ResolvedPlatformRuntime {
+            name: name.to_string(),
+            artifact_id: format!("simulator-{name}"),
+            kind: ArtifactKind::Simulator,
+            generation: "y2026_1".to_string(),
+            version: "0.1.0".to_string(),
+            artifact_ref: format!(
+                "simulator-{name}:0.1.0-y2026_1-stable-{}",
+                host_target_triple()
+            ),
+            sha256: None,
+            metadata: None,
+            target_status: Some(ArtifactStatus::Pending),
+            per_triple_status: BTreeMap::new(),
+            changed_contracts: Vec::new(),
+            contract_uses: Vec::new(),
             path_override: None,
         }
     }

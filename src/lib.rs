@@ -41,6 +41,7 @@ pub mod process;
 pub mod project;
 pub mod resolver;
 pub mod shell;
+pub mod simulate_staging;
 pub mod supervisor;
 pub mod ui;
 pub mod utils;

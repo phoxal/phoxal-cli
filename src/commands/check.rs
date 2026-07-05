@@ -1582,7 +1582,7 @@ fn format_problem(problem: &graph_check::Problem) -> String {
             provider_participant_id,
         } => {
             format!(
-                "NoSimulatorProvider: sim plan substitutes component {component_instance} with {provider_participant_id}, but no checked simulator-kind participant is present in the plan. Add phoxal-simulator-webots from the artifact catalog, or add a simulator-webots path override for local simulator development."
+                "NoSimulatorProvider: sim plan substitutes component {component_instance} with {provider_participant_id}, but no checked simulator-kind participant is present in the plan. Add phoxal-simulator-webots-supervisor and phoxal-simulator-webots-controller from the artifact catalog, or add simulator-webots-supervisor/simulator-webots-controller path overrides for local simulator development."
             )
         }
         graph_check::Problem::SubstitutionProviderWrongKind {
