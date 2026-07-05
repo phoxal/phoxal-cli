@@ -312,7 +312,7 @@ fn run(
             ))
         },
         fetch_emit_apis_from_tool,
-        build_emit_apis_from_source,
+        |participant| build_emit_apis_from_source_for_check(participant, ui),
     )?;
 
     Ok(CheckRunResult {
@@ -1188,30 +1188,129 @@ fn env_key(value: &str) -> String {
 }
 
 pub(crate) fn build_emit_apis_from_source(participant: &SourceParticipant) -> Result<RawEmitApis> {
+    let cache_root = crate::host_paths::cache_dir()?;
+    build_emit_apis_from_source_with_diagnostics(
+        participant,
+        &cache_root,
+        build_emit_apis_by_building,
+        None,
+    )
+}
+
+fn build_emit_apis_from_source_for_check(
+    participant: &SourceParticipant,
+    ui: &crate::Ui,
+) -> Result<RawEmitApis> {
+    let cache_root = crate::host_paths::cache_dir()?;
+    build_emit_apis_from_source_with_diagnostics(
+        participant,
+        &cache_root,
+        build_emit_apis_by_building,
+        Some(ui),
+    )
+}
+
+/// Core of [`build_emit_apis_from_source`], parameterized over the cache root
+/// and the (expensive) builder so tests can exercise the cache read/write and
+/// cold-cache fallback decision against a throwaway directory without
+/// spawning a real `cargo run` or touching `~/.phoxal/cache`.
+#[cfg(test)]
+fn build_emit_apis_from_source_with(
+    participant: &SourceParticipant,
+    cache_root: &Path,
+    build_by_building: impl FnMut(&Path) -> Result<RawEmitApis>,
+) -> Result<RawEmitApis> {
+    build_emit_apis_from_source_with_diagnostics(participant, cache_root, build_by_building, None)
+}
+
+fn build_emit_apis_from_source_with_diagnostics(
+    participant: &SourceParticipant,
+    cache_root: &Path,
+    mut build_by_building: impl FnMut(&Path) -> Result<RawEmitApis>,
+    ui: Option<&crate::Ui>,
+) -> Result<RawEmitApis> {
     match participant.build_mode {
         SourceBuildMode::Build => {
-            let raw = build_emit_apis_by_building(&participant.crate_dir)?;
+            let raw = build_by_building(&participant.crate_dir)?;
             // Cache the freshly-emitted metadata keyed by the source tree so a
             // later `check --service <other>` can reuse it without rebuilding.
-            if let Err(error) = write_source_emit_apis_cache(&participant.crate_dir, &raw) {
+            if let Err(error) =
+                write_source_emit_apis_cache(cache_root, &participant.crate_dir, &raw)
+            {
                 tracing::debug!(
                     "failed to cache emit-apis for {}: {error:#}",
                     participant.crate_dir.display()
                 );
             }
+            report_source_emit_apis_progress(
+                ui,
+                format!(
+                    "built emit-apis for {} {}",
+                    participant.kind_label(),
+                    participant.name
+                ),
+            );
             Ok(raw)
         }
-        SourceBuildMode::UseCached => read_source_emit_apis_cache(&participant.crate_dir)
-            .with_context(|| {
-                format!(
-                    "no cached emit-apis for {} {} ({}); run `phoxal check` once (no --service) \
-                     to build every participant and populate the cache, then re-run \
-                     `phoxal check --service <name>`",
-                    participant.kind_label(),
-                    participant.name,
-                    participant.crate_dir.display()
-                )
-            }),
+        SourceBuildMode::UseCached => {
+            match read_source_emit_apis_cache(cache_root, &participant.crate_dir) {
+                Ok(raw) => {
+                    report_source_emit_apis_progress(
+                        ui,
+                        format!(
+                            "reused cached emit-apis for {} {}",
+                            participant.kind_label(),
+                            participant.name
+                        ),
+                    );
+                    Ok(raw)
+                }
+                // Cold cache: `check --service <name>` must be self-sufficient on
+                // a fresh cache, so a sibling with no cache entry falls back to a
+                // best-effort build (Option A from follow-ups/13) instead of
+                // erroring. The named target above is still the only participant
+                // this scoped check treats as authoritative; this is a one-time
+                // refresh so future scoped runs hit the cache again.
+                Err(_) => {
+                    let raw = build_by_building(&participant.crate_dir).with_context(|| {
+                        format!(
+                            "{} {} ({}) has no cached emit-apis and could not be built on demand; \
+                             run `phoxal check` once (no --service) to build every participant and \
+                             populate the cache, then re-run `phoxal check --service <name>`",
+                            participant.kind_label(),
+                            participant.name,
+                            participant.crate_dir.display()
+                        )
+                    })?;
+                    if let Err(error) =
+                        write_source_emit_apis_cache(cache_root, &participant.crate_dir, &raw)
+                    {
+                        tracing::debug!(
+                            "failed to cache emit-apis for {}: {error:#}",
+                            participant.crate_dir.display()
+                        );
+                    }
+                    report_source_emit_apis_progress(
+                        ui,
+                        format!(
+                            "refreshed emit-apis for {} {} (no cache entry, built on demand)",
+                            participant.kind_label(),
+                            participant.name
+                        ),
+                    );
+                    Ok(raw)
+                }
+            }
+        }
+    }
+}
+
+fn report_source_emit_apis_progress(ui: Option<&crate::Ui>, message: String) {
+    if let Some(ui) = ui {
+        ui.info(message);
+    } else {
+        // This low-level builder is also used by tests and callers without a `Ui`.
+        eprintln!("check: {message}");
     }
 }
 
@@ -1248,20 +1347,61 @@ fn build_emit_apis_by_building(dir: &Path) -> Result<RawEmitApis> {
 /// Cache file for a source crate's last-built `emit-apis`, keyed by the source
 /// tree hash so cached metadata always matches the current source. A scoped
 /// `check --service <name>` reads this for the participants it does not rebuild.
-fn source_emit_apis_cache_path(crate_dir: &Path) -> Result<PathBuf> {
+///
+/// The path also folds in the inputs that change the *shape* of the emitted
+/// doc without changing the source tree: the bus ABI, emit-apis schema, and
+/// target triple this `phoxal-cli` binary is built for. These are deliberately
+/// the CLI's own linked `phoxal::bus::BUS_ABI` and
+/// `phoxal::participant::emit::EMIT_SCHEMA`, not anything read back out of the
+/// cached doc: a stale doc built under a different framework schema gets its
+/// own cache slot instead of being reused as if it were current.
+/// Per-contract `schema_id`s and `artifact.id`/`kind` are NOT part of the
+/// path - they are validated after the doc is read
+/// (`validate_source_artifact_identity`, `check_graph`'s per-contract
+/// `schema_id` agreement), so a mismatch there is caught as a
+/// check failure rather than silently reused. There is intentionally no
+/// per-package `api_version` and no image digest in this key (native/official
+/// artifacts are identified by release-asset checksum elsewhere, see
+/// `fetch_emit_apis_from_native_artifact`).
+fn source_emit_apis_cache_path(cache_root: &Path, crate_dir: &Path) -> Result<PathBuf> {
     let source_hash = crate::utils::hash_tree(crate_dir).with_context(|| {
         format!(
             "failed to hash source crate {} for emit-apis cache",
             crate_dir.display()
         )
     })?;
-    Ok(crate::host_paths::cache_dir()?
+    let identity_key = format!(
+        "{source_hash}-{bus_abi}-{emit_schema}-{target_triple}",
+        bus_abi = sanitize_cache_component(phoxal::bus::BUS_ABI.id()),
+        emit_schema = sanitize_cache_component(phoxal::participant::emit::EMIT_SCHEMA),
+        target_triple = sanitize_cache_component(&crate::resolver::host_target_triple()),
+    );
+    Ok(cache_root
         .join("emit-apis")
-        .join(format!("{source_hash}.json")))
+        .join(format!("{identity_key}.json")))
 }
 
-fn write_source_emit_apis_cache(crate_dir: &Path, raw: &RawEmitApis) -> Result<()> {
-    let path = source_emit_apis_cache_path(crate_dir)?;
+/// Cache paths are files on disk; replace characters that are awkward or
+/// unsafe in a path component (e.g. `/` in `phoxal-bus/v0`) with `_`.
+fn sanitize_cache_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn write_source_emit_apis_cache(
+    cache_root: &Path,
+    crate_dir: &Path,
+    raw: &RawEmitApis,
+) -> Result<()> {
+    let path = source_emit_apis_cache_path(cache_root, crate_dir)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
             format!("failed to create emit-apis cache dir {}", parent.display())
@@ -1272,8 +1412,8 @@ fn write_source_emit_apis_cache(crate_dir: &Path, raw: &RawEmitApis) -> Result<(
         .with_context(|| format!("failed to write emit-apis cache {}", path.display()))
 }
 
-fn read_source_emit_apis_cache(crate_dir: &Path) -> Result<RawEmitApis> {
-    let path = source_emit_apis_cache_path(crate_dir)?;
+fn read_source_emit_apis_cache(cache_root: &Path, crate_dir: &Path) -> Result<RawEmitApis> {
+    let path = source_emit_apis_cache_path(cache_root, crate_dir)?;
     let json = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read emit-apis cache {}", path.display()))?;
     serde_json::from_str(&json)
@@ -2389,6 +2529,280 @@ mod tests {
         Ok(())
     }
 
+    // -- Follow-up #13: `check --service <name>` self-sufficiency on a cold
+    // emit-apis cache (`build_emit_apis_from_source_with`'s cache read/write and
+    // cold-miss fallback). These drive the real cache path/read/write helpers
+    // against a throwaway `cache_root`, not the `run_check` fake-`build`
+    // injection used above, so they prove the on-disk fallback itself.
+
+    #[test]
+    fn cold_cache_use_cached_sibling_falls_back_to_building_and_populates_cache() -> Result<()> {
+        // `check --service other`: `other` is `Build` (the named target); `sibling`
+        // is `UseCached` but the cache is empty (first-ever run). The sibling must
+        // still be built (Option A best-effort) rather than erroring, and the
+        // result must be written to cache so a later scoped run reuses it.
+        let cache_root = tempfile::tempdir()?;
+        let target_temp = tempfile::tempdir()?;
+        let sibling_temp = tempfile::tempdir()?;
+        let target_dir = fixture_crate_dir(&target_temp, "other");
+        let sibling_dir = fixture_crate_dir(&sibling_temp, "sibling");
+
+        let target = SourceParticipant::user_service("other", target_dir.clone());
+        let sibling = SourceParticipant {
+            build_mode: SourceBuildMode::UseCached,
+            ..SourceParticipant::user_service("sibling", sibling_dir.clone())
+        };
+
+        let mut built = Vec::new();
+        let target_raw = build_emit_apis_from_source_with(&target, cache_root.path(), |dir| {
+            built.push(dir.to_path_buf());
+            Ok(raw("other", "y2026_1", &[]))
+        })?;
+        assert_eq!(target_raw.artifact.id, "other");
+
+        let sibling_raw = build_emit_apis_from_source_with(&sibling, cache_root.path(), |dir| {
+            built.push(dir.to_path_buf());
+            Ok(raw("sibling", "y2026_1", &[]))
+        })?;
+        assert_eq!(sibling_raw.artifact.id, "sibling");
+
+        // Both the named target and the uncached sibling were actually built:
+        // the scoped check is self-sufficient on an empty cache.
+        assert_eq!(built, vec![target_dir, sibling_dir]);
+
+        // The on-demand build populated the cache, so a later scoped run (still
+        // `UseCached` for `sibling`) reuses it without building again.
+        let mut rebuilt = false;
+        let cached_raw = build_emit_apis_from_source_with(&sibling, cache_root.path(), |_| {
+            rebuilt = true;
+            Ok(raw("sibling", "y2026_1", &[]))
+        })?;
+        assert!(!rebuilt, "warm cache must not trigger a rebuild");
+        assert_eq!(cached_raw, sibling_raw);
+        Ok(())
+    }
+
+    #[test]
+    fn warm_cache_reuses_sibling_metadata_without_rebuilding() -> Result<()> {
+        // A sibling with metadata already cached (e.g. from a prior full `check`)
+        // must be reused as-is; the scoped check never rebuilds it.
+        let cache_root = tempfile::tempdir()?;
+        let sibling_temp = tempfile::tempdir()?;
+        let sibling_dir = fixture_crate_dir(&sibling_temp, "sibling");
+        let sibling = SourceParticipant {
+            build_mode: SourceBuildMode::UseCached,
+            ..SourceParticipant::user_service("sibling", sibling_dir.clone())
+        };
+
+        write_source_emit_apis_cache(
+            cache_root.path(),
+            &sibling_dir,
+            &raw("sibling", "y2026_1", &[]),
+        )?;
+
+        let raw_result = build_emit_apis_from_source_with(&sibling, cache_root.path(), |_| {
+            bail!("UseCached must not build when the cache already has an entry")
+        })?;
+        assert_eq!(raw_result.artifact.id, "sibling");
+        Ok(())
+    }
+
+    #[test]
+    fn build_target_always_builds_and_refreshes_cache_even_when_warm() -> Result<()> {
+        // The named `--service` target is always rebuilt, even if a stale cache
+        // entry exists for it (its `build_mode` is always `Build`, never
+        // `UseCached`, so this documents that the fast path never short-circuits
+        // the one crate the user asked to check).
+        let cache_root = tempfile::tempdir()?;
+        let target_temp = tempfile::tempdir()?;
+        let target_dir = fixture_crate_dir(&target_temp, "other");
+        let target = SourceParticipant::user_service("other", target_dir.clone());
+
+        write_source_emit_apis_cache(
+            cache_root.path(),
+            &target_dir,
+            &raw("other", "stale_generation", &[]),
+        )?;
+
+        let mut built = false;
+        let raw_result = build_emit_apis_from_source_with(&target, cache_root.path(), |_| {
+            built = true;
+            Ok(raw("other", "y2026_1", &[]))
+        })?;
+        assert!(built, "the named --service target must always be built");
+        assert_eq!(raw_result.api_version, "y2026_1");
+        Ok(())
+    }
+
+    #[test]
+    fn cold_cache_sibling_build_failure_still_reports_actionable_error() {
+        // If the on-demand fallback build itself fails (e.g. the sibling crate is
+        // genuinely broken), the error must still point at the full-`check`
+        // recovery path rather than a bare build error.
+        let cache_root = tempfile::tempdir().unwrap();
+        let sibling_temp = tempfile::tempdir().unwrap();
+        let sibling_dir = fixture_crate_dir(&sibling_temp, "bad_sibling");
+        let sibling = SourceParticipant {
+            build_mode: SourceBuildMode::UseCached,
+            ..SourceParticipant::user_service("bad_sibling", sibling_dir)
+        };
+
+        let error = build_emit_apis_from_source_with(&sibling, cache_root.path(), |_| {
+            bail!("simulated build failure")
+        })
+        .expect_err("build failure on a cold cache must surface, not silently pass");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("no cached emit-apis"), "{message}");
+        assert!(
+            message.contains("run `phoxal check` once (no --service)"),
+            "{message}"
+        );
+        assert!(message.contains("simulated build failure"), "{message}");
+    }
+
+    #[test]
+    fn cache_path_changes_with_bus_abi_emit_schema_target_triple_and_not_with_official_artifacts()
+    -> Result<()> {
+        // Official/native artifacts never go through the source cache at all
+        // (they resolve via `fetch_emit_apis_from_native_artifact` /
+        // `fetch_emit_apis_from_native_tool` from the catalog); this test proves
+        // that guarantee holds for the cache *path* helper itself: two distinct
+        // source crates never collide, and the same crate content is
+        // addressed identically (it is a pure function of the source tree plus
+        // the linked framework bus ABI / emit-apis schema / target triple - no
+        // artifact id, kind, or per-package api_version feeds into it).
+        let cache_root = tempfile::tempdir()?;
+        let temp_a = tempfile::tempdir()?;
+        let temp_b = tempfile::tempdir()?;
+        let crate_a = fixture_crate_dir(&temp_a, "crate-a");
+        let crate_b = fixture_crate_dir(&temp_b, "crate-b");
+
+        let path_a = source_emit_apis_cache_path(cache_root.path(), &crate_a)?;
+        let path_b = source_emit_apis_cache_path(cache_root.path(), &crate_b)?;
+        assert_ne!(
+            path_a, path_b,
+            "distinct source trees must not collide on the same cache path"
+        );
+
+        let path_a_again = source_emit_apis_cache_path(cache_root.path(), &crate_a)?;
+        assert_eq!(
+            path_a, path_a_again,
+            "the same source tree must resolve to a stable cache path"
+        );
+
+        // The path embeds this CLI's own linked bus ABI and emit-apis schema,
+        // not anything from a doc - assert those markers are present so a
+        // future change to the identity key is a deliberate, visible edit here.
+        let path_str = path_a.to_string_lossy();
+        assert!(
+            path_str.contains(&sanitize_cache_component(phoxal::bus::BUS_ABI.id())),
+            "{path_str}"
+        );
+        assert!(
+            path_str.contains(&sanitize_cache_component(
+                phoxal::participant::emit::EMIT_SCHEMA
+            )),
+            "{path_str}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_check_is_self_sufficient_on_a_cold_cache_with_official_and_source_participants()
+    -> Result<()> {
+        // Full acceptance scenario: `check --service other` against a graph with
+        // (a) an official platform artifact resolved from the catalog/native
+        // cache, (b) the named source target, and (c) an uncached source
+        // sibling. Everything must resolve from a *completely empty* emit-apis
+        // cache: the official artifact through its own (unrelated) fetch path,
+        // the target by building, and the sibling by the on-demand fallback
+        // build - proving the three metadata sources do not interfere.
+        let cache_root = tempfile::tempdir()?;
+        let target_temp = tempfile::tempdir()?;
+        let sibling_temp = tempfile::tempdir()?;
+        let target_dir = fixture_crate_dir(&target_temp, "other");
+        let sibling_dir = fixture_crate_dir(&sibling_temp, "sibling");
+
+        let all_sources = vec![
+            SourceParticipant::user_service("other", target_dir.clone()),
+            SourceParticipant::user_service("sibling", sibling_dir.clone()),
+        ];
+        let sources = source_participants_for_service(&all_sources, Some("other"));
+
+        let images = vec![("mission".to_string(), "mission:ok".to_string())];
+        let mut official_fetches = 0;
+        let mut source_builds = Vec::new();
+        let outcome = run_check(
+            &images,
+            &[],
+            &sources,
+            |image_ref| {
+                official_fetches += 1;
+                match image_ref {
+                    // Official metadata comes from its own catalog/native-cache
+                    // fetch path, never from the source emit-apis cache this
+                    // change touches.
+                    "mission:ok" => Ok(raw("mission", "y2026_1", &[])),
+                    unexpected => bail!("unexpected image {unexpected}"),
+                }
+            },
+            |_| bail!("no tools should be fetched"),
+            |participant| {
+                source_builds.push(participant.crate_dir.clone());
+                build_emit_apis_from_source_with(participant, cache_root.path(), |dir| {
+                    if dir == target_dir {
+                        Ok(raw("other", "y2026_1", &[]))
+                    } else if dir == sibling_dir {
+                        Ok(raw("sibling", "y2026_1", &[]))
+                    } else {
+                        bail!("unexpected source dir {}", dir.display())
+                    }
+                })
+            },
+        )?;
+
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
+        assert_eq!(
+            official_fetches, 1,
+            "official artifact fetched exactly once"
+        );
+        // Both the target and the previously-uncached sibling were resolved
+        // (the sibling via the cold-cache fallback, not an error).
+        assert_eq!(source_builds, vec![target_dir.clone(), sibling_dir.clone()]);
+
+        // A second scoped run against the now-warm cache reuses the sibling's
+        // metadata: only the named target is rebuilt.
+        let mut second_run_builds = Vec::new();
+        let outcome2 = run_check(
+            &images,
+            &[],
+            &sources,
+            |_| Ok(raw("mission", "y2026_1", &[])),
+            |_| bail!("no tools should be fetched"),
+            |participant| {
+                build_emit_apis_from_source_with(participant, cache_root.path(), |dir| {
+                    second_run_builds.push(dir.to_path_buf());
+                    if dir == target_dir {
+                        Ok(raw("other", "y2026_1", &[]))
+                    } else {
+                        bail!(
+                            "sibling {} must be served from the now-warm cache, not rebuilt",
+                            dir.display()
+                        )
+                    }
+                })
+            },
+        )?;
+        assert!(outcome2.is_ok(), "unexpected outcome: {outcome2:?}");
+        assert_eq!(
+            second_run_builds,
+            vec![target_dir],
+            "only the named --service target rebuilds once the sibling cache is warm"
+        );
+        Ok(())
+    }
+
     #[test]
     fn component_driver_wrong_schema_id_fails_with_mismatch_problem() -> Result<()> {
         // A component driver (subscribing `drive/target`) and a platform publisher
@@ -2962,6 +3376,15 @@ mod tests {
             "{errors:?}"
         );
         Ok(())
+    }
+
+    /// Writes a marker file so the tempdir hashes distinctly under
+    /// `hash_tree` (an empty directory always hashes to the SHA-256 of empty
+    /// input, so two unrelated empty fixture crates would otherwise collide
+    /// on the same source-tree hash and thus the same cache path).
+    fn fixture_crate_dir(temp: &tempfile::TempDir, marker: &str) -> PathBuf {
+        std::fs::write(temp.path().join("Cargo.toml"), marker).expect("write fixture marker");
+        temp.path().to_path_buf()
     }
 
     fn raw(id: &str, api_version: &str, contracts: &[(&str, &str, &str)]) -> RawEmitApis {
