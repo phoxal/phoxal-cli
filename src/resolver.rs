@@ -1184,6 +1184,22 @@ pub fn host_target_triple() -> String {
     })
 }
 
+/// Resolve a user-supplied `--target` selector to the full catalog target
+/// triple official artifacts are cataloged under. Accepts the short arch aliases
+/// (`aarch64`/`arm64`, `x86_64`/`amd64`) or a full triple passed through as-is.
+/// Official artifacts publish gnu Linux assets, so a bare arch maps to the gnu
+/// triple; deploy owns the separate musl cross-build triple.
+pub fn resolve_target_triple(selector: &str) -> Result<String> {
+    Ok(match selector {
+        "aarch64" | "arm64" => "aarch64-unknown-linux-gnu".to_string(),
+        "x86_64" | "amd64" => "x86_64-unknown-linux-gnu".to_string(),
+        other if other.contains('-') => other.to_string(),
+        other => bail!(
+            "unrecognized --target '{other}'; expected aarch64, x86_64, or a full target triple"
+        ),
+    })
+}
+
 fn resolve_user_runtime(
     project_root: &Path,
     name: &str,

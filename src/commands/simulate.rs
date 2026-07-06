@@ -93,6 +93,12 @@ pub struct Simulate {
         help = "Apply a robot.<env>.yaml overlay before simulating (repeatable). Path pins are only legal through overlays."
     )]
     pub env: Vec<String>,
+    #[arg(
+        long,
+        value_name = "TRIPLE",
+        help = "Resolve the robot's official artifacts for this target instead of the host (e.g. aarch64, x86_64, or a full triple). The simulator itself still runs on the host. Use it to plan a Linux robot's simulation from a non-Linux host."
+    )]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +116,7 @@ pub struct SimulateOptions {
     pub message_format: MessageFormat,
     pub watch: bool,
     pub overlays: Vec<String>,
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +150,7 @@ impl Simulate {
             message_format: self.message_format,
             watch: self.watch,
             overlays: self.env.clone(),
+            target: self.target.clone(),
         };
         let mode = if self.dry_run {
             SimulateMode::DryRun
@@ -362,6 +370,14 @@ pub(crate) fn resolve_project(
     // be staged. Component asset git refs are resolved only for live simulate,
     // where Webots world staging genuinely needs local asset files; dry-run
     // reports the intended staged paths without fetching assets.
+    // The robot's own official artifacts (services + component drivers) resolve
+    // for `--target` when set, so a Linux robot can be planned from a non-Linux
+    // host; the simulator itself keeps the host target since Webots runs locally.
+    let official_target = options
+        .target
+        .as_deref()
+        .map(crate::resolver::resolve_target_triple)
+        .transpose()?;
     let resolved = resolve(
         &robot,
         &project_root,
@@ -369,6 +385,7 @@ pub(crate) fn resolve_project(
         ResolveOptions {
             resolve_source_commits: true,
             resolve_component_asset_commits: mode == SimulateMode::Live,
+            official_target_triple: official_target,
             ..ResolveOptions::default()
         },
     )?;
