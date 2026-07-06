@@ -22,7 +22,8 @@ use crate::launch_plan::{
     SITE_TOOL_ROUTER, SubstitutionRecord, build_launch_plan,
 };
 use crate::resolver::{
-    ResolveOptions, ResolvedComponent, ResolvedRobot, RobotManifestExtras, resolve,
+    ResolveOptions, ResolvedComponent, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras,
+    resolve,
 };
 use crate::simulate_staging::{
     ComponentTypeToStage, RobotToStage, StagedSimulationWorld, stage_simulation_world,
@@ -446,10 +447,6 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
                 checked_participants: sim_participants.clone(),
             },
         )?;
-    }
-
-    for warning in &report.warnings {
-        eprintln!("warning: {warning:?}");
     }
 
     build_launch_plan(
@@ -943,6 +940,7 @@ fn stage_and_prepare_webots_spec(app: &AppContext, plan: &SimulatePlan) -> Resul
         &plan.resolved,
         &plan.launch_plan,
     )?;
+    stage_simulator_controller_binaries(&plan.project_root, &plan.resolved, &app.ui)?;
     let webots_path = crate::host_doctor::webots_executable_path()
         .map_err(|error| anyhow!("{error}"))
         .context("failed to locate the Webots executable for live simulate")?;
@@ -960,6 +958,183 @@ fn stage_and_prepare_webots_spec(app: &AppContext, plan: &SimulatePlan) -> Resul
         shutdown_grace: std::time::Duration::from_secs(10),
         note: None,
     })
+}
+
+/// Stage the two Webots controller BINARIES (supervisor + per-robot
+/// controller) into the standard Webots layout,
+/// `dist/simulator/webots/controllers/<controller-name>/<controller-name>`
+/// (`project.rs` names these paths; nothing populated them before this fix).
+/// Webots looks up a world node's `controller "<name>"` field under exactly
+/// this `controllers/<name>/<name>` path; when the executable is missing it
+/// silently falls back to its own built-in `generic` controller instead of
+/// running ours, so this staging step is load-bearing for live simulate, not
+/// cosmetic.
+///
+/// For a PATH-OVERRIDDEN simulator (`runtime.source_path()` is `Some`, the
+/// local-dev / live-gate case), the binary is built fresh with
+/// `crate::commands::run::build_source_binary`, which runs `cargo build --bin
+/// <name>` in the simulator crate and returns the built path - the same
+/// mechanism every other path-overridden participant (services, tools,
+/// drivers) already uses via `run.rs`.
+///
+/// For a CATALOG simulator (no path override), the binary is obtained the
+/// same way every other official/native artifact is provisioned: resolve a
+/// `NativeArtifactDescriptor` from the runtime and look it up in the artifact
+/// cache via `native_artifacts::artifact_binary_path` - mirroring
+/// `commands::run::locate_official_binary`. If that cache entry is missing,
+/// this is a hard error (`NativePending`-style), not a silent skip: a missing
+/// controller binary must never be allowed to fall through to Webots'
+/// `generic` controller unnoticed.
+fn stage_simulator_controller_binaries(
+    project_root: &Path,
+    resolved: &ResolvedRobot,
+    ui: &crate::Ui,
+) -> Result<()> {
+    let project = crate::project::Project::new(project_root)?;
+    let webots_home = detected_webots_home_for_build_env();
+    for runtime in &resolved.simulators {
+        let controller_name = webots_controller_name_for_simulator_artifact(&runtime.name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "unrecognized simulator artifact '{}'; expected '{}' or '{}'",
+                    runtime.name,
+                    SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
+                    SIMULATOR_CONTROLLER_ARTIFACT_NAME
+                )
+            })?;
+        let built_binary = if let Some(crate_dir) = runtime.source_path() {
+            let preferred_name = format!("phoxal-simulator-{}", runtime.name);
+            let _env_guard = webots_home
+                .as_ref()
+                .map(|home| WebotsHomeEnvGuard::set(home));
+            crate::commands::run::build_source_binary(crate_dir, &preferred_name, ui).with_context(
+                || {
+                    format!(
+                        "failed to build path-overridden simulator '{}' from {}",
+                        runtime.name,
+                        crate_dir.display()
+                    )
+                },
+            )?
+        } else {
+            provisioned_official_simulator_binary(runtime)?
+        };
+        let staged_dir = project.staged_webots_controller_dir(controller_name);
+        std::fs::create_dir_all(&staged_dir).with_context(|| {
+            format!(
+                "failed to create staged controller directory {}",
+                staged_dir.display()
+            )
+        })?;
+        let staged_binary = staged_dir.join(controller_name);
+        std::fs::copy(&built_binary, &staged_binary).with_context(|| {
+            format!(
+                "failed to copy simulator binary {} to staged controller path {}",
+                built_binary.display(),
+                staged_binary.display()
+            )
+        })?;
+        crate::utils::make_executable(&staged_binary).with_context(|| {
+            format!(
+                "failed to mark staged controller binary executable: {}",
+                staged_binary.display()
+            )
+        })?;
+        ui.info(format!(
+            "staged simulator controller binary {} at {}",
+            runtime.name,
+            staged_binary.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Map a resolved simulator artifact name to its Webots controller directory
+/// name (the value that must appear in the staged world's `controller "..."`
+/// field and the `controllers/<name>/<name>` staged path) - the inverse
+/// mapping of participant ids, but keyed to the on-disk Webots layout instead
+/// of the bus participant id.
+fn webots_controller_name_for_simulator_artifact(artifact_name: &str) -> Option<&'static str> {
+    if artifact_name == SIMULATOR_SUPERVISOR_ARTIFACT_NAME {
+        Some("phoxal-simulator-webots-supervisor")
+    } else if artifact_name == SIMULATOR_CONTROLLER_ARTIFACT_NAME {
+        Some("phoxal-simulator-webots-controller")
+    } else {
+        None
+    }
+}
+
+/// Obtain the cached native-artifact binary path for a CATALOG (non
+/// path-overridden) simulator runtime, mirroring how
+/// `commands::run::locate_official_binary` resolves every other official
+/// artifact. Errors clearly rather than leaving the controller silently
+/// unstaged when the artifact was never pulled into the cache.
+fn provisioned_official_simulator_binary(runtime: &ResolvedPlatformRuntime) -> Result<PathBuf> {
+    let descriptor = crate::native_artifacts::NativeArtifactDescriptor::from_runtime(runtime)
+        .with_context(|| {
+            format!(
+                "failed to resolve native-artifact descriptor for simulator '{}'",
+                runtime.name
+            )
+        })?
+        .ok_or_else(|| {
+            anyhow!(
+                "simulator '{}' has no native-artifact metadata (missing sha256/emit-apis); run `phoxal-cli pull` or pin a path override",
+                runtime.name
+            )
+        })?;
+    let cached = crate::native_artifacts::artifact_binary_path(&descriptor)?;
+    if !cached.is_file() {
+        bail!(
+            "NativePending: simulator '{}' binary is not in the artifact cache ({}); run `phoxal-cli pull` to fetch it",
+            runtime.name,
+            cached.display()
+        );
+    }
+    Ok(cached)
+}
+
+/// The Webots-linked simulator crates need `WEBOTS_HOME` to build (their
+/// `phoxal-api`/webots-sys build script links against the Webots controller
+/// library). `build_source_binary` inherits the CLI process environment, so
+/// when the live simulate flow already has `WEBOTS_HOME` set (or the caller
+/// relies on the orchestrator to set it) this is a no-op; this only fills the
+/// gap defensively when host_doctor can detect an install but the process
+/// environment does not already carry `WEBOTS_HOME`.
+fn detected_webots_home_for_build_env() -> Option<PathBuf> {
+    if std::env::var_os("WEBOTS_HOME").is_some() {
+        return None;
+    }
+    crate::host_doctor::webots_home_path().ok()
+}
+
+/// RAII guard that sets `WEBOTS_HOME` for the duration of a `build_source_binary`
+/// call when the process environment does not already carry it, and restores
+/// the previous (absent) state afterwards. Process env mutation is otherwise
+/// unsafe to interleave with other threads; live simulate's staging runs
+/// single-threaded ahead of any concurrent build, so this is scoped as
+/// tightly as possible and only used when `WEBOTS_HOME` was confirmed absent.
+struct WebotsHomeEnvGuard;
+
+impl WebotsHomeEnvGuard {
+    fn set(home: &Path) -> Self {
+        // SAFETY: staging runs before any concurrent participant build is
+        // spawned in the live-simulate path, and this guard only ever sets a
+        // variable it first confirmed was absent (`detected_webots_home_for_build_env`).
+        unsafe {
+            std::env::set_var("WEBOTS_HOME", home);
+        }
+        Self
+    }
+}
+
+impl Drop for WebotsHomeEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: see `set` - this only ever clears the variable this guard set.
+        unsafe {
+            std::env::remove_var("WEBOTS_HOME");
+        }
+    }
 }
 
 /// Stage a simulation world for the resolved robot: locate the controller and
@@ -2459,5 +2634,111 @@ components:
             metadata: None,
             path_override: None,
         }
+    }
+
+    /// Write a minimal, fast-building binary crate at `dir` whose package and
+    /// `[[bin]]` name is `bin_name` - stands in for the real
+    /// `phoxal-simulator-webots-{supervisor,controller}` crates without
+    /// depending on the framework workspace or Webots being installed, so
+    /// this test runs in CI regardless of host Webots availability.
+    fn write_fake_simulator_crate(dir: &Path, bin_name: &str) -> Result<()> {
+        fs::create_dir_all(dir.join("src"))?;
+        fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{bin_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"{bin_name}\"\npath = \"src/main.rs\"\n"
+            ),
+        )?;
+        fs::write(
+            dir.join("src/main.rs"),
+            "fn main() {\n    println!(\"fake simulator binary\");\n}\n",
+        )?;
+        Ok(())
+    }
+
+    /// Bug 1 regression test: staging must produce a real, executable
+    /// controller binary at the standard Webots layout
+    /// (`dist/simulator/webots/controllers/<name>/<name>`) for BOTH the
+    /// supervisor and the per-robot controller when the simulators are
+    /// path-overridden (the live-gate case), by actually running `cargo
+    /// build` against fake stand-in crates and copying the result - not just
+    /// asserting a path string was computed.
+    #[test]
+    fn path_overridden_simulators_are_built_and_staged_as_webots_controllers() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root)?;
+
+        let supervisor_dir = temp.path().join("framework/simulator/webots-supervisor");
+        let controller_dir = temp.path().join("framework/simulator/webots-controller");
+        write_fake_simulator_crate(&supervisor_dir, "phoxal-simulator-webots-supervisor")?;
+        write_fake_simulator_crate(&controller_dir, "phoxal-simulator-webots-controller")?;
+
+        let mut resolved = resolved_with_drive_components(&[], false)?;
+        resolved.simulators.clear();
+        let mut supervisor = simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME);
+        supervisor.path_override = Some(supervisor_dir.clone());
+        let mut controller = simulator_runtime(SIMULATOR_CONTROLLER_ARTIFACT_NAME);
+        controller.path_override = Some(controller_dir.clone());
+        resolved.simulators.extend([supervisor, controller]);
+
+        stage_simulator_controller_binaries(&project_root, &resolved, &crate::Ui)?;
+
+        let project = crate::project::Project::new(&project_root)?;
+        let supervisor_binary = project.staged_webots_supervisor_binary();
+        let controller_binary = project.staged_webots_controller_binary();
+
+        for binary in [&supervisor_binary, &controller_binary] {
+            assert!(
+                binary.is_file(),
+                "expected staged controller binary to exist at {}",
+                binary.display()
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(binary)?.permissions().mode();
+                assert!(
+                    mode & 0o111 != 0,
+                    "staged controller binary {} must be executable (mode {mode:o})",
+                    binary.display()
+                );
+            }
+        }
+
+        // Confirm it is genuinely the built binary, not an empty placeholder:
+        // running it must succeed and print the fake marker.
+        let output = std::process::Command::new(&supervisor_binary).output()?;
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("fake simulator binary"),
+            "staged supervisor binary did not run as expected"
+        );
+
+        Ok(())
+    }
+
+    /// A catalog (non path-overridden) simulator with no native-artifact
+    /// metadata and nothing in the artifact cache must fail loudly during
+    /// staging rather than silently leaving the controller unstaged - the
+    /// exact "generic controller" trap bug 1 exists to close.
+    #[test]
+    fn catalog_simulator_missing_from_cache_is_a_hard_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut resolved = resolved_with_drive_components(&[], false)?;
+        resolved.simulators.clear();
+        resolved
+            .simulators
+            .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
+
+        let error = stage_simulator_controller_binaries(temp.path(), &resolved, &crate::Ui)
+            .expect_err("a catalog simulator with no cached binary must error, not silently skip");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("webots-supervisor"),
+            "error should name the simulator that failed to provision: {message}"
+        );
+
+        Ok(())
     }
 }
