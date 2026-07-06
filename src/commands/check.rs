@@ -134,12 +134,9 @@ impl CheckCmd {
             .await
             .context("check worker failed")??;
 
-        // Emit the graph warnings and the v0 pre-stable warning to stderr BEFORE
-        // the hard outcome check so a failing `phoxal check` still surfaces them.
-        // These go to stderr only; JSON stdout (below) stays clean.
-        for warning in &result.outcome.report.warnings {
-            eprintln!("warning: {}", format_warning(warning));
-        }
+        // Emit the v0 pre-stable warning to stderr BEFORE the hard outcome check
+        // so a failing `phoxal check` still surfaces it. This goes to stderr
+        // only; JSON stdout (below) stays clean.
         eprintln!(
             "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
         );
@@ -152,7 +149,6 @@ impl CheckCmd {
             channel: result.channel.clone(),
             catalog_revision: result.catalog_revision.clone(),
             participant_count: result.participant_count,
-            warning_count: result.outcome.report.warnings.len(),
         };
         crate::commands::print_message(
             &output,
@@ -179,7 +175,6 @@ struct CheckOutput {
     channel: String,
     catalog_revision: Option<String>,
     participant_count: usize,
-    warning_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1634,26 +1629,6 @@ fn format_problem(problem: &graph_check::Problem) -> String {
                  rebuild the disagreeing side(s) so they compile against the same contract wire shape (schema_id)"
             )
         }
-        graph_check::Problem::MissingProducer {
-            family,
-            topic,
-            consumers,
-        } => {
-            format!(
-                "no producer for {family} ({topic}); consumed by: {}",
-                consumers.join(", ")
-            )
-        }
-        graph_check::Problem::MissingConsumer {
-            family,
-            topic,
-            producers,
-        } => {
-            format!(
-                "no consumer for {family} ({topic}); produced by: {}",
-                producers.join(", ")
-            )
-        }
         graph_check::Problem::MultipleServerResponders {
             family,
             topic,
@@ -1668,16 +1643,6 @@ fn format_problem(problem: &graph_check::Problem) -> String {
             format!(
                 "invalid config for user service {runtime_id}: {}",
                 errors.join("; ")
-            )
-        }
-        graph_check::Problem::UnresolvedComponentTemplate {
-            artifact_id,
-            template,
-            family,
-            missing,
-        } => {
-            format!(
-                "unresolved component template for {artifact_id}: {family} ({template}) expands to no concrete topic ({missing})"
             )
         }
     }
@@ -1701,21 +1666,6 @@ pub(crate) const fn format_direction(direction: graph_check::Direction) -> &'sta
         graph_check::Direction::QueryResponse => "query_response",
         graph_check::Direction::ServerRequest => "server_request",
         graph_check::Direction::ServerResponse => "server_response",
-    }
-}
-
-fn format_warning(warning: &graph_check::Warning) -> String {
-    match warning {
-        graph_check::Warning::MissingConsumer {
-            family,
-            topic,
-            producers,
-        } => {
-            format!(
-                "no consumer for {family} ({topic}); produced by: {}",
-                producers.join(", ")
-            )
-        }
     }
 }
 
@@ -1919,7 +1869,6 @@ mod tests {
         )?;
 
         assert!(outcome.report.problems.is_empty());
-        assert!(outcome.report.warnings.is_empty());
         Ok(())
     }
 
@@ -2386,10 +2335,11 @@ mod tests {
     }
 
     #[test]
-    fn scoped_service_check_ignores_unrelated_build_failures_but_keeps_topology() -> Result<()> {
+    fn scoped_service_check_ignores_unrelated_build_failures() -> Result<()> {
         // `check --service other`: an unrelated user service that fails to BUILD
-        // must NOT fail the scoped check (its metadata comes from cache), yet a
-        // topology problem contributed by another participant is still detected.
+        // must NOT fail the scoped check (its metadata comes from cache). Under
+        // the relaxed graph check, `bad`'s unsatisfied consumer (from cached
+        // metadata, no producer in the graph) is no longer a reported problem.
         let all_sources = vec![
             SourceParticipant::user_service(
                 "bad".to_string(),
@@ -2431,17 +2381,19 @@ mod tests {
             },
         )?;
 
-        // The unrelated build failure did not abort the check, but `bad`'s
-        // unsatisfied consumer (from cached metadata) is still reported.
-        assert!(matches!(
-            outcome.report.problems.as_slice(),
-            [Problem::MissingProducer { consumers, .. }] if consumers == &vec!["bad".to_string()]
-        ));
+        // The unrelated build failure did not abort the check, and `bad`'s
+        // unsatisfied consumer (from cached metadata) is no longer a problem
+        // under the relaxed graph check.
+        assert!(outcome.report.problems.is_empty());
         Ok(())
     }
 
     #[test]
-    fn scoped_service_check_detects_component_driver_topology_problems() -> Result<()> {
+    fn scoped_service_check_allows_component_driver_with_no_producer() -> Result<()> {
+        // A component driver subscribing to a contract with no producer in the
+        // graph used to be reported as a topology problem, keyed by the
+        // concrete component instance id, not the driver artifact. Under the
+        // relaxed graph check this graph is simply legal.
         let all_sources = vec![
             SourceParticipant::user_service(
                 "other".to_string(),
@@ -2478,16 +2430,12 @@ mod tests {
             },
         )?;
 
-        assert!(matches!(
-            outcome.report.problems.as_slice(),
-            // Keyed by the concrete component instance id, not the driver artifact.
-            [Problem::MissingProducer { consumers, .. }] if consumers == &vec!["left_drive".to_string()]
-        ));
+        assert!(outcome.report.problems.is_empty());
         Ok(())
     }
 
     #[test]
-    fn scoped_service_check_detects_other_user_service_topology_problems() -> Result<()> {
+    fn scoped_service_check_allows_other_user_service_with_no_producer() -> Result<()> {
         let all_sources = vec![
             SourceParticipant::user_service(
                 "bad".to_string(),
@@ -2522,10 +2470,7 @@ mod tests {
             },
         )?;
 
-        assert!(matches!(
-            outcome.report.problems.as_slice(),
-            [Problem::MissingProducer { consumers, .. }] if consumers == &vec!["bad".to_string()]
-        ));
+        assert!(outcome.report.problems.is_empty());
         Ok(())
     }
 

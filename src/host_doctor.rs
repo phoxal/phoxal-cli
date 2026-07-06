@@ -109,6 +109,16 @@ pub fn webots_executable_path() -> Result<PathBuf, HostError> {
     detect_webots_executable().map(|webots| webots.path)
 }
 
+/// Detect the Webots installation directory (`WEBOTS_HOME`-equivalent), the
+/// same resolution `preflight`/`probe_webots_home` use, exposed for callers
+/// (simulator build staging) that want to set `WEBOTS_HOME` defensively for a
+/// child `cargo build` when the process environment does not already carry
+/// it.
+pub fn webots_home_path() -> Result<PathBuf, HostError> {
+    let executable = detect_webots_executable().ok();
+    detect_webots_home(executable.as_ref()).map(|home| home.path)
+}
+
 pub fn probe_version() -> ProbeStatus {
     ProbeStatus::Ok(format!("phoxal-cli {}", env!("CARGO_PKG_VERSION")))
 }
@@ -204,6 +214,22 @@ fn first_line<'a>(stdout: &'a str, fallback: &'a str) -> &'a str {
 }
 
 fn detect_webots_executable() -> Result<WebotsExecutable, HostError> {
+    // Prefer a known install's direct binary (e.g. macOS's
+    // `<home>/Contents/MacOS/webots`) over whatever `webots` resolves to on
+    // PATH. On macOS, Cyberbotics installs a `/usr/local/bin/webots` shim that
+    // is just `open -a /Applications/Webots.app --args "$@"`: `open -a`
+    // detaches and returns 0 immediately, so a child process spawned against
+    // that shim exits at once while the real app keeps running detached. The
+    // direct binary under the app bundle does not have this problem and is
+    // also what a foreground-attached launch needs. Linux/Windows installs do
+    // not carry this indirection, so this ordering is a no-op there whenever
+    // no known install directory exists (the PATH fallback below still
+    // applies for a custom, non-standard install location).
+    if let Some(found) = first_working_executable(known_webots_executable_paths(), "known install")
+    {
+        return Ok(found);
+    }
+
     if let Ok(version) = shell::run_stdout("webots", ["--version"], None) {
         return Ok(WebotsExecutable {
             path: executable_on_path("webots").unwrap_or_else(|| PathBuf::from("webots")),
@@ -212,7 +238,18 @@ fn detect_webots_executable() -> Result<WebotsExecutable, HostError> {
         });
     }
 
-    for candidate in known_webots_executable_paths() {
+    Err(webots_missing())
+}
+
+/// Return the first candidate that exists as a file and responds to
+/// `--version`, tagged with `source`. Pulled out of `detect_webots_executable`
+/// so the known-install-first preference is directly unit-testable against a
+/// fake install layout, without mutating process-global `PATH`/`WEBOTS_HOME`.
+fn first_working_executable(
+    candidates: Vec<PathBuf>,
+    source: &'static str,
+) -> Option<WebotsExecutable> {
+    for candidate in candidates {
         if !candidate.is_file() {
             continue;
         }
@@ -220,15 +257,14 @@ fn detect_webots_executable() -> Result<WebotsExecutable, HostError> {
             continue;
         };
         if let Ok(version) = shell::run_stdout(executable, ["--version"], None) {
-            return Ok(WebotsExecutable {
+            return Some(WebotsExecutable {
                 path: candidate,
                 version: Some(first_line(&version, "version unavailable").to_string()),
-                source: "known install",
+                source,
             });
         }
     }
-
-    Err(webots_missing())
+    None
 }
 
 fn detect_webots_home(executable: Option<&WebotsExecutable>) -> Result<WebotsHome, HostError> {
@@ -436,4 +472,78 @@ fn webots_home_unresolved() -> HostError {
         ],
         Some(DRY_RUN_FALLBACK),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn write_fake_executable(path: &Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, script).unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[test]
+    fn macos_home_candidates_include_the_direct_app_bundle_binary() {
+        let home = Path::new("/Applications/Webots.app");
+        let candidates = webots_executable_candidates_for_home(home);
+        assert!(
+            candidates.contains(&home.join("Contents").join("MacOS").join("webots")),
+            "known-install candidates for a Webots.app-shaped home must include the direct app binary: {candidates:?}"
+        );
+    }
+
+    /// Bug 2 regression test. A fake webots-home dir stands in for
+    /// `/Applications/Webots.app`, with only its direct `Contents/MacOS/webots`
+    /// binary present (no `<home>/webots`, matching the real app bundle
+    /// layout). `first_working_executable` over that home's known-install
+    /// candidates must find and select the direct binary. This is the exact
+    /// selection `detect_webots_executable` now runs *before* ever falling
+    /// back to whatever `webots` resolves to on PATH - which on a real macOS
+    /// host is `/usr/local/bin/webots`, an `open -a` shim that exits 0
+    /// instantly without actually launching anything attached. Preferring the
+    /// known-install candidates first means the direct binary wins over that
+    /// shim whenever a standard install is present.
+    #[cfg(unix)]
+    #[test]
+    fn known_install_selection_finds_the_direct_binary_for_a_fake_webots_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("Webots.app");
+        let direct_binary = home.join("Contents").join("MacOS").join("webots");
+        write_fake_executable(
+            &direct_binary,
+            "#!/bin/sh\necho \"Webots R2026a\"\nexit 0\n",
+        );
+
+        let candidates = webots_executable_candidates_for_home(&home);
+        let found = first_working_executable(candidates, "known install")
+            .expect("the fake direct binary should be found and respond to --version");
+        assert_eq!(found.path, direct_binary);
+        assert_eq!(found.source, "known install");
+    }
+
+    /// Companion to the regression test above: even when a PATH-style
+    /// candidate list is placed first (as `detect_webots_executable` used to
+    /// do), `first_working_executable` just returns whatever is first that
+    /// works - so the fix is entirely in the *order* `detect_webots_executable`
+    /// now calls it: known-install candidates, then PATH. This test pins that
+    /// an `open -a`-style wrapper (exits 0 instantly, no stdout) still counts
+    /// as "working" by this helper's own criteria, which is exactly why the
+    /// ordering (not the working-ness check) is what had to change.
+    #[cfg(unix)]
+    #[test]
+    fn an_instant_exit_wrapper_still_looks_like_it_works_in_isolation() {
+        let temp = tempfile::tempdir().unwrap();
+        let wrapper = temp.path().join("webots");
+        write_fake_executable(&wrapper, "#!/bin/sh\nexit 0\n");
+
+        let found = first_working_executable(vec![wrapper.clone()], "PATH")
+            .expect("an instantly-exiting script still passes the --version probe");
+        assert_eq!(found.path, wrapper);
+    }
 }

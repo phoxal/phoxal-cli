@@ -273,10 +273,6 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
             &outcome,
         )?;
     }
-    for warning in &outcome.report.warnings {
-        ui.warn(format!("graph warning: {warning:?}"));
-    }
-
     let plan = build_launch_plan(
         LaunchMode::Run,
         &[CheckedRobotLaunchInput {
