@@ -48,18 +48,35 @@ pub struct NativeArtifactDescriptor {
     pub version: String,
     pub asset: String,
     pub sha256: String,
-    pub metadata: ResolvedArtifactMetadata,
+    /// The packaged emit-apis sidecar metadata. `Some` for every kind that
+    /// ships a runtime binary (service/driver/tool/simulator); `None` for
+    /// `component_assets` - a target-independent asset bundle has no runtime
+    /// binary to describe (docs #21), so it ships no emit-apis sidecar at all.
+    pub metadata: Option<ResolvedArtifactMetadata>,
+    /// The binary name inside the unpacked tarball. Empty for
+    /// `component_assets` - an asset bundle has no binary.
     pub binary_name: String,
 }
 
 impl NativeArtifactDescriptor {
+    /// Build a descriptor from any resolved official artifact that carries a
+    /// release asset: a service/simulator ([`ResolvedPlatformRuntime`]) or -
+    /// via [`crate::resolver::ResolvedComponentPackage::catalog_runtime`] - a
+    /// catalog-resolved component assets bundle or driver, since both project
+    /// onto the identical `ResolvedPlatformRuntime` shape. Returns `None` when
+    /// there is no release asset to stage (a path override, or a catalog entry
+    /// with no release asset for this scope yet).
     pub fn from_runtime(runtime: &ResolvedPlatformRuntime) -> Result<Option<Self>> {
-        let (Some(sha256), Some(metadata)) = (&runtime.sha256, &runtime.metadata) else {
+        let Some(sha256) = &runtime.sha256 else {
             return Ok(None);
         };
         if runtime.path_override.is_some() {
             return Ok(None);
         }
+        let binary_name = match runtime.kind {
+            ArtifactKind::ComponentAssets => String::new(),
+            _ => official_binary_name(runtime.kind, &runtime.name),
+        };
         Ok(Some(Self {
             package_id: runtime.package.clone(),
             kind: runtime.kind,
@@ -67,8 +84,8 @@ impl NativeArtifactDescriptor {
             version: runtime.version.clone(),
             asset: runtime.artifact_ref().to_string(),
             sha256: sha256.clone(),
-            metadata: metadata.clone(),
-            binary_name: official_binary_name(runtime.kind, &runtime.name),
+            metadata: runtime.metadata.clone(),
+            binary_name,
         }))
     }
 
@@ -86,7 +103,7 @@ impl NativeArtifactDescriptor {
             version: tool.resolved.clone(),
             asset: tool.asset.clone(),
             sha256: tool.sha256.clone(),
-            metadata: metadata.clone(),
+            metadata: Some(metadata.clone()),
             binary_name: tool.binary_name.clone(),
         }))
     }
@@ -127,6 +144,24 @@ pub fn stage_tool(
     stage_descriptor(ui, &descriptor, mode).map(Some)
 }
 
+/// Stage a resolved component package's (assets or driver) catalog bundle.
+/// `None` when the package is not catalog-sourced (`Path`/`Git` - a local
+/// override with no release asset to fetch) or when the catalog entry has no
+/// release asset for the needed scope yet. Reuses the identical
+/// [`NativeArtifactDescriptor`]/[`stage_descriptor`] machinery services and
+/// tools already stage through - a component's `catalog_runtime` projects onto
+/// the same [`ResolvedPlatformRuntime`] shape.
+pub fn stage_component_package(
+    ui: Option<&Ui>,
+    package: &crate::resolver::ResolvedComponentPackage,
+    mode: ProvisioningMode,
+) -> Result<Option<PathBuf>> {
+    let Some(runtime) = &package.catalog_runtime else {
+        return Ok(None);
+    };
+    stage_runtime(ui, runtime, mode)
+}
+
 pub fn stage_resolved_artifacts(
     ui: Option<&Ui>,
     resolved: &crate::resolver::ResolvedRobot,
@@ -148,9 +183,131 @@ pub fn stage_resolved_artifacts(
             count += 1;
         }
     }
+    // One component id may back several instances (`left_drive`/`right_drive`
+    // both resolve `phoxal/component-ddsm115-*`); stage each distinct package
+    // once. Path/Git-sourced packages have no `catalog_runtime` and are
+    // skipped here - they already have a local source directory.
+    let mut staged_packages = std::collections::BTreeSet::new();
+    for component in &resolved.components {
+        if staged_packages.insert(component.assets.package.clone())
+            && stage_component_package(ui, &component.assets, mode)?.is_some()
+        {
+            count += 1;
+        }
+        if let Some(driver) = &component.driver
+            && staged_packages.insert(driver.package.clone())
+            && stage_component_package(ui, driver, mode)?.is_some()
+        {
+            count += 1;
+        }
+    }
     Ok(count)
 }
 
+/// Stage every resolved component's `component_assets` bundle
+/// (`component.yaml`, `structure.urdf`, `simulation.yaml`, `meshes/`) into
+/// `<robot_root>/components/<component-id>/`, so `robot_root`-relative asset
+/// resolution (`PHOXAL_ROBOT_ROOT` + `PHOXAL_COMPONENT_INSTANCE`, see
+/// `phoxal::participant::launch`) finds the same shape for `run`/`simulate`
+/// that deploy already stages under `/opt/phoxal/components/` (docs #21). One
+/// component id may back several instances; its bundle is copied once and
+/// shared. A no-op when the resolved source directory already IS
+/// `<robot_root>/components/<id>` (the common `Path`-pinned dev-overlay case),
+/// since only a `Catalog`/`Git` resolution whose files live elsewhere needs an
+/// actual copy.
+pub fn stage_component_bundles_into_robot_root(
+    project_root: &Path,
+    robot_root: &Path,
+    resolved: &crate::resolver::ResolvedRobot,
+) -> Result<()> {
+    let mut staged = std::collections::BTreeSet::new();
+    for component in &resolved.components {
+        let component_id = &component.source_name;
+        if !staged.insert(component_id.clone()) {
+            continue;
+        }
+        let source_dir = crate::component_driver::component_assets_dir(component, project_root)
+            .with_context(|| format!("failed to locate component assets for '{component_id}'"))?;
+        let dest_dir = robot_root.join("components").join(component_id);
+        if source_dir == dest_dir {
+            continue;
+        }
+        copy_component_bundle_files(&source_dir, &dest_dir)?;
+    }
+    Ok(())
+}
+
+/// Copy one component's asset bundle files from `source_dir` into `dest_dir`.
+/// `component.yaml` is required; `structure.urdf`/`simulation.yaml`/`meshes/`
+/// are optional per component.
+fn copy_component_bundle_files(source_dir: &Path, dest_dir: &Path) -> Result<()> {
+    const COMPONENT_FILE: &str = "component.yaml";
+    const OPTIONAL_FILES: [&str; 2] = ["structure.urdf", "simulation.yaml"];
+    const MESHES_DIR: &str = "meshes";
+
+    fs::create_dir_all(dest_dir)
+        .with_context(|| format!("failed to create {}", dest_dir.display()))?;
+
+    let component_file = source_dir.join(COMPONENT_FILE);
+    fs::copy(&component_file, dest_dir.join(COMPONENT_FILE)).with_context(|| {
+        format!(
+            "failed to stage component metadata {} to {}",
+            component_file.display(),
+            dest_dir.display()
+        )
+    })?;
+
+    for optional_file in OPTIONAL_FILES {
+        let source_file = source_dir.join(optional_file);
+        if !source_file.is_file() {
+            continue;
+        }
+        fs::copy(&source_file, dest_dir.join(optional_file)).with_context(|| {
+            format!(
+                "failed to stage {} to {}",
+                source_file.display(),
+                dest_dir.display()
+            )
+        })?;
+    }
+
+    let meshes_source = source_dir.join(MESHES_DIR);
+    if meshes_source.is_dir() {
+        copy_dir_recursive_into(&meshes_source, &dest_dir.join(MESHES_DIR))?;
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive_into(source: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest).with_context(|| format!("failed to create {}", dest.display()))?;
+    for entry in
+        fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let source_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive_into(&source_path, &dest_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &dest_path).with_context(|| {
+                format!(
+                    "failed to stage {} to {}",
+                    source_path.display(),
+                    dest_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Stage one native artifact's tarball into the local cache, unpacking it,
+/// then - only when the descriptor carries `Some` metadata - fetching its
+/// packaged emit-apis sidecar. `component_assets` descriptors carry no
+/// metadata (docs #21), so they skip the sidecar entirely and stage the
+/// tarball only; every other kind (service/driver/tool/simulator) always has
+/// one.
 pub fn stage_descriptor(
     ui: Option<&Ui>,
     descriptor: &NativeArtifactDescriptor,
@@ -159,7 +316,14 @@ pub fn stage_descriptor(
     let root = artifact_cache_dir(descriptor)?;
     let metadata = metadata_path(descriptor)?;
     let binary = root.join(&descriptor.binary_name);
-    if mode == ProvisioningMode::MissingOnly && metadata.is_file() {
+    // A descriptor with no metadata (component_assets) is "already staged"
+    // once the tarball is unpacked - probe the cache root itself instead of a
+    // metadata sidecar that will never exist.
+    let already_staged = match &metadata {
+        Some(metadata) => metadata.is_file(),
+        None => root.is_dir(),
+    };
+    if mode == ProvisioningMode::MissingOnly && already_staged {
         return Ok(binary);
     }
 
@@ -180,23 +344,35 @@ pub fn stage_descriptor(
     verify_file_sha256(&asset_path, &descriptor.sha256)?;
     unpack_asset(&asset_path, &root)?;
     // The packaged emit-apis metadata ships as its own release asset next to
-    // the archive, not inside it.
-    let emit_apis_bytes = download_release_asset(
-        &descriptor.tag(),
-        &descriptor.metadata.emit_apis,
-        &descriptor.metadata.emit_apis_sha256,
-    )?;
-    write_file_atomic(&metadata, &emit_apis_bytes)?;
-    verify_file_sha256(&metadata, &descriptor.metadata.emit_apis_sha256)?;
+    // the archive, not inside it - only for kinds that have one.
+    if let (Some(descriptor_metadata), Some(metadata_path)) = (&descriptor.metadata, &metadata) {
+        let emit_apis_bytes = download_release_asset(
+            &descriptor.tag(),
+            &descriptor_metadata.emit_apis,
+            &descriptor_metadata.emit_apis_sha256,
+        )?;
+        write_file_atomic(metadata_path, &emit_apis_bytes)?;
+        verify_file_sha256(metadata_path, &descriptor_metadata.emit_apis_sha256)?;
+    }
     if binary.is_file() {
         make_executable(&binary)?;
     }
     Ok(binary)
 }
 
+/// Read a staged artifact's packaged emit-apis JSON, staging it first if
+/// necessary. Only meaningful for a descriptor that carries `Some` metadata -
+/// callers must not call this for a `component_assets` descriptor (it has no
+/// emit-apis at all); see [`NativeArtifactDescriptor::metadata`].
 pub fn read_packaged_emit_apis(descriptor: &NativeArtifactDescriptor) -> Result<String> {
+    let metadata = metadata_path(descriptor)?.ok_or_else(|| {
+        anyhow!(
+            "{} {} has no emit-apis metadata to read (component_assets never does)",
+            descriptor.kind,
+            descriptor.name
+        )
+    })?;
     stage_descriptor(None, descriptor, ProvisioningMode::MissingOnly)?;
-    let metadata = metadata_path(descriptor)?;
     fs::read_to_string(&metadata)
         .with_context(|| format!("failed to read packaged emit-apis {}", metadata.display()))
 }
@@ -212,8 +388,15 @@ pub fn artifact_cache_dir(descriptor: &NativeArtifactDescriptor) -> Result<PathB
         .join(sanitize_path_segment(&descriptor.asset)))
 }
 
-pub fn metadata_path(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
-    Ok(artifact_cache_dir(descriptor)?.join(&descriptor.metadata.emit_apis))
+/// The packaged emit-apis sidecar's cache path, or `None` for a descriptor
+/// with no metadata (`component_assets`).
+pub fn metadata_path(descriptor: &NativeArtifactDescriptor) -> Result<Option<PathBuf>> {
+    let Some(metadata) = &descriptor.metadata else {
+        return Ok(None);
+    };
+    Ok(Some(
+        artifact_cache_dir(descriptor)?.join(&metadata.emit_apis),
+    ))
 }
 
 fn cached_asset_path(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {

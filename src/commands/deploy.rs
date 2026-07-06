@@ -801,12 +801,17 @@ fn prepare_deploy(
         .collect::<Vec<_>>();
     ensure_no_native_c_source_dependencies(&checked_source_participants)?;
     let robot_graph = robot_graph_from_resolved(&resolved);
-    let platform_refs = platform_artifact_refs_from_resolved(&resolved);
-    let official_by_ref = resolved
+    let mut platform_refs = platform_artifact_refs_from_resolved(&resolved);
+    platform_refs
+        .extend(crate::commands::check::component_driver_platform_refs_from_resolved(&resolved));
+    let mut official_by_ref = resolved
         .platform_runtimes
         .iter()
         .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
         .collect::<BTreeMap<_, _>>();
+    official_by_ref.extend(crate::commands::check::component_driver_runtimes_by_ref(
+        &resolved,
+    ));
     let outcome = run_check_with_context(
         &platform_refs,
         &[],
@@ -1822,6 +1827,48 @@ fn crate_name_from_package_id(package_id: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Every resolved runtime deploy stages like a service: the platform runtimes
+/// AND every Catalog-sourced component driver's `catalog_runtime` (docs #21 -
+/// a driver projects onto the identical `ResolvedPlatformRuntime` shape). One
+/// component id may back several instances sharing the same driver package;
+/// this yields each distinct one once.
+fn official_runtimes_including_component_drivers(
+    resolved: &ResolvedRobot,
+) -> Vec<&ResolvedPlatformRuntime> {
+    let mut seen = BTreeSet::new();
+    let mut runtimes = Vec::new();
+    for runtime in &resolved.platform_runtimes {
+        if seen.insert(runtime.package.clone()) {
+            runtimes.push(runtime);
+        }
+    }
+    for driver in resolved
+        .components
+        .iter()
+        .filter_map(|component| component.driver.as_ref())
+        .filter(|driver| matches!(driver.source, ResolvedComponentSource::Catalog))
+    {
+        if let Some(runtime) = &driver.catalog_runtime
+            && seen.insert(runtime.package.clone())
+        {
+            runtimes.push(runtime);
+        }
+    }
+    runtimes
+}
+
+/// Find a resolved runtime (service, simulator, or Catalog-sourced component
+/// driver) by its participant/launch `artifact_id` - a driver's is the
+/// component id (`runtime.name`), matching how a service's is its own name.
+fn official_runtime_by_artifact_id<'a>(
+    resolved: &'a ResolvedRobot,
+    artifact_id: &str,
+) -> Option<&'a ResolvedPlatformRuntime> {
+    official_runtimes_including_component_drivers(resolved)
+        .into_iter()
+        .find(|runtime| runtime.name == artifact_id)
+}
+
 fn stage_official_artifacts(
     root: &Path,
     resolved: &ResolvedRobot,
@@ -1829,7 +1876,7 @@ fn stage_official_artifacts(
     require_binaries: bool,
 ) -> Result<BTreeMap<String, OfficialArtifactPlan>> {
     let mut artifacts = BTreeMap::new();
-    for runtime in &resolved.platform_runtimes {
+    for runtime in official_runtimes_including_component_drivers(resolved) {
         if !plan.robots.iter().any(|robot| {
             robot.participants.iter().any(|participant| {
                 participant.artifact_id == runtime.name
@@ -2294,10 +2341,7 @@ fn participant_binary_name(
             Ok(format!("driver-{}", participant.artifact_id))
         }
         ParticipantExecution::OfficialArtifact { .. } => {
-            let runtime = resolved
-                .platform_runtimes
-                .iter()
-                .find(|runtime| runtime.name == participant.artifact_id)
+            let runtime = official_runtime_by_artifact_id(resolved, &participant.artifact_id)
                 .ok_or_else(|| {
                     anyhow!(
                         "official participant {} has no resolved runtime",
@@ -2420,12 +2464,13 @@ fn write_robot_yaml(root: &Path, robot: &Robot) -> Result<()> {
 /// component checkout happened to live - only the resolved
 /// `component_assets` package's own source directory matters.
 ///
-/// Only `Path`-sourced (dev-overlay-pinned) assets are staged here, matching
-/// the pre-existing metadata-staging contract: this step copies local files
-/// synchronously while rendering the payload and must not reach the network
-/// or the release-asset cache. A `Git`- or `Catalog`-sourced assets package is
-/// staged by the artifact-provisioning path instead (`native_artifacts`/`pull`),
-/// not this local metadata copy.
+/// `Path`-sourced (dev-overlay-pinned) assets stage from their local checkout
+/// directly. `Catalog`-sourced assets stage from the CLI's native-artifact
+/// cache ONLY - never the network, matching the pre-existing offline
+/// guarantee official service/tool binaries already have (`phoxal-cli pull`
+/// populates the cache; deploy, live or `--dry-run`, only ever reads it). A
+/// `Git`-sourced assets package is not staged here (no local checkout in the
+/// deploy flow) - unchanged pre-existing scope.
 fn stage_payload_metadata(
     project_root: &Path,
     root: &Path,
@@ -2442,18 +2487,22 @@ fn stage_payload_metadata(
 
     let mut staged_components = BTreeSet::new();
     for component in &resolved.components {
-        if !matches!(
-            component.assets.source,
-            ResolvedComponentSource::Path { .. }
-        ) {
-            continue;
-        }
         let component_id = &component.source_name;
+        let source_dir = match &component.assets.source {
+            ResolvedComponentSource::Path { .. } => Some(
+                crate::component_driver::component_assets_dir(component, project_root)?,
+            ),
+            ResolvedComponentSource::Catalog => {
+                locate_cached_component_assets_dir(&component.assets)?
+            }
+            ResolvedComponentSource::Git { .. } => None,
+        };
+        let Some(source_dir) = source_dir else {
+            continue;
+        };
         if !staged_components.insert(component_id.clone()) {
             continue;
         }
-        let source_dir = crate::component_driver::component_assets_dir(component, project_root)
-            .with_context(|| format!("failed to locate component assets for '{component_id}'"))?;
         let payload_dir = payload_components_dir(root).join(component_id);
         staged_files.extend(stage_component_assets_bundle(
             root,
@@ -2464,6 +2513,30 @@ fn stage_payload_metadata(
     }
 
     Ok(staged_files)
+}
+
+/// Locate a Catalog-sourced `component_assets` package's already-staged cache
+/// directory, WITHOUT downloading - deploy (live or `--dry-run`) must never
+/// reach the network for artifacts; `phoxal-cli pull` is what populates this
+/// cache. `Ok(None)` when nothing is cached yet (a fresh clean machine that
+/// has not run `pull`) - the caller skips staging that component's assets
+/// rather than erroring, since deploy's live-artifact `NativePending` gate
+/// (`stage_official_artifacts`) is the authoritative "not available locally"
+/// diagnostic surface; a missing assets-only bundle does not block a
+/// hardware-driver deploy.
+fn locate_cached_component_assets_dir(
+    package: &crate::resolver::ResolvedComponentPackage,
+) -> Result<Option<PathBuf>> {
+    let Some(runtime) = &package.catalog_runtime else {
+        return Ok(None);
+    };
+    let Some(descriptor) =
+        crate::native_artifacts::NativeArtifactDescriptor::from_runtime(runtime)?
+    else {
+        return Ok(None);
+    };
+    let cache_dir = crate::native_artifacts::artifact_cache_dir(&descriptor)?;
+    Ok(cache_dir.is_dir().then_some(cache_dir))
 }
 
 fn payload_components_dir(root: &Path) -> PathBuf {
@@ -2625,11 +2698,10 @@ fn release_record(
     for participant in &plan.robots[0].participants {
         match &participant.execution {
             ParticipantExecution::OfficialArtifact { .. } => {
-                let runtime = resolved
-                    .platform_runtimes
-                    .iter()
-                    .find(|runtime| runtime.name == participant.artifact_id)
-                    .ok_or_else(|| anyhow!("missing runtime for {}", participant.artifact_id))?;
+                let runtime = official_runtime_by_artifact_id(resolved, &participant.artifact_id)
+                    .ok_or_else(|| {
+                    anyhow!("missing runtime for {}", participant.artifact_id)
+                })?;
                 if let Some(artifact) = official_plans.get(&runtime.package) {
                     artifacts
                         .entry(artifact.artifact_id.clone())
@@ -3531,6 +3603,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
+    use crate::resolver::ResolvedComponent;
     use clap::Parser;
     use phoxal_cli_test_support::write_basic_project;
 
@@ -4509,6 +4582,195 @@ capabilities:
         assert!(right.contains("SupplementaryGroups=i2c"));
         assert!(left.contains("ExecStart=/opt/phoxal/bin/driver-ddsm115"));
         assert!(right.contains("ExecStart=/opt/phoxal/bin/driver-ddsm115"));
+        Ok(())
+    }
+
+    fn resolved_with_components(
+        components: Vec<crate::resolver::ResolvedComponent>,
+    ) -> Result<ResolvedRobot> {
+        Ok(ResolvedRobot {
+            robot: Robot::parse_from_string(MINIMAL_RESOLVED_ROBOT_YAML)?,
+            target_generation: "y2026_1".to_string(),
+            channel: phoxal::model::robot::v1::Channel::Stable,
+            target: crate::resolver::host_target_triple(),
+            catalog_revision: None,
+            platform_runtimes: Vec::new(),
+            simulators: Vec::new(),
+            user_runtimes: Vec::new(),
+            components,
+            tools: Vec::new(),
+            path_overrides: Vec::new(),
+        })
+    }
+
+    const MINIMAL_RESOLVED_ROBOT_YAML: &str = r#"schema: v0
+robot:
+  id: testbot
+  namespace: test
+  kinematic:
+    kind: omnidirectional
+    actuators: []
+    encoders: []
+  components: {}
+artifacts:
+  generation: y2026_1
+"#;
+
+    /// A Catalog-sourced component package with a populated `catalog_runtime`
+    /// but nothing warmed in the local artifact cache - the shape a fresh
+    /// clean machine sees before any `phoxal-cli pull`.
+    fn cold_cache_catalog_component_package(
+        package: &str,
+        kind: crate::catalog::ArtifactKind,
+        component_name: &str,
+    ) -> crate::resolver::ResolvedComponentPackage {
+        crate::resolver::ResolvedComponentPackage {
+            package: package.to_string(),
+            kind,
+            source: ResolvedComponentSource::Catalog,
+            path_override: None,
+            catalog_runtime: Some(ResolvedPlatformRuntime {
+                name: component_name.to_string(),
+                package: package.to_string(),
+                kind,
+                generation: "y2026_1".to_string(),
+                version: "0.1.0".to_string(),
+                artifact_ref: format!(
+                    "phoxal-component-{component_name}-{}-v0.1.0-aarch64-unknown-linux-gnu.tar.zst",
+                    kind.catalog_kind()
+                ),
+                sha256: Some("a".repeat(64)),
+                metadata: (kind == crate::catalog::ArtifactKind::ComponentDriver).then(|| {
+                    crate::resolver::ResolvedArtifactMetadata {
+                        emit_apis: format!("{component_name}.emit-apis.json"),
+                        emit_apis_sha256: "b".repeat(64),
+                    }
+                }),
+                target_status: Some(ArtifactStatus::Released),
+                per_triple_status: BTreeMap::new(),
+                changed_contracts: Vec::new(),
+                contract_uses: Vec::new(),
+                path_override: None,
+            }),
+        }
+    }
+
+    /// Points `PHOXAL_HOME` (and therefore the native-artifact cache) at a
+    /// scratch directory so this test's "nothing cached yet" assumption is
+    /// exact, and the cache location is process-isolated for the duration
+    /// of this guard.
+    struct ScratchPhoxalHome {
+        _root: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScratchPhoxalHome {
+        fn new() -> Result<Self> {
+            let root = tempfile::tempdir()?;
+            let previous = std::env::var_os("PHOXAL_HOME");
+            // SAFETY: test-only, and this guard's Drop restores the prior
+            // value before the temp dir it points at is removed.
+            unsafe {
+                std::env::set_var("PHOXAL_HOME", root.path());
+            }
+            Ok(Self {
+                _root: root,
+                previous,
+            })
+        }
+    }
+
+    impl Drop for ScratchPhoxalHome {
+        fn drop(&mut self) {
+            // SAFETY: see `new`.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("PHOXAL_HOME", value),
+                    None => std::env::remove_var("PHOXAL_HOME"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dry_run_stays_offline_for_catalog_resolved_component_driver() -> Result<()> {
+        // Band B kept `deploy --dry-run` from resolving git component
+        // commits so it never touches the network; a Catalog-sourced
+        // component driver/assets pair must uphold the identical guarantee.
+        // This exercises exactly the two functions `render_payload` calls to
+        // stage a component's driver binary / assets bundle
+        // (`stage_official_artifacts`'s runtime lookup and
+        // `locate_cached_component_assets_dir`) directly against a cold
+        // cache, bypassing the graph-check emit-apis fetch (a pre-existing,
+        // symmetric-with-services network dependency that is unrelated to
+        // this staging step and out of this change's scope). Observing a
+        // clean, local-only result - `NativePending`-eligible missing
+        // binary, no cached assets dir - proves neither function reaches
+        // for the network; this process has real internet access, so a
+        // download attempt against the fixture's made-up (unpublished)
+        // asset name would surface as a loud HTTP/connection error, not a
+        // silent hang.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
+
+        let driver_package = cold_cache_catalog_component_package(
+            "phoxal/component-ddsm115-driver",
+            crate::catalog::ArtifactKind::ComponentDriver,
+            "ddsm115",
+        );
+        let assets_package = cold_cache_catalog_component_package(
+            "phoxal/component-ddsm115-assets",
+            crate::catalog::ArtifactKind::ComponentAssets,
+            "ddsm115",
+        );
+
+        let mut resolved = resolved_with_components(vec![ResolvedComponent {
+            instance: "left_drive".to_string(),
+            source_name: "ddsm115".to_string(),
+            assets: assets_package.clone(),
+            driver: Some(driver_package),
+            has_driver: true,
+        }])?;
+        resolved.tools.push(ResolvedTool {
+            name: SITE_TOOL_ROUTER.to_string(),
+            package: "phoxal/tool-router".to_string(),
+            requested: "0.1.0".to_string(),
+            resolved: "0.1.0".to_string(),
+            repo: "phoxal/framework".to_string(),
+            asset: "phoxal-tool-router-0.1.0-aarch64-unknown-linux-gnu.tar.zst".to_string(),
+            binary_name: "phoxal-tool-router".to_string(),
+            sha256: "0".repeat(64),
+            metadata: None,
+            path_override: Some(PathBuf::from("/fake/router")),
+        });
+
+        // 1) `official_runtime_by_artifact_id` finds the driver's
+        //    `catalog_runtime` (proving it is visible through the same
+        //    lookup a service uses).
+        let found = official_runtime_by_artifact_id(&resolved, "ddsm115")
+            .expect("catalog driver runtime must be discoverable by its artifact id");
+        assert_eq!(found.package, "phoxal/component-ddsm115-driver");
+
+        // 2) `official_runtime_plan` (what `stage_official_artifacts` calls)
+        //    reports the binary as locally absent rather than downloading -
+        //    a cold cache yields `source_path: None`, which the caller
+        //    turns into `NativePending` for a live deploy or a tolerated
+        //    "missing" entry for `--dry-run`.
+        let root = tempfile::tempdir()?;
+        let plan = official_runtime_plan(root.path(), found)?;
+        assert!(
+            plan.source_path.is_none(),
+            "a cold cache must report no local binary, not download one"
+        );
+        assert!(plan.missing_label.is_none(), "target_status is Released");
+
+        // 3) `locate_cached_component_assets_dir` returns `None` on a cold
+        //    cache instead of fetching the assets bundle.
+        assert_eq!(
+            locate_cached_component_assets_dir(&assets_package)?,
+            None,
+            "a cold cache must report no cached assets dir, not download one"
+        );
+
         Ok(())
     }
 

@@ -489,13 +489,6 @@ pub(crate) fn watch_targets_from_sources(
 ) -> Vec<WatchTarget> {
     let mut grouped = BTreeMap::<(WatchTargetKind, PathBuf, String), WatchTarget>::new();
     for participant in source_participants {
-        if participant
-            .crate_dir
-            .to_string_lossy()
-            .starts_with("<catalog:")
-        {
-            continue;
-        }
         let kind = match participant.kind {
             SourceParticipantKind::UserService | SourceParticipantKind::OfficialService => {
                 WatchTargetKind::Service

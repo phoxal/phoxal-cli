@@ -8,13 +8,13 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 
 use crate::AppContext;
-use crate::catalog::{ArtifactKind, CatalogEntry, CatalogRevision, Channel as CatalogChannel};
+use crate::catalog::CatalogRevision;
 use crate::commands::MessageFormat;
 use crate::commands::check::{
-    CheckGraphContext, RawEmitApis, SourceParticipant, SourceParticipantKind,
-    build_emit_apis_from_source, fetch_emit_apis_from_native_artifact,
-    platform_artifact_refs_from_resolved, robot_graph_from_resolved, run_check_with_context,
-    source_participants_building_only_crate, source_participants_from_resolved,
+    CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
+    fetch_emit_apis_from_native_artifact, platform_artifact_refs_from_resolved,
+    robot_graph_from_resolved, run_check_with_context, source_participants_building_only_crate,
+    source_participants_from_resolved,
 };
 use crate::component_driver::{component_assets_dir, component_driver_crate_dir};
 use crate::launch_plan::{
@@ -22,8 +22,7 @@ use crate::launch_plan::{
     SITE_TOOL_ROUTER, SubstitutionRecord, build_launch_plan,
 };
 use crate::resolver::{
-    ResolveOptions, ResolvedComponent, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras,
-    resolve,
+    ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras, resolve,
 };
 use crate::simulate_staging::{
     ComponentTypeToStage, RobotToStage, StagedSimulationWorld, stage_simulation_world,
@@ -297,6 +296,14 @@ fn prepare_with_mode(
     mode: SimulateMode,
 ) -> Result<SimulatePlan> {
     let resolved = resolve_project(project_start, options.clone(), mode)?;
+    if mode == SimulateMode::Live {
+        crate::native_artifacts::stage_component_bundles_into_robot_root(
+            &resolved.project_root,
+            &resolved.project_root,
+            &resolved.resolved,
+        )
+        .context("failed to stage component assets into the simulation robot root")?;
+    }
     let launch_plan = build_checked_sim_launch_plan(
         &resolved.project_root,
         &resolved.resolved,
@@ -398,13 +405,21 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
         source_participants =
             source_participants_building_only_crate(&source_participants, crate_dir);
     }
-    let platform_refs = platform_artifact_refs_from_resolved(resolved);
-    let official_by_ref = resolved
+    // A Catalog-sourced component driver is a platform ref here too (docs
+    // #21), exactly like `check`/`run`/`deploy` - fetched from its packaged
+    // release asset rather than built from source. Only a Path/Git-overridden
+    // driver crate reaches the `build` closure below.
+    let mut platform_refs = platform_artifact_refs_from_resolved(resolved);
+    platform_refs
+        .extend(crate::commands::check::component_driver_platform_refs_from_resolved(resolved));
+    let mut official_by_ref = resolved
         .platform_runtimes
         .iter()
         .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
         .collect::<BTreeMap<_, _>>();
-    let catalog_driver_raws = catalog_driver_raws_by_instance(resolved, catalog)?;
+    official_by_ref.extend(crate::commands::check::component_driver_runtimes_by_ref(
+        resolved,
+    ));
 
     let metadata_outcome = run_check_with_context(
         &platform_refs,
@@ -423,9 +438,6 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
         |_| unreachable!("simulate does not check site tools as graph participants"),
         |participant| {
             if participant.kind == SourceParticipantKind::ComponentDriver {
-                if let Some(raw) = catalog_driver_raws.get(participant.name.as_str()) {
-                    return Ok(raw.clone());
-                }
                 return build_emit_apis_from_source(participant)
                     .map_err(|error| driver_metadata_unavailable(participant, error));
             }
@@ -558,93 +570,21 @@ pub(crate) fn simulator_participant_id_for_resolved_artifact(
     }
 }
 
+/// Simulate's source participants: identical to
+/// `source_participants_from_resolved` (a Catalog-sourced driver is never a
+/// source participant - see `component_driver_platform_refs_from_resolved`),
+/// sorted for stable dry-run/watch-target output. `catalog` is accepted for
+/// signature symmetry with the other `sim_*` helpers but no longer consulted
+/// here now that catalog drivers route entirely through the platform-ref path.
 pub(crate) fn sim_source_participants(
     project_root: &Path,
     resolved: &ResolvedRobot,
-    catalog: Option<&CatalogRevision>,
+    _catalog: Option<&CatalogRevision>,
 ) -> Result<Vec<SourceParticipant>> {
     let mut participants =
-        source_participants_from_resolved(project_root, resolved, |component, project_root| {
-            if catalog_driver_entry(resolved, catalog, component).is_some() {
-                Ok(PathBuf::from(format!(
-                    "<catalog:{}>",
-                    component.source_name
-                )))
-            } else {
-                component_driver_crate_dir(component, project_root)
-            }
-        })?;
+        source_participants_from_resolved(project_root, resolved, component_driver_crate_dir)?;
     participants.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(participants)
-}
-
-fn catalog_driver_raws_by_instance(
-    resolved: &ResolvedRobot,
-    catalog: Option<&CatalogRevision>,
-) -> Result<BTreeMap<String, RawEmitApis>> {
-    let mut raws = BTreeMap::new();
-    for component in resolved
-        .components
-        .iter()
-        .filter(|component| component.has_driver)
-    {
-        let Some(entry) = catalog_driver_entry(resolved, catalog, component) else {
-            continue;
-        };
-        let runtime = crate::resolver::resolved_runtime_from_entry(entry, &resolved.target)?;
-        let raw = fetch_emit_apis_from_native_artifact(&runtime).with_context(|| {
-            format!(
-                "failed to read packaged emit-apis for catalog driver {}",
-                component.source_name
-            )
-        })?;
-        raws.insert(component.instance.clone(), raw);
-    }
-    Ok(raws)
-}
-
-fn catalog_driver_entry<'a>(
-    resolved: &ResolvedRobot,
-    catalog: Option<&'a CatalogRevision>,
-    component: &ResolvedComponent,
-) -> Option<&'a CatalogEntry> {
-    let catalog = catalog?;
-    let driver = component.driver.as_ref()?;
-    if driver.path_override().is_some() {
-        return None;
-    }
-    if driver.source != crate::resolver::ResolvedComponentSource::Catalog {
-        return None;
-    }
-    let channel = CatalogChannel::from(resolved.channel);
-    catalog
-        .entries
-        .iter()
-        .filter(|entry| entry.kind == ArtifactKind::ComponentDriver)
-        .filter(|entry| entry.package == driver.package)
-        .filter(|entry| entry.channels.contains_key(&channel))
-        .filter(|entry| {
-            entry
-                .target_triples
-                .iter()
-                .any(|target| target == &resolved.target)
-        })
-        .filter(|entry| entry.release_assets.contains_key(&resolved.target))
-        .filter(|entry| {
-            !crate::catalog::compare_generations(&entry.api_generation, &resolved.target_generation)
-                .is_gt()
-        })
-        .max_by(|left, right| {
-            crate::catalog::compare_generations(&left.api_generation, &right.api_generation)
-                .then_with(|| compare_versions(&left.version, &right.version))
-        })
-}
-
-fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
-    match (semver::Version::parse(left), semver::Version::parse(right)) {
-        (Ok(left), Ok(right)) => left.cmp(&right),
-        _ => left.cmp(right),
-    }
 }
 
 fn driver_metadata_unavailable(
@@ -1346,7 +1286,7 @@ fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::catalog::{
-        ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
+        ArtifactKind, ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
         fixture_contract_for_tests, fixture_tool_entry_for_tests,
     };
     use crate::resolver::{
@@ -2617,6 +2557,7 @@ artifacts:
                         path: PathBuf::from("components/ddsm115"),
                     },
                     path_override: None,
+                    catalog_runtime: None,
                 },
                 driver: Some(crate::resolver::ResolvedComponentPackage {
                     package: "phoxal/component-ddsm115-driver".to_string(),
@@ -2625,6 +2566,7 @@ artifacts:
                         path: PathBuf::from("components/ddsm115"),
                     },
                     path_override: None,
+                    catalog_runtime: None,
                 }),
                 has_driver: true,
             });

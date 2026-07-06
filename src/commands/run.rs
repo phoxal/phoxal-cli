@@ -240,16 +240,35 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
             "native artifact refresh failed; using cache/path overrides only: {error:#}"
         ));
     }
+    // Stage every resolved component's asset bundle into the robot root
+    // (`project_root` for `run`) so `PHOXAL_ROBOT_ROOT`-relative asset
+    // resolution finds the same `components/<id>/` shape deploy stages under
+    // `/opt/phoxal/` (docs #21). A no-op for a `Path`-pinned component whose
+    // files already live there.
+    if let Err(error) = crate::native_artifacts::stage_component_bundles_into_robot_root(
+        project_root,
+        project_root,
+        &resolved,
+    ) {
+        ui.warn(format!(
+            "component asset staging into the robot root failed: {error:#}"
+        ));
+    }
 
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
     let robot_graph = robot_graph_from_resolved(&resolved);
-    let platform_refs = platform_artifact_refs_from_resolved(&resolved);
-    let official_by_ref = resolved
+    let mut platform_refs = platform_artifact_refs_from_resolved(&resolved);
+    platform_refs
+        .extend(crate::commands::check::component_driver_platform_refs_from_resolved(&resolved));
+    let mut official_by_ref = resolved
         .platform_runtimes
         .iter()
         .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
         .collect::<BTreeMap<_, _>>();
+    official_by_ref.extend(crate::commands::check::component_driver_runtimes_by_ref(
+        &resolved,
+    ));
     let outcome = run_check_with_context(
         &platform_refs,
         &[],
@@ -710,7 +729,7 @@ fn locate_official_binary(
         return Ok(Some(path));
     }
     let binary_name = runtime
-        .map(|runtime| format!("phoxal-{}-{}", runtime.kind, runtime.name))
+        .map(|runtime| crate::resolver::official_binary_name(runtime.kind, &runtime.name))
         .unwrap_or_else(|| participant_id.to_string());
     if let Ok(dir) = std::env::var("PHOXAL_ARTIFACT_DIR") {
         let path = PathBuf::from(dir).join(&binary_name);

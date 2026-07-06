@@ -247,13 +247,27 @@ fn build_robot_launch(
         .iter()
         .map(|participant| (participant.name.as_str(), participant))
         .collect::<BTreeMap<_, _>>();
-    let official_artifacts = input
+    let mut official_artifacts = input
         .resolved
         .platform_runtimes
         .iter()
         .chain(input.resolved.simulators.iter())
         .map(|runtime| (runtime.name.as_str(), runtime.artifact_ref().to_string()))
         .collect::<BTreeMap<_, _>>();
+    // A Catalog-sourced component driver is a first-class catalog artifact
+    // too (docs #21): its `catalog_runtime` projects onto the identical
+    // `ResolvedPlatformRuntime` shape a service/simulator resolves to, keyed
+    // here by the component id (`checked.artifact_id`) exactly like a
+    // service is keyed by its own name.
+    official_artifacts.extend(
+        input
+            .resolved
+            .components
+            .iter()
+            .filter_map(|component| component.driver.as_ref())
+            .filter_map(|driver| driver.catalog_runtime.as_ref())
+            .map(|runtime| (runtime.name.as_str(), runtime.artifact_ref().to_string())),
+    );
 
     let mut participants = Vec::new();
     for checked in input

@@ -17,8 +17,9 @@ use crate::catalog::ArtifactKind;
 use crate::commands::MessageFormat;
 use crate::component_driver::component_driver_crate_dir;
 use crate::resolver::{
-    ResolveOptions, ResolvedComponent, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras,
-    discover_robot_yaml, load_robot_with_extras, resolve, tool_emit_apis_id,
+    ResolveOptions, ResolvedComponent, ResolvedComponentSource, ResolvedPlatformRuntime,
+    ResolvedRobot, RobotManifestExtras, discover_robot_yaml, load_robot_with_extras, resolve,
+    tool_emit_apis_id,
 };
 use crate::utils::{cargo_binary_name, resolve_project_path};
 
@@ -191,6 +192,15 @@ pub struct PlatformArtifactRef {
     pub name: String,
     pub kind: ArtifactKind,
     pub artifact_ref: String,
+    /// The component instance ids launching this artifact, for a
+    /// `ComponentDriver` ref only. Empty for every other kind (a normal
+    /// graph-scoped singleton participant). A catalog-resolved component
+    /// driver is fetched once but launched once per instance that declares
+    /// it (`left_drive`/`right_drive` sharing one `phoxal/component-<id>
+    /// -driver` package) - mirrors how [`SourceParticipant::component_driver_with_artifact_id`]
+    /// keys a path/git-overridden driver's graph membership by instance, not
+    /// by artifact id. Must not be empty when `kind == ComponentDriver`.
+    pub instances: Vec<String>,
 }
 
 impl PlatformArtifactRef {
@@ -279,11 +289,12 @@ fn run(
     let participant_count =
         platform_refs.len() + tool_participants.len() + source_participants.len();
     let robot_graph = robot_graph_from_resolved(&resolved);
-    let official_by_ref = resolved
+    let mut official_by_ref = resolved
         .platform_runtimes
         .iter()
         .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
         .collect::<std::collections::BTreeMap<_, _>>();
+    official_by_ref.extend(component_driver_runtimes_by_ref(&resolved));
     let tools_by_ref = resolved
         .tools
         .iter()
@@ -489,12 +500,84 @@ pub(crate) fn platform_artifact_refs_from_resolved(
             name: runtime.name.clone(),
             kind: runtime.kind,
             artifact_ref: runtime.artifact_ref().to_string(),
+            instances: Vec::new(),
         })
+        .collect()
+}
+
+/// One `PlatformArtifactRef` per distinct Catalog-sourced `component_driver`
+/// package, `instances` listing every component instance that shares it
+/// (`left_drive`/`right_drive` both resolving
+/// `phoxal/component-ddsm115-driver`). A Path/Git-sourced driver is a source
+/// participant instead (see `source_participants_from_resolved`) and is not
+/// included here. Reused by every command that validates the graph like a
+/// service (`check`, `run`, `deploy`); `simulate` also fetches through this
+/// same function but discards a driver participant from its final launch set
+/// after validating its contracts (drivers are sim-substituted, never
+/// launched).
+pub(crate) fn component_driver_platform_refs_from_resolved(
+    resolved: &ResolvedRobot,
+) -> Vec<PlatformArtifactRef> {
+    struct CatalogDriverRef {
+        name: String,
+        artifact_ref: String,
+        instances: Vec<String>,
+    }
+
+    let mut by_package = std::collections::BTreeMap::<String, CatalogDriverRef>::new();
+    for component in &resolved.components {
+        let Some(driver) = &component.driver else {
+            continue;
+        };
+        if !matches!(driver.source, ResolvedComponentSource::Catalog) {
+            continue;
+        }
+        let Some(runtime) = &driver.catalog_runtime else {
+            continue;
+        };
+        by_package
+            .entry(driver.package.clone())
+            .or_insert_with(|| CatalogDriverRef {
+                name: runtime.name.clone(),
+                artifact_ref: runtime.artifact_ref().to_string(),
+                instances: Vec::new(),
+            })
+            .instances
+            .push(component.instance.clone());
+    }
+    by_package
+        .into_values()
+        .map(|driver_ref| PlatformArtifactRef {
+            name: driver_ref.name,
+            kind: ArtifactKind::ComponentDriver,
+            artifact_ref: driver_ref.artifact_ref,
+            instances: driver_ref.instances,
+        })
+        .collect()
+}
+
+/// Every distinct Catalog-sourced component driver's `catalog_runtime`, keyed
+/// by its `artifact_ref` - the same shape as the `official_by_ref` map every
+/// caller already builds from `resolved.platform_runtimes` for the shared
+/// `fetch_emit_apis_from_native_artifact` closure. Callers merge this in so
+/// one fetch closure resolves services, simulators, AND catalog component
+/// drivers identically.
+pub(crate) fn component_driver_runtimes_by_ref(
+    resolved: &ResolvedRobot,
+) -> std::collections::BTreeMap<String, &ResolvedPlatformRuntime> {
+    resolved
+        .components
+        .iter()
+        .filter_map(|component| component.driver.as_ref())
+        .filter(|driver| matches!(driver.source, ResolvedComponentSource::Catalog))
+        .filter_map(|driver| driver.catalog_runtime.as_ref())
+        .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
         .collect()
 }
 
 fn check_artifact_refs_from_resolved(resolved: &ResolvedRobot) -> Vec<PlatformArtifactRef> {
     let mut refs = platform_artifact_refs_from_resolved(resolved);
+    refs.extend(component_driver_platform_refs_from_resolved(resolved));
     refs.extend(
         resolved
             .tools
@@ -505,6 +588,7 @@ fn check_artifact_refs_from_resolved(resolved: &ResolvedRobot) -> Vec<PlatformAr
                 name: tool_emit_apis_id(&tool.name).to_string(),
                 kind: ArtifactKind::Tool,
                 artifact_ref: tool.asset.clone(),
+                instances: Vec::new(),
             }),
     );
     refs
@@ -536,11 +620,17 @@ pub(crate) fn source_participants_from_resolved(
         )
     }));
 
-    for component in resolved
-        .components
-        .iter()
-        .filter(|component| component.driver.is_some())
-    {
+    // A Catalog-sourced driver is a first-class catalog artifact, not a
+    // build-from-source participant - it becomes a `PlatformArtifactRef`
+    // instead (see `component_driver_platform_refs_from_resolved`), fetched
+    // and validated like a service. Only a Path/Git (fork/dev-override)
+    // driver builds from source here.
+    for component in resolved.components.iter().filter(|component| {
+        component
+            .driver
+            .as_ref()
+            .is_some_and(|driver| !matches!(driver.source, ResolvedComponentSource::Catalog))
+    }) {
         let crate_dir = if let Some(path) = component.driver_path_override() {
             path.to_path_buf()
         } else {
@@ -807,6 +897,7 @@ fn service_platform_artifact_refs(
             name: name.clone(),
             kind: ArtifactKind::Service,
             artifact_ref: artifact_ref.clone(),
+            instances: Vec::new(),
         })
         .collect()
 }
@@ -853,7 +944,22 @@ pub fn run_check_with_deployed_user_service_images(
                 artifact.name
             )
         })?;
-        participants.push(participant);
+        if artifact.instances.is_empty() {
+            participants.push(participant);
+        } else {
+            // A catalog component driver is fetched once but launched once
+            // per instance that declares it - key each instance's graph
+            // membership by its own id, exactly like a path/git-overridden
+            // driver source participant does (see
+            // `SourceParticipantKind::ComponentDriver` below).
+            for instance in &artifact.instances {
+                let mut instance_participant = participant.clone();
+                instance_participant.participant_id = instance.clone();
+                instance_participant.scope =
+                    graph_check::ParticipantScope::ComponentInstance(instance.clone());
+                participants.push(instance_participant);
+            }
+        }
     }
 
     for service in inputs.user_service_images {
@@ -1708,6 +1814,43 @@ mod tests {
                 path: PathBuf::from(path),
             },
             path_override: None,
+            catalog_runtime: None,
+        }
+    }
+
+    /// A Catalog-sourced component package with a populated `catalog_runtime`,
+    /// the shape `resolve_component_package` produces once a matching release
+    /// asset exists.
+    fn fixture_catalog_component_package(
+        package: &str,
+        kind: crate::catalog::ArtifactKind,
+        component_name: &str,
+    ) -> ResolvedComponentPackage {
+        ResolvedComponentPackage {
+            package: package.to_string(),
+            kind,
+            source: ResolvedComponentSource::Catalog,
+            path_override: None,
+            catalog_runtime: Some(ResolvedPlatformRuntime {
+                name: component_name.to_string(),
+                package: package.to_string(),
+                kind,
+                generation: "y2026_1".to_string(),
+                version: "0.1.0".to_string(),
+                artifact_ref: format!("{}-driver-v0.1.0.tar.zst", component_name),
+                sha256: Some("a".repeat(64)),
+                metadata: (kind == crate::catalog::ArtifactKind::ComponentDriver).then(|| {
+                    crate::resolver::ResolvedArtifactMetadata {
+                        emit_apis: format!("{component_name}.emit-apis.json"),
+                        emit_apis_sha256: "b".repeat(64),
+                    }
+                }),
+                target_status: Some(crate::catalog::ArtifactStatus::Released),
+                per_triple_status: BTreeMap::new(),
+                changed_contracts: Vec::new(),
+                contract_uses: Vec::new(),
+                path_override: None,
+            }),
         }
     }
 
@@ -2038,6 +2181,7 @@ mod tests {
             name: "bno085".to_string(),
             kind: ArtifactKind::ComponentDriver,
             artifact_ref: "driver-bno085:swapped".to_string(),
+            instances: vec!["imu".to_string()],
         }];
         let robot_graph = graph_check::RobotGraph::default();
         let extras = RobotManifestExtras::default();
@@ -2932,6 +3076,194 @@ mod tests {
 
         assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
         assert_eq!(built, vec![temp.path().join("component-crates/left_drive")]);
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_component_driver_becomes_a_platform_ref_not_a_source_participant() -> Result<()> {
+        // A Catalog-sourced driver is a first-class catalog artifact - it
+        // must NOT enter `source_participants_from_resolved` (which would
+        // later bail trying to build/locate a nonexistent local crate dir).
+        let temp = tempfile::tempdir()?;
+        let resolved = resolved_with_components(vec![ResolvedComponent {
+            instance: "left_drive".to_string(),
+            source_name: "ddsm115".to_string(),
+            assets: fixture_catalog_component_package(
+                "phoxal/component-ddsm115-assets",
+                crate::catalog::ArtifactKind::ComponentAssets,
+                "ddsm115",
+            ),
+            driver: Some(fixture_catalog_component_package(
+                "phoxal/component-ddsm115-driver",
+                crate::catalog::ArtifactKind::ComponentDriver,
+                "ddsm115",
+            )),
+            has_driver: true,
+        }])?;
+
+        let source_participants = source_participants_from_resolved(
+            temp.path(),
+            &resolved,
+            |component, _project_root| {
+                panic!(
+                    "a Catalog-sourced driver for '{}' must never reach the source-crate locator",
+                    component.instance
+                )
+            },
+        )?;
+        assert!(
+            source_participants.is_empty(),
+            "catalog driver must not become a source participant: {source_participants:?}"
+        );
+
+        let platform_refs = component_driver_platform_refs_from_resolved(&resolved);
+        assert_eq!(platform_refs.len(), 1);
+        assert_eq!(
+            platform_refs[0].kind,
+            crate::catalog::ArtifactKind::ComponentDriver
+        );
+        assert_eq!(platform_refs[0].name, "ddsm115");
+        assert_eq!(platform_refs[0].instances, vec!["left_drive".to_string()]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn n_instances_of_one_catalog_driver_fetch_once_and_validate_as_n_graph_participants()
+    -> Result<()> {
+        // Two instances (`left_drive`/`right_drive`) share one catalog
+        // driver package: the fetch closure must be called exactly once
+        // (proving the driver is fetched once, not per instance), yet both
+        // instances must appear as distinct, correctly-scoped graph
+        // participants - exactly like two Path/Git-overridden driver
+        // instances already do.
+        let temp = tempfile::tempdir()?;
+        let resolved = resolved_with_components(vec![
+            ResolvedComponent {
+                instance: "left_drive".to_string(),
+                source_name: "ddsm115".to_string(),
+                assets: fixture_catalog_component_package(
+                    "phoxal/component-ddsm115-assets",
+                    crate::catalog::ArtifactKind::ComponentAssets,
+                    "ddsm115",
+                ),
+                driver: Some(fixture_catalog_component_package(
+                    "phoxal/component-ddsm115-driver",
+                    crate::catalog::ArtifactKind::ComponentDriver,
+                    "ddsm115",
+                )),
+                has_driver: true,
+            },
+            ResolvedComponent {
+                instance: "right_drive".to_string(),
+                source_name: "ddsm115".to_string(),
+                assets: fixture_catalog_component_package(
+                    "phoxal/component-ddsm115-assets",
+                    crate::catalog::ArtifactKind::ComponentAssets,
+                    "ddsm115",
+                ),
+                driver: Some(fixture_catalog_component_package(
+                    "phoxal/component-ddsm115-driver",
+                    crate::catalog::ArtifactKind::ComponentDriver,
+                    "ddsm115",
+                )),
+                has_driver: true,
+            },
+        ])?;
+
+        let platform_refs = component_driver_platform_refs_from_resolved(&resolved);
+        assert_eq!(
+            platform_refs.len(),
+            1,
+            "one shared package must yield one platform ref, not one per instance"
+        );
+        let mut instances = platform_refs[0].instances.clone();
+        instances.sort();
+        assert_eq!(
+            instances,
+            vec!["left_drive".to_string(), "right_drive".to_string()]
+        );
+
+        let source_participants = source_participants_from_resolved(
+            temp.path(),
+            &resolved,
+            |_component, _project_root| panic!("catalog drivers never reach the source locator"),
+        )?;
+        assert!(source_participants.is_empty());
+
+        let mut fetch_calls = 0;
+        let outcome = run_check_with_context(
+            &platform_refs,
+            &[],
+            &source_participants,
+            CheckGraphContext {
+                robot_graph: &graph_check::RobotGraph::default(),
+                manifest_extras: &RobotManifestExtras::default(),
+            },
+            |artifact_ref| {
+                fetch_calls += 1;
+                assert_eq!(artifact_ref, "ddsm115-driver-v0.1.0.tar.zst");
+                Ok(raw_kind("driver", "ddsm115", "y2026_1", &[]))
+            },
+            |_| bail!("no tools should be fetched"),
+            |_| bail!("no source participants should be built"),
+        )?;
+
+        assert_eq!(
+            fetch_calls, 1,
+            "the shared driver must be fetched exactly once"
+        );
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
+        let mut participant_ids = outcome
+            .checked_participants
+            .iter()
+            .map(|participant| participant.participant_id.clone())
+            .collect::<Vec<_>>();
+        participant_ids.sort();
+        assert_eq!(
+            participant_ids,
+            vec!["left_drive".to_string(), "right_drive".to_string()],
+            "each instance must be a distinct graph node keyed by its own instance id"
+        );
+        for participant in &outcome.checked_participants {
+            assert_eq!(participant.artifact_id, "ddsm115");
+            assert!(matches!(
+                &participant.scope,
+                graph_check::ParticipantScope::ComponentInstance(instance)
+                    if *instance == participant.participant_id
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn driverless_catalog_component_stages_assets_only_and_is_not_a_check_participant() -> Result<()>
+    {
+        // Component assets contribute no contracts and are never a check
+        // participant, catalog-sourced or not; a driverless instance yields
+        // no source participant and no platform ref.
+        let temp = tempfile::tempdir()?;
+        let resolved = resolved_with_components(vec![ResolvedComponent {
+            instance: "caster".to_string(),
+            source_name: "passive_caster".to_string(),
+            assets: fixture_catalog_component_package(
+                "phoxal/component-passive_caster-assets",
+                crate::catalog::ArtifactKind::ComponentAssets,
+                "passive_caster",
+            ),
+            driver: None,
+            has_driver: false,
+        }])?;
+
+        let source_participants = source_participants_from_resolved(
+            temp.path(),
+            &resolved,
+            |_component, _project_root| panic!("a driverless component has no driver to locate"),
+        )?;
+        assert!(source_participants.is_empty());
+        assert!(component_driver_platform_refs_from_resolved(&resolved).is_empty());
+
         Ok(())
     }
 

@@ -185,6 +185,18 @@ pub struct ResolvedComponentPackage {
     pub kind: ArtifactKind,
     pub source: ResolvedComponentSource,
     pub path_override: Option<PathBuf>,
+    /// Present exactly when `source == Catalog` and the catalog resolved a
+    /// matching entry with a release asset for the needed scope
+    /// (target-independent for assets, `context.target` for drivers). Carries
+    /// the same shape a service/simulator resolves to
+    /// ([`ResolvedPlatformRuntime`]) so components stage through the identical
+    /// native-artifact machinery (`native_artifacts::NativeArtifactDescriptor`)
+    /// instead of a parallel bespoke path. `None` for `Path`/`Git` sources, and
+    /// for a `Catalog` source whose entry has no release asset yet (a
+    /// metadata-only / not-yet-published catalog entry) - callers that need to
+    /// stage a real bundle must treat that as a clear "not available" error,
+    /// not silently succeed.
+    pub catalog_runtime: Option<ResolvedPlatformRuntime>,
 }
 
 impl ResolvedComponentPackage {
@@ -954,7 +966,8 @@ fn resolve_catalog_entries(
                 version: entry.version.clone(),
                 artifact_ref,
                 sha256: release_asset.map(|asset| asset.sha256.clone()),
-                metadata: release_asset.map(|asset| resolved_metadata(&asset.metadata)),
+                metadata: release_asset
+                    .and_then(|asset| resolved_metadata_opt(asset.metadata.as_ref())),
                 target_status: entry.status_for(target),
                 per_triple_status: entry.status.clone(),
                 changed_contracts: entry.changed_contracts.clone(),
@@ -1045,7 +1058,7 @@ pub(crate) fn resolved_runtime_from_entry(
         version: entry.version.clone(),
         artifact_ref,
         sha256: release_asset.map(|asset| asset.sha256.clone()),
-        metadata: release_asset.map(|asset| resolved_metadata(&asset.metadata)),
+        metadata: release_asset.and_then(|asset| resolved_metadata_opt(asset.metadata.as_ref())),
         target_status: entry.status_for(target),
         per_triple_status: entry.status.clone(),
         changed_contracts: entry.changed_contracts.clone(),
@@ -1059,6 +1072,18 @@ fn resolved_metadata(metadata: &ReleaseAssetMetadata) -> ResolvedArtifactMetadat
         emit_apis: metadata.emit_apis.clone(),
         emit_apis_sha256: metadata.emit_apis_sha256.clone(),
     }
+}
+
+/// `component_assets` release assets carry no `metadata` (docs #21: a
+/// target-independent asset bundle has no runtime binary to describe); every
+/// other kind's release asset always carries `Some`. Callers building a
+/// [`ResolvedPlatformRuntime`]/[`ResolvedComponentPackage`] from a release
+/// asset route through this so a missing sidecar becomes `None` metadata
+/// rather than a panic.
+fn resolved_metadata_opt(
+    metadata: Option<&ReleaseAssetMetadata>,
+) -> Option<ResolvedArtifactMetadata> {
+    metadata.map(resolved_metadata)
 }
 
 fn compare_catalog_entries(left: &CatalogEntry, right: &CatalogEntry) -> std::cmp::Ordering {
@@ -1279,7 +1304,17 @@ fn resolve_components(
 /// Resolve one component package slot (`component_assets` or
 /// `component_driver`) for `package`: an `artifacts.pins` entry takes
 /// precedence (`Git`/`Path`/version/sha256 pin form), otherwise it resolves
-/// from the catalog.
+/// from the catalog. A catalog resolution also captures the matched entry's
+/// release asset for the needed scope (target-independent for assets, the
+/// resolved target triple for drivers) into `catalog_runtime`, exactly like a
+/// service/simulator captures `artifact_ref`/`sha256`/`metadata` - see
+/// [`resolved_runtime_from_entry`]. If the entry exists but has no release
+/// asset for that scope (a metadata-only entry, or not yet published for this
+/// target), resolution still succeeds (the entry is real and versioned - a
+/// bare `check` on an older generation must not hard-fail here), but
+/// `catalog_runtime` carries `sha256: None, metadata: None` so a later staging
+/// attempt reports a clear diagnostic instead of silently succeeding with no
+/// bundle to fetch.
 fn resolve_component_package(
     context: &ComponentResolveContext<'_>,
     package: &str,
@@ -1298,7 +1333,7 @@ fn resolve_component_package(
     } else {
         context.target
     };
-    catalog
+    let entry = catalog
         .entries
         .iter()
         .filter(|entry| entry.kind == kind && entry.package == package)
@@ -1315,11 +1350,15 @@ fn resolve_component_package(
         .max_by(|left, right| compare_catalog_entries(left, right))
         .ok_or_else(|| anyhow!("{package} is not available in the artifact catalog"))?;
 
+    let catalog_runtime = resolved_runtime_from_entry(entry, target_scope)
+        .with_context(|| format!("failed to resolve catalog entry for {package}"))?;
+
     Ok(ResolvedComponentPackage {
         package: package.to_string(),
         kind,
         source: ResolvedComponentSource::Catalog,
         path_override: None,
+        catalog_runtime: Some(catalog_runtime),
     })
 }
 
@@ -1356,6 +1395,10 @@ fn resolve_pinned_component_package(
         kind,
         source,
         path_override: None,
+        // A `Sha256`/`Version` artifact pin does not (yet) re-enter the
+        // catalog to capture a release asset; unchanged pre-existing
+        // behavior. `Git`/`Path` pins never have a catalog runtime.
+        catalog_runtime: None,
     })
 }
 
@@ -1422,7 +1465,8 @@ fn resolve_tools(
                 sha256: release_asset
                     .map(|asset| asset.sha256.clone())
                     .unwrap_or_else(|| "0".repeat(64)),
-                metadata: release_asset.map(|asset| resolved_metadata(&asset.metadata)),
+                metadata: release_asset
+                    .and_then(|asset| resolved_metadata_opt(asset.metadata.as_ref())),
                 path_override: None,
             })
         })
@@ -1438,7 +1482,8 @@ pub(crate) fn tool_emit_apis_id(tool_name: &str) -> &str {
 
 #[cfg(test)]
 mod identity_tests {
-    use super::tool_emit_apis_id;
+    use super::{official_binary_name, tool_emit_apis_id};
+    use crate::catalog::ArtifactKind;
 
     #[test]
     fn tool_emit_apis_id_strips_provider_and_site_tool_prefixes() {
@@ -1446,10 +1491,53 @@ mod identity_tests {
         assert_eq!(tool_emit_apis_id("tool-router"), "router");
         assert_eq!(tool_emit_apis_id("router"), "router");
     }
+
+    #[test]
+    fn official_binary_name_uses_package_shape_for_component_driver() {
+        // docs #21: the driver binary is `phoxal-component-<id>-driver`, NOT
+        // `phoxal-component_driver-<id>` (the catalog kind tag).
+        assert_eq!(
+            official_binary_name(ArtifactKind::ComponentDriver, "ddsm115"),
+            "phoxal-component-ddsm115-driver"
+        );
+    }
+
+    #[test]
+    fn official_binary_name_uses_catalog_kind_for_other_kinds() {
+        assert_eq!(
+            official_binary_name(ArtifactKind::Service, "drive"),
+            "phoxal-service-drive"
+        );
+        assert_eq!(
+            official_binary_name(ArtifactKind::Tool, "router"),
+            "phoxal-tool-router"
+        );
+        assert_eq!(
+            official_binary_name(ArtifactKind::Simulator, "webots-supervisor"),
+            "phoxal-simulator-webots-supervisor"
+        );
+    }
 }
 
+/// The official binary name a resolved artifact's packaged tarball contains.
+/// For most kinds this is `phoxal-<catalog_kind>-<name>`
+/// (`phoxal-service-drive`, `phoxal-tool-router`,
+/// `phoxal-simulator-webots-supervisor`). A `ComponentDriver` is the one
+/// exception: its catalog `kind` (`component_driver`) is not its binary name -
+/// docs #21 names the driver binary `phoxal-component-<id>-driver`, matching
+/// the package-id shape (`phoxal/component-<id>-driver`) rather than the
+/// catalog kind tag. `ComponentAssets` has no runtime binary at all and must
+/// never reach this function.
 pub(crate) fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
-    format!("phoxal-{kind}-{name}")
+    match kind {
+        ArtifactKind::ComponentDriver => format!("phoxal-component-{name}-driver"),
+        ArtifactKind::ComponentAssets => {
+            unreachable!("component_assets has no runtime binary to name")
+        }
+        ArtifactKind::Service | ArtifactKind::Tool | ArtifactKind::Simulator => {
+            format!("phoxal-{kind}-{name}")
+        }
+    }
 }
 
 /// The filesystem/tag-safe projection of a provider-qualified package id
