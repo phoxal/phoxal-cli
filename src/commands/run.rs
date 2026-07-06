@@ -19,7 +19,7 @@ use crate::commands::check::{
     platform_artifact_refs_from_resolved, robot_graph_from_resolved, run_check_with_context,
     source_participants_from_resolved,
 };
-use crate::component_driver::component_crate_dir;
+use crate::component_driver::component_driver_crate_dir;
 use crate::launch_env::encode_participant_env;
 use crate::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution,
@@ -224,6 +224,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         catalog.as_ref(),
         ResolveOptions {
             resolve_source_commits: true,
+            resolve_component_asset_commits: false,
             ..ResolveOptions::default()
         },
     )?;
@@ -241,7 +242,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     }
 
     let source_participants =
-        source_participants_from_resolved(project_root, &resolved, component_crate_dir)?;
+        source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
     let robot_graph = robot_graph_from_resolved(&resolved);
     let platform_refs = platform_artifact_refs_from_resolved(&resolved);
     let official_by_ref = resolved
@@ -848,7 +849,7 @@ fn binary_name_with_suffix(binary_name: &str) -> String {
 }
 
 fn device_missing_note(resolved: &ResolvedRobot, participant_id: &str) -> Option<String> {
-    let component = resolved.robot.components.instances.get(participant_id)?;
+    let component = resolved.robot.robot.components.get(participant_id)?;
     let driver = component.driver.as_ref()?;
     let missing = missing_device_path(&driver.connection)?;
     Some(format!(

@@ -61,18 +61,10 @@ fn write_robot_project(root: &std::path::Path) -> anyhow::Result<()> {
 fn minimal_robot_yaml() -> &'static str {
     r#"schema: v0
 
-identity:
+robot:
   id: testbot
   namespace: test
-
-structure: structure.urdf
-
-phoxal_artifacts:
-  channel: stable
-  generation: y2026_1
-phoxal_participants: {}
-
-motion:
+  structure: structure.urdf
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -81,10 +73,11 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
+  components: {}
 
-components:
-  sources: {}
-  instances: {}
+artifacts:
+  channel: stable
+  generation: y2026_1
 "#
 }
 

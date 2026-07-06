@@ -1,27 +1,59 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
-use crate::resolver::{ResolvedComponent, ResolvedComponentSource};
+use crate::resolver::{ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource};
 use crate::utils::resolve_project_path;
 use crate::{host_paths, shell};
 
-pub(crate) fn component_crate_dir(
+/// Locate the on-disk source directory for a component instance's resolved
+/// `component_driver` package (the crate `check`/`run`/`watch` build). Errors
+/// if the instance has no resolved driver package (a driverless instance, or
+/// one whose `driver:` block failed to resolve - callers only reach this for
+/// instances known to have a driver).
+pub(crate) fn component_driver_crate_dir(
     component: &ResolvedComponent,
     project_root: &Path,
 ) -> Result<PathBuf> {
-    match &component.source {
+    let driver = component.driver.as_ref().ok_or_else(|| {
+        anyhow!(
+            "component instance '{}' has no resolved component_driver package",
+            component.instance
+        )
+    })?;
+    resolved_component_package_dir(driver, &component.source_name, project_root)
+}
+
+/// Locate the on-disk source directory for a component instance's resolved
+/// `component_assets` package (`component.yaml`, `structure.urdf`,
+/// `simulation.yaml`, `meshes/`). Always present - see [`ResolvedComponent`].
+pub(crate) fn component_assets_dir(
+    component: &ResolvedComponent,
+    project_root: &Path,
+) -> Result<PathBuf> {
+    resolved_component_package_dir(&component.assets, &component.source_name, project_root)
+}
+
+fn resolved_component_package_dir(
+    package: &ResolvedComponentPackage,
+    source_name: &str,
+    project_root: &Path,
+) -> Result<PathBuf> {
+    match &package.source {
         ResolvedComponentSource::Path { path } => Ok(resolve_project_path(project_root, path)),
         ResolvedComponentSource::Git {
             git,
-            commit,
+            rev,
             directory,
-            ..
         } => {
-            let repo_dir = ensure_component_repo_cache(&component.source_name, git, commit)?;
+            let repo_dir = ensure_component_repo_cache(source_name, git, rev)?;
             component_repo_subdir(repo_dir, directory.as_deref())
         }
+        ResolvedComponentSource::Catalog => bail!(
+            "component package {} resolves from the artifact catalog; it has no local source directory to build",
+            package.package
+        ),
     }
 }
 

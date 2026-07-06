@@ -7,12 +7,17 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const CATALOG_SCHEMA: &str = "phoxal.artifact-catalog/v0";
-pub const CATALOG_FORMAT_VERSION: u32 = 1;
+pub const CATALOG_SCHEMA: &str = "phoxal.artifact-catalog/v1";
+pub const CATALOG_FORMAT_VERSION: u32 = 2;
 pub const CHECKSUM_CANONICALIZATION: &str = "json-v1-empty-revision-and-integrity-sha256";
 pub const DEFAULT_CATALOG_URL: &str =
     "https://raw.githubusercontent.com/phoxal/framework/artifact-catalog-v0-stable/latest.json";
 pub const CATALOG_SOURCE_ENV: &str = "PHOXAL_ARTIFACT_CATALOG";
+/// The target scope a [`ArtifactKind::ComponentAssets`] entry declares instead
+/// of a per-triple binary matrix: asset bundles are target-independent files,
+/// not per-architecture binaries (docs #21). Mirrors the framework's own
+/// `xtask::workspace::TARGET_INDEPENDENT_SCOPE`.
+pub const TARGET_INDEPENDENT_SCOPE: &str = "target-independent";
 
 const CATALOG_CACHE_FILE: &str = "phoxal-artifact-catalog.json";
 
@@ -61,12 +66,16 @@ pub struct CatalogSignature {
     pub signature: String,
 }
 
+/// One catalog entry. `package` (the provider-qualified `phoxal/<name>`
+/// identity) is the sole canonical identity: there is no public `artifact_id`
+/// alongside it (docs #21). Code that wants the provider, the bare name, or
+/// the kind-prefix-stripped artifact name derives it from `package`/`kind`
+/// rather than carrying a second public name.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogEntry {
-    pub artifact_id: String,
-    pub kind: ArtifactKind,
     pub package: String,
+    pub kind: ArtifactKind,
     pub version: String,
     pub api_generation: String,
     pub contract_uses: Vec<ContractUse>,
@@ -79,21 +88,65 @@ pub struct CatalogEntry {
     pub changed_contracts: Vec<String>,
 }
 
+/// Canonical catalog package kinds (docs #21): `Driver` becomes the
+/// `component_driver`/`component_assets` split. The runtime's own `emit-apis`
+/// vocabulary is intentionally different (a driver participant reports
+/// `artifact.kind: "driver"`, not `component_driver`) - see
+/// [`ArtifactKind::emit_apis_kind`] and the vocabulary-reconciliation callers
+/// in `commands::check`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     Service,
-    Driver,
+    /// Target-independent component files: `component.yaml`,
+    /// `simulation.yaml`, `structure.urdf`, meshes, and other asset data.
+    ComponentAssets,
+    /// The optional target-specific checked driver binary for a component.
+    ComponentDriver,
     Tool,
     Simulator,
 }
 
 impl ArtifactKind {
+    /// The `artifact.kind` string a real participant binary reports from its
+    /// own `emit-apis` output - the runtime's own vocabulary
+    /// (`phoxal-macros`' authoring kind, `phoxal::check::ParticipantKind`).
+    /// Intentionally distinct from the catalog's own `kind` tag: the runtime
+    /// authoring surface still calls a component driver `"driver"` and knows
+    /// nothing about the catalog's `component_driver`/`component_assets`
+    /// split. `ComponentAssets` has no runtime binary at all, so this value is
+    /// never asserted against a real subprocess for that kind.
     #[must_use]
     pub const fn emit_apis_kind(self) -> &'static str {
         match self {
             Self::Service => "service",
-            Self::Driver => "driver",
+            Self::ComponentAssets => "component_assets",
+            Self::ComponentDriver => "driver",
+            Self::Tool => "tool",
+            Self::Simulator => "simulator",
+        }
+    }
+
+    /// The catalog's own serialized `kind` tag - the public vocabulary this
+    /// module's JSON exposes, distinct from [`Self::emit_apis_kind`].
+    #[must_use]
+    pub const fn catalog_kind(self) -> &'static str {
+        match self {
+            Self::Service => "service",
+            Self::ComponentAssets => "component_assets",
+            Self::ComponentDriver => "component_driver",
+            Self::Tool => "tool",
+            Self::Simulator => "simulator",
+        }
+    }
+
+    /// The package-id prefix segment (the token before `-` in
+    /// `phoxal/<prefix>-<name>`) this kind uses when deriving `artifact_name`
+    /// from `package`.
+    const fn package_prefix(self) -> &'static str {
+        match self {
+            Self::Service => "service",
+            Self::ComponentAssets | Self::ComponentDriver => "component",
             Self::Tool => "tool",
             Self::Simulator => "simulator",
         }
@@ -102,7 +155,7 @@ impl ArtifactKind {
 
 impl std::fmt::Display for ArtifactKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.emit_apis_kind())
+        formatter.write_str(self.catalog_kind())
     }
 }
 
@@ -453,13 +506,28 @@ impl CatalogRevision {
 }
 
 impl CatalogEntry {
+    /// The provider segment of `package` (`phoxal` in `phoxal/service-drive`).
+    #[must_use]
+    pub fn provider(&self) -> Option<&str> {
+        self.package.split_once('/').map(|(provider, _)| provider)
+    }
+
+    /// The bare artifact name derived from `package`, stripping the
+    /// provider (`phoxal/`), the kind prefix (`service-`, `component-`,
+    /// `tool-`, `simulator-`), and - for the two component kinds - the
+    /// trailing `-assets`/`-driver` suffix. `phoxal/component-ddsm115-assets`
+    /// and `phoxal/component-ddsm115-driver` both derive `ddsm115`;
+    /// `phoxal/simulator-webots-supervisor` derives `webots-supervisor`
+    /// (only the leading `simulator-` is a prefix, the rest is the name).
     #[must_use]
     pub fn artifact_name(&self) -> Option<&str> {
+        let name = self.package.split_once('/').map(|(_, name)| name)?;
+        let prefix = self.kind.package_prefix();
+        let rest = name.strip_prefix(prefix)?.strip_prefix('-')?;
         match self.kind {
-            ArtifactKind::Service => self.artifact_id.strip_prefix("service-"),
-            ArtifactKind::Driver => self.artifact_id.strip_prefix("driver-"),
-            ArtifactKind::Tool => self.artifact_id.strip_prefix("tool-"),
-            ArtifactKind::Simulator => self.artifact_id.strip_prefix("simulator-"),
+            ArtifactKind::ComponentAssets => rest.strip_suffix("-assets"),
+            ArtifactKind::ComponentDriver => rest.strip_suffix("-driver"),
+            ArtifactKind::Service | ArtifactKind::Tool | ArtifactKind::Simulator => Some(rest),
         }
     }
 
@@ -476,55 +544,70 @@ fn validate_entries(entries: &[CatalogEntry]) -> Result<()> {
 
     let mut seen = BTreeSet::new();
     for entry in entries {
-        if !seen.insert((&entry.artifact_id, &entry.version)) {
+        if !seen.insert((&entry.package, &entry.version)) {
             bail!(
                 "catalog contains duplicate entry for {} v{}",
-                entry.artifact_id,
+                entry.package,
                 entry.version
             );
         }
         if entry.artifact_name().is_none() {
             bail!(
                 "{} does not match its catalog kind {}",
-                entry.artifact_id,
+                entry.package,
                 entry.kind
             );
         }
         // Privileged tools may declare no typed contracts (tool-router is pure
-        // infrastructure) - the framework-side catalog validators carry the same
-        // kind-scoped exception. Every checked kind must declare its contracts.
-        if entry.contract_uses.is_empty() && entry.kind != ArtifactKind::Tool {
-            bail!("{} contract_uses must not be empty", entry.artifact_id);
+        // infrastructure), and `component_assets` bundles are target-independent
+        // files with no runtime contracts at all (docs #21) - the framework-side
+        // catalog validators carry the same kind-scoped exceptions. Every other
+        // kind must declare its contracts.
+        if entry.contract_uses.is_empty()
+            && entry.kind != ArtifactKind::Tool
+            && entry.kind != ArtifactKind::ComponentAssets
+        {
+            bail!("{} contract_uses must not be empty", entry.package);
         }
         for contract in &entry.contract_uses {
             if contract.family.trim().is_empty() {
-                bail!("{} has an empty contract family", entry.artifact_id);
+                bail!("{} has an empty contract family", entry.package);
             }
             if contract.topic_template.trim().is_empty() {
-                bail!("{} has an empty topic_template", entry.artifact_id);
+                bail!("{} has an empty topic_template", entry.package);
             }
             if !is_schema_id(&contract.schema_id) {
                 bail!(
                     "{} has invalid schema_id '{}'",
-                    entry.artifact_id,
+                    entry.package,
                     contract.schema_id
                 );
             }
         }
         if entry.target_triples.is_empty() {
-            bail!("{} target_triples must not be empty", entry.artifact_id);
+            bail!("{} target_triples must not be empty", entry.package);
+        }
+        if entry.kind == ArtifactKind::ComponentAssets {
+            validate_component_assets_scope(entry)?;
+        } else if entry
+            .target_triples
+            .iter()
+            .any(|triple| triple == TARGET_INDEPENDENT_SCOPE)
+        {
+            bail!(
+                "{} is not a component_assets package but declares the target-independent scope; \
+                 do not pretend a per-architecture binary is target-independent",
+                entry.package
+            );
         }
         for triple in &entry.target_triples {
             let status = entry.status.get(triple).with_context(|| {
-                format!(
-                    "{} is missing status for target {triple}",
-                    entry.artifact_id
-                )
+                format!("{} is missing status for target {triple}", entry.package)
             })?;
             if *status == ArtifactStatus::Released && !entry.release_assets.contains_key(triple) {
                 bail!(
                     "{} target {triple} is released but has no release asset",
-                    entry.artifact_id
+                    entry.package
                 );
             }
         }
@@ -532,27 +615,42 @@ fn validate_entries(entries: &[CatalogEntry]) -> Result<()> {
             if !entry.target_triples.contains(triple) {
                 bail!(
                     "{} release asset target {triple} is not in target_triples",
-                    entry.artifact_id
+                    entry.package
                 );
             }
             if !is_sha256(&asset.sha256) {
                 bail!(
                     "{} release asset for {triple} has invalid sha256",
-                    entry.artifact_id
+                    entry.package
                 );
             }
             if !is_sha256(&asset.metadata.emit_apis_sha256) {
                 bail!(
                     "{} emit-apis metadata for {triple} has invalid sha256",
-                    entry.artifact_id
+                    entry.package
                 );
             }
         }
         if entry.channels.is_empty() {
-            bail!("{} channels must not be empty", entry.artifact_id);
+            bail!("{} channels must not be empty", entry.package);
         }
     }
 
+    Ok(())
+}
+
+/// The `component_assets` carve-out (docs #21): a single target-independent
+/// scope token instead of a per-triple binary matrix. Asset bundles are not
+/// per-architecture binaries, so this rejects anything that looks like one.
+fn validate_component_assets_scope(entry: &CatalogEntry) -> Result<()> {
+    if entry.target_triples != [TARGET_INDEPENDENT_SCOPE.to_string()] {
+        bail!(
+            "{} is a component_assets package and must declare exactly the \
+             target-independent scope '{TARGET_INDEPENDENT_SCOPE}', not a per-triple matrix; got {:?}",
+            entry.package,
+            entry.target_triples
+        );
+    }
     Ok(())
 }
 
@@ -679,9 +777,8 @@ pub fn fixture_service_entry_for_tests(
     let mut statuses = BTreeMap::new();
     statuses.insert(target.to_string(), status);
     CatalogEntry {
-        artifact_id: format!("service-{name}"),
+        package: format!("phoxal/service-{name}"),
         kind: ArtifactKind::Service,
-        package: format!("phoxal-service-{name}"),
         version: version.to_string(),
         api_generation: generation.to_string(),
         contract_uses: contracts,
@@ -710,7 +807,7 @@ pub fn fixture_service_entry_for_tests(
     }
 }
 
-pub fn fixture_driver_entry_for_tests(
+pub fn fixture_component_driver_entry_for_tests(
     name: &str,
     generation: &str,
     version: &str,
@@ -722,10 +819,30 @@ pub fn fixture_driver_entry_for_tests(
     let mut entry = fixture_service_entry_for_tests(
         name, generation, version, channel, target, status, contracts,
     );
-    entry.artifact_id = format!("driver-{name}");
-    entry.kind = ArtifactKind::Driver;
-    entry.package = format!("phoxal-driver-{name}");
+    entry.package = format!("phoxal/component-{name}-driver");
+    entry.kind = ArtifactKind::ComponentDriver;
     entry.launch_facts.participant_kind = "driver".to_string();
+    entry
+}
+
+pub fn fixture_component_assets_entry_for_tests(
+    name: &str,
+    generation: &str,
+    version: &str,
+    channel: Channel,
+) -> CatalogEntry {
+    let mut entry = fixture_service_entry_for_tests(
+        name,
+        generation,
+        version,
+        channel,
+        TARGET_INDEPENDENT_SCOPE,
+        ArtifactStatus::Pending,
+        Vec::new(),
+    );
+    entry.package = format!("phoxal/component-{name}-assets");
+    entry.kind = ArtifactKind::ComponentAssets;
+    entry.launch_facts.participant_kind = "component_assets".to_string();
     entry
 }
 
@@ -741,9 +858,8 @@ pub fn fixture_tool_entry_for_tests(
     let mut entry = fixture_service_entry_for_tests(
         name, generation, version, channel, target, status, contracts,
     );
-    entry.artifact_id = format!("tool-{name}");
+    entry.package = format!("phoxal/tool-{name}");
     entry.kind = ArtifactKind::Tool;
-    entry.package = format!("phoxal-tool-{name}");
     entry.launch_facts.participant_kind = "tool".to_string();
     entry.launch_facts.participant_class = "privileged".to_string();
     entry
@@ -761,9 +877,8 @@ pub fn fixture_simulator_entry_for_tests(
     let mut entry = fixture_service_entry_for_tests(
         name, generation, version, channel, target, status, contracts,
     );
-    entry.artifact_id = format!("simulator-{name}");
+    entry.package = format!("phoxal/simulator-{name}");
     entry.kind = ArtifactKind::Simulator;
-    entry.package = format!("phoxal-simulator-{name}");
     entry.launch_facts.participant_kind = "simulator".to_string();
     entry
 }
@@ -784,7 +899,7 @@ pub fn fixture_contract_for_tests(
 
 pub fn unavailable_catalog_error() -> anyhow::Error {
     anyhow!(
-        "no artifact catalog revision is available; tried cached catalog and default catalog URL {DEFAULT_CATALOG_URL}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add phoxal_artifacts.catalog in robot.yaml, or run `phoxal-cli pull` with network access to refresh the cache."
+        "no artifact catalog revision is available; tried cached catalog and default catalog URL {DEFAULT_CATALOG_URL}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add artifacts.catalog in robot.yaml, or run `phoxal-cli pull` with network access to refresh the cache."
     )
 }
 
@@ -793,7 +908,7 @@ fn unavailable_catalog_error_with_attempts(
     source: anyhow::Error,
 ) -> anyhow::Error {
     anyhow!(
-        "no artifact catalog revision is available; tried {}. Default fetch failed: {source:#}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add phoxal_artifacts.catalog in robot.yaml, or run `phoxal-cli pull` with network access to refresh the cache.",
+        "no artifact catalog revision is available; tried {}. Default fetch failed: {source:#}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add artifacts.catalog in robot.yaml, or run `phoxal-cli pull` with network access to refresh the cache.",
         tried.join(", ")
     )
 }

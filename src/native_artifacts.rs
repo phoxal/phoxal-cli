@@ -35,9 +35,14 @@ impl ProvisioningMode {
     }
 }
 
+/// A resolved official artifact ready for native (host or robot) staging. The
+/// public identity is the provider-qualified `package` id
+/// (`phoxal/service-drive`); on-disk names use its filesystem-safe projection
+/// ([`Self::package`]/[`Self::tag`]) since a package id's `/` is not a legal
+/// path component (docs #21).
 #[derive(Debug, Clone)]
 pub struct NativeArtifactDescriptor {
-    pub artifact_id: String,
+    pub package_id: String,
     pub kind: ArtifactKind,
     pub name: String,
     pub version: String,
@@ -56,7 +61,7 @@ impl NativeArtifactDescriptor {
             return Ok(None);
         }
         Ok(Some(Self {
-            artifact_id: runtime.artifact_id.clone(),
+            package_id: runtime.package.clone(),
             kind: runtime.kind,
             name: runtime.name.clone(),
             version: runtime.version.clone(),
@@ -75,13 +80,9 @@ impl NativeArtifactDescriptor {
             return Ok(None);
         }
         Ok(Some(Self {
-            artifact_id: tool.name.clone(),
+            package_id: tool.package.clone(),
             kind: ArtifactKind::Tool,
-            name: tool
-                .name
-                .strip_prefix("tool-")
-                .unwrap_or(&tool.name)
-                .to_string(),
+            name: crate::resolver::tool_emit_apis_id(&tool.name).to_string(),
             version: tool.resolved.clone(),
             asset: tool.asset.clone(),
             sha256: tool.sha256.clone(),
@@ -90,9 +91,12 @@ impl NativeArtifactDescriptor {
         }))
     }
 
+    /// The filesystem-safe projection of the provider-qualified package id
+    /// (`phoxal/service-drive` -> `phoxal-service-drive`) used for cache
+    /// directory names, release tags, and asset file names.
     #[must_use]
     pub fn package(&self) -> String {
-        format!("phoxal-{}-{}", self.kind, self.name)
+        self.package_id.replace('/', "-")
     }
 
     #[must_use]
@@ -204,7 +208,7 @@ pub fn artifact_binary_path(descriptor: &NativeArtifactDescriptor) -> Result<Pat
 pub fn artifact_cache_dir(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
     Ok(crate::host_paths::cache_dir()?
         .join("artifacts")
-        .join(&descriptor.artifact_id)
+        .join(descriptor.package())
         .join(sanitize_path_segment(&descriptor.asset)))
 }
 
@@ -216,7 +220,7 @@ fn cached_asset_path(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
     Ok(crate::host_paths::cache_dir()?
         .join("artifacts")
         .join("_assets")
-        .join(&descriptor.artifact_id)
+        .join(descriptor.package())
         .join(&descriptor.version)
         .join(&descriptor.asset))
 }

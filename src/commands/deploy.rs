@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
-use phoxal::model::robot::v1::{ComponentSource as RobotComponentSource, ConnectionConfig, Robot};
+use phoxal::model::robot::v1::{ConnectionConfig, Robot};
 use phoxal::participant::launch::env;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -28,7 +28,7 @@ use crate::commands::check::{
     fetch_emit_apis_from_native_artifact, platform_artifact_refs_from_resolved,
     robot_graph_from_resolved, run_check_with_context, source_participants_from_resolved,
 };
-use crate::component_driver::component_crate_dir;
+use crate::component_driver::component_driver_crate_dir;
 use crate::launch_env::{EncodedParticipantEnv, encode_participant_env};
 use crate::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
@@ -53,6 +53,9 @@ const UNIT_STAGING_PREFIX: &str = "/tmp/phoxal-units-";
 const RELEASE_SCHEMA: &str = "phoxal.release/v0";
 const SUDO_PASSWORD_ENV: &str = "PHOXAL_SUDO_PASSWORD";
 const COMPONENT_FILE: &str = "component.yaml";
+const STRUCTURE_FILE: &str = "structure.urdf";
+const SIMULATION_FILE: &str = "simulation.yaml";
+const MESHES_DIR: &str = "meshes";
 const WATCHDOG_SEC: u64 = 10;
 const CARGO_ZIGBUILD_VERSION: &str = "0.23.0";
 #[cfg(not(test))]
@@ -778,13 +781,14 @@ fn prepare_deploy(
         catalog.as_ref(),
         ResolveOptions {
             resolve_source_commits: true,
+            resolve_component_asset_commits: false,
             official_target_triple: Some(target.official_triple.clone()),
             tool_target_triple: Some(target.official_triple.clone()),
         },
     )?;
 
     let all_source_participants =
-        source_participants_from_resolved(project_root, &resolved, component_crate_dir)?;
+        source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
     let checked_source_participants = all_source_participants
         .iter()
         .filter(|participant| {
@@ -912,7 +916,7 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
     )?;
 
     write_robot_yaml(root.path(), robot)?;
-    let metadata_files = stage_payload_metadata(project_root, root.path(), robot)?;
+    let metadata_files = stage_payload_metadata(project_root, root.path(), robot, resolved)?;
 
     let release = release_record(resolved, plan, &source_builds, &official_plans)?;
     let release_json_text =
@@ -1156,7 +1160,7 @@ fn source_kind(kind: SourceParticipantKind) -> ArtifactKind {
         SourceParticipantKind::UserService | SourceParticipantKind::OfficialService => {
             ArtifactKind::Service
         }
-        SourceParticipantKind::ComponentDriver => ArtifactKind::Driver,
+        SourceParticipantKind::ComponentDriver => ArtifactKind::ComponentDriver,
         SourceParticipantKind::Tool => ArtifactKind::Tool,
         SourceParticipantKind::Simulator => ArtifactKind::Simulator,
     }
@@ -1172,10 +1176,11 @@ fn source_record(
             .components
             .iter()
             .find(|component| component.instance == participant.name)
+        && let Some(driver) = &component.driver
     {
-        return match &component.source {
-            ResolvedComponentSource::Git { git, commit, .. } => {
-                Ok(serde_json::json!({ "git": git, "rev": commit }))
+        return match &driver.source {
+            ResolvedComponentSource::Git { git, rev, .. } => {
+                Ok(serde_json::json!({ "git": git, "rev": rev }))
             }
             ResolvedComponentSource::Path { path } => {
                 let full = crate::utils::resolve_project_path(project_root, path);
@@ -1183,6 +1188,9 @@ fn source_record(
                     "path": path.display().to_string(),
                     "tree": format!("sha256:{}", hash_tree(&full)?)
                 }))
+            }
+            ResolvedComponentSource::Catalog => {
+                Ok(serde_json::json!({ "package": driver.package }))
             }
         };
     }
@@ -1837,12 +1845,12 @@ fn stage_official_artifacts(
         if require_binaries && plan.source_path.is_none() {
             bail!(
                 "NativePending: official artifact {} is not available locally for {}; run `phoxal-cli pull`, set PHOXAL_ARTIFACT_{}_PATH, or set PHOXAL_ARTIFACT_DIR",
-                runtime.artifact_id,
+                runtime.package,
                 resolved.target,
-                env_key(&runtime.artifact_id)
+                env_key(&runtime.package)
             );
         }
-        artifacts.insert(runtime.artifact_id.clone(), plan);
+        artifacts.insert(runtime.package.clone(), plan);
     }
     let router = resolved
         .tools
@@ -1861,17 +1869,25 @@ fn stage_official_artifacts(
     Ok(artifacts)
 }
 
+/// The filesystem-safe projection of a provider-qualified package id
+/// (`phoxal/service-drive` -> `phoxal-service-drive`), used for on-disk
+/// binary/install names - a package id's `/` is not a legal path component.
+fn filesystem_safe_package_name(package: &str) -> String {
+    package.replace('/', "-")
+}
+
 fn official_runtime_plan(
     root: &Path,
     runtime: &ResolvedPlatformRuntime,
 ) -> Result<OfficialArtifactPlan> {
     let source_path = locate_official_runtime_binary(runtime)?;
+    let install_binary_name = filesystem_safe_package_name(&runtime.package);
     if let Some(source) = &source_path {
-        let dest = payload_bin(root).join(&runtime.artifact_id);
+        let dest = payload_bin(root).join(&install_binary_name);
         fs::copy(source, &dest).with_context(|| {
             format!(
                 "failed to stage official artifact {} from {}",
-                runtime.artifact_id,
+                runtime.package,
                 source.display()
             )
         })?;
@@ -1884,16 +1900,16 @@ fn official_runtime_plan(
         .or_else(|| runtime.sha256.clone())
         .unwrap_or_else(|| "0".repeat(64));
     Ok(OfficialArtifactPlan {
-        artifact_id: runtime.artifact_id.clone(),
+        artifact_id: runtime.package.clone(),
         kind: runtime.kind,
         version: runtime.version.clone(),
         sha256,
-        install_binary_name: runtime.artifact_id.clone(),
+        install_binary_name,
         source_path,
         missing_label: (runtime.target_status != Some(ArtifactStatus::Released)).then(|| {
             format!(
                 "{} ({})",
-                runtime.artifact_id,
+                runtime.package,
                 runtime
                     .target_status
                     .map(|status| status.to_string())
@@ -1927,7 +1943,7 @@ fn official_tool_plan(root: &Path, tool: &ResolvedTool) -> Result<OfficialArtifa
         .transpose()?
         .unwrap_or_else(|| tool.sha256.clone());
     Ok(OfficialArtifactPlan {
-        artifact_id: tool.name.clone(),
+        artifact_id: tool.package.clone(),
         kind: ArtifactKind::Tool,
         version: tool.resolved.clone(),
         sha256,
@@ -1946,13 +1962,13 @@ fn test_official_stub(root: &Path, name: &str) -> Result<PathBuf> {
 }
 
 fn locate_official_runtime_binary(runtime: &ResolvedPlatformRuntime) -> Result<Option<PathBuf>> {
-    if let Some(path) = env_path_override("PHOXAL_ARTIFACT", &runtime.artifact_id) {
+    if let Some(path) = env_path_override("PHOXAL_ARTIFACT", &runtime.package) {
         return Ok(Some(path));
     }
     if let Ok(dir) = std::env::var("PHOXAL_ARTIFACT_DIR") {
         for name in [
-            runtime.artifact_id.as_str(),
-            &crate::resolver::official_binary_name(runtime.kind, &runtime.name),
+            filesystem_safe_package_name(&runtime.package),
+            crate::resolver::official_binary_name(runtime.kind, &runtime.name),
         ] {
             let path = PathBuf::from(&dir).join(name);
             if path.is_file() {
@@ -2289,7 +2305,7 @@ fn participant_binary_name(
                     )
                 })?;
             official_plans
-                .get(&runtime.artifact_id)
+                .get(&runtime.package)
                 .map(|artifact| artifact.install_binary_name.clone())
                 .ok_or_else(|| {
                     anyhow!(
@@ -2322,7 +2338,7 @@ struct UnitPrivileges {
 }
 
 fn unit_privileges(resolved: &ResolvedRobot, participant_id: &str) -> UnitPrivileges {
-    let Some(component) = resolved.robot.components.instances.get(participant_id) else {
+    let Some(component) = resolved.robot.robot.components.get(participant_id) else {
         return UnitPrivileges::default();
     };
     let Some(driver) = component.driver.as_ref() else {
@@ -2395,50 +2411,145 @@ fn write_robot_yaml(root: &Path, robot: &Robot) -> Result<()> {
     write_text(&payload_opt(root).join("robot.yaml"), &yaml)
 }
 
-#[derive(Debug, Deserialize)]
-struct ComponentMetadataReference {
-    #[serde(default)]
-    structure: Option<PathBuf>,
-}
-
-fn stage_payload_metadata(project_root: &Path, root: &Path, robot: &Robot) -> Result<Vec<String>> {
+/// Stage the robot's own structure file plus every resolved component's full
+/// `component_assets` bundle (`component.yaml`, `simulation.yaml`,
+/// `structure.urdf`, `meshes/`) into the deploy payload's
+/// `/opt/phoxal/components/<component-id>/` (docs #21's deploy install
+/// payload shape). One component id may back several instances; its bundle is
+/// staged once and shared. Asset resolution never depends on where a
+/// component checkout happened to live - only the resolved
+/// `component_assets` package's own source directory matters.
+///
+/// Only `Path`-sourced (dev-overlay-pinned) assets are staged here, matching
+/// the pre-existing metadata-staging contract: this step copies local files
+/// synchronously while rendering the payload and must not reach the network
+/// or the release-asset cache. A `Git`- or `Catalog`-sourced assets package is
+/// staged by the artifact-provisioning path instead (`native_artifacts`/`pull`),
+/// not this local metadata copy.
+fn stage_payload_metadata(
+    project_root: &Path,
+    root: &Path,
+    robot: &Robot,
+    resolved: &ResolvedRobot,
+) -> Result<Vec<String>> {
     let mut staged_files = Vec::new();
     staged_files.push(stage_declared_metadata_file(
         project_root,
         &payload_opt(root),
-        &robot.structure,
+        &robot.robot.structure,
         "robot structure",
     )?);
 
-    for (source_id, source) in &robot.components.sources {
-        let RobotComponentSource::Path(source) = source else {
+    let mut staged_components = BTreeSet::new();
+    for component in &resolved.components {
+        if !matches!(
+            component.assets.source,
+            ResolvedComponentSource::Path { .. }
+        ) {
             continue;
-        };
-        let field = format!("components.sources.{source_id}.path");
-        validate_payload_relative_path(&source.path, &field)?;
-        let source_dir = crate::utils::resolve_project_path(project_root, &source.path);
-        let payload_dir = payload_opt(root).join(&source.path);
-        let component_file = source_dir.join(COMPONENT_FILE);
-        copy_metadata_file(
-            &component_file,
-            &payload_dir.join(COMPONENT_FILE),
-            &format!("component metadata for '{source_id}'"),
-        )?;
-        staged_files.push(opt_remote_path(&source.path.join(COMPONENT_FILE)));
-
-        if let Some(structure) = component_structure_reference(&component_file)? {
-            let structure_field = format!("components.sources.{source_id}.structure");
-            validate_payload_relative_path(&structure, &structure_field)?;
-            copy_metadata_file(
-                &source_dir.join(&structure),
-                &payload_dir.join(&structure),
-                &format!("component structure for '{source_id}'"),
-            )?;
-            staged_files.push(opt_remote_path(&source.path.join(structure)));
         }
+        let component_id = &component.source_name;
+        if !staged_components.insert(component_id.clone()) {
+            continue;
+        }
+        let source_dir = crate::component_driver::component_assets_dir(component, project_root)
+            .with_context(|| format!("failed to locate component assets for '{component_id}'"))?;
+        let payload_dir = payload_components_dir(root).join(component_id);
+        staged_files.extend(stage_component_assets_bundle(
+            root,
+            &source_dir,
+            &payload_dir,
+            component_id,
+        )?);
     }
 
     Ok(staged_files)
+}
+
+fn payload_components_dir(root: &Path) -> PathBuf {
+    payload_opt(root).join("components")
+}
+
+/// Copy one component's asset bundle (`component.yaml`, `simulation.yaml`,
+/// `structure.urdf`, `meshes/`) from its resolved source directory into the
+/// staged payload directory, returning the `/opt/phoxal/...`-rooted remote
+/// paths of every file staged. Only files that actually exist are copied -
+/// `simulation.yaml` and `meshes/` are optional per component.
+fn stage_component_assets_bundle(
+    root: &Path,
+    source_dir: &Path,
+    payload_dir: &Path,
+    component_id: &str,
+) -> Result<Vec<String>> {
+    let mut staged_files = Vec::new();
+    let component_file = source_dir.join(COMPONENT_FILE);
+    copy_metadata_file(
+        &component_file,
+        &payload_dir.join(COMPONENT_FILE),
+        &format!("component metadata for '{component_id}'"),
+    )?;
+    staged_files.push(payload_remote_path(root, &payload_dir.join(COMPONENT_FILE)));
+
+    for optional_file in [STRUCTURE_FILE, SIMULATION_FILE] {
+        let source_file = source_dir.join(optional_file);
+        if !source_file.is_file() {
+            continue;
+        }
+        copy_metadata_file(
+            &source_file,
+            &payload_dir.join(optional_file),
+            &format!("component {optional_file} for '{component_id}'"),
+        )?;
+        staged_files.push(payload_remote_path(root, &payload_dir.join(optional_file)));
+    }
+
+    let meshes_source = source_dir.join(MESHES_DIR);
+    if meshes_source.is_dir() {
+        let meshes_dest = payload_dir.join(MESHES_DIR);
+        copy_dir_recursive(root, &meshes_source, &meshes_dest, &mut staged_files)?;
+    }
+
+    Ok(staged_files)
+}
+
+/// The remote path a staged payload file is reported under, computed by
+/// stripping the temp payload root (`payload_opt(root)`) and re-rooting under
+/// `{OPT_ROOT}`.
+fn payload_remote_path(root: &Path, payload_path: &Path) -> String {
+    let relative = payload_path
+        .strip_prefix(payload_opt(root))
+        .unwrap_or(payload_path);
+    opt_remote_path(relative)
+}
+
+fn copy_dir_recursive(
+    root: &Path,
+    source: &Path,
+    dest: &Path,
+    staged_files: &mut Vec<String>,
+) -> Result<()> {
+    fs::create_dir_all(dest).with_context(|| format!("failed to create {}", dest.display()))?;
+    for entry in
+        fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let source_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(root, &source_path, &dest_path, staged_files)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &dest_path).with_context(|| {
+                format!(
+                    "failed to stage {} to {}",
+                    source_path.display(),
+                    dest_path.display()
+                )
+            })?;
+            staged_files.push(payload_remote_path(root, &dest_path));
+        }
+    }
+    Ok(())
 }
 
 fn stage_declared_metadata_file(
@@ -2451,19 +2562,6 @@ fn stage_declared_metadata_file(
     let source = crate::utils::resolve_project_path(project_root, relative_path);
     copy_metadata_file(&source, &payload_root.join(relative_path), label)?;
     Ok(opt_remote_path(relative_path))
-}
-
-fn component_structure_reference(component_file: &Path) -> Result<Option<PathBuf>> {
-    let contents = fs::read_to_string(component_file)
-        .with_context(|| format!("failed to read {}", component_file.display()))?;
-    let metadata =
-        serde_yaml::from_str::<ComponentMetadataReference>(&contents).with_context(|| {
-            format!(
-                "failed to parse metadata references from {}",
-                component_file.display()
-            )
-        })?;
-    Ok(metadata.structure)
 }
 
 fn validate_payload_relative_path(path: &Path, field: &str) -> Result<()> {
@@ -2532,7 +2630,7 @@ fn release_record(
                     .iter()
                     .find(|runtime| runtime.name == participant.artifact_id)
                     .ok_or_else(|| anyhow!("missing runtime for {}", participant.artifact_id))?;
-                if let Some(artifact) = official_plans.get(&runtime.artifact_id) {
+                if let Some(artifact) = official_plans.get(&runtime.package) {
                     artifacts
                         .entry(artifact.artifact_id.clone())
                         .or_insert_with(|| release_official_artifact(artifact));
@@ -3445,6 +3543,7 @@ mod tests {
         pub fn write_basic_project(root: &Path) -> Result<()> {
             write_fixture_catalog(root)?;
             fs::write(root.join("robot.yaml"), basic_robot_yaml())?;
+            fs::write(root.join("robot.dev.yaml"), basic_robot_dev_overlay_yaml())?;
             write_robot_structure(root)?;
             write_service_crate(root, "navtask", "service", "navtask")?;
             write_component_metadata(root, "ddsm115")?;
@@ -3454,6 +3553,7 @@ mod tests {
         pub fn write_driver_project(root: &Path) -> Result<()> {
             write_fixture_catalog(root)?;
             fs::write(root.join("robot.yaml"), driver_robot_yaml())?;
+            fs::write(root.join("robot.dev.yaml"), driver_robot_dev_overlay_yaml())?;
             write_robot_structure(root)?;
             write_service_crate(root, "navtask", "service", "navtask")?;
             write_driver_crate(root, "ddsm115", "driver-ddsm115")?;
@@ -3464,6 +3564,10 @@ mod tests {
         pub fn write_bench_camera_project(root: &Path) -> Result<()> {
             write_fixture_catalog(root)?;
             fs::write(root.join("robot.yaml"), bench_camera_robot_yaml())?;
+            fs::write(
+                root.join("robot.dev.yaml"),
+                bench_camera_robot_dev_overlay_yaml(),
+            )?;
             write_robot_structure(root)?;
             write_component_metadata(root, "bench_camera")?;
             let component_dir = root.join("components").join("bench_camera");
@@ -3488,6 +3592,7 @@ mod tests {
         pub fn write_native_dep_project(root: &Path) -> Result<()> {
             write_fixture_catalog(root)?;
             fs::write(root.join("robot.yaml"), basic_robot_yaml())?;
+            fs::write(root.join("robot.dev.yaml"), basic_robot_dev_overlay_yaml())?;
             let dir = root.join("runtimes/navtask");
             fs::create_dir_all(dir.join("src"))?;
             fs::write(
@@ -3581,19 +3686,10 @@ mod tests {
 
         fn basic_robot_yaml() -> &'static str {
             r#"schema: v0
-identity:
+robot:
   id: testbot
   namespace: dev
-structure: structure.urdf
-phoxal_artifacts:
-  channel: stable
-  generation: y2026_1
-  catalog: catalog.json
-phoxal_participants: {}
-user_participants:
-  navtask:
-    path: runtimes/navtask
-motion:
+  structure: structure.urdf
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -3602,90 +3698,95 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
-components:
-  sources:
-    ddsm115:
-      path: components/ddsm115
-  instances:
+  components:
     left_drive:
       component: ddsm115
       mount_link: left_wheel
     right_drive:
       component: ddsm115
       mount_link: right_wheel
+artifacts:
+  channel: stable
+  generation: y2026_1
+  catalog: catalog.json
+services:
+  navtask:
+    path: runtimes/navtask
+"#
+        }
+
+        /// Path pins are dev-overlay-only; every fixture project pairs its base
+        /// `robot.yaml` with this `robot.dev.yaml` overlay (loaded via
+        /// `--env dev`, see `dry_options`/`live_options`) so local component
+        /// asset/driver directories resolve without a real catalog/network.
+        fn basic_robot_dev_overlay_yaml() -> &'static str {
+            r#"artifacts:
+  pins:
+    phoxal/component-ddsm115-assets:
+      path: components/ddsm115
 "#
         }
 
         fn bench_camera_robot_yaml() -> &'static str {
             r#"schema: v0
-identity:
+robot:
   id: benchbot
   namespace: dev
-structure: structure.urdf
-phoxal_artifacts:
-  channel: stable
-  generation: y2026_1
-  catalog: catalog.json
-phoxal_participants: {}
-motion:
+  structure: structure.urdf
   kinematic:
     kind: omnidirectional
     actuators: [front_camera.motor]
     encoders: [front_camera.encoder]
-components:
-  sources:
-    bench_camera:
-      path: components/bench_camera
-  instances:
+  components:
     front_camera:
       component: bench_camera
       mount_link: camera_mount
+artifacts:
+  channel: stable
+  generation: y2026_1
+  catalog: catalog.json
+"#
+        }
+
+        fn bench_camera_robot_dev_overlay_yaml() -> &'static str {
+            r#"artifacts:
+  pins:
+    phoxal/component-bench_camera-assets:
+      path: components/bench_camera
 "#
         }
 
         fn catalog_only_robot_yaml() -> &'static str {
             r#"schema: v0
-identity:
+robot:
   id: catalogbot
   namespace: dev
-structure: structure.urdf
-phoxal_artifacts:
-  channel: stable
-  generation: y2026_1
-  catalog: catalog.json
-phoxal_participants: {}
-motion:
+  structure: structure.urdf
   kinematic:
     kind: omnidirectional
     actuators: [catalog_drive.motor]
     encoders: [catalog_drive.encoder]
-components:
-  sources:
-    catalog_motor:
-      git: https://github.com/phoxal/framework
-      tag: 0123456789abcdef0123456789abcdef01234567
-  instances:
+  components:
     catalog_drive:
       component: catalog_motor
       mount_link: left_wheel
+artifacts:
+  channel: stable
+  generation: y2026_1
+  catalog: catalog.json
+  pins:
+    phoxal/component-catalog_motor-assets:
+      git: /definitely/not/a/component-assets-repo
+      rev: main
 "#
         }
 
         fn driver_robot_yaml() -> &'static str {
             r#"schema: v0
-identity:
+robot:
   id: testbot
   namespace: dev
-structure: structure.urdf
-phoxal_artifacts:
-  channel: stable
-  generation: y2026_1
-  catalog: catalog.json
-phoxal_participants: {}
-user_participants:
-  navtask:
-    path: runtimes/navtask
-motion:
+  structure: structure.urdf
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -3694,11 +3795,7 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
-components:
-  sources:
-    ddsm115:
-      path: components/ddsm115
-  instances:
+  components:
     left_drive:
       component: ddsm115
       mount_link: left_wheel
@@ -3709,6 +3806,23 @@ components:
       mount_link: right_wheel
       driver:
         connection: { type: i2c, bus: 1, address: 16 }
+artifacts:
+  channel: stable
+  generation: y2026_1
+  catalog: catalog.json
+services:
+  navtask:
+    path: runtimes/navtask
+"#
+        }
+
+        fn driver_robot_dev_overlay_yaml() -> &'static str {
+            r#"artifacts:
+  pins:
+    phoxal/component-ddsm115-assets:
+      path: components/ddsm115
+    phoxal/component-ddsm115-driver:
+      path: components/ddsm115
 "#
         }
 
@@ -4028,12 +4142,16 @@ capabilities:
         Ok(())
     }
 
+    /// Every `phoxal_cli_test_support` fixture stages its component asset/driver
+    /// path pins in a `robot.dev.yaml` overlay (path pins are dev-overlay-only
+    /// in the new grammar); both option builders load it so fixture projects
+    /// resolve their components without touching a real catalog/network.
     fn dry_options() -> DeployOptions {
         DeployOptions {
             host: None,
             dry_run: true,
             target: Some("aarch64".to_string()),
-            overlays: Vec::new(),
+            overlays: vec!["dev".to_string()],
             catalog_source: None,
             message_format: MessageFormat::Human,
             health_timeout: Duration::from_secs(3),
@@ -4045,7 +4163,7 @@ capabilities:
             host: Some("robot@test".to_string()),
             dry_run: false,
             target: None,
-            overlays: Vec::new(),
+            overlays: vec!["dev".to_string()],
             catalog_source: None,
             message_format: MessageFormat::Human,
             health_timeout: Duration::from_secs(3),
@@ -4138,6 +4256,17 @@ capabilities:
                 .contains_key("/opt/phoxal/env/navtask.env")
         );
         assert_eq!(payload.release_json["schema"], RELEASE_SCHEMA);
+        let release_artifact_ids = payload.release_json["artifacts"]
+            .as_array()
+            .expect("release artifacts should be an array")
+            .iter()
+            .filter_map(|artifact| artifact["id"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            release_artifact_ids.contains("phoxal/tool-router"),
+            "official tool release record should use package identity: {:?}",
+            payload.release_json["artifacts"]
+        );
         assert!(
             payload
                 .install_plan
@@ -4207,9 +4336,16 @@ capabilities:
     fn payload_without_path_components_has_no_components_dir() -> Result<()> {
         let temp = tempfile::tempdir()?;
         phoxal_cli_test_support::write_catalog_only_project(temp.path())?;
+        // This fixture's component pin is a git (not path) pin with a bogus
+        // repository. Deploy metadata staging must skip it without trying
+        // `git ls-remote` or `git clone`, so unlike the other fixtures it
+        // carries no `robot.dev.yaml` overlay to load.
         let payload = prepare_deploy(
             temp.path(),
-            &dry_options(),
+            &DeployOptions {
+                overlays: Vec::new(),
+                ..dry_options()
+            },
             target_for_arch("aarch64"),
             false,
             DRY_RUN_REMOTE_USER,

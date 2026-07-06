@@ -17,7 +17,7 @@ use crate::commands::run::{RunOptions, source_spec_from_launch_record};
 use crate::commands::simulate::{
     SimulateMode, SimulateOptions, build_checked_sim_launch_plan_with_scope, resolve_project,
 };
-use crate::component_driver::component_crate_dir;
+use crate::component_driver::component_driver_crate_dir;
 use crate::launch_plan::{CheckedRobotLaunchInput, LaunchMode, LaunchPlan, build_launch_plan};
 use crate::resolver::{
     ResolveOptions, ResolvedRobot, discover_robot_yaml, load_robot_with_extras,
@@ -391,11 +391,12 @@ fn recheck_run_target(
         catalog.as_ref(),
         ResolveOptions {
             resolve_source_commits: true,
+            resolve_component_asset_commits: false,
             ..ResolveOptions::default()
         },
     )?;
     let source_participants =
-        source_participants_from_resolved(project_root, &resolved, component_crate_dir)?;
+        source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
     let scoped = source_participants_building_only_crate(&source_participants, &target.crate_dir);
     let robot_graph = robot_graph_from_resolved(&resolved);
     let platform_refs = platform_artifact_refs_from_resolved(&resolved);
@@ -724,15 +725,9 @@ mod tests {
     fn empty_resolved() -> ResolvedRobot {
         let robot = phoxal::model::robot::v1::Robot::parse_from_string(
             r#"schema: v0
-identity:
+robot:
   id: robot
   namespace: test
-structure: structure.urdf
-phoxal_participants: {}
-components:
-  sources: {}
-  instances: {}
-motion:
   kinematic:
     kind: differential
     left_actuators: []
@@ -741,6 +736,7 @@ motion:
     right_encoders: []
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
+  components: {}
 "#,
         )
         .unwrap();

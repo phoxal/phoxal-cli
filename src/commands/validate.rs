@@ -91,20 +91,15 @@ fn target_generation_for_validate(
     robot: &Robot,
     catalog: Option<&crate::catalog::CatalogRevision>,
 ) -> String {
-    let target = robot
-        .phoxal_artifacts
-        .target
-        .clone()
-        .unwrap_or_else(crate::resolver::host_target_triple);
+    let target = crate::resolver::host_target_triple();
     robot
-        .phoxal_artifacts
+        .artifacts
         .generation
         .clone()
-        .or_else(|| robot.api_version.clone())
         .or_else(|| {
             catalog.and_then(|catalog| {
                 catalog.newest_generation_on_channel(
-                    crate::catalog::Channel::from(robot.phoxal_artifacts.channel),
+                    crate::catalog::Channel::from(robot.artifacts.channel),
                     &target,
                 )
             })
@@ -149,14 +144,7 @@ fn collect_user_service_dependency_report(
     expected_generation: &str,
 ) -> UserServiceDependencyReport {
     let mut report = UserServiceDependencyReport::default();
-    for (name, runtime) in &robot.user_participants {
-        if let Err(error) = crate::resolver::validate_user_runtime_framework_selector(
-            name,
-            &runtime.framework,
-            expected_generation,
-        ) {
-            report.problems.push(error.to_string());
-        }
+    for (name, runtime) in &robot.services {
         let runtime_dir = resolve_robot_path(robot_root, &runtime.path);
         let manifest_path = runtime_dir.join("Cargo.toml");
         let Ok(contents) = fs::read_to_string(&manifest_path) else {
@@ -237,9 +225,9 @@ fn print_text_report(
     target_generation: &str,
     catalog: Option<&crate::catalog::CatalogRevision>,
 ) {
-    println!("robot: {}", robot.identity.id);
+    println!("robot: {}", robot.robot.id);
     println!("target_generation: {target_generation}");
-    println!("channel: {}", robot.phoxal_artifacts.channel);
+    println!("channel: {}", robot.artifacts.channel);
     println!("platform_services:");
     for runtime in catalog
         .into_iter()
@@ -248,16 +236,16 @@ fn print_text_report(
     {
         let artifact_ref = format!(
             "{}:{}-{}",
-            runtime.artifact_id, runtime.api_generation, robot.phoxal_artifacts.channel
+            runtime.package, runtime.api_generation, robot.artifacts.channel
         );
-        println!("  - {} -> {}", runtime.artifact_id, artifact_ref);
+        println!("  - {} -> {}", runtime.package, artifact_ref);
     }
-    println!("user_participants:");
-    for (name, runtime) in &robot.user_participants {
+    println!("services:");
+    for (name, runtime) in &robot.services {
         println!("  - {} -> {}", name, runtime.path.display());
     }
     println!("components:");
-    for (instance_name, instance) in &robot.components.instances {
+    for (instance_name, instance) in &robot.robot.components {
         let driver = if instance.driver.is_some() {
             "driver"
         } else {
@@ -276,27 +264,27 @@ fn print_json_report(
     catalog: Option<&crate::catalog::CatalogRevision>,
 ) -> Result<()> {
     let report = serde_json::json!({
-        "robot": robot.identity.id,
+        "robot": robot.robot.id,
         "target_generation": target_generation,
-        "channel": robot.phoxal_artifacts.channel,
+        "channel": robot.artifacts.channel,
         "platform_services": catalog.into_iter().flat_map(|catalog| catalog.entries.iter()).filter(|entry| entry.kind == crate::catalog::ArtifactKind::Service).map(|runtime| {
             let artifact_ref = format!(
                 "{}:{}-{}",
-                runtime.artifact_id, runtime.api_generation, robot.phoxal_artifacts.channel
+                runtime.package, runtime.api_generation, robot.artifacts.channel
             );
             serde_json::json!({
-                "name": runtime.artifact_id,
+                "name": runtime.package,
                 "api_generation": runtime.api_generation,
                 "artifact_ref": artifact_ref,
             })
         }).collect::<Vec<_>>(),
-        "user_participants": robot.user_participants.iter().map(|(name, runtime)| {
+        "services": robot.services.iter().map(|(name, runtime)| {
             serde_json::json!({
                 "name": name,
                 "path": runtime.path,
             })
         }).collect::<Vec<_>>(),
-        "components": robot.components.instances.iter().map(|(instance_name, instance)| {
+        "components": robot.robot.components.iter().map(|(instance_name, instance)| {
             serde_json::json!({
                 "instance": instance_name,
                 "source": instance.component,
@@ -458,69 +446,6 @@ serde = "1"
         Ok(())
     }
 
-    #[test]
-    fn empty_user_service_framework_collects_problem() -> anyhow::Result<()> {
-        let temp = tempfile::tempdir()?;
-        let runtime_dir = temp.path().join("runtimes/drive");
-        write_manifest(
-            &runtime_dir,
-            r#"
-[package]
-name = "drive"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-phoxal = "0.14.0"
-"#,
-        )?;
-        let robot = Robot::parse_from_string(
-            r#"schema: v0
-api_version: y2026_1
-
-identity:
-  id: testbot
-  namespace: test
-
-structure: structure.urdf
-
-phoxal_artifacts:
-  channel: stable
-phoxal_participants: {}
-
-user_participants:
-  drive:
-    path: runtimes/drive
-    framework: ""
-
-motion:
-  kinematic:
-    kind: differential
-    left_actuators: [left_drive.motor]
-    right_actuators: [right_drive.motor]
-    left_encoders: [left_drive.encoder]
-    right_encoders: [right_drive.encoder]
-    wheel_radius_m: 0.1
-    wheel_base_m: 0.5
-
-components:
-  sources: {}
-  instances: {}
-"#,
-        )?;
-
-        let problems = collect_user_service_problems(temp.path(), &robot, "y2026_1");
-
-        assert_eq!(
-            problems,
-            vec![
-                "user service 'drive': framework '' must be \"match-platform\" or the target generation 'y2026_1'"
-                    .to_string()
-            ]
-        );
-        Ok(())
-    }
-
     fn write_manifest(runtime_dir: &Path, manifest: &str) -> anyhow::Result<()> {
         fs::create_dir_all(runtime_dir)?;
         fs::write(runtime_dir.join("Cargo.toml"), manifest)?;
@@ -530,23 +455,9 @@ components:
     fn robot_with_user_service(runtime_path: &str) -> anyhow::Result<Robot> {
         Robot::parse_from_string(&format!(
             r#"schema: v0
-api_version: y2026_1
-
-identity:
+robot:
   id: testbot
   namespace: test
-
-structure: structure.urdf
-
-phoxal_artifacts:
-  channel: stable
-phoxal_participants: {{}}
-
-user_participants:
-  drive:
-    path: {runtime_path}
-
-motion:
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -555,18 +466,18 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
-
-components:
-  sources:
-    ddsm115:
-      path: ./components/ddsm115
-  instances:
+  components:
     left_drive:
       component: ddsm115
       mount_link: left_wheel_mount
     right_drive:
       component: ddsm115
       mount_link: right_wheel_mount
+artifacts:
+  channel: stable
+services:
+  drive:
+    path: {runtime_path}
 "#
         ))
     }

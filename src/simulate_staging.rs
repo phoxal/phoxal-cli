@@ -156,7 +156,7 @@ pub fn stage_simulation_world(
     })?;
 
     for robot in robots {
-        let proto_name = proto_name_for_robot(&robot.bundle.manifest.identity.id)?;
+        let proto_name = proto_name_for_robot(&robot.bundle.manifest.robot.id)?;
         let proto_path = staged_protos_dir.join(format!("{proto_name}.proto"));
         let mesh_url_prefix = relative_mesh_url_prefix(mesh_root, &proto_path)?;
         let component_solid_links = stage_component_protos(
@@ -419,20 +419,14 @@ mod tests {
     fn fixture_bundle(robot_id: &str) -> RobotBundle {
         let manifest_yaml = format!(
             r#"schema: v0
-api_version: y2026_1
-identity:
+robot:
   id: {robot_id}
   namespace: dev
-structure: structure.urdf
-phoxal_participants: {{}}
-motion:
   kinematic:
     kind: omnidirectional
     actuators: []
     encoders: []
-components:
-  sources: {{}}
-  instances: {{}}
+  components: {{}}
 "#
         );
         let manifest = phoxal::model::robot::v1::Robot::parse_from_string(&manifest_yaml)
@@ -646,22 +640,14 @@ components:
         )?;
 
         let manifest_yaml = r#"schema: v0
-api_version: y2026_1
-identity:
+robot:
   id: testbot
   namespace: dev
-structure: structure.urdf
-phoxal_participants: {}
-motion:
   kinematic:
     kind: omnidirectional
     actuators: [left_drive.motor]
     encoders: []
-components:
-  sources:
-    ddsm115:
-      path: components/ddsm115
-  instances:
+  components:
     left_drive:
       component: ddsm115
       mount_link: base_link

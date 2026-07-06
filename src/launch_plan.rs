@@ -178,7 +178,7 @@ fn resolved_tool<'a>(resolved: &'a ResolvedRobot, tool_name: &str) -> Result<&'a
         .ok_or_else(|| {
             anyhow!(
                 "resolved robot {} is missing required site tool {tool_name}",
-                resolved.robot.identity.id
+                resolved.robot.robot.id
             )
         })
 }
@@ -279,8 +279,8 @@ fn build_robot_launch(
     });
 
     Ok(RobotLaunch {
-        id: input.resolved.robot.identity.id.clone(),
-        namespace: input.resolved.robot.identity.namespace.clone(),
+        id: input.resolved.robot.robot.id.clone(),
+        namespace: input.resolved.robot.robot.namespace.clone(),
         participants,
         substitutions: input
             .accepted_substitutions
@@ -416,8 +416,8 @@ fn participant_launch(
     };
     ParticipantLaunch {
         participant_id: checked.participant_id.clone(),
-        namespace: input.resolved.robot.identity.namespace.clone(),
-        robot_id: input.resolved.robot.identity.id.clone(),
+        namespace: input.resolved.robot.robot.namespace.clone(),
+        robot_id: input.resolved.robot.robot.id.clone(),
         bus: BusProfile {
             connect_endpoints: vec![DEFAULT_ROUTER_CONNECT.to_string()],
         },
@@ -517,7 +517,7 @@ fn expected_simulator_participant_ids(resolved: &ResolvedRobot) -> BTreeSet<Stri
         .filter_map(|runtime| {
             crate::commands::simulate::simulator_participant_id_for_resolved_artifact(
                 &runtime.name,
-                &resolved.robot.identity.id,
+                &resolved.robot.robot.id,
             )
         })
         .collect()
@@ -531,6 +531,7 @@ mod tests {
 
     use crate::catalog::{
         ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
+        fixture_component_assets_entry_for_tests, fixture_component_driver_entry_for_tests,
         fixture_contract_for_tests, fixture_service_entry_for_tests,
     };
     use crate::commands::check::{
@@ -553,26 +554,44 @@ mod tests {
         )?;
         std::fs::write(temp.path().join("runtimes/mission/src.txt"), "source")?;
         let robot = phoxal::model::robot::v1::Robot::parse_from_string(FIXTURE_ROBOT)?;
-        let catalog = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
-            "drive",
-            "y2026_1",
-            "0.1.0",
-            CatalogChannel::Stable,
-            &host_target_triple(),
-            ArtifactStatus::Released,
-            vec![fixture_contract_for_tests(
-                "drive::Target",
-                "drive/target",
-                "publish",
-                "schema-drive",
-            )],
-        )]);
+        let catalog = fixture_catalog_for_tests(vec![
+            fixture_service_entry_for_tests(
+                "drive",
+                "y2026_1",
+                "0.1.0",
+                CatalogChannel::Stable,
+                &host_target_triple(),
+                ArtifactStatus::Released,
+                vec![fixture_contract_for_tests(
+                    "drive::Target",
+                    "drive/target",
+                    "publish",
+                    "schema-drive",
+                )],
+            ),
+            fixture_component_assets_entry_for_tests(
+                "ddsm115",
+                "y2026_1",
+                "0.1.0",
+                CatalogChannel::Stable,
+            ),
+            fixture_component_driver_entry_for_tests(
+                "ddsm115",
+                "y2026_1",
+                "0.1.0",
+                CatalogChannel::Stable,
+                &host_target_triple(),
+                ArtifactStatus::Released,
+                Vec::new(),
+            ),
+        ]);
         let mut resolved = resolve(
             &robot,
             temp.path(),
             Some(&catalog),
             ResolveOptions {
                 resolve_source_commits: false,
+                resolve_component_asset_commits: false,
                 ..ResolveOptions::default()
             },
         )?;
@@ -764,7 +783,6 @@ mod tests {
             .push(crate::resolver::ResolvedUserRuntime {
                 name: "mission".to_string(),
                 path: PathBuf::from("runtimes/mission"),
-                framework: "y2026_1".to_string(),
                 source_hash: "hash".to_string(),
             });
         let extras = RobotManifestExtras::default();
@@ -845,20 +863,16 @@ mod tests {
     fn empty_resolved_robot(id: &str) -> anyhow::Result<ResolvedRobot> {
         let yaml = format!(
             r#"schema: v0
-api_version: y2026_1
-identity:
+robot:
   id: {id}
   namespace: dev
-structure: structure.urdf
-phoxal_participants: {{}}
-motion:
   kinematic:
     kind: omnidirectional
     actuators: []
     encoders: []
-components:
-  sources: {{}}
-  instances: {{}}
+  components: {{}}
+artifacts:
+  generation: y2026_1
 "#
         );
         let robot = phoxal::model::robot::v1::Robot::parse_from_string(&yaml)?;
@@ -886,6 +900,7 @@ components:
     fn tool(name: &str) -> ResolvedTool {
         ResolvedTool {
             name: name.to_string(),
+            package: format!("phoxal/{name}"),
             requested: "0.1.0".to_string(),
             resolved: "0.1.0".to_string(),
             repo: "phoxal/framework".to_string(),
@@ -898,19 +913,9 @@ components:
     }
 
     const FIXTURE_ROBOT: &str = r#"schema: v0
-api_version: y2026_1
-identity:
+robot:
   id: robot_v1
   namespace: dev
-structure: structure.urdf
-bus:
-  listen:
-    - serial//dev/ttyUSB0?baudrate=115200
-phoxal_participants: {}
-user_participants:
-  mission:
-    path: runtimes/mission
-motion:
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -919,11 +924,7 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
-components:
-  sources:
-    ddsm115:
-      path: components/ddsm115
-  instances:
+  components:
     left_drive:
       component: ddsm115
       mount_link: left_wheel
@@ -934,5 +935,11 @@ components:
       mount_link: right_wheel
       driver:
         connection: { type: can, bus: 0, node_id: 2 }
+bus:
+  listen:
+    - serial//dev/ttyUSB0?baudrate=115200
+services:
+  mission:
+    path: runtimes/mission
 "#;
 }

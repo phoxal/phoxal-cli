@@ -50,6 +50,7 @@ impl WebotsSceneDescription {
 
         let mounted_components_for_link = configuration
             .manifest
+            .robot
             .components
             .iter()
             .map(|(component_id, model_component)| {
@@ -98,7 +99,7 @@ impl WebotsSceneDescription {
             );
 
         Ok(Self {
-            robot_name: configuration.manifest.identity.id.clone(),
+            robot_name: configuration.manifest.robot.id.clone(),
             root_link_id,
             links,
             contact_materials: BTreeMap::new(),
