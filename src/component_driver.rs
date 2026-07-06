@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::native_artifacts::{self, NativeArtifactDescriptor, ProvisioningMode};
 use crate::resolver::{ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource};
 use crate::utils::resolve_project_path;
 use crate::{host_paths, shell};
@@ -50,11 +51,40 @@ fn resolved_component_package_dir(
             let repo_dir = ensure_component_repo_cache(source_name, git, rev)?;
             component_repo_subdir(repo_dir, directory.as_deref())
         }
-        ResolvedComponentSource::Catalog => bail!(
-            "component package {} resolves from the artifact catalog; it has no local source directory to build",
-            package.package
-        ),
+        ResolvedComponentSource::Catalog => catalog_component_package_dir(package),
     }
+}
+
+/// Fetch and unpack a catalog-resolved component package's release asset via
+/// the identical native-staging path services/tools already use
+/// ([`native_artifacts::stage_component_package`]/`stage_descriptor`), and
+/// return its local cache directory: the unpacked assets bundle root
+/// (`component.yaml`, `structure.urdf`, `simulation.yaml`, `meshes/`) for a
+/// `component_assets` package, or the cache directory containing the staged
+/// driver binary + packaged emit-apis for a `component_driver` package.
+/// `MissingOnly` mode: reuses an already-staged local cache without touching
+/// the network again, matching how a service's cache is consulted.
+fn catalog_component_package_dir(package: &ResolvedComponentPackage) -> Result<PathBuf> {
+    let Some(runtime) = &package.catalog_runtime else {
+        bail!(
+            "component package {} resolves from the artifact catalog but has no release asset for \
+             this target yet; it cannot be staged locally. Wait for it to publish, or pin \
+             artifacts.pins.{} to a path/git override.",
+            package.package,
+            package.package
+        );
+    };
+    let descriptor = NativeArtifactDescriptor::from_runtime(runtime)?.ok_or_else(|| {
+        anyhow!(
+            "component package {} has no release asset for this target yet; it cannot be staged locally. \
+             Wait for it to publish, or pin artifacts.pins.{} to a path/git override.",
+            package.package,
+            package.package
+        )
+    })?;
+    native_artifacts::stage_descriptor(None, &descriptor, ProvisioningMode::MissingOnly)
+        .with_context(|| format!("failed to stage component package {}", package.package))?;
+    native_artifacts::artifact_cache_dir(&descriptor)
 }
 
 fn ensure_component_repo_cache(source_name: &str, git: &str, commit: &str) -> Result<PathBuf> {

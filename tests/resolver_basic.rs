@@ -3,13 +3,14 @@ use std::fs;
 use phoxal::model::robot::RobotV1 as Robot;
 use phoxal_cli::catalog::{
     ArtifactStatus, CatalogRevision, Channel as CatalogChannel, fixture_catalog_for_tests,
-    fixture_component_assets_entry_for_tests, fixture_component_driver_entry_for_tests,
-    fixture_contract_for_tests, fixture_service_entry_for_tests, fixture_simulator_entry_for_tests,
-    fixture_tool_entry_for_tests,
+    fixture_component_assets_entry_for_tests, fixture_component_assets_release_asset_for_tests,
+    fixture_component_driver_entry_for_tests, fixture_contract_for_tests,
+    fixture_release_asset_with_metadata_for_tests, fixture_service_entry_for_tests,
+    fixture_simulator_entry_for_tests, fixture_tool_entry_for_tests,
 };
 use phoxal_cli::resolver::{
-    ResolveOptions, ResolvedPathOverrideKind, ResolvedRobot, host_target_triple,
-    load_robot_with_extras, load_robot_with_extras_and_overlays, resolve,
+    ResolveOptions, ResolvedComponentSource, ResolvedPathOverrideKind, ResolvedRobot,
+    host_target_triple, load_robot_with_extras, load_robot_with_extras_and_overlays, resolve,
 };
 
 #[test]
@@ -128,6 +129,147 @@ fn component_with_driver_block_resolves_both_assets_and_driver() -> anyhow::Resu
     assert_eq!(left_drive.assets.package, "phoxal/component-ddsm115-assets");
     let driver = left_drive.driver.as_ref().expect("driver package resolved");
     assert_eq!(driver.package, "phoxal/component-ddsm115-driver");
+
+    Ok(())
+}
+
+#[test]
+fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyhow::Result<()> {
+    // The resolver must capture, for a Catalog-sourced component package,
+    // exactly the same shape a service captures: the resolved catalog
+    // entry's version, the per-scope `ReleaseAsset`, and the resolved target
+    // scope (target-independent for assets, the target triple for drivers).
+    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
+        "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount",
+        "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount\n      driver:\n        connection: { type: can, bus: 0, node_id: 1 }",
+    ))?;
+    let target = host_target_triple();
+    let mut assets_entry = fixture_component_assets_entry_for_tests(
+        "ddsm115",
+        "y2026_1",
+        "0.1.0",
+        CatalogChannel::Stable,
+    );
+    assets_entry.release_assets.insert(
+        phoxal_cli::catalog::TARGET_INDEPENDENT_SCOPE.to_string(),
+        fixture_component_assets_release_asset_for_tests(
+            "phoxal-component-ddsm115-assets-v0.1.0.tar.zst",
+            &"a".repeat(64),
+        ),
+    );
+    let mut driver_entry = fixture_component_driver_entry_for_tests(
+        "ddsm115",
+        "y2026_1",
+        "0.1.0",
+        CatalogChannel::Stable,
+        &target,
+        ArtifactStatus::Released,
+        Vec::new(),
+    );
+    driver_entry.release_assets.insert(
+        target.clone(),
+        fixture_release_asset_with_metadata_for_tests(
+            &format!("phoxal-component-ddsm115-driver-v0.1.0-{target}.tar.zst"),
+            &"b".repeat(64),
+        ),
+    );
+    let catalog = fixture_catalog_for_tests(vec![
+        fixture_service_entry_for_tests(
+            "drive",
+            "y2026_1",
+            "0.1.0",
+            CatalogChannel::Stable,
+            &target,
+            ArtifactStatus::Pending,
+            vec![fixture_contract_for_tests(
+                "drive::Target",
+                "drive/target",
+                "publish",
+                "0123456789abcdef",
+            )],
+        ),
+        assets_entry,
+        driver_entry,
+    ]);
+
+    let resolved = resolve(
+        &robot,
+        std::path::Path::new("."),
+        Some(&catalog),
+        offline_options(),
+    )?;
+    let left_drive = resolved
+        .components
+        .iter()
+        .find(|component| component.instance == "left_drive")
+        .expect("left_drive component resolved");
+
+    assert_eq!(left_drive.assets.source, ResolvedComponentSource::Catalog);
+    let assets_runtime = left_drive
+        .assets
+        .catalog_runtime
+        .as_ref()
+        .expect("catalog-sourced assets package captures a catalog_runtime");
+    assert_eq!(assets_runtime.name, "ddsm115");
+    assert_eq!(assets_runtime.version, "0.1.0");
+    assert_eq!(
+        assets_runtime.sha256.as_deref(),
+        Some("a".repeat(64)).as_deref()
+    );
+    assert!(
+        assets_runtime.metadata.is_none(),
+        "component_assets carries no emit-apis metadata"
+    );
+    assert_eq!(
+        assets_runtime.artifact_ref(),
+        "phoxal-component-ddsm115-assets-v0.1.0.tar.zst"
+    );
+
+    let driver = left_drive.driver.as_ref().expect("driver package resolved");
+    assert_eq!(driver.source, ResolvedComponentSource::Catalog);
+    let driver_runtime = driver
+        .catalog_runtime
+        .as_ref()
+        .expect("catalog-sourced driver package captures a catalog_runtime");
+    assert_eq!(driver_runtime.name, "ddsm115");
+    assert_eq!(
+        driver_runtime.sha256.as_deref(),
+        Some("b".repeat(64)).as_deref()
+    );
+    assert!(
+        driver_runtime.metadata.is_some(),
+        "component_driver carries emit-apis metadata"
+    );
+    assert_eq!(
+        driver_runtime.artifact_ref(),
+        format!("phoxal-component-ddsm115-driver-v0.1.0-{target}.tar.zst")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn catalog_component_with_no_release_asset_yet_still_resolves_with_none_runtime_sha256()
+-> anyhow::Result<()> {
+    // A metadata-only / not-yet-published catalog entry must not silently
+    // succeed as if a bundle exists to fetch: resolution succeeds (the
+    // package is real and versioned), but `catalog_runtime.sha256` stays
+    // `None` so a later staging attempt reports a clear diagnostic.
+    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1"))?;
+    let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
+
+    let left_drive = resolved
+        .components
+        .iter()
+        .find(|component| component.instance == "left_drive")
+        .expect("left_drive component resolved");
+    let runtime = left_drive
+        .assets
+        .catalog_runtime
+        .as_ref()
+        .expect("catalog_runtime is populated even with no release asset yet");
+    assert!(runtime.sha256.is_none());
+    assert!(runtime.metadata.is_none());
 
     Ok(())
 }

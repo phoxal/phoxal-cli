@@ -232,7 +232,12 @@ pub struct ContractUse {
 pub struct ReleaseAsset {
     pub asset: String,
     pub sha256: String,
-    pub metadata: ReleaseAssetMetadata,
+    /// The packaged emit-apis sidecar metadata. `Some` for every kind that
+    /// ships a runtime binary (`service`/`driver`/`tool`/`simulator`); `None`
+    /// for `component_assets` - a target-independent asset bundle carries no
+    /// emit-apis at all, since it has no runtime binary to describe (docs
+    /// #21). Consumers must not assume `Some`.
+    pub metadata: Option<ReleaseAssetMetadata>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -624,11 +629,29 @@ fn validate_entries(entries: &[CatalogEntry]) -> Result<()> {
                     entry.package
                 );
             }
-            if !is_sha256(&asset.metadata.emit_apis_sha256) {
-                bail!(
-                    "{} emit-apis metadata for {triple} has invalid sha256",
-                    entry.package
-                );
+            match (&asset.metadata, entry.kind) {
+                (Some(_), ArtifactKind::ComponentAssets) => {
+                    bail!(
+                        "{} release asset for {triple} is a component_assets bundle and must not carry emit-apis metadata",
+                        entry.package
+                    );
+                }
+                (Some(metadata), _) => {
+                    if !is_sha256(&metadata.emit_apis_sha256) {
+                        bail!(
+                            "{} emit-apis metadata for {triple} has invalid sha256",
+                            entry.package
+                        );
+                    }
+                }
+                (None, ArtifactKind::ComponentAssets) => {}
+                (None, _) => {
+                    bail!(
+                        "{} release asset for {triple} has no metadata; only {} may omit emit-apis metadata",
+                        entry.package,
+                        ArtifactKind::ComponentAssets.catalog_kind()
+                    );
+                }
             }
         }
         if entry.channels.is_empty() {
@@ -897,6 +920,30 @@ pub fn fixture_contract_for_tests(
     }
 }
 
+/// A release asset for a kind that ships a runtime binary
+/// (`service`/`driver`/`tool`/`simulator`): `metadata` is always `Some`.
+pub fn fixture_release_asset_with_metadata_for_tests(asset: &str, sha256: &str) -> ReleaseAsset {
+    ReleaseAsset {
+        asset: asset.to_string(),
+        sha256: sha256.to_string(),
+        metadata: Some(ReleaseAssetMetadata {
+            emit_apis: format!("{asset}.emit-apis.json"),
+            emit_apis_sha256: sha256.to_string(),
+            sha256_file: format!("{asset}.sha256"),
+        }),
+    }
+}
+
+/// A `component_assets` release asset: `metadata` is always `None`, since a
+/// target-independent asset bundle carries no emit-apis (docs #21).
+pub fn fixture_component_assets_release_asset_for_tests(asset: &str, sha256: &str) -> ReleaseAsset {
+    ReleaseAsset {
+        asset: asset.to_string(),
+        sha256: sha256.to_string(),
+        metadata: None,
+    }
+}
+
 pub fn unavailable_catalog_error() -> anyhow::Error {
     anyhow!(
         "no artifact catalog revision is available; tried cached catalog and default catalog URL {DEFAULT_CATALOG_URL}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add artifacts.catalog in robot.yaml, or run `phoxal-cli pull` with network access to refresh the cache."
@@ -916,6 +963,101 @@ fn unavailable_catalog_error_with_attempts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The framework wire schema (docs #21): a `component_assets` release
+    /// asset entry serializes with a literal JSON `null` for `metadata`
+    /// (never omitted, never an object), and round-trips back to `None`.
+    #[test]
+    fn component_assets_release_asset_serializes_metadata_as_null_and_round_trips() {
+        let asset = fixture_component_assets_release_asset_for_tests(
+            "phoxal-component-ddsm115-assets-v0.1.5-target-independent.tar.zst",
+            &"c".repeat(64),
+        );
+        assert_eq!(asset.metadata, None);
+
+        let json = serde_json::to_value(&asset).expect("asset serializes");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "asset": "phoxal-component-ddsm115-assets-v0.1.5-target-independent.tar.zst",
+                "sha256": "c".repeat(64),
+                "metadata": null,
+            })
+        );
+
+        let round_tripped: ReleaseAsset =
+            serde_json::from_value(json).expect("null metadata deserializes back to None");
+        assert_eq!(round_tripped, asset);
+    }
+
+    /// Every other kind (service/driver/tool/simulator) keeps a `Some`
+    /// metadata sidecar; the schema mirror must not collapse that case.
+    #[test]
+    fn service_release_asset_round_trips_some_metadata() {
+        let asset = fixture_release_asset_with_metadata_for_tests(
+            "phoxal-service-drive-v0.8.4-aarch64-unknown-linux-gnu.tar.zst",
+            &"d".repeat(64),
+        );
+        let json = serde_json::to_value(&asset).expect("asset serializes");
+        assert!(json["metadata"].is_object());
+        let round_tripped: ReleaseAsset =
+            serde_json::from_value(json).expect("object metadata deserializes back to Some");
+        assert_eq!(round_tripped, asset);
+    }
+
+    /// A release asset that omits `metadata` for a non-`component_assets`
+    /// kind must fail catalog verification with a named diagnostic, not
+    /// silently succeed.
+    #[test]
+    fn verify_rejects_missing_metadata_for_non_asset_kind() {
+        let mut entry = fixture_service_entry_for_tests(
+            "drive",
+            "y2026_1",
+            "0.1.0",
+            Channel::Stable,
+            "aarch64-unknown-linux-gnu",
+            ArtifactStatus::Released,
+            vec![fixture_contract_for_tests(
+                "drive::Target",
+                "drive/target",
+                "publish",
+                "0123456789abcdef",
+            )],
+        );
+        entry.release_assets.insert(
+            "aarch64-unknown-linux-gnu".to_string(),
+            fixture_component_assets_release_asset_for_tests("drive.tar.zst", &"a".repeat(64)),
+        );
+        let revision = fixture_catalog_for_tests(vec![entry]);
+
+        let error = revision
+            .verify()
+            .expect_err("service release asset without metadata should fail verification");
+        assert!(format!("{error:#}").contains("has no metadata"));
+    }
+
+    #[test]
+    fn verify_rejects_emit_apis_metadata_for_component_assets() {
+        let mut entry = fixture_component_assets_entry_for_tests(
+            "ddsm115",
+            "y2026_1",
+            "0.1.0",
+            Channel::Stable,
+        );
+        entry.release_assets.insert(
+            TARGET_INDEPENDENT_SCOPE.to_string(),
+            fixture_release_asset_with_metadata_for_tests(
+                "phoxal-component-ddsm115-assets-v0.1.5-target-independent.tar.zst",
+                &"a".repeat(64),
+            ),
+        );
+        let revision = fixture_catalog_for_tests(vec![entry]);
+
+        let error = revision
+            .verify()
+            .expect_err("component_assets release asset with metadata should fail verification");
+        assert!(format!("{error:#}").contains("must not carry emit-apis metadata"));
+    }
 
     #[test]
     fn checksum_verification_rejects_edits() {
@@ -965,15 +1107,7 @@ phoxal-api = { version = "0.19", features = ["preview-y2026_2"] }
         );
         entry.release_assets.insert(
             "aarch64-unknown-linux-gnu".to_string(),
-            ReleaseAsset {
-                asset: "drive.tar.zst".to_string(),
-                sha256: "a".repeat(64),
-                metadata: ReleaseAssetMetadata {
-                    emit_apis: "drive.emit-apis.json".to_string(),
-                    emit_apis_sha256: "b".repeat(64),
-                    sha256_file: "drive.tar.zst.sha256".to_string(),
-                },
-            },
+            fixture_release_asset_with_metadata_for_tests("drive.tar.zst", &"a".repeat(64)),
         );
         let catalog = fixture_catalog_for_tests(vec![entry]);
 
