@@ -49,6 +49,12 @@ pub struct CheckCmd {
         help = "Apply a robot.<env>.yaml overlay before checking (repeatable). Path pins are only legal through overlays."
     )]
     pub env: Vec<String>,
+    #[arg(
+        long,
+        value_name = "TRIPLE",
+        help = "Resolve official artifacts for this target instead of the host (e.g. aarch64, x86_64, or a full triple). Use it to validate a Linux robot from a non-Linux host."
+    )]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -57,6 +63,7 @@ pub struct CheckOptions {
     pub service: Option<String>,
     pub catalog_source: Option<String>,
     pub overlays: Vec<String>,
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -129,6 +136,7 @@ impl CheckCmd {
             service: self.service.clone(),
             catalog_source: app.catalog_source.clone(),
             overlays: self.env.clone(),
+            target: self.target.clone(),
         };
         let ui = app.ui;
         let result = tokio::task::spawn_blocking(move || run(&project_root, options, &ui))
@@ -248,6 +256,11 @@ fn run(
     // network; a git component pinned to a commit SHA resolves offline; a
     // tag/branch ref is resolved live via `git ls-remote` with an actionable
     // error if the network is unavailable.
+    let target_triple = options
+        .target
+        .as_deref()
+        .map(crate::resolver::resolve_target_triple)
+        .transpose()?;
     let resolved = resolve(
         &robot,
         project_root,
@@ -255,7 +268,8 @@ fn run(
         ResolveOptions {
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
-            ..ResolveOptions::default()
+            official_target_triple: target_triple.clone(),
+            tool_target_triple: target_triple,
         },
     )?;
     let platform_refs = check_artifact_refs_from_resolved(&resolved);
