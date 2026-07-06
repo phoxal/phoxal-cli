@@ -140,16 +140,12 @@ pub fn status(
                     "generation readiness from the generated artifact catalog (06)",
                 )
             })?;
-    let target = robot
-        .phoxal_artifacts
-        .target
-        .clone()
-        .unwrap_or_else(crate::resolver::host_target_triple);
+    let target = crate::resolver::host_target_triple();
     let generation = generation
         .map(str::to_string)
         .map(Ok)
         .unwrap_or_else(|| crate::resolver::target_generation_for_robot(&robot, Some(&catalog)))?;
-    let channel = crate::catalog::Channel::from(robot.phoxal_artifacts.channel);
+    let channel = crate::catalog::Channel::from(robot.artifacts.channel);
 
     let entries = catalog
         .entries
@@ -176,7 +172,7 @@ pub fn status(
                 })
                 .collect::<Vec<_>>();
             ArtifactReadiness {
-                artifact_id: entry.artifact_id.clone(),
+                artifact_id: entry.package.clone(),
                 kind: entry.kind.to_string(),
                 version: entry.version.clone(),
                 api_generation: entry.api_generation.clone(),
@@ -217,9 +213,9 @@ fn robot_scoped_artifact_ids(
     robot: &phoxal::model::robot::RobotV1,
     entries: &[&crate::catalog::CatalogEntry],
 ) -> BTreeSet<String> {
-    let driver_artifact_names = robot
+    let driver_component_ids = robot
+        .robot
         .components
-        .instances
         .values()
         .filter(|instance| instance.driver.is_some())
         .map(|instance| instance.component.as_str())
@@ -228,13 +224,13 @@ fn robot_scoped_artifact_ids(
     entries
         .iter()
         .filter_map(|entry| match entry.kind {
-            crate::catalog::ArtifactKind::Service => Some(entry.artifact_id.clone()),
-            crate::catalog::ArtifactKind::Driver
+            crate::catalog::ArtifactKind::Service => Some(entry.package.clone()),
+            crate::catalog::ArtifactKind::ComponentDriver
                 if entry
                     .artifact_name()
-                    .is_some_and(|name| driver_artifact_names.contains(name)) =>
+                    .is_some_and(|name| driver_component_ids.contains(name)) =>
             {
-                Some(entry.artifact_id.clone())
+                Some(entry.package.clone())
             }
             _ => None,
         })
@@ -248,7 +244,7 @@ mod tests {
     use super::*;
     use crate::catalog::{
         ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
-        fixture_contract_for_tests, fixture_driver_entry_for_tests,
+        fixture_component_driver_entry_for_tests, fixture_contract_for_tests,
         fixture_service_entry_for_tests,
     };
 
@@ -268,7 +264,7 @@ mod tests {
             output
                 .artifacts
                 .iter()
-                .any(|artifact| artifact.artifact_id == "driver-bno085"),
+                .any(|artifact| artifact.artifact_id == "phoxal/component-bno085-driver"),
             "driver rows stay visible in the whole-catalog readiness table"
         );
         assert_eq!(output.changed_contracts, vec!["drive::Target"]);
@@ -317,7 +313,7 @@ mod tests {
         );
         service.changed_contracts = vec!["drive::Target".to_string()];
 
-        let mut used_driver = fixture_driver_entry_for_tests(
+        let mut used_driver = fixture_component_driver_entry_for_tests(
             "ddsm115",
             "y2026_1",
             "0.1.0",
@@ -333,7 +329,7 @@ mod tests {
         );
         used_driver.changed_contracts = vec!["wheel::State".to_string()];
 
-        let mut unused_driver = fixture_driver_entry_for_tests(
+        let mut unused_driver = fixture_component_driver_entry_for_tests(
             "bno085",
             "y2026_1",
             "0.1.0",
@@ -355,15 +351,9 @@ mod tests {
 
     fn driverless_robot_yaml() -> &'static str {
         r#"schema: v0
-phoxal_artifacts:
-  channel: stable
-  generation: y2026_1
-phoxal_participants: {}
-identity:
+robot:
   id: testbot
   namespace: test
-structure: structure.urdf
-motion:
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -372,28 +362,21 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
-components:
-  sources:
-    ddsm115:
-      path: ./components/ddsm115
-  instances:
+  components:
     left_drive:
       component: ddsm115
       mount_link: left_wheel_mount
+artifacts:
+  channel: stable
+  generation: y2026_1
 "#
     }
 
     fn robot_with_driver_yaml() -> &'static str {
         r#"schema: v0
-phoxal_artifacts:
-  channel: stable
-  generation: y2026_1
-phoxal_participants: {}
-identity:
+robot:
   id: testbot
   namespace: test
-structure: structure.urdf
-motion:
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -402,16 +385,15 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
-components:
-  sources:
-    ddsm115:
-      path: ./components/ddsm115
-  instances:
+  components:
     left_drive:
       component: ddsm115
       mount_link: left_wheel_mount
       driver:
         connection: { type: can, bus: 0, node_id: 1 }
+artifacts:
+  channel: stable
+  generation: y2026_1
 "#
     }
 }

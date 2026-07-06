@@ -3,8 +3,9 @@ use std::fs;
 use phoxal::model::robot::RobotV1 as Robot;
 use phoxal_cli::catalog::{
     ArtifactStatus, CatalogRevision, Channel as CatalogChannel, fixture_catalog_for_tests,
-    fixture_contract_for_tests, fixture_driver_entry_for_tests, fixture_service_entry_for_tests,
-    fixture_simulator_entry_for_tests, fixture_tool_entry_for_tests,
+    fixture_component_assets_entry_for_tests, fixture_component_driver_entry_for_tests,
+    fixture_contract_for_tests, fixture_service_entry_for_tests, fixture_simulator_entry_for_tests,
+    fixture_tool_entry_for_tests,
 };
 use phoxal_cli::resolver::{
     ResolveOptions, ResolvedPathOverrideKind, ResolvedRobot, host_target_triple,
@@ -58,7 +59,7 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
             .expect("drive runtime")
             .artifact_ref(),
         format!(
-            "service-drive:0.1.0-y2026_1-stable-{}",
+            "phoxal-service-drive:0.1.0-y2026_1-stable-{}",
             host_target_triple()
         )
     );
@@ -67,14 +68,16 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
 }
 
 #[test]
-fn catalog_drivers_do_not_enter_driverless_robot_platform_set() -> anyhow::Result<()> {
+fn catalog_component_drivers_do_not_enter_platform_service_set() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1"))?;
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
 
-    assert!(resolved.platform_runtimes.iter().all(|runtime| {
-        runtime.kind == phoxal_cli::catalog::ArtifactKind::Service
-            && !runtime.artifact_id.starts_with("driver-")
-    }));
+    assert!(
+        resolved
+            .platform_runtimes
+            .iter()
+            .all(|runtime| runtime.kind == phoxal_cli::catalog::ArtifactKind::Service)
+    );
     assert!(
         !resolved
             .platform_runtimes
@@ -86,19 +89,35 @@ fn catalog_drivers_do_not_enter_driverless_robot_platform_set() -> anyhow::Resul
 }
 
 #[test]
-fn component_driver_still_resolves_from_component_source() -> anyhow::Result<()> {
+fn driverless_component_resolves_assets_only() -> anyhow::Result<()> {
+    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1"))?;
+    let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
+
+    let left_drive = resolved
+        .components
+        .iter()
+        .find(|component| component.instance == "left_drive")
+        .expect("left_drive component resolved");
+    assert!(!left_drive.has_driver);
+    assert!(left_drive.driver.is_none());
+    assert_eq!(left_drive.source_name, "ddsm115");
+    assert_eq!(left_drive.assets.package, "phoxal/component-ddsm115-assets");
+    assert_eq!(
+        left_drive.assets.source,
+        phoxal_cli::resolver::ResolvedComponentSource::Catalog
+    );
+
+    Ok(())
+}
+
+#[test]
+fn component_with_driver_block_resolves_both_assets_and_driver() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount",
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount\n      driver:\n        connection: { type: can, bus: 0, node_id: 1 }",
     ))?;
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
 
-    assert!(
-        !resolved
-            .platform_runtimes
-            .iter()
-            .any(|runtime| runtime.artifact_id == "driver-ddsm115")
-    );
     let left_drive = resolved
         .components
         .iter()
@@ -106,12 +125,56 @@ fn component_driver_still_resolves_from_component_source() -> anyhow::Result<()>
         .expect("left_drive component resolved");
     assert!(left_drive.has_driver);
     assert_eq!(left_drive.source_name, "ddsm115");
-    assert_eq!(
-        left_drive.source,
-        phoxal_cli::resolver::ResolvedComponentSource::Path {
-            path: std::path::PathBuf::from("./components/ddsm115")
-        }
-    );
+    assert_eq!(left_drive.assets.package, "phoxal/component-ddsm115-assets");
+    let driver = left_drive.driver.as_ref().expect("driver package resolved");
+    assert_eq!(driver.package, "phoxal/component-ddsm115-driver");
+
+    Ok(())
+}
+
+#[test]
+fn declared_driver_with_no_catalog_driver_package_is_a_named_diagnostic() -> anyhow::Result<()> {
+    // Only the assets package is in this catalog; the instance declares
+    // `driver:` but no matching `phoxal/component-ddsm115-driver` package
+    // exists in the resolved graph.
+    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
+        "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount",
+        "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount\n      driver:\n        connection: { type: can, bus: 0, node_id: 1 }",
+    ))?;
+    let catalog = fixture_catalog_for_tests(vec![
+        fixture_service_entry_for_tests(
+            "drive",
+            "y2026_1",
+            "0.1.0",
+            CatalogChannel::Stable,
+            &host_target_triple(),
+            ArtifactStatus::Pending,
+            vec![fixture_contract_for_tests(
+                "drive::Target",
+                "drive/target",
+                "publish",
+                "0123456789abcdef",
+            )],
+        ),
+        fixture_component_assets_entry_for_tests(
+            "ddsm115",
+            "y2026_1",
+            "0.1.0",
+            CatalogChannel::Stable,
+        ),
+    ]);
+
+    let error = resolve(
+        &robot,
+        std::path::Path::new("."),
+        Some(&catalog),
+        offline_options(),
+    )
+    .expect_err("declared driver with no resolvable driver package should fail");
+    let message = error.to_string();
+    assert!(message.contains("ComponentDriverUnavailable"), "{message}");
+    assert!(message.contains("left_drive"), "{message}");
+    assert!(message.contains("ddsm115"), "{message}");
 
     Ok(())
 }
@@ -159,74 +222,10 @@ fn resolves_known_api_to_its_official_set() -> anyhow::Result<()> {
 }
 
 #[test]
-fn image_override_for_official_runtime_is_rejected() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
-        "phoxal_participants: {}",
-        "phoxal_participants:\n  images:\n    drive: service-drive:y2026_1-v0.13.0",
-    ))?;
-    let catalog = test_catalog();
-
-    let error = resolve(
-        &robot,
-        std::path::Path::new("."),
-        Some(&catalog),
-        offline_options(),
-    )
-    .expect_err("image overrides should be rejected");
-    assert!(
-        error
-            .to_string()
-            .contains("phoxal_participants.images is no longer supported")
-    );
-
-    Ok(())
-}
-
-#[test]
-fn unknown_platform_image_key_fails_for_api() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
-        "phoxal_participants: {}",
-        "phoxal_participants:\n  images:\n    diagnostics: service-diagnostics:y2026_1-stable",
-    ))?;
-    let catalog = test_catalog();
-
-    let error = resolve(
-        &robot,
-        std::path::Path::new("."),
-        Some(&catalog),
-        offline_options(),
-    )
-    .expect_err("image key outside the API set should fail");
-    assert!(error.to_string().contains("not a platform participant"));
-
-    Ok(())
-}
-
-#[test]
-fn user_runtime_shadowing_platform_fails_for_api() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
-        "phoxal_participants: {}",
-        "phoxal_participants: {}\n\nuser_participants:\n  drive:\n    path: ./runtimes/drive",
-    ))?;
-    let catalog = test_catalog();
-
-    let error = resolve(
-        &robot,
-        std::path::Path::new("."),
-        Some(&catalog),
-        offline_options(),
-    )
-    .expect_err("shadowing should fail");
-    assert!(error.to_string().contains("shadows a platform participant"));
-
-    Ok(())
-}
-
-#[test]
-fn user_runtime_match_platform_resolves_to_api_version_and_hash() -> anyhow::Result<()> {
+fn user_service_resolves_source_hash() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     write_runtime_source(temp.path(), "runtimes/autonomy", "fn main() {}\n")?;
-    let robot = Robot::parse_from_string(&robot_with_user_runtime(
+    let robot = Robot::parse_from_string(&robot_with_user_service(
         r#"
   autonomy:
     path: runtimes/autonomy
@@ -243,7 +242,6 @@ fn user_runtime_match_platform_resolves_to_api_version_and_hash() -> anyhow::Res
         .find(|runtime| runtime.name == "autonomy")
         .expect("user service resolved");
     assert_eq!(runtime.path, std::path::PathBuf::from("runtimes/autonomy"));
-    assert_eq!(runtime.framework, "y2026_1");
     assert_eq!(runtime.source_hash.len(), 16);
     assert_eq!(second.user_runtimes[0].source_hash, runtime.source_hash);
 
@@ -251,58 +249,20 @@ fn user_runtime_match_platform_resolves_to_api_version_and_hash() -> anyhow::Res
 }
 
 #[test]
-fn user_runtime_explicit_matching_framework_is_preserved() -> anyhow::Result<()> {
+fn missing_user_service_source_dir_fails() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
-    write_runtime_source(temp.path(), "runtimes/autonomy", "fn main() {}\n")?;
-    let robot = Robot::parse_from_string(&robot_with_user_runtime(
+    let robot = Robot::parse_from_string(&robot_with_user_service(
         r#"
   autonomy:
     path: runtimes/autonomy
-    framework: y2026_1
-"#,
-    ))?;
-
-    let catalog = test_catalog();
-    let resolved = resolve(&robot, temp.path(), Some(&catalog), offline_options())?;
-
-    assert_eq!(resolved.user_runtimes[0].framework, "y2026_1");
-    Ok(())
-}
-
-#[test]
-fn user_runtime_explicit_mismatched_framework_fails() -> anyhow::Result<()> {
-    let temp = tempfile::tempdir()?;
-    write_runtime_source(temp.path(), "runtimes/autonomy", "fn main() {}\n")?;
-    let robot = Robot::parse_from_string(&robot_with_user_runtime(
-        r#"
-  autonomy:
-    path: runtimes/autonomy
-    framework: y2026_2
 "#,
     ))?;
 
     let catalog = test_catalog();
     let error = resolve(&robot, temp.path(), Some(&catalog), offline_options())
-        .expect_err("stale framework");
+        .expect_err("missing source dir should fail");
 
-    assert_eq!(
-        error.to_string(),
-        "user service 'autonomy': framework 'y2026_2' must be \"match-platform\" or the target generation 'y2026_1'"
-    );
-    Ok(())
-}
-
-#[test]
-fn missing_instance_source_fails() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
-        "  sources:\n    ddsm115:\n      path: ./components/ddsm115",
-        "  sources: {}",
-    ))?;
-
-    let error = resolve_with_catalog(&robot, std::path::Path::new("."))
-        .expect_err("missing source should fail");
-    assert!(error.to_string().contains("references missing source"));
-
+    assert!(error.to_string().contains("does not exist"), "{error:#}");
     Ok(())
 }
 
@@ -317,59 +277,47 @@ fn tools_resolve_from_catalog_entries() -> anyhow::Result<()> {
             .iter()
             .find(|tool| tool.name == tool_name)
             .unwrap_or_else(|| panic!("{tool_name} resolved"));
+        assert_eq!(tool.package, format!("phoxal/{tool_name}"));
         assert_eq!(tool.repo, "phoxal/framework", "{tool_name} repo");
         assert_eq!(tool.resolved, "0.1.0", "{tool_name} version");
-        assert_eq!(tool.binary_name, format!("phoxal-{}", tool_name));
     }
     assert_eq!(
         resolved
             .simulators
             .iter()
-            .map(|simulator| simulator.artifact_id.as_str())
+            .map(|simulator| simulator.package.as_str())
             .collect::<Vec<_>>(),
-        vec!["simulator-webots-controller", "simulator-webots-supervisor"]
+        vec![
+            "phoxal/simulator-webots-controller",
+            "phoxal/simulator-webots-supervisor"
+        ]
     );
 
     Ok(())
 }
 
 #[test]
-fn tool_version_override_is_preserved_for_any_known_tool() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
-        "phoxal_participants: {}",
-        "phoxal_participants: {}\n\ntools:\n  tool-joypad:\n    version: \"0.9.9\"",
-    ))?;
-    let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
-    let joypad = resolved
-        .tools
-        .iter()
-        .find(|tool| tool.name == "tool-joypad")
-        .expect("joypad resolved");
-    assert_eq!(joypad.resolved, "0.9.9");
-
-    Ok(())
-}
-
-#[test]
-fn path_pin_with_unknown_prefix_is_rejected() -> anyhow::Result<()> {
+fn path_pin_with_unqualified_key_is_rejected() -> anyhow::Result<()> {
+    // Pin keys must be provider-qualified `<provider>/<name>` package ids; an
+    // unqualified key is rejected during resolution/validation.
     let robot = Robot::parse_from_string(&robot_with_path_pin(
         "runtime-drive",
         "./framework/service/drive",
     ))?;
     let error = resolve_with_catalog(&robot, std::path::Path::new("."))
-        .expect_err("unknown path pin key should fail");
+        .expect_err("unqualified path pin key should fail");
 
     assert!(
-        error.to_string().contains("unknown artifact path pin"),
+        error.to_string().contains("provider-qualified"),
         "{error:#}"
     );
     Ok(())
 }
 
 #[test]
-fn unused_kind_qualified_path_pin_is_rejected() -> anyhow::Result<()> {
+fn unused_provider_qualified_path_pin_is_rejected() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&robot_with_path_pin(
-        "driver-bno085",
+        "phoxal/component-bno085-driver",
         "./framework/component/bno085",
     ))?;
     let error = resolve_with_catalog(&robot, std::path::Path::new("."))
@@ -384,7 +332,7 @@ fn unused_kind_qualified_path_pin_is_rejected() -> anyhow::Result<()> {
 
 #[test]
 fn loaded_catalog_without_target_generation_gets_not_yet_available_error() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml_without_api())?;
+    let robot = Robot::parse_from_string(&minimal_robot_yaml_without_generation())?;
     let catalog = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
         "drive",
         "y2026_1",
@@ -407,6 +355,7 @@ fn loaded_catalog_without_target_generation_gets_not_yet_available_error() -> an
         ResolveOptions {
             official_target_triple: Some(target.to_string()),
             resolve_source_commits: false,
+            resolve_component_asset_commits: false,
             ..ResolveOptions::default()
         },
     )
@@ -430,13 +379,14 @@ fn loaded_catalog_without_target_generation_gets_not_yet_available_error() -> an
 
 #[test]
 fn official_only_robot_without_catalog_keeps_no_catalog_error() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml_without_api())?;
+    let robot = Robot::parse_from_string(&minimal_robot_yaml_without_generation())?;
     let error = resolve(
         &robot,
         std::path::Path::new("."),
         None,
         ResolveOptions {
             resolve_source_commits: false,
+            resolve_component_asset_commits: false,
             ..ResolveOptions::default()
         },
     )
@@ -457,7 +407,7 @@ fn path_pins_are_overlay_only() -> anyhow::Result<()> {
     let base_path = temp.path().join("robot.yaml");
     fs::write(
         &base_path,
-        robot_with_path_pin("service-drive", "../framework/service/drive"),
+        robot_with_path_pin("phoxal/service-drive", "../framework/service/drive"),
     )?;
     let error = load_robot_with_extras(&base_path).expect_err("base path pin should fail");
     assert!(error.to_string().contains("dev-overlay only"), "{error:#}");
@@ -465,15 +415,15 @@ fn path_pins_are_overlay_only() -> anyhow::Result<()> {
     fs::write(&base_path, minimal_robot_yaml("y2026_1"))?;
     fs::write(
         temp.path().join("robot.dev.yaml"),
-        "phoxal_artifacts:\n  pins:\n    service-drive:\n      path: ../framework/service/drive\n",
+        "artifacts:\n  pins:\n    phoxal/service-drive:\n      path: ../framework/service/drive\n",
     )?;
     let loaded = load_robot_with_extras_and_overlays(&base_path, &["dev".to_string()])?;
     assert!(
         loaded
             .robot
-            .phoxal_artifacts
+            .artifacts
             .pins
-            .contains_key("service-drive")
+            .contains_key("phoxal/service-drive")
     );
     Ok(())
 }
@@ -482,14 +432,14 @@ fn path_pins_are_overlay_only() -> anyhow::Result<()> {
 fn simulator_path_pin_replaces_the_supervisor_or_controller_artifact() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let robot = Robot::parse_from_string(&robot_with_path_pin(
-        "simulator-webots-controller",
+        "phoxal/simulator-webots-controller",
         "../framework/simulator/webots-controller",
     ))?;
     let resolved = resolve_with_catalog(&robot, temp.path())?;
     let controller = resolved
         .simulators
         .iter()
-        .find(|simulator| simulator.artifact_id == "simulator-webots-controller")
+        .find(|simulator| simulator.package == "phoxal/simulator-webots-controller")
         .expect("webots-controller simulator resolved");
 
     assert_eq!(
@@ -505,17 +455,17 @@ fn simulator_path_pin_replaces_the_supervisor_or_controller_artifact() -> anyhow
         resolved
             .path_overrides
             .iter()
-            .find(|override_| override_.key == "simulator-webots-controller")
+            .find(|override_| override_.key == "phoxal/simulator-webots-controller")
             .map(|override_| override_.kind),
         Some(ResolvedPathOverrideKind::Simulator)
     );
 
-    // The supervisor entry is untouched: only the pinned artifact_id resolves
-    // to a path override.
+    // The supervisor entry is untouched: only the pinned package resolves to
+    // a path override.
     let supervisor = resolved
         .simulators
         .iter()
-        .find(|simulator| simulator.artifact_id == "simulator-webots-supervisor")
+        .find(|simulator| simulator.package == "phoxal/simulator-webots-supervisor")
         .expect("webots-supervisor simulator resolved");
     assert!(supervisor.source_path().is_none());
 
@@ -523,32 +473,10 @@ fn simulator_path_pin_replaces_the_supervisor_or_controller_artifact() -> anyhow
 }
 
 #[test]
-fn legacy_single_simulator_path_pin_key_is_rejected() -> anyhow::Result<()> {
-    // Part 6: the pre-split `simulator-webots` key is gone now that the
-    // simulator is two artifacts (`simulator-webots-supervisor`,
-    // `simulator-webots-controller`); a pin using the stale key must fail
-    // loudly rather than silently resolving to nothing.
-    let robot = Robot::parse_from_string(&robot_with_path_pin(
-        "simulator-webots",
-        "../framework/simulator/webots",
-    ))?;
-    let error = resolve_with_catalog(&robot, std::path::Path::new("."))
-        .expect_err("the stale pre-split simulator key should be rejected");
-    let message = error.to_string();
-    assert!(message.contains("unused artifact path pin"), "{message}");
-    assert!(
-        message.contains("simulator-webots-controller")
-            && message.contains("simulator-webots-supervisor"),
-        "{message}"
-    );
-    Ok(())
-}
-
-#[test]
 fn service_path_pin_replaces_catalog_artifact() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let robot = Robot::parse_from_string(&robot_with_path_pin(
-        "service-drive",
+        "phoxal/service-drive",
         "../framework/service/drive",
     ))?;
     let resolved = resolve_with_catalog(&robot, temp.path())?;
@@ -567,9 +495,38 @@ fn service_path_pin_replaces_catalog_artifact() -> anyhow::Result<()> {
         resolved
             .path_overrides
             .iter()
-            .find(|override_| override_.key == "service-drive")
+            .find(|override_| override_.key == "phoxal/service-drive")
             .map(|override_| override_.kind),
         Some(ResolvedPathOverrideKind::Service)
+    );
+    Ok(())
+}
+
+#[test]
+fn component_asset_path_pin_forks_the_assets_package() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let robot = Robot::parse_from_string(&robot_with_path_pin(
+        "phoxal/component-ddsm115-assets",
+        "../framework/component/ddsm115",
+    ))?;
+    let resolved = resolve_with_catalog(&robot, temp.path())?;
+    let left_drive = resolved
+        .components
+        .iter()
+        .find(|component| component.instance == "left_drive")
+        .expect("left_drive component resolved");
+
+    assert_eq!(
+        left_drive.assets.path_override(),
+        Some(temp.path().join("../framework/component/ddsm115").as_path())
+    );
+    assert_eq!(
+        resolved
+            .path_overrides
+            .iter()
+            .find(|override_| override_.key == "phoxal/component-ddsm115-assets")
+            .map(|override_| override_.kind),
+        Some(ResolvedPathOverrideKind::ComponentAssets)
     );
     Ok(())
 }
@@ -600,8 +557,14 @@ fn test_catalog() -> CatalogRevision {
             )
         })
         .collect::<Vec<_>>();
-    entries.extend(driver_names().into_iter().map(|name| {
-        fixture_driver_entry_for_tests(
+    for name in component_names() {
+        entries.push(fixture_component_assets_entry_for_tests(
+            name,
+            "y2026_1",
+            "0.1.0",
+            CatalogChannel::Stable,
+        ));
+        entries.push(fixture_component_driver_entry_for_tests(
             name,
             "y2026_1",
             "0.1.0",
@@ -614,8 +577,8 @@ fn test_catalog() -> CatalogRevision {
                 "publish",
                 "fedcba9876543210",
             )],
-        )
-    }));
+        ));
+    }
     entries.extend([
         fixture_tool_entry_for_tests(
             "router",
@@ -631,20 +594,6 @@ fn test_catalog() -> CatalogRevision {
             "y2026_1",
             "0.1.0",
             CatalogChannel::Stable,
-            &target,
-            ArtifactStatus::Pending,
-            vec![fixture_contract_for_tests(
-                "drive::Target",
-                "drive/target",
-                "subscribe",
-                "0123456789abcdef",
-            )],
-        ),
-        fixture_tool_entry_for_tests(
-            "joypad",
-            "y2026_1",
-            "0.9.9",
-            CatalogChannel::Preview,
             &target,
             ArtifactStatus::Pending,
             vec![fixture_contract_for_tests(
@@ -704,33 +653,25 @@ fn service_names() -> Vec<&'static str> {
     ]
 }
 
-fn driver_names() -> Vec<&'static str> {
+fn component_names() -> Vec<&'static str> {
     vec!["ddsm115", "bno085"]
 }
 
 fn offline_options() -> ResolveOptions {
     ResolveOptions {
         resolve_source_commits: false,
+        resolve_component_asset_commits: false,
         ..ResolveOptions::default()
     }
 }
 
-fn minimal_robot_yaml(api_version: &str) -> String {
+fn minimal_robot_yaml(generation: &str) -> String {
     format!(
         r#"schema: v0
-api_version: {api_version}
-
-identity:
+robot:
   id: testbot
   namespace: test
-
-structure: structure.urdf
-
-phoxal_artifacts:
-  channel: stable
-phoxal_participants: {{}}
-
-motion:
+  structure: structure.urdf
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -739,37 +680,35 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
-
-components:
-  sources:
-    ddsm115:
-      path: ./components/ddsm115
-  instances:
+  components:
     left_drive:
       component: ddsm115
       mount_link: left_wheel_mount
     right_drive:
       component: ddsm115
       mount_link: right_wheel_mount
+artifacts:
+  channel: stable
+  generation: {generation}
 "#
     )
 }
 
-fn minimal_robot_yaml_without_api() -> String {
-    minimal_robot_yaml("y2026_1").replace("api_version: y2026_1\n\n", "")
+fn minimal_robot_yaml_without_generation() -> String {
+    minimal_robot_yaml("y2026_1").replace("  generation: y2026_1\n", "")
 }
 
 fn robot_with_path_pin(key: &str, path: &str) -> String {
     minimal_robot_yaml("y2026_1").replace(
-        "phoxal_artifacts:\n  channel: stable",
-        &format!("phoxal_artifacts:\n  channel: stable\n  pins:\n    {key}:\n      path: {path}"),
+        "artifacts:\n  channel: stable",
+        &format!("artifacts:\n  channel: stable\n  pins:\n    {key}:\n      path: {path}"),
     )
 }
 
-fn robot_with_user_runtime(user_runtimes: &str) -> String {
+fn robot_with_user_service(services: &str) -> String {
     minimal_robot_yaml("y2026_1").replace(
-        "phoxal_participants: {}",
-        &format!("phoxal_participants: {{}}\n\nuser_participants:\n{user_runtimes}"),
+        "artifacts:\n  channel: stable",
+        &format!("services:\n{services}\nartifacts:\n  channel: stable"),
     )
 }
 

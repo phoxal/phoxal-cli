@@ -49,9 +49,56 @@ fn normalize_component_mesh_path(path: &str, component_mesh_prefix: Option<&str>
         return path.to_string();
     };
 
-    if path.contains('/') {
+    if path
+        .strip_prefix(component_mesh_prefix)
+        .is_some_and(|rest| rest.starts_with('/'))
+    {
         path.to_string()
     } else {
         format!("{component_mesh_prefix}/{path}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::staged_mesh_path_from_urdf_filename;
+
+    #[test]
+    fn component_mesh_paths_are_prefixed_even_when_nested() {
+        assert_eq!(
+            staged_mesh_path_from_urdf_filename("meshes/wheel.stl", Some("ddsm115")),
+            "ddsm115/wheel.stl"
+        );
+        assert_eq!(
+            staged_mesh_path_from_urdf_filename("meshes/visual/wheel.stl", Some("ddsm115")),
+            "ddsm115/visual/wheel.stl"
+        );
+        assert_eq!(
+            staged_mesh_path_from_urdf_filename(
+                "package://meshes/visual/wheel.stl",
+                Some("ddsm115")
+            ),
+            "ddsm115/visual/wheel.stl"
+        );
+    }
+
+    #[test]
+    fn robot_mesh_paths_and_already_prefixed_component_paths_are_stable() {
+        assert_eq!(
+            staged_mesh_path_from_urdf_filename("meshes/base.stl", None),
+            "base.stl"
+        );
+        assert_eq!(
+            staged_mesh_path_from_urdf_filename("package://robot/meshes/base.stl", Some("ddsm115")),
+            "base.stl"
+        );
+        assert_eq!(
+            staged_mesh_path_from_urdf_filename("model://robot/meshes/base.stl", Some("ddsm115")),
+            "base.stl"
+        );
+        assert_eq!(
+            staged_mesh_path_from_urdf_filename("meshes/ddsm115/visual/wheel.stl", Some("ddsm115")),
+            "ddsm115/visual/wheel.stl"
+        );
     }
 }

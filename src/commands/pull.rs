@@ -84,6 +84,7 @@ pub fn run(
             // pull refreshes official artifacts and host tools only; it never
             // reads component commits, so it stays off the network for git refs.
             resolve_source_commits: false,
+            resolve_component_asset_commits: false,
             ..ResolveOptions::default()
         },
     )?;

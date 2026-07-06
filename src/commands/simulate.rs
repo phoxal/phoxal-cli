@@ -16,7 +16,7 @@ use crate::commands::check::{
     platform_artifact_refs_from_resolved, robot_graph_from_resolved, run_check_with_context,
     source_participants_building_only_crate, source_participants_from_resolved,
 };
-use crate::component_driver::component_crate_dir;
+use crate::component_driver::{component_assets_dir, component_driver_crate_dir};
 use crate::launch_plan::{
     CheckedRobotLaunchInput, DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, SITE_TOOL_JOYPAD,
     SITE_TOOL_ROUTER, SubstitutionRecord, build_launch_plan,
@@ -173,10 +173,11 @@ pub async fn run(
             let project_root = app.project.root().to_path_buf();
             let ui = app.ui;
             let prepared_options = options.clone();
-            let plan =
-                tokio::task::spawn_blocking(move || prepare(&project_root, prepared_options))
-                    .await
-                    .context("simulate preparation worker failed")??;
+            let plan = tokio::task::spawn_blocking(move || {
+                prepare_with_mode(&project_root, prepared_options, SimulateMode::Live)
+            })
+            .await
+            .context("simulate preparation worker failed")??;
 
             crate::host_doctor::preflight()
                 .map_err(|error| anyhow!("{error}"))
@@ -287,7 +288,15 @@ pub async fn run(
 }
 
 pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<SimulatePlan> {
-    let resolved = resolve_project(project_start, options.clone(), SimulateMode::DryRun)?;
+    prepare_with_mode(project_start, options, SimulateMode::DryRun)
+}
+
+fn prepare_with_mode(
+    project_start: &Path,
+    options: SimulateOptions,
+    mode: SimulateMode,
+) -> Result<SimulatePlan> {
+    let resolved = resolve_project(project_start, options.clone(), mode)?;
     let launch_plan = build_checked_sim_launch_plan(
         &resolved.project_root,
         &resolved.resolved,
@@ -314,7 +323,7 @@ pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<Simulat
 pub(crate) fn resolve_project(
     project_start: &Path,
     options: SimulateOptions,
-    _mode: SimulateMode,
+    mode: SimulateMode,
 ) -> Result<ResolvedSimulation> {
     let robot_path = crate::resolver::discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
@@ -342,17 +351,17 @@ pub(crate) fn resolve_project(
         }),
     })?;
 
-    // Always resolve live git component commits so component drivers can be
-    // staged. A path-only / official-only graph needs no component network; a
-    // git component pinned to a commit SHA resolves offline; a tag/branch ref is
-    // resolved live via `git ls-remote` with an actionable error if the network
-    // is unavailable.
+    // Always resolve live git component driver commits so driver metadata can
+    // be staged. Component asset git refs are resolved only for live simulate,
+    // where Webots world staging genuinely needs local asset files; dry-run
+    // reports the intended staged paths without fetching assets.
     let resolved = resolve(
         &robot,
         &project_root,
         catalog.as_ref(),
         ResolveOptions {
             resolve_source_commits: true,
+            resolve_component_asset_commits: mode == SimulateMode::Live,
             ..ResolveOptions::default()
         },
     )?;
@@ -425,9 +434,9 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
     )?;
 
     let mut checked_participants = metadata_outcome.checked_participants.clone();
-    remap_simulator_participant_ids(&mut checked_participants, &resolved.robot.identity.id)?;
+    remap_simulator_participant_ids(&mut checked_participants, &resolved.robot.robot.id)?;
     checked_participants.extend(official_simulator_participants(resolved)?);
-    let controller_provider_id = simulator_controller_provider_id(&resolved.robot.identity.id);
+    let controller_provider_id = simulator_controller_provider_id(&resolved.robot.robot.id);
     let substitutions =
         contract_substitutions_from_driver_metadata(&checked_participants, &controller_provider_id);
     let sim_participants = sim_checked_participants(&checked_participants);
@@ -465,7 +474,7 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
 fn official_simulator_participants(
     resolved: &ResolvedRobot,
 ) -> Result<Vec<graph_check::ParticipantApis>> {
-    let robot_id = resolved.robot.identity.id.as_str();
+    let robot_id = resolved.robot.robot.id.as_str();
     let mut participants = Vec::new();
     for runtime in resolved
         .simulators
@@ -562,7 +571,7 @@ pub(crate) fn sim_source_participants(
                     component.source_name
                 )))
             } else {
-                component_crate_dir(component, project_root)
+                component_driver_crate_dir(component, project_root)
             }
         })?;
     participants.sort_by(|left, right| left.name.cmp(&right.name));
@@ -600,18 +609,19 @@ fn catalog_driver_entry<'a>(
     component: &ResolvedComponent,
 ) -> Option<&'a CatalogEntry> {
     let catalog = catalog?;
-    if component.driver_path_override.is_some() {
+    let driver = component.driver.as_ref()?;
+    if driver.path_override().is_some() {
         return None;
     }
-    if !is_catalog_driver_source(component) {
+    if driver.source != crate::resolver::ResolvedComponentSource::Catalog {
         return None;
     }
     let channel = CatalogChannel::from(resolved.channel);
     catalog
         .entries
         .iter()
-        .filter(|entry| entry.kind == ArtifactKind::Driver)
-        .filter(|entry| entry.artifact_name() == Some(component.source_name.as_str()))
+        .filter(|entry| entry.kind == ArtifactKind::ComponentDriver)
+        .filter(|entry| entry.package == driver.package)
         .filter(|entry| entry.channels.contains_key(&channel))
         .filter(|entry| {
             entry
@@ -628,18 +638,6 @@ fn catalog_driver_entry<'a>(
             crate::catalog::compare_generations(&left.api_generation, &right.api_generation)
                 .then_with(|| compare_versions(&left.version, &right.version))
         })
-}
-
-fn is_catalog_driver_source(component: &ResolvedComponent) -> bool {
-    let crate::resolver::ResolvedComponentSource::Git { git, directory, .. } = &component.source
-    else {
-        return false;
-    };
-    let normalized_git = git.trim_end_matches(".git");
-    let official_repo = normalized_git == "https://github.com/phoxal/framework"
-        || normalized_git == "git@github.com:phoxal/framework";
-    let expected_directory = Path::new("component").join(&component.source_name);
-    official_repo && directory.as_deref() == Some(expected_directory.as_path())
 }
 
 fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
@@ -826,7 +824,7 @@ fn intended_staged_world_path(project_root: &Path, world_path: &Path) -> PathBuf
 /// One line per resolved simulator artifact (supervisor + controller), naming
 /// the artifact and its participant id.
 fn simulator_artifact_lines(resolved: &ResolvedRobot) -> Vec<String> {
-    let robot_id = resolved.robot.identity.id.as_str();
+    let robot_id = resolved.robot.robot.id.as_str();
     resolved
         .simulators
         .iter()
@@ -1162,7 +1160,7 @@ pub(crate) fn stage_simulation_for_robot(
         .robots
         .first()
         .context("sim launch plan has no robot")?;
-    let robot_id = &resolved.robot.identity.id;
+    let robot_id = &resolved.robot.robot.id;
     let controller_id = simulator_controller_provider_id(robot_id);
     let controller_launch = robot
         .participants
@@ -1183,12 +1181,12 @@ pub(crate) fn stage_simulation_for_robot(
             )
         })?;
 
-    let structure_path = project_root.join(&resolved.robot.structure);
+    let structure_path = project_root.join(&resolved.robot.robot.structure);
     let structure = phoxal::model::structure::Structure::read_from_file(&structure_path)
         .with_context(|| {
             format!(
                 "failed to read robot structure declared by robot.yaml structure: {}",
-                resolved.robot.structure.display()
+                resolved.robot.robot.structure.display()
             )
         })?;
     structure
@@ -1201,7 +1199,7 @@ pub(crate) fn stage_simulation_for_robot(
         if component_type_dirs.contains_key(&component.source_name) {
             continue;
         }
-        let crate_dir = component_crate_dir(component, project_root)?;
+        let crate_dir = component_assets_dir(component, project_root)?;
         let component_model = phoxal::model::component::Component::read_from_dir(&crate_dir)
             .with_context(|| {
                 format!(
@@ -1247,10 +1245,20 @@ pub(crate) fn stage_simulation_for_robot(
         .all(|runtime| runtime.source_path().is_none());
 
     let project = crate::project::Project::new(project_root)?;
+    let mesh_root = project.staged_webots_meshes_dir();
+    // The Phase-6 mesh-staging gap: the generated PROTOs reference mesh assets
+    // relative to `mesh_root` (the robot's own meshes directly under it, each
+    // component's under `<mesh_root>/<component_type>/` per
+    // `component_mesh_prefix`), but nothing copied the physical mesh files
+    // there before this fix - the robot spawned with no visible geometry.
+    stage_robot_meshes(project_root, &resolved.robot.robot.structure, &mesh_root)?;
+    for (component_type, source_dir) in &component_type_dirs {
+        stage_component_meshes(source_dir, component_type, &mesh_root)?;
+    }
     stage_simulation_world(
         &base_world_text,
         &project.staged_webots_protos_dir(),
-        &project.staged_webots_meshes_dir(),
+        &mesh_root,
         &project.staged_webots_world(world_name),
         supervisor_launch,
         require_native,
@@ -1261,6 +1269,77 @@ pub(crate) fn stage_simulation_for_robot(
             controller_launch,
         }],
     )
+}
+
+/// The mesh source directory convention: a `meshes/` sibling of the file a
+/// URDF/robot document is anchored at (the robot's own `structure.urdf` at
+/// the project root, or a component's `structure.urdf` in its source dir).
+const MESHES_DIR: &str = "meshes";
+
+/// Stage the robot's own `meshes/` directory (if any) directly under
+/// `mesh_root` - `WebotsSceneDescription::from_robot` renders with
+/// `component_mesh_prefix: None`, so the robot's own mesh URDF references
+/// (`meshes/<file>`) resolve unprefixed, one level under `mesh_root` itself.
+fn stage_robot_meshes(project_root: &Path, structure_path: &Path, mesh_root: &Path) -> Result<()> {
+    let structure_dir = project_root
+        .join(structure_path)
+        .parent()
+        .map_or_else(|| project_root.to_path_buf(), std::path::Path::to_path_buf);
+    let source = structure_dir.join(MESHES_DIR);
+    stage_mesh_dir_if_present(&source, mesh_root)
+}
+
+/// Stage one component type's `meshes/` directory (if any) under
+/// `<mesh_root>/<component_type>/` - the prefix
+/// `WebotsSceneDescription::from_component`'s `component_mesh_prefix` embeds
+/// into the component's own mesh URDF references (`meshes/<file>` ->
+/// `<component_type>/<file>`, see `staged_mesh_path_from_urdf_filename`).
+fn stage_component_meshes(source_dir: &Path, component_type: &str, mesh_root: &Path) -> Result<()> {
+    let source = source_dir.join(MESHES_DIR);
+    let dest = mesh_root.join(component_type);
+    stage_mesh_dir_if_present(&source, &dest)
+}
+
+/// Copy every file under `source` (if it exists as a directory) into `dest`,
+/// recreating the relative subtree. A component/robot with no `meshes/`
+/// directory at all is not an error - not every URDF references mesh
+/// geometry.
+fn stage_mesh_dir_if_present(source: &Path, dest: &Path) -> Result<()> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("failed to create staged mesh directory {}", dest.display()))?;
+    copy_dir_recursive(source, dest)
+}
+
+fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(source)
+        .with_context(|| format!("failed to read mesh source directory {}", source.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let source_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            std::fs::create_dir_all(&dest_path).with_context(|| {
+                format!(
+                    "failed to create staged mesh directory {}",
+                    dest_path.display()
+                )
+            })?;
+            copy_dir_recursive(&source_path, &dest_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&source_path, &dest_path).with_context(|| {
+                format!(
+                    "failed to stage mesh file {} to {}",
+                    source_path.display(),
+                    dest_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1334,7 +1413,6 @@ mod tests {
         resolved.user_runtimes.push(ResolvedUserRuntime {
             name: "mission".to_string(),
             path: PathBuf::from("runtimes/mission"),
-            framework: "y2026_1".to_string(),
             source_hash: "hash".to_string(),
         });
         let extras = RobotManifestExtras::default();
@@ -1644,7 +1722,7 @@ mod tests {
             },
             simulator_controller_participant(SIMULATOR_CONTROLLER_ARTIFACT_NAME, Vec::new()),
         ];
-        remap_simulator_participant_ids(&mut checked, &resolved.robot.identity.id)?;
+        remap_simulator_participant_ids(&mut checked, &resolved.robot.robot.id)?;
 
         assert!(checked.iter().any(|participant| {
             participant.participant_id == supervisor_id
@@ -2168,6 +2246,7 @@ mod tests {
             SimulateOptions {
                 world: "test".to_string(),
                 catalog_source: Some(catalog_path.display().to_string()),
+                overlays: vec!["dev".to_string()],
                 ..SimulateOptions::default()
             },
         )
@@ -2193,6 +2272,7 @@ mod tests {
             SimulateOptions {
                 world: "test".to_string(),
                 catalog_source: Some(catalog_path.display().to_string()),
+                overlays: vec!["dev".to_string()],
                 ..SimulateOptions::default()
             },
         )
@@ -2222,6 +2302,10 @@ mod tests {
 
     fn write_robot_project_with_custom_component(root: &Path) -> Result<()> {
         fs::write(root.join("robot.yaml"), robot_yaml_with_custom_component())?;
+        fs::write(
+            root.join("robot.dev.yaml"),
+            robot_yaml_with_component_dev_overlay(),
+        )?;
         write_catalog_with_site_tools(root)?;
         fs::write(
             root.join("structure.urdf"),
@@ -2237,20 +2321,11 @@ mod tests {
 
     fn minimal_robot_yaml() -> &'static str {
         r#"schema: v0
-api_version: y2026_1
 
-identity:
+robot:
   id: testbot
   namespace: test
-
-structure: structure.urdf
-
-phoxal_artifacts:
-  channel: stable
-  catalog: catalog.json
-phoxal_participants: {}
-
-motion:
+  structure: structure.urdf
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -2259,15 +2334,21 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
+  components: {}
 
-components:
-  sources: {}
-  instances: {}
+artifacts:
+  channel: stable
+  generation: y2026_1
+  catalog: catalog.json
 "#
     }
 
     fn write_robot_project_with_component(root: &Path) -> Result<()> {
         fs::write(root.join("robot.yaml"), robot_yaml_with_component())?;
+        fs::write(
+            root.join("robot.dev.yaml"),
+            robot_yaml_with_component_dev_overlay(),
+        )?;
         write_catalog_with_site_tools(root)?;
         write_driver_crate(root, "ddsm115")?;
         fs::write(
@@ -2285,29 +2366,15 @@ components:
     fn robot_yaml_with_component() -> &'static str {
         r#"schema: v0
 
-identity:
+robot:
   id: testbot
   namespace: test
-
-structure: structure.urdf
-
-phoxal_artifacts:
-  channel: stable
-  generation: y2026_1
-  catalog: catalog.json
-phoxal_participants: {}
-
-motion:
+  structure: structure.urdf
   kinematic:
     kind: omnidirectional
     actuators: [left_drive.motor]
     encoders: []
-
-components:
-  sources:
-    ddsm115:
-      path: components/ddsm115
-  instances:
+  components:
     left_drive:
       component: ddsm115
       mount_link: left_wheel
@@ -2316,44 +2383,29 @@ components:
           kind: motor
       driver:
         connection: { type: can, bus: 0, node_id: 1 }
+
+artifacts:
+  channel: stable
+  generation: y2026_1
+  catalog: catalog.json
+"#
+    }
+
+    /// Path pins are dev-overlay-only; `write_robot_project_with_component`
+    /// pairs the base `robot.yaml` above with this overlay (loaded via
+    /// `SimulateOptions.overlays: vec!["dev".into()]`).
+    fn robot_yaml_with_component_dev_overlay() -> &'static str {
+        r#"artifacts:
+  pins:
+    phoxal/component-ddsm115-assets:
+      path: components/ddsm115
+    phoxal/component-ddsm115-driver:
+      path: components/ddsm115
 "#
     }
 
     fn robot_yaml_with_custom_component() -> &'static str {
-        r#"schema: v0
-
-identity:
-  id: testbot
-  namespace: test
-
-structure: structure.urdf
-
-phoxal_artifacts:
-  channel: stable
-  generation: y2026_1
-  catalog: catalog.json
-phoxal_participants: {}
-
-motion:
-  kinematic:
-    kind: omnidirectional
-    actuators: [left_drive.motor]
-    encoders: []
-
-components:
-  sources:
-    ddsm115:
-      path: components/ddsm115
-  instances:
-    left_drive:
-      component: ddsm115
-      mount_link: left_wheel
-      parameters:
-        motor:
-          kind: motor
-      driver:
-        connection: { type: can, bus: 0, node_id: 1 }
-"#
+        robot_yaml_with_component()
     }
 
     fn write_catalog_with_driver(root: &Path) -> Result<PathBuf> {
@@ -2505,20 +2557,17 @@ components:
     fn empty_resolved_robot(id: &str) -> Result<ResolvedRobot> {
         let yaml = format!(
             r#"schema: v0
-api_version: y2026_1
-identity:
+robot:
   id: {id}
   namespace: dev
-structure: structure.urdf
-phoxal_participants: {{}}
-motion:
+  structure: structure.urdf
   kinematic:
     kind: omnidirectional
     actuators: []
     encoders: []
-components:
-  sources: {{}}
-  instances: {{}}
+  components: {{}}
+artifacts:
+  generation: y2026_1
 "#
         );
         let robot = phoxal::model::robot::v1::Robot::parse_from_string(&yaml)?;
@@ -2554,7 +2603,6 @@ components:
             resolved.user_runtimes.push(ResolvedUserRuntime {
                 name: "mission".to_string(),
                 path: PathBuf::from("runtimes/mission"),
-                framework: "y2026_1".to_string(),
                 source_hash: "hash".to_string(),
             });
         }
@@ -2562,11 +2610,23 @@ components:
             resolved.components.push(ResolvedComponent {
                 instance: (*instance).to_string(),
                 source_name: "ddsm115".to_string(),
-                source: ResolvedComponentSource::Path {
-                    path: PathBuf::from("components/ddsm115"),
+                assets: crate::resolver::ResolvedComponentPackage {
+                    package: "phoxal/component-ddsm115-assets".to_string(),
+                    kind: crate::catalog::ArtifactKind::ComponentAssets,
+                    source: ResolvedComponentSource::Path {
+                        path: PathBuf::from("components/ddsm115"),
+                    },
+                    path_override: None,
                 },
+                driver: Some(crate::resolver::ResolvedComponentPackage {
+                    package: "phoxal/component-ddsm115-driver".to_string(),
+                    kind: crate::catalog::ArtifactKind::ComponentDriver,
+                    source: ResolvedComponentSource::Path {
+                        path: PathBuf::from("components/ddsm115"),
+                    },
+                    path_override: None,
+                }),
                 has_driver: true,
-                driver_path_override: None,
             });
         }
         Ok(resolved)
@@ -2578,7 +2638,7 @@ components:
     ) -> ResolvedPlatformRuntime {
         ResolvedPlatformRuntime {
             name: name.to_string(),
-            artifact_id: format!("service-{name}"),
+            package: format!("phoxal/service-{name}"),
             kind: ArtifactKind::Service,
             generation: "y2026_1".to_string(),
             version: "0.1.0".to_string(),
@@ -2599,7 +2659,7 @@ components:
     fn simulator_runtime(name: &str) -> ResolvedPlatformRuntime {
         ResolvedPlatformRuntime {
             name: name.to_string(),
-            artifact_id: format!("simulator-{name}"),
+            package: format!("phoxal/simulator-{name}"),
             kind: ArtifactKind::Simulator,
             generation: "y2026_1".to_string(),
             version: "0.1.0".to_string(),
@@ -2625,6 +2685,7 @@ components:
     fn tool(name: &str) -> ResolvedTool {
         ResolvedTool {
             name: name.to_string(),
+            package: format!("phoxal/{name}"),
             requested: "0.1.0".to_string(),
             resolved: "0.1.0".to_string(),
             repo: "phoxal/framework".to_string(),

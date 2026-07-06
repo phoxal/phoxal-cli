@@ -74,8 +74,8 @@ fn resolve_identity(
             })?;
             let loaded = load_robot_with_extras(&robot_path)?;
             Ok((
-                namespace.unwrap_or(loaded.robot.identity.namespace),
-                robot_id.unwrap_or(loaded.robot.identity.id),
+                namespace.unwrap_or(loaded.robot.robot.namespace),
+                robot_id.unwrap_or(loaded.robot.robot.id),
             ))
         }
     }

@@ -1,23 +1,9 @@
 schema: v0
-api_version: y2026_1
 
-identity:
+robot:
   id: robot-v1
   namespace: dev
-
-structure: structure.urdf
-
-phoxal_artifacts:
-  channel: stable
-phoxal_participants: {}
-
-user_participants:
-  mission_behavior:
-    path: ./runtimes/mission_behavior
-  inspection_policy:
-    path: ./runtimes/inspection_policy
-
-motion:
+  structure: structure.urdf
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -26,20 +12,7 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.12
     wheel_base_m: 0.6
-
-components:
-  sources:
-    oak_d_lite:
-      git: https://github.com/phoxal/framework
-      tag: main
-      directory: component/oak_d_lite
-    ddsm115:
-      git: https://github.com/phoxal/framework
-      tag: main
-      directory: component/ddsm115
-    passive_caster:
-      path: ./components/passive_caster
-  instances:
+  components:
     left_drive:
       component: ddsm115
       mount_link: left_wheel_mount
@@ -53,3 +26,31 @@ components:
       roles:
         rgb: [localization]
         depth: [localization, mapping, traversability]
+
+artifacts:
+  channel: stable
+  pins:
+    phoxal/component-oak_d_lite-assets:
+      git: https://github.com/phoxal/framework
+      rev: main
+      directory: component/oak_d_lite
+    phoxal/component-oak_d_lite-driver:
+      git: https://github.com/phoxal/framework
+      rev: main
+      directory: component/oak_d_lite/driver
+    phoxal/component-ddsm115-assets:
+      git: https://github.com/phoxal/framework
+      rev: main
+      directory: component/ddsm115
+    phoxal/component-ddsm115-driver:
+      git: https://github.com/phoxal/framework
+      rev: main
+      directory: component/ddsm115/driver
+    phoxal/component-passive_caster-assets:
+      path: ./components/passive_caster
+
+services:
+  mission_behavior:
+    path: ./runtimes/mission_behavior
+  inspection_policy:
+    path: ./runtimes/inspection_policy

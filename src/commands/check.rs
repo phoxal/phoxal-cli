@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::AppContext;
 use crate::catalog::ArtifactKind;
 use crate::commands::MessageFormat;
-use crate::component_driver::component_crate_dir;
+use crate::component_driver::component_driver_crate_dir;
 use crate::resolver::{
     ResolveOptions, ResolvedComponent, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras,
     discover_robot_yaml, load_robot_with_extras, resolve, tool_emit_apis_id,
@@ -197,7 +197,8 @@ impl PlatformArtifactRef {
     fn kind_label(&self) -> &'static str {
         match self.kind {
             ArtifactKind::Service => "official service",
-            ArtifactKind::Driver => "official driver",
+            ArtifactKind::ComponentAssets => "official component assets",
+            ArtifactKind::ComponentDriver => "official driver",
             ArtifactKind::Tool => "official tool",
             ArtifactKind::Simulator => "official simulator",
         }
@@ -243,6 +244,7 @@ fn run(
         catalog.as_ref(),
         ResolveOptions {
             resolve_source_commits: true,
+            resolve_component_asset_commits: false,
             ..ResolveOptions::default()
         },
     )?;
@@ -260,7 +262,7 @@ fn run(
     ensure_catalog_availability(&resolved)?;
     let tool_participants = tool_participants_from_resolved(&resolved)?;
     let all_source_participants =
-        source_participants_from_resolved(project_root, &resolved, component_crate_dir)?;
+        source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
     if let Some(catalog) = catalog.as_ref() {
         ensure_no_promoted_preview_features(&all_source_participants, catalog)?;
     }
@@ -537,10 +539,10 @@ pub(crate) fn source_participants_from_resolved(
     for component in resolved
         .components
         .iter()
-        .filter(|component| component.has_driver)
+        .filter(|component| component.driver.is_some())
     {
-        let crate_dir = if let Some(path) = &component.driver_path_override {
-            path.clone()
+        let crate_dir = if let Some(path) = component.driver_path_override() {
+            path.to_path_buf()
         } else {
             locate_component_crate(component, project_root).with_context(|| {
                 format!(
@@ -599,11 +601,9 @@ fn ensure_user_service_exists(resolved: &ResolvedRobot, service_name: &str) -> R
             .collect::<Vec<_>>()
             .join(", ");
         if available.is_empty() {
-            bail!("user service '{service_name}' is not defined in user_participants");
+            bail!("user service '{service_name}' is not defined in services");
         }
-        bail!(
-            "user service '{service_name}' is not defined in user_participants; available: {available}"
-        );
+        bail!("user service '{service_name}' is not defined in services; available: {available}");
     }
     Ok(())
 }
@@ -622,7 +622,7 @@ fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()> {
 
     let mut message = format!(
         "NotYetAvailable: {} is not deployable for target generation {} on {}",
-        resolved.robot.identity.id, resolved.target_generation, resolved.target
+        resolved.robot.robot.id, resolved.target_generation, resolved.target
     );
     if let Some(revision) = &resolved.catalog_revision {
         message.push_str("\n\ncatalog revision: ");
@@ -635,7 +635,7 @@ fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()> {
             .map(|status| status.to_string())
             .unwrap_or_else(|| "missing".to_string());
         message.push_str("\n  - ");
-        message.push_str(&runtime.artifact_id);
+        message.push_str(&runtime.package);
         message.push_str(" (");
         message.push_str(&runtime.changed_contracts.join(", "));
         message.push_str(") is ");
@@ -654,7 +654,7 @@ fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()> {
         }
     }
     message.push_str(
-        "\n\nFix: wait for the listed official artifacts to publish, or pin phoxal_artifacts.generation to an older generation whose changed contracts you do not need.",
+        "\n\nFix: wait for the listed official artifacts to publish, or pin artifacts.generation to an older generation whose changed contracts you do not need.",
     );
     bail!("{message}")
 }
@@ -950,7 +950,7 @@ pub fn run_check_with_deployed_user_service_images(
 
 pub(crate) fn robot_graph_from_resolved(resolved: &ResolvedRobot) -> graph_check::RobotGraph {
     let mut component_capabilities = Vec::new();
-    for (instance_name, instance) in &resolved.robot.components.instances {
+    for (instance_name, instance) in &resolved.robot.robot.components {
         for (capability_id, parameters) in &instance.parameters {
             component_capabilities.push(graph_check::ComponentCapability {
                 instance: instance_name.clone(),
@@ -963,7 +963,7 @@ pub(crate) fn robot_graph_from_resolved(resolved: &ResolvedRobot) -> graph_check
     component_capabilities.dedup();
 
     let mut motion_capabilities = BTreeSet::new();
-    collect_motion_capabilities(&resolved.robot.motion.kinematic, &mut motion_capabilities);
+    collect_motion_capabilities(&resolved.robot.robot.kinematic, &mut motion_capabilities);
 
     graph_check::RobotGraph {
         component_capabilities,
@@ -1054,11 +1054,7 @@ fn validate_user_service_config(
         .user_runtime_config(service_id)
         .cloned()
         .unwrap_or(Value::Null);
-    let errors = validate_json_schema(
-        schema,
-        &config,
-        &format!("user_participants.{service_id}.config"),
-    );
+    let errors = validate_json_schema(schema, &config, &format!("services.{service_id}.config"));
     if errors.is_empty() {
         None
     } else {
@@ -1695,10 +1691,25 @@ impl std::error::Error for MissingImageError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver::ResolvedComponentSource;
+    use crate::resolver::{ResolvedComponentPackage, ResolvedComponentSource};
     use graph_check::{Direction, ParticipantClass, Problem};
     use phoxal::model::robot::v1::{Channel, Robot};
     use std::collections::BTreeMap;
+
+    fn fixture_component_package(
+        package: &str,
+        kind: crate::catalog::ArtifactKind,
+        path: &str,
+    ) -> ResolvedComponentPackage {
+        ResolvedComponentPackage {
+            package: package.to_string(),
+            kind,
+            source: ResolvedComponentSource::Path {
+                path: PathBuf::from(path),
+            },
+            path_override: None,
+        }
+    }
 
     #[test]
     fn healthy_graph_passes_with_fake_emit_apis() -> Result<()> {
@@ -2025,7 +2036,7 @@ mod tests {
     fn official_driver_artifact_identity_uses_driver_label() {
         let artifacts = vec![PlatformArtifactRef {
             name: "bno085".to_string(),
-            kind: ArtifactKind::Driver,
+            kind: ArtifactKind::ComponentDriver,
             artifact_ref: "driver-bno085:swapped".to_string(),
         }];
         let robot_graph = graph_check::RobotGraph::default();
@@ -2859,20 +2870,28 @@ mod tests {
             ResolvedComponent {
                 instance: "left_drive".to_string(),
                 source_name: "ddsm115".to_string(),
-                source: ResolvedComponentSource::Path {
-                    path: PathBuf::from("components/ddsm115"),
-                },
+                assets: fixture_component_package(
+                    "phoxal/component-ddsm115-assets",
+                    crate::catalog::ArtifactKind::ComponentAssets,
+                    "components/ddsm115",
+                ),
+                driver: Some(fixture_component_package(
+                    "phoxal/component-ddsm115-driver",
+                    crate::catalog::ArtifactKind::ComponentDriver,
+                    "components/ddsm115",
+                )),
                 has_driver: true,
-                driver_path_override: None,
             },
             ResolvedComponent {
                 instance: "caster".to_string(),
                 source_name: "passive_caster".to_string(),
-                source: ResolvedComponentSource::Path {
-                    path: PathBuf::from("components/passive_caster"),
-                },
+                assets: fixture_component_package(
+                    "phoxal/component-passive_caster-assets",
+                    crate::catalog::ArtifactKind::ComponentAssets,
+                    "components/passive_caster",
+                ),
+                driver: None,
                 has_driver: false,
-                driver_path_override: None,
             },
         ])?;
         let mut located = Vec::new();
@@ -2922,7 +2941,7 @@ mod tests {
         let mut resolved = resolved_with_components(Vec::new())?;
         resolved.platform_runtimes.push(ResolvedPlatformRuntime {
             name: "drive".to_string(),
-            artifact_id: "service-drive".to_string(),
+            package: "phoxal/service-drive".to_string(),
             kind: crate::catalog::ArtifactKind::Service,
             generation: "y2026_1".to_string(),
             version: "0.1.0".to_string(),
@@ -3431,19 +3450,9 @@ mod tests {
     }
 
     const MINIMAL_ROBOT: &str = r#"schema: v0
-api_version: y2026_1
-
-identity:
+robot:
   id: testbot
   namespace: test
-
-structure: structure.urdf
-
-phoxal_artifacts:
-  channel: stable
-phoxal_participants: {}
-
-motion:
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -3452,9 +3461,8 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
-
-components:
-  sources: {}
-  instances: {}
+  components: {}
+artifacts:
+  channel: stable
 "#;
 }

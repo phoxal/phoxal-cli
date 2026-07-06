@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal::model::robot::{
     RobotV1 as Robot,
-    v1::{ArtifactPin, Channel, ComponentSource, UserParticipant},
+    v1::{ArtifactPin, Channel, UserService},
 };
 use serde_json::Value;
 
@@ -15,6 +15,10 @@ use crate::catalog::{
 };
 use crate::shell;
 use crate::utils::{hash_tree, resolve_project_path};
+
+/// The provider every official Phoxal package uses in its provider-qualified
+/// `artifacts.pins` / catalog `package` identity (`phoxal/service-drive`, ...).
+const PHOXAL_PROVIDER: &str = "phoxal";
 
 const ROBOT_FILE: &str = "robot.yaml";
 
@@ -27,6 +31,12 @@ pub struct ResolveOptions {
     /// flows that never read component commits (`pull`, `outdated`) leave it
     /// off so they stay fully offline.
     pub resolve_source_commits: bool,
+    /// Resolve git-backed `component_assets` refs to commits. Most commands do
+    /// not read non-local asset bundles while rendering plans/payload metadata,
+    /// so they leave this off to avoid staging-time network access; live
+    /// simulation turns it on because Webots world generation needs the asset
+    /// files locally.
+    pub resolve_component_asset_commits: bool,
     /// Override the official service/driver target triple. Deploy probes the
     /// robot arch and resolves catalog assets for that Linux triple instead of
     /// the host.
@@ -40,6 +50,7 @@ impl Default for ResolveOptions {
     fn default() -> Self {
         Self {
             resolve_source_commits: true,
+            resolve_component_asset_commits: true,
             official_target_triple: None,
             tool_target_triple: None,
         }
@@ -87,10 +98,13 @@ pub struct LoadedRobot {
     pub extras: RobotManifestExtras,
 }
 
+/// One resolved official platform artifact (a service or a simulator). The
+/// public identity is the provider-qualified `package` id
+/// (`phoxal/service-drive`); there is no separate `artifact_id` (docs #21).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPlatformRuntime {
     pub name: String,
-    pub artifact_id: String,
+    pub package: String,
     pub kind: ArtifactKind,
     pub generation: String,
     pub version: String,
@@ -127,25 +141,64 @@ impl ResolvedPlatformRuntime {
 pub struct ResolvedUserRuntime {
     pub name: String,
     pub path: PathBuf,
-    pub framework: String,
     pub source_hash: String,
 }
 
+/// One resolved `robot.components.<instance>` entry: the logical component id
+/// (`component: <id>`) resolves to an always-present `component_assets`
+/// package and an optional `component_driver` package - present only when the
+/// instance declares a `driver` block AND a matching driver package exists in
+/// the resolved graph (docs #21). Driverless components are valid: they still
+/// carry assets and may be simulated, but never launch a hardware driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedComponent {
     pub instance: String,
+    /// The logical component id (`component: <id>` in `robot.yaml`).
     pub source_name: String,
-    pub source: ResolvedComponentSource,
+    /// The resolved `component_assets` package. Always present.
+    pub assets: ResolvedComponentPackage,
+    /// The resolved `component_driver` package. Present only when the
+    /// instance declares `driver` and a driver package resolves for this
+    /// component; see [`ComponentDriverUnavailable`].
+    pub driver: Option<ResolvedComponentPackage>,
+    /// Whether the instance declares a `driver:` block in `robot.yaml`. This
+    /// is the manifest-level intent; `driver.is_some()` is whether a matching
+    /// package actually resolved for it.
     pub has_driver: bool,
-    pub driver_path_override: Option<PathBuf>,
+}
+
+impl ResolvedComponent {
+    #[must_use]
+    pub fn driver_path_override(&self) -> Option<&Path> {
+        self.driver
+            .as_ref()
+            .and_then(|driver| driver.path_override())
+    }
+}
+
+/// One resolved component package (either the `component_assets` or the
+/// `component_driver` half of a component instance).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedComponentPackage {
+    /// The provider-qualified package id (`phoxal/component-ddsm115-assets`).
+    pub package: String,
+    pub kind: ArtifactKind,
+    pub source: ResolvedComponentSource,
+    pub path_override: Option<PathBuf>,
+}
+
+impl ResolvedComponentPackage {
+    #[must_use]
+    pub fn path_override(&self) -> Option<&Path> {
+        self.path_override.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedComponentSource {
     Git {
         git: String,
-        tag: String,
-        commit: String,
+        rev: String,
         /// Subdirectory within the repository holding the component
         /// definition. `None` means the repository root.
         directory: Option<PathBuf>,
@@ -153,11 +206,20 @@ pub enum ResolvedComponentSource {
     Path {
         path: PathBuf,
     },
+    /// Resolves from the official artifact catalog (no fork pin for this
+    /// package); staged from a `CatalogEntry` release asset.
+    Catalog,
 }
 
+/// A resolved native tool (`tool-router`, `tool-joypad`). `name` is the short,
+/// launch-safe kind-qualified id used for participant/site ids, systemd unit
+/// names, and env var keys (`SITE_TOOL_ROUTER` etc.); `package` is the
+/// canonical provider-qualified identity (`phoxal/tool-router`) used for
+/// catalog lookups and native-artifact provisioning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedTool {
     pub name: String,
+    pub package: String,
     pub requested: String,
     pub resolved: String,
     pub repo: String,
@@ -171,7 +233,8 @@ pub struct ResolvedTool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedPathOverrideKind {
     Service,
-    Driver,
+    ComponentAssets,
+    ComponentDriver,
     Tool,
     Simulator,
 }
@@ -181,7 +244,8 @@ impl ResolvedPathOverrideKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Service => "service",
-            Self::Driver => "driver",
+            Self::ComponentAssets => "component_assets",
+            Self::ComponentDriver => "component_driver",
             Self::Tool => "tool",
             Self::Simulator => "simulator",
         }
@@ -195,6 +259,26 @@ pub struct ResolvedPathOverride {
     pub artifact_name: String,
     pub path: PathBuf,
 }
+
+/// A named diagnostic: an instance declares `driver:` but the resolved graph
+/// has no matching `component_driver` package for its component (docs #21).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentDriverUnavailable {
+    pub instance: String,
+    pub component: String,
+}
+
+impl std::fmt::Display for ComponentDriverUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "ComponentDriverUnavailable: robot.components.{}.driver is declared but component '{}' has no {PHOXAL_PROVIDER}/component-{}-driver package in the resolved graph",
+            self.instance, self.component, self.component
+        )
+    }
+}
+
+impl std::error::Error for ComponentDriverUnavailable {}
 
 pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
     let mut cursor = if start.is_file() {
@@ -219,8 +303,8 @@ pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
 
 pub fn load_robot(path: &Path) -> Result<Robot> {
     // Delegate to the extras-aware loader so EVERY command tolerates the
-    // `user_participants.<name>.config` keys as a CLI-side side channel: they
-    // are stripped before the typed parse and threaded through
+    // `services.<name>.config` keys as a CLI-side side channel: they are
+    // stripped before the typed parse and threaded through
     // `RobotManifestExtras`. Commands that don't need the extras just discard
     // them.
     load_robot_with_extras(path).map(|loaded| loaded.robot)
@@ -261,7 +345,7 @@ pub fn load_robot_with_extras_and_overlays(
 fn ensure_no_base_path_pins(yaml: &serde_yaml::Value, path: &Path) -> Result<()> {
     let Some(pins) = yaml
         .as_mapping()
-        .and_then(|root| root.get("phoxal_artifacts"))
+        .and_then(|root| root.get("artifacts"))
         .and_then(serde_yaml::Value::as_mapping)
         .and_then(|artifacts| artifacts.get("pins"))
         .and_then(serde_yaml::Value::as_mapping)
@@ -283,7 +367,7 @@ fn ensure_no_base_path_pins(yaml: &serde_yaml::Value, path: &Path) -> Result<()>
         return Ok(());
     }
     bail!(
-        "{path}: phoxal_artifacts.pins path overrides are dev-overlay only; move {} to robot.<env>.yaml and load it with --env <env>",
+        "{path}: artifacts.pins path overrides are dev-overlay only; move {} to robot.<env>.yaml and load it with --env <env>",
         path_pins.join(", "),
         path = path.display()
     )
@@ -301,24 +385,24 @@ fn parse_robot_value_with_extras(yaml: &mut serde_yaml::Value, path: &Path) -> R
 
 fn validate_launch_participant_ids(robot: &Robot, path: &Path) -> Result<()> {
     let mut errors = Vec::new();
-    for name in robot.user_participants.keys() {
+    for name in robot.services.keys() {
         if !is_launch_id(name) {
             errors.push(format!(
-                "user_participants.{name} in {} must use only [a-z0-9_]; '-' is reserved as a launch separator",
+                "services.{name} in {} must use only [a-z0-9_]; '-' is reserved as a launch separator",
                 path.display()
             ));
         }
     }
-    for instance in robot.components.instances.keys() {
+    for instance in robot.robot.components.keys() {
         if !is_launch_id(instance) {
             errors.push(format!(
-                "components.instances.{instance} in {} must use only [a-z0-9_]; '-' is reserved as a launch separator",
+                "robot.components.{instance} in {} must use only [a-z0-9_]; '-' is reserved as a launch separator",
                 path.display()
             ));
         }
-        if robot.user_participants.contains_key(instance) {
+        if robot.services.contains_key(instance) {
             errors.push(format!(
-                "user_participants.{instance} collides with components.instances.{instance}; participant ids must be unique",
+                "services.{instance} collides with robot.components.{instance}; participant ids must be unique",
             ));
         }
     }
@@ -356,7 +440,7 @@ fn merge_yaml_overlay(
     overlay: serde_yaml::Value,
     path: &mut Vec<String>,
 ) {
-    if is_replace_whole_user_runtime_config(path) {
+    if is_replace_whole_user_service_config(path) {
         *base = overlay;
         return;
     }
@@ -384,8 +468,8 @@ fn merge_yaml_overlay(
     }
 }
 
-fn is_replace_whole_user_runtime_config(path: &[String]) -> bool {
-    path.len() == 3 && path[0] == "user_participants" && path[2] == "config"
+fn is_replace_whole_user_service_config(path: &[String]) -> bool {
+    path.len() == 3 && path[0] == "services" && path[2] == "config"
 }
 
 fn take_manifest_extras(
@@ -396,7 +480,7 @@ fn take_manifest_extras(
     let mut stripped_extras = false;
 
     if let Some(root) = yaml.as_mapping_mut()
-        && let Some(artifacts) = root.get_mut("phoxal_artifacts")
+        && let Some(artifacts) = root.get_mut("artifacts")
         && let Some(artifacts) = artifacts.as_mapping_mut()
         && let Some(catalog) = artifacts.remove("catalog")
     {
@@ -404,27 +488,27 @@ fn take_manifest_extras(
         stripped_extras = true;
     }
 
-    let Some(user_runtimes) = yaml
+    let Some(services) = yaml
         .as_mapping_mut()
-        .and_then(|mapping| mapping.get_mut("user_participants"))
+        .and_then(|mapping| mapping.get_mut("services"))
         .and_then(serde_yaml::Value::as_mapping_mut)
     else {
         return Ok((extras, stripped_extras));
     };
 
-    for (name, runtime) in user_runtimes {
+    for (name, service) in services {
         let Some(name) = name.as_str() else {
             continue;
         };
-        let Some(runtime) = runtime.as_mapping_mut() else {
+        let Some(service) = service.as_mapping_mut() else {
             continue;
         };
-        let config = runtime.remove("config");
+        let config = service.remove("config");
         stripped_extras |= config.is_some();
         let config = config
             .map(|config| {
                 serde_json::to_value(config).with_context(|| {
-                    format!("user_participants.{name}.config must be representable as JSON")
+                    format!("services.{name}.config must be representable as JSON")
                 })
             })
             .transpose()?;
@@ -442,13 +526,13 @@ fn take_manifest_extras(
 fn parse_catalog_source_extra(value: &serde_yaml::Value, robot_path: &Path) -> Result<PathBuf> {
     let Some(source) = value.as_str() else {
         bail!(
-            "phoxal_artifacts.catalog in {} must be a local path string",
+            "artifacts.catalog in {} must be a local path string",
             robot_path.display()
         );
     };
     if source.trim().is_empty() {
         bail!(
-            "phoxal_artifacts.catalog in {} must not be empty",
+            "artifacts.catalog in {} must not be empty",
             robot_path.display()
         );
     }
@@ -461,12 +545,11 @@ pub fn resolve(
     catalog: Option<&CatalogRevision>,
     options: ResolveOptions,
 ) -> Result<ResolvedRobot> {
-    let channel = robot.phoxal_artifacts.channel;
+    let channel = robot.artifacts.channel;
     let catalog_channel = CatalogChannel::from(channel);
     let target = options
         .official_target_triple
         .clone()
-        .or_else(|| robot.phoxal_artifacts.target.clone())
         .unwrap_or_else(host_target_triple);
     let target_generation = target_generation(robot, catalog, catalog_channel, &target)?;
     let platform_names = catalog
@@ -479,11 +562,6 @@ pub fn resolve(
     robot
         .validate_with(&platform_names)
         .map_err(|errors| anyhow!("Robot errors:\n{}", join_errors(errors)))?;
-    if !robot.phoxal_participants.images.is_empty() {
-        bail!(
-            "phoxal_participants.images is no longer supported: official artifacts now ship as native release assets"
-        );
-    }
     let tool_target = options
         .tool_target_triple
         .unwrap_or_else(host_target_triple);
@@ -502,18 +580,26 @@ pub fn resolve(
         .unwrap_or_default();
 
     let user_runtimes = robot
-        .user_participants
+        .services
         .iter()
-        .map(|(name, runtime)| {
-            resolve_user_runtime(project_root, &target_generation, name, runtime)
-        })
+        .map(|(name, service)| resolve_user_runtime(project_root, name, service))
         .collect::<Result<Vec<_>>>()?;
 
     // Git ref → commit SHA resolution: when `resolve_source_commits` is set, a
-    // `tag` that is already a full commit SHA resolves with no network, while a
+    // `rev` that is already a full commit SHA resolves with no network, while a
     // tag/branch ref is resolved live via `git ls-remote`. Flows that never read
     // component commits (`pull`, `outdated`) leave it off so they stay offline.
-    let mut components = resolve_components(robot, options.resolve_source_commits)?;
+    // Component assets have a separate gate because deploy/check/run do not
+    // read non-local asset bundles during planning/staging; live simulate does.
+    let mut components = resolve_components(
+        robot,
+        catalog,
+        catalog_channel,
+        &target,
+        &target_generation,
+        options.resolve_source_commits,
+        options.resolve_component_asset_commits,
+    )?;
     let mut tools = resolve_tools(
         robot,
         catalog,
@@ -554,13 +640,15 @@ fn apply_path_pins(
     tools: &mut [ResolvedTool],
 ) -> Result<Vec<ResolvedPathOverride>> {
     let mut overrides = Vec::new();
-    for (key, pin) in &robot.phoxal_artifacts.pins {
-        let ArtifactPin::Path(pin) = pin;
+    for (key, pin) in &robot.artifacts.pins {
+        let ArtifactPin::Path(pin) = pin else {
+            continue;
+        };
         let path = resolve_project_path(project_root, &pin.path);
         if apply_service_path_pin(key, &path, platform_runtimes, &mut overrides) {
             continue;
         }
-        if apply_driver_path_pin(key, &path, components, &mut overrides) {
+        if apply_component_path_pin(key, &path, components, &mut overrides) {
             continue;
         }
         if apply_tool_path_pin(key, &path, tools, &mut overrides) {
@@ -586,7 +674,7 @@ fn apply_service_path_pin(
 ) -> bool {
     let Some(runtime) = platform_runtimes
         .iter_mut()
-        .find(|runtime| runtime.kind == ArtifactKind::Service && runtime.artifact_id == key)
+        .find(|runtime| runtime.kind == ArtifactKind::Service && runtime.package == key)
     else {
         return false;
     };
@@ -605,28 +693,35 @@ fn apply_service_path_pin(
     true
 }
 
-fn apply_driver_path_pin(
+fn apply_component_path_pin(
     key: &str,
     path: &Path,
     components: &mut [ResolvedComponent],
     overrides: &mut Vec<ResolvedPathOverride>,
 ) -> bool {
-    let Some(driver_name) = key.strip_prefix("driver-") else {
-        return false;
-    };
     let mut used = false;
-    for component in components
-        .iter_mut()
-        .filter(|component| component.has_driver && component.source_name == driver_name)
-    {
-        component.driver_path_override = Some(path.to_path_buf());
-        used = true;
+    for component in components.iter_mut() {
+        if component.assets.package == key {
+            component.assets.path_override = Some(path.to_path_buf());
+            used = true;
+        }
+        if let Some(driver) = component.driver.as_mut()
+            && driver.package == key
+        {
+            driver.path_override = Some(path.to_path_buf());
+            used = true;
+        }
     }
     if used {
+        let kind = if key.ends_with("-driver") {
+            ResolvedPathOverrideKind::ComponentDriver
+        } else {
+            ResolvedPathOverrideKind::ComponentAssets
+        };
         overrides.push(ResolvedPathOverride {
             key: key.to_string(),
-            kind: ResolvedPathOverrideKind::Driver,
-            artifact_name: driver_name.to_string(),
+            kind,
+            artifact_name: key.to_string(),
             path: path.to_path_buf(),
         });
     }
@@ -639,7 +734,7 @@ fn apply_tool_path_pin(
     tools: &mut [ResolvedTool],
     overrides: &mut Vec<ResolvedPathOverride>,
 ) -> bool {
-    let Some(tool) = tools.iter_mut().find(|tool| tool.name == key) else {
+    let Some(tool) = tools.iter_mut().find(|tool| tool.package == key) else {
         return false;
     };
     tool.path_override = Some(path.to_path_buf());
@@ -649,7 +744,7 @@ fn apply_tool_path_pin(
     overrides.push(ResolvedPathOverride {
         key: key.to_string(),
         kind: ResolvedPathOverrideKind::Tool,
-        artifact_name: tool_emit_apis_id(key).to_string(),
+        artifact_name: tool_emit_apis_id(&tool.name).to_string(),
         path: path.to_path_buf(),
     });
     true
@@ -663,7 +758,7 @@ fn apply_simulator_path_pin(
 ) -> bool {
     let Some(runtime) = simulators
         .iter_mut()
-        .find(|runtime| runtime.kind == ArtifactKind::Simulator && runtime.artifact_id == key)
+        .find(|runtime| runtime.kind == ArtifactKind::Simulator && runtime.package == key)
     else {
         return false;
     };
@@ -695,18 +790,19 @@ fn unknown_path_pin_message(
     } else {
         used.join(", ")
     };
-    if matches!(
-        key.split_once('-').map(|(prefix, _)| prefix),
-        Some("service" | "driver" | "tool" | "simulator")
-    ) {
+    if is_provider_qualified_key(key) {
         format!(
-            "unused artifact path pin '{key}': no artifact with that kind-qualified id is used by the resolved graph; available path-pin ids: {available}"
+            "unused artifact path pin '{key}': no package with that id is used by the resolved graph; available path-pin ids: {available}"
         )
     } else {
         format!(
-            "unknown artifact path pin '{key}': pins must be kind-qualified ids (service-*, driver-*, tool-*, simulator-*); available path-pin ids: {available}"
+            "unknown artifact path pin '{key}': pins must be provider-qualified package ids ('{PHOXAL_PROVIDER}/<name>'); available path-pin ids: {available}"
         )
     }
+}
+
+fn is_provider_qualified_key(key: &str) -> bool {
+    phoxal::model::robot::v1::is_provider_qualified_pin_key(key)
 }
 
 fn used_path_pin_keys(
@@ -720,20 +816,21 @@ fn used_path_pin_keys(
         platform_runtimes
             .iter()
             .filter(|runtime| runtime.kind == ArtifactKind::Service)
-            .map(|runtime| runtime.artifact_id.clone()),
+            .map(|runtime| runtime.package.clone()),
     );
     keys.extend(
         components
             .iter()
-            .filter(|component| component.has_driver)
-            .map(|component| format!("driver-{}", component.source_name)),
+            .map(|component| component.assets.package.clone()),
     );
-    keys.extend(tools.iter().map(|tool| tool.name.clone()));
     keys.extend(
-        simulators
+        components
             .iter()
-            .map(|simulator| simulator.artifact_id.clone()),
+            .filter_map(|component| component.driver.as_ref())
+            .map(|driver| driver.package.clone()),
     );
+    keys.extend(tools.iter().map(|tool| tool.package.clone()));
+    keys.extend(simulators.iter().map(|simulator| simulator.package.clone()));
     keys.sort();
     keys.dedup();
     keys
@@ -745,11 +842,7 @@ fn target_generation(
     channel: CatalogChannel,
     target: &str,
 ) -> Result<String> {
-    if let Some(generation) = robot.phoxal_artifacts.generation.as_deref() {
-        validate_generation_pin(robot.api_version.as_deref(), generation)?;
-        return Ok(generation.to_string());
-    }
-    if let Some(generation) = robot.api_version.as_deref() {
+    if let Some(generation) = robot.artifacts.generation.as_deref() {
         return Ok(generation.to_string());
     }
     if let Some(catalog) = catalog {
@@ -770,10 +863,10 @@ fn target_generation(
 }
 
 fn robot_uses_only_catalog_artifacts(robot: &Robot) -> bool {
-    robot.user_participants.is_empty()
+    robot.services.is_empty()
         && robot
+            .robot
             .components
-            .instances
             .values()
             .all(|component| component.driver.is_none())
 }
@@ -784,7 +877,7 @@ fn catalog_target_generation_not_yet_available(
     target: &str,
 ) -> anyhow::Error {
     anyhow!(
-        "NotYetAvailable: loaded artifact catalog revision {} has no released generation assets for target {target} on channel {channel}. Pass a catalog that includes released assets for {target}/{channel}, pin phoxal_artifacts.generation/api_version for source-only development, or deploy a target covered by this catalog.",
+        "NotYetAvailable: loaded artifact catalog revision {} has no released generation assets for target {target} on channel {channel}. Pass a catalog that includes released assets for {target}/{channel}, pin artifacts.generation for source-only development, or deploy a target covered by this catalog.",
         catalog.revision
     )
 }
@@ -793,28 +886,12 @@ pub(crate) fn target_generation_for_robot(
     robot: &Robot,
     catalog: Option<&CatalogRevision>,
 ) -> Result<String> {
-    let target = robot
-        .phoxal_artifacts
-        .target
-        .clone()
-        .unwrap_or_else(host_target_triple);
     target_generation(
         robot,
         catalog,
-        CatalogChannel::from(robot.phoxal_artifacts.channel),
-        &target,
+        CatalogChannel::from(robot.artifacts.channel),
+        &host_target_triple(),
     )
-}
-
-fn validate_generation_pin(root_api_version: Option<&str>, generation: &str) -> Result<()> {
-    if let Some(root_api_version) = root_api_version
-        && root_api_version != generation
-    {
-        bail!(
-            "robot.yaml declares api_version {root_api_version} but phoxal_artifacts.generation {generation}; remove the root api_version or make both generations match"
-        );
-    }
-    Ok(())
 }
 
 fn resolve_catalog_entries(
@@ -838,7 +915,7 @@ fn resolve_catalog_entries(
             continue;
         }
         selected
-            .entry(entry.artifact_id.clone())
+            .entry(entry.package.clone())
             .and_modify(|existing| {
                 if compare_catalog_entries(entry, existing).is_gt() {
                     *existing = entry;
@@ -854,7 +931,7 @@ fn resolve_catalog_entries(
         .map(|entry| {
             let name = entry
                 .artifact_name()
-                .ok_or_else(|| anyhow!("{} does not match kind {}", entry.artifact_id, entry.kind))?
+                .ok_or_else(|| anyhow!("{} does not match kind {}", entry.package, entry.kind))?
                 .to_string();
             let release_asset = entry.release_assets.get(target);
             let artifact_ref = release_asset
@@ -862,12 +939,16 @@ fn resolve_catalog_entries(
                 .unwrap_or_else(|| {
                     format!(
                         "{}:{}-{}-{}-{}",
-                        entry.artifact_id, entry.version, entry.api_generation, channel, target
+                        filesystem_safe_package_name(&entry.package),
+                        entry.version,
+                        entry.api_generation,
+                        channel,
+                        target
                     )
                 });
             Ok(ResolvedPlatformRuntime {
                 name,
-                artifact_id: entry.artifact_id.clone(),
+                package: entry.package.clone(),
                 kind: entry.kind,
                 generation: entry.api_generation.clone(),
                 version: entry.version.clone(),
@@ -925,7 +1006,7 @@ fn select_latest_entries<'a>(
             continue;
         }
         selected
-            .entry(entry.artifact_id.clone())
+            .entry(entry.package.clone())
             .and_modify(|existing| {
                 if compare_catalog_entries(entry, existing).is_gt() {
                     *existing = entry;
@@ -942,7 +1023,7 @@ pub(crate) fn resolved_runtime_from_entry(
 ) -> Result<ResolvedPlatformRuntime> {
     let name = entry
         .artifact_name()
-        .ok_or_else(|| anyhow!("{} does not match kind {}", entry.artifact_id, entry.kind))?
+        .ok_or_else(|| anyhow!("{} does not match kind {}", entry.package, entry.kind))?
         .to_string();
     let release_asset = entry.release_assets.get(target);
     let artifact_ref = release_asset
@@ -950,12 +1031,15 @@ pub(crate) fn resolved_runtime_from_entry(
         .unwrap_or_else(|| {
             format!(
                 "{}:{}-{}-{}",
-                entry.artifact_id, entry.version, entry.api_generation, target
+                filesystem_safe_package_name(&entry.package),
+                entry.version,
+                entry.api_generation,
+                target
             )
         });
     Ok(ResolvedPlatformRuntime {
         name,
-        artifact_id: entry.artifact_id.clone(),
+        package: entry.package.clone(),
         kind: entry.kind,
         generation: entry.api_generation.clone(),
         version: entry.version.clone(),
@@ -1000,7 +1084,7 @@ fn ensure_catalog_schema_agreement<'a>(
                 .or_default()
                 .entry(&contract.schema_id)
                 .or_default()
-                .push(&entry.artifact_id);
+                .push(&entry.package);
         }
     }
     for ((family, topic), schema_ids) in schemas {
@@ -1018,9 +1102,9 @@ fn ensure_catalog_schema_agreement<'a>(
     Ok(())
 }
 
-/// Resolve a git component `tag` to a concrete commit SHA.
+/// Resolve a git component ref to a concrete commit SHA.
 ///
-/// A `tag` that is already a full 40-character commit SHA is an explicit pin and
+/// A ref that is already a full 40-character commit SHA is an explicit pin and
 /// is returned as-is with no network access. Any other ref (a tag or branch
 /// name) is resolved live via `git ls-remote`; if the network is unavailable the
 /// failure is reported with an actionable fix.
@@ -1031,7 +1115,7 @@ fn resolve_component_commit(url: &str, git_ref: &str) -> Result<String> {
     resolve_git_ref(url, git_ref).with_context(|| {
         format!(
             "could not resolve git component ref '{git_ref}' from {url} without network access. \
-             Pin the component to an explicit commit SHA in robot.yaml (components.sources.<name>.tag: <40-char sha>), \
+             Pin the component to an explicit commit SHA in robot.yaml (artifacts.pins.<package>.rev: <40-char sha>), \
              or run with network access so `git ls-remote` can resolve the ref."
         )
     })
@@ -1077,18 +1161,16 @@ pub fn host_target_triple() -> String {
 
 fn resolve_user_runtime(
     project_root: &Path,
-    api_version: &str,
     name: &str,
-    runtime: &UserParticipant,
+    service: &UserService,
 ) -> Result<ResolvedUserRuntime> {
-    let runtime_dir = resolve_project_path(project_root, &runtime.path);
+    let runtime_dir = resolve_project_path(project_root, &service.path);
     if !runtime_dir.is_dir() {
         bail!(
             "user service '{name}' source dir {} does not exist; user services must have an on-disk source directory to hash/build",
             runtime_dir.display()
         );
     }
-    let framework = resolve_user_runtime_framework(name, &runtime.framework, api_version)?;
     let source_hash = hash_tree(&runtime_dir).with_context(|| {
         format!(
             "failed to hash user service '{name}' source tree at {}",
@@ -1097,85 +1179,184 @@ fn resolve_user_runtime(
     })?;
     Ok(ResolvedUserRuntime {
         name: name.to_string(),
-        path: runtime.path.clone(),
-        framework,
+        path: service.path.clone(),
         source_hash,
     })
 }
 
-pub(crate) fn resolve_user_runtime_framework(
-    runtime_name: &str,
-    selector: &str,
-    api_version: &str,
-) -> Result<String> {
-    validate_user_runtime_framework_selector(runtime_name, selector, api_version)?;
-    if selector == "match-platform" {
-        return Ok(api_version.to_string());
-    }
-    Ok(selector.to_string())
-}
-
-pub(crate) fn validate_user_runtime_framework_selector(
-    runtime_name: &str,
-    selector: &str,
-    target_generation: &str,
-) -> Result<()> {
-    if selector == "match-platform" || selector == target_generation {
-        return Ok(());
-    }
-    bail!(
-        "user service '{runtime_name}': framework '{selector}' must be \"match-platform\" or the target generation '{target_generation}'"
-    )
+/// Resolve every `robot.components.<instance>` entry: `component: <id>`
+/// always resolves `phoxal/component-<id>-assets`, and resolves
+/// `phoxal/component-<id>-driver` only when the instance declares a `driver`
+/// block. A driverless instance is valid and stages no driver package. An
+/// instance that declares `driver` but has no matching driver package in the
+/// resolved graph is a hard [`ComponentDriverUnavailable`] error.
+///
+/// Forks may replace either package slot via `artifacts.pins`; a pin with a
+/// `Git`/`Path` form resolves that package from the fork instead of the
+/// catalog. `resolve_source_commits` gates live `git ls-remote` the same way
+/// it always has: `pull`/`outdated` leave it off to stay fully offline.
+/// Shared resolution context for [`resolve_component_package`]: the pieces
+/// every component package slot (assets or driver) needs, bundled so the
+/// per-slot resolver stays under clippy's argument-count lint.
+struct ComponentResolveContext<'a> {
+    robot: &'a Robot,
+    catalog: Option<&'a CatalogRevision>,
+    channel: CatalogChannel,
+    target: &'a str,
+    target_generation: &'a str,
+    resolve_source_commits: bool,
+    resolve_component_asset_commits: bool,
 }
 
 fn resolve_components(
     robot: &Robot,
+    catalog: Option<&CatalogRevision>,
+    channel: CatalogChannel,
+    target: &str,
+    target_generation: &str,
     resolve_source_commits: bool,
+    resolve_component_asset_commits: bool,
 ) -> Result<Vec<ResolvedComponent>> {
+    let context = ComponentResolveContext {
+        robot,
+        catalog,
+        channel,
+        target,
+        target_generation,
+        resolve_source_commits,
+        resolve_component_asset_commits,
+    };
     let mut components = Vec::new();
-    for (instance_name, instance) in &robot.components.instances {
-        let source = robot
-            .components
-            .sources
-            .get(&instance.component)
-            .ok_or_else(|| {
-                anyhow!(
-                    "components.instances.{}.component references missing source '{}'",
-                    instance_name,
-                    instance.component
-                )
-            })?;
-        let source = match source {
-            ComponentSource::Git(source) => {
-                // Resolve the commit live. A `tag` that is already a full commit
-                // SHA needs no network; a tag/branch ref is resolved via
-                // `git ls-remote`. Flows that never read commits leave
-                // `resolve_source_commits` off and skip this entirely.
-                let commit = if resolve_source_commits {
-                    resolve_component_commit(&source.git, &source.tag)?
-                } else {
-                    String::new()
-                };
-                ResolvedComponentSource::Git {
-                    git: source.git.clone(),
-                    tag: source.tag.clone(),
-                    commit,
-                    directory: source.directory.clone(),
+    for (instance_name, instance) in &robot.robot.components {
+        let component_id = &instance.component;
+        let assets_package = format!("{PHOXAL_PROVIDER}/component-{component_id}-assets");
+        let driver_package = format!("{PHOXAL_PROVIDER}/component-{component_id}-driver");
+
+        let assets = resolve_component_package(
+            &context,
+            &assets_package,
+            ArtifactKind::ComponentAssets,
+            context.resolve_component_asset_commits,
+        )
+        .with_context(|| {
+            format!(
+                "robot.components.{instance_name}.component '{component_id}' failed to resolve its component_assets package"
+            )
+        })?;
+
+        let has_driver = instance.driver.is_some();
+        let driver = if has_driver {
+            match resolve_component_package(
+                &context,
+                &driver_package,
+                ArtifactKind::ComponentDriver,
+                context.resolve_source_commits,
+            ) {
+                Ok(driver) => Some(driver),
+                Err(_) => {
+                    return Err(ComponentDriverUnavailable {
+                        instance: instance_name.clone(),
+                        component: component_id.clone(),
+                    }
+                    .into());
                 }
             }
-            ComponentSource::Path(source) => ResolvedComponentSource::Path {
-                path: source.path.clone(),
-            },
+        } else {
+            None
         };
+
         components.push(ResolvedComponent {
             instance: instance_name.clone(),
-            source_name: instance.component.clone(),
-            source,
-            has_driver: instance.driver.is_some(),
-            driver_path_override: None,
+            source_name: component_id.clone(),
+            assets,
+            driver,
+            has_driver,
         });
     }
     Ok(components)
+}
+
+/// Resolve one component package slot (`component_assets` or
+/// `component_driver`) for `package`: an `artifacts.pins` entry takes
+/// precedence (`Git`/`Path`/version/sha256 pin form), otherwise it resolves
+/// from the catalog.
+fn resolve_component_package(
+    context: &ComponentResolveContext<'_>,
+    package: &str,
+    kind: ArtifactKind,
+    resolve_git_ref: bool,
+) -> Result<ResolvedComponentPackage> {
+    if let Some(pin) = context.robot.artifacts.pins.get(package) {
+        return resolve_pinned_component_package(package, kind, pin, resolve_git_ref);
+    }
+
+    let Some(catalog) = context.catalog else {
+        bail!("no artifact catalog revision is available to resolve {package}");
+    };
+    let target_scope = if kind == ArtifactKind::ComponentAssets {
+        crate::catalog::TARGET_INDEPENDENT_SCOPE
+    } else {
+        context.target
+    };
+    catalog
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == kind && entry.package == package)
+        .filter(|entry| entry.channels.contains_key(&context.channel))
+        .filter(|entry| {
+            entry
+                .target_triples
+                .iter()
+                .any(|triple| triple == target_scope)
+        })
+        .filter(|entry| {
+            compare_generations(&entry.api_generation, context.target_generation).is_le()
+        })
+        .max_by(|left, right| compare_catalog_entries(left, right))
+        .ok_or_else(|| anyhow!("{package} is not available in the artifact catalog"))?;
+
+    Ok(ResolvedComponentPackage {
+        package: package.to_string(),
+        kind,
+        source: ResolvedComponentSource::Catalog,
+        path_override: None,
+    })
+}
+
+fn resolve_pinned_component_package(
+    package: &str,
+    kind: ArtifactKind,
+    pin: &ArtifactPin,
+    resolve_git_ref: bool,
+) -> Result<ResolvedComponentPackage> {
+    let source = match pin {
+        ArtifactPin::Path(pin) => ResolvedComponentSource::Path {
+            path: pin.path.clone(),
+        },
+        ArtifactPin::Git(pin) => {
+            // Resolve the commit live. A `rev` that is already a full commit
+            // SHA needs no network; a tag/branch ref is resolved via
+            // `git ls-remote`. Flows that never read this package's local
+            // files leave `resolve_git_ref` off and skip this entirely.
+            let commit = if resolve_git_ref {
+                resolve_component_commit(&pin.git, &pin.rev)?
+            } else {
+                String::new()
+            };
+            ResolvedComponentSource::Git {
+                git: pin.git.clone(),
+                rev: commit,
+                directory: pin.directory.clone(),
+            }
+        }
+        ArtifactPin::Sha256(_) | ArtifactPin::Version(_) => ResolvedComponentSource::Catalog,
+    };
+    Ok(ResolvedComponentPackage {
+        package: package.to_string(),
+        kind,
+        source,
+        path_override: None,
+    })
 }
 
 fn resolve_tools(
@@ -1186,22 +1367,15 @@ fn resolve_tools(
     target_generation: &str,
 ) -> Result<Vec<ResolvedTool>> {
     let Some(catalog) = catalog else {
-        if let Some(name) = robot.tools.keys().next() {
-            bail!("unknown native tool '{name}'");
-        }
         return Ok(Vec::new());
     };
+    let _ = robot;
 
     let tool_entries = catalog
         .entries
         .iter()
         .filter(|entry| entry.kind == ArtifactKind::Tool)
         .collect::<Vec<_>>();
-    for name in robot.tools.keys() {
-        if !tool_entries.iter().any(|entry| entry.artifact_id == *name) {
-            bail!("unknown native tool '{name}'");
-        }
-    }
 
     let mut selected = BTreeMap::<String, &CatalogEntry>::new();
     for entry in tool_entries {
@@ -1211,30 +1385,17 @@ fn resolve_tools(
         if compare_generations(&entry.api_generation, target_generation).is_gt() {
             continue;
         }
-        if let Some(pin) = robot.tools.get(&entry.artifact_id) {
-            if entry.version != pin.version {
-                continue;
-            }
-        } else if !entry.channels.contains_key(&channel) {
+        if !entry.channels.contains_key(&channel) {
             continue;
         }
         selected
-            .entry(entry.artifact_id.clone())
+            .entry(entry.package.clone())
             .and_modify(|existing| {
                 if compare_catalog_entries(entry, existing).is_gt() {
                     *existing = entry;
                 }
             })
             .or_insert(entry);
-    }
-
-    for (name, pin) in &robot.tools {
-        if !selected.contains_key(name) {
-            bail!(
-                "native tool '{name}' version {} is not available in the artifact catalog for target {target}",
-                pin.version
-            );
-        }
     }
 
     selected
@@ -1246,20 +1407,18 @@ fn resolve_tools(
                 .unwrap_or_else(|| {
                     format!(
                         "{}:{}-{}-{}",
-                        entry.artifact_id, entry.version, entry.api_generation, target
+                        entry.package, entry.version, entry.api_generation, target
                     )
                 });
+            let artifact_name = entry.artifact_name().unwrap_or("");
             Ok(ResolvedTool {
-                name: entry.artifact_id.clone(),
-                requested: robot
-                    .tools
-                    .get(&entry.artifact_id)
-                    .map(|tool| tool.version.clone())
-                    .unwrap_or_else(|| entry.version.clone()),
+                name: format!("tool-{artifact_name}"),
+                package: entry.package.clone(),
+                requested: entry.version.clone(),
                 resolved: entry.version.clone(),
                 repo: "phoxal/framework".to_string(),
                 asset,
-                binary_name: official_binary_name(entry.kind, entry.artifact_name().unwrap_or("")),
+                binary_name: official_binary_name(entry.kind, artifact_name),
                 sha256: release_asset
                     .map(|asset| asset.sha256.clone())
                     .unwrap_or_else(|| "0".repeat(64)),
@@ -1271,11 +1430,34 @@ fn resolve_tools(
 }
 
 pub(crate) fn tool_emit_apis_id(tool_name: &str) -> &str {
-    tool_name.strip_prefix("tool-").unwrap_or(tool_name)
+    tool_name
+        .strip_prefix(&format!("{PHOXAL_PROVIDER}/tool-"))
+        .or_else(|| tool_name.strip_prefix("tool-"))
+        .unwrap_or(tool_name)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::tool_emit_apis_id;
+
+    #[test]
+    fn tool_emit_apis_id_strips_provider_and_site_tool_prefixes() {
+        assert_eq!(tool_emit_apis_id("phoxal/tool-router"), "router");
+        assert_eq!(tool_emit_apis_id("tool-router"), "router");
+        assert_eq!(tool_emit_apis_id("router"), "router");
+    }
 }
 
 pub(crate) fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
     format!("phoxal-{kind}-{name}")
+}
+
+/// The filesystem/tag-safe projection of a provider-qualified package id
+/// (`phoxal/service-drive` -> `phoxal-service-drive`), used for the synthetic
+/// `artifact_ref` fallback when a catalog entry has no real release asset yet
+/// (docs #21's release-tag/asset projection).
+fn filesystem_safe_package_name(package: &str) -> String {
+    package.replace('/', "-")
 }
 
 fn join_errors(errors: Vec<phoxal::model::robot::ValidationError>) -> String {
@@ -1291,33 +1473,42 @@ mod tests {
     use super::*;
     use crate::catalog::{
         ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
-        fixture_contract_for_tests, fixture_service_entry_for_tests,
+        fixture_component_assets_entry_for_tests, fixture_contract_for_tests,
+        fixture_service_entry_for_tests,
     };
 
     fn test_catalog() -> CatalogRevision {
-        fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
-            "drive",
-            "y2026_1",
-            "0.1.0",
-            CatalogChannel::Stable,
-            &host_target_triple(),
-            ArtifactStatus::Pending,
-            vec![fixture_contract_for_tests(
-                "drive::Target",
-                "drive/target",
-                "publish",
-                "0123456789abcdef",
-            )],
-        )])
+        fixture_catalog_for_tests(vec![
+            fixture_service_entry_for_tests(
+                "drive",
+                "y2026_1",
+                "0.1.0",
+                CatalogChannel::Stable,
+                &host_target_triple(),
+                ArtifactStatus::Pending,
+                vec![fixture_contract_for_tests(
+                    "drive::Target",
+                    "drive/target",
+                    "publish",
+                    "0123456789abcdef",
+                )],
+            ),
+            fixture_component_assets_entry_for_tests(
+                "ddsm115",
+                "y2026_1",
+                "0.1.0",
+                CatalogChannel::Stable,
+            ),
+        ])
     }
 
     #[test]
     fn resolve_without_source_commits_leaves_git_component_commits_empty() -> anyhow::Result<()> {
         // Flows that never read component commits (`pull`, `outdated`) resolve
         // with `resolve_source_commits: false` and must NOT run `git ls-remote`.
-        // A git component is resolved with an empty commit; if resolution tried
-        // to reach the network it would either hang or fail, so an empty commit
-        // proves no ls-remote was attempted.
+        // A git component pin is resolved with an empty commit; if resolution
+        // tried to reach the network it would either hang or fail, so an empty
+        // commit proves no ls-remote was attempted.
         let robot = Robot::parse_from_string(GIT_COMPONENT_ROBOT)?;
         let catalog = test_catalog();
         let resolved = resolve(
@@ -1326,6 +1517,7 @@ mod tests {
             Some(&catalog),
             ResolveOptions {
                 resolve_source_commits: false,
+                resolve_component_asset_commits: false,
                 ..ResolveOptions::default()
             },
         )?;
@@ -1335,12 +1527,11 @@ mod tests {
             .iter()
             .find(|component| component.source_name == "ddsm115")
             .expect("ddsm115 component resolved");
-        match &git_component.source {
-            ResolvedComponentSource::Git { commit, tag, .. } => {
-                assert_eq!(tag, "main");
+        match &git_component.assets.source {
+            ResolvedComponentSource::Git { rev, .. } => {
                 assert!(
-                    commit.is_empty(),
-                    "offline resolve must leave the git commit empty (no ls-remote), got {commit:?}"
+                    rev.is_empty(),
+                    "offline resolve must leave the git commit empty (no ls-remote), got {rev:?}"
                 );
             }
             other => panic!("expected a git component source, got {other:?}"),
@@ -1349,15 +1540,9 @@ mod tests {
     }
 
     const GIT_COMPONENT_ROBOT: &str = r#"schema: v0
-api_version: y2026_1
-identity:
+robot:
   id: testbot
   namespace: test
-structure: structure.urdf
-phoxal_artifacts:
-  channel: stable
-phoxal_participants: {}
-motion:
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -1366,29 +1551,30 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
-components:
-  sources:
-    ddsm115:
-      git: https://github.com/phoxal/framework
-      tag: main
-      directory: component/ddsm115
-  instances:
+  components:
     left_drive:
       component: ddsm115
       mount_link: left_wheel_mount
     right_drive:
       component: ddsm115
       mount_link: right_wheel_mount
+artifacts:
+  channel: stable
+  pins:
+    phoxal/component-ddsm115-assets:
+      git: https://github.com/phoxal/framework
+      rev: main
+      directory: component/ddsm115
 "#;
 
     #[test]
     fn explicit_commit_sha_tag_resolves_without_network() -> anyhow::Result<()> {
-        // A `tag` that is already a full commit SHA is an explicit pin: it must
+        // A `rev` that is already a full commit SHA is an explicit pin: it must
         // resolve with no network (no `git ls-remote`), so a live-resolution
         // flow works offline when components are pinned to a SHA.
         let sha = "0123456789abcdef0123456789abcdef01234567";
         let robot = Robot::parse_from_string(
-            &GIT_COMPONENT_ROBOT.replace("tag: main", &format!("tag: {sha}")),
+            &GIT_COMPONENT_ROBOT.replace("rev: main", &format!("rev: {sha}")),
         )?;
         let catalog = test_catalog();
         let resolved = resolve(
@@ -1397,6 +1583,7 @@ components:
             Some(&catalog),
             ResolveOptions {
                 resolve_source_commits: true,
+                resolve_component_asset_commits: true,
                 ..ResolveOptions::default()
             },
         )?;
@@ -1406,10 +1593,9 @@ components:
             .iter()
             .find(|component| component.source_name == "ddsm115")
             .expect("ddsm115 component resolved");
-        match &git_component.source {
-            ResolvedComponentSource::Git { commit, tag, .. } => {
-                assert_eq!(tag, sha);
-                assert_eq!(commit, sha);
+        match &git_component.assets.source {
+            ResolvedComponentSource::Git { rev, .. } => {
+                assert_eq!(rev, sha);
             }
             other => panic!("expected a git component source, got {other:?}"),
         }
@@ -1433,8 +1619,8 @@ components:
     }
 
     #[test]
-    fn load_robot_tolerates_user_runtime_config() -> anyhow::Result<()> {
-        // The CLI threads `user_participants.<name>.config` through
+    fn load_robot_tolerates_user_service_config() -> anyhow::Result<()> {
+        // The CLI threads `services.<name>.config` through
         // `RobotManifestExtras` as a side channel; `load_robot` must strip it
         // so every command accepts a manifest that declares typed config.
         let temp = tempfile::tempdir()?;
@@ -1442,20 +1628,9 @@ components:
         std::fs::write(
             &path,
             r#"schema: v0
-api_version: y2026_1
-identity:
+robot:
   id: bot
   namespace: dev
-structure: structure.urdf
-phoxal_artifacts:
-  channel: stable
-phoxal_participants: {}
-user_participants:
-  brain:
-    path: runtimes/brain
-    config:
-      gain: 0.5
-motion:
   kinematic:
     kind: differential
     left_actuators: [l.motor]
@@ -1464,19 +1639,21 @@ motion:
     right_encoders: [r.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
-components:
-  sources: {}
-  instances: {}
+services:
+  brain:
+    path: runtimes/brain
+    config:
+      gain: 0.5
 "#,
         )?;
 
         // Plain load_robot must parse it despite the config key the typed model
         // does not know about.
         let robot = load_robot(&path)?;
-        assert!(robot.user_participants.contains_key("brain"));
+        assert!(robot.services.contains_key("brain"));
 
         let loaded = load_robot_with_extras(&path)?;
-        assert!(loaded.robot.user_participants.contains_key("brain"));
+        assert!(loaded.robot.services.contains_key("brain"));
         assert_eq!(
             loaded.extras.user_runtime_config("brain"),
             Some(&serde_json::json!({ "gain": 0.5 }))
@@ -1492,11 +1669,17 @@ components:
         std::fs::write(
             &path,
             r#"schema: v0
-api_version: y2026_1
-identity:
+robot:
   id: bot
   namespace: dev
-structure: structure.urdf
+  kinematic:
+    kind: differential
+    left_actuators: [l.motor]
+    right_actuators: [r.motor]
+    left_encoders: [l.encoder]
+    right_encoders: [r.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
 bus:
   listen:
     - tcp/127.0.0.1:7448
@@ -1510,21 +1693,6 @@ bus:
     retry:
       initial_ms: 2000
       max_ms: 10000
-phoxal_artifacts:
-  channel: stable
-phoxal_participants: {}
-motion:
-  kinematic:
-    kind: differential
-    left_actuators: [l.motor]
-    right_actuators: [r.motor]
-    left_encoders: [l.encoder]
-    right_encoders: [r.encoder]
-    wheel_radius_m: 0.1
-    wheel_base_m: 0.5
-components:
-  sources: {}
-  instances: {}
 "#,
         )?;
 
@@ -1554,20 +1722,9 @@ components:
         std::fs::write(
             &path,
             r#"schema: v0
-api_version: y2026_1
-identity:
+robot:
   id: bot
   namespace: dev
-structure: structure.urdf
-phoxal_artifacts:
-  channel: stable
-phoxal_participants: {}
-user_participants:
-  mission-service:
-    path: runtimes/mission
-  left_drive:
-    path: runtimes/left_drive
-motion:
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -1576,14 +1733,15 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
-components:
-  sources:
-    ddsm115:
-      path: components/ddsm115
-  instances:
+  components:
     left_drive:
       component: ddsm115
       mount_link: left
+services:
+  mission-service:
+    path: runtimes/mission
+  left_drive:
+    path: runtimes/left_drive
 "#,
         )?;
 
@@ -1598,7 +1756,7 @@ components:
     fn platform_runtime_exposes_native_artifact_ref() {
         let runtime = ResolvedPlatformRuntime {
             name: "asset".to_string(),
-            artifact_id: "service-asset".to_string(),
+            package: "phoxal/service-asset".to_string(),
             kind: ArtifactKind::Service,
             generation: "y2026_1".to_string(),
             version: "0.1.0".to_string(),

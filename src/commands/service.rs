@@ -100,7 +100,7 @@ pub fn service_catalog_summary(
             .iter()
             .filter(|entry| entry.kind == crate::catalog::ArtifactKind::Service)
             .map(|entry| ServiceCatalogEntry {
-                id: entry.artifact_id.clone(),
+                id: entry.package.clone(),
                 api_generations: vec![entry.api_generation.clone()],
                 participant_kind: "service",
             })
@@ -129,7 +129,7 @@ mod tests {
 
         assert_eq!(summary.entries.len(), 1);
         let entry = &summary.entries[0];
-        assert_eq!(entry.id, "service-drive");
+        assert_eq!(entry.id, "phoxal/service-drive");
         assert_eq!(entry.api_generations, vec!["y2026_1".to_string()]);
         assert_eq!(entry.participant_kind, "service");
 
@@ -138,19 +138,9 @@ mod tests {
 
     fn minimal_robot_yaml() -> &'static str {
         r#"schema: v0
-api_version: y2026_1
-
-identity:
+robot:
   id: testbot
   namespace: test
-
-structure: structure.urdf
-
-phoxal_artifacts:
-  channel: stable
-phoxal_participants: {}
-
-motion:
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]
@@ -159,10 +149,9 @@ motion:
     right_encoders: [right_drive.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
-
-components:
-  sources: {}
-  instances: {}
+  components: {}
+artifacts:
+  channel: stable
 "#
     }
 
