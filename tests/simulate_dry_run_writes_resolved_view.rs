@@ -26,21 +26,24 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
     assert!(!temp.path().join(".phoxal/webots").exists());
     assert!(!temp.path().join(".phoxal/cache/state.yaml").exists());
     assert!(!temp.path().join("phoxal.sources.lock").exists());
-    assert_eq!(
-        plan.bus_connect,
-        phoxal_cli::launch_plan::DEFAULT_ROUTER_CONNECT
-    );
-    assert_eq!(plan.world_path, temp.path().join("worlds/test.wbt"));
+    // `LaunchMode::Webots` carries the resolved world path directly now
+    // (there is no separate `world_path` field to check against).
+    match &plan.plan.mode {
+        phoxal_cli::launch_plan::LaunchMode::Webots { world } => {
+            assert_eq!(*world, temp.path().join("worlds/test.wbt"));
+        }
+        other => panic!("expected LaunchMode::Webots, got {other:?}"),
+    }
     // `tool-joypad` is peripheral teleop and no longer launches by default
-    // for `simulate` (opt in via `--joypad`); see `commands::simulate::native_tool_labels`.
-    assert_eq!(
-        plan.native_tools,
-        vec![
-            phoxal_cli::launch_plan::SITE_TOOL_ROUTER.to_string(),
-            "webots".to_string(),
-        ]
-    );
-    assert!(plan.resolved.platform_runtimes.is_empty());
+    // for `simulate` (opt in via `--joypad`); see `commands::simulate::prepare_with_mode`.
+    let site_ids = plan
+        .plan
+        .site
+        .iter()
+        .map(|site| site.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(site_ids, vec![phoxal_cli::launch_plan::SITE_TOOL_ROUTER]);
+    assert!(plan.ctx.resolved.platform_runtimes.is_empty());
 
     Ok(())
 }
