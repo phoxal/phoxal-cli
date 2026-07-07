@@ -46,6 +46,7 @@ pub mod supervisor;
 pub mod ui;
 pub mod utils;
 pub mod watch;
+pub mod webots_stage_root;
 pub mod webots_staging;
 pub mod world;
 

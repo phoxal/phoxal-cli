@@ -218,45 +218,11 @@ impl Project {
         self.dev_robot_dir(robot_hostname).join("logs")
     }
 
-    pub fn staged_webots_root(&self) -> PathBuf {
-        self.workspace_root
-            .join("dist")
-            .join("simulator")
-            .join("webots")
-    }
-
-    pub fn staged_webots_protos_dir(&self) -> PathBuf {
-        self.staged_webots_root().join("protos")
-    }
-
-    pub fn staged_webots_meshes_dir(&self) -> PathBuf {
-        self.staged_webots_root().join(MESHES_DIR)
-    }
-
-    pub fn staged_webots_worlds_dir(&self) -> PathBuf {
-        self.staged_webots_root().join("worlds")
-    }
-
-    pub fn staged_webots_world(&self, world_name: &str) -> PathBuf {
-        self.staged_webots_worlds_dir()
-            .join(format!("{world_name}.wbt"))
-    }
-
-    pub fn staged_webots_controller_dir(&self, controller_name: &str) -> PathBuf {
-        self.staged_webots_root()
-            .join("controllers")
-            .join(controller_name)
-    }
-
-    pub fn staged_webots_supervisor_binary(&self) -> PathBuf {
-        self.staged_webots_controller_dir("phoxal-simulator-webots-supervisor")
-            .join("phoxal-simulator-webots-supervisor")
-    }
-
-    pub fn staged_webots_controller_binary(&self) -> PathBuf {
-        self.staged_webots_controller_dir("phoxal-simulator-webots-controller")
-            .join("phoxal-simulator-webots-controller")
-    }
+    // The Webots simulation staging tree used to live here
+    // (`dist/simulator/webots/...`, project-scoped). It moved to a single,
+    // home-based, per-play scratch area under `~/.phoxal/run/simulation/webots`
+    // - see `webots_stage_root` - since it is synthesized fresh every play and
+    // was never meant to be a durable, project-scoped artifact.
 }
 
 fn normalize_existing_path(path: &Path) -> Result<PathBuf> {

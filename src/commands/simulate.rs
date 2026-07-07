@@ -33,6 +33,7 @@ use crate::supervisor::{
     local_router_reachable, router_ownership, start_bus_log_subscriber, supervise_until_shutdown,
     supervisor_actions_path, supervisor_state_path,
 };
+use crate::webots_stage_root;
 use crate::world;
 
 /// The world-scoped participant id for the Webots supervisor artifact
@@ -312,12 +313,19 @@ fn prepare_with_mode(
         )
         .context("failed to stage component assets into the simulation robot root")?;
     }
-    let launch_plan = build_checked_sim_launch_plan(
+    let mut launch_plan = build_checked_sim_launch_plan(
         &resolved.project_root,
         &resolved.resolved,
         &resolved.manifest_extras,
         resolved.catalog.as_ref(),
     )?;
+    if !options.joypad {
+        // See `native_tool_labels`: joypad is opt-in for simulate now, so
+        // drop it from the actual launch plan too (not just the dry-run
+        // display list) - otherwise live simulate would still try to launch
+        // it and hit the config-deserialization failure this change avoids.
+        launch_plan.site.retain(|site| site.id != SITE_TOOL_JOYPAD);
+    }
     let source_participants = sim_source_participants(
         &resolved.project_root,
         &resolved.resolved,
@@ -678,6 +686,12 @@ fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Resul
             }
             println!("world: {}", plan.world_path.display());
             println!("router: {}", plan.bus_connect);
+            // Out of the project tree now (`~/.phoxal/run/simulation/webots`,
+            // see `webots_stage_root`), so print it explicitly for discoverability
+            // even though nothing is written in dry-run mode.
+            if let Ok(root) = webots_stage_root::root() {
+                println!("staged simulation to {}", root.display());
+            }
             println!("site tools:");
             for tool in &plan.native_tools {
                 println!("  - {tool}");
@@ -720,8 +734,7 @@ fn build_dry_run_output(plan: &SimulatePlan) -> SimulateDryRunOutput {
     let substitutions = substitution_lines(&plan.launch_plan);
     let simulator_artifacts = simulator_artifact_lines(&plan.resolved);
     let simulation_managed = simulation_managed_lines(&plan.launch_plan);
-    let intended_staged_world_path =
-        intended_staged_world_path(&plan.project_root, &plan.world_path);
+    let intended_staged_world_path = intended_staged_world_path(&plan.world_path);
     SimulateDryRunOutput {
         mode: "dry-run",
         target_generation: plan.resolved.target_generation.clone(),
@@ -767,15 +780,14 @@ struct WebotsAppSummary {
 
 /// The staged world path `simulate --dry-run` would produce, without actually
 /// staging (Part 6: dry-run reports the intended path but never launches
-/// Webots or writes staged files).
-fn intended_staged_world_path(project_root: &Path, world_path: &Path) -> PathBuf {
+/// Webots or writes staged files). Home-based (`webots_stage_root`), not
+/// project-relative - see the module doc for why.
+fn intended_staged_world_path(world_path: &Path) -> PathBuf {
     let world_name = world_path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("default");
-    crate::project::Project::new(project_root)
-        .map(|project| project.staged_webots_world(world_name))
-        .unwrap_or_else(|_| world_path.to_path_buf())
+    webots_stage_root::world_path(world_name).unwrap_or_else(|_| world_path.to_path_buf())
 }
 
 /// One line per resolved simulator artifact (supervisor + controller), naming
@@ -870,9 +882,23 @@ fn substitution_topic_summary(substitution: &SubstitutionRecord) -> String {
         .join(", ")
 }
 
+/// `tool-joypad` is peripheral teleop, not part of the sim contract graph, so
+/// it no longer launches by default: the framework `tool-joypad` deserializes
+/// its `PHOXAL_CONFIG` as a unit `()`, but this crate's shared site-tool
+/// launch path (`launch_plan::build_site_launches` / `commands::run::site_env`)
+/// unconditionally sends `PHOXAL_CONFIG={}` for every non-router site tool -
+/// which fails a genuinely config-less tool's deserialization with `invalid
+/// type: map, expected unit`, exactly the live-gate failure this fixes.
+/// Making that encoding conditional is the more "correct" fix, but it is
+/// shared with `run`/`deploy` (out of this fix's scope, and a behavior change
+/// neither asked for); simulate instead just stops auto-launching joypad,
+/// gated behind the pre-existing (till now unused) `--joypad`/`options.joypad`
+/// flag - see the matching filter in `prepare_with_mode`.
 fn native_tool_labels(options: SimulateOptions) -> Vec<String> {
-    let _ = options;
-    let mut labels = vec![SITE_TOOL_ROUTER.to_string(), SITE_TOOL_JOYPAD.to_string()];
+    let mut labels = vec![SITE_TOOL_ROUTER.to_string()];
+    if options.joypad {
+        labels.push(SITE_TOOL_JOYPAD.to_string());
+    }
     labels.push("webots".to_string());
     labels
 }
@@ -895,10 +921,17 @@ fn stage_and_prepare_webots_spec(app: &AppContext, plan: &SimulatePlan) -> Resul
         &plan.resolved,
         &plan.launch_plan,
     )?;
-    stage_simulator_controller_binaries(&plan.project_root, &plan.resolved, &app.ui)?;
+    stage_simulator_controller_binaries(&plan.resolved, &app.ui)?;
     let webots_path = crate::host_doctor::webots_executable_path()
         .map_err(|error| anyhow!("{error}"))
         .context("failed to locate the Webots executable for live simulate")?;
+    // The staged root now lives under `~/.phoxal/run/...` rather than the
+    // project tree, so print it explicitly - it is no longer discoverable by
+    // just looking under the project.
+    app.ui.info(format!(
+        "staged simulation to {}",
+        webots_stage_root::root()?.display()
+    ));
     app.ui.info(format!(
         "staged simulation world at {}",
         staged.staged_world_path.display()
@@ -917,35 +950,37 @@ fn stage_and_prepare_webots_spec(app: &AppContext, plan: &SimulatePlan) -> Resul
 
 /// Stage the two Webots controller BINARIES (supervisor + per-robot
 /// controller) into the standard Webots layout,
-/// `dist/simulator/webots/controllers/<controller-name>/<controller-name>`
-/// (`project.rs` names these paths; nothing populated them before this fix).
-/// Webots looks up a world node's `controller "<name>"` field under exactly
-/// this `controllers/<name>/<name>` path; when the executable is missing it
-/// silently falls back to its own built-in `generic` controller instead of
-/// running ours, so this staging step is load-bearing for live simulate, not
-/// cosmetic.
+/// `~/.phoxal/run/simulation/webots/controllers/<controller-name>/<controller-name>`
+/// (`webots_stage_root` names these paths). Webots looks up a world node's
+/// `controller "<name>"` field under exactly this `controllers/<name>/<name>`
+/// path; when the executable is missing it silently falls back to its own
+/// built-in `generic` controller instead of running ours, so this staging
+/// step is load-bearing for live simulate, not cosmetic.
+///
+/// The staged entry is a SYMLINK to the resolved binary, not a copy - the
+/// cache (or the path-pinned dev build's `target/` directory) stays the
+/// single source of truth. Webots execs `controllers/<name>/<name>` directly
+/// and gets its runtime lib env from its own launch, so the physical location
+/// the symlink resolves to does not matter.
 ///
 /// For a PATH-OVERRIDDEN simulator (`runtime.source_path()` is `Some`, the
 /// local-dev / live-gate case), the binary is built fresh with
 /// `crate::commands::run::build_source_binary`, which runs `cargo build --bin
 /// <name>` in the simulator crate and returns the built path - the same
 /// mechanism every other path-overridden participant (services, tools,
-/// drivers) already uses via `run.rs`.
+/// drivers) already uses via `run.rs`. Cargo's own `target_directory` is
+/// always absolute, so this is already a legal symlink target.
 ///
 /// For a CATALOG simulator (no path override), the binary is obtained the
 /// same way every other official/native artifact is provisioned: resolve a
 /// `NativeArtifactDescriptor` from the runtime and look it up in the artifact
 /// cache via `native_artifacts::artifact_binary_path` - mirroring
-/// `commands::run::locate_official_binary`. If that cache entry is missing,
-/// this is a hard error (`NativePending`-style), not a silent skip: a missing
-/// controller binary must never be allowed to fall through to Webots'
-/// `generic` controller unnoticed.
-fn stage_simulator_controller_binaries(
-    project_root: &Path,
-    resolved: &ResolvedRobot,
-    ui: &crate::Ui,
-) -> Result<()> {
-    let project = crate::project::Project::new(project_root)?;
+/// `commands::run::locate_official_binary`. The cache lives under the
+/// (already absolute) `host_paths::cache_dir()`. If the cache entry is
+/// missing, this is a hard error (`NativePending`-style), not a silent skip:
+/// a missing controller binary must never be allowed to fall through to
+/// Webots' `generic` controller unnoticed.
+fn stage_simulator_controller_binaries(resolved: &ResolvedRobot, ui: &crate::Ui) -> Result<()> {
     let webots_home = detected_webots_home_for_build_env();
     for runtime in &resolved.simulators {
         let controller_name = webots_controller_name_for_simulator_artifact(&runtime.name)
@@ -957,7 +992,7 @@ fn stage_simulator_controller_binaries(
                     SIMULATOR_CONTROLLER_ARTIFACT_NAME
                 )
             })?;
-        let built_binary = if let Some(crate_dir) = runtime.source_path() {
+        let resolved_binary = if let Some(crate_dir) = runtime.source_path() {
             let preferred_name = format!("phoxal-simulator-{}", runtime.name);
             let _env_guard = webots_home
                 .as_ref()
@@ -974,7 +1009,8 @@ fn stage_simulator_controller_binaries(
         } else {
             provisioned_official_simulator_binary(runtime)?
         };
-        let staged_dir = project.staged_webots_controller_dir(controller_name);
+        require_absolute_symlink_target("resolved simulator binary", &resolved_binary)?;
+        let staged_dir = webots_stage_root::controller_dir(controller_name)?;
         std::fs::create_dir_all(&staged_dir).with_context(|| {
             format!(
                 "failed to create staged controller directory {}",
@@ -982,26 +1018,38 @@ fn stage_simulator_controller_binaries(
             )
         })?;
         let staged_binary = staged_dir.join(controller_name);
-        std::fs::copy(&built_binary, &staged_binary).with_context(|| {
+        std::os::unix::fs::symlink(&resolved_binary, &staged_binary).with_context(|| {
             format!(
-                "failed to copy simulator binary {} to staged controller path {}",
-                built_binary.display(),
-                staged_binary.display()
-            )
-        })?;
-        crate::utils::make_executable(&staged_binary).with_context(|| {
-            format!(
-                "failed to mark staged controller binary executable: {}",
+                "failed to symlink simulator binary {} to staged controller path {}",
+                resolved_binary.display(),
                 staged_binary.display()
             )
         })?;
         ui.info(format!(
-            "staged simulator controller binary {} at {}",
+            "staged simulator controller binary {} at {} (symlink to {})",
             runtime.name,
-            staged_binary.display()
+            staged_binary.display(),
+            resolved_binary.display()
         ));
     }
     Ok(())
+}
+
+/// Symlink targets into the staged simulation must be absolute (Webots' cwd
+/// when it execs `controllers/<name>/<name>` is not the staged tree, so a
+/// relative symlink would not resolve). Both sources this crate ever
+/// symlinks from - the native-artifact cache and a path-pinned crate's cargo
+/// `target_directory` - are already absolute by construction; this asserts
+/// that rather than silently trying to fix up a relative one.
+fn require_absolute_symlink_target(label: &str, path: &Path) -> Result<()> {
+    if path.is_absolute() {
+        Ok(())
+    } else {
+        bail!(
+            "{label} must be an absolute path to symlink into the staged simulation, got {}",
+            path.display()
+        );
+    }
 }
 
 /// Map a resolved simulator artifact name to its Webots controller directory
@@ -1106,6 +1154,13 @@ pub(crate) fn stage_simulation_for_robot(
     resolved: &ResolvedRobot,
     launch_plan: &LaunchPlan,
 ) -> Result<StagedSimulationWorld> {
+    // Wipe-and-restage per play: the staged root is a single, home-based
+    // location shared across every `simulate` invocation (not project-scoped
+    // any more), and Webots only ever runs one world per play, so a previous
+    // play's stale worlds/protos/meshes/controllers must never linger. This
+    // must run before any of this play's own staging below writes anything.
+    webots_stage_root::wipe_and_recreate()?;
+
     let base_world_text = std::fs::read_to_string(world_source_path)
         .with_context(|| format!("failed to read {}", world_source_path.display()))?;
     let world_name = world_source_path
@@ -1201,22 +1256,25 @@ pub(crate) fn stage_simulation_for_robot(
         .iter()
         .all(|runtime| runtime.source_path().is_none());
 
-    let project = crate::project::Project::new(project_root)?;
-    let mesh_root = project.staged_webots_meshes_dir();
+    let mesh_root = webots_stage_root::meshes_dir()?;
     // The Phase-6 mesh-staging gap: the generated PROTOs reference mesh assets
     // relative to `mesh_root` (the robot's own meshes directly under it, each
     // component's under `<mesh_root>/<component_type>/` per
     // `component_mesh_prefix`), but nothing copied the physical mesh files
     // there before this fix - the robot spawned with no visible geometry.
+    // The robot's own meshes stay a real copy directly under `mesh_root`
+    // (it shares that directory with every component's symlinked subdir, so
+    // it cannot itself be a symlink); each component type's own `meshes/` is
+    // symlinked instead - see `stage_component_meshes`.
     stage_robot_meshes(project_root, &resolved.robot.robot.structure, &mesh_root)?;
     for (component_type, source_dir) in &component_type_dirs {
         stage_component_meshes(source_dir, component_type, &mesh_root)?;
     }
     stage_simulation_world(
         &base_world_text,
-        &project.staged_webots_protos_dir(),
+        &webots_stage_root::protos_dir()?,
         &mesh_root,
-        &project.staged_webots_world(world_name),
+        &webots_stage_root::world_path(world_name)?,
         supervisor_launch,
         require_native,
         &[RobotToStage {
@@ -1237,37 +1295,57 @@ const MESHES_DIR: &str = "meshes";
 /// `mesh_root` - `WebotsSceneDescription::from_robot` renders with
 /// `component_mesh_prefix: None`, so the robot's own mesh URDF references
 /// (`meshes/<file>`) resolve unprefixed, one level under `mesh_root` itself.
+///
+/// This stays a real COPY, not a symlink: `mesh_root` also hosts every
+/// mounted component type's own symlinked `<component_type>/` subdirectory
+/// side by side (see `stage_component_meshes`), so `mesh_root` itself must
+/// remain a real directory the robot's own files sit in directly - there is
+/// no single source directory a whole-`mesh_root` symlink could point at.
 fn stage_robot_meshes(project_root: &Path, structure_path: &Path, mesh_root: &Path) -> Result<()> {
     let structure_dir = project_root
         .join(structure_path)
         .parent()
         .map_or_else(|| project_root.to_path_buf(), std::path::Path::to_path_buf);
     let source = structure_dir.join(MESHES_DIR);
-    stage_mesh_dir_if_present(&source, mesh_root)
-}
-
-/// Stage one component type's `meshes/` directory (if any) under
-/// `<mesh_root>/<component_type>/` - the prefix
-/// `WebotsSceneDescription::from_component`'s `component_mesh_prefix` embeds
-/// into the component's own mesh URDF references (`meshes/<file>` ->
-/// `<component_type>/<file>`, see `staged_mesh_path_from_urdf_filename`).
-fn stage_component_meshes(source_dir: &Path, component_type: &str, mesh_root: &Path) -> Result<()> {
-    let source = source_dir.join(MESHES_DIR);
-    let dest = mesh_root.join(component_type);
-    stage_mesh_dir_if_present(&source, &dest)
-}
-
-/// Copy every file under `source` (if it exists as a directory) into `dest`,
-/// recreating the relative subtree. A component/robot with no `meshes/`
-/// directory at all is not an error - not every URDF references mesh
-/// geometry.
-fn stage_mesh_dir_if_present(source: &Path, dest: &Path) -> Result<()> {
     if !source.is_dir() {
         return Ok(());
     }
-    std::fs::create_dir_all(dest)
-        .with_context(|| format!("failed to create staged mesh directory {}", dest.display()))?;
-    copy_dir_recursive(source, dest)
+    std::fs::create_dir_all(mesh_root).with_context(|| {
+        format!(
+            "failed to create staged mesh directory {}",
+            mesh_root.display()
+        )
+    })?;
+    copy_dir_recursive(&source, mesh_root)
+}
+
+/// Stage one component type's `meshes/` directory (if any) as a SYMLINK at
+/// `<mesh_root>/<component_type>/` pointing at the component's resolved mesh
+/// source directory (the unpacked cached asset bundle's `meshes/` for a
+/// catalog component, or the local `components/<id>/meshes/` for a
+/// path-pinned one - both already absolute, see `component_assets_dir`) - the
+/// cache/path-pin stays the single source of truth instead of a copy. The
+/// prefix `WebotsSceneDescription::from_component`'s `component_mesh_prefix`
+/// embeds into the component's own mesh URDF references (`meshes/<file>` ->
+/// `<component_type>/<file>`, see `staged_mesh_path_from_urdf_filename`), so
+/// the generated PROTOs resolve through the symlinked directory exactly as
+/// they would a copied one. `mesh_root` itself must already exist (see
+/// `webots_stage_root::wipe_and_recreate`) - not every robot has its own
+/// meshes to trigger `stage_robot_meshes`' `create_dir_all`.
+fn stage_component_meshes(source_dir: &Path, component_type: &str, mesh_root: &Path) -> Result<()> {
+    let source = source_dir.join(MESHES_DIR);
+    if !source.is_dir() {
+        return Ok(());
+    }
+    require_absolute_symlink_target("component mesh source directory", &source)?;
+    let dest = mesh_root.join(component_type);
+    std::os::unix::fs::symlink(&source, &dest).with_context(|| {
+        format!(
+            "failed to symlink component meshes {} to staged path {}",
+            source.display(),
+            dest.display()
+        )
+    })
 }
 
 fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
@@ -1306,6 +1384,7 @@ mod tests {
         ArtifactKind, ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
         fixture_contract_for_tests, fixture_tool_entry_for_tests,
     };
+    use crate::host_paths::test_support::ScratchPhoxalHome;
     use crate::resolver::{
         ResolvedComponent, ResolvedComponentSource, ResolvedPathOverride, ResolvedPathOverrideKind,
         ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, host_target_triple,
@@ -1885,6 +1964,11 @@ mod tests {
         // participants, staging must write a `.wbt` declaring the robot's
         // EXTERNPROTO and the supervisor's static node, with no static robot
         // instance node.
+        //
+        // Staging now lands under `~/.phoxal/run/simulation/webots` (home,
+        // not project-scoped), so this must run under a scratch `PHOXAL_HOME`
+        // rather than touching the real developer machine's staging root.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         fs::write(
             temp.path().join("structure.urdf"),
@@ -1995,6 +2079,7 @@ mod tests {
         // staged .wbt on disk with the supervisor node and no static robot
         // instance node, using the controller/supervisor ParticipantLaunch
         // records already carried by the Sim LaunchPlan.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         fs::write(
             temp.path().join("structure.urdf"),
@@ -2678,16 +2763,16 @@ artifacts:
 
     /// Bug 1 regression test: staging must produce a real, executable
     /// controller binary at the standard Webots layout
-    /// (`dist/simulator/webots/controllers/<name>/<name>`) for BOTH the
-    /// supervisor and the per-robot controller when the simulators are
+    /// (`~/.phoxal/run/simulation/webots/controllers/<name>/<name>`) for BOTH
+    /// the supervisor and the per-robot controller when the simulators are
     /// path-overridden (the live-gate case), by actually running `cargo
-    /// build` against fake stand-in crates and copying the result - not just
-    /// asserting a path string was computed.
+    /// build` against fake stand-in crates - not just asserting a path string
+    /// was computed. Also covers the copy->symlink change: the staged entry
+    /// must be a symlink to the built binary, not a copy.
     #[test]
     fn path_overridden_simulators_are_built_and_staged_as_webots_controllers() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
-        let project_root = temp.path().join("project");
-        fs::create_dir_all(&project_root)?;
 
         let supervisor_dir = temp.path().join("framework/simulator/webots-supervisor");
         let controller_dir = temp.path().join("framework/simulator/webots-controller");
@@ -2702,16 +2787,24 @@ artifacts:
         controller.path_override = Some(controller_dir.clone());
         resolved.simulators.extend([supervisor, controller]);
 
-        stage_simulator_controller_binaries(&project_root, &resolved, &crate::Ui)?;
+        stage_simulator_controller_binaries(&resolved, &crate::Ui)?;
 
-        let project = crate::project::Project::new(&project_root)?;
-        let supervisor_binary = project.staged_webots_supervisor_binary();
-        let controller_binary = project.staged_webots_controller_binary();
+        let supervisor_binary =
+            webots_stage_root::controller_dir("phoxal-simulator-webots-supervisor")?
+                .join("phoxal-simulator-webots-supervisor");
+        let controller_binary =
+            webots_stage_root::controller_dir("phoxal-simulator-webots-controller")?
+                .join("phoxal-simulator-webots-controller");
 
         for binary in [&supervisor_binary, &controller_binary] {
             assert!(
                 binary.is_file(),
                 "expected staged controller binary to exist at {}",
+                binary.display()
+            );
+            assert!(
+                fs::symlink_metadata(binary)?.file_type().is_symlink(),
+                "staged controller binary {} should be a symlink, not a copy",
                 binary.display()
             );
             #[cfg(unix)]
@@ -2744,19 +2837,230 @@ artifacts:
     /// exact "generic controller" trap bug 1 exists to close.
     #[test]
     fn catalog_simulator_missing_from_cache_is_a_hard_error() -> Result<()> {
-        let temp = tempfile::tempdir()?;
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let mut resolved = resolved_with_drive_components(&[], false)?;
         resolved.simulators.clear();
         resolved
             .simulators
             .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
 
-        let error = stage_simulator_controller_binaries(temp.path(), &resolved, &crate::Ui)
+        let error = stage_simulator_controller_binaries(&resolved, &crate::Ui)
             .expect_err("a catalog simulator with no cached binary must error, not silently skip");
         let message = format!("{error:#}");
         assert!(
             message.contains("webots-supervisor"),
             "error should name the simulator that failed to provision: {message}"
+        );
+
+        Ok(())
+    }
+
+    /// The staging LOCATION change (Part 4 follow-up): the staged root must
+    /// resolve under `~/.phoxal/run/simulation/webots` (relocatable via
+    /// `PHOXAL_HOME`), never under the project tree, and each mounted
+    /// component type's staged `meshes/<component_type>` entry must be a
+    /// SYMLINK to the component's resolved mesh source directory - not a
+    /// copy - so the cache/path-pin stays the single source of truth.
+    #[test]
+    fn stage_simulation_for_robot_resolves_under_home_and_symlinks_component_meshes() -> Result<()>
+    {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
+        let temp = tempfile::tempdir()?;
+        fs::write(
+            temp.path().join("structure.urdf"),
+            r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="base_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
+        )?;
+        fs::create_dir_all(temp.path().join("worlds"))?;
+        let world_source_path = temp.path().join("worlds/default.wbt");
+        fs::write(
+            &world_source_path,
+            "#VRML_SIM R2023b utf8\n\nWorldInfo {\n}\n",
+        )?;
+        write_driver_crate(temp.path(), "ddsm115")?;
+        fs::write(
+            temp.path().join("components/ddsm115/component.yaml"),
+            "version: v1\ncapabilities: {}\n",
+        )?;
+        let component_meshes_dir = temp.path().join("components/ddsm115/meshes");
+        fs::create_dir_all(&component_meshes_dir)?;
+        fs::write(component_meshes_dir.join("wheel.dae"), b"not a real mesh")?;
+
+        let mut resolved = resolved_with_drive_components(&["left_drive"], false)?;
+        resolved
+            .simulators
+            .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
+        let extras = RobotManifestExtras::default();
+        let graph = component_graph(&["left_drive"]);
+        let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
+        let controller_id = simulator_controller_provider_id("robot_v1");
+        let checked = vec![
+            service_participant(
+                "drive",
+                vec![motor_command(graph_check::Direction::Publish)],
+            ),
+            driver_participant(
+                "ddsm115",
+                "left_drive",
+                vec![motor_command(graph_check::Direction::Subscribe)],
+            ),
+            graph_check::ParticipantApis {
+                participant_id: supervisor_id.clone(),
+                artifact_id: "webots-supervisor".to_string(),
+                participant_kind: graph_check::ParticipantKind::Simulator,
+                participant_class: graph_check::ParticipantClass::Checked,
+                api_version: "y2026_1".to_string(),
+                bus_abi: None,
+                config_schema: None,
+                scope: graph_check::ParticipantScope::Graph,
+                contracts: Vec::new(),
+            },
+            simulator_controller_participant(
+                &controller_id,
+                vec![motor_command(graph_check::Direction::Subscribe)],
+            ),
+        ];
+        let substitutions = contract_substitutions_from_driver_metadata(&checked, &controller_id);
+        let sim_participants = sim_checked_participants(&checked);
+        let report = graph_check::check_plan(graph_check::CheckInput {
+            mode: graph_check::PlanMode::Sim,
+            participants: &sim_participants,
+            robot_graph: &graph,
+            substitutions: &substitutions,
+        });
+        assert!(report.is_ok(), "{report:?}");
+
+        let plan = build_launch_plan(
+            LaunchMode::Sim,
+            &[CheckedRobotLaunchInput {
+                project_root: temp.path(),
+                resolved: &resolved,
+                manifest_extras: &extras,
+                checked_participants: &sim_participants,
+                accepted_substitutions: &report.accepted_substitutions,
+                source_participants: &[],
+            }],
+        )?;
+
+        let staged = stage_simulation_for_robot(temp.path(), &world_source_path, &resolved, &plan)?;
+
+        let root = webots_stage_root::root()?;
+        assert!(
+            root.ends_with("run/simulation/webots"),
+            "staged root should resolve under run/simulation/webots, got {}",
+            root.display()
+        );
+        assert!(
+            staged.staged_world_path.starts_with(&root),
+            "staged world {} should live under the staged root {}",
+            staged.staged_world_path.display(),
+            root.display()
+        );
+
+        let staged_component_meshes = root.join("meshes").join("ddsm115");
+        let meta = fs::symlink_metadata(&staged_component_meshes)?;
+        assert!(
+            meta.file_type().is_symlink(),
+            "staged component meshes {} should be a symlink, not a copy",
+            staged_component_meshes.display()
+        );
+        let link_target = fs::read_link(&staged_component_meshes)?;
+        assert_eq!(link_target, component_meshes_dir);
+        assert!(
+            link_target.is_absolute(),
+            "mesh symlink target must be absolute: {}",
+            link_target.display()
+        );
+        assert_eq!(
+            fs::read(staged_component_meshes.join("wheel.dae"))?,
+            b"not a real mesh"
+        );
+
+        Ok(())
+    }
+
+    /// The wipe-per-play guarantee: a previous play's stale staged content
+    /// must never linger into the next `simulate` invocation - it is one
+    /// Webots world per run, so a clean slate every play is correct.
+    #[test]
+    fn stage_simulation_for_robot_wipes_previous_play_before_restaging() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
+        let temp = tempfile::tempdir()?;
+        fs::write(
+            temp.path().join("structure.urdf"),
+            r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="base_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
+        )?;
+        fs::create_dir_all(temp.path().join("worlds"))?;
+        let world_source = temp.path().join("worlds/test.wbt");
+        fs::write(&world_source, "#VRML_SIM R2023b utf8\n\nWorldInfo {\n}\n")?;
+
+        let mut resolved = resolved_with_drive_components(&[], false)?;
+        resolved
+            .simulators
+            .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
+        resolved
+            .simulators
+            .push(simulator_runtime(SIMULATOR_CONTROLLER_ARTIFACT_NAME));
+        let extras = RobotManifestExtras::default();
+        let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
+        let controller_id = simulator_controller_provider_id("robot_v1");
+        let checked = vec![
+            service_participant(
+                "drive",
+                vec![motor_command(graph_check::Direction::Publish)],
+            ),
+            graph_check::ParticipantApis {
+                participant_id: supervisor_id.clone(),
+                artifact_id: "webots-supervisor".to_string(),
+                participant_kind: graph_check::ParticipantKind::Simulator,
+                participant_class: graph_check::ParticipantClass::Checked,
+                api_version: "y2026_1".to_string(),
+                bus_abi: None,
+                config_schema: None,
+                scope: graph_check::ParticipantScope::Graph,
+                contracts: Vec::new(),
+            },
+            graph_check::ParticipantApis {
+                participant_id: controller_id.clone(),
+                artifact_id: "webots-controller".to_string(),
+                participant_kind: graph_check::ParticipantKind::Simulator,
+                participant_class: graph_check::ParticipantClass::Checked,
+                api_version: "y2026_1".to_string(),
+                bus_abi: None,
+                config_schema: None,
+                scope: graph_check::ParticipantScope::Graph,
+                contracts: Vec::new(),
+            },
+        ];
+        let sim_participants = sim_checked_participants(&checked);
+        let plan = build_launch_plan(
+            LaunchMode::Sim,
+            &[CheckedRobotLaunchInput {
+                project_root: temp.path(),
+                resolved: &resolved,
+                manifest_extras: &extras,
+                checked_participants: &sim_participants,
+                accepted_substitutions: &[],
+                source_participants: &[],
+            }],
+        )?;
+
+        let first = stage_simulation_for_robot(temp.path(), &world_source, &resolved, &plan)?;
+        assert!(first.staged_world_path.is_file());
+
+        // Plant a stray marker directly under the staged root, simulating
+        // leftover content from a previous play that must not survive the
+        // next one's staging.
+        let root = webots_stage_root::root()?;
+        let marker = root.join("stale-from-previous-play.txt");
+        fs::write(&marker, b"stale")?;
+        assert!(marker.is_file());
+
+        let second = stage_simulation_for_robot(temp.path(), &world_source, &resolved, &plan)?;
+        assert!(second.staged_world_path.is_file());
+        assert!(
+            !marker.exists(),
+            "a second stage must wipe the staged root before restaging, but {} survived",
+            marker.display()
         );
 
         Ok(())

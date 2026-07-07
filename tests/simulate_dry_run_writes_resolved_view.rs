@@ -31,11 +31,12 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
         phoxal_cli::launch_plan::DEFAULT_ROUTER_CONNECT
     );
     assert_eq!(plan.world_path, temp.path().join("worlds/test.wbt"));
+    // `tool-joypad` is peripheral teleop and no longer launches by default
+    // for `simulate` (opt in via `--joypad`); see `commands::simulate::native_tool_labels`.
     assert_eq!(
         plan.native_tools,
         vec![
             phoxal_cli::launch_plan::SITE_TOOL_ROUTER.to_string(),
-            phoxal_cli::launch_plan::SITE_TOOL_JOYPAD.to_string(),
             "webots".to_string(),
         ]
     );

@@ -107,7 +107,7 @@ pub struct StagedSimulationWorld {
 /// written; component PROTOs go under its `components/` subdirectory (the
 /// relative path the robot PROTO's own `EXTERNPROTO` declarations point at,
 /// `webots_staging::render::proto::component_externprotos`). `mesh_root` is
-/// the staged mesh directory (`project::staged_webots_meshes_dir`) each
+/// the staged mesh directory (`webots_stage_root::meshes_dir`) each
 /// generated PROTO's mesh asset references are resolved relative to.
 /// `staged_world_path` is where the staged `.wbt` text is written.
 pub fn stage_simulation_world(
