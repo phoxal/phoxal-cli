@@ -10,8 +10,12 @@ use sha2::{Digest, Sha256};
 pub const CATALOG_SCHEMA: &str = "phoxal.artifact-catalog/v1";
 pub const CATALOG_FORMAT_VERSION: u32 = 2;
 pub const CHECKSUM_CANONICALIZATION: &str = "json-v1-empty-revision-and-integrity-sha256";
+/// The catalog is hosted as the `latest.json` asset of the single mutable
+/// `stable` front-door release (docs follow-ups/22 + decision D25), not a git
+/// ref. The per-artifact "warehouse" releases (`--latest=false`) hold the
+/// tarballs the catalog points at.
 pub const DEFAULT_CATALOG_URL: &str =
-    "https://raw.githubusercontent.com/phoxal/framework/artifact-catalog-v0-stable/latest.json";
+    "https://github.com/phoxal/framework/releases/download/stable/latest.json";
 pub const CATALOG_SOURCE_ENV: &str = "PHOXAL_ARTIFACT_CATALOG";
 /// The target scope a [`ArtifactKind::ComponentAssets`] entry declares instead
 /// of a per-triple binary matrix: asset bundles are target-independent files,
