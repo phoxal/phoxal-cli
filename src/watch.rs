@@ -434,7 +434,7 @@ fn recheck_run_target(
             resolved: &resolved,
             manifest_extras: &loaded.extras,
             checked_participants: &outcome.checked_participants,
-            accepted_substitutions: &[],
+            substitutions: &[],
             source_participants: &scoped,
         }],
     )?;

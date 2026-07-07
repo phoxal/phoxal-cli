@@ -842,7 +842,7 @@ fn prepare_deploy(
             resolved: &resolved,
             manifest_extras: &loaded.extras,
             checked_participants: &outcome.checked_participants,
-            accepted_substitutions: &[],
+            substitutions: &[],
             source_participants: &checked_source_participants,
         }],
     )?;

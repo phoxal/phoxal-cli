@@ -1678,56 +1678,6 @@ fn format_report_error(report: &graph_check::Report) -> String {
 
 fn format_problem(problem: &graph_check::Problem) -> String {
     match problem {
-        graph_check::Problem::SubstitutionNotAllowed {
-            mode,
-            component_instance,
-            provider_participant_id,
-        } => {
-            format!(
-                "substitution for component {component_instance} by {provider_participant_id} is not allowed in {} plans; substitutions are sim-only",
-                mode.as_str()
-            )
-        }
-        graph_check::Problem::SubstitutionProviderMissing {
-            component_instance,
-            provider_participant_id,
-        } => {
-            format!(
-                "NoSimulatorProvider: sim plan substitutes component {component_instance} with {provider_participant_id}, but no checked simulator-kind participant is present in the plan. Add phoxal-simulator-webots-supervisor and phoxal-simulator-webots-controller from the artifact catalog, or add simulator-webots-supervisor/simulator-webots-controller path overrides for local simulator development."
-            )
-        }
-        graph_check::Problem::SubstitutionProviderWrongKind {
-            component_instance,
-            provider_participant_id,
-            provider_kind,
-        } => {
-            format!(
-                "substitution provider {provider_participant_id} for component {component_instance} has kind '{}', but substitutions require artifact.kind 'simulator'",
-                provider_kind.as_str()
-            )
-        }
-        graph_check::Problem::SubstitutionProviderNotChecked {
-            component_instance,
-            provider_participant_id,
-        } => {
-            format!(
-                "substitution provider {provider_participant_id} for component {component_instance} is privileged and cannot satisfy checked topology"
-            )
-        }
-        graph_check::Problem::IncompleteSubstitution {
-            component_instance,
-            provider_participant_id,
-            missing_contracts,
-        } => {
-            let missing = missing_contracts
-                .iter()
-                .map(format_contract)
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "simulator substitution for component {component_instance} by {provider_participant_id} is incomplete; missing contracts: {missing}"
-            )
-        }
         graph_check::Problem::ContractSchemaMismatch {
             family,
             topic,
@@ -1762,16 +1712,6 @@ fn format_problem(problem: &graph_check::Problem) -> String {
             )
         }
     }
-}
-
-fn format_contract(contract: &graph_check::Contract) -> String {
-    format!(
-        "{} ({}, {}, schema_id {})",
-        contract.family,
-        contract.topic,
-        format_direction(contract.direction),
-        contract.schema_id
-    )
 }
 
 pub(crate) const fn format_direction(direction: graph_check::Direction) -> &'static str {
