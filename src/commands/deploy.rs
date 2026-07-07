@@ -4658,39 +4658,11 @@ artifacts:
     /// Points `PHOXAL_HOME` (and therefore the native-artifact cache) at a
     /// scratch directory so this test's "nothing cached yet" assumption is
     /// exact, and the cache location is process-isolated for the duration
-    /// of this guard.
-    struct ScratchPhoxalHome {
-        _root: tempfile::TempDir,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl ScratchPhoxalHome {
-        fn new() -> Result<Self> {
-            let root = tempfile::tempdir()?;
-            let previous = std::env::var_os("PHOXAL_HOME");
-            // SAFETY: test-only, and this guard's Drop restores the prior
-            // value before the temp dir it points at is removed.
-            unsafe {
-                std::env::set_var("PHOXAL_HOME", root.path());
-            }
-            Ok(Self {
-                _root: root,
-                previous,
-            })
-        }
-    }
-
-    impl Drop for ScratchPhoxalHome {
-        fn drop(&mut self) {
-            // SAFETY: see `new`.
-            unsafe {
-                match &self.previous {
-                    Some(value) => std::env::set_var("PHOXAL_HOME", value),
-                    None => std::env::remove_var("PHOXAL_HOME"),
-                }
-            }
-        }
-    }
+    /// of this guard. Shared crate-wide (`host_paths::test_support`) since
+    /// `PHOXAL_HOME` is process-global and `cargo test` runs unit tests
+    /// concurrently; every test that mutates it must serialize on the same
+    /// lock.
+    use crate::host_paths::test_support::ScratchPhoxalHome;
 
     #[test]
     fn dry_run_stays_offline_for_catalog_resolved_component_driver() -> Result<()> {
