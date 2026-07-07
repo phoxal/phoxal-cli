@@ -32,7 +32,7 @@ use crate::component_driver::component_driver_crate_dir;
 use crate::launch_env::{EncodedParticipantEnv, encode_participant_env};
 use crate::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
-    SITE_TOOL_ROUTER, SiteLaunch, build_launch_plan,
+    PlanContext, SITE_TOOL_ROUTER, SiteLaunch, build_launch_plan,
 };
 use crate::resolver::{
     ResolveOptions, ResolvedComponentSource, ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool,
@@ -846,12 +846,19 @@ fn prepare_deploy(
             source_participants: &checked_source_participants,
         }],
     )?;
-    render_payload(RenderPayloadInput {
+
+    let project_root = project_root.to_path_buf();
+    let ctx = PlanContext {
+        robot_path,
         project_root,
+        resolved,
+        source_participants: all_source_participants,
+    };
+
+    render_payload(RenderPayloadInput {
         robot: &loaded.robot,
-        resolved: &resolved,
+        ctx: &ctx,
         plan: &plan,
-        source_participants: &all_source_participants,
         target,
         health_timeout: options.health_timeout,
         require_official_binaries,
@@ -861,11 +868,9 @@ fn prepare_deploy(
 }
 
 struct RenderPayloadInput<'a> {
-    project_root: &'a Path,
     robot: &'a Robot,
-    resolved: &'a ResolvedRobot,
+    ctx: &'a PlanContext,
     plan: &'a LaunchPlan,
-    source_participants: &'a [SourceParticipant],
     target: TargetTriples,
     health_timeout: Duration,
     require_official_binaries: bool,
@@ -875,17 +880,18 @@ struct RenderPayloadInput<'a> {
 
 fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
     let RenderPayloadInput {
-        project_root,
         robot,
-        resolved,
+        ctx,
         plan,
-        source_participants,
         target,
         health_timeout,
         require_official_binaries,
         remote_user,
         ui,
     } = input;
+    let project_root = ctx.project_root.as_path();
+    let resolved = &ctx.resolved;
+    let source_participants = ctx.source_participants.as_slice();
     let root = tempfile::tempdir().context("failed to create deploy payload directory")?;
     create_payload_dirs(root.path())?;
 

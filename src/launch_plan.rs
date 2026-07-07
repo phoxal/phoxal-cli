@@ -16,12 +16,35 @@ pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
 pub const SITE_TOOL_ROUTER: &str = "tool-router";
 pub const SITE_TOOL_JOYPAD: &str = "tool-joypad";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LaunchMode {
     Run,
-    Sim,
     Deploy,
+    /// Simulate under Webots, carrying the resolved `.wbt` world path the
+    /// plan was built for. Replaces the old data-less `Sim` variant plus the
+    /// `SimulatePlan::world_path` field it used to take a detour through -
+    /// the plan's own mode now carries the world directly.
+    Webots {
+        world: PathBuf,
+    },
+}
+
+/// The shared context a `LaunchPlan` is built from and launched alongside:
+/// which `robot.yaml` it came from, the project root, the full resolved
+/// robot, and its source participants. Not part of the plan itself (the plan
+/// is the launch descriptor; this is where it came from), and - like
+/// `LaunchPlan` - never persisted to disk. Replaces the fields the old
+/// `SimulatePlan` wrapper re-declared next to its own `LaunchPlan`
+/// (`resolved`/`project_root`/`source_participants`/`robot_path`), and the
+/// matching re-declarations in `run`'s `PreparedRun`, `deploy`'s
+/// `RenderPayloadInput`, and the `watch` configs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanContext {
+    pub robot_path: PathBuf,
+    pub project_root: PathBuf,
+    pub resolved: ResolvedRobot,
+    pub source_participants: Vec<SourceParticipant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,7 +85,7 @@ pub struct ParticipantLaunchRecord {
 /// graph proof and appears on the board via bus presence/logs (D23), but the
 /// CLI supervisor never spawns or restarts it - Webots (via the supervisor)
 /// owns its lifecycle. Both the Webots supervisor and each robot's controller
-/// are `SimulationManaged` in `Sim` mode.
+/// are `SimulationManaged` in `Webots` mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchOwnership {
@@ -114,21 +137,21 @@ pub fn build_launch_plan(
     if robots.is_empty() {
         bail!("LaunchPlan requires at least one robot");
     }
-    if mode == LaunchMode::Deploy && robots.len() != 1 {
+    if matches!(mode, LaunchMode::Deploy) && robots.len() != 1 {
         bail!("deploy LaunchPlan must contain exactly one robot");
     }
 
-    let site = build_site_launches(mode, robots)?;
+    let site = build_site_launches(&mode, robots)?;
     let robots = robots
         .iter()
-        .map(|robot| build_robot_launch(mode, robot))
+        .map(|robot| build_robot_launch(&mode, robot))
         .collect::<Result<Vec<_>>>()?;
 
     Ok(LaunchPlan { mode, site, robots })
 }
 
 fn build_site_launches(
-    mode: LaunchMode,
+    mode: &LaunchMode,
     robots: &[CheckedRobotLaunchInput<'_>],
 ) -> Result<Vec<SiteLaunch>> {
     let router = merge_site_tool_artifact(SITE_TOOL_ROUTER, robots)?;
@@ -138,7 +161,7 @@ fn build_site_launches(
         artifact_ref: router,
         phoxal_config: router_config,
     }];
-    if mode != LaunchMode::Deploy {
+    if !matches!(mode, LaunchMode::Deploy) {
         let joypad = merge_site_tool_artifact(SITE_TOOL_JOYPAD, robots)?;
         site.push(SiteLaunch {
             id: SITE_TOOL_JOYPAD.to_string(),
@@ -187,7 +210,7 @@ fn tool_artifact_ref(tool: &ResolvedTool) -> String {
     format!("{}@{}:{}", tool.repo, tool.resolved, tool.asset)
 }
 
-fn router_config(mode: LaunchMode, robots: &[CheckedRobotLaunchInput<'_>]) -> Result<Value> {
+fn router_config(mode: &LaunchMode, robots: &[CheckedRobotLaunchInput<'_>]) -> Result<Value> {
     let mut listen = BTreeSet::<String>::new();
     let mut device_claims = BTreeMap::<String, String>::new();
     for robot in robots {
@@ -218,7 +241,7 @@ fn router_config(mode: LaunchMode, robots: &[CheckedRobotLaunchInput<'_>]) -> Re
             Value::Array(listen.into_iter().map(Value::String).collect()),
         );
     }
-    if mode == LaunchMode::Deploy
+    if matches!(mode, LaunchMode::Deploy)
         && let Some(uplink) = &robots[0].resolved.robot.bus.uplink
     {
         config.insert(
@@ -238,7 +261,7 @@ fn listen_device_claim(endpoint: &str) -> Option<String> {
 }
 
 fn build_robot_launch(
-    mode: LaunchMode,
+    mode: &LaunchMode,
     input: &CheckedRobotLaunchInput<'_>,
 ) -> Result<RobotLaunch> {
     ensure_launch_set_parity(mode, input)?;
@@ -301,7 +324,7 @@ fn build_robot_launch(
 }
 
 fn is_robot_launch_participant(
-    mode: LaunchMode,
+    mode: &LaunchMode,
     participant: &graph_check::ParticipantApis,
 ) -> bool {
     if !participant.participant_class.is_checked() {
@@ -313,14 +336,14 @@ fn is_robot_launch_participant(
     if participant.participant_kind == graph_check::ParticipantKind::Simulator {
         // Simulator participants (the Webots supervisor + each robot's
         // controller) are launched by Webots itself, never by the CLI
-        // supervisor - but in Sim mode they still need a launch record for
+        // supervisor - but in Webots mode they still need a launch record for
         // board presence and controllerArgs/spawn-descriptor rendering (Part
-        // 3/4). Outside Sim mode a simulator participant never appears in the
-        // checked set at all (substitutions are sim-only), so this only takes
-        // effect for Sim.
-        return mode == LaunchMode::Sim;
+        // 3/4). Outside Webots mode a simulator participant never appears in
+        // the checked set at all (substitutions are sim-only), so this only
+        // takes effect for Webots.
+        return matches!(mode, LaunchMode::Webots { .. });
     }
-    if mode == LaunchMode::Sim
+    if matches!(mode, LaunchMode::Webots { .. })
         && matches!(
             participant.participant_kind,
             graph_check::ParticipantKind::Driver
@@ -333,14 +356,14 @@ fn is_robot_launch_participant(
 
 /// Which launch-ownership a checked participant gets in this plan. Simulator
 /// participants (the Webots supervisor and each robot's controller) are
-/// `SimulationManaged` in `Sim` mode - the CLI supervisor never spawns or
+/// `SimulationManaged` in `Webots` mode - the CLI supervisor never spawns or
 /// restarts them, Webots does. Every other participant (services, user
 /// runtimes, component drivers) is `CliManaged`.
 fn launch_ownership(
-    mode: LaunchMode,
+    mode: &LaunchMode,
     participant: &graph_check::ParticipantApis,
 ) -> LaunchOwnership {
-    if mode == LaunchMode::Sim
+    if matches!(mode, LaunchMode::Webots { .. })
         && participant.participant_kind == graph_check::ParticipantKind::Simulator
     {
         LaunchOwnership::SimulationManaged
@@ -397,7 +420,7 @@ fn participant_execution(
 }
 
 fn participant_launch(
-    mode: LaunchMode,
+    mode: &LaunchMode,
     input: &CheckedRobotLaunchInput<'_>,
     checked: &graph_check::ParticipantApis,
 ) -> ParticipantLaunch {
@@ -414,7 +437,7 @@ fn participant_launch(
         },
         clock: match mode {
             LaunchMode::Run | LaunchMode::Deploy => ClockMode::Real,
-            LaunchMode::Sim => ClockMode::Simulation,
+            LaunchMode::Webots { .. } => ClockMode::Simulation,
         },
         config: input
             .manifest_extras
@@ -426,14 +449,14 @@ fn participant_launch(
     }
 }
 
-fn robot_root_for_mode(mode: LaunchMode, project_root: &Path) -> PathBuf {
+fn robot_root_for_mode(mode: &LaunchMode, project_root: &Path) -> PathBuf {
     match mode {
-        LaunchMode::Run | LaunchMode::Sim => project_root.to_path_buf(),
+        LaunchMode::Run | LaunchMode::Webots { .. } => project_root.to_path_buf(),
         LaunchMode::Deploy => PathBuf::from("/opt/phoxal"),
     }
 }
 
-fn ensure_launch_set_parity(mode: LaunchMode, input: &CheckedRobotLaunchInput<'_>) -> Result<()> {
+fn ensure_launch_set_parity(mode: &LaunchMode, input: &CheckedRobotLaunchInput<'_>) -> Result<()> {
     let expected = expected_checked_participant_ids(mode, input.resolved);
     let checked = input
         .checked_participants
@@ -467,7 +490,7 @@ fn ensure_launch_set_parity(mode: LaunchMode, input: &CheckedRobotLaunchInput<'_
 }
 
 fn expected_checked_participant_ids(
-    mode: LaunchMode,
+    mode: &LaunchMode,
     resolved: &ResolvedRobot,
 ) -> BTreeSet<String> {
     let mut expected = BTreeSet::new();
@@ -483,7 +506,7 @@ fn expected_checked_participant_ids(
             .iter()
             .map(|runtime| runtime.name.clone()),
     );
-    if mode == LaunchMode::Sim {
+    if matches!(mode, LaunchMode::Webots { .. }) {
         expected.extend(expected_simulator_participant_ids(resolved));
     } else {
         expected.extend(
@@ -497,7 +520,7 @@ fn expected_checked_participant_ids(
     expected
 }
 
-/// The participant ids the Sim launch set must carry for the resolved
+/// The participant ids the Webots launch set must carry for the resolved
 /// simulator artifacts (the Webots supervisor plus this robot's controller),
 /// using the same world-scoped/robot-scoped id scheme
 /// `commands::simulate::official_simulator_participants` assigns.
@@ -738,7 +761,12 @@ mod tests {
             empty_checked_input(Path::new("/tmp/left"), &left, &extras),
             empty_checked_input(Path::new("/tmp/right"), &right, &extras),
         ];
-        let plan = build_launch_plan(LaunchMode::Sim, &inputs)?;
+        let plan = build_launch_plan(
+            LaunchMode::Webots {
+                world: PathBuf::from("worlds/test.wbt"),
+            },
+            &inputs,
+        )?;
         assert_eq!(
             plan.site[0].phoxal_config,
             serde_json::json!({
@@ -754,8 +782,13 @@ mod tests {
             empty_checked_input(Path::new("/tmp/left"), &left, &extras),
             empty_checked_input(Path::new("/tmp/right"), &right, &extras),
         ];
-        let error = build_launch_plan(LaunchMode::Sim, &inputs)
-            .expect_err("same serial device with different options conflicts");
+        let error = build_launch_plan(
+            LaunchMode::Webots {
+                world: PathBuf::from("worlds/test.wbt"),
+            },
+            &inputs,
+        )
+        .expect_err("same serial device with different options conflicts");
         assert!(
             error
                 .to_string()

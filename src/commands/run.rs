@@ -23,7 +23,8 @@ use crate::component_driver::component_driver_crate_dir;
 use crate::launch_env::encode_participant_env;
 use crate::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution,
-    ParticipantLaunchRecord, SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SiteLaunch, build_launch_plan,
+    ParticipantLaunchRecord, PlanContext, SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SiteLaunch,
+    build_launch_plan,
 };
 use crate::resolver::{
     ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, discover_robot_yaml,
@@ -91,9 +92,7 @@ pub struct RunOptions {
 
 #[derive(Debug)]
 struct PreparedRun {
-    project_root: PathBuf,
-    resolved: ResolvedRobot,
-    source_participants: Vec<crate::commands::check::SourceParticipant>,
+    ctx: PlanContext,
     plan: LaunchPlan,
     board: BoardBackend,
     specs: Vec<ParticipantSpec>,
@@ -162,10 +161,8 @@ impl Run {
                 .map(|spec| spec.id.clone())
                 .collect::<BTreeSet<_>>();
             let handle = crate::watch::spawn_run_watch(crate::watch::RunWatchConfig {
-                project_root: prepared.project_root.clone(),
+                ctx: prepared.ctx.clone(),
                 options: watch_options,
-                resolved: prepared.resolved.clone(),
-                source_participants: prepared.source_participants.clone(),
                 live_ids,
                 board: prepared.board.clone(),
                 action_tx,
@@ -321,15 +318,22 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         ui,
     )?;
 
-    Ok(PreparedRun {
-        project_root: project_root.to_path_buf(),
+    let robot_log_targets = plan
+        .robots
+        .iter()
+        .map(|robot| (robot.namespace.clone(), robot.id.clone()))
+        .collect();
+    let project_root = project_root.to_path_buf();
+    let ctx = PlanContext {
+        robot_path,
+        project_root,
         resolved,
         source_participants,
-        robot_log_targets: plan
-            .robots
-            .iter()
-            .map(|robot| (robot.namespace.clone(), robot.id.clone()))
-            .collect(),
+    };
+
+    Ok(PreparedRun {
+        ctx,
+        robot_log_targets,
         plan,
         board,
         specs,

@@ -18,8 +18,8 @@ use crate::commands::check::{
 };
 use crate::component_driver::{component_assets_dir, component_driver_crate_dir};
 use crate::launch_plan::{
-    CheckedRobotLaunchInput, DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, SITE_TOOL_JOYPAD,
-    SITE_TOOL_ROUTER, SubstitutedContract, SubstitutionRecord, build_launch_plan,
+    CheckedRobotLaunchInput, DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, PlanContext,
+    SITE_TOOL_JOYPAD, SubstitutedContract, SubstitutionRecord, build_launch_plan,
 };
 use crate::resolver::{
     ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras, resolve,
@@ -120,16 +120,17 @@ pub struct SimulateOptions {
     pub target: Option<String>,
 }
 
+/// Pairs the sim `LaunchPlan` with its `PlanContext` (Part 3/6): replaces the
+/// old `SimulatePlan` wrapper, which re-declared `resolved`/`project_root`/
+/// `source_participants`/`robot_path` fields `PlanContext` now owns, plus a
+/// sim-only `world_path` now carried directly by `LaunchMode::Webots` and a
+/// `bus_connect` that was always just `DEFAULT_ROUTER_CONNECT`, and a
+/// `native_tools` display list now computed from the plan at print time (see
+/// `native_tool_labels_from_plan`).
 #[derive(Debug, Clone, PartialEq)]
-pub struct SimulatePlan {
-    pub robot_path: PathBuf,
-    pub project_root: PathBuf,
-    pub world_path: PathBuf,
-    pub bus_connect: String,
-    pub native_tools: Vec<String>,
-    pub resolved: ResolvedRobot,
-    pub launch_plan: LaunchPlan,
-    pub source_participants: Vec<SourceParticipant>,
+pub struct SimPlan {
+    pub plan: LaunchPlan,
+    pub ctx: PlanContext,
 }
 
 pub(crate) struct ResolvedSimulation {
@@ -166,22 +167,22 @@ pub async fn run(
     app: &AppContext,
     options: SimulateOptions,
     mode: SimulateMode,
-) -> Result<SimulatePlan> {
+) -> Result<SimPlan> {
     match mode {
         SimulateMode::DryRun => {
             let project_root = app.project.root().to_path_buf();
             let message_format = options.message_format;
-            let plan = tokio::task::spawn_blocking(move || prepare(&project_root, options))
+            let sim = tokio::task::spawn_blocking(move || prepare(&project_root, options))
                 .await
                 .context("simulate dry-run worker failed")??;
-            report_plan_only(&plan, message_format)?;
-            Ok(plan)
+            report_plan_only(&sim, message_format)?;
+            Ok(sim)
         }
         SimulateMode::Live => {
             let project_root = app.project.root().to_path_buf();
             let ui = app.ui;
             let prepared_options = options.clone();
-            let plan = tokio::task::spawn_blocking(move || {
+            let sim = tokio::task::spawn_blocking(move || {
                 prepare_with_mode(&project_root, prepared_options, SimulateMode::Live)
             })
             .await
@@ -200,30 +201,30 @@ pub async fn run(
                 router_ownership(local_router_reachable(&default_connect_endpoint()));
             let mut specs = Vec::new();
             crate::commands::run::prepare_site_tools(
-                &plan.launch_plan,
-                &plan.resolved,
+                &sim.plan,
+                &sim.ctx.resolved,
                 &board,
                 &mut specs,
                 router_ownership,
             )?;
             crate::commands::run::prepare_robot_participants(
-                &plan.launch_plan,
-                &plan.resolved,
-                &plan.project_root,
+                &sim.plan,
+                &sim.ctx.resolved,
+                &sim.ctx.project_root,
                 &crate::commands::run::DriverPolicy::drivers_off_for_sim(),
                 &board,
                 &mut specs,
                 &ui,
             )?;
-            prepare_substitution_notes(&plan.launch_plan, &board);
+            prepare_substitution_notes(&sim.plan, &board);
 
-            let webots_spec = stage_and_prepare_webots_spec(app, &plan)?;
+            let webots_spec = stage_and_prepare_webots_spec(app, &sim)?;
             specs.push(webots_spec);
 
             app.ui.info(format!(
                 "simulation launch plan resolved: {} robot(s), {} site tool(s)",
-                plan.launch_plan.robots.len(),
-                plan.launch_plan.site.len()
+                sim.plan.robots.len(),
+                sim.plan.site.len()
             ));
             match router_ownership {
                 RouterOwnership::External => app.ui.info("reusing reachable external tool-router"),
@@ -234,8 +235,8 @@ pub async fn run(
             }
             crate::commands::run::report_launch_commands(&specs, options.message_format)?;
 
-            let _log_tasks = plan
-                .launch_plan
+            let _log_tasks = sim
+                .plan
                 .robots
                 .iter()
                 .map(|robot| {
@@ -255,10 +256,8 @@ pub async fn run(
                     .map(|spec| spec.id.clone())
                     .collect::<std::collections::BTreeSet<_>>();
                 let handle = crate::watch::spawn_sim_watch(crate::watch::SimWatchConfig {
-                    project_root: plan.project_root.clone(),
+                    ctx: sim.ctx.clone(),
                     options: options.clone(),
-                    resolved: plan.resolved.clone(),
-                    source_participants: plan.source_participants.clone(),
                     live_ids,
                     board: board.clone(),
                     action_tx,
@@ -290,12 +289,12 @@ pub async fn run(
                     outcome.failed_participants.join(", ")
                 );
             }
-            Ok(plan)
+            Ok(sim)
         }
     }
 }
 
-pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<SimulatePlan> {
+pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<SimPlan> {
     prepare_with_mode(project_start, options, SimulateMode::DryRun)
 }
 
@@ -303,7 +302,7 @@ fn prepare_with_mode(
     project_start: &Path,
     options: SimulateOptions,
     mode: SimulateMode,
-) -> Result<SimulatePlan> {
+) -> Result<SimPlan> {
     let resolved = resolve_project(project_start, options.clone(), mode)?;
     if mode == SimulateMode::Live {
         crate::native_artifacts::stage_component_bundles_into_robot_root(
@@ -313,33 +312,34 @@ fn prepare_with_mode(
         )
         .context("failed to stage component assets into the simulation robot root")?;
     }
-    let mut launch_plan = build_checked_sim_launch_plan(
+    let mut plan = build_checked_sim_launch_plan(
         &resolved.project_root,
+        &resolved.world_path,
         &resolved.resolved,
         &resolved.manifest_extras,
         resolved.catalog.as_ref(),
     )?;
     if !options.joypad {
-        // See `native_tool_labels`: joypad is opt-in for simulate now, so
-        // drop it from the actual launch plan too (not just the dry-run
-        // display list) - otherwise live simulate would still try to launch
-        // it and hit the config-deserialization failure this change avoids.
-        launch_plan.site.retain(|site| site.id != SITE_TOOL_JOYPAD);
+        // `tool-joypad` is opt-in for simulate now (see the display-label doc
+        // on `native_tool_labels_from_plan`), so drop it from the actual
+        // launch plan too (not just the dry-run display list) - otherwise
+        // live simulate would still try to launch it and hit the
+        // config-deserialization failure this change avoids.
+        plan.site.retain(|site| site.id != SITE_TOOL_JOYPAD);
     }
     let source_participants = sim_source_participants(
         &resolved.project_root,
         &resolved.resolved,
         resolved.catalog.as_ref(),
     )?;
-    Ok(SimulatePlan {
-        robot_path: resolved.robot_path,
-        project_root: resolved.project_root,
-        world_path: resolved.world_path,
-        bus_connect: DEFAULT_ROUTER_CONNECT.to_string(),
-        native_tools: native_tool_labels(options),
-        resolved: resolved.resolved,
-        launch_plan,
-        source_participants,
+    Ok(SimPlan {
+        plan,
+        ctx: PlanContext {
+            robot_path: resolved.robot_path,
+            project_root: resolved.project_root,
+            resolved: resolved.resolved,
+            source_participants,
+        },
     })
 }
 
@@ -409,15 +409,24 @@ pub(crate) fn resolve_project(
 
 pub(crate) fn build_checked_sim_launch_plan(
     project_root: &Path,
+    world: &Path,
     resolved: &ResolvedRobot,
     manifest_extras: &RobotManifestExtras,
     catalog: Option<&CatalogRevision>,
 ) -> Result<LaunchPlan> {
-    build_checked_sim_launch_plan_with_scope(project_root, resolved, manifest_extras, catalog, None)
+    build_checked_sim_launch_plan_with_scope(
+        project_root,
+        world,
+        resolved,
+        manifest_extras,
+        catalog,
+        None,
+    )
 }
 
 pub(crate) fn build_checked_sim_launch_plan_with_scope(
     project_root: &Path,
+    world: &Path,
     resolved: &ResolvedRobot,
     manifest_extras: &RobotManifestExtras,
     catalog: Option<&CatalogRevision>,
@@ -493,7 +502,9 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
     }
 
     build_launch_plan(
-        LaunchMode::Sim,
+        LaunchMode::Webots {
+            world: world.to_path_buf(),
+        },
         &[CheckedRobotLaunchInput {
             project_root,
             resolved,
@@ -690,27 +701,27 @@ fn sim_checked_participants(
         .collect()
 }
 
-fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Result<()> {
-    let output = build_dry_run_output(plan);
+fn report_plan_only(sim: &SimPlan, message_format: MessageFormat) -> Result<()> {
+    let output = build_dry_run_output(sim);
     crate::commands::print_message(
         &output,
         || {
             println!(
                 "target_generation: {} (channel {})",
-                plan.resolved.target_generation, plan.resolved.channel
+                sim.ctx.resolved.target_generation, sim.ctx.resolved.channel
             );
-            if let Some(revision) = &plan.resolved.catalog_revision {
+            if let Some(revision) = &sim.ctx.resolved.catalog_revision {
                 println!("catalog revision: {revision}");
             }
             println!(
                 "official services ({}):",
-                plan.resolved.platform_runtimes.len()
+                sim.ctx.resolved.platform_runtimes.len()
             );
-            for runtime in &plan.resolved.platform_runtimes {
+            for runtime in &sim.ctx.resolved.platform_runtimes {
                 println!("  - {} -> {}", runtime.name, runtime.artifact_ref());
             }
-            println!("world: {}", plan.world_path.display());
-            println!("router: {}", plan.bus_connect);
+            println!("world: {}", output.world_path.display());
+            println!("router: {}", output.bus_connect);
             // Out of the project tree now (`~/.phoxal/run/simulation/webots`,
             // see `webots_stage_root`), so print it explicitly for discoverability
             // even though nothing is written in dry-run mode.
@@ -718,7 +729,7 @@ fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Resul
                 println!("staged simulation to {}", root.display());
             }
             println!("site tools:");
-            for tool in &plan.native_tools {
+            for tool in &output.native_tools {
                 println!("  - {tool}");
             }
             println!(
@@ -755,20 +766,22 @@ fn report_plan_only(plan: &SimulatePlan, message_format: MessageFormat) -> Resul
 /// their participant ids, and each simulator participant's SIMULATION-MANAGED
 /// ownership + the intended staged world path. Never stages or launches
 /// anything - the path is computed, not written.
-fn build_dry_run_output(plan: &SimulatePlan) -> SimulateDryRunOutput {
-    let substitutions = substitution_lines(&plan.launch_plan);
-    let simulator_artifacts = simulator_artifact_lines(&plan.resolved);
-    let simulation_managed = simulation_managed_lines(&plan.launch_plan);
-    let intended_staged_world_path = intended_staged_world_path(&plan.world_path);
+fn build_dry_run_output(sim: &SimPlan) -> SimulateDryRunOutput {
+    let substitutions = substitution_lines(&sim.plan);
+    let simulator_artifacts = simulator_artifact_lines(&sim.ctx.resolved);
+    let simulation_managed = simulation_managed_lines(&sim.plan);
+    let world_path = webots_world(&sim.plan.mode).to_path_buf();
+    let intended_staged_world_path = intended_staged_world_path(&world_path);
+    let native_tools = native_tool_labels_from_plan(&sim.plan);
     SimulateDryRunOutput {
         mode: "dry-run",
-        target_generation: plan.resolved.target_generation.clone(),
-        channel: plan.resolved.channel.to_string(),
-        catalog_revision: plan.resolved.catalog_revision.clone(),
-        world_path: plan.world_path.clone(),
-        bus_connect: plan.bus_connect.clone(),
-        platform_service_count: plan.resolved.platform_runtimes.len(),
-        native_tools: plan.native_tools.clone(),
+        target_generation: sim.ctx.resolved.target_generation.clone(),
+        channel: sim.ctx.resolved.channel.to_string(),
+        catalog_revision: sim.ctx.resolved.catalog_revision.clone(),
+        world_path,
+        bus_connect: DEFAULT_ROUTER_CONNECT.to_string(),
+        platform_service_count: sim.ctx.resolved.platform_runtimes.len(),
+        native_tools,
         substitutions,
         webots_app: WebotsAppSummary {
             site_id: WEBOTS_SITE_ID.to_string(),
@@ -777,6 +790,16 @@ fn build_dry_run_output(plan: &SimulatePlan) -> SimulateDryRunOutput {
         },
         simulator_artifacts,
         simulation_managed_participants: simulation_managed,
+    }
+}
+
+/// Extract the resolved `.wbt` world path a sim `LaunchPlan`'s mode carries.
+/// `simulate` always builds `LaunchMode::Webots`, so any other mode here is a
+/// caller bug, not a user-facing error.
+fn webots_world(mode: &LaunchMode) -> &Path {
+    match mode {
+        LaunchMode::Webots { world } => world.as_path(),
+        _ => unreachable!("simulate always builds a plan with LaunchMode::Webots"),
     }
 }
 
@@ -918,13 +941,18 @@ fn substitution_topic_summary(substitution: &SubstitutionRecord) -> String {
 /// shared with `run`/`deploy` (out of this fix's scope, and a behavior change
 /// neither asked for); simulate instead just stops auto-launching joypad,
 /// gated behind the pre-existing (till now unused) `--joypad`/`options.joypad`
-/// flag - see the matching filter in `prepare_with_mode`.
-fn native_tool_labels(options: SimulateOptions) -> Vec<String> {
-    let mut labels = vec![SITE_TOOL_ROUTER.to_string()];
-    if options.joypad {
-        labels.push(SITE_TOOL_JOYPAD.to_string());
-    }
-    labels.push("webots".to_string());
+/// flag - see the matching filter in `prepare_with_mode`, which already drops
+/// `tool-joypad` from `LaunchPlan.site` when `--joypad` is absent. This
+/// function's labels are derived from that same plan, so they never need
+/// `options` themselves - it replaces the old `SimulatePlan::native_tools`
+/// stored field.
+fn native_tool_labels_from_plan(plan: &LaunchPlan) -> Vec<String> {
+    let mut labels = plan
+        .site
+        .iter()
+        .map(|site| site.id.clone())
+        .collect::<Vec<_>>();
+    labels.push(WEBOTS_SITE_ID.to_string());
     labels
 }
 
@@ -939,14 +967,11 @@ pub(crate) const WEBOTS_SITE_ID: &str = "webots";
 /// only simulator-side child. The supervisor and controller participants are
 /// registered separately by `prepare_robot_participants` (SIMULATION-MANAGED,
 /// no spec of their own); this function only produces Webots's own spec.
-fn stage_and_prepare_webots_spec(app: &AppContext, plan: &SimulatePlan) -> Result<ParticipantSpec> {
-    let staged = stage_simulation_for_robot(
-        &plan.project_root,
-        &plan.world_path,
-        &plan.resolved,
-        &plan.launch_plan,
-    )?;
-    stage_simulator_controller_binaries(&plan.resolved, &app.ui)?;
+fn stage_and_prepare_webots_spec(app: &AppContext, sim: &SimPlan) -> Result<ParticipantSpec> {
+    let world = webots_world(&sim.plan.mode);
+    let staged =
+        stage_simulation_for_robot(&sim.ctx.project_root, world, &sim.ctx.resolved, &sim.plan)?;
+    stage_simulator_controller_binaries(&sim.ctx.resolved, &app.ui)?;
     let webots_path = crate::host_doctor::webots_executable_path()
         .map_err(|error| anyhow!("{error}"))
         .context("failed to locate the Webots executable for live simulate")?;
@@ -1410,12 +1435,21 @@ mod tests {
         fixture_contract_for_tests, fixture_tool_entry_for_tests,
     };
     use crate::host_paths::test_support::ScratchPhoxalHome;
+    use crate::launch_plan::SITE_TOOL_ROUTER;
     use crate::resolver::{
         ResolvedComponent, ResolvedComponentSource, ResolvedPathOverride, ResolvedPathOverrideKind,
         ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, host_target_triple,
         target_generation_for_robot,
     };
     use std::fs;
+
+    /// A `LaunchMode::Webots` for tests that only care about exercising the
+    /// Webots-mode participant/ownership rules, not the world path itself.
+    fn webots_mode_for_tests() -> LaunchMode {
+        LaunchMode::Webots {
+            world: PathBuf::from("worlds/test.wbt"),
+        }
+    }
 
     #[test]
     fn live_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
@@ -1498,7 +1532,7 @@ mod tests {
             }],
         )?;
         let sim_plan = build_launch_plan(
-            LaunchMode::Sim,
+            webots_mode_for_tests(),
             &[CheckedRobotLaunchInput {
                 project_root: temp.path(),
                 resolved: &resolved,
@@ -1545,7 +1579,7 @@ mod tests {
         assert!(report.is_ok(), "{report:?}");
 
         let plan = build_launch_plan(
-            LaunchMode::Sim,
+            webots_mode_for_tests(),
             &[CheckedRobotLaunchInput {
                 project_root: temp.path(),
                 resolved: &resolved,
@@ -1719,7 +1753,7 @@ mod tests {
         let extras = RobotManifestExtras::default();
         let sources = sim_source_participants(temp.path(), &resolved, None)?;
         let plan = build_launch_plan(
-            LaunchMode::Sim,
+            webots_mode_for_tests(),
             &[CheckedRobotLaunchInput {
                 project_root: temp.path(),
                 resolved: &resolved,
@@ -1792,7 +1826,7 @@ mod tests {
         )];
         let sim_participants = sim_checked_participants(&checked);
         let plan = build_launch_plan(
-            LaunchMode::Sim,
+            webots_mode_for_tests(),
             &[CheckedRobotLaunchInput {
                 project_root: temp.path(),
                 resolved: &resolved,
@@ -1869,7 +1903,7 @@ mod tests {
         assert!(report.is_ok(), "{report:?}");
 
         let plan = build_launch_plan(
-            LaunchMode::Sim,
+            webots_mode_for_tests(),
             &[CheckedRobotLaunchInput {
                 project_root: temp.path(),
                 resolved: &resolved,
@@ -1965,7 +1999,7 @@ mod tests {
         assert!(report.is_ok(), "{report:?}");
 
         let plan = build_launch_plan(
-            LaunchMode::Sim,
+            webots_mode_for_tests(),
             &[CheckedRobotLaunchInput {
                 project_root: temp.path(),
                 resolved: &resolved,
@@ -2064,7 +2098,7 @@ mod tests {
         let sim_participants = sim_checked_participants(&checked);
 
         let plan = build_launch_plan(
-            LaunchMode::Sim,
+            webots_mode_for_tests(),
             &[CheckedRobotLaunchInput {
                 project_root: temp.path(),
                 resolved: &resolved,
@@ -2146,7 +2180,7 @@ mod tests {
         let sim_participants = sim_checked_participants(&checked);
 
         let launch_plan = build_launch_plan(
-            LaunchMode::Sim,
+            webots_mode_for_tests(),
             &[CheckedRobotLaunchInput {
                 project_root: temp.path(),
                 resolved: &resolved,
@@ -2157,15 +2191,14 @@ mod tests {
             }],
         )?;
 
-        let plan = SimulatePlan {
-            robot_path: temp.path().join("robot.yaml"),
-            project_root: temp.path().to_path_buf(),
-            world_path: temp.path().join("worlds/test.wbt"),
-            bus_connect: DEFAULT_ROUTER_CONNECT.to_string(),
-            native_tools: native_tool_labels(SimulateOptions::default()),
-            resolved,
-            launch_plan,
-            source_participants: Vec::new(),
+        let plan = SimPlan {
+            plan: launch_plan,
+            ctx: PlanContext {
+                robot_path: temp.path().join("robot.yaml"),
+                project_root: temp.path().to_path_buf(),
+                resolved,
+                source_participants: Vec::new(),
+            },
         };
 
         let output = build_dry_run_output(&plan);
@@ -2237,7 +2270,7 @@ mod tests {
         )?;
 
         assert_eq!(
-            plan.launch_plan.robots[0]
+            plan.plan.robots[0]
                 .substitutions
                 .iter()
                 .map(|substitution| substitution.component_instance.as_str())
@@ -2245,7 +2278,7 @@ mod tests {
             vec!["left_drive"]
         );
         assert_eq!(
-            plan.launch_plan.robots[0].substitutions[0].provider_participant_id,
+            plan.plan.robots[0].substitutions[0].provider_participant_id,
             "simulator-webots-controller-testbot"
         );
         Ok(())
@@ -2876,7 +2909,7 @@ artifacts:
         assert!(report.is_ok(), "{report:?}");
 
         let plan = build_launch_plan(
-            LaunchMode::Sim,
+            webots_mode_for_tests(),
             &[CheckedRobotLaunchInput {
                 project_root: temp.path(),
                 resolved: &resolved,
@@ -2979,7 +3012,7 @@ artifacts:
         ];
         let sim_participants = sim_checked_participants(&checked);
         let plan = build_launch_plan(
-            LaunchMode::Sim,
+            webots_mode_for_tests(),
             &[CheckedRobotLaunchInput {
                 project_root: temp.path(),
                 resolved: &resolved,

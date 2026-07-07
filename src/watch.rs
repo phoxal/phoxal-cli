@@ -18,7 +18,9 @@ use crate::commands::simulate::{
     SimulateMode, SimulateOptions, build_checked_sim_launch_plan_with_scope, resolve_project,
 };
 use crate::component_driver::component_driver_crate_dir;
-use crate::launch_plan::{CheckedRobotLaunchInput, LaunchMode, LaunchPlan, build_launch_plan};
+use crate::launch_plan::{
+    CheckedRobotLaunchInput, LaunchMode, LaunchPlan, PlanContext, build_launch_plan,
+};
 use crate::resolver::{
     ResolveOptions, ResolvedRobot, discover_robot_yaml, load_robot_with_extras,
     load_robot_with_extras_and_overlays, resolve,
@@ -96,20 +98,16 @@ impl DebounceQueue {
 }
 
 pub(crate) struct RunWatchConfig {
-    pub project_root: PathBuf,
+    pub ctx: PlanContext,
     pub options: RunOptions,
-    pub resolved: ResolvedRobot,
-    pub source_participants: Vec<SourceParticipant>,
     pub live_ids: BTreeSet<String>,
     pub board: BoardBackend,
     pub action_tx: mpsc::Sender<SupervisorAction>,
 }
 
 pub(crate) struct SimWatchConfig {
-    pub project_root: PathBuf,
+    pub ctx: PlanContext,
     pub options: SimulateOptions,
-    pub resolved: ResolvedRobot,
-    pub source_participants: Vec<SourceParticipant>,
     pub live_ids: BTreeSet<String>,
     pub board: BoardBackend,
     pub action_tx: mpsc::Sender<SupervisorAction>,
@@ -118,13 +116,13 @@ pub(crate) struct SimWatchConfig {
 pub(crate) fn spawn_run_watch(config: RunWatchConfig) -> JoinHandle<()> {
     let targets = watch_targets_from_sources(
         WatchMode::Run,
-        &config.resolved,
-        &config.source_participants,
+        &config.ctx.resolved,
+        &config.ctx.source_participants,
         &config.live_ids,
     );
     spawn_watch_loop(
         WatchMode::Run,
-        config.project_root,
+        config.ctx.project_root,
         WatchOptions::Run(config.options),
         config.board,
         config.action_tx,
@@ -135,13 +133,13 @@ pub(crate) fn spawn_run_watch(config: RunWatchConfig) -> JoinHandle<()> {
 pub(crate) fn spawn_sim_watch(config: SimWatchConfig) -> JoinHandle<()> {
     let targets = watch_targets_from_sources(
         WatchMode::Sim,
-        &config.resolved,
-        &config.source_participants,
+        &config.ctx.resolved,
+        &config.ctx.source_participants,
         &config.live_ids,
     );
     spawn_watch_loop(
         WatchMode::Sim,
-        config.project_root,
+        config.ctx.project_root,
         WatchOptions::Sim(config.options),
         config.board,
         config.action_tx,
@@ -449,6 +447,7 @@ fn recheck_sim_target(
     let resolved = resolve_project(project_root, options.clone(), SimulateMode::Live)?;
     let plan = build_checked_sim_launch_plan_with_scope(
         &resolved.project_root,
+        &resolved.world_path,
         &resolved.resolved,
         &resolved.manifest_extras,
         resolved.catalog.as_ref(),
