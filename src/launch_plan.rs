@@ -103,7 +103,7 @@ pub struct CheckedRobotLaunchInput<'a> {
     pub resolved: &'a ResolvedRobot,
     pub manifest_extras: &'a RobotManifestExtras,
     pub checked_participants: &'a [graph_check::ParticipantApis],
-    pub accepted_substitutions: &'a [graph_check::AcceptedSubstitution],
+    pub substitutions: &'a [SubstitutionRecord],
     pub source_participants: &'a [SourceParticipant],
 }
 
@@ -296,11 +296,7 @@ fn build_robot_launch(
         id: input.resolved.robot.robot.id.clone(),
         namespace: input.resolved.robot.robot.namespace.clone(),
         participants,
-        substitutions: input
-            .accepted_substitutions
-            .iter()
-            .map(substitution_record)
-            .collect(),
+        substitutions: input.substitutions.to_vec(),
     })
 }
 
@@ -350,25 +346,6 @@ fn launch_ownership(
         LaunchOwnership::SimulationManaged
     } else {
         LaunchOwnership::CliManaged
-    }
-}
-
-fn substitution_record(accepted: &graph_check::AcceptedSubstitution) -> SubstitutionRecord {
-    SubstitutionRecord {
-        component_instance: accepted.component_instance.clone(),
-        provider_participant_id: accepted.provider_participant_id.clone(),
-        provider_artifact_id: accepted.provider_artifact_id.clone(),
-        provider_kind: accepted.provider_kind.as_str().to_string(),
-        contracts: accepted
-            .contracts
-            .iter()
-            .map(|contract| SubstitutedContract {
-                family: contract.family.clone(),
-                topic: contract.topic.clone(),
-                direction: crate::commands::check::format_direction(contract.direction).to_string(),
-                schema_id: contract.schema_id.clone(),
-            })
-            .collect(),
     }
 }
 
@@ -674,7 +651,7 @@ mod tests {
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &outcome.checked_participants,
-                accepted_substitutions: &[],
+                substitutions: &[],
                 source_participants: &source_participants,
             }],
         )?;
@@ -816,7 +793,7 @@ mod tests {
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &checked,
-                accepted_substitutions: &[],
+                substitutions: &[],
                 source_participants: &sources,
             }],
         )
@@ -869,7 +846,7 @@ mod tests {
             resolved,
             manifest_extras,
             checked_participants: &[],
-            accepted_substitutions: &[],
+            substitutions: &[],
             source_participants: &[],
         }
     }

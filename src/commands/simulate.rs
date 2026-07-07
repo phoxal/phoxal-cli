@@ -19,7 +19,7 @@ use crate::commands::check::{
 use crate::component_driver::{component_assets_dir, component_driver_crate_dir};
 use crate::launch_plan::{
     CheckedRobotLaunchInput, DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, SITE_TOOL_JOYPAD,
-    SITE_TOOL_ROUTER, SubstitutionRecord, build_launch_plan,
+    SITE_TOOL_ROUTER, SubstitutedContract, SubstitutionRecord, build_launch_plan,
 };
 use crate::resolver::{
     ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras, resolve,
@@ -474,14 +474,11 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
     remap_simulator_participant_ids(&mut checked_participants, &resolved.robot.robot.id)?;
     checked_participants.extend(official_simulator_participants(resolved)?);
     let controller_provider_id = simulator_controller_provider_id(&resolved.robot.robot.id);
-    let substitutions =
-        contract_substitutions_from_driver_metadata(&checked_participants, &controller_provider_id);
+    let substitutions = simulated_component_records(&checked_participants, &controller_provider_id);
     let sim_participants = sim_checked_participants(&checked_participants);
     let report = graph_check::check_plan(graph_check::CheckInput {
-        mode: graph_check::PlanMode::Sim,
         participants: &sim_participants,
         robot_graph: &robot_graph,
-        substitutions: &substitutions,
     });
     if !report.is_ok() {
         crate::commands::check::ensure_check_outcome_ok(
@@ -502,7 +499,7 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
             resolved,
             manifest_extras,
             checked_participants: &sim_participants,
-            accepted_substitutions: &report.accepted_substitutions,
+            substitutions: &substitutions,
             source_participants: &source_participants,
         }],
     )
@@ -623,11 +620,27 @@ fn driver_metadata_unavailable(
     )
 }
 
-pub(crate) fn contract_substitutions_from_driver_metadata(
+/// Board display only: which component-driver participants sim dropped from
+/// the checked set (see `sim_checked_participants`) are instead "simulated by"
+/// the Webots controller. This is not a checked fact - `phoxal::check` (0.28+)
+/// no longer has a substitution concept, materializes nothing, and exposes no
+/// way to recover a materialized topic from a report - it is purely the CLI's
+/// own record of a caller-side plan choice, so it can render "component X
+/// simulated by webots-controller" on the sim board and dry-run output.
+///
+/// A driver's own `emit-apis` reports its component-template contracts with a
+/// literal `{instance}` placeholder (the same driver binary can be launched
+/// at any instance), so `{instance}` is filled in here with the driver's own
+/// known `component_instance` before display - the one piece of materialization
+/// this function can do unambiguously without consulting the robot graph. Any
+/// remaining `{capability}` placeholder is left as-is: `substitution_topic_summary`
+/// only keys off the `component/<instance>/` prefix, so this is enough to keep
+/// the board's collapsed "component/<instance>/*" rendering working.
+pub(crate) fn simulated_component_records(
     participants: &[graph_check::ParticipantApis],
     provider_participant_id: &str,
-) -> Vec<graph_check::ContractSubstitution> {
-    let mut substitutions = participants
+) -> Vec<SubstitutionRecord> {
+    let mut records = participants
         .iter()
         .filter(|participant| {
             participant.participant_class.is_checked()
@@ -635,16 +648,28 @@ pub(crate) fn contract_substitutions_from_driver_metadata(
         })
         .filter_map(|participant| match &participant.scope {
             graph_check::ParticipantScope::ComponentInstance(instance) => {
-                Some(graph_check::ContractSubstitution {
+                Some(SubstitutionRecord {
                     component_instance: instance.clone(),
                     provider_participant_id: provider_participant_id.to_string(),
-                    contracts: participant.contracts.clone(),
+                    provider_artifact_id: SIMULATOR_CONTROLLER_ARTIFACT_NAME.to_string(),
+                    provider_kind: "simulator".to_string(),
+                    contracts: participant
+                        .contracts
+                        .iter()
+                        .map(|contract| SubstitutedContract {
+                            family: contract.family.clone(),
+                            topic: contract.topic.replace("{instance}", instance),
+                            direction: crate::commands::check::format_direction(contract.direction)
+                                .to_string(),
+                            schema_id: contract.schema_id.clone(),
+                        })
+                        .collect(),
                 })
             }
             graph_check::ParticipantScope::Graph => None,
         })
         .collect::<Vec<_>>();
-    substitutions.sort_by(|left, right| {
+    records.sort_by(|left, right| {
         left.component_instance
             .cmp(&right.component_instance)
             .then_with(|| {
@@ -652,7 +677,7 @@ pub(crate) fn contract_substitutions_from_driver_metadata(
                     .cmp(&right.provider_participant_id)
             })
     });
-    substitutions
+    records
 }
 
 fn sim_checked_participants(
@@ -1468,7 +1493,7 @@ mod tests {
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &checked,
-                accepted_substitutions: &[],
+                substitutions: &[],
                 source_participants: &sources,
             }],
         )?;
@@ -1479,7 +1504,7 @@ mod tests {
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &checked,
-                accepted_substitutions: &[],
+                substitutions: &[],
                 source_participants: &sources,
             }],
         )?;
@@ -1511,13 +1536,11 @@ mod tests {
                 vec![motor_command(graph_check::Direction::Subscribe)],
             ),
         ];
-        let substitutions = contract_substitutions_from_driver_metadata(&checked, &controller_id);
+        let substitutions = simulated_component_records(&checked, &controller_id);
         let sim_participants = sim_checked_participants(&checked);
         let report = graph_check::check_plan(graph_check::CheckInput {
-            mode: graph_check::PlanMode::Sim,
             participants: &sim_participants,
             robot_graph: &graph,
-            substitutions: &substitutions,
         });
         assert!(report.is_ok(), "{report:?}");
 
@@ -1528,7 +1551,7 @@ mod tests {
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &sim_participants,
-                accepted_substitutions: &report.accepted_substitutions,
+                substitutions: &substitutions,
                 source_participants: &[],
             }],
         )?;
@@ -1551,7 +1574,6 @@ mod tests {
 
     #[test]
     fn two_identical_instances_get_disjoint_substitution_sets() {
-        let graph = component_graph(&["left_drive", "right_drive"]);
         let controller_id = simulator_controller_provider_id("robot_v1");
         let checked = vec![
             service_participant(
@@ -1561,30 +1583,28 @@ mod tests {
             driver_participant(
                 "ddsm115",
                 "left_drive",
-                vec![motor_command(graph_check::Direction::Subscribe)],
+                vec![materialized_motor_command(
+                    "left_drive",
+                    graph_check::Direction::Subscribe,
+                )],
             ),
             driver_participant(
                 "ddsm115",
                 "right_drive",
-                vec![motor_command(graph_check::Direction::Subscribe)],
+                vec![materialized_motor_command(
+                    "right_drive",
+                    graph_check::Direction::Subscribe,
+                )],
             ),
             simulator_controller_participant(
                 &controller_id,
                 vec![motor_command(graph_check::Direction::Subscribe)],
             ),
         ];
-        let substitutions = contract_substitutions_from_driver_metadata(&checked, &controller_id);
-        let sim_participants = sim_checked_participants(&checked);
-        let report = graph_check::check_plan(graph_check::CheckInput {
-            mode: graph_check::PlanMode::Sim,
-            participants: &sim_participants,
-            robot_graph: &graph,
-            substitutions: &substitutions,
-        });
-
-        assert!(report.is_ok(), "{report:?}");
-        let topics = report
-            .accepted_substitutions
+        // Board display only (no checker involved, see module docs): each
+        // dropped driver instance gets its own disjoint substitution record.
+        let substitutions = simulated_component_records(&checked, &controller_id);
+        let topics = substitutions
             .iter()
             .map(|substitution| {
                 (
@@ -1600,79 +1620,6 @@ mod tests {
                 ("right_drive", "component/right_drive/motor/motor/command"),
             ]
         );
-    }
-
-    #[test]
-    fn provider_not_covering_instance_surfaces_core_failure() {
-        let graph = component_graph(&["left_drive", "right_drive"]);
-        let controller_id = simulator_controller_provider_id("robot_v1");
-        let checked = vec![
-            service_participant(
-                "drive",
-                vec![motor_command(graph_check::Direction::Publish)],
-            ),
-            driver_participant(
-                "ddsm115",
-                "left_drive",
-                vec![motor_command(graph_check::Direction::Subscribe)],
-            ),
-            driver_participant(
-                "ddsm115",
-                "right_drive",
-                vec![motor_command(graph_check::Direction::Subscribe)],
-            ),
-            simulator_controller_participant(
-                &controller_id,
-                vec![materialized_motor_command(
-                    "left_drive",
-                    graph_check::Direction::Subscribe,
-                )],
-            ),
-        ];
-        let substitutions = contract_substitutions_from_driver_metadata(&checked, &controller_id);
-        let sim_participants = sim_checked_participants(&checked);
-        let report = graph_check::check_plan(graph_check::CheckInput {
-            mode: graph_check::PlanMode::Sim,
-            participants: &sim_participants,
-            robot_graph: &graph,
-            substitutions: &substitutions,
-        });
-
-        assert!(matches!(
-            report.problems.as_slice(),
-            [graph_check::Problem::IncompleteSubstitution {
-                component_instance,
-                missing_contracts,
-                ..
-            }] if component_instance == "right_drive"
-                && missing_contracts
-                    .iter()
-                    .any(|contract| contract.topic == "component/right_drive/motor/motor/command")
-        ));
-    }
-
-    #[test]
-    fn deploy_plan_with_substitution_is_a_hard_error() {
-        let substitution = graph_check::ContractSubstitution {
-            component_instance: "left_drive".to_string(),
-            provider_participant_id: simulator_controller_provider_id("robot_v1"),
-            contracts: vec![motor_command(graph_check::Direction::Subscribe)],
-        };
-        let report = graph_check::check_plan(graph_check::CheckInput {
-            mode: graph_check::PlanMode::Deploy,
-            participants: &[],
-            robot_graph: &graph_check::RobotGraph::default(),
-            substitutions: &[substitution],
-        });
-
-        assert!(matches!(
-            report.problems.as_slice(),
-            [graph_check::Problem::SubstitutionNotAllowed {
-                mode: graph_check::PlanMode::Deploy,
-                component_instance,
-                ..
-            }] if component_instance == "left_drive"
-        ));
     }
 
     #[test]
@@ -1778,7 +1725,7 @@ mod tests {
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &checked,
-                accepted_substitutions: &[],
+                substitutions: &[],
                 source_participants: &sources,
             }],
         )?;
@@ -1838,16 +1785,7 @@ mod tests {
                 vec![motor_command(graph_check::Direction::Subscribe)],
             ),
         ];
-        let accepted = vec![graph_check::AcceptedSubstitution {
-            component_instance: "left_drive".to_string(),
-            provider_participant_id: controller_id.clone(),
-            provider_artifact_id: "webots-controller".to_string(),
-            provider_kind: graph_check::ParticipantKind::Simulator,
-            contracts: vec![materialized_motor_command(
-                "left_drive",
-                graph_check::Direction::Subscribe,
-            )],
-        }];
+        let substitutions = simulated_component_records(&checked, &controller_id);
         let sources = vec![SourceParticipant::user_service(
             "mission",
             temp.path().join("runtimes/mission"),
@@ -1860,7 +1798,7 @@ mod tests {
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &sim_participants,
-                accepted_substitutions: &accepted,
+                substitutions: &substitutions,
                 source_participants: &sources,
             }],
         )?;
@@ -1922,13 +1860,11 @@ mod tests {
                 vec![motor_command(graph_check::Direction::Subscribe)],
             ),
         ];
-        let substitutions = contract_substitutions_from_driver_metadata(&checked, &controller_id);
+        let substitutions = simulated_component_records(&checked, &controller_id);
         let sim_participants = sim_checked_participants(&checked);
         let report = graph_check::check_plan(graph_check::CheckInput {
-            mode: graph_check::PlanMode::Sim,
             participants: &sim_participants,
             robot_graph: &graph,
-            substitutions: &substitutions,
         });
         assert!(report.is_ok(), "{report:?}");
 
@@ -1939,7 +1875,7 @@ mod tests {
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &sim_participants,
-                accepted_substitutions: &report.accepted_substitutions,
+                substitutions: &substitutions,
                 source_participants: &[],
             }],
         )?;
@@ -2020,13 +1956,11 @@ mod tests {
                 vec![motor_command(graph_check::Direction::Subscribe)],
             ),
         ];
-        let substitutions = contract_substitutions_from_driver_metadata(&checked, &controller_id);
+        let substitutions = simulated_component_records(&checked, &controller_id);
         let sim_participants = sim_checked_participants(&checked);
         let report = graph_check::check_plan(graph_check::CheckInput {
-            mode: graph_check::PlanMode::Sim,
             participants: &sim_participants,
             robot_graph: &graph,
-            substitutions: &substitutions,
         });
         assert!(report.is_ok(), "{report:?}");
 
@@ -2037,7 +1971,7 @@ mod tests {
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &sim_participants,
-                accepted_substitutions: &report.accepted_substitutions,
+                substitutions: &substitutions,
                 source_participants: &[],
             }],
         )?;
@@ -2136,7 +2070,7 @@ mod tests {
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &sim_participants,
-                accepted_substitutions: &[],
+                substitutions: &[],
                 source_participants: &[],
             }],
         )?;
@@ -2218,7 +2152,7 @@ mod tests {
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &sim_participants,
-                accepted_substitutions: &[],
+                substitutions: &[],
                 source_participants: &[],
             }],
         )?;
@@ -2278,12 +2212,21 @@ mod tests {
     }
 
     #[test]
-    fn real_sim_plan_with_component_names_missing_simulator_provider() -> Result<()> {
+    fn real_sim_plan_with_component_names_missing_simulator_provider_still_succeeds() -> Result<()>
+    {
+        // phoxal 0.28 dropped the substitution-completeness gate entirely
+        // (see `phoxal::check` module docs): whether a simulator provider is
+        // actually present is a caller/deployment choice, not something the
+        // checker judges. So a sim plan with a component driver but no
+        // resolved simulator must still succeed - and the board still labels
+        // the driver's component as "simulated by" the controller, because
+        // that label is a CLI-side display fact computed from the plan, not
+        // a checked one.
         let temp = tempfile::tempdir()?;
         write_robot_project_with_component(temp.path())?;
         let catalog_path = write_catalog_with_driver(temp.path())?;
 
-        let error = prepare(
+        let plan = prepare(
             temp.path(),
             SimulateOptions {
                 world: "test".to_string(),
@@ -2291,14 +2234,19 @@ mod tests {
                 overlays: vec!["dev".to_string()],
                 ..SimulateOptions::default()
             },
-        )
-        .expect_err("no simulator provider should fail the sim check");
-        let message = error.to_string();
-        assert!(message.contains("NoSimulatorProvider"), "{message}");
-        assert!(message.contains("left_drive"), "{message}");
-        assert!(
-            message.contains("simulator-webots-controller-testbot"),
-            "{message}"
+        )?;
+
+        assert_eq!(
+            plan.launch_plan.robots[0]
+                .substitutions
+                .iter()
+                .map(|substitution| substitution.component_instance.as_str())
+                .collect::<Vec<_>>(),
+            vec!["left_drive"]
+        );
+        assert_eq!(
+            plan.launch_plan.robots[0].substitutions[0].provider_participant_id,
+            "simulator-webots-controller-testbot"
         );
         Ok(())
     }
@@ -2919,13 +2867,11 @@ artifacts:
                 vec![motor_command(graph_check::Direction::Subscribe)],
             ),
         ];
-        let substitutions = contract_substitutions_from_driver_metadata(&checked, &controller_id);
+        let substitutions = simulated_component_records(&checked, &controller_id);
         let sim_participants = sim_checked_participants(&checked);
         let report = graph_check::check_plan(graph_check::CheckInput {
-            mode: graph_check::PlanMode::Sim,
             participants: &sim_participants,
             robot_graph: &graph,
-            substitutions: &substitutions,
         });
         assert!(report.is_ok(), "{report:?}");
 
@@ -2936,7 +2882,7 @@ artifacts:
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &sim_participants,
-                accepted_substitutions: &report.accepted_substitutions,
+                substitutions: &substitutions,
                 source_participants: &[],
             }],
         )?;
@@ -3039,7 +2985,7 @@ artifacts:
                 resolved: &resolved,
                 manifest_extras: &extras,
                 checked_participants: &sim_participants,
-                accepted_substitutions: &[],
+                substitutions: &[],
                 source_participants: &[],
             }],
         )?;

@@ -300,7 +300,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
             resolved: &resolved,
             manifest_extras: &loaded.extras,
             checked_participants: &outcome.checked_participants,
-            accepted_substitutions: &[],
+            substitutions: &[],
             source_participants: &source_participants,
         }],
     )?;
