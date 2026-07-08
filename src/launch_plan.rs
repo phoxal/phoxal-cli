@@ -544,7 +544,7 @@ mod tests {
     use anyhow::bail;
 
     use crate::catalog::{
-        ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
+        Channel as CatalogChannel, fixture_catalog_for_tests,
         fixture_component_assets_entry_for_tests, fixture_component_driver_entry_for_tests,
         fixture_contract_for_tests, fixture_service_entry_for_tests,
     };
@@ -575,13 +575,8 @@ mod tests {
                 "0.1.0",
                 CatalogChannel::Stable,
                 &host_target_triple(),
-                ArtifactStatus::Released,
-                vec![fixture_contract_for_tests(
-                    "drive::Target",
-                    "drive/target",
-                    "publish",
-                    "schema-drive",
-                )],
+                true,
+                vec![fixture_contract_for_tests("drive::Target", "schema-drive")],
             ),
             fixture_component_assets_entry_for_tests(
                 "ddsm115",
@@ -595,7 +590,7 @@ mod tests {
                 "0.1.0",
                 CatalogChannel::Stable,
                 &host_target_triple(),
-                ArtifactStatus::Released,
+                true,
                 Vec::new(),
             ),
         ]);
@@ -931,7 +926,11 @@ artifacts:
             asset: format!("{name}-0.1.0-{}.tar.gz", host_target_triple()),
             binary_name: name.to_string(),
             sha256: "0".repeat(64),
-            metadata: None,
+            published: false,
+            generation: "y2026_1".to_string(),
+            contracts: Vec::new(),
+            config_schema: None,
+            bus_abi: None,
             path_override: None,
         }
     }

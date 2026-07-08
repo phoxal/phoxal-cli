@@ -2797,9 +2797,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal"
-version = "0.28.0"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb98c1aa6f28053fb7f1efca0f11d8c46573e2ee9ac52a2c1454797794282065"
+checksum = "a3e5dbae92f0882dcfa6b7c72d1ebdb0aea326ffb27aa2325b7951db8ced87bd"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2816,6 +2816,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

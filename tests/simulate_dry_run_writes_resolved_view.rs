@@ -1,8 +1,7 @@
 use std::fs;
 
 use phoxal_cli::catalog::{
-    ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
-    fixture_tool_entry_for_tests,
+    Channel as CatalogChannel, fixture_catalog_for_tests, fixture_tool_entry_for_tests,
 };
 use phoxal_cli::commands::simulate::{SimulateOptions, prepare};
 use phoxal_cli::resolver::host_target_triple;
@@ -94,7 +93,7 @@ fn write_catalog(root: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
             "0.1.0",
             CatalogChannel::Stable,
             &host_target_triple(),
-            ArtifactStatus::Pending,
+            false,
             Vec::new(),
         ),
         fixture_tool_entry_for_tests(
@@ -103,7 +102,7 @@ fn write_catalog(root: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
             "0.1.0",
             CatalogChannel::Stable,
             &host_target_triple(),
-            ArtifactStatus::Pending,
+            false,
             Vec::new(),
         ),
     ]);

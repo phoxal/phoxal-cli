@@ -10,9 +10,7 @@ use sha2::{Digest, Sha256};
 use tar::Archive;
 
 use crate::catalog::ArtifactKind;
-use crate::resolver::{
-    ResolvedArtifactMetadata, ResolvedPlatformRuntime, ResolvedTool, official_binary_name,
-};
+use crate::resolver::{ResolvedPlatformRuntime, ResolvedTool, official_binary_name};
 use crate::ui::Ui;
 use crate::utils::make_executable;
 
@@ -40,6 +38,11 @@ impl ProvisioningMode {
 /// (`phoxal/service-drive`); on-disk names use its filesystem-safe projection
 /// ([`Self::package`]/[`Self::tag`]) since a package id's `/` is not a legal
 /// path component (docs #21).
+///
+/// Contract/config metadata is no longer part of staging at all: the catalog
+/// inlines it in the manifest's `ArtifactEntry` (`resolver::ResolvedPlatformRuntime::contracts`
+/// etc.), so there is no `.emit-apis.json` sidecar to fetch here anymore -
+/// staging is purely "download the tarball, verify it, unpack it."
 #[derive(Debug, Clone)]
 pub struct NativeArtifactDescriptor {
     pub package_id: String,
@@ -48,11 +51,6 @@ pub struct NativeArtifactDescriptor {
     pub version: String,
     pub asset: String,
     pub sha256: String,
-    /// The packaged emit-apis sidecar metadata. `Some` for every kind that
-    /// ships a runtime binary (service/driver/tool/simulator); `None` for
-    /// `component_assets` - a target-independent asset bundle has no runtime
-    /// binary to describe (docs #21), so it ships no emit-apis sidecar at all.
-    pub metadata: Option<ResolvedArtifactMetadata>,
     /// The binary name inside the unpacked tarball. Empty for
     /// `component_assets` - an asset bundle has no binary.
     pub binary_name: String,
@@ -60,12 +58,12 @@ pub struct NativeArtifactDescriptor {
 
 impl NativeArtifactDescriptor {
     /// Build a descriptor from any resolved official artifact that carries a
-    /// release asset: a service/simulator ([`ResolvedPlatformRuntime`]) or -
+    /// built tarball: a service/simulator ([`ResolvedPlatformRuntime`]) or -
     /// via [`crate::resolver::ResolvedComponentPackage::catalog_runtime`] - a
     /// catalog-resolved component assets bundle or driver, since both project
     /// onto the identical `ResolvedPlatformRuntime` shape. Returns `None` when
-    /// there is no release asset to stage (a path override, or a catalog entry
-    /// with no release asset for this scope yet).
+    /// there is nothing to stage (a path override, or a catalog entry with no
+    /// built artifact for this scope yet).
     pub fn from_runtime(runtime: &ResolvedPlatformRuntime) -> Result<Option<Self>> {
         let Some(sha256) = &runtime.sha256 else {
             return Ok(None);
@@ -84,16 +82,12 @@ impl NativeArtifactDescriptor {
             version: runtime.version.clone(),
             asset: runtime.artifact_ref().to_string(),
             sha256: sha256.clone(),
-            metadata: runtime.metadata.clone(),
             binary_name,
         }))
     }
 
     pub fn from_tool(tool: &ResolvedTool) -> Result<Option<Self>> {
-        let Some(metadata) = &tool.metadata else {
-            return Ok(None);
-        };
-        if tool.path_override.is_some() {
+        if !tool.published || tool.path_override.is_some() {
             return Ok(None);
         }
         Ok(Some(Self {
@@ -103,7 +97,6 @@ impl NativeArtifactDescriptor {
             version: tool.resolved.clone(),
             asset: tool.asset.clone(),
             sha256: tool.sha256.clone(),
-            metadata: Some(metadata.clone()),
             binary_name: tool.binary_name.clone(),
         }))
     }
@@ -146,8 +139,8 @@ pub fn stage_tool(
 
 /// Stage a resolved component package's (assets or driver) catalog bundle.
 /// `None` when the package is not catalog-sourced (`Path`/`Git` - a local
-/// override with no release asset to fetch) or when the catalog entry has no
-/// release asset for the needed scope yet. Reuses the identical
+/// override with no bundle to fetch) or when the catalog entry has no built
+/// artifact for the needed scope yet. Reuses the identical
 /// [`NativeArtifactDescriptor`]/[`stage_descriptor`] machinery services and
 /// tools already stage through - a component's `catalog_runtime` projects onto
 /// the same [`ResolvedPlatformRuntime`] shape.
@@ -302,27 +295,17 @@ fn copy_dir_recursive_into(source: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Stage one native artifact's tarball into the local cache, unpacking it,
-/// then - only when the descriptor carries `Some` metadata - fetching its
-/// packaged emit-apis sidecar. `component_assets` descriptors carry no
-/// metadata (docs #21), so they skip the sidecar entirely and stage the
-/// tarball only; every other kind (service/driver/tool/simulator) always has
-/// one.
+/// Stage one native artifact's tarball into the local cache, unpacking it.
+/// `component_assets` descriptors have no binary at all, so "staged" just
+/// means the tarball is unpacked.
 pub fn stage_descriptor(
     ui: Option<&Ui>,
     descriptor: &NativeArtifactDescriptor,
     mode: ProvisioningMode,
 ) -> Result<PathBuf> {
     let root = artifact_cache_dir(descriptor)?;
-    let metadata = metadata_path(descriptor)?;
     let binary = root.join(&descriptor.binary_name);
-    // A descriptor with no metadata (component_assets) is "already staged"
-    // once the tarball is unpacked - probe the cache root itself instead of a
-    // metadata sidecar that will never exist.
-    let already_staged = match &metadata {
-        Some(metadata) => metadata.is_file(),
-        None => root.is_dir(),
-    };
+    let already_staged = root.is_dir();
     if mode == ProvisioningMode::MissingOnly && already_staged {
         return Ok(binary);
     }
@@ -343,38 +326,10 @@ pub fn stage_descriptor(
     }
     verify_file_sha256(&asset_path, &descriptor.sha256)?;
     unpack_asset(&asset_path, &root)?;
-    // The packaged emit-apis metadata ships as its own release asset next to
-    // the archive, not inside it - only for kinds that have one.
-    if let (Some(descriptor_metadata), Some(metadata_path)) = (&descriptor.metadata, &metadata) {
-        let emit_apis_bytes = download_release_asset(
-            &descriptor.tag(),
-            &descriptor_metadata.emit_apis,
-            &descriptor_metadata.emit_apis_sha256,
-        )?;
-        write_file_atomic(metadata_path, &emit_apis_bytes)?;
-        verify_file_sha256(metadata_path, &descriptor_metadata.emit_apis_sha256)?;
-    }
     if binary.is_file() {
         make_executable(&binary)?;
     }
     Ok(binary)
-}
-
-/// Read a staged artifact's packaged emit-apis JSON, staging it first if
-/// necessary. Only meaningful for a descriptor that carries `Some` metadata -
-/// callers must not call this for a `component_assets` descriptor (it has no
-/// emit-apis at all); see [`NativeArtifactDescriptor::metadata`].
-pub fn read_packaged_emit_apis(descriptor: &NativeArtifactDescriptor) -> Result<String> {
-    let metadata = metadata_path(descriptor)?.ok_or_else(|| {
-        anyhow!(
-            "{} {} has no emit-apis metadata to read (component_assets never does)",
-            descriptor.kind,
-            descriptor.name
-        )
-    })?;
-    stage_descriptor(None, descriptor, ProvisioningMode::MissingOnly)?;
-    fs::read_to_string(&metadata)
-        .with_context(|| format!("failed to read packaged emit-apis {}", metadata.display()))
 }
 
 pub fn artifact_binary_path(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
@@ -386,17 +341,6 @@ pub fn artifact_cache_dir(descriptor: &NativeArtifactDescriptor) -> Result<PathB
         .join("artifacts")
         .join(descriptor.package())
         .join(sanitize_path_segment(&descriptor.asset)))
-}
-
-/// The packaged emit-apis sidecar's cache path, or `None` for a descriptor
-/// with no metadata (`component_assets`).
-pub fn metadata_path(descriptor: &NativeArtifactDescriptor) -> Result<Option<PathBuf>> {
-    let Some(metadata) = &descriptor.metadata else {
-        return Ok(None);
-    };
-    Ok(Some(
-        artifact_cache_dir(descriptor)?.join(&metadata.emit_apis),
-    ))
 }
 
 fn cached_asset_path(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {

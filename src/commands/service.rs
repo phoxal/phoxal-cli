@@ -96,9 +96,8 @@ pub fn service_catalog_summary(
     .ok_or_else(crate::catalog::unavailable_catalog_error)?;
     Ok(ServiceCatalogSummary {
         entries: catalog
-            .entries
+            .services
             .iter()
-            .filter(|entry| entry.kind == crate::catalog::ArtifactKind::Service)
             .map(|entry| ServiceCatalogEntry {
                 id: entry.package.clone(),
                 api_generations: vec![entry.api_generation.clone()],
@@ -115,8 +114,8 @@ mod tests {
 
     use super::*;
     use crate::catalog::{
-        ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
-        fixture_contract_for_tests, fixture_service_entry_for_tests,
+        Channel as CatalogChannel, fixture_catalog_for_tests, fixture_contract_for_tests,
+        fixture_service_entry_for_tests,
     };
 
     #[test]
@@ -162,11 +161,9 @@ artifacts:
             "0.1.0",
             CatalogChannel::Stable,
             &crate::resolver::host_target_triple(),
-            ArtifactStatus::Pending,
+            false,
             vec![fixture_contract_for_tests(
                 "drive::Target",
-                "drive/target",
-                "publish",
                 "0123456789abcdef",
             )],
         )]);

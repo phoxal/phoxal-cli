@@ -61,7 +61,7 @@ fn resolved_component_package_dir(
 /// return its local cache directory: the unpacked assets bundle root
 /// (`component.yaml`, `structure.urdf`, `simulation.yaml`, `meshes/`) for a
 /// `component_assets` package, or the cache directory containing the staged
-/// driver binary + packaged emit-apis for a `component_driver` package.
+/// driver binary for a `component_driver` package.
 /// `MissingOnly` mode: reuses an already-staged local cache without touching
 /// the network again, matching how a service's cache is consulted.
 fn catalog_component_package_dir(package: &ResolvedComponentPackage) -> Result<PathBuf> {

@@ -2,11 +2,11 @@ use std::fs;
 
 use phoxal::model::robot::RobotV1 as Robot;
 use phoxal_cli::catalog::{
-    ArtifactStatus, CatalogRevision, Channel as CatalogChannel, fixture_catalog_for_tests,
-    fixture_component_assets_entry_for_tests, fixture_component_assets_release_asset_for_tests,
+    CatalogRevision, Channel as CatalogChannel, fixture_artifact_for_tests,
+    fixture_catalog_for_tests, fixture_component_assets_entry_for_tests,
     fixture_component_driver_entry_for_tests, fixture_contract_for_tests,
-    fixture_release_asset_with_metadata_for_tests, fixture_service_entry_for_tests,
-    fixture_simulator_entry_for_tests, fixture_tool_entry_for_tests,
+    fixture_service_entry_for_tests, fixture_simulator_entry_for_tests,
+    fixture_tool_entry_for_tests,
 };
 use phoxal_cli::resolver::{
     ResolveOptions, ResolvedComponentSource, ResolvedPathOverrideKind, ResolvedRobot,
@@ -150,9 +150,9 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
         "0.1.0",
         CatalogChannel::Stable,
     );
-    assets_entry.release_assets.insert(
+    assets_entry.as_asset_entry_mut().artifacts.insert(
         phoxal_cli::catalog::TARGET_INDEPENDENT_SCOPE.to_string(),
-        fixture_component_assets_release_asset_for_tests(
+        fixture_artifact_for_tests(
             "phoxal-component-ddsm115-assets-v0.1.0.tar.zst",
             &"a".repeat(64),
         ),
@@ -163,12 +163,12 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
         "0.1.0",
         CatalogChannel::Stable,
         &target,
-        ArtifactStatus::Released,
+        false,
         Vec::new(),
     );
-    driver_entry.release_assets.insert(
+    driver_entry.as_artifact_entry_mut().artifacts.insert(
         target.clone(),
-        fixture_release_asset_with_metadata_for_tests(
+        fixture_artifact_for_tests(
             &format!("phoxal-component-ddsm115-driver-v0.1.0-{target}.tar.zst"),
             &"b".repeat(64),
         ),
@@ -180,11 +180,9 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
             "0.1.0",
             CatalogChannel::Stable,
             &target,
-            ArtifactStatus::Pending,
+            false,
             vec![fixture_contract_for_tests(
                 "drive::Target",
-                "drive/target",
-                "publish",
                 "0123456789abcdef",
             )],
         ),
@@ -217,8 +215,8 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
         Some("a".repeat(64)).as_deref()
     );
     assert!(
-        assets_runtime.metadata.is_none(),
-        "component_assets carries no emit-apis metadata"
+        assets_runtime.bus_abi.is_none(),
+        "component_assets carries no bus_abi/contracts (no runtime binary to describe)"
     );
     assert_eq!(
         assets_runtime.artifact_ref(),
@@ -237,8 +235,8 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
         Some("b".repeat(64)).as_deref()
     );
     assert!(
-        driver_runtime.metadata.is_some(),
-        "component_driver carries emit-apis metadata"
+        driver_runtime.bus_abi.is_some(),
+        "component_driver carries inlined bus_abi metadata"
     );
     assert_eq!(
         driver_runtime.artifact_ref(),
@@ -269,7 +267,7 @@ fn catalog_component_with_no_release_asset_yet_still_resolves_with_none_runtime_
         .as_ref()
         .expect("catalog_runtime is populated even with no release asset yet");
     assert!(runtime.sha256.is_none());
-    assert!(runtime.metadata.is_none());
+    assert!(!runtime.published);
 
     Ok(())
 }
@@ -290,11 +288,9 @@ fn declared_driver_with_no_catalog_driver_package_is_a_named_diagnostic() -> any
             "0.1.0",
             CatalogChannel::Stable,
             &host_target_triple(),
-            ArtifactStatus::Pending,
+            false,
             vec![fixture_contract_for_tests(
                 "drive::Target",
-                "drive/target",
-                "publish",
                 "0123456789abcdef",
             )],
         ),
@@ -473,23 +469,27 @@ fn unused_provider_qualified_path_pin_is_rejected() -> anyhow::Result<()> {
 }
 
 #[test]
-fn loaded_catalog_without_target_generation_gets_not_yet_available_error() -> anyhow::Result<()> {
+fn loaded_catalog_without_target_channel_gets_not_yet_available_error() -> anyhow::Result<()> {
+    // The lean catalog schema has no separate "declared target triple" list
+    // to mismatch against (only `artifacts`, which is legitimately empty in a
+    // metadata-only catalog and must not by itself fail resolution - see
+    // `catalog::newest_generation_on_channel`). What remains a real,
+    // catalog-wide mismatch a robot can hit is the *channel*: a catalog that
+    // only publishes `preview` has nothing for a robot pinned to `stable`.
     let robot = Robot::parse_from_string(&minimal_robot_yaml_without_generation())?;
+    let target = "aarch64-unknown-linux-gnu";
     let catalog = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
         "drive",
         "y2026_1",
         "0.1.0",
-        CatalogChannel::Stable,
-        "x86_64-unknown-linux-gnu",
-        ArtifactStatus::Pending,
+        CatalogChannel::Preview,
+        target,
+        true,
         vec![fixture_contract_for_tests(
             "drive::Target",
-            "drive/target",
-            "publish",
             "0123456789abcdef",
         )],
     )]);
-    let target = "aarch64-unknown-linux-gnu";
     let error = resolve(
         &robot,
         std::path::Path::new("."),
@@ -501,7 +501,7 @@ fn loaded_catalog_without_target_generation_gets_not_yet_available_error() -> an
             ..ResolveOptions::default()
         },
     )
-    .expect_err("catalog missing the requested deploy target should fail explicitly");
+    .expect_err("catalog with nothing on the robot's channel should fail explicitly");
     let message = error.to_string();
 
     assert!(message.contains("NotYetAvailable"), "{message}");
@@ -689,11 +689,9 @@ fn test_catalog() -> CatalogRevision {
                 "0.1.0",
                 CatalogChannel::Stable,
                 &target,
-                ArtifactStatus::Pending,
+                false,
                 vec![fixture_contract_for_tests(
                     "drive::Target",
-                    "drive/target",
-                    "publish",
                     "0123456789abcdef",
                 )],
             )
@@ -712,11 +710,9 @@ fn test_catalog() -> CatalogRevision {
             "0.1.0",
             CatalogChannel::Stable,
             &target,
-            ArtifactStatus::Pending,
+            false,
             vec![fixture_contract_for_tests(
                 "component::State",
-                &format!("component/{name}/state"),
-                "publish",
                 "fedcba9876543210",
             )],
         ));
@@ -728,7 +724,7 @@ fn test_catalog() -> CatalogRevision {
             "0.1.0",
             CatalogChannel::Stable,
             &target,
-            ArtifactStatus::Pending,
+            false,
             Vec::new(),
         ),
         fixture_tool_entry_for_tests(
@@ -737,11 +733,9 @@ fn test_catalog() -> CatalogRevision {
             "0.1.0",
             CatalogChannel::Stable,
             &target,
-            ArtifactStatus::Pending,
+            false,
             vec![fixture_contract_for_tests(
                 "drive::Target",
-                "drive/target",
-                "subscribe",
                 "0123456789abcdef",
             )],
         ),
@@ -751,7 +745,7 @@ fn test_catalog() -> CatalogRevision {
             "0.14.0",
             CatalogChannel::Stable,
             &target,
-            ArtifactStatus::Pending,
+            false,
             Vec::new(),
         ),
         fixture_simulator_entry_for_tests(
@@ -760,11 +754,9 @@ fn test_catalog() -> CatalogRevision {
             "0.14.0",
             CatalogChannel::Stable,
             &target,
-            ArtifactStatus::Pending,
+            false,
             vec![fixture_contract_for_tests(
                 "component::MotorCommand",
-                "component/{instance}/motor/{capability}/command",
-                "subscribe",
                 "fedcba9876543210",
             )],
         ),

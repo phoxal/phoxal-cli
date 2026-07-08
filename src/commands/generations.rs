@@ -145,35 +145,51 @@ pub fn status(
         .map(str::to_string)
         .map(Ok)
         .unwrap_or_else(|| crate::resolver::target_generation_for_robot(&robot, Some(&catalog)))?;
-    let channel = crate::catalog::Channel::from(robot.artifacts.channel);
+    let channel = crate::catalog::to_catalog_channel(robot.artifacts.channel);
 
     let entries = catalog
-        .entries
+        .services
         .iter()
-        .filter(|entry| entry.api_generation == generation)
-        .filter(|entry| entry.channels.contains_key(&channel))
-        .filter(|entry| entry.target_triples.iter().any(|triple| triple == &target))
+        .map(|entry| (crate::catalog::ArtifactKind::Service, entry))
+        .chain(
+            catalog
+                .drivers
+                .iter()
+                .map(|entry| (crate::catalog::ArtifactKind::ComponentDriver, entry)),
+        )
+        .chain(
+            catalog
+                .tools
+                .iter()
+                .map(|entry| (crate::catalog::ArtifactKind::Tool, entry)),
+        )
+        .chain(
+            catalog
+                .simulators
+                .iter()
+                .map(|entry| (crate::catalog::ArtifactKind::Simulator, entry)),
+        )
+        .filter(|(_, entry)| entry.api_generation == generation)
+        .filter(|(_, entry)| entry.channels.contains_key(&channel))
         .collect::<Vec<_>>();
     let robot_scoped_artifact_ids = robot_scoped_artifact_ids(&robot, &entries);
 
     let mut artifacts = entries
         .iter()
-        .map(|entry| {
-            let target_status = entry
-                .status_for(&target)
-                .map(|status| status.to_string())
-                .unwrap_or_else(|| "missing".to_string());
+        .map(|(kind, entry)| {
+            let published = entry.artifacts.contains_key(&target);
+            let target_status = if published { "released" } else { "missing" }.to_string();
             let per_triple_status = entry
-                .status
-                .iter()
-                .map(|(triple, status)| TripleStatus {
+                .artifacts
+                .keys()
+                .map(|triple| TripleStatus {
                     triple: triple.clone(),
-                    status: status.to_string(),
+                    status: "released".to_string(),
                 })
                 .collect::<Vec<_>>();
             ArtifactReadiness {
                 artifact_id: entry.package.clone(),
-                kind: entry.kind.to_string(),
+                kind: kind.to_string(),
                 version: entry.version.clone(),
                 api_generation: entry.api_generation.clone(),
                 target_status,
@@ -199,7 +215,7 @@ pub fn status(
 
     Ok(GenerationStatusOutput {
         generation,
-        channel: channel.to_string(),
+        channel: crate::catalog::channel_as_str(channel).to_string(),
         target,
         catalog_revision: catalog.revision,
         ready,
@@ -211,7 +227,7 @@ pub fn status(
 
 fn robot_scoped_artifact_ids(
     robot: &phoxal::model::robot::RobotV1,
-    entries: &[&crate::catalog::CatalogEntry],
+    entries: &[(crate::catalog::ArtifactKind, &crate::catalog::ArtifactEntry)],
 ) -> BTreeSet<String> {
     let driver_component_ids = robot
         .robot
@@ -223,11 +239,10 @@ fn robot_scoped_artifact_ids(
 
     entries
         .iter()
-        .filter_map(|entry| match entry.kind {
+        .filter_map(|(kind, entry)| match kind {
             crate::catalog::ArtifactKind::Service => Some(entry.package.clone()),
             crate::catalog::ArtifactKind::ComponentDriver
-                if entry
-                    .artifact_name()
+                if crate::catalog::artifact_name(*kind, &entry.package)
                     .is_some_and(|name| driver_component_ids.contains(name)) =>
             {
                 Some(entry.package.clone())
@@ -243,7 +258,7 @@ mod tests {
 
     use super::*;
     use crate::catalog::{
-        ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
+        Channel as CatalogChannel, fixture_catalog_for_tests,
         fixture_component_driver_entry_for_tests, fixture_contract_for_tests,
         fixture_service_entry_for_tests,
     };
@@ -303,15 +318,13 @@ mod tests {
             "0.1.0",
             CatalogChannel::Stable,
             &target,
-            ArtifactStatus::Pending,
+            false,
             vec![fixture_contract_for_tests(
                 "drive::Target",
-                "drive/target",
-                "publish",
                 "0123456789abcdef",
             )],
         );
-        service.changed_contracts = vec!["drive::Target".to_string()];
+        service.as_artifact_entry_mut().changed_contracts = vec!["drive::Target".to_string()];
 
         let mut used_driver = fixture_component_driver_entry_for_tests(
             "ddsm115",
@@ -319,15 +332,13 @@ mod tests {
             "0.1.0",
             CatalogChannel::Stable,
             &target,
-            ArtifactStatus::Pending,
+            false,
             vec![fixture_contract_for_tests(
                 "wheel::State",
-                "wheel/state",
-                "publish",
                 "fedcba9876543210",
             )],
         );
-        used_driver.changed_contracts = vec!["wheel::State".to_string()];
+        used_driver.as_artifact_entry_mut().changed_contracts = vec!["wheel::State".to_string()];
 
         let mut unused_driver = fixture_component_driver_entry_for_tests(
             "bno085",
@@ -335,15 +346,13 @@ mod tests {
             "0.1.0",
             CatalogChannel::Stable,
             &target,
-            ArtifactStatus::Pending,
+            false,
             vec![fixture_contract_for_tests(
                 "imu::Reading",
-                "imu/reading",
-                "publish",
                 "1111111111111111",
             )],
         );
-        unused_driver.changed_contracts = vec!["imu::Reading".to_string()];
+        unused_driver.as_artifact_entry_mut().changed_contracts = vec!["imu::Reading".to_string()];
 
         let catalog = fixture_catalog_for_tests(vec![service, used_driver, unused_driver]);
         Ok(serde_json::to_string_pretty(&catalog)?)

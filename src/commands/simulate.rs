@@ -440,8 +440,8 @@ pub(crate) fn build_checked_sim_launch_plan_with_scope(
             source_participants_building_only_crate(&source_participants, crate_dir);
     }
     // A Catalog-sourced component driver is a platform ref here too (docs
-    // #21), exactly like `check`/`run`/`deploy` - fetched from its packaged
-    // release asset rather than built from source. Only a Path/Git-overridden
+    // #21), exactly like `check`/`run`/`deploy` - synthesized from catalog
+    // metadata rather than built from source. Only a Path/Git-overridden
     // driver crate reaches the `build` closure below.
     let mut platform_refs = platform_artifact_refs_from_resolved(resolved);
     platform_refs
@@ -528,7 +528,7 @@ fn official_simulator_participants(
     {
         let raw = fetch_emit_apis_from_native_artifact(runtime).with_context(|| {
             format!(
-                "failed to read packaged emit-apis for simulator {}",
+                "failed to synthesize catalog emit-apis for simulator {}",
                 runtime.name
             )
         })?;
@@ -625,7 +625,7 @@ fn driver_metadata_unavailable(
     error: anyhow::Error,
 ) -> anyhow::Error {
     anyhow!(
-        "DriverMetadataUnavailable: component driver crate '{}' for instance '{}' could not produce emit-apis on this host: {error:#}\n\nCustom and git-sourced driver crates must compile far enough on the dev host for `emit-apis`; keep hardware transport behind a target cfg boundary such as `cfg(target_os = \"linux\")`. Alternatively publish packaged driver metadata in the verified artifact catalog and use that catalog driver instead.",
+        "DriverMetadataUnavailable: component driver crate '{}' for instance '{}' could not produce emit-apis on this host: {error:#}\n\nCustom and git-sourced driver crates must compile far enough on the dev host for `emit-apis`; keep hardware transport behind a target cfg boundary such as `cfg(target_os = \"linux\")`. Alternatively use a verified artifact catalog entry with inlined driver metadata.",
         participant.expected_artifact_id,
         participant.name
     )
@@ -1132,7 +1132,7 @@ fn provisioned_official_simulator_binary(runtime: &ResolvedPlatformRuntime) -> R
         })?
         .ok_or_else(|| {
             anyhow!(
-                "simulator '{}' has no native-artifact metadata (missing sha256/emit-apis); run `phoxal-cli pull` or pin a path override",
+                "simulator '{}' has no built native artifact for this target (missing tarball/sha256); run `phoxal-cli pull` or pin a path override",
                 runtime.name
             )
         })?;
@@ -1431,7 +1431,7 @@ fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::catalog::{
-        ArtifactKind, ArtifactStatus, Channel as CatalogChannel, fixture_catalog_for_tests,
+        ArtifactKind, Channel as CatalogChannel, fixture_catalog_for_tests,
         fixture_contract_for_tests, fixture_tool_entry_for_tests,
     };
     use crate::host_paths::test_support::ScratchPhoxalHome;
@@ -1498,12 +1498,7 @@ mod tests {
         add_site_tools(&mut resolved);
         resolved.platform_runtimes.push(platform_runtime(
             "drive",
-            vec![fixture_contract_for_tests(
-                "drive::Target",
-                "drive/target",
-                "publish",
-                "schema-drive",
-            )],
+            vec![fixture_contract_for_tests("drive::Target", "schema-drive")],
         ));
         resolved.user_runtimes.push(ResolvedUserRuntime {
             name: "mission".to_string(),
@@ -2304,7 +2299,7 @@ mod tests {
         assert!(message.contains("DriverMetadataUnavailable"), "{message}");
         assert!(message.contains("ddsm115"), "{message}");
         assert!(message.contains("cfg(target_os = \"linux\")"), "{message}");
-        assert!(message.contains("packaged driver metadata"), "{message}");
+        assert!(message.contains("inlined driver metadata"), "{message}");
         Ok(())
     }
 
@@ -2444,7 +2439,7 @@ artifacts:
                 "0.1.0",
                 CatalogChannel::Stable,
                 &host_target_triple(),
-                ArtifactStatus::Pending,
+                false,
                 Vec::new(),
             ),
             fixture_tool_entry_for_tests(
@@ -2453,7 +2448,7 @@ artifacts:
                 "0.1.0",
                 CatalogChannel::Stable,
                 &host_target_triple(),
-                ArtifactStatus::Pending,
+                false,
                 Vec::new(),
             ),
         ]);
@@ -2659,7 +2654,7 @@ artifacts:
 
     fn platform_runtime(
         name: &str,
-        contracts: Vec<crate::catalog::ContractUse>,
+        contracts: Vec<crate::catalog::Contract>,
     ) -> ResolvedPlatformRuntime {
         ResolvedPlatformRuntime {
             name: name.to_string(),
@@ -2672,11 +2667,12 @@ artifacts:
                 host_target_triple()
             ),
             sha256: None,
-            metadata: None,
-            target_status: Some(ArtifactStatus::Pending),
-            per_triple_status: BTreeMap::new(),
+            published: false,
+            published_triples: Vec::new(),
             changed_contracts: Vec::new(),
-            contract_uses: contracts,
+            contracts,
+            config_schema: None,
+            bus_abi: Some("phoxal-bus/v0".to_string()),
             path_override: None,
         }
     }
@@ -2693,11 +2689,12 @@ artifacts:
                 host_target_triple()
             ),
             sha256: None,
-            metadata: None,
-            target_status: Some(ArtifactStatus::Pending),
-            per_triple_status: BTreeMap::new(),
+            published: false,
+            published_triples: Vec::new(),
             changed_contracts: Vec::new(),
-            contract_uses: Vec::new(),
+            contracts: Vec::new(),
+            config_schema: None,
+            bus_abi: Some("phoxal-bus/v0".to_string()),
             path_override: None,
         }
     }
@@ -2717,7 +2714,11 @@ artifacts:
             asset: format!("{name}-0.1.0-{}.tar.gz", host_target_triple()),
             binary_name: name.to_string(),
             sha256: "0".repeat(64),
-            metadata: None,
+            published: false,
+            generation: "y2026_1".to_string(),
+            contracts: Vec::new(),
+            config_schema: None,
+            bus_abi: Some("phoxal-bus/v0".to_string()),
             path_override: None,
         }
     }
