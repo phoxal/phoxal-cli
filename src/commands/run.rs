@@ -801,10 +801,10 @@ fn native_pending_official_note(
     runtime: Option<&ResolvedPlatformRuntime>,
     participant_id: &str,
 ) -> String {
-    let status = runtime
-        .and_then(|runtime| runtime.target_status)
-        .map(|status| status.to_string())
-        .unwrap_or_else(|| "missing".to_string());
+    let status = match runtime {
+        Some(runtime) if runtime.published => "released",
+        _ => "missing",
+    };
     let target = host_target_triple();
     format!(
         "NativePending: official artifact {participant_id} is {status} for {target} or not cached; run `phoxal-cli pull`, set PHOXAL_ARTIFACT_{}_PATH, or set PHOXAL_ARTIFACT_DIR",

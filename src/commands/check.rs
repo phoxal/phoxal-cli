@@ -718,7 +718,7 @@ fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()> {
         .iter()
         .filter(|runtime| runtime.source_path().is_none())
         .filter(|runtime| !runtime.changed_contracts.is_empty())
-        .filter(|runtime| runtime.target_status != Some(crate::catalog::ArtifactStatus::Released))
+        .filter(|runtime| !runtime.published)
         .collect::<Vec<_>>();
     if unavailable.is_empty() {
         return Ok(());
@@ -734,27 +734,15 @@ fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()> {
     }
     message.push_str("\n\nRequired changed-contract artifacts not released:");
     for runtime in unavailable {
-        let status = runtime
-            .target_status
-            .map(|status| status.to_string())
-            .unwrap_or_else(|| "missing".to_string());
         message.push_str("\n  - ");
         message.push_str(&runtime.package);
         message.push_str(" (");
         message.push_str(&runtime.changed_contracts.join(", "));
-        message.push_str(") is ");
-        message.push_str(&status);
-        message.push_str(" for ");
+        message.push_str(") is missing for ");
         message.push_str(&resolved.target);
-        if !runtime.per_triple_status.is_empty() {
-            let triples = runtime
-                .per_triple_status
-                .iter()
-                .map(|(triple, status)| format!("{triple}: {status}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            message.push_str("; per-triple status: ");
-            message.push_str(&triples);
+        if !runtime.published_triples.is_empty() {
+            message.push_str("; published triples: ");
+            message.push_str(&runtime.published_triples.join(", "));
         }
     }
     message.push_str(
@@ -765,7 +753,7 @@ fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()> {
 
 fn ensure_no_promoted_preview_features(
     participants: &[SourceParticipant],
-    catalog: &crate::catalog::CatalogRevision,
+    catalog: &crate::catalog::Manifest,
 ) -> Result<()> {
     let mut promoted = Vec::new();
     for participant in participants {
@@ -1209,40 +1197,91 @@ fn validate_json_schema(schema: &Value, value: &Value, path: &str) -> Vec<String
         .collect()
 }
 
+/// Build an official (catalog-resolved) participant's `emit-apis` document
+/// directly from its resolved `ArtifactEntry` fields - `contracts`,
+/// `config_schema`, `bus_abi`, and `api_generation` are inlined in the
+/// catalog manifest itself (docs #21 / phoxal 0.29's lean `phoxal::catalog`),
+/// so there is no `.emit-apis.json` sidecar to download and parse anymore.
+/// This is a pure, in-memory synthesis: it never touches the network or the
+/// native-artifact cache, and it succeeds even for a metadata-only catalog
+/// entry with no built tarball for this target (staging that tarball is a
+/// separate, later concern - see `native_artifacts::stage_runtime`).
+///
+/// The catalog's inlined [`crate::catalog::Contract`] carries only
+/// `family`/`schema_id` (no `topic`/`direction` - the module docs call those
+/// "a property of the API generation's own contract manifest, not of a
+/// specific artifact's catalog entry"). `phoxal::check` groups by
+/// `(family, topic)` and needs a `direction` to detect responder conflicts;
+/// with no independent topic supplied, `family` doubles as the topic key
+/// (still a correct, if coarser, per-contract schema-agreement grouping) and
+/// every contract is reported as `publish` - the common case for a runtime's
+/// own owned contracts. This means the responder-conflict rule
+/// (`MultipleServerResponders`) no longer fires for catalog-sourced
+/// participants; see the WS1b report for the full rationale.
 pub(crate) fn fetch_emit_apis_from_native_artifact(
     runtime: &ResolvedPlatformRuntime,
 ) -> Result<RawEmitApis> {
-    let descriptor = crate::native_artifacts::NativeArtifactDescriptor::from_runtime(runtime)?
-        .ok_or_else(|| {
-            anyhow!(
-                "{} {} has no packaged emit-apis metadata for {}",
-                runtime.kind,
-                runtime.name,
-                runtime.artifact_ref()
-            )
-        })?;
-    let json = crate::native_artifacts::read_packaged_emit_apis(&descriptor)?;
-    serde_json::from_str(&json).with_context(|| {
-        format!(
-            "packaged emit-apis for {} {} ({}) was not valid JSON",
-            runtime.kind,
-            runtime.name,
-            runtime.artifact_ref()
-        )
-    })
+    emit_apis_from_catalog_metadata(
+        runtime.kind.emit_apis_kind(),
+        &runtime.name,
+        &runtime.generation,
+        runtime.bus_abi.as_deref(),
+        runtime.config_schema.clone(),
+        &runtime.contracts,
+    )
 }
 
 pub(crate) fn fetch_emit_apis_from_native_tool(
     tool: &crate::resolver::ResolvedTool,
 ) -> Result<RawEmitApis> {
-    let descriptor = crate::native_artifacts::NativeArtifactDescriptor::from_tool(tool)?
-        .ok_or_else(|| anyhow!("tool {} has no packaged emit-apis metadata", tool.name))?;
-    let json = crate::native_artifacts::read_packaged_emit_apis(&descriptor)?;
-    serde_json::from_str(&json).with_context(|| {
-        format!(
-            "packaged emit-apis for tool {} ({}) was not valid JSON",
-            tool.name, tool.asset
-        )
+    emit_apis_from_catalog_metadata(
+        "tool",
+        crate::resolver::tool_emit_apis_id(&tool.name),
+        &tool.generation,
+        tool.bus_abi.as_deref(),
+        tool.config_schema.clone(),
+        &tool.contracts,
+    )
+}
+
+fn emit_apis_from_catalog_metadata(
+    artifact_kind: &str,
+    artifact_id: &str,
+    api_version: &str,
+    bus_abi: Option<&str>,
+    config_schema: Option<Value>,
+    contracts: &[crate::catalog::Contract],
+) -> Result<RawEmitApis> {
+    // Every native tool (`tool-router`, `tool-joypad`) is privileged
+    // (host/root access); every other official kind is a checked participant.
+    // The lean manifest no longer carries participant_class, but the
+    // kind -> class mapping was always fixed, so it is derived here instead
+    // of read off the manifest.
+    let participant_class = if artifact_kind == "tool" {
+        "privileged".to_string()
+    } else {
+        default_participant_class()
+    };
+    Ok(RawEmitApis {
+        artifact: RawArtifact {
+            kind: artifact_kind.to_string(),
+            id: artifact_id.to_string(),
+        },
+        participant_class,
+        api_version: api_version.to_string(),
+        bus_abi: bus_abi.map(str::to_string),
+        required_contracts: contracts
+            .iter()
+            .map(|contract| RawContract {
+                family: contract.family.clone(),
+                // No independent topic in the lean catalog schema - see the
+                // doc comment on `fetch_emit_apis_from_native_artifact`.
+                topic: contract.family.clone(),
+                direction: "publish".to_string(),
+                schema_id: contract.schema_id.clone(),
+            })
+            .collect(),
+        config_schema,
     })
 }
 
@@ -1793,16 +1832,13 @@ mod tests {
                 version: "0.1.0".to_string(),
                 artifact_ref: format!("{}-driver-v0.1.0.tar.zst", component_name),
                 sha256: Some("a".repeat(64)),
-                metadata: (kind == crate::catalog::ArtifactKind::ComponentDriver).then(|| {
-                    crate::resolver::ResolvedArtifactMetadata {
-                        emit_apis: format!("{component_name}.emit-apis.json"),
-                        emit_apis_sha256: "b".repeat(64),
-                    }
-                }),
-                target_status: Some(crate::catalog::ArtifactStatus::Released),
-                per_triple_status: BTreeMap::new(),
+                published: true,
+                published_triples: Vec::new(),
+                bus_abi: (kind == crate::catalog::ArtifactKind::ComponentDriver)
+                    .then(|| "phoxal-bus/v0".to_string()),
+                config_schema: None,
                 changed_contracts: Vec::new(),
-                contract_uses: Vec::new(),
+                contracts: Vec::new(),
                 path_override: None,
             }),
         }
@@ -3233,11 +3269,12 @@ mod tests {
             version: "0.1.0".to_string(),
             artifact_ref: "path:framework/service/drive".to_string(),
             sha256: None,
-            metadata: None,
-            target_status: Some(crate::catalog::ArtifactStatus::Released),
-            per_triple_status: BTreeMap::new(),
+            published: true,
+            published_triples: Vec::new(),
+            bus_abi: None,
+            config_schema: None,
             changed_contracts: Vec::new(),
-            contract_uses: Vec::new(),
+            contracts: Vec::new(),
             path_override: Some(temp.path().join("framework/service/drive")),
         });
 

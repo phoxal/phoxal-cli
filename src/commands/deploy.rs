@@ -21,7 +21,7 @@ use tempfile::TempDir;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::AppContext;
-use crate::catalog::{ArtifactKind, ArtifactStatus};
+use crate::catalog::ArtifactKind;
 use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
@@ -1959,16 +1959,7 @@ fn official_runtime_plan(
         sha256,
         install_binary_name,
         source_path,
-        missing_label: (runtime.target_status != Some(ArtifactStatus::Released)).then(|| {
-            format!(
-                "{} ({})",
-                runtime.package,
-                runtime
-                    .target_status
-                    .map(|status| status.to_string())
-                    .unwrap_or_else(|| "missing".to_string())
-            )
-        }),
+        missing_label: (!runtime.published).then(|| format!("{} (missing)", runtime.package)),
     })
 }
 
@@ -3615,9 +3606,7 @@ mod tests {
 
     mod phoxal_cli_test_support {
         use super::*;
-        use crate::catalog::{
-            ArtifactStatus, Channel as CatalogChannel, fixture_tool_entry_for_tests,
-        };
+        use crate::catalog::{Channel as CatalogChannel, fixture_tool_entry_for_tests};
 
         pub fn write_basic_project(root: &Path) -> Result<()> {
             write_fixture_catalog(root)?;
@@ -3684,17 +3673,21 @@ mod tests {
 
         fn write_fixture_catalog(root: &Path) -> Result<()> {
             let catalog = crate::catalog::fixture_catalog_for_tests(vec![
+                // A decoy extra catalog entry proving multi-entry catalogs
+                // resolve fine; kept off the `stable` channel every fixture
+                // robot below targets, so it never becomes a real deploy
+                // participant (the lean manifest schema has no separate
+                // "declared target" concept to keep it inert by target alone
+                // - see `resolver::select_latest_artifact_entries`).
                 crate::catalog::fixture_service_entry_for_tests(
                     "fixture_only",
                     "y2026_1",
                     "0.1.0",
-                    crate::catalog::Channel::Stable,
+                    crate::catalog::Channel::Preview,
                     "test-only-target",
-                    ArtifactStatus::Pending,
+                    false,
                     vec![crate::catalog::fixture_contract_for_tests(
                         "fixture::Only",
-                        "fixture/only",
-                        "publish",
                         "0123456789abcdef",
                     )],
                 ),
@@ -3704,7 +3697,7 @@ mod tests {
                     "0.1.0",
                     CatalogChannel::Stable,
                     "aarch64-unknown-linux-gnu",
-                    ArtifactStatus::Pending,
+                    false,
                     Vec::new(),
                 ),
             ]);
@@ -4646,16 +4639,13 @@ artifacts:
                     kind.catalog_kind()
                 ),
                 sha256: Some("a".repeat(64)),
-                metadata: (kind == crate::catalog::ArtifactKind::ComponentDriver).then(|| {
-                    crate::resolver::ResolvedArtifactMetadata {
-                        emit_apis: format!("{component_name}.emit-apis.json"),
-                        emit_apis_sha256: "b".repeat(64),
-                    }
-                }),
-                target_status: Some(ArtifactStatus::Released),
-                per_triple_status: BTreeMap::new(),
+                published: true,
+                published_triples: Vec::new(),
+                bus_abi: (kind == crate::catalog::ArtifactKind::ComponentDriver)
+                    .then(|| "phoxal-bus/v0".to_string()),
+                config_schema: None,
                 changed_contracts: Vec::new(),
-                contract_uses: Vec::new(),
+                contracts: Vec::new(),
                 path_override: None,
             }),
         }
@@ -4717,7 +4707,11 @@ artifacts:
             asset: "phoxal-tool-router-0.1.0-aarch64-unknown-linux-gnu.tar.zst".to_string(),
             binary_name: "phoxal-tool-router".to_string(),
             sha256: "0".repeat(64),
-            metadata: None,
+            published: true,
+            generation: "y2026_1".to_string(),
+            contracts: Vec::new(),
+            config_schema: None,
+            bus_abi: None,
             path_override: Some(PathBuf::from("/fake/router")),
         });
 
@@ -4739,7 +4733,7 @@ artifacts:
             plan.source_path.is_none(),
             "a cold cache must report no local binary, not download one"
         );
-        assert!(plan.missing_label.is_none(), "target_status is Released");
+        assert!(plan.missing_label.is_none(), "artifact is published");
 
         // 3) `locate_cached_component_assets_dir` returns `None` on a cold
         //    cache instead of fetching the assets bundle.

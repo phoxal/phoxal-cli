@@ -44,7 +44,7 @@ impl Validate {
             crate::commands::load_catalog_for_robot(app, project_root, &loaded.extras, false)?;
         let platform_names = catalog
             .as_ref()
-            .map(crate::catalog::CatalogRevision::service_names)
+            .map(crate::catalog::service_names)
             .unwrap_or_default();
         let platform_name_refs = platform_names
             .iter()
@@ -98,8 +98,9 @@ fn target_generation_for_validate(
         .clone()
         .or_else(|| {
             catalog.and_then(|catalog| {
-                catalog.newest_generation_on_channel(
-                    crate::catalog::Channel::from(robot.artifacts.channel),
+                crate::catalog::newest_generation_on_channel(
+                    catalog,
+                    crate::catalog::to_catalog_channel(robot.artifacts.channel),
                     &target,
                 )
             })
@@ -231,8 +232,7 @@ fn print_text_report(
     println!("platform_services:");
     for runtime in catalog
         .into_iter()
-        .flat_map(|catalog| catalog.entries.iter())
-        .filter(|entry| entry.kind == crate::catalog::ArtifactKind::Service)
+        .flat_map(|catalog| catalog.services.iter())
     {
         let artifact_ref = format!(
             "{}:{}-{}",
@@ -267,7 +267,7 @@ fn print_json_report(
         "robot": robot.robot.id,
         "target_generation": target_generation,
         "channel": robot.artifacts.channel,
-        "platform_services": catalog.into_iter().flat_map(|catalog| catalog.entries.iter()).filter(|entry| entry.kind == crate::catalog::ArtifactKind::Service).map(|runtime| {
+        "platform_services": catalog.into_iter().flat_map(|catalog| catalog.services.iter()).map(|runtime| {
             let artifact_ref = format!(
                 "{}:{}-{}",
                 runtime.package, runtime.api_generation, robot.artifacts.channel
