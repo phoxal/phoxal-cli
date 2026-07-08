@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -9,7 +9,7 @@ use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use tar::Archive;
 
-use crate::catalog::ArtifactKind;
+use crate::catalog::{ArtifactKind, LocalManifestUpsert};
 use crate::resolver::{ResolvedPlatformRuntime, ResolvedTool, official_binary_name};
 use crate::ui::Ui;
 use crate::utils::make_executable;
@@ -54,6 +54,20 @@ pub struct NativeArtifactDescriptor {
     /// The binary name inside the unpacked tarball. Empty for
     /// `component_assets` - an asset bundle has no binary.
     pub binary_name: String,
+    /// The API generation this artifact authors against; empty for
+    /// `component_assets`. Carried here (duplicating
+    /// `ResolvedPlatformRuntime`/`ResolvedTool`) so [`stage_descriptor`] can
+    /// upsert the local download manifest entry on its own, without every
+    /// caller threading this metadata back through separately.
+    pub generation: String,
+    pub contracts: Vec<crate::catalog::Contract>,
+    pub config_schema: Option<serde_json::Value>,
+    pub bus_abi: Option<String>,
+    pub changed_contracts: Vec<String>,
+    pub channel: crate::catalog::Channel,
+    /// The target triple this tarball was resolved/built for, or
+    /// [`crate::catalog::TARGET_INDEPENDENT_SCOPE`] for `component_assets`.
+    pub target: String,
 }
 
 impl NativeArtifactDescriptor {
@@ -83,6 +97,13 @@ impl NativeArtifactDescriptor {
             asset: runtime.artifact_ref().to_string(),
             sha256: sha256.clone(),
             binary_name,
+            generation: runtime.generation.clone(),
+            contracts: runtime.contracts.clone(),
+            config_schema: runtime.config_schema.clone(),
+            bus_abi: runtime.bus_abi.clone(),
+            changed_contracts: runtime.changed_contracts.clone(),
+            channel: runtime.channel,
+            target: runtime.target.clone(),
         }))
     }
 
@@ -98,6 +119,13 @@ impl NativeArtifactDescriptor {
             asset: tool.asset.clone(),
             sha256: tool.sha256.clone(),
             binary_name: tool.binary_name.clone(),
+            generation: tool.generation.clone(),
+            contracts: tool.contracts.clone(),
+            config_schema: tool.config_schema.clone(),
+            bus_abi: tool.bus_abi.clone(),
+            changed_contracts: Vec::new(),
+            channel: tool.channel,
+            target: tool.target.clone(),
         }))
     }
 
@@ -112,6 +140,23 @@ impl NativeArtifactDescriptor {
     #[must_use]
     pub fn tag(&self) -> String {
         format!("{}-v{}", self.package(), self.version)
+    }
+
+    fn local_manifest_upsert(&self) -> LocalManifestUpsert {
+        LocalManifestUpsert {
+            kind: self.kind,
+            package: self.package_id.clone(),
+            version: self.version.clone(),
+            generation: self.generation.clone(),
+            contracts: self.contracts.clone(),
+            config_schema: self.config_schema.clone(),
+            bus_abi: self.bus_abi.clone(),
+            changed_contracts: self.changed_contracts.clone(),
+            channel: self.channel,
+            target: self.target.clone(),
+            tarball: self.asset.clone(),
+            sha256: self.sha256.clone(),
+        }
     }
 }
 
@@ -295,7 +340,9 @@ fn copy_dir_recursive_into(source: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Stage one native artifact's tarball into the local cache, unpacking it.
+/// Stage one native artifact: ensure its tarball is present in the flat
+/// content-addressed cache ([`artifact_tarball_path`]), then lazily unpack it
+/// into its ephemeral `run/exec/` location ([`artifact_exec_dir`]).
 /// `component_assets` descriptors have no binary at all, so "staged" just
 /// means the tarball is unpacked.
 pub fn stage_descriptor(
@@ -303,10 +350,10 @@ pub fn stage_descriptor(
     descriptor: &NativeArtifactDescriptor,
     mode: ProvisioningMode,
 ) -> Result<PathBuf> {
-    let root = artifact_cache_dir(descriptor)?;
-    let binary = root.join(&descriptor.binary_name);
-    let already_staged = root.is_dir();
-    if mode == ProvisioningMode::MissingOnly && already_staged {
+    let exec_dir = artifact_exec_dir(descriptor)?;
+    let binary = exec_dir.join(&descriptor.binary_name);
+    let tarball_path = ensure_tarball_cached(descriptor, mode)?;
+    if mode == ProvisioningMode::MissingOnly && exec_dir.is_dir() {
         return Ok(binary);
     }
 
@@ -318,38 +365,69 @@ pub fn stage_descriptor(
             descriptor.tag()
         ));
     }
-    let asset_path = cached_asset_path(descriptor)?;
-    if mode == ProvisioningMode::Refresh || !asset_path.is_file() {
-        let bytes =
-            download_release_asset(&descriptor.tag(), &descriptor.asset, &descriptor.sha256)?;
-        write_file_atomic(&asset_path, &bytes)?;
-    }
-    verify_file_sha256(&asset_path, &descriptor.sha256)?;
-    unpack_asset(&asset_path, &root)?;
+    unpack_asset(&tarball_path, &exec_dir)?;
     if binary.is_file() {
         make_executable(&binary)?;
     }
     Ok(binary)
 }
 
+/// Ensure `descriptor`'s tarball is present and sha256-valid in the flat
+/// `cache/artifacts/` store, downloading it if missing/mismatched/`Refresh`d.
+/// The tarball file itself IS the cache entry - presence plus a matching
+/// sha256 means "skip re-download". On a fresh download, upserts the local
+/// download manifest ([`crate::catalog::upsert_local_manifest_entry`]) with
+/// this artifact's inlined contracts/config/bus_abi so `check`/`run` can read
+/// them back offline for this cached artifact.
+fn ensure_tarball_cached(
+    descriptor: &NativeArtifactDescriptor,
+    mode: ProvisioningMode,
+) -> Result<PathBuf> {
+    let path = artifact_tarball_path(descriptor)?;
+    let cached_and_valid = mode != ProvisioningMode::Refresh
+        && path.is_file()
+        && sha256_file(&path).is_ok_and(|sha| sha == descriptor.sha256);
+    if !cached_and_valid {
+        let bytes =
+            download_release_asset(&descriptor.tag(), &descriptor.asset, &descriptor.sha256)?;
+        write_file_atomic(&path, &bytes)?;
+        crate::catalog::upsert_local_manifest_entry(descriptor.local_manifest_upsert())
+            .context("failed to update the local download manifest")?;
+    }
+    verify_file_sha256(&path, &descriptor.sha256)?;
+    Ok(path)
+}
+
 pub fn artifact_binary_path(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
-    Ok(artifact_cache_dir(descriptor)?.join(&descriptor.binary_name))
+    Ok(artifact_exec_dir(descriptor)?.join(&descriptor.binary_name))
 }
 
-pub fn artifact_cache_dir(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
-    Ok(crate::host_paths::cache_dir()?
-        .join("artifacts")
-        .join(descriptor.package())
-        .join(sanitize_path_segment(&descriptor.asset)))
+/// The flat, content-addressed tarball cache path: `cache/artifacts/<asset>`,
+/// named exactly as the published release asset - no per-package
+/// subdirectories.
+pub fn artifact_tarball_path(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
+    Ok(crate::host_paths::artifacts_dir()?.join(&descriptor.asset))
 }
 
-fn cached_asset_path(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
-    Ok(crate::host_paths::cache_dir()?
-        .join("artifacts")
-        .join("_assets")
-        .join(descriptor.package())
-        .join(&descriptor.version)
-        .join(&descriptor.asset))
+/// Where `descriptor`'s tarball is lazily unpacked for use: an ephemeral
+/// location under `run/exec/`, NOT under `cache/artifacts/` - the cache stays
+/// a pure tarball store, and the unpacked bundle is disposable (it can always
+/// be rebuilt from the cached tarball). Keyed by the tarball's own filename
+/// (already a unique, filesystem-safe identity for this exact artifact/
+/// version/target), so re-staging the same descriptor reuses the same dir.
+pub fn artifact_exec_dir(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
+    Ok(crate::host_paths::run_dir()?
+        .join("exec")
+        .join(exec_dir_name(&descriptor.asset)))
+}
+
+fn exec_dir_name(asset: &str) -> String {
+    let stem = asset
+        .strip_suffix(".tar.zst")
+        .or_else(|| asset.strip_suffix(".tar.gz"))
+        .or_else(|| asset.strip_suffix(".tar"))
+        .unwrap_or(asset);
+    sanitize_path_segment(stem)
 }
 
 fn release_asset_url(tag: &str, asset: &str) -> String {
@@ -483,13 +561,23 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let partial = path.with_extension("partial");
-    fs::write(&partial, bytes).with_context(|| format!("failed to write {}", partial.display()))?;
-    fs::rename(&partial, path).with_context(|| format!("failed to finalize {}", path.display()))
+    let parent = path
+        .parent()
+        .context("artifact cache path did not have a parent directory")?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let mut partial = tempfile::Builder::new()
+        .prefix(".native-artifact-")
+        .suffix(".partial")
+        .tempfile_in(parent)
+        .with_context(|| format!("failed to create temp artifact in {}", parent.display()))?;
+    partial
+        .write_all(bytes)
+        .with_context(|| format!("failed to write {}", partial.path().display()))?;
+    partial
+        .persist(path)
+        .map(|_| ())
+        .map_err(|error| error.error)
+        .with_context(|| format!("failed to finalize {}", path.display()))
 }
 
 fn sanitize_path_segment(value: &str) -> String {

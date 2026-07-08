@@ -932,6 +932,8 @@ artifacts:
             config_schema: None,
             bus_abi: None,
             path_override: None,
+            channel: crate::catalog::Channel::Stable,
+            target: host_target_triple(),
         }
     }
 

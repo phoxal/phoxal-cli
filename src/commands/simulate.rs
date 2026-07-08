@@ -13,8 +13,7 @@ use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
     fetch_emit_apis_from_native_artifact, platform_artifact_refs_from_resolved,
-    robot_graph_from_resolved, run_check_with_context, source_participants_building_only_crate,
-    source_participants_from_resolved,
+    robot_graph_from_resolved, run_check_with_context, source_participants_from_resolved,
 };
 use crate::component_driver::{component_assets_dir, component_driver_crate_dir};
 use crate::launch_plan::{
@@ -363,7 +362,6 @@ pub(crate) fn resolve_project(
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
     let catalog = crate::catalog::load_catalog(crate::catalog::CatalogLoadOptions {
-        refresh: options.pull,
         cli_source: options.catalog_source.clone(),
         robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
             if source.is_absolute() {
@@ -407,6 +405,11 @@ pub(crate) fn resolve_project(
     })
 }
 
+/// Build the checked simulation launch plan. Every source participant
+/// (drivers, path-overridden services/simulators) rebuilds live - there is no
+/// disk cache to scope a rebuild around (docs: `check::build_emit_apis_from_source`
+/// never caches), so a `watch`-triggered recheck simply rebuilds the whole
+/// source graph rather than just the one crate that changed.
 pub(crate) fn build_checked_sim_launch_plan(
     project_root: &Path,
     world: &Path,
@@ -414,31 +417,9 @@ pub(crate) fn build_checked_sim_launch_plan(
     manifest_extras: &RobotManifestExtras,
     catalog: Option<&CatalogRevision>,
 ) -> Result<LaunchPlan> {
-    build_checked_sim_launch_plan_with_scope(
-        project_root,
-        world,
-        resolved,
-        manifest_extras,
-        catalog,
-        None,
-    )
-}
-
-pub(crate) fn build_checked_sim_launch_plan_with_scope(
-    project_root: &Path,
-    world: &Path,
-    resolved: &ResolvedRobot,
-    manifest_extras: &RobotManifestExtras,
-    catalog: Option<&CatalogRevision>,
-    build_only_crate: Option<&Path>,
-) -> Result<LaunchPlan> {
     let robot_graph = robot_graph_from_resolved(resolved);
-    let mut source_participants = sim_source_participants(project_root, resolved, catalog)
+    let source_participants = sim_source_participants(project_root, resolved, catalog)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
-    if let Some(crate_dir) = build_only_crate {
-        source_participants =
-            source_participants_building_only_crate(&source_participants, crate_dir);
-    }
     // A Catalog-sourced component driver is a platform ref here too (docs
     // #21), exactly like `check`/`run`/`deploy` - synthesized from catalog
     // metadata rather than built from source. Only a Path/Git-overridden
@@ -2674,6 +2655,8 @@ artifacts:
             config_schema: None,
             bus_abi: Some("phoxal-bus/v0".to_string()),
             path_override: None,
+            channel: crate::catalog::Channel::Stable,
+            target: host_target_triple(),
         }
     }
 
@@ -2696,6 +2679,8 @@ artifacts:
             config_schema: None,
             bus_abi: Some("phoxal-bus/v0".to_string()),
             path_override: None,
+            channel: crate::catalog::Channel::Stable,
+            target: host_target_triple(),
         }
     }
 
@@ -2720,6 +2705,8 @@ artifacts:
             config_schema: None,
             bus_abi: Some("phoxal-bus/v0".to_string()),
             path_override: None,
+            channel: crate::catalog::Channel::Stable,
+            target: host_target_triple(),
         }
     }
 

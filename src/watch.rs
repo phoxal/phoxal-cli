@@ -10,12 +10,11 @@ use tokio::time::MissedTickBehavior;
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
     fetch_emit_apis_from_native_artifact, platform_artifact_refs_from_resolved,
-    robot_graph_from_resolved, run_check_with_context, source_participants_building_only_crate,
-    source_participants_from_resolved,
+    robot_graph_from_resolved, run_check_with_context, source_participants_from_resolved,
 };
 use crate::commands::run::{RunOptions, source_spec_from_launch_record};
 use crate::commands::simulate::{
-    SimulateMode, SimulateOptions, build_checked_sim_launch_plan_with_scope, resolve_project,
+    SimulateMode, SimulateOptions, build_checked_sim_launch_plan, resolve_project,
 };
 use crate::component_driver::component_driver_crate_dir;
 use crate::launch_plan::{
@@ -381,7 +380,6 @@ fn recheck_run_target(
         options.catalog_source.clone(),
         project_root,
         &loaded.extras,
-        false,
     )?;
     let resolved = resolve(
         &loaded.robot,
@@ -393,9 +391,12 @@ fn recheck_run_target(
             ..ResolveOptions::default()
         },
     )?;
+    // Every source participant rebuilds live on every recheck - there is no
+    // more disk cache to scope around (docs: `check::build_emit_apis_from_source`
+    // never caches), so a single changed crate simply triggers a full rebuild
+    // of the whole source graph rather than just the changed one.
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
-    let scoped = source_participants_building_only_crate(&source_participants, &target.crate_dir);
     let robot_graph = robot_graph_from_resolved(&resolved);
     let platform_refs = platform_artifact_refs_from_resolved(&resolved);
     let official_by_ref = resolved
@@ -406,7 +407,7 @@ fn recheck_run_target(
     let outcome = run_check_with_context(
         &platform_refs,
         &[],
-        &scoped,
+        &source_participants,
         CheckGraphContext {
             robot_graph: &robot_graph,
             manifest_extras: &loaded.extras,
@@ -433,7 +434,7 @@ fn recheck_run_target(
             manifest_extras: &loaded.extras,
             checked_participants: &outcome.checked_participants,
             substitutions: &[],
-            source_participants: &scoped,
+            source_participants: &source_participants,
         }],
     )?;
     Ok(WatchOutcome::Swaps(specs_for_target(&plan, target)?))
@@ -445,13 +446,12 @@ fn recheck_sim_target(
     target: &WatchTarget,
 ) -> Result<WatchOutcome> {
     let resolved = resolve_project(project_root, options.clone(), SimulateMode::Live)?;
-    let plan = build_checked_sim_launch_plan_with_scope(
+    let plan = build_checked_sim_launch_plan(
         &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,
         &resolved.manifest_extras,
         resolved.catalog.as_ref(),
-        Some(&target.crate_dir),
     )?;
     if target.kind == WatchTargetKind::Driver {
         return Ok(WatchOutcome::MetadataOnly);
@@ -558,7 +558,6 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::check::SourceBuildMode;
 
     #[test]
     fn debounce_collapses_save_bursts() {
@@ -571,28 +570,6 @@ mod tests {
             debounce.due(start + Duration::from_millis(151)),
             vec!["mission".to_string()]
         );
-    }
-
-    #[test]
-    fn source_scope_builds_only_one_owner_crate() {
-        let driver_a = SourceParticipant::component_driver_with_artifact_id(
-            "left_drive",
-            "ddsm115",
-            PathBuf::from("/tmp/driver"),
-        );
-        let driver_b = SourceParticipant::component_driver_with_artifact_id(
-            "right_drive",
-            "ddsm115",
-            PathBuf::from("/tmp/driver"),
-        );
-        let service = SourceParticipant::user_service("mission", PathBuf::from("/tmp/mission"));
-        let scoped = source_participants_building_only_crate(
-            &[driver_a, driver_b, service],
-            Path::new("/tmp/driver"),
-        );
-        assert_eq!(scoped[0].build_mode, SourceBuildMode::Build);
-        assert_eq!(scoped[1].build_mode, SourceBuildMode::UseCached);
-        assert_eq!(scoped[2].build_mode, SourceBuildMode::UseCached);
     }
 
     #[test]

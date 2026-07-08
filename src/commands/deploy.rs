@@ -773,7 +773,6 @@ fn prepare_deploy(
         options.catalog_source.clone(),
         project_root,
         &loaded.extras,
-        false,
     )?;
     let resolved = resolve(
         &loaded.robot,
@@ -1316,7 +1315,7 @@ struct ZigbuildToolchain {
 
 #[cfg(not(test))]
 fn ensure_zigbuild_toolchain(ui: &crate::Ui) -> Result<ZigbuildToolchain> {
-    let tool_root = crate::host_paths::cache_dir()?.join("deploy/tools/zigbuild");
+    let tool_root = crate::host_paths::deploy_dir()?.join("tools/zigbuild");
     let bin_dir = tool_root.join("bin");
     fs::create_dir_all(&bin_dir)
         .with_context(|| format!("failed to create {}", bin_dir.display()))?;
@@ -1643,9 +1642,7 @@ fn cross_build_source_binary(
         )
     })?;
     let binary_name = cargo_binary_name(&crate_dir, Some(preferred_name))?;
-    let target_dir = crate::host_paths::cache_dir()?
-        .join("deploy/target")
-        .join(target);
+    let target_dir = crate::host_paths::deploy_dir()?.join("target").join(target);
     ui.info(format!(
         "cross-building {preferred_name} for {target} with cargo zigbuild --release"
     ));
@@ -2532,8 +2529,8 @@ fn locate_cached_component_assets_dir(
     else {
         return Ok(None);
     };
-    let cache_dir = crate::native_artifacts::artifact_cache_dir(&descriptor)?;
-    Ok(cache_dir.is_dir().then_some(cache_dir))
+    let exec_dir = crate::native_artifacts::artifact_exec_dir(&descriptor)?;
+    Ok(exec_dir.is_dir().then_some(exec_dir))
 }
 
 fn payload_components_dir(root: &Path) -> PathBuf {
@@ -4647,6 +4644,8 @@ artifacts:
                 changed_contracts: Vec::new(),
                 contracts: Vec::new(),
                 path_override: None,
+                channel: crate::catalog::Channel::Stable,
+                target: "aarch64-unknown-linux-gnu".to_string(),
             }),
         }
     }
@@ -4713,6 +4712,8 @@ artifacts:
             config_schema: None,
             bus_abi: None,
             path_override: Some(PathBuf::from("/fake/router")),
+            channel: crate::catalog::Channel::Stable,
+            target: "aarch64-unknown-linux-gnu".to_string(),
         });
 
         // 1) `official_runtime_by_artifact_id` finds the driver's

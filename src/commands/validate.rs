@@ -40,8 +40,7 @@ impl Validate {
             .context("robot.yaml did not have a parent directory")?;
         let loaded = crate::resolver::load_robot_with_extras(&robot_path)?;
         let robot = loaded.robot;
-        let catalog =
-            crate::commands::load_catalog_for_robot(app, project_root, &loaded.extras, false)?;
+        let catalog = crate::commands::load_catalog_for_robot(app, project_root, &loaded.extras)?;
         let platform_names = catalog
             .as_ref()
             .map(crate::catalog::service_names)

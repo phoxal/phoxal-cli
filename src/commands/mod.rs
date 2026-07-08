@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::AppContext;
 use crate::resolver::RobotManifestExtras;
 
+pub mod cache;
 pub mod check;
 pub mod deploy;
 pub mod doctor;
@@ -43,25 +44,22 @@ pub fn print_message<T: Serialize>(
     }
 }
 
+/// Load the artifact catalog for a robot project. There is no `refresh`
+/// parameter anymore: [`crate::catalog::load_catalog`] always fetches the
+/// remote catalog fresh (no on-disk cache of the fetch) unless an explicit
+/// local/URL source is given - see its docs.
 pub(crate) fn load_catalog_for_robot(
     app: &AppContext,
     project_root: &std::path::Path,
     manifest_extras: &RobotManifestExtras,
-    refresh: bool,
 ) -> Result<Option<crate::catalog::CatalogRevision>> {
-    load_catalog_for_robot_from_source(
-        app.catalog_source.clone(),
-        project_root,
-        manifest_extras,
-        refresh,
-    )
+    load_catalog_for_robot_from_source(app.catalog_source.clone(), project_root, manifest_extras)
 }
 
 pub(crate) fn load_catalog_for_robot_from_source(
     catalog_source: Option<String>,
     project_root: &std::path::Path,
     manifest_extras: &RobotManifestExtras,
-    refresh: bool,
 ) -> Result<Option<crate::catalog::CatalogRevision>> {
     let robot_source = manifest_extras.catalog_source.as_ref().map(|source| {
         if source.is_absolute() {
@@ -71,7 +69,6 @@ pub(crate) fn load_catalog_for_robot_from_source(
         }
     });
     crate::catalog::load_catalog(crate::catalog::CatalogLoadOptions {
-        refresh,
         cli_source: catalog_source,
         robot_source,
     })
@@ -183,7 +180,7 @@ pub struct Cli {
         env = crate::catalog::CATALOG_SOURCE_ENV,
         global = true,
         value_name = "PATH_OR_HTTPS_URL",
-        help = "Artifact catalog override. Local paths are verified directly; HTTPS sources use the cache and refresh with --pull."
+        help = "Artifact catalog override. Local paths are read directly; HTTPS sources (including the default) are always fetched fresh - there is no on-disk cache of this fetch."
     )]
     pub catalog_source: Option<String>,
 
@@ -213,6 +210,10 @@ pub enum RootCommand {
     Deploy(deploy::Deploy),
     #[command(about = "Refresh the catalog and native artifact cache.")]
     Pull(pull::Pull),
+    #[command(
+        about = "Manage the ~/.phoxal cache (native artifacts, git checkouts, deploy toolchain)."
+    )]
+    Cache(cache::CacheCmd),
     #[command(about = "Report native artifact drift.")]
     Outdated(outdated::Outdated),
     #[command(about = "Inspect API generation readiness from the artifact catalog.")]
@@ -238,6 +239,7 @@ impl RootCommand {
             Self::Status(command) => command.run(app).await,
             Self::Deploy(command) => command.run(app).await,
             Self::Pull(command) => command.run(app).await,
+            Self::Cache(command) => command.run(app).await,
             Self::Outdated(command) => command.run(app).await,
             Self::Generations(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
