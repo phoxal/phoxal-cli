@@ -1,12 +1,11 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::git_artifact;
 use crate::native_artifacts::{self, NativeArtifactDescriptor, ProvisioningMode};
 use crate::resolver::{ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource};
 use crate::utils::resolve_project_path;
-use crate::{host_paths, shell};
 
 /// Locate the on-disk source directory for a component instance's resolved
 /// `component_driver` package (the crate `check`/`run`/`watch` build). Errors
@@ -23,7 +22,7 @@ pub(crate) fn component_driver_crate_dir(
             component.instance
         )
     })?;
-    resolved_component_package_dir(driver, &component.source_name, project_root)
+    resolved_component_package_dir(driver, project_root)
 }
 
 /// Locate the on-disk source directory for a component instance's resolved
@@ -33,12 +32,15 @@ pub(crate) fn component_assets_dir(
     component: &ResolvedComponent,
     project_root: &Path,
 ) -> Result<PathBuf> {
-    resolved_component_package_dir(&component.assets, &component.source_name, project_root)
+    resolved_component_package_dir(&component.assets, project_root)
 }
 
+/// A component's `Git` source now routes through the general
+/// `crate::git_artifact` resolver (any `robot.yaml` `artifacts.pins` entry
+/// can be git-sourced, not just components; see `resolver::apply_path_pins`)
+/// instead of the old component-only `cache/components/` cache.
 fn resolved_component_package_dir(
     package: &ResolvedComponentPackage,
-    source_name: &str,
     project_root: &Path,
 ) -> Result<PathBuf> {
     match &package.source {
@@ -48,8 +50,8 @@ fn resolved_component_package_dir(
             rev,
             directory,
         } => {
-            let repo_dir = ensure_component_repo_cache(source_name, git, rev)?;
-            component_repo_subdir(repo_dir, directory.as_deref())
+            let repo_dir = git_artifact::ensure_git_artifact(git, rev)?;
+            git_artifact::subdir(repo_dir, directory.as_deref())
         }
         ResolvedComponentSource::Catalog => catalog_component_package_dir(package),
     }
@@ -58,11 +60,11 @@ fn resolved_component_package_dir(
 /// Fetch and unpack a catalog-resolved component package's release asset via
 /// the identical native-staging path services/tools already use
 /// ([`native_artifacts::stage_component_package`]/`stage_descriptor`), and
-/// return its local cache directory: the unpacked assets bundle root
+/// return its local exec directory: the unpacked assets bundle root
 /// (`component.yaml`, `structure.urdf`, `simulation.yaml`, `meshes/`) for a
-/// `component_assets` package, or the cache directory containing the staged
-/// driver binary for a `component_driver` package.
-/// `MissingOnly` mode: reuses an already-staged local cache without touching
+/// `component_assets` package, or the directory containing the staged driver
+/// binary for a `component_driver` package.
+/// `MissingOnly` mode: reuses an already-staged local unpack without touching
 /// the network again, matching how a service's cache is consulted.
 fn catalog_component_package_dir(package: &ResolvedComponentPackage) -> Result<PathBuf> {
     let Some(runtime) = &package.catalog_runtime else {
@@ -84,68 +86,5 @@ fn catalog_component_package_dir(package: &ResolvedComponentPackage) -> Result<P
     })?;
     native_artifacts::stage_descriptor(None, &descriptor, ProvisioningMode::MissingOnly)
         .with_context(|| format!("failed to stage component package {}", package.package))?;
-    native_artifacts::artifact_cache_dir(&descriptor)
-}
-
-fn ensure_component_repo_cache(source_name: &str, git: &str, commit: &str) -> Result<PathBuf> {
-    let cache_dir = host_paths::cache_dir()?
-        .join("components")
-        .join(format!("{source_name}-{commit}"));
-    if cache_dir.join(".git").is_dir() {
-        return Ok(cache_dir);
-    }
-    if cache_dir.exists() {
-        bail!(
-            "component cache {} already exists but is not a git checkout",
-            cache_dir.display()
-        );
-    }
-
-    let parent = cache_dir
-        .parent()
-        .context("component cache path did not have a parent directory")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create component cache {}", parent.display()))?;
-    let staging = tempfile::TempDir::new_in(parent)
-        .with_context(|| format!("failed to create staging cache in {}", parent.display()))?;
-    let staging_arg = staging.path().to_string_lossy().to_string();
-    shell::run_status("git", ["clone", "--no-checkout", git, &staging_arg], None)
-        .with_context(|| format!("failed to clone component source {git}"))?;
-    shell::run_status(
-        "git",
-        ["checkout", "--detach", commit],
-        Some(staging.path()),
-    )
-    .with_context(|| format!("failed to check out component source {git} at {commit}"))?;
-
-    match fs::rename(staging.path(), &cache_dir) {
-        Ok(()) => {}
-        Err(error) if cache_dir.join(".git").is_dir() => {
-            tracing::debug!(
-                "component cache {} appeared during clone; keeping existing destination ({error})",
-                cache_dir.display()
-            );
-        }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!("failed to move component cache to {}", cache_dir.display())
-            });
-        }
-    }
-    Ok(cache_dir)
-}
-
-fn component_repo_subdir(repo_root: PathBuf, directory: Option<&Path>) -> Result<PathBuf> {
-    let Some(directory) = directory else {
-        return Ok(repo_root);
-    };
-    for part in directory.components() {
-        if !matches!(part, std::path::Component::Normal(_)) {
-            bail!(
-                "component source directory {} must be a relative path without '..'",
-                directory.display()
-            );
-        }
-    }
-    Ok(repo_root.join(directory))
+    native_artifacts::artifact_exec_dir(&descriptor)
 }

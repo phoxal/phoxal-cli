@@ -228,3 +228,21 @@ fn parses_pull_and_outdated() {
     let cli = Cli::try_parse_from(["phoxal-cli", "outdated"]).expect("outdated parses");
     assert!(matches!(cli.command, RootCommand::Outdated(_)));
 }
+
+#[test]
+fn parses_cache_clean_and_dry_run() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "cache", "clean"]).expect("cache clean parses");
+    let RootCommand::Cache(cache) = cli.command else {
+        panic!("expected cache command");
+    };
+    let phoxal_cli::commands::cache::CacheSubcommand::Clean(clean) = cache.command;
+    assert!(!clean.dry_run);
+
+    let cli = Cli::try_parse_from(["phoxal-cli", "cache", "clean", "--dry-run"])
+        .expect("cache clean --dry-run parses");
+    let RootCommand::Cache(cache) = cli.command else {
+        panic!("expected cache command");
+    };
+    let phoxal_cli::commands::cache::CacheSubcommand::Clean(clean) = cache.command;
+    assert!(clean.dry_run);
+}

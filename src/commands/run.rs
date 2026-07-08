@@ -42,7 +42,7 @@ use crate::utils::cargo_binary_name;
 pub struct Run {
     #[arg(
         long,
-        help = "Refresh the catalog and native artifact cache before launch."
+        help = "Refresh the native artifact cache before launch (the catalog itself is always fetched fresh)."
     )]
     pub pull: bool,
     #[arg(
@@ -213,7 +213,6 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         options.catalog_source.clone(),
         project_root,
         &loaded.extras,
-        options.pull,
     )?;
     let resolved = resolve(
         &loaded.robot,
@@ -541,11 +540,11 @@ pub(crate) fn prepare_robot_participants(
                 ParticipantState::Starting,
             ));
             match &participant.execution {
-                ParticipantExecution::OfficialArtifact { artifact_ref } => {
+                ParticipantExecution::OfficialArtifact { .. } => {
                     let runtime = official_by_name
                         .get(participant.artifact_id.as_str())
                         .copied();
-                    match locate_official_binary(runtime, &participant.artifact_id, artifact_ref)? {
+                    match locate_official_binary(runtime, &participant.artifact_id)? {
                         Some(path) => specs.push(ParticipantSpec {
                             id,
                             kind,
@@ -727,7 +726,6 @@ fn locate_tool_binary(resolved: &ResolvedRobot, name: &str) -> Result<Option<Pat
 fn locate_official_binary(
     runtime: Option<&ResolvedPlatformRuntime>,
     participant_id: &str,
-    artifact_ref: &str,
 ) -> Result<Option<PathBuf>> {
     if let Some(path) = env_path_override("PHOXAL_ARTIFACT", participant_id) {
         return Ok(Some(path));
@@ -748,12 +746,11 @@ fn locate_official_binary(
         let cache = crate::native_artifacts::artifact_binary_path(&descriptor)?;
         return Ok(cache.is_file().then_some(cache));
     }
-    let cache = crate::host_paths::cache_dir()?
-        .join("artifacts")
-        .join(participant_id)
-        .join(sanitize_path_segment(artifact_ref))
-        .join(binary_name);
-    Ok(cache.is_file().then_some(cache))
+    // No env override, and no resolved runtime to derive a native-artifact
+    // descriptor from (a path-overridden or otherwise non-catalog runtime) -
+    // nothing else in the flat `cache/artifacts/` store can identify this
+    // participant's binary; there is no per-package legacy fallback anymore.
+    Ok(None)
 }
 
 fn env_path_override(prefix: &str, id: &str) -> Option<PathBuf> {
@@ -769,19 +766,6 @@ fn env_key(value: &str) -> String {
         .map(|ch| {
             if ch.is_ascii_alphanumeric() {
                 ch.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-fn sanitize_path_segment(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
-                ch
             } else {
                 '_'
             }

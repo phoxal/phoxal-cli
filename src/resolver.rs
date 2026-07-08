@@ -133,6 +133,16 @@ pub struct ResolvedPlatformRuntime {
     pub bus_abi: Option<String>,
     pub changed_contracts: Vec<String>,
     pub path_override: Option<PathBuf>,
+    /// The channel this entry was selected on. Meaningful only for a
+    /// catalog-resolved runtime (a path override never re-derives it); kept
+    /// here - not just implied by `ResolvedRobot::channel` - so
+    /// [`crate::native_artifacts::NativeArtifactDescriptor`] can upsert a
+    /// self-contained local download manifest entry without threading the
+    /// whole resolved robot back through staging.
+    pub channel: CatalogChannel,
+    /// The target triple this entry was resolved/built for
+    /// (`crate::catalog::TARGET_INDEPENDENT_SCOPE` for `component_assets`).
+    pub target: String,
 }
 
 impl ResolvedPlatformRuntime {
@@ -256,6 +266,12 @@ pub struct ResolvedTool {
     pub config_schema: Option<Value>,
     pub bus_abi: Option<String>,
     pub path_override: Option<PathBuf>,
+    /// The channel this entry was selected on; see
+    /// [`ResolvedPlatformRuntime::channel`].
+    pub channel: CatalogChannel,
+    /// The target triple this entry was resolved/built for; see
+    /// [`ResolvedPlatformRuntime::target`].
+    pub target: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -638,6 +654,7 @@ pub fn resolve(
     let path_overrides = apply_path_pins(
         robot,
         project_root,
+        options.resolve_source_commits,
         &mut platform_runtimes,
         &mut simulators,
         &mut components,
@@ -659,9 +676,22 @@ pub fn resolve(
     })
 }
 
+/// Apply every `artifacts.pins` `Path`/`Git` override to the resolved graph.
+/// `Path` pins resolve directly against `project_root`. `Git` pins resolve
+/// through the general [`crate::git_artifact`] resolver - the SAME one
+/// components use - EXCEPT for a key that belongs to a component: components
+/// resolve their own git pins earlier, inside [`resolve_component_package`],
+/// and stage them lazily at point-of-use
+/// (`component_driver::component_driver_crate_dir`/`component_assets_dir`),
+/// so this function skips those keys rather than eagerly cloning them a
+/// second time up front. For a non-component key, `resolve_source_commits`
+/// gates the same way it does for components: off (`pull`/`outdated`) leaves
+/// the pin unapplied rather than touching the network, on resolves the ref to
+/// a commit and clones/reuses the shallow checkout.
 fn apply_path_pins(
     robot: &Robot,
     project_root: &Path,
+    resolve_source_commits: bool,
     platform_runtimes: &mut [ResolvedPlatformRuntime],
     simulators: &mut [ResolvedPlatformRuntime],
     components: &mut [ResolvedComponent],
@@ -669,10 +699,19 @@ fn apply_path_pins(
 ) -> Result<Vec<ResolvedPathOverride>> {
     let mut overrides = Vec::new();
     for (key, pin) in &robot.artifacts.pins {
-        let ArtifactPin::Path(pin) = pin else {
-            continue;
+        let path = match pin {
+            ArtifactPin::Path(pin) => resolve_project_path(project_root, &pin.path),
+            ArtifactPin::Git(pin) => {
+                if is_component_package_key(key, components) {
+                    continue;
+                }
+                let Some(path) = resolve_git_artifact_pin_path(pin, resolve_source_commits)? else {
+                    continue;
+                };
+                path
+            }
+            ArtifactPin::Sha256(_) | ArtifactPin::Version(_) => continue,
         };
-        let path = resolve_project_path(project_root, &pin.path);
         if apply_service_path_pin(key, &path, platform_runtimes, &mut overrides) {
             continue;
         }
@@ -692,6 +731,38 @@ fn apply_path_pins(
     }
     overrides.sort_by(|left, right| left.key.cmp(&right.key));
     Ok(overrides)
+}
+
+fn is_component_package_key(key: &str, components: &[ResolvedComponent]) -> bool {
+    components.iter().any(|component| {
+        component.assets.package == key
+            || component
+                .driver
+                .as_ref()
+                .is_some_and(|driver| driver.package == key)
+    })
+}
+
+/// Resolve a general (non-component) `Git` artifacts.pin to a local checkout
+/// directory: resolve `rev` to a commit (network-gated by
+/// `resolve_source_commits`, exactly like [`resolve_component_commit`]), then
+/// shallow-clone/reuse it via [`crate::git_artifact::ensure_git_artifact`].
+/// `None` when `resolve_source_commits` is off - the pin is left unapplied
+/// rather than touching the network (mirrors how an offline component git
+/// pin resolves with an empty commit instead of cloning).
+fn resolve_git_artifact_pin_path(
+    pin: &phoxal::model::robot::v1::ArtifactGitPin,
+    resolve_source_commits: bool,
+) -> Result<Option<PathBuf>> {
+    if !resolve_source_commits {
+        return Ok(None);
+    }
+    let commit = resolve_component_commit(&pin.git, &pin.rev)?;
+    let repo_dir = crate::git_artifact::ensure_git_artifact(&pin.git, &commit)?;
+    Ok(Some(crate::git_artifact::subdir(
+        repo_dir,
+        pin.directory.as_deref(),
+    )?))
 }
 
 fn apply_service_path_pin(
@@ -948,6 +1019,7 @@ fn resolve_catalog_entries(
                 ArtifactKind::Service,
                 entry,
                 Some(channel),
+                channel,
                 target,
             )
         })
@@ -964,7 +1036,13 @@ fn resolve_simulators(
     selected
         .into_values()
         .map(|entry| {
-            resolved_runtime_from_artifact_entry(ArtifactKind::Simulator, entry, None, target)
+            resolved_runtime_from_artifact_entry(
+                ArtifactKind::Simulator,
+                entry,
+                None,
+                channel,
+                target,
+            )
         })
         .collect()
 }
@@ -1005,7 +1083,8 @@ fn select_latest_artifact_entries<'a>(
 pub(crate) fn resolved_runtime_from_artifact_entry(
     kind: ArtifactKind,
     entry: &ArtifactEntry,
-    channel: Option<CatalogChannel>,
+    ref_channel_suffix: Option<CatalogChannel>,
+    channel: CatalogChannel,
     target: &str,
 ) -> Result<ResolvedPlatformRuntime> {
     let name = crate::catalog::artifact_name(kind, &entry.package)
@@ -1014,7 +1093,7 @@ pub(crate) fn resolved_runtime_from_artifact_entry(
     let built = entry.artifacts.get(target);
     let artifact_ref = built
         .map(|artifact| artifact.tarball.clone())
-        .unwrap_or_else(|| match channel {
+        .unwrap_or_else(|| match ref_channel_suffix {
             // Services encode the channel in their synthetic not-yet-built
             // ref (a `phoxal-cli` convention predating the lean catalog, kept
             // for stable `artifact_ref()` output); other kinds never have.
@@ -1049,11 +1128,14 @@ pub(crate) fn resolved_runtime_from_artifact_entry(
         bus_abi: Some(entry.bus_abi.clone()),
         changed_contracts: entry.changed_contracts.clone(),
         path_override: None,
+        channel,
+        target: target.to_string(),
     })
 }
 
 fn resolved_runtime_from_asset_entry(
     entry: &AssetEntry,
+    channel: CatalogChannel,
     target: &str,
 ) -> Result<ResolvedPlatformRuntime> {
     let name = crate::catalog::artifact_name(ArtifactKind::ComponentAssets, &entry.package)
@@ -1087,6 +1169,8 @@ fn resolved_runtime_from_asset_entry(
         bus_abi: None,
         changed_contracts: Vec::new(),
         path_override: None,
+        channel,
+        target: target.to_string(),
     })
 }
 
@@ -1136,7 +1220,8 @@ fn ensure_catalog_schema_agreement<'a>(
     Ok(())
 }
 
-/// Resolve a git component ref to a concrete commit SHA.
+/// Resolve a git `artifacts.pins` ref (component or general) to a concrete
+/// commit SHA.
 ///
 /// A ref that is already a full 40-character commit SHA is an explicit pin and
 /// is returned as-is with no network access. Any other ref (a tag or branch
@@ -1148,14 +1233,14 @@ fn resolve_component_commit(url: &str, git_ref: &str) -> Result<String> {
     }
     resolve_git_ref(url, git_ref).with_context(|| {
         format!(
-            "could not resolve git component ref '{git_ref}' from {url} without network access. \
-             Pin the component to an explicit commit SHA in robot.yaml (artifacts.pins.<package>.rev: <40-char sha>), \
+            "could not resolve git ref '{git_ref}' from {url} without network access. \
+             Pin artifacts.pins.<package>.rev to an explicit commit SHA in robot.yaml, \
              or run with network access so `git ls-remote` can resolve the ref."
         )
     })
 }
 
-fn is_full_commit_sha(value: &str) -> bool {
+pub(crate) fn is_full_commit_sha(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|byte| byte.is_ascii_hexdigit())
 }
 
@@ -1362,8 +1447,12 @@ fn resolve_component_package(
             .filter(|entry| entry.channels.contains_key(&context.channel))
             .max_by(|left, right| compare_versions(&left.version, &right.version))
             .ok_or_else(|| anyhow!("{package} is not available in the artifact catalog"))?;
-        resolved_runtime_from_asset_entry(entry, crate::catalog::TARGET_INDEPENDENT_SCOPE)
-            .with_context(|| format!("failed to resolve catalog entry for {package}"))?
+        resolved_runtime_from_asset_entry(
+            entry,
+            context.channel,
+            crate::catalog::TARGET_INDEPENDENT_SCOPE,
+        )
+        .with_context(|| format!("failed to resolve catalog entry for {package}"))?
     } else {
         let entries = match kind {
             ArtifactKind::ComponentDriver => &catalog.drivers,
@@ -1380,7 +1469,7 @@ fn resolve_component_package(
             })
             .max_by(|left, right| compare_catalog_entries(left, right))
             .ok_or_else(|| anyhow!("{package} is not available in the artifact catalog"))?;
-        resolved_runtime_from_artifact_entry(kind, entry, None, context.target)
+        resolved_runtime_from_artifact_entry(kind, entry, None, context.channel, context.target)
             .with_context(|| format!("failed to resolve catalog entry for {package}"))?
     };
 
@@ -1478,6 +1567,8 @@ fn resolve_tools(
                 config_schema: entry.config_schema.clone(),
                 bus_abi: Some(entry.bus_abi.clone()),
                 path_override: None,
+                channel,
+                target: target.to_string(),
             })
         })
         .collect()
@@ -1869,6 +1960,8 @@ services:
             config_schema: None,
             bus_abi: None,
             path_override: None,
+            channel: CatalogChannel::Stable,
+            target: "aarch64-unknown-linux-gnu".to_string(),
         };
 
         assert_eq!(runtime.artifact_ref(), "service-asset:y2026_1-stable");

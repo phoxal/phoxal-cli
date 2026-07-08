@@ -23,11 +23,6 @@ pub enum GenerationsSubcommand {
 pub struct Status {
     #[arg(long, value_name = "GENERATION", help = "Generation to inspect.")]
     pub generation: Option<String>,
-    #[arg(
-        long,
-        help = "Refresh the artifact catalog before reporting readiness."
-    )]
-    pub pull: bool,
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
     pub message_format: MessageFormat,
 }
@@ -71,7 +66,7 @@ impl Generations {
 
 impl Status {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let output = status(app, self.generation.as_deref(), self.pull)?;
+        let output = status(app, self.generation.as_deref())?;
         crate::commands::print_message(
             &output,
             || {
@@ -122,24 +117,19 @@ impl Status {
     }
 }
 
-pub fn status(
-    app: &AppContext,
-    generation: Option<&str>,
-    refresh: bool,
-) -> Result<GenerationStatusOutput> {
+pub fn status(app: &AppContext, generation: Option<&str>) -> Result<GenerationStatusOutput> {
     let robot_path = crate::resolver::discover_robot_yaml(app.project.root())?;
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
     let loaded = crate::resolver::load_robot_with_extras(&robot_path)?;
     let robot = loaded.robot;
-    let catalog =
-        crate::commands::load_catalog_for_robot(app, project_root, &loaded.extras, refresh)?
-            .ok_or_else(|| {
-                crate::native_pending::error(
-                    "generation readiness from the generated artifact catalog (06)",
-                )
-            })?;
+    let catalog = crate::commands::load_catalog_for_robot(app, project_root, &loaded.extras)?
+        .ok_or_else(|| {
+            crate::native_pending::error(
+                "generation readiness from the generated artifact catalog (06)",
+            )
+        })?;
     let target = crate::resolver::host_target_triple();
     let generation = generation
         .map(str::to_string)
@@ -273,7 +263,7 @@ mod tests {
             Some(temp.path().join("catalog.json").display().to_string()),
         )?;
 
-        let output = status(&app, None, false)?;
+        let output = status(&app, None)?;
 
         assert!(
             output
@@ -296,7 +286,7 @@ mod tests {
             Some(temp.path().join("catalog.json").display().to_string()),
         )?;
 
-        let output = status(&app, None, false)?;
+        let output = status(&app, None)?;
 
         assert_eq!(
             output.changed_contracts,

@@ -31,6 +31,7 @@ pub mod catalog;
 pub mod commands;
 pub(crate) mod component_driver;
 pub mod context;
+pub(crate) mod git_artifact;
 pub mod host_doctor;
 pub mod host_paths;
 pub mod launch_env;

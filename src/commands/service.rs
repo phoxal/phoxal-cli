@@ -91,7 +91,6 @@ pub fn service_catalog_summary(
         catalog_source,
         project_root,
         &loaded.extras,
-        false,
     )?
     .ok_or_else(crate::catalog::unavailable_catalog_error)?;
     Ok(ServiceCatalogSummary {

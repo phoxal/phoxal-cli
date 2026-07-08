@@ -66,7 +66,6 @@ pub fn run(
     let loaded = load_robot_with_extras(&robot_path)?;
     let robot = loaded.robot;
     let catalog = crate::catalog::load_catalog(crate::catalog::CatalogLoadOptions {
-        refresh: true,
         cli_source: catalog_source,
         robot_source: loaded.extras.catalog_source.as_ref().map(|source| {
             if source.is_absolute() {

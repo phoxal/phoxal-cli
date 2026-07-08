@@ -15,21 +15,39 @@ pub fn cache_dir() -> Result<PathBuf> {
     phoxal_home().map(|path| path.join("cache"))
 }
 
-pub fn tools_cache_dir() -> Result<PathBuf> {
-    cache_dir().map(|path| path.join("tools"))
-}
-
-pub fn worlds_dir() -> Result<PathBuf> {
-    phoxal_home().map(|path| path.join("worlds"))
-}
-
 pub fn run_dir() -> Result<PathBuf> {
     phoxal_home().map(|path| path.join("run"))
 }
 
-pub fn config_path() -> Result<PathBuf> {
-    phoxal_home().map(|path| path.join("config.yaml"))
+/// The LOCAL download manifest: a `phoxal::catalog::Manifest` holding only the
+/// entries whose tarball(s) are present in [`artifacts_dir`] - NOT a cached
+/// copy of the remote catalog (see `crate::catalog`). Directly under
+/// `cache/`, not a `cache/catalog/` subdir.
+pub fn local_manifest_path() -> Result<PathBuf> {
+    cache_dir().map(|path| path.join(LOCAL_MANIFEST_FILE))
 }
+
+/// The flat, content-addressed native-artifact tarball store: one file per
+/// release asset, named exactly as published (`phoxal-driver-bno085-v0.1.5-
+/// <triple>.tar.zst`) - no per-package subdirectories.
+pub fn artifacts_dir() -> Result<PathBuf> {
+    cache_dir().map(|path| path.join("artifacts"))
+}
+
+/// Shallow git checkouts for `robot.yaml` `artifacts.pins` git sources (any
+/// kind, not just components) - see `crate::git_artifact`.
+pub fn git_artifacts_dir() -> Result<PathBuf> {
+    cache_dir().map(|path| path.join("git-artifacts"))
+}
+
+/// The cross-build toolchain + target dir `deploy` caches under
+/// `cache/deploy/` (zigbuild toolchain provisioning, cross-compiled target
+/// directories).
+pub fn deploy_dir() -> Result<PathBuf> {
+    cache_dir().map(|path| path.join("deploy"))
+}
+
+const LOCAL_MANIFEST_FILE: &str = "phoxal-artifacts.json";
 
 /// Test-only support for pointing `PHOXAL_HOME` (and therefore
 /// `cache_dir()`/`run_dir()`/the Webots staging root) at a scratch directory.

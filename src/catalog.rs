@@ -4,15 +4,20 @@
 //! The framework owns the wire schema itself (`Manifest`, `AssetEntry`,
 //! `ArtifactEntry`, `Artifact`, `Channel`, `Contract`) - this module re-exports
 //! those types and adds only the CLI-local concerns layered on top: fetching
-//! the catalog file (a local path or an HTTPS URL), on-disk caching of the
-//! loaded manifest, the `ArtifactKind` tag the CLI uses to remember which of
-//! the manifest's five arrays an entry came from (the published schema does
-//! not tag entries with a `kind` - "the array an entry lives in *is* its
-//! kind"), API-generation comparison/ordering, and the preview-feature
-//! promotion scanner. It does not redefine the manifest's own wire shape or
-//! its cache LAYOUT (that is a separate slice's job).
-use std::collections::BTreeSet;
+//! the REMOTE catalog (a local path or an HTTPS URL, always fetched fresh -
+//! there is no on-disk cache of the remote fetch; see [`load_catalog`]), the
+//! `ArtifactKind` tag the CLI uses to remember which of the manifest's five
+//! arrays an entry came from (the published schema does not tag entries with
+//! a `kind` - "the array an entry lives in *is* its kind"), API-generation
+//! comparison/ordering, the preview-feature promotion scanner, and the LOCAL
+//! download manifest ([`upsert_local_manifest_entry`]/[`prune_local_manifest`])
+//! that records which official artifacts are actually present in
+//! `cache/artifacts/` - a wholly different document from the remote catalog,
+//! never a cached copy of it (docs D64: no lockfile, no cached remote
+//! catalog).
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -49,11 +54,8 @@ pub const CATALOG_SOURCE_ENV: &str = "PHOXAL_ARTIFACT_CATALOG";
 /// `xtask::workspace::TARGET_INDEPENDENT_SCOPE`.
 pub const TARGET_INDEPENDENT_SCOPE: &str = "target-independent";
 
-const CATALOG_CACHE_FILE: &str = "phoxal-artifacts.json";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogLoadOptions {
-    pub refresh: bool,
     pub cli_source: Option<String>,
     pub robot_source: Option<PathBuf>,
 }
@@ -168,26 +170,22 @@ pub fn to_catalog_channel(channel: phoxal::model::robot::v1::Channel) -> Channel
     }
 }
 
+/// Load the remote artifact catalog, always fetched fresh into memory -
+/// there is no on-disk cache of this document (docs D64: no lockfile, no
+/// cached copy of the remote catalog). An explicit source (`--catalog`, the
+/// `PHOXAL_ARTIFACT_CATALOG` env var, or `robot.yaml`'s `artifacts.catalog`)
+/// takes precedence; a local path is read directly, an HTTPS URL is fetched
+/// live. With no explicit source, this fetches [`DEFAULT_CATALOG_URL`].
+///
+/// A fully offline session can still validate previously-downloaded official
+/// artifacts by pointing `--catalog` at the LOCAL download manifest
+/// ([`crate::host_paths::local_manifest_path`]) directly - it is itself a
+/// valid `Manifest`, just scoped to what is actually cached locally.
 pub fn load_catalog(options: CatalogLoadOptions) -> Result<Option<Manifest>> {
     if let Some(source) = explicit_source(options.cli_source, options.robot_source) {
-        let manifest = read_source(&source, options.refresh)?;
-        return Ok(Some(manifest));
+        return read_source(&source).map(Some);
     }
-
-    let cache_path = cache_path()?;
-    if options.refresh {
-        let manifest = fetch_default_catalog(&cache_path, true)?;
-        write_cache(&cache_path, &manifest)?;
-        return Ok(Some(manifest));
-    }
-
-    if cache_path.is_file() {
-        return read_catalog_path(&cache_path).map(Some);
-    }
-
-    let manifest = fetch_default_catalog(&cache_path, false)?;
-    write_cache(&cache_path, &manifest)?;
-    Ok(Some(manifest))
+    fetch_default_catalog().map(Some)
 }
 
 fn explicit_source(cli_source: Option<String>, robot_source: Option<PathBuf>) -> Option<String> {
@@ -196,17 +194,10 @@ fn explicit_source(cli_source: Option<String>, robot_source: Option<PathBuf>) ->
         .or_else(|| robot_source.map(|path| path.display().to_string()))
 }
 
-fn read_source(source: &str, refresh: bool) -> Result<Manifest> {
+fn read_source(source: &str) -> Result<Manifest> {
     if source.starts_with("https://") {
-        let cache_path = cache_path()?;
-        if refresh || !cache_path.is_file() {
-            let manifest = fetch_https(source)
-                .with_context(|| format!("failed to fetch artifact catalog from {source}"))?;
-            write_cache(&cache_path, &manifest)?;
-            Ok(manifest)
-        } else {
-            read_catalog_path(&cache_path)
-        }
+        fetch_https(source)
+            .with_context(|| format!("failed to fetch artifact catalog from {source}"))
     } else if source.starts_with("http://") {
         bail!("artifact catalog source must use HTTPS or a local path: {source}");
     } else {
@@ -214,16 +205,8 @@ fn read_source(source: &str, refresh: bool) -> Result<Manifest> {
     }
 }
 
-fn fetch_default_catalog(cache_path: &Path, refresh: bool) -> Result<Manifest> {
-    let mut tried = Vec::new();
-    if refresh {
-        tried.push(format!("default catalog URL {DEFAULT_CATALOG_URL}"));
-    } else {
-        tried.push(format!("cached catalog {}", cache_path.display()));
-        tried.push(format!("default catalog URL {DEFAULT_CATALOG_URL}"));
-    }
-    fetch_https(DEFAULT_CATALOG_URL)
-        .map_err(|error| unavailable_catalog_error_with_attempts(&tried, error))
+fn fetch_default_catalog() -> Result<Manifest> {
+    fetch_https(DEFAULT_CATALOG_URL).map_err(unavailable_catalog_error_with_fetch_error)
 }
 
 pub fn read_catalog_path(path: &Path) -> Result<Manifest> {
@@ -254,25 +237,32 @@ fn fetch_https(url: &str) -> Result<Manifest> {
     Ok(manifest)
 }
 
-fn cache_path() -> Result<PathBuf> {
-    Ok(crate::host_paths::cache_dir()?
-        .join("catalog")
-        .join(CATALOG_CACHE_FILE))
-}
-
-fn write_cache(path: &Path, manifest: &Manifest) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create catalog cache dir {}", parent.display()))?;
-    }
+/// Serialize `manifest` as pretty JSON and write it to `path` atomically
+/// (write to a unique sibling temp file, then rename into place) so a reader
+/// never observes a half-written manifest. Used by the local download
+/// manifest; the remote catalog itself is never written to disk (see the
+/// [`load_catalog`] docs).
+fn write_manifest_atomic(path: &Path, manifest: &Manifest) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("local manifest path did not have a parent directory")?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     let mut json =
-        serde_json::to_string_pretty(manifest).context("failed to serialize catalog cache")?;
+        serde_json::to_string_pretty(manifest).context("failed to serialize local manifest")?;
     json.push('\n');
-    let partial = path.with_extension("partial");
-    fs::write(&partial, json)
-        .with_context(|| format!("failed to write catalog cache {}", partial.display()))?;
-    fs::rename(&partial, path)
-        .with_context(|| format!("failed to finalize catalog cache {}", path.display()))
+    let mut partial = tempfile::Builder::new()
+        .prefix(".phoxal-artifacts-")
+        .suffix(".partial")
+        .tempfile_in(parent)
+        .with_context(|| format!("failed to create temp manifest in {}", parent.display()))?;
+    partial
+        .write_all(json.as_bytes())
+        .with_context(|| format!("failed to write {}", partial.path().display()))?;
+    partial
+        .persist(path)
+        .map(|_| ())
+        .map_err(|error| error.error)
+        .with_context(|| format!("failed to finalize {}", path.display()))
 }
 
 /// Every official service name in the manifest, deduplicated and sorted.
@@ -425,18 +415,222 @@ fn preview_features_in_line(line: &str) -> Vec<&str> {
 
 pub fn unavailable_catalog_error() -> anyhow::Error {
     anyhow!(
-        "no artifact catalog revision is available; tried cached catalog and default catalog URL {DEFAULT_CATALOG_URL}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add artifacts.catalog in robot.yaml, or run `phoxal-cli pull` with network access to refresh the cache."
+        "no artifact catalog revision is available; tried the default catalog URL {DEFAULT_CATALOG_URL}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add artifacts.catalog in robot.yaml, or point --catalog at the local download manifest ({LOCAL_MANIFEST_HINT}) to validate offline against already-cached artifacts."
     )
 }
 
-fn unavailable_catalog_error_with_attempts(
-    tried: &[String],
-    source: anyhow::Error,
-) -> anyhow::Error {
+fn unavailable_catalog_error_with_fetch_error(source: anyhow::Error) -> anyhow::Error {
     anyhow!(
-        "no artifact catalog revision is available; tried {}. Default fetch failed: {source:#}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add artifacts.catalog in robot.yaml, or run `phoxal-cli pull` with network access to refresh the cache.",
-        tried.join(", ")
+        "no artifact catalog revision is available; fetching the default catalog URL {DEFAULT_CATALOG_URL} failed: {source:#}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add artifacts.catalog in robot.yaml, or point --catalog at the local download manifest ({LOCAL_MANIFEST_HINT}) to validate offline against already-cached artifacts."
     )
+}
+
+/// Human-readable hint for the local download manifest path, used only in
+/// diagnostics (not resolved against the real `PHOXAL_HOME` - a fixed
+/// `~/.phoxal/...` string reads better in an error message than a
+/// possibly-relocated absolute path).
+const LOCAL_MANIFEST_HINT: &str = "~/.phoxal/cache/phoxal-artifacts.json";
+
+// ---------------------------------------------------------------------------
+// Local download manifest (`cache/phoxal-artifacts.json`).
+//
+// A wholly local document: it records which official artifacts are actually
+// present in `cache/artifacts/`, with their contracts/config/bus_abi inlined
+// exactly like the remote catalog's own `ArtifactEntry`/`AssetEntry` shapes -
+// so `check`/`run` can validate a cached artifact's contracts without any
+// network access, and so the file itself is a valid `--catalog` source for a
+// fully offline session. It is NOT a cache of the remote catalog: an entry
+// only exists here once its tarball has actually been downloaded, and
+// `cache clean` prunes entries whose tarball no longer exists.
+// ---------------------------------------------------------------------------
+
+/// One official artifact's data needed to upsert its entry into the local
+/// download manifest once its tarball lands in `cache/artifacts/`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalManifestUpsert {
+    pub kind: ArtifactKind,
+    pub package: String,
+    pub version: String,
+    /// Empty for [`ArtifactKind::ComponentAssets`] - an asset bundle carries
+    /// no API generation.
+    pub generation: String,
+    pub contracts: Vec<Contract>,
+    pub config_schema: Option<serde_json::Value>,
+    pub bus_abi: Option<String>,
+    pub changed_contracts: Vec<String>,
+    pub channel: Channel,
+    /// The target triple this tarball was built for, or
+    /// [`TARGET_INDEPENDENT_SCOPE`] for a `component_assets` bundle.
+    pub target: String,
+    pub tarball: String,
+    pub sha256: String,
+}
+
+/// Read the local download manifest, or an empty (but validly finalized)
+/// manifest if it does not exist yet.
+pub fn load_local_manifest() -> Result<Manifest> {
+    let path = crate::host_paths::local_manifest_path()?;
+    read_local_manifest_at(&path)
+}
+
+fn read_local_manifest_at(path: &Path) -> Result<Manifest> {
+    if !path.is_file() {
+        return empty_manifest();
+    }
+    read_catalog_path(path)
+}
+
+fn empty_manifest() -> Result<Manifest> {
+    Manifest::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        .finalize()
+        .context("failed to build an empty local download manifest")
+}
+
+/// Insert or replace `upsert`'s entry (keyed by `package`) in the local
+/// download manifest and write it back atomically. Called once a tarball has
+/// been freshly downloaded into `cache/artifacts/` (see
+/// `native_artifacts::stage_descriptor`); idempotent to call again with the
+/// same data.
+pub fn upsert_local_manifest_entry(upsert: LocalManifestUpsert) -> Result<()> {
+    let path = crate::host_paths::local_manifest_path()?;
+    let mut manifest = read_local_manifest_at(&path)?;
+
+    if upsert.kind == ArtifactKind::ComponentAssets {
+        let existing = manifest
+            .assets
+            .iter()
+            .find(|entry| entry.package == upsert.package && entry.version == upsert.version);
+        let mut artifacts = existing
+            .map(|entry| entry.artifacts.clone())
+            .unwrap_or_default();
+        artifacts.insert(
+            upsert.target.clone(),
+            Artifact {
+                tarball: upsert.tarball.clone(),
+                sha256: upsert.sha256.clone(),
+            },
+        );
+        let mut channels = existing
+            .map(|entry| entry.channels.clone())
+            .unwrap_or_default();
+        channels.insert(upsert.channel, upsert.version.clone());
+        manifest
+            .assets
+            .retain(|entry| entry.package != upsert.package);
+        manifest.assets.push(AssetEntry {
+            package: upsert.package,
+            version: upsert.version,
+            artifacts,
+            channels,
+        });
+    } else {
+        let list = match upsert.kind {
+            ArtifactKind::Service => &mut manifest.services,
+            ArtifactKind::ComponentDriver => &mut manifest.drivers,
+            ArtifactKind::Tool => &mut manifest.tools,
+            ArtifactKind::Simulator => &mut manifest.simulators,
+            ArtifactKind::ComponentAssets => unreachable!("handled above"),
+        };
+        let existing = list
+            .iter()
+            .find(|entry| entry.package == upsert.package && entry.version == upsert.version);
+        let mut artifacts = existing
+            .map(|entry| entry.artifacts.clone())
+            .unwrap_or_default();
+        artifacts.insert(
+            upsert.target.clone(),
+            Artifact {
+                tarball: upsert.tarball.clone(),
+                sha256: upsert.sha256.clone(),
+            },
+        );
+        let mut channels = existing
+            .map(|entry| entry.channels.clone())
+            .unwrap_or_default();
+        channels.insert(upsert.channel, upsert.version.clone());
+        let entry = ArtifactEntry {
+            package: upsert.package.clone(),
+            version: upsert.version,
+            api_generation: upsert.generation,
+            contracts: upsert.contracts,
+            config_schema: upsert.config_schema,
+            bus_abi: upsert.bus_abi.unwrap_or_default(),
+            artifacts,
+            channels,
+            changed_contracts: upsert.changed_contracts,
+        };
+        list.retain(|existing| existing.package != upsert.package);
+        list.push(entry);
+    }
+
+    let manifest = manifest
+        .finalize()
+        .context("failed to finalize the local download manifest")?;
+    write_manifest_atomic(&path, &manifest)
+}
+
+/// Drop every local-manifest entry whose tarball(s) are no longer present
+/// under `cache/artifacts/`, and report how many entries were dropped. A
+/// no-op (returns `0`) if the local manifest does not exist. Used by
+/// `phoxal-cli cache clean` after clearing `cache/artifacts/`, and generally
+/// keeps the manifest honest if a tarball is ever removed by hand.
+pub fn prune_local_manifest() -> Result<usize> {
+    let path = crate::host_paths::local_manifest_path()?;
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let manifest = read_catalog_path(&path)?;
+    let artifacts_dir = crate::host_paths::artifacts_dir()?;
+    let tarball_present = |artifacts: &BTreeMap<String, Artifact>| {
+        artifacts
+            .values()
+            .all(|artifact| artifacts_dir.join(&artifact.tarball).is_file())
+    };
+
+    let mut dropped = 0usize;
+    let mut retain_counting = |present: bool| {
+        if !present {
+            dropped += 1;
+        }
+        present
+    };
+    let mut assets = manifest.assets;
+    assets.retain(|entry| retain_counting(tarball_present(&entry.artifacts)));
+    let mut services = manifest.services;
+    services.retain(|entry| retain_counting(tarball_present(&entry.artifacts)));
+    let mut drivers = manifest.drivers;
+    drivers.retain(|entry| retain_counting(tarball_present(&entry.artifacts)));
+    let mut tools = manifest.tools;
+    tools.retain(|entry| retain_counting(tarball_present(&entry.artifacts)));
+    let mut simulators = manifest.simulators;
+    simulators.retain(|entry| retain_counting(tarball_present(&entry.artifacts)));
+
+    if dropped == 0 {
+        return Ok(0);
+    }
+    let pruned = Manifest::new(assets, services, drivers, tools, simulators)
+        .finalize()
+        .context("failed to finalize the pruned local download manifest")?;
+    write_manifest_atomic(&path, &pruned)?;
+    Ok(dropped)
+}
+
+/// The number of entries the local download manifest currently holds, with no
+/// side effects - used by `phoxal-cli cache clean --dry-run` to preview how
+/// many entries a real clean would prune (a full `cache clean` always empties
+/// `cache/artifacts/` entirely, so every current entry would lose its
+/// tarball and be dropped).
+pub fn local_manifest_entry_count() -> Result<usize> {
+    let path = crate::host_paths::local_manifest_path()?;
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let manifest = read_catalog_path(&path)?;
+    Ok(manifest.assets.len()
+        + manifest.services.len()
+        + manifest.drivers.len()
+        + manifest.tools.len()
+        + manifest.simulators.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +868,7 @@ pub fn fixture_artifact_for_tests(tarball: &str, sha256: &str) -> Artifact {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_paths::test_support::ScratchPhoxalHome;
 
     #[test]
     fn checksum_verification_rejects_edits() {
@@ -755,5 +950,40 @@ phoxal-api = { version = "0.19", features = ["preview-y2026_2"] }
             ),
             Some("webots-supervisor")
         );
+    }
+
+    #[test]
+    fn local_manifest_upsert_merges_targets_for_same_package_version() -> Result<()> {
+        let _guard = ScratchPhoxalHome::new()?;
+        let first = LocalManifestUpsert {
+            kind: ArtifactKind::Service,
+            package: "phoxal/service-drive".to_string(),
+            version: "0.1.0".to_string(),
+            generation: "y2026_1".to_string(),
+            contracts: Vec::new(),
+            config_schema: None,
+            bus_abi: Some("phoxal-bus/v0".to_string()),
+            changed_contracts: Vec::new(),
+            channel: Channel::Stable,
+            target: "aarch64-unknown-linux-gnu".to_string(),
+            tarball: "phoxal-service-drive-v0.1.0-aarch64-unknown-linux-gnu.tar.zst".to_string(),
+            sha256: "0".repeat(64),
+        };
+        let mut second = first.clone();
+        second.target = "x86_64-unknown-linux-gnu".to_string();
+        second.tarball = "phoxal-service-drive-v0.1.0-x86_64-unknown-linux-gnu.tar.zst".to_string();
+        second.sha256 = "1".repeat(64);
+
+        upsert_local_manifest_entry(first)?;
+        upsert_local_manifest_entry(second)?;
+
+        let manifest = load_local_manifest()?;
+        assert_eq!(manifest.services.len(), 1);
+        let entry = &manifest.services[0];
+        assert_eq!(entry.package, "phoxal/service-drive");
+        assert_eq!(entry.artifacts.len(), 2);
+        assert!(entry.artifacts.contains_key("aarch64-unknown-linux-gnu"));
+        assert!(entry.artifacts.contains_key("x86_64-unknown-linux-gnu"));
+        Ok(())
     }
 }
