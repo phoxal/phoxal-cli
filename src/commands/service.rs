@@ -135,7 +135,7 @@ mod tests {
     }
 
     fn minimal_robot_yaml() -> &'static str {
-        r#"schema: v0
+        r#"schema: robot/v0
 robot:
   id: testbot
   namespace: test

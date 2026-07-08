@@ -115,8 +115,6 @@ pub struct SubstitutionRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubstitutedContract {
     pub family: String,
-    pub topic: String,
-    pub direction: String,
     pub schema_id: String,
 }
 
@@ -550,7 +548,7 @@ mod tests {
     };
     use crate::commands::check::{
         CheckGraphContext, RawArtifact, RawEmitApis, SourceParticipant,
-        platform_artifact_refs_from_resolved, robot_graph_from_resolved, run_check_with_context,
+        platform_artifact_refs_from_resolved, run_check_with_context,
     };
     use crate::resolver::{
         ResolveOptions, ResolvedRobot, host_target_triple, resolve, target_generation_for_robot,
@@ -567,7 +565,7 @@ mod tests {
             "[package]\nname = \"mission\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
         )?;
         std::fs::write(temp.path().join("runtimes/mission/src.txt"), "source")?;
-        let robot = phoxal::model::robot::v1::Robot::parse_from_string(FIXTURE_ROBOT)?;
+        let robot = phoxal::model::robot::v0::Robot::parse_from_string(FIXTURE_ROBOT)?;
         let catalog = fixture_catalog_for_tests(vec![
             fixture_service_entry_for_tests(
                 "drive",
@@ -627,14 +625,12 @@ mod tests {
                 temp.path().join("components/ddsm115"),
             ),
         ];
-        let robot_graph = robot_graph_from_resolved(&resolved);
         let platform_refs = platform_artifact_refs_from_resolved(&resolved);
         let outcome = run_check_with_context(
             &platform_refs,
             &[],
             &source_participants,
             CheckGraphContext {
-                robot_graph: &robot_graph,
                 manifest_extras: &extras,
             },
             |artifact_ref| {
@@ -881,7 +877,7 @@ mod tests {
 
     fn empty_resolved_robot(id: &str) -> anyhow::Result<ResolvedRobot> {
         let yaml = format!(
-            r#"schema: v0
+            r#"schema: robot/v0
 robot:
   id: {id}
   namespace: dev
@@ -894,12 +890,12 @@ artifacts:
   generation: y2026_1
 "#
         );
-        let robot = phoxal::model::robot::v1::Robot::parse_from_string(&yaml)?;
+        let robot = phoxal::model::robot::v0::Robot::parse_from_string(&yaml)?;
         let generation = target_generation_for_robot(&robot, None)?;
         Ok(ResolvedRobot {
             robot,
             target_generation: generation,
-            channel: phoxal::model::robot::v1::Channel::Stable,
+            channel: phoxal::model::robot::v0::Channel::Stable,
             target: host_target_triple(),
             catalog_revision: None,
             platform_runtimes: Vec::new(),
@@ -937,7 +933,7 @@ artifacts:
         }
     }
 
-    const FIXTURE_ROBOT: &str = r#"schema: v0
+    const FIXTURE_ROBOT: &str = r#"schema: robot/v0
 robot:
   id: robot_v1
   namespace: dev

@@ -62,7 +62,7 @@ fn write_robot_project(root: &std::path::Path) -> anyhow::Result<()> {
 }
 
 fn minimal_robot_yaml() -> &'static str {
-    r#"schema: v0
+    r#"schema: robot/v0
 
 robot:
   id: testbot

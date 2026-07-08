@@ -1,6 +1,6 @@
 use std::fs;
 
-use phoxal::model::robot::RobotV1 as Robot;
+use phoxal::model::robot::RobotV0 as Robot;
 use phoxal_cli::catalog::{
     CatalogRevision, Channel as CatalogChannel, fixture_artifact_for_tests,
     fixture_catalog_for_tests, fixture_component_assets_entry_for_tests,
@@ -801,7 +801,7 @@ fn offline_options() -> ResolveOptions {
 
 fn minimal_robot_yaml(generation: &str) -> String {
     format!(
-        r#"schema: v0
+        r#"schema: robot/v0
 robot:
   id: testbot
   namespace: test

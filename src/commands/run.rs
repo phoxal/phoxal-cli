@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
-use phoxal::model::robot::v1::ConnectionConfig;
+use phoxal::model::robot::v0::ConnectionConfig;
 use phoxal::participant::launch::env;
 use serde::Serialize;
 use serde_json::Value;
@@ -16,7 +16,7 @@ use crate::AppContext;
 use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, build_emit_apis_from_source, fetch_emit_apis_from_native_artifact,
-    platform_artifact_refs_from_resolved, robot_graph_from_resolved, run_check_with_context,
+    platform_artifact_refs_from_resolved, run_check_with_context,
     source_participants_from_resolved,
 };
 use crate::component_driver::component_driver_crate_dir;
@@ -253,7 +253,6 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
 
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
-    let robot_graph = robot_graph_from_resolved(&resolved);
     let mut platform_refs = platform_artifact_refs_from_resolved(&resolved);
     platform_refs
         .extend(crate::commands::check::component_driver_platform_refs_from_resolved(&resolved));
@@ -270,7 +269,6 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         &[],
         &source_participants,
         CheckGraphContext {
-            robot_graph: &robot_graph,
             manifest_extras: &loaded.extras,
         },
         |artifact_ref| {

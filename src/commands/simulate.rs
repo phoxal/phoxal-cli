@@ -13,7 +13,7 @@ use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
     fetch_emit_apis_from_native_artifact, platform_artifact_refs_from_resolved,
-    robot_graph_from_resolved, run_check_with_context, source_participants_from_resolved,
+    run_check_with_context, source_participants_from_resolved,
 };
 use crate::component_driver::{component_assets_dir, component_driver_crate_dir};
 use crate::launch_plan::{
@@ -417,7 +417,6 @@ pub(crate) fn build_checked_sim_launch_plan(
     manifest_extras: &RobotManifestExtras,
     catalog: Option<&CatalogRevision>,
 ) -> Result<LaunchPlan> {
-    let robot_graph = robot_graph_from_resolved(resolved);
     let source_participants = sim_source_participants(project_root, resolved, catalog)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
     // A Catalog-sourced component driver is a platform ref here too (docs
@@ -440,10 +439,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         &platform_refs,
         &[],
         &source_participants,
-        CheckGraphContext {
-            robot_graph: &robot_graph,
-            manifest_extras,
-        },
+        CheckGraphContext { manifest_extras },
         |artifact_ref| {
             let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
                 anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
@@ -466,10 +462,7 @@ pub(crate) fn build_checked_sim_launch_plan(
     let controller_provider_id = simulator_controller_provider_id(&resolved.robot.robot.id);
     let substitutions = simulated_component_records(&checked_participants, &controller_provider_id);
     let sim_participants = sim_checked_participants(&checked_participants);
-    let report = graph_check::check_plan(graph_check::CheckInput {
-        participants: &sim_participants,
-        robot_graph: &robot_graph,
-    });
+    let report = graph_check::check_graph(&sim_participants);
     if !report.is_ok() {
         crate::commands::check::ensure_check_outcome_ok(
             &resolved.target_generation,
@@ -620,14 +613,9 @@ fn driver_metadata_unavailable(
 /// own record of a caller-side plan choice, so it can render "component X
 /// simulated by webots-controller" on the sim board and dry-run output.
 ///
-/// A driver's own `emit-apis` reports its component-template contracts with a
-/// literal `{instance}` placeholder (the same driver binary can be launched
-/// at any instance), so `{instance}` is filled in here with the driver's own
-/// known `component_instance` before display - the one piece of materialization
-/// this function can do unambiguously without consulting the robot graph. Any
-/// remaining `{capability}` placeholder is left as-is: `substitution_topic_summary`
-/// only keys off the `component/<instance>/` prefix, so this is enough to keep
-/// the board's collapsed "component/<instance>/*" rendering working.
+/// A driver's own `emit-apis` reports only `family`/`schema_id` per contract
+/// now (no `topic`/`direction`), so there is nothing left to materialize per
+/// instance here - the record just carries the family for display.
 pub(crate) fn simulated_component_records(
     participants: &[graph_check::ParticipantApis],
     provider_participant_id: &str,
@@ -650,9 +638,6 @@ pub(crate) fn simulated_component_records(
                         .iter()
                         .map(|contract| SubstitutedContract {
                             family: contract.family.clone(),
-                            topic: contract.topic.replace("{instance}", instance),
-                            direction: crate::commands::check::format_direction(contract.direction)
-                                .to_string(),
                             schema_id: contract.schema_id.clone(),
                         })
                         .collect(),
@@ -893,22 +878,12 @@ fn substitution_note(substitution: &SubstitutionRecord) -> String {
     )
 }
 
+/// A driver's own `emit-apis` now reports only `family`/`schema_id` per
+/// contract (no `topic`), so there is no per-topic wire detail left to
+/// summarize here - this collapses to the component instance's wildcard,
+/// same as the old "every contract is under this component" shortcut.
 fn substitution_topic_summary(substitution: &SubstitutionRecord) -> String {
-    let component_prefix = format!("component/{}/", substitution.component_instance);
-    if substitution.contracts.is_empty()
-        || substitution
-            .contracts
-            .iter()
-            .all(|contract| contract.topic.starts_with(&component_prefix))
-    {
-        return format!("component/{}/*", substitution.component_instance);
-    }
-    substitution
-        .contracts
-        .iter()
-        .map(|contract| contract.topic.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
+    format!("component/{}/*", substitution.component_instance)
 }
 
 /// `tool-joypad` is peripheral teleop, not part of the sim contract graph, so
@@ -1251,14 +1226,14 @@ pub(crate) fn stage_simulation_for_robot(
                     crate_dir.display()
                 )
             })?
-            .as_v1()
-            .context("Webots staging only supports component.yaml version v1")?
+            .as_v0()
+            .context("Webots staging only supports component.yaml version v0")?
             .clone();
         components.insert(component.source_name.clone(), component_model);
         component_type_dirs.insert(component.source_name.clone(), crate_dir);
     }
 
-    let bundle = phoxal::model::v1::Robot {
+    let bundle = phoxal::model::v0::Robot {
         manifest: resolved.robot.clone(),
         components,
         structure,
@@ -1529,29 +1504,15 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let resolved = resolved_with_drive_components(&["left_drive"], false)?;
         let extras = RobotManifestExtras::default();
-        let graph = component_graph(&["left_drive"]);
         let controller_id = simulator_controller_provider_id("robot_v1");
         let checked = vec![
-            service_participant(
-                "drive",
-                vec![motor_command(graph_check::Direction::Publish)],
-            ),
-            driver_participant(
-                "ddsm115",
-                "left_drive",
-                vec![motor_command(graph_check::Direction::Subscribe)],
-            ),
-            simulator_controller_participant(
-                &controller_id,
-                vec![motor_command(graph_check::Direction::Subscribe)],
-            ),
+            service_participant("drive", vec![motor_command()]),
+            driver_participant("ddsm115", "left_drive", vec![motor_command()]),
+            simulator_controller_participant(&controller_id, vec![motor_command()]),
         ];
         let substitutions = simulated_component_records(&checked, &controller_id);
         let sim_participants = sim_checked_participants(&checked);
-        let report = graph_check::check_plan(graph_check::CheckInput {
-            participants: &sim_participants,
-            robot_graph: &graph,
-        });
+        let report = graph_check::check_graph(&sim_participants);
         assert!(report.is_ok(), "{report:?}");
 
         let plan = build_launch_plan(
@@ -1586,50 +1547,19 @@ mod tests {
     fn two_identical_instances_get_disjoint_substitution_sets() {
         let controller_id = simulator_controller_provider_id("robot_v1");
         let checked = vec![
-            service_participant(
-                "drive",
-                vec![motor_command(graph_check::Direction::Publish)],
-            ),
-            driver_participant(
-                "ddsm115",
-                "left_drive",
-                vec![materialized_motor_command(
-                    "left_drive",
-                    graph_check::Direction::Subscribe,
-                )],
-            ),
-            driver_participant(
-                "ddsm115",
-                "right_drive",
-                vec![materialized_motor_command(
-                    "right_drive",
-                    graph_check::Direction::Subscribe,
-                )],
-            ),
-            simulator_controller_participant(
-                &controller_id,
-                vec![motor_command(graph_check::Direction::Subscribe)],
-            ),
+            service_participant("drive", vec![motor_command()]),
+            driver_participant("ddsm115", "left_drive", vec![motor_command()]),
+            driver_participant("ddsm115", "right_drive", vec![motor_command()]),
+            simulator_controller_participant(&controller_id, vec![motor_command()]),
         ];
         // Board display only (no checker involved, see module docs): each
         // dropped driver instance gets its own disjoint substitution record.
         let substitutions = simulated_component_records(&checked, &controller_id);
-        let topics = substitutions
+        let instances = substitutions
             .iter()
-            .map(|substitution| {
-                (
-                    substitution.component_instance.as_str(),
-                    substitution.contracts[0].topic.as_str(),
-                )
-            })
+            .map(|substitution| substitution.component_instance.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(
-            topics,
-            vec![
-                ("left_drive", "component/left_drive/motor/motor/command"),
-                ("right_drive", "component/right_drive/motor/motor/command"),
-            ]
-        );
+        assert_eq!(instances, vec!["left_drive", "right_drive"]);
     }
 
     #[test]
@@ -1785,15 +1715,8 @@ mod tests {
         let checked = vec![
             service_participant("drive", Vec::new()),
             service_participant("mission", Vec::new()),
-            driver_participant(
-                "ddsm115",
-                "left_drive",
-                vec![motor_command(graph_check::Direction::Subscribe)],
-            ),
-            simulator_controller_participant(
-                &controller_id,
-                vec![motor_command(graph_check::Direction::Subscribe)],
-            ),
+            driver_participant("ddsm115", "left_drive", vec![motor_command()]),
+            simulator_controller_participant(&controller_id, vec![motor_command()]),
         ];
         let substitutions = simulated_component_records(&checked, &controller_id);
         let sources = vec![SourceParticipant::user_service(
@@ -1841,19 +1764,11 @@ mod tests {
             .simulators
             .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
         let extras = RobotManifestExtras::default();
-        let graph = component_graph(&["left_drive"]);
         let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
         let controller_id = simulator_controller_provider_id("robot_v1");
         let checked = vec![
-            service_participant(
-                "drive",
-                vec![motor_command(graph_check::Direction::Publish)],
-            ),
-            driver_participant(
-                "ddsm115",
-                "left_drive",
-                vec![motor_command(graph_check::Direction::Subscribe)],
-            ),
+            service_participant("drive", vec![motor_command()]),
+            driver_participant("ddsm115", "left_drive", vec![motor_command()]),
             graph_check::ParticipantApis {
                 participant_id: supervisor_id.clone(),
                 artifact_id: "webots-supervisor".to_string(),
@@ -1865,17 +1780,11 @@ mod tests {
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
             },
-            simulator_controller_participant(
-                &controller_id,
-                vec![motor_command(graph_check::Direction::Subscribe)],
-            ),
+            simulator_controller_participant(&controller_id, vec![motor_command()]),
         ];
         let substitutions = simulated_component_records(&checked, &controller_id);
         let sim_participants = sim_checked_participants(&checked);
-        let report = graph_check::check_plan(graph_check::CheckInput {
-            participants: &sim_participants,
-            robot_graph: &graph,
-        });
+        let report = graph_check::check_graph(&sim_participants);
         assert!(report.is_ok(), "{report:?}");
 
         let plan = build_launch_plan(
@@ -1929,7 +1838,7 @@ mod tests {
         write_driver_crate(temp.path(), "ddsm115")?;
         fs::write(
             temp.path().join("components/ddsm115/component.yaml"),
-            "version: v1\ncapabilities: {}\n",
+            "schema: component/v0\ncapabilities: {}\n",
         )?;
 
         let mut resolved = resolved_with_drive_components(&["left_drive"], false)?;
@@ -1937,19 +1846,11 @@ mod tests {
             .simulators
             .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
         let extras = RobotManifestExtras::default();
-        let graph = component_graph(&["left_drive"]);
         let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
         let controller_id = simulator_controller_provider_id("robot_v1");
         let checked = vec![
-            service_participant(
-                "drive",
-                vec![motor_command(graph_check::Direction::Publish)],
-            ),
-            driver_participant(
-                "ddsm115",
-                "left_drive",
-                vec![motor_command(graph_check::Direction::Subscribe)],
-            ),
+            service_participant("drive", vec![motor_command()]),
+            driver_participant("ddsm115", "left_drive", vec![motor_command()]),
             graph_check::ParticipantApis {
                 participant_id: supervisor_id.clone(),
                 artifact_id: "webots-supervisor".to_string(),
@@ -1961,17 +1862,11 @@ mod tests {
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
             },
-            simulator_controller_participant(
-                &controller_id,
-                vec![motor_command(graph_check::Direction::Subscribe)],
-            ),
+            simulator_controller_participant(&controller_id, vec![motor_command()]),
         ];
         let substitutions = simulated_component_records(&checked, &controller_id);
         let sim_participants = sim_checked_participants(&checked);
-        let report = graph_check::check_plan(graph_check::CheckInput {
-            participants: &sim_participants,
-            robot_graph: &graph,
-        });
+        let report = graph_check::check_graph(&sim_participants);
         assert!(report.is_ok(), "{report:?}");
 
         let plan = build_launch_plan(
@@ -2044,10 +1939,7 @@ mod tests {
         let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
         let controller_id = simulator_controller_provider_id("robot_v1");
         let checked = vec![
-            service_participant(
-                "drive",
-                vec![motor_command(graph_check::Direction::Publish)],
-            ),
+            service_participant("drive", vec![motor_command()]),
             graph_check::ParticipantApis {
                 participant_id: supervisor_id.clone(),
                 artifact_id: "webots-supervisor".to_string(),
@@ -2126,10 +2018,7 @@ mod tests {
         let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
         let controller_id = simulator_controller_provider_id("robot_v1");
         let checked = vec![
-            service_participant(
-                "drive",
-                vec![motor_command(graph_check::Direction::Publish)],
-            ),
+            service_participant("drive", vec![motor_command()]),
             graph_check::ParticipantApis {
                 participant_id: supervisor_id.clone(),
                 artifact_id: "webots-supervisor".to_string(),
@@ -2319,7 +2208,7 @@ mod tests {
     }
 
     fn minimal_robot_yaml() -> &'static str {
-        r#"schema: v0
+        r#"schema: robot/v0
 
 robot:
   id: testbot
@@ -2363,7 +2252,7 @@ artifacts:
     }
 
     fn robot_yaml_with_component() -> &'static str {
-        r#"schema: v0
+        r#"schema: robot/v0
 
 robot:
   id: testbot
@@ -2515,47 +2404,16 @@ artifacts:
         }
     }
 
-    fn motor_command(direction: graph_check::Direction) -> graph_check::Contract {
+    fn motor_command() -> graph_check::Contract {
         graph_check::Contract {
             family: "component::MotorCommand".to_string(),
-            topic: "component/{instance}/motor/{capability}/command".to_string(),
-            direction,
             schema_id: "schema-motor".to_string(),
-        }
-    }
-
-    fn materialized_motor_command(
-        instance: &str,
-        direction: graph_check::Direction,
-    ) -> graph_check::Contract {
-        graph_check::Contract {
-            family: "component::MotorCommand".to_string(),
-            topic: format!("component/{instance}/motor/motor/command"),
-            direction,
-            schema_id: "schema-motor".to_string(),
-        }
-    }
-
-    fn component_graph(instances: &[&str]) -> graph_check::RobotGraph {
-        graph_check::RobotGraph {
-            component_capabilities: instances
-                .iter()
-                .map(|instance| graph_check::ComponentCapability {
-                    instance: (*instance).to_string(),
-                    capability: "motor".to_string(),
-                    kind: "motor".to_string(),
-                })
-                .collect(),
-            motion_capabilities: instances
-                .iter()
-                .map(|instance| ((*instance).to_string(), "motor".to_string()))
-                .collect(),
         }
     }
 
     fn empty_resolved_robot(id: &str) -> Result<ResolvedRobot> {
         let yaml = format!(
-            r#"schema: v0
+            r#"schema: robot/v0
 robot:
   id: {id}
   namespace: dev
@@ -2569,12 +2427,12 @@ artifacts:
   generation: y2026_1
 "#
         );
-        let robot = phoxal::model::robot::v1::Robot::parse_from_string(&yaml)?;
+        let robot = phoxal::model::robot::v0::Robot::parse_from_string(&yaml)?;
         let generation = target_generation_for_robot(&robot, None)?;
         Ok(ResolvedRobot {
             robot,
             target_generation: generation,
-            channel: phoxal::model::robot::v1::Channel::Stable,
+            channel: phoxal::model::robot::v0::Channel::Stable,
             target: host_target_triple(),
             catalog_revision: None,
             platform_runtimes: Vec::new(),
@@ -2848,7 +2706,7 @@ artifacts:
         write_driver_crate(temp.path(), "ddsm115")?;
         fs::write(
             temp.path().join("components/ddsm115/component.yaml"),
-            "version: v1\ncapabilities: {}\n",
+            "schema: component/v0\ncapabilities: {}\n",
         )?;
         let component_meshes_dir = temp.path().join("components/ddsm115/meshes");
         fs::create_dir_all(&component_meshes_dir)?;
@@ -2859,19 +2717,11 @@ artifacts:
             .simulators
             .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
         let extras = RobotManifestExtras::default();
-        let graph = component_graph(&["left_drive"]);
         let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
         let controller_id = simulator_controller_provider_id("robot_v1");
         let checked = vec![
-            service_participant(
-                "drive",
-                vec![motor_command(graph_check::Direction::Publish)],
-            ),
-            driver_participant(
-                "ddsm115",
-                "left_drive",
-                vec![motor_command(graph_check::Direction::Subscribe)],
-            ),
+            service_participant("drive", vec![motor_command()]),
+            driver_participant("ddsm115", "left_drive", vec![motor_command()]),
             graph_check::ParticipantApis {
                 participant_id: supervisor_id.clone(),
                 artifact_id: "webots-supervisor".to_string(),
@@ -2883,17 +2733,11 @@ artifacts:
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
             },
-            simulator_controller_participant(
-                &controller_id,
-                vec![motor_command(graph_check::Direction::Subscribe)],
-            ),
+            simulator_controller_participant(&controller_id, vec![motor_command()]),
         ];
         let substitutions = simulated_component_records(&checked, &controller_id);
         let sim_participants = sim_checked_participants(&checked);
-        let report = graph_check::check_plan(graph_check::CheckInput {
-            participants: &sim_participants,
-            robot_graph: &graph,
-        });
+        let report = graph_check::check_graph(&sim_participants);
         assert!(report.is_ok(), "{report:?}");
 
         let plan = build_launch_plan(
@@ -2971,10 +2815,7 @@ artifacts:
         let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
         let controller_id = simulator_controller_provider_id("robot_v1");
         let checked = vec![
-            service_participant(
-                "drive",
-                vec![motor_command(graph_check::Direction::Publish)],
-            ),
+            service_participant("drive", vec![motor_command()]),
             graph_check::ParticipantApis {
                 participant_id: supervisor_id.clone(),
                 artifact_id: "webots-supervisor".to_string(),

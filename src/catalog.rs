@@ -163,10 +163,10 @@ pub fn provider(package: &str) -> Option<&str> {
 /// orphan-rule-violating `From` impl (both types are foreign to this crate
 /// once the catalog schema moved into `phoxal::catalog`).
 #[must_use]
-pub fn to_catalog_channel(channel: phoxal::model::robot::v1::Channel) -> Channel {
+pub fn to_catalog_channel(channel: phoxal::model::robot::v0::Channel) -> Channel {
     match channel {
-        phoxal::model::robot::v1::Channel::Stable => Channel::Stable,
-        phoxal::model::robot::v1::Channel::Preview => Channel::Preview,
+        phoxal::model::robot::v0::Channel::Stable => Channel::Stable,
+        phoxal::model::robot::v0::Channel::Preview => Channel::Preview,
     }
 }
 

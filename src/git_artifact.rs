@@ -1,6 +1,6 @@
 //! General git-artifact resolver: a shallow, deterministic on-disk checkout
 //! for ANY `robot.yaml` `artifacts.pins` entry pinned to a git source
-//! (`phoxal::model::robot::v1::ArtifactPin::Git`), not just components.
+//! (`phoxal::model::robot::v0::ArtifactPin::Git`), not just components.
 //!
 //! Lives under `cache/git-artifacts/<hash>` (see
 //! [`crate::host_paths::git_artifacts_dir`]), one directory per distinct

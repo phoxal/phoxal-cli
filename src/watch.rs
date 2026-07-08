@@ -10,7 +10,7 @@ use tokio::time::MissedTickBehavior;
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
     fetch_emit_apis_from_native_artifact, platform_artifact_refs_from_resolved,
-    robot_graph_from_resolved, run_check_with_context, source_participants_from_resolved,
+    run_check_with_context, source_participants_from_resolved,
 };
 use crate::commands::run::{RunOptions, source_spec_from_launch_record};
 use crate::commands::simulate::{
@@ -397,7 +397,6 @@ fn recheck_run_target(
     // of the whole source graph rather than just the changed one.
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
-    let robot_graph = robot_graph_from_resolved(&resolved);
     let platform_refs = platform_artifact_refs_from_resolved(&resolved);
     let official_by_ref = resolved
         .platform_runtimes
@@ -409,7 +408,6 @@ fn recheck_run_target(
         &[],
         &source_participants,
         CheckGraphContext {
-            robot_graph: &robot_graph,
             manifest_extras: &loaded.extras,
         },
         |artifact_ref| {
@@ -692,8 +690,8 @@ mod tests {
     }
 
     fn empty_resolved() -> ResolvedRobot {
-        let robot = phoxal::model::robot::v1::Robot::parse_from_string(
-            r#"schema: v0
+        let robot = phoxal::model::robot::v0::Robot::parse_from_string(
+            r#"schema: robot/v0
 robot:
   id: robot
   namespace: test
@@ -712,7 +710,7 @@ robot:
         ResolvedRobot {
             robot,
             target_generation: "y2026_1".to_string(),
-            channel: phoxal::model::robot::v1::Channel::Stable,
+            channel: phoxal::model::robot::v0::Channel::Stable,
             target: "host".to_string(),
             catalog_revision: None,
             platform_runtimes: Vec::new(),

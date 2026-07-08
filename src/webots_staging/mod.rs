@@ -3,9 +3,9 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use heck::ToUpperCamelCase;
-use phoxal::model::simulation::v1::Simulation;
+use phoxal::model::simulation::v0::Simulation;
 use phoxal::model::structure::Structure;
-use phoxal::model::v1::Robot;
+use phoxal::model::v0::Robot;
 use webots_proto::Proto;
 use webots_proto::ast::proto::ast::{AstNode, ExternProto};
 use webots_proto::ast::proto::span::Span;
@@ -48,7 +48,7 @@ pub struct WebotsController {
 
 pub fn generate_component_proto(
     component_type: &str,
-    component: &phoxal::model::component::v1::Component,
+    component: &phoxal::model::component::v0::Component,
     structure: &Structure,
     simulation: &Simulation,
     mesh_url_prefix: &str,

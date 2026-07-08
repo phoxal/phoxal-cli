@@ -1,4 +1,4 @@
-schema: v0
+schema: robot/v0
 
 robot:
   id: robot-v1

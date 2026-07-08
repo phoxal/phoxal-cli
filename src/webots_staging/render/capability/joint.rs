@@ -5,7 +5,7 @@ use crate::webots_staging::native_fields::{
     NativeValue, native_webots_fields_for_capability, native_webots_motor_fields,
 };
 use crate::webots_staging::scene::WebotsSceneDescription;
-use phoxal::model::component::v1::capability::Capability as PhysicalCapability;
+use phoxal::model::component::v0::capability::Capability as PhysicalCapability;
 use phoxal::model::simulation::capability::Capability as SimulationCapability;
 
 impl WebotsSceneDescription {
