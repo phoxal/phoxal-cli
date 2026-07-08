@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use phoxal::model::simulation::Simulation as SimulationModel;
 use phoxal::model::structure::Structure;
-use phoxal::model::v1::Robot as RobotBundle;
+use phoxal::model::v0::Robot as RobotBundle;
 use phoxal::participant::launch::ParticipantLaunch;
 use serde::Serialize;
 
@@ -302,8 +302,8 @@ fn stage_component_protos(
                     component_type.source_dir.display()
                 )
             })?
-            .as_v1()
-            .context("Webots staging only supports simulation.yaml version v1")?
+            .as_v0()
+            .context("Webots staging only supports simulation.yaml version v0")?
             .clone();
 
         let comp_proto_name = proto_name_for_robot(component_type.component_type)?;
@@ -418,7 +418,7 @@ mod tests {
 
     fn fixture_bundle(robot_id: &str) -> RobotBundle {
         let manifest_yaml = format!(
-            r#"schema: v0
+            r#"schema: robot/v0
 robot:
   id: {robot_id}
   namespace: dev
@@ -429,7 +429,7 @@ robot:
   components: {{}}
 "#
         );
-        let manifest = phoxal::model::robot::v1::Robot::parse_from_string(&manifest_yaml)
+        let manifest = phoxal::model::robot::v0::Robot::parse_from_string(&manifest_yaml)
             .expect("fixture manifest should parse");
         let structure = Structure::from_urdf_str(
             r#"<robot name="testbot">
@@ -619,7 +619,7 @@ robot:
 
     #[test]
     fn stages_a_mounted_component_proto_alongside_the_robot_proto() -> Result<()> {
-        use phoxal::model::component::v1::Component as ComponentSpec;
+        use phoxal::model::component::v0::Component as ComponentSpec;
 
         let temp = tempfile::tempdir()?;
         let protos_dir = temp.path().join("protos");
@@ -636,10 +636,10 @@ robot:
         )?;
         std::fs::write(
             component_source_dir.join("simulation.yaml"),
-            "version: v1\ncapabilities: {}\nlinks: {}\n",
+            "schema: simulation/v0\ncapabilities: {}\nlinks: {}\n",
         )?;
 
-        let manifest_yaml = r#"schema: v0
+        let manifest_yaml = r#"schema: robot/v0
 robot:
   id: testbot
   namespace: dev
@@ -655,7 +655,7 @@ robot:
         motor:
           kind: motor
 "#;
-        let manifest = phoxal::model::robot::v1::Robot::parse_from_string(manifest_yaml)?;
+        let manifest = phoxal::model::robot::v0::Robot::parse_from_string(manifest_yaml)?;
         let structure = Structure::from_urdf_str(
             r#"<robot name="testbot">
   <link name="base_footprint" />

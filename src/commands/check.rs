@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     fmt,
     path::{Path, PathBuf},
 };
@@ -7,8 +6,6 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 use phoxal::check as graph_check;
-use phoxal::model::component::v1::CapabilityRef;
-use phoxal::model::robot::v1::KinematicConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -93,8 +90,6 @@ pub struct RawArtifact {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RawContract {
     pub family: String,
-    pub topic: String,
-    pub direction: String,
     /// The framework's normalized transitive wire-shape hash for this contract
     /// body (`emit-apis` per-contract `schema_id`).
     pub schema_id: String,
@@ -109,7 +104,6 @@ pub struct CheckOutcome {
 
 #[derive(Debug, Clone, Copy)]
 pub struct CheckGraphContext<'a> {
-    pub robot_graph: &'a graph_check::RobotGraph,
     pub manifest_extras: &'a RobotManifestExtras,
 }
 
@@ -306,7 +300,6 @@ fn run(
     };
     let participant_count =
         platform_refs.len() + tool_participants.len() + source_participants.len();
-    let robot_graph = robot_graph_from_resolved(&resolved);
     let mut official_by_ref = resolved
         .platform_runtimes
         .iter()
@@ -323,7 +316,6 @@ fn run(
         &tool_participants,
         source_participants,
         CheckGraphContext {
-            robot_graph: &robot_graph,
             manifest_extras: &manifest_extras,
         },
         |artifact_ref| {
@@ -775,7 +767,6 @@ pub fn run_check(
     fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
     build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
 ) -> Result<CheckOutcome> {
-    let robot_graph = graph_check::RobotGraph::default();
     let manifest_extras = RobotManifestExtras::default();
     let platform_artifact_refs = service_platform_artifact_refs(resolved_platform_image_refs);
     run_check_with_context(
@@ -783,7 +774,6 @@ pub fn run_check(
         tool_participants,
         source_participants,
         CheckGraphContext {
-            robot_graph: &robot_graph,
             manifest_extras: &manifest_extras,
         },
         fetch,
@@ -972,106 +962,13 @@ pub fn run_check_with_deployed_user_service_images(
         participants.push(participant_apis);
     }
 
-    let mut report = graph_check::check_graph_with_topology(&participants, context.robot_graph);
+    let mut report = graph_check::check_graph(&participants);
     report.problems.extend(config_problems);
     Ok(CheckOutcome {
         missing_images,
         report,
         checked_participants: participants,
     })
-}
-
-pub(crate) fn robot_graph_from_resolved(resolved: &ResolvedRobot) -> graph_check::RobotGraph {
-    let mut component_capabilities = Vec::new();
-    for (instance_name, instance) in &resolved.robot.robot.components {
-        for (capability_id, parameters) in &instance.parameters {
-            component_capabilities.push(graph_check::ComponentCapability {
-                instance: instance_name.clone(),
-                capability: capability_id.clone(),
-                kind: parameters.kind_name().to_string(),
-            });
-        }
-    }
-    component_capabilities.sort();
-    component_capabilities.dedup();
-
-    let mut motion_capabilities = BTreeSet::new();
-    collect_motion_capabilities(&resolved.robot.robot.kinematic, &mut motion_capabilities);
-
-    graph_check::RobotGraph {
-        component_capabilities,
-        motion_capabilities,
-    }
-}
-
-fn collect_motion_capabilities(
-    kinematic: &KinematicConfig,
-    motion_capabilities: &mut BTreeSet<(String, String)>,
-) {
-    let mut insert = |capability: &CapabilityRef| {
-        motion_capabilities.insert((
-            capability.component_id.clone(),
-            capability.capability_id.clone(),
-        ));
-    };
-    match kinematic {
-        KinematicConfig::Differential {
-            left_actuators,
-            right_actuators,
-            left_encoders,
-            right_encoders,
-            ..
-        } => {
-            for capability in left_actuators
-                .iter()
-                .chain(right_actuators)
-                .chain(left_encoders)
-                .chain(right_encoders)
-            {
-                insert(capability);
-            }
-        }
-        KinematicConfig::Mecanum {
-            front_left_actuator,
-            front_right_actuator,
-            rear_left_actuator,
-            rear_right_actuator,
-            ..
-        } => {
-            for capability in [
-                front_left_actuator,
-                front_right_actuator,
-                rear_left_actuator,
-                rear_right_actuator,
-            ] {
-                insert(capability);
-            }
-        }
-        KinematicConfig::Ackermann {
-            steering_actuator,
-            drive_actuator,
-            steering_encoder,
-            drive_encoder,
-            ..
-        } => {
-            insert(steering_actuator);
-            insert(drive_actuator);
-            if let Some(capability) = steering_encoder {
-                insert(capability);
-            }
-            if let Some(capability) = drive_encoder {
-                insert(capability);
-            }
-        }
-        KinematicConfig::Omnidirectional {
-            actuators,
-            encoders,
-        } => {
-            for capability in actuators.iter().chain(encoders) {
-                insert(capability);
-            }
-        }
-    }
 }
 
 fn validate_user_service_config(
@@ -1133,16 +1030,9 @@ fn validate_json_schema(schema: &Value, value: &Value, path: &str) -> Vec<String
 /// separate, later concern - see `native_artifacts::stage_runtime`).
 ///
 /// The catalog's inlined [`crate::catalog::Contract`] carries only
-/// `family`/`schema_id` (no `topic`/`direction` - the module docs call those
-/// "a property of the API generation's own contract manifest, not of a
-/// specific artifact's catalog entry"). `phoxal::check` groups by
-/// `(family, topic)` and needs a `direction` to detect responder conflicts;
-/// with no independent topic supplied, `family` doubles as the topic key
-/// (still a correct, if coarser, per-contract schema-agreement grouping) and
-/// every contract is reported as `publish` - the common case for a runtime's
-/// own owned contracts. This means the responder-conflict rule
-/// (`MultipleServerResponders`) no longer fires for catalog-sourced
-/// participants; see the WS1b report for the full rationale.
+/// `family`/`schema_id`, which is exactly what `phoxal::check` groups on
+/// (per-contract `schema_id` agreement by `family` alone - there is no
+/// topology/topic/direction check left to feed).
 pub(crate) fn fetch_emit_apis_from_native_artifact(
     runtime: &ResolvedPlatformRuntime,
 ) -> Result<RawEmitApis> {
@@ -1199,10 +1089,6 @@ fn emit_apis_from_catalog_metadata(
             .iter()
             .map(|contract| RawContract {
                 family: contract.family.clone(),
-                // No independent topic in the lean catalog schema - see the
-                // doc comment on `fetch_emit_apis_from_native_artifact`.
-                topic: contract.family.clone(),
-                direction: "publish".to_string(),
                 schema_id: contract.schema_id.clone(),
             })
             .collect(),
@@ -1397,23 +1283,11 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
         let contracts = raw
             .required_contracts
             .into_iter()
-            .map(|contract| {
-                let direction =
-                    graph_check::Direction::parse(&contract.direction).ok_or_else(|| {
-                        anyhow!(
-                            "unrecognized emit-apis direction '{}' for artifact '{}'",
-                            contract.direction,
-                            artifact_id
-                        )
-                    })?;
-                Ok(graph_check::Contract {
-                    family: contract.family,
-                    topic: contract.topic,
-                    direction,
-                    schema_id: contract.schema_id,
-                })
+            .map(|contract| graph_check::Contract {
+                family: contract.family,
+                schema_id: contract.schema_id,
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
 
         Ok(Self {
             // Default the participant id to the artifact id; callers that launch
@@ -1484,11 +1358,7 @@ fn format_report_error(report: &graph_check::Report) -> String {
 
 fn format_problem(problem: &graph_check::Problem) -> String {
     match problem {
-        graph_check::Problem::ContractSchemaMismatch {
-            family,
-            topic,
-            schema_ids,
-        } => {
+        graph_check::Problem::ContractSchemaMismatch { family, schema_ids } => {
             let reporters = schema_ids
                 .iter()
                 .map(|(schema_id, participants)| {
@@ -1497,18 +1367,8 @@ fn format_problem(problem: &graph_check::Problem) -> String {
                 .collect::<Vec<_>>()
                 .join("; ");
             format!(
-                "contract {family} ({topic}) has disagreeing wire shapes: {reporters}; \
+                "contract {family} has disagreeing wire shapes: {reporters}; \
                  rebuild the disagreeing side(s) so they compile against the same contract wire shape (schema_id)"
-            )
-        }
-        graph_check::Problem::MultipleServerResponders {
-            family,
-            topic,
-            responders,
-        } => {
-            format!(
-                "query topic {family} ({topic}) has more than one server: {}; keep exactly one",
-                responders.join(", ")
             )
         }
         graph_check::Problem::InvalidConfig { runtime_id, errors } => {
@@ -1517,17 +1377,6 @@ fn format_problem(problem: &graph_check::Problem) -> String {
                 errors.join("; ")
             )
         }
-    }
-}
-
-pub(crate) const fn format_direction(direction: graph_check::Direction) -> &'static str {
-    match direction {
-        graph_check::Direction::Publish => "publish",
-        graph_check::Direction::Subscribe => "subscribe",
-        graph_check::Direction::QueryRequest => "query_request",
-        graph_check::Direction::QueryResponse => "query_response",
-        graph_check::Direction::ServerRequest => "server_request",
-        graph_check::Direction::ServerResponse => "server_response",
     }
 }
 
@@ -1558,8 +1407,8 @@ impl std::error::Error for MissingImageError {
 mod tests {
     use super::*;
     use crate::resolver::{ResolvedComponentPackage, ResolvedComponentSource};
-    use graph_check::{Direction, ParticipantClass, Problem};
-    use phoxal::model::robot::v1::{Channel, Robot};
+    use graph_check::{ParticipantClass, Problem};
+    use phoxal::model::robot::v0::{Channel, Robot};
     use std::collections::BTreeMap;
 
     fn fixture_component_package(
@@ -1626,22 +1475,14 @@ mod tests {
             &[],
             &sources,
             |image_ref| match image_ref {
-                "mission:ok" => Ok(raw(
-                    "mission",
-                    "y2026_1",
-                    &[("drive::Target", "drive/target", "publish")],
-                )),
+                "mission:ok" => Ok(raw("mission", "y2026_1", &["drive::Target"])),
                 unexpected => bail!("unexpected image {unexpected}"),
             },
             |_| bail!("no tools should be fetched"),
             |participant| {
                 let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/runtimes/drive") {
-                    Ok(raw(
-                        "drive",
-                        "y2026_1",
-                        &[("drive::Target", "drive/target", "subscribe")],
-                    ))
+                    Ok(raw("drive", "y2026_1", &["drive::Target"]))
                 } else {
                     bail!("unexpected source dir {}", dir.display())
                 }
@@ -1666,23 +1507,14 @@ mod tests {
             &[],
             &sources,
             |image_ref| match image_ref {
-                "mission:ok" => Ok(raw(
-                    "mission",
-                    "y2026_1",
-                    &[("drive::Target", "drive/target", "publish")],
-                )),
+                "mission:ok" => Ok(raw("mission", "y2026_1", &["drive::Target"])),
                 unexpected => bail!("unexpected image {unexpected}"),
             },
             |_| bail!("no tools should be fetched"),
             |participant| {
                 let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/components/ddsm115") {
-                    Ok(raw_kind(
-                        "driver",
-                        "ddsm115",
-                        "y2026_1",
-                        &[("drive::Target", "drive/target", "subscribe")],
-                    ))
+                    Ok(raw_kind("driver", "ddsm115", "y2026_1", &["drive::Target"]))
                 } else {
                     bail!("unexpected source dir {}", dir.display())
                 }
@@ -1715,7 +1547,7 @@ mod tests {
                         "tool",
                         "joypad",
                         "y2026_1",
-                        &[("drive::Target", "drive/target", "subscribe", "bbbb")],
+                        &[("drive::Target", "bbbb")],
                         "privileged",
                     ))
                 } else {
@@ -1728,7 +1560,7 @@ mod tests {
                     Ok(raw_with_schema(
                         "drive",
                         "y2026_1",
-                        &[("drive::Target", "drive/target", "publish", "aaaa")],
+                        &[("drive::Target", "aaaa")],
                     ))
                 } else {
                     bail!("unexpected source dir {}", dir.display())
@@ -1740,7 +1572,6 @@ mod tests {
             outcome.report.problems,
             vec![Problem::ContractSchemaMismatch {
                 family: "drive::Target".to_string(),
-                topic: "drive/target".to_string(),
                 schema_ids: vec![
                     ("aaaa".to_string(), vec!["drive".to_string()]),
                     ("bbbb".to_string(), vec!["joypad".to_string()]),
@@ -1768,10 +1599,7 @@ mod tests {
                         "tool",
                         "joypad",
                         "y2026_1",
-                        &[
-                            ("drive::Target", "drive/target", "subscribe"),
-                            ("odometry::State", "odometry/state", "publish"),
-                        ],
+                        &["drive::Target", "odometry::State"],
                         "privileged",
                     ))
                 } else {
@@ -1797,7 +1625,6 @@ mod tests {
             "ddsm115".to_string(),
             PathBuf::from("/fake/project/components/ddsm115"),
         )];
-        let robot_graph = graph_check::RobotGraph::default();
         let extras = RobotManifestExtras::default();
 
         let mut fetched_images = Vec::new();
@@ -1810,7 +1637,6 @@ mod tests {
                 source_participants: &sources,
             },
             CheckGraphContext {
-                robot_graph: &robot_graph,
                 manifest_extras: &extras,
             },
             |image_ref| {
@@ -1855,7 +1681,7 @@ mod tests {
                 "mission:ok" => Ok(raw_with_schema(
                     "mission",
                     "y2026_1",
-                    &[("drive::Target", "drive/target", "publish", "aaaa")],
+                    &[("drive::Target", "aaaa")],
                 )),
                 unexpected => bail!("unexpected image {unexpected}"),
             },
@@ -1864,7 +1690,7 @@ mod tests {
                 Ok(raw_with_schema(
                     "drive",
                     "y2026_1",
-                    &[("drive::Target", "drive/target", "subscribe", "bbbb")],
+                    &[("drive::Target", "bbbb")],
                 ))
             },
         )?;
@@ -1873,7 +1699,6 @@ mod tests {
             outcome.report.problems,
             vec![Problem::ContractSchemaMismatch {
                 family: "drive::Target".to_string(),
-                topic: "drive/target".to_string(),
                 schema_ids: vec![
                     ("aaaa".to_string(), vec!["mission".to_string()]),
                     ("bbbb".to_string(), vec!["drive".to_string()]),
@@ -1942,7 +1767,6 @@ mod tests {
             artifact_ref: "driver-bno085:swapped".to_string(),
             instances: vec!["imu".to_string()],
         }];
-        let robot_graph = graph_check::RobotGraph::default();
         let extras = RobotManifestExtras::default();
 
         let error = run_check_with_context(
@@ -1950,7 +1774,6 @@ mod tests {
             &[],
             &[],
             CheckGraphContext {
-                robot_graph: &robot_graph,
                 manifest_extras: &extras,
             },
             |artifact_ref| match artifact_ref {
@@ -2263,12 +2086,7 @@ mod tests {
                 if dir == Path::new("/fake/project/runtimes/other") {
                     Ok(raw("other", "y2026_1", &[]))
                 } else if dir == Path::new("/fake/project/components/ddsm115") {
-                    Ok(raw_kind(
-                        "driver",
-                        "ddsm115",
-                        "y2026_1",
-                        &[("drive::Target", "drive/target", "subscribe")],
-                    ))
+                    Ok(raw_kind("driver", "ddsm115", "y2026_1", &["drive::Target"]))
                 } else {
                     bail!("unexpected source dir {}", dir.display())
                 }
@@ -2301,11 +2119,7 @@ mod tests {
             |participant| {
                 let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/runtimes/bad") {
-                    Ok(raw(
-                        "bad",
-                        "y2026_1",
-                        &[("drive::Target", "drive/target", "subscribe")],
-                    ))
+                    Ok(raw("bad", "y2026_1", &["drive::Target"]))
                 } else if dir == Path::new("/fake/project/runtimes/other") {
                     Ok(raw("other", "y2026_1", &[]))
                 } else {
@@ -2372,7 +2186,7 @@ mod tests {
                 "mission:ok" => Ok(raw_with_schema(
                     "mission",
                     "y2026_1",
-                    &[("drive::Target", "drive/target", "publish", "aaaa")],
+                    &[("drive::Target", "aaaa")],
                 )),
                 unexpected => bail!("unexpected image {unexpected}"),
             },
@@ -2382,7 +2196,7 @@ mod tests {
                     "driver",
                     "ddsm115",
                     "y2026_1",
-                    &[("drive::Target", "drive/target", "subscribe", "bbbb")],
+                    &[("drive::Target", "bbbb")],
                     "checked",
                 ))
             },
@@ -2392,7 +2206,6 @@ mod tests {
             outcome.report.problems,
             vec![Problem::ContractSchemaMismatch {
                 family: "drive::Target".to_string(),
-                topic: "drive/target".to_string(),
                 schema_ids: vec![
                     ("aaaa".to_string(), vec!["mission".to_string()]),
                     ("bbbb".to_string(), vec!["left_drive".to_string()]),
@@ -2644,7 +2457,6 @@ mod tests {
             &[],
             &source_participants,
             CheckGraphContext {
-                robot_graph: &graph_check::RobotGraph::default(),
                 manifest_extras: &RobotManifestExtras::default(),
             },
             |artifact_ref| {
@@ -2753,14 +2565,12 @@ mod tests {
             )]
         );
 
-        let robot_graph = robot_graph_from_resolved(&resolved);
         let extras = RobotManifestExtras::default();
         let outcome = run_check_with_context(
             &platform_refs,
             &[],
             &source_participants,
             CheckGraphContext {
-                robot_graph: &robot_graph,
                 manifest_extras: &extras,
             },
             |_| bail!("path-overridden service should not read catalog metadata"),
@@ -2808,24 +2618,6 @@ mod tests {
     }
 
     #[test]
-    fn unrecognized_direction_names_artifact() {
-        let raw = raw(
-            "drive",
-            "y2026_1",
-            &[("drive::Target", "drive/target", "future_direction")],
-        );
-
-        let error =
-            graph_check::ParticipantApis::try_from(raw).expect_err("unknown direction should fail");
-
-        assert!(
-            error.to_string().contains(
-                "unrecognized emit-apis direction 'future_direction' for artifact 'drive'"
-            )
-        );
-    }
-
-    #[test]
     fn raw_emit_apis_accepts_required_contracts_json() -> Result<()> {
         let parsed: RawEmitApis = serde_json::from_str(
             r#"{
@@ -2835,8 +2627,6 @@ mod tests {
                 "required_contracts": [
                     {
                         "family": "drive::Target",
-                        "topic": "drive/target",
-                        "direction": "subscribe",
                         "schema_id": "deadbeef",
                         "ignored": true
                     }
@@ -2858,7 +2648,8 @@ mod tests {
                 .and_then(Value::as_str),
             Some("object")
         );
-        assert_eq!(participant.contracts[0].direction, Direction::Subscribe);
+        assert_eq!(participant.contracts[0].family, "drive::Target");
+        assert_eq!(participant.contracts[0].schema_id, "deadbeef");
         Ok(())
     }
 
@@ -2889,20 +2680,6 @@ mod tests {
     }
 
     #[test]
-    fn multiple_server_responders_format_names_query_topic_and_fix() {
-        let message = format_problem(&Problem::MultipleServerResponders {
-            family: "asset::GetResponse".to_string(),
-            topic: "asset/get".to_string(),
-            responders: vec!["asset-alpha".to_string(), "asset-beta".to_string()],
-        });
-
-        assert_eq!(
-            message,
-            "query topic asset::GetResponse (asset/get) has more than one server: asset-alpha, asset-beta; keep exactly one"
-        );
-    }
-
-    #[test]
     fn user_service_config_is_validated_against_emitted_schema() -> Result<()> {
         let sources = vec![SourceParticipant::user_service(
             "avoid".to_string(),
@@ -2917,14 +2694,12 @@ mod tests {
             )]),
             ..RobotManifestExtras::default()
         };
-        let robot_graph = graph_check::RobotGraph::default();
 
         let outcome = run_check_with_context(
             &[],
             &[],
             &sources,
             CheckGraphContext {
-                robot_graph: &robot_graph,
                 manifest_extras: &extras,
             },
             |_| bail!("no platform images should be fetched"),
@@ -2960,14 +2735,12 @@ mod tests {
             PathBuf::from("/fake/project/runtimes/optional"),
         )];
         let extras = RobotManifestExtras::default();
-        let robot_graph = graph_check::RobotGraph::default();
 
         let outcome = run_check_with_context(
             &[],
             &[],
             &sources,
             CheckGraphContext {
-                robot_graph: &robot_graph,
                 manifest_extras: &extras,
             },
             |_| bail!("no platform images should be fetched"),
@@ -2998,14 +2771,12 @@ mod tests {
             PathBuf::from("/fake/project/runtimes/required"),
         )];
         let extras = RobotManifestExtras::default();
-        let robot_graph = graph_check::RobotGraph::default();
 
         let outcome = run_check_with_context(
             &[],
             &[],
             &sources,
             CheckGraphContext {
-                robot_graph: &robot_graph,
                 manifest_extras: &extras,
             },
             |_| bail!("no platform images should be fetched"),
@@ -3056,14 +2827,12 @@ mod tests {
             )]),
             ..RobotManifestExtras::default()
         };
-        let robot_graph = graph_check::RobotGraph::default();
 
         let outcome = run_check_with_context(
             &[],
             &[],
             &sources,
             CheckGraphContext {
-                robot_graph: &robot_graph,
                 manifest_extras: &extras,
             },
             |_| bail!("no platform images should be fetched"),
@@ -3133,17 +2902,13 @@ mod tests {
         temp.path().to_path_buf()
     }
 
-    fn raw(id: &str, api_version: &str, contracts: &[(&str, &str, &str)]) -> RawEmitApis {
+    fn raw(id: &str, api_version: &str, contracts: &[&str]) -> RawEmitApis {
         raw_kind("service", id, api_version, contracts)
     }
 
     /// Like `raw`, but each contract carries an explicit `schema_id` so a test can
-    /// force two participants to disagree on a shared `(family, topic)`.
-    fn raw_with_schema(
-        id: &str,
-        api_version: &str,
-        contracts: &[(&str, &str, &str, &str)],
-    ) -> RawEmitApis {
+    /// force two participants to disagree on a shared `family`.
+    fn raw_with_schema(id: &str, api_version: &str, contracts: &[(&str, &str)]) -> RawEmitApis {
         raw_kind_with_schema("service", id, api_version, contracts, "checked")
     }
 
@@ -3151,7 +2916,7 @@ mod tests {
         kind: &str,
         id: &str,
         api_version: &str,
-        contracts: &[(&str, &str, &str, &str)],
+        contracts: &[(&str, &str)],
         participant_class: &str,
     ) -> RawEmitApis {
         RawEmitApis {
@@ -3164,10 +2929,8 @@ mod tests {
             bus_abi: None,
             required_contracts: contracts
                 .iter()
-                .map(|(family, topic, direction, schema_id)| RawContract {
+                .map(|(family, schema_id)| RawContract {
                     family: (*family).to_string(),
-                    topic: (*topic).to_string(),
-                    direction: (*direction).to_string(),
                     schema_id: (*schema_id).to_string(),
                 })
                 .collect(),
@@ -3175,12 +2938,7 @@ mod tests {
         }
     }
 
-    fn raw_kind(
-        kind: &str,
-        id: &str,
-        api_version: &str,
-        contracts: &[(&str, &str, &str)],
-    ) -> RawEmitApis {
+    fn raw_kind(kind: &str, id: &str, api_version: &str, contracts: &[&str]) -> RawEmitApis {
         raw_kind_class(kind, id, api_version, contracts, "checked")
     }
 
@@ -3188,7 +2946,7 @@ mod tests {
         kind: &str,
         id: &str,
         api_version: &str,
-        contracts: &[(&str, &str, &str)],
+        contracts: &[&str],
         participant_class: &str,
     ) -> RawEmitApis {
         RawEmitApis {
@@ -3201,13 +2959,11 @@ mod tests {
             bus_abi: None,
             required_contracts: contracts
                 .iter()
-                .map(|(family, topic, direction)| RawContract {
+                .map(|family| RawContract {
                     family: (*family).to_string(),
-                    topic: (*topic).to_string(),
-                    direction: (*direction).to_string(),
                     // A single default wire-shape id: every contract in these
-                    // fixtures shares one id, so a shared (family, topic) agrees
-                    // unless a test deliberately overrides it.
+                    // fixtures shares one id, so a shared family agrees unless
+                    // a test deliberately overrides it.
                     schema_id: "deadbeef".to_string(),
                 })
                 .collect(),
@@ -3231,7 +2987,7 @@ mod tests {
         })
     }
 
-    const MINIMAL_ROBOT: &str = r#"schema: v0
+    const MINIMAL_ROBOT: &str = r#"schema: robot/v0
 robot:
   id: testbot
   namespace: test

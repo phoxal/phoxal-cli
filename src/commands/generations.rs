@@ -216,7 +216,7 @@ pub fn status(app: &AppContext, generation: Option<&str>) -> Result<GenerationSt
 }
 
 fn robot_scoped_artifact_ids(
-    robot: &phoxal::model::robot::RobotV1,
+    robot: &phoxal::model::robot::RobotV0,
     entries: &[(crate::catalog::ArtifactKind, &crate::catalog::ArtifactEntry)],
 ) -> BTreeSet<String> {
     let driver_component_ids = robot
@@ -349,7 +349,7 @@ mod tests {
     }
 
     fn driverless_robot_yaml() -> &'static str {
-        r#"schema: v0
+        r#"schema: robot/v0
 robot:
   id: testbot
   namespace: test
@@ -372,7 +372,7 @@ artifacts:
     }
 
     fn robot_with_driver_yaml() -> &'static str {
-        r#"schema: v0
+        r#"schema: robot/v0
 robot:
   id: testbot
   namespace: test

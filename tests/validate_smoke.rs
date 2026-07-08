@@ -1,4 +1,4 @@
-use phoxal::model::robot::RobotV1 as Robot;
+use phoxal::model::robot::RobotV0 as Robot;
 
 #[test]
 fn plan_robot_validates_against_catalog() -> anyhow::Result<()> {

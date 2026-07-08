@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal::model::robot::{
-    RobotV1 as Robot,
-    v1::{ArtifactPin, Channel, UserService},
+    RobotV0 as Robot,
+    v0::{ArtifactPin, Channel, UserService},
 };
 use serde_json::Value;
 
@@ -751,7 +751,7 @@ fn is_component_package_key(key: &str, components: &[ResolvedComponent]) -> bool
 /// rather than touching the network (mirrors how an offline component git
 /// pin resolves with an empty commit instead of cloning).
 fn resolve_git_artifact_pin_path(
-    pin: &phoxal::model::robot::v1::ArtifactGitPin,
+    pin: &phoxal::model::robot::v0::ArtifactGitPin,
     resolve_source_commits: bool,
 ) -> Result<Option<PathBuf>> {
     if !resolve_source_commits {
@@ -909,7 +909,7 @@ fn unknown_path_pin_message(
 }
 
 fn is_provider_qualified_key(key: &str) -> bool {
-    phoxal::model::robot::v1::is_provider_qualified_pin_key(key)
+    phoxal::model::robot::v0::is_provider_qualified_pin_key(key)
 }
 
 fn used_path_pin_keys(
@@ -1730,7 +1730,7 @@ mod tests {
         Ok(())
     }
 
-    const GIT_COMPONENT_ROBOT: &str = r#"schema: v0
+    const GIT_COMPONENT_ROBOT: &str = r#"schema: robot/v0
 robot:
   id: testbot
   namespace: test
@@ -1818,7 +1818,7 @@ artifacts:
         let path = temp.path().join("robot.yaml");
         std::fs::write(
             &path,
-            r#"schema: v0
+            r#"schema: robot/v0
 robot:
   id: bot
   namespace: dev
@@ -1859,7 +1859,7 @@ services:
         let path = temp.path().join("robot.yaml");
         std::fs::write(
             &path,
-            r#"schema: v0
+            r#"schema: robot/v0
 robot:
   id: bot
   namespace: dev
@@ -1912,7 +1912,7 @@ bus:
         let path = temp.path().join("robot.yaml");
         std::fs::write(
             &path,
-            r#"schema: v0
+            r#"schema: robot/v0
 robot:
   id: bot
   namespace: dev

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, ValueEnum};
-use phoxal::model::robot::RobotV1 as Robot;
+use phoxal::model::robot::RobotV0 as Robot;
 use toml::Value as TomlValue;
 
 use crate::AppContext;
@@ -453,7 +453,7 @@ serde = "1"
 
     fn robot_with_user_service(runtime_path: &str) -> anyhow::Result<Robot> {
         Robot::parse_from_string(&format!(
-            r#"schema: v0
+            r#"schema: robot/v0
 robot:
   id: testbot
   namespace: test

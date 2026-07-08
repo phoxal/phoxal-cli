@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
-use phoxal::model::robot::v1::{ConnectionConfig, Robot};
+use phoxal::model::robot::v0::{ConnectionConfig, Robot};
 use phoxal::participant::launch::env;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -26,7 +26,7 @@ use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
     fetch_emit_apis_from_native_artifact, platform_artifact_refs_from_resolved,
-    robot_graph_from_resolved, run_check_with_context, source_participants_from_resolved,
+    run_check_with_context, source_participants_from_resolved,
 };
 use crate::component_driver::component_driver_crate_dir;
 use crate::launch_env::{EncodedParticipantEnv, encode_participant_env};
@@ -799,7 +799,6 @@ fn prepare_deploy(
         .cloned()
         .collect::<Vec<_>>();
     ensure_no_native_c_source_dependencies(&checked_source_participants)?;
-    let robot_graph = robot_graph_from_resolved(&resolved);
     let mut platform_refs = platform_artifact_refs_from_resolved(&resolved);
     platform_refs
         .extend(crate::commands::check::component_driver_platform_refs_from_resolved(&resolved));
@@ -816,7 +815,6 @@ fn prepare_deploy(
         &[],
         &checked_source_participants,
         CheckGraphContext {
-            robot_graph: &robot_graph,
             manifest_extras: &loaded.extras,
         },
         |artifact_ref| {
@@ -2442,9 +2440,9 @@ impl UnitPrivileges {
 
 fn write_robot_yaml(root: &Path, robot: &Robot) -> Result<()> {
     // Serialize through the version dispatcher so the payload keeps the
-    // `schema: v0` tag - on-target consumers (tool-router, participants)
+    // `schema: robot/v0` tag - on-target consumers (tool-router, participants)
     // parse via the dispatcher and reject an untagged manifest.
-    let yaml = serde_yaml::to_string(&phoxal::model::robot::Robot::V1(robot.clone()))
+    let yaml = serde_yaml::to_string(&phoxal::model::robot::Robot::V0(robot.clone()))
         .context("failed to serialize resolved robot.yaml")?;
     write_text(&payload_opt(root).join("robot.yaml"), &yaml)
 }
@@ -3754,7 +3752,7 @@ mod tests {
         }
 
         fn basic_robot_yaml() -> &'static str {
-            r#"schema: v0
+            r#"schema: robot/v0
 robot:
   id: testbot
   namespace: dev
@@ -3797,7 +3795,7 @@ services:
         }
 
         fn bench_camera_robot_yaml() -> &'static str {
-            r#"schema: v0
+            r#"schema: robot/v0
 robot:
   id: benchbot
   namespace: dev
@@ -3826,7 +3824,7 @@ artifacts:
         }
 
         fn catalog_only_robot_yaml() -> &'static str {
-            r#"schema: v0
+            r#"schema: robot/v0
 robot:
   id: catalogbot
   namespace: dev
@@ -3851,7 +3849,7 @@ artifacts:
         }
 
         fn driver_robot_yaml() -> &'static str {
-            r#"schema: v0
+            r#"schema: robot/v0
 robot:
   id: testbot
   namespace: dev
@@ -3923,7 +3921,7 @@ services:
         }
 
         fn component_yaml() -> &'static str {
-            r#"version: v1
+            r#"schema: component/v0
 structure: structure.urdf
 capabilities:
   motor:
@@ -4312,7 +4310,7 @@ capabilities:
         let payload_robot =
             std::fs::read_to_string(payload_opt(payload.root.path()).join("robot.yaml"))?;
         assert!(
-            payload_robot.starts_with("schema: v0"),
+            payload_robot.starts_with("schema: robot/v0"),
             "payload robot.yaml must keep the schema tag:\n{payload_robot}"
         );
         phoxal::model::robot::Robot::parse_from_string(&payload_robot)
@@ -4587,7 +4585,7 @@ capabilities:
         Ok(ResolvedRobot {
             robot: Robot::parse_from_string(MINIMAL_RESOLVED_ROBOT_YAML)?,
             target_generation: "y2026_1".to_string(),
-            channel: phoxal::model::robot::v1::Channel::Stable,
+            channel: phoxal::model::robot::v0::Channel::Stable,
             target: crate::resolver::host_target_triple(),
             catalog_revision: None,
             platform_runtimes: Vec::new(),
@@ -4599,7 +4597,7 @@ capabilities:
         })
     }
 
-    const MINIMAL_RESOLVED_ROBOT_YAML: &str = r#"schema: v0
+    const MINIMAL_RESOLVED_ROBOT_YAML: &str = r#"schema: robot/v0
 robot:
   id: testbot
   namespace: test
