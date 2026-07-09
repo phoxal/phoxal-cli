@@ -54,15 +54,8 @@ pub struct NativeArtifactDescriptor {
     /// The binary name inside the unpacked tarball. Empty for
     /// `component_assets` - an asset bundle has no binary.
     pub binary_name: String,
-    /// The API generation this artifact authors against; empty for
-    /// `component_assets`. Carried here (duplicating
-    /// `ResolvedPlatformRuntime`/`ResolvedTool`) so [`stage_descriptor`] can
-    /// upsert the local download manifest entry on its own, without every
-    /// caller threading this metadata back through separately.
-    pub generation: String,
     pub contracts: Vec<crate::catalog::Contract>,
     pub config_schema: Option<serde_json::Value>,
-    pub bus_abi: Option<String>,
     pub changed_contracts: Vec<String>,
     pub channel: crate::catalog::Channel,
     /// The target triple this tarball was resolved/built for, or
@@ -97,10 +90,8 @@ impl NativeArtifactDescriptor {
             asset: runtime.artifact_ref().to_string(),
             sha256: sha256.clone(),
             binary_name,
-            generation: runtime.generation.clone(),
             contracts: runtime.contracts.clone(),
             config_schema: runtime.config_schema.clone(),
-            bus_abi: runtime.bus_abi.clone(),
             changed_contracts: runtime.changed_contracts.clone(),
             channel: runtime.channel,
             target: runtime.target.clone(),
@@ -119,10 +110,8 @@ impl NativeArtifactDescriptor {
             asset: tool.asset.clone(),
             sha256: tool.sha256.clone(),
             binary_name: tool.binary_name.clone(),
-            generation: tool.generation.clone(),
             contracts: tool.contracts.clone(),
             config_schema: tool.config_schema.clone(),
-            bus_abi: tool.bus_abi.clone(),
             changed_contracts: Vec::new(),
             channel: tool.channel,
             target: tool.target.clone(),
@@ -147,10 +136,8 @@ impl NativeArtifactDescriptor {
             kind: self.kind,
             package: self.package_id.clone(),
             version: self.version.clone(),
-            generation: self.generation.clone(),
             contracts: self.contracts.clone(),
             config_schema: self.config_schema.clone(),
-            bus_abi: self.bus_abi.clone(),
             changed_contracts: self.changed_contracts.clone(),
             channel: self.channel,
             target: self.target.clone(),
@@ -377,8 +364,8 @@ pub fn stage_descriptor(
 /// The tarball file itself IS the cache entry - presence plus a matching
 /// sha256 means "skip re-download". On a fresh download, upserts the local
 /// download manifest ([`crate::catalog::upsert_local_manifest_entry`]) with
-/// this artifact's inlined contracts/config/bus_abi so `check`/`run` can read
-/// them back offline for this cached artifact.
+/// this artifact's inlined contracts/config so `check`/`run` can read them
+/// back offline for this cached artifact.
 fn ensure_tarball_cached(
     descriptor: &NativeArtifactDescriptor,
     mode: ProvisioningMode,

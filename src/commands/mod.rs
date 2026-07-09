@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use phoxal::bus::ApiVersion;
 use serde::Serialize;
 
 use crate::AppContext;
@@ -12,7 +11,6 @@ pub mod cache;
 pub mod check;
 pub mod deploy;
 pub mod doctor;
-pub mod generations;
 pub mod logs;
 pub mod outdated;
 pub mod pull;
@@ -103,38 +101,24 @@ pub struct VersionArgs {
 
 /// What the CLI itself supports, independent of any one robot graph.
 ///
-/// `api_version` compatibility is per-contract (`schema_id`, see emit-apis), not
-/// a single graph-wide version, so this reports the CLI's own build identity
-/// instead: its version, the `bus_abi` wire envelope it links, the emit-apis
-/// metadata schema it understands, and the API generations it can resolve or
-/// check against a catalog.
+/// Contract compatibility is per-contract name identity now (D1) - there is
+/// no single graph-wide API version or generation ceiling left to report. So
+/// this reports the CLI's own build identity instead: its version, the wire
+/// codec it speaks, and the linker-section names it reads a participant's
+/// compiled-in `#[derive(phoxal::Api)]` metadata from (see
+/// [`crate::participant_metadata`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VersionSummary {
     pub cli_version: &'static str,
-    pub framework_compatibility: FrameworkCompatibility,
-    pub metadata_schema: &'static str,
-    pub supported_generations: Vec<&'static str>,
+    pub wire_codec: String,
+    pub participant_metadata_sections: &'static [&'static str],
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FrameworkCompatibility {
-    pub bus_abi: &'static str,
-}
-
-/// The API generations this build can resolve/check against a catalog, i.e.
-/// the version modules compiled into the linked `phoxal-api`. Only `y2026_1`
-/// is published today; extend this list when the CLI links a `phoxal-api`
-/// with more generation modules compiled in.
-const SUPPORTED_GENERATIONS: &[&str] = &[phoxal_api::y2026_1::Api::ID];
 
 pub fn version_summary() -> VersionSummary {
     VersionSummary {
         cli_version: env!("CARGO_PKG_VERSION"),
-        framework_compatibility: FrameworkCompatibility {
-            bus_abi: phoxal::bus::BUS_ABI.id(),
-        },
-        metadata_schema: phoxal::participant::emit::EMIT_SCHEMA,
-        supported_generations: SUPPORTED_GENERATIONS.to_vec(),
+        wire_codec: phoxal::bus::encoding_string(phoxal::bus::CodecId::MessagePack),
+        participant_metadata_sections: &crate::participant_metadata::SECTION_NAMES,
     }
 }
 
@@ -166,7 +150,7 @@ impl VersionArgs {
     version = long_version(),
     about = "Build, check, simulate, and deploy Phoxal robot projects.",
     long_about = "Build, check, simulate, and deploy Phoxal robot projects.\n\n\
-                  phoxal-cli reads robot.yaml, resolves the graph against a verified generated artifact catalog when official native artifacts are needed, and drives the develop/simulate/deploy loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `check`, `generations status`, `simulate`, and `deploy --dry-run --target aarch64`."
+                  phoxal-cli reads robot.yaml, resolves the graph against a verified generated artifact catalog when official native artifacts are needed, and drives the develop/simulate/deploy loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `check`, `simulate`, and `deploy --dry-run --target aarch64`."
 )]
 pub struct Cli {
     #[arg(
@@ -191,9 +175,9 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum RootCommand {
     #[command(
-        about = "Check the robot graph's per-contract wire-shape agreement and topology via emit-apis.",
-        long_about = "Check the robot graph's per-contract wire-shape agreement and topology via emit-apis.\n\n\
-                      Resolves robot.yaml, then runs each available participant's emit-apis (host tools and locally built user services/component drivers) and validates the graph with phoxal::check. It fails if participants sharing a contract disagree on its schema_id (wire shape) or if the producer/consumer topology is unsatisfied. Mixed participant api_versions are allowed as long as shared contracts' schema_ids agree. Official artifact readiness comes from the configured generated catalog; git component commits resolve live unless pinned to a commit SHA in robot.yaml."
+        about = "Check the robot graph's participants and config against phoxal::check.",
+        long_about = "Check the robot graph's participants and config against phoxal::check.\n\n\
+                      Resolves robot.yaml, then reads each available participant's compiled-in contract metadata (official artifacts from the catalog, host tools and locally built user services/component drivers from their own built binary) and validates the graph with phoxal::check. Contract compatibility is per-contract name identity (D1) - two participants naming the same generation-qualified contract are compatible by construction, so there is no wire-shape hash to agree on. This still validates each user service's manifest config against its emitted JSON Schema. Official artifact readiness comes from the configured generated catalog; git component commits resolve live unless pinned to a commit SHA in robot.yaml."
     )]
     Check(check::CheckCmd),
     #[command(about = "Validate robot.yaml structure and user-service phoxal dependencies.")]
@@ -216,8 +200,6 @@ pub enum RootCommand {
     Cache(cache::CacheCmd),
     #[command(about = "Report native artifact drift.")]
     Outdated(outdated::Outdated),
-    #[command(about = "Inspect API generation readiness from the artifact catalog.")]
-    Generations(generations::Generations),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
     #[command(about = "Inspect the user-service catalog.")]
@@ -241,7 +223,6 @@ impl RootCommand {
             Self::Pull(command) => command.run(app).await,
             Self::Cache(command) => command.run(app).await,
             Self::Outdated(command) => command.run(app).await,
-            Self::Generations(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
             Self::Service(command) => command.run(app).await,
             Self::Version(command) => command.run(),
@@ -264,16 +245,12 @@ mod tests {
 
         assert_eq!(summary.cli_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(
-            summary.framework_compatibility.bus_abi,
-            phoxal::bus::BUS_ABI.id()
+            summary.wire_codec,
+            phoxal::bus::encoding_string(phoxal::bus::CodecId::MessagePack)
         );
         assert_eq!(
-            summary.metadata_schema,
-            phoxal::participant::emit::EMIT_SCHEMA
-        );
-        assert_eq!(
-            summary.supported_generations,
-            vec![phoxal_api::y2026_1::Api::ID]
+            summary.participant_metadata_sections,
+            crate::participant_metadata::SECTION_NAMES
         );
     }
 
@@ -286,9 +263,8 @@ mod tests {
             value,
             serde_json::json!({
                 "cli_version": env!("CARGO_PKG_VERSION"),
-                "framework_compatibility": { "bus_abi": phoxal::bus::BUS_ABI.id() },
-                "metadata_schema": phoxal::participant::emit::EMIT_SCHEMA,
-                "supported_generations": [phoxal_api::y2026_1::Api::ID],
+                "wire_codec": phoxal::bus::encoding_string(phoxal::bus::CodecId::MessagePack),
+                "participant_metadata_sections": crate::participant_metadata::SECTION_NAMES,
             })
         );
     }

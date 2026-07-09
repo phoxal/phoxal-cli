@@ -63,14 +63,18 @@ pub struct CheckOptions {
     pub target: Option<String>,
 }
 
+/// The CLI's own participant-report shape: known artifact identity (never
+/// self-reported anymore - a built binary's linker section carries only its
+/// contracts, see [`crate::participant_metadata`]) plus the extracted
+/// contract list. No `bus_abi` (D1, X-tools slice: dissolved into the
+/// generation-qualified contract key, `phoxal::check::ParticipantApis` no
+/// longer carries it either).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct RawEmitApis {
     pub artifact: RawArtifact,
     #[serde(default = "default_participant_class")]
     pub participant_class: String,
     pub api_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bus_abi: Option<String>,
     #[serde(alias = "contracts")]
     pub required_contracts: Vec<RawContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,12 +91,15 @@ pub struct RawArtifact {
     pub id: String,
 }
 
+/// One contract this participant plays a role in: `family` is the
+/// version-qualified contract name (e.g. `"y2026_1::drive::Target"`, D1) and
+/// `role` is `"publish"`/`"subscribe"`/`"serve"`/`"ask"`
+/// (`phoxal::participant::ContractRole`). No `schema_id`: name identity alone
+/// decides compatibility now.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RawContract {
     pub family: String,
-    /// The framework's normalized transitive wire-shape hash for this contract
-    /// body (`emit-apis` per-contract `schema_id`).
-    pub schema_id: String,
+    pub role: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,11 +151,10 @@ impl CheckCmd {
             "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
         );
 
-        ensure_check_outcome_ok(&result.target_generation, &result.channel, &result.outcome)?;
+        ensure_check_outcome_ok(&result.channel, &result.outcome)?;
 
         let output = CheckOutput {
             status: "ok",
-            target_generation: result.target_generation.clone(),
             channel: result.channel.clone(),
             catalog_revision: result.catalog_revision.clone(),
             participant_count: result.participant_count,
@@ -157,8 +163,8 @@ impl CheckCmd {
             &output,
             || {
                 println!(
-                    "ok: {} participants validated against target generation {} (channel {})",
-                    result.participant_count, result.target_generation, result.channel
+                    "ok: {} participants validated (channel {})",
+                    result.participant_count, result.channel
                 );
                 if let Some(revision) = &result.catalog_revision {
                     println!("catalog revision: {revision}");
@@ -174,7 +180,6 @@ impl CheckCmd {
 #[derive(Debug, Serialize)]
 struct CheckOutput {
     status: &'static str,
-    target_generation: String,
     channel: String,
     catalog_revision: Option<String>,
     participant_count: usize,
@@ -182,7 +187,6 @@ struct CheckOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CheckRunResult {
-    target_generation: String,
     channel: String,
     catalog_revision: Option<String>,
     participant_count: usize,
@@ -280,9 +284,6 @@ fn run(
     let tool_participants = tool_participants_from_resolved(&resolved)?;
     let all_source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
-    if let Some(catalog) = catalog.as_ref() {
-        ensure_no_promoted_preview_features(&all_source_participants, catalog)?;
-    }
     if let Some(service_name) = options.service.as_deref() {
         ensure_user_service_exists(&resolved, service_name)?;
     }
@@ -334,7 +335,6 @@ fn run(
     )?;
 
     Ok(CheckRunResult {
-        target_generation: resolved.target_generation,
         channel: resolved.channel.to_string(),
         catalog_revision: resolved.catalog_revision,
         participant_count,
@@ -699,8 +699,8 @@ fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()> {
     }
 
     let mut message = format!(
-        "NotYetAvailable: {} is not deployable for target generation {} on {}",
-        resolved.robot.robot.id, resolved.target_generation, resolved.target
+        "NotYetAvailable: {} is not deployable on {}",
+        resolved.robot.robot.id, resolved.target
     );
     if let Some(revision) = &resolved.catalog_revision {
         message.push_str("\n\ncatalog revision: ");
@@ -720,42 +720,8 @@ fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()> {
         }
     }
     message.push_str(
-        "\n\nFix: wait for the listed official artifacts to publish, or pin artifacts.generation to an older generation whose changed contracts you do not need.",
+        "\n\nFix: wait for the listed official artifacts to publish, or pin artifacts.pins.<package> to an exact version/sha256 whose changed contracts you do not need.",
     );
-    bail!("{message}")
-}
-
-fn ensure_no_promoted_preview_features(
-    participants: &[SourceParticipant],
-    catalog: &crate::catalog::Manifest,
-) -> Result<()> {
-    let mut promoted = Vec::new();
-    for participant in participants {
-        let manifest_path = participant.crate_dir.join("Cargo.toml");
-        if manifest_path.is_file() {
-            promoted.extend(crate::catalog::promoted_preview_features(
-                &manifest_path,
-                catalog,
-            )?);
-        }
-    }
-    if promoted.is_empty() {
-        return Ok(());
-    }
-
-    let mut message = String::from("PromotedGeneration: remove stale preview generation features");
-    for feature in promoted {
-        message.push_str("\n  - ");
-        message.push_str(&feature.manifest_path.display().to_string());
-        message.push(':');
-        message.push_str(&feature.line_number.to_string());
-        message.push_str(" targets promoted generation ");
-        message.push_str(&feature.generation);
-        message.push_str("; delete this line or remove the `preview-");
-        message.push_str(&feature.generation);
-        message.push_str("` feature: ");
-        message.push_str(&feature.line);
-    }
     bail!("{message}")
 }
 
@@ -764,7 +730,7 @@ pub fn run_check(
     tool_participants: &[ToolParticipant],
     source_participants: &[SourceParticipant],
     fetch: impl FnMut(&str) -> Result<RawEmitApis>,
-    fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
+    fetch_tool: impl FnMut(&ToolParticipant) -> Result<RawEmitApis>,
     build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
 ) -> Result<CheckOutcome> {
     let manifest_extras = RobotManifestExtras::default();
@@ -788,7 +754,7 @@ pub fn run_check_with_context(
     source_participants: &[SourceParticipant],
     context: CheckGraphContext<'_>,
     fetch: impl FnMut(&str) -> Result<RawEmitApis>,
-    fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
+    fetch_tool: impl FnMut(&ToolParticipant) -> Result<RawEmitApis>,
     build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
 ) -> Result<CheckOutcome> {
     run_check_with_deployed_user_service_images(
@@ -823,7 +789,7 @@ pub fn run_check_with_deployed_user_service_images(
     inputs: CheckParticipants<'_>,
     context: CheckGraphContext<'_>,
     mut fetch: impl FnMut(&str) -> Result<RawEmitApis>,
-    mut fetch_tool: impl FnMut(&Path) -> Result<RawEmitApis>,
+    mut fetch_tool: impl FnMut(&ToolParticipant) -> Result<RawEmitApis>,
     mut build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
 ) -> Result<CheckOutcome> {
     let mut missing_images = Vec::new();
@@ -904,7 +870,7 @@ pub fn run_check_with_deployed_user_service_images(
     }
 
     for tool in inputs.tool_participants {
-        let raw = fetch_tool(&tool.binary_path).with_context(|| {
+        let raw = fetch_tool(tool).with_context(|| {
             format!(
                 "failed to obtain emit-apis for tool {} ({})",
                 tool.name,
@@ -1019,28 +985,24 @@ fn validate_json_schema(schema: &Value, value: &Value, path: &str) -> Vec<String
         .collect()
 }
 
-/// Build an official (catalog-resolved) participant's `emit-apis` document
-/// directly from its resolved `ArtifactEntry` fields - `contracts`,
-/// `config_schema`, `bus_abi`, and `api_generation` are inlined in the
-/// catalog manifest itself (docs #21 / phoxal 0.29's lean `phoxal::catalog`),
-/// so there is no `.emit-apis.json` sidecar to download and parse anymore.
-/// This is a pure, in-memory synthesis: it never touches the network or the
-/// native-artifact cache, and it succeeds even for a metadata-only catalog
-/// entry with no built tarball for this target (staging that tarball is a
-/// separate, later concern - see `native_artifacts::stage_runtime`).
-///
-/// The catalog's inlined [`crate::catalog::Contract`] carries only
-/// `family`/`schema_id`, which is exactly what `phoxal::check` groups on
-/// (per-contract `schema_id` agreement by `family` alone - there is no
-/// topology/topic/direction check left to feed).
+/// Build an official (catalog-resolved) participant's report directly from
+/// its resolved `ArtifactEntry` fields - `contracts` and `config_schema` are
+/// inlined in the catalog manifest itself (docs #21 / the lean
+/// `phoxal::catalog`), so there is no sidecar to download and parse. This is
+/// a pure, in-memory synthesis: it never touches the network, the
+/// native-artifact cache, or the binary itself, and it succeeds even for a
+/// metadata-only catalog entry with no built tarball for this target
+/// (staging that tarball is a separate, later concern - see
+/// `native_artifacts::stage_runtime`). There is no `api_generation` to thread
+/// through anymore (D1): a catalog artifact's `api_version` report is empty,
+/// exactly like every other origin (extraction never recovers one either -
+/// see [`build_emit_apis_by_building`]).
 pub(crate) fn fetch_emit_apis_from_native_artifact(
     runtime: &ResolvedPlatformRuntime,
 ) -> Result<RawEmitApis> {
     emit_apis_from_catalog_metadata(
         runtime.kind.emit_apis_kind(),
         &runtime.name,
-        &runtime.generation,
-        runtime.bus_abi.as_deref(),
         runtime.config_schema.clone(),
         &runtime.contracts,
     )
@@ -1052,8 +1014,6 @@ pub(crate) fn fetch_emit_apis_from_native_tool(
     emit_apis_from_catalog_metadata(
         "tool",
         crate::resolver::tool_emit_apis_id(&tool.name),
-        &tool.generation,
-        tool.bus_abi.as_deref(),
         tool.config_schema.clone(),
         &tool.contracts,
     )
@@ -1062,49 +1022,99 @@ pub(crate) fn fetch_emit_apis_from_native_tool(
 fn emit_apis_from_catalog_metadata(
     artifact_kind: &str,
     artifact_id: &str,
-    api_version: &str,
-    bus_abi: Option<&str>,
     config_schema: Option<Value>,
     contracts: &[crate::catalog::Contract],
 ) -> Result<RawEmitApis> {
-    // Every native tool (`tool-router`, `tool-joypad`) is privileged
-    // (host/root access); every other official kind is a checked participant.
-    // The lean manifest no longer carries participant_class, but the
-    // kind -> class mapping was always fixed, so it is derived here instead
-    // of read off the manifest.
-    let participant_class = if artifact_kind == "tool" {
-        "privileged".to_string()
-    } else {
-        default_participant_class()
-    };
     Ok(RawEmitApis {
         artifact: RawArtifact {
             kind: artifact_kind.to_string(),
             id: artifact_id.to_string(),
         },
-        participant_class,
-        api_version: api_version.to_string(),
-        bus_abi: bus_abi.map(str::to_string),
+        participant_class: default_participant_class_for_kind(artifact_kind),
+        api_version: String::new(),
         required_contracts: contracts
             .iter()
             .map(|contract| RawContract {
                 family: contract.family.clone(),
-                schema_id: contract.schema_id.clone(),
+                role: contract.role.clone(),
             })
             .collect(),
         config_schema,
     })
 }
 
-pub(crate) fn fetch_emit_apis_from_tool(binary_path: &Path) -> Result<RawEmitApis> {
-    let executable = binary_path.to_string_lossy();
-    let output = crate::shell::run_stdout(executable.as_ref(), ["emit-apis"], None)?;
-    serde_json::from_str(&output).with_context(|| {
-        format!(
-            "emit-apis output from tool {} was not valid JSON",
-            binary_path.display()
-        )
-    })
+/// Every native tool (`tool-router`, `tool-joypad`) is privileged (host/root
+/// access); every other kind is a checked participant. Neither the catalog
+/// nor a binary's extracted metadata carries `participant_class` anymore, so
+/// the kind -> class mapping (always fixed) is derived here instead of read
+/// off either source.
+fn default_participant_class_for_kind(artifact_kind: &str) -> String {
+    if artifact_kind == "tool" {
+        "privileged".to_string()
+    } else {
+        default_participant_class()
+    }
+}
+
+/// Fetches a native tool binary's contract report by extracting its
+/// compiled-in `#[derive(phoxal::Api)]` metadata section directly from the
+/// built artifact file - never by executing it (the `emit-apis` runtime
+/// subcommand this used to run is gone). A binary's own linker section
+/// carries only its contracts, not its artifact identity (`kind`/`id`) or a
+/// config schema (`ParticipantConfig::SCHEMA_JSON` is a fixed `"{}"`
+/// placeholder for every participant today, pending a host-side `build.rs`
+/// materialization step - RECONCILIATION correction #12), so both are
+/// supplied from what is already known about `tool` rather than self-reported.
+pub(crate) fn fetch_emit_apis_from_tool(tool: &ToolParticipant) -> Result<RawEmitApis> {
+    let meta = crate::participant_metadata::extract_participant_metadata(&tool.binary_path)
+        .with_context(|| {
+            format!(
+                "failed to extract API metadata from {}",
+                tool.binary_path.display()
+            )
+        })?;
+    Ok(raw_emit_apis_from_extracted_metadata(
+        "tool",
+        crate::resolver::tool_emit_apis_id(&tool.name),
+        meta,
+    ))
+}
+
+/// Builds a [`RawEmitApis`] from a binary's extracted [`ParticipantMeta`] plus
+/// already-known artifact identity - the shared tail of
+/// [`fetch_emit_apis_from_tool`] and [`build_emit_apis_by_building`].
+///
+/// [`ParticipantMeta`]: crate::participant_metadata::ParticipantMeta
+fn raw_emit_apis_from_extracted_metadata(
+    artifact_kind: &str,
+    artifact_id: &str,
+    meta: crate::participant_metadata::ParticipantMeta,
+) -> RawEmitApis {
+    RawEmitApis {
+        artifact: RawArtifact {
+            kind: artifact_kind.to_string(),
+            id: artifact_id.to_string(),
+        },
+        participant_class: default_participant_class_for_kind(artifact_kind),
+        // No single API generation to report anymore (D1): a participant's
+        // `Api` may mix contracts from several generations freely, so there
+        // is no one dated value left to put here.
+        api_version: String::new(),
+        required_contracts: meta
+            .contracts
+            .into_iter()
+            .map(|contract| RawContract {
+                family: contract.contract,
+                role: contract.role,
+            })
+            .collect(),
+        // `ParticipantConfig::SCHEMA_JSON` is a fixed `"{}"` placeholder for
+        // every participant today (RECONCILIATION correction #12: the real
+        // `schemars` schema needs a host-side `build.rs` step a proc-macro
+        // cannot do) - identical to what the catalog itself carries for an
+        // official artifact, so a source-built participant reports the same.
+        config_schema: Some(serde_json::json!({})),
+    }
 }
 
 fn tool_env_override(tool: &crate::resolver::ResolvedTool) -> Option<PathBuf> {
@@ -1148,11 +1158,15 @@ fn env_key(value: &str) -> String {
         .collect()
 }
 
-/// Build a source participant's `emit-apis` document by actually building and
-/// running it - never cached. Custom / `path:` / git-sourced participants are
+/// Build a source participant's contract report by actually compiling it -
+/// never cached. Custom / `path:` / git-sourced participants are
 /// re-evaluated every invocation (docs: the old `cache/emit-apis/` disk cache
 /// is gone; official artifacts already skip this entirely, reading contracts
 /// straight off the catalog - see [`fetch_emit_apis_from_native_artifact`]).
+/// The build no longer runs the compiled binary (the `emit-apis` runtime
+/// subcommand this used to execute is gone): it extracts the participant's
+/// compiled-in `#[derive(phoxal::Api)]` metadata section straight from the
+/// built artifact file, exactly like [`fetch_emit_apis_from_tool`].
 pub(crate) fn build_emit_apis_from_source(participant: &SourceParticipant) -> Result<RawEmitApis> {
     build_emit_apis_from_source_with_diagnostics(participant, build_emit_apis_by_building, None)
 }
@@ -1166,13 +1180,13 @@ fn build_emit_apis_from_source_for_check(
 
 /// Core of [`build_emit_apis_from_source`], parameterized over the (expensive)
 /// builder so tests can exercise it against a fake build closure instead of
-/// spawning a real `cargo run`.
+/// spawning a real `cargo build`.
 fn build_emit_apis_from_source_with_diagnostics(
     participant: &SourceParticipant,
-    mut build_by_building: impl FnMut(&Path) -> Result<RawEmitApis>,
+    mut build_by_building: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
     ui: Option<&crate::Ui>,
 ) -> Result<RawEmitApis> {
-    let raw = build_by_building(&participant.crate_dir)?;
+    let raw = build_by_building(participant)?;
     report_source_emit_apis_progress(
         ui,
         format!(
@@ -1193,34 +1207,98 @@ fn report_source_emit_apis_progress(ui: Option<&crate::Ui>, message: String) {
     }
 }
 
-fn build_emit_apis_by_building(dir: &Path) -> Result<RawEmitApis> {
-    let crate_dir = dir
-        .canonicalize()
-        .with_context(|| format!("failed to canonicalize source crate {}", dir.display()))?;
-    let binary_name = cargo_binary_name(&crate_dir, None)?;
-    // Build + run via `cargo run` rather than locating the binary by hand: a crate
-    // that is a workspace member (e.g. a phoxal/framework `component/<name>` driver)
-    // compiles into the *workspace-root* `target/`, not `<crate_dir>/target/`, so a fixed
-    // `<crate_dir>/target/debug/<bin>` path would miss it. `cargo run` resolves the
-    // location workspace-aware, and `--quiet` keeps stdout to just the binary's
-    // `emit-apis` JSON (cargo's own progress goes to stderr).
-    let output = crate::shell::run_stdout(
-        "cargo",
-        ["run", "--quiet", "--bin", &binary_name, "--", "emit-apis"],
-        Some(&crate_dir),
-    )
-    .with_context(|| {
+/// The expected `artifact.kind` label for a [`SourceParticipant`]'s kind -
+/// shared between [`build_emit_apis_by_building`] (which now supplies this
+/// identity itself, since extraction never self-reports it) and
+/// [`validate_source_artifact_identity`] (which still checks a fake/injected
+/// report against it in tests).
+fn expected_kind_for_source_participant(kind: SourceParticipantKind) -> &'static str {
+    match kind {
+        SourceParticipantKind::UserService | SourceParticipantKind::OfficialService => "service",
+        SourceParticipantKind::ComponentDriver => "driver",
+        SourceParticipantKind::Tool => "tool",
+        SourceParticipantKind::Simulator => "simulator",
+    }
+}
+
+fn build_emit_apis_by_building(participant: &SourceParticipant) -> Result<RawEmitApis> {
+    let crate_dir = participant.crate_dir.canonicalize().with_context(|| {
         format!(
-            "failed to build/run `{binary_name} emit-apis` for source crate {}",
-            crate_dir.display()
+            "failed to canonicalize source crate {}",
+            participant.crate_dir.display()
         )
     })?;
-    serde_json::from_str(&output).with_context(|| {
-        format!(
-            "emit-apis output from source crate {} was not valid JSON",
-            crate_dir.display()
-        )
-    })
+    let binary_name = cargo_binary_name(&crate_dir, None)?;
+    let binary_path = build_and_locate_binary(&crate_dir, &binary_name)?;
+    let meta = crate::participant_metadata::extract_participant_metadata(&binary_path)
+        .with_context(|| {
+            format!(
+                "failed to extract API metadata from {}",
+                binary_path.display()
+            )
+        })?;
+    Ok(raw_emit_apis_from_extracted_metadata(
+        expected_kind_for_source_participant(participant.kind),
+        &participant.expected_artifact_id,
+        meta,
+    ))
+}
+
+/// Builds `binary_name` in `crate_dir` and locates its resulting executable
+/// path via cargo's own `--message-format=json` build log, rather than
+/// guessing `<dir>/target/debug/<bin>` by hand: a crate that is a workspace
+/// member (e.g. a `phoxal/framework` `component/<name>` driver) compiles into
+/// the *workspace-root* `target/`, not `<crate_dir>/target/`, so a fixed path
+/// would miss it. Cargo's own artifact messages are workspace-aware
+/// regardless of layout.
+fn build_and_locate_binary(crate_dir: &Path, binary_name: &str) -> Result<PathBuf> {
+    let output = crate::shell::run_output(
+        "cargo",
+        [
+            "build",
+            "--quiet",
+            "--message-format=json",
+            "--bin",
+            binary_name,
+        ],
+        Some(crate_dir),
+    )
+    .with_context(|| format!("failed to spawn `cargo build --bin {binary_name}`"))?;
+    if !output.status.success() {
+        bail!(
+            "failed to build `{binary_name}` in {}\nstdout:\n{}\nstderr:\n{}",
+            crate_dir.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .context("cargo build --message-format=json wrote non-UTF8 stdout")?;
+    for line in stdout.lines() {
+        let Ok(message) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if message.get("reason").and_then(Value::as_str) != Some("compiler-artifact") {
+            continue;
+        }
+        let Some(target) = message.get("target") else {
+            continue;
+        };
+        let is_bin = target
+            .get("kind")
+            .and_then(Value::as_array)
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("bin")));
+        if !is_bin || target.get("name").and_then(Value::as_str) != Some(binary_name) {
+            continue;
+        }
+        if let Some(executable) = message.get("executable").and_then(Value::as_str) {
+            return Ok(PathBuf::from(executable));
+        }
+    }
+    bail!(
+        "cargo build for `{binary_name}` in {} did not report an executable path",
+        crate_dir.display()
+    )
 }
 
 fn validate_service_artifact_identity(
@@ -1235,16 +1313,10 @@ fn validate_source_artifact_identity(
     participant: &SourceParticipant,
     raw: &RawEmitApis,
 ) -> Result<()> {
-    let expected_kind = match participant.kind {
-        SourceParticipantKind::UserService | SourceParticipantKind::OfficialService => "service",
-        SourceParticipantKind::ComponentDriver => "driver",
-        SourceParticipantKind::Tool => "tool",
-        SourceParticipantKind::Simulator => "simulator",
-    };
     validate_artifact_identity(
         participant.kind_label(),
         participant.expected_artifact_id.as_str(),
-        expected_kind,
+        expected_kind_for_source_participant(participant.kind),
         raw,
     )
 }
@@ -1280,12 +1352,16 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
         let participant_kind = graph_check::ParticipantKind::parse(&raw.artifact.kind);
         let participant_class =
             graph_check::ParticipantClass::parse(&raw.participant_class).unwrap_or_default();
+        // `role` is dropped here (D1): `phoxal::check::Contract` is
+        // `{family}` only - name identity alone decides compatibility, so
+        // there is nothing left for the graph checker to gate per-role.
+        // `role` is still carried on `RawContract`/`catalog::Contract` for
+        // callers that need it (native-artifact/local-manifest upserts).
         let contracts = raw
             .required_contracts
             .into_iter()
             .map(|contract| graph_check::Contract {
                 family: contract.family,
-                schema_id: contract.schema_id,
             })
             .collect::<Vec<_>>();
 
@@ -1298,7 +1374,6 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
             participant_kind,
             participant_class,
             api_version: raw.api_version,
-            bus_abi: raw.bus_abi,
             config_schema: raw.config_schema,
             scope: graph_check::ParticipantScope::Graph,
             contracts,
@@ -1306,15 +1381,11 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
     }
 }
 
-pub(crate) fn ensure_check_outcome_ok(
-    api_version: &str,
-    channel: &str,
-    outcome: &CheckOutcome,
-) -> Result<()> {
+pub(crate) fn ensure_check_outcome_ok(channel: &str, outcome: &CheckOutcome) -> Result<()> {
     if !outcome.missing_images.is_empty() {
         bail!(
             "{}",
-            format_missing_images_error(api_version, channel, &outcome.missing_images)
+            format_missing_images_error(channel, &outcome.missing_images)
         );
     }
 
@@ -1325,13 +1396,8 @@ pub(crate) fn ensure_check_outcome_ok(
     Ok(())
 }
 
-fn format_missing_images_error(
-    target_generation: &str,
-    channel: &str,
-    missing_images: &[String],
-) -> String {
-    let mut message =
-        format!("target generation {target_generation} is not available on channel {channel}");
+fn format_missing_images_error(channel: &str, missing_images: &[String]) -> String {
+    let mut message = format!("required official artifacts are not available on channel {channel}");
     message.push_str("\n\nMissing official artifacts:");
     for image_ref in missing_images {
         message.push_str("\n  - ");
@@ -1339,11 +1405,9 @@ fn format_missing_images_error(
     }
     message.push_str("\n\nFix:");
     message.push_str("\n  - refresh or override the generated artifact catalog with `phoxal-cli --catalog <path> check`");
-    message.push_str("\n  - or wait until Phoxal publishes the complete ");
-    message.push_str(target_generation);
-    message.push('-');
+    message.push_str("\n  - or wait until Phoxal publishes the missing official artifacts on the ");
     message.push_str(channel);
-    message.push_str(" official artifact set");
+    message.push_str(" channel");
     message
 }
 
@@ -1358,19 +1422,6 @@ fn format_report_error(report: &graph_check::Report) -> String {
 
 fn format_problem(problem: &graph_check::Problem) -> String {
     match problem {
-        graph_check::Problem::ContractSchemaMismatch { family, schema_ids } => {
-            let reporters = schema_ids
-                .iter()
-                .map(|(schema_id, participants)| {
-                    format!("{schema_id} (reported by {})", participants.join(", "))
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
-            format!(
-                "contract {family} has disagreeing wire shapes: {reporters}; \
-                 rebuild the disagreeing side(s) so they compile against the same contract wire shape (schema_id)"
-            )
-        }
         graph_check::Problem::InvalidConfig { runtime_id, errors } => {
             format!(
                 "invalid config for user service {runtime_id}: {}",
@@ -1444,14 +1495,11 @@ mod tests {
                 name: component_name.to_string(),
                 package: package.to_string(),
                 kind,
-                generation: "y2026_1".to_string(),
                 version: "0.1.0".to_string(),
                 artifact_ref: format!("{}-driver-v0.1.0.tar.zst", component_name),
                 sha256: Some("a".repeat(64)),
                 published: true,
                 published_triples: Vec::new(),
-                bus_abi: (kind == crate::catalog::ArtifactKind::ComponentDriver)
-                    .then(|| "phoxal-bus/v0".to_string()),
                 config_schema: None,
                 changed_contracts: Vec::new(),
                 contracts: Vec::new(),
@@ -1526,7 +1574,11 @@ mod tests {
     }
 
     #[test]
-    fn privileged_tools_are_included_in_schema_agreement() -> Result<()> {
+    fn privileged_tools_share_a_contract_family_with_no_agreement_gate() -> Result<()> {
+        // D1: a privileged tool and a checked source participant reporting
+        // different roles for the same `family` is not a mismatch - there is
+        // no `schema_id` axis left to disagree on; name identity alone
+        // decides compatibility.
         let tools = vec![ToolParticipant {
             name: "joypad".to_string(),
             binary_path: PathBuf::from("/fake/cache/joypad"),
@@ -1541,13 +1593,14 @@ mod tests {
             &tools,
             &sources,
             |_| bail!("no platform images should be fetched"),
-            |path| {
+            |tool| {
+                let path = tool.binary_path.as_path();
                 if path == Path::new("/fake/cache/joypad") {
-                    Ok(raw_kind_with_schema(
+                    Ok(raw_kind_with_role(
                         "tool",
                         "joypad",
                         "y2026_1",
-                        &[("drive::Target", "bbbb")],
+                        &[("drive::Target", "subscribe")],
                         "privileged",
                     ))
                 } else {
@@ -1557,10 +1610,10 @@ mod tests {
             |participant| {
                 let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/runtimes/drive") {
-                    Ok(raw_with_schema(
+                    Ok(raw_with_role(
                         "drive",
                         "y2026_1",
-                        &[("drive::Target", "aaaa")],
+                        &[("drive::Target", "publish")],
                     ))
                 } else {
                     bail!("unexpected source dir {}", dir.display())
@@ -1568,16 +1621,7 @@ mod tests {
             },
         )?;
 
-        assert_eq!(
-            outcome.report.problems,
-            vec![Problem::ContractSchemaMismatch {
-                family: "drive::Target".to_string(),
-                schema_ids: vec![
-                    ("aaaa".to_string(), vec!["drive".to_string()]),
-                    ("bbbb".to_string(), vec!["joypad".to_string()]),
-                ],
-            }]
-        );
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
         Ok(())
     }
 
@@ -1593,7 +1637,8 @@ mod tests {
             &tools,
             &[],
             |_| bail!("no platform images should be fetched"),
-            |path| {
+            |tool| {
+                let path = tool.binary_path.as_path();
                 if path == Path::new("/fake/cache/joypad") {
                     Ok(raw_kind_class(
                         "tool",
@@ -1664,9 +1709,11 @@ mod tests {
     }
 
     #[test]
-    fn source_wrong_schema_id_fails_with_mismatch_problem() -> Result<()> {
-        // A platform publisher and a source subscriber share `drive/target` but
-        // report different `schema_id`s -> one `ContractSchemaMismatch`.
+    fn source_and_platform_sharing_a_contract_family_is_a_healthy_graph() -> Result<()> {
+        // D1: a platform publisher and a source subscriber sharing
+        // `drive::Target` is healthy regardless of role - name identity
+        // alone decides compatibility, there is no wire-shape agreement axis
+        // left to gate on.
         let images = vec![("mission".to_string(), "mission:ok".to_string())];
         let sources = vec![SourceParticipant::user_service(
             "drive".to_string(),
@@ -1678,34 +1725,24 @@ mod tests {
             &[],
             &sources,
             |image_ref| match image_ref {
-                "mission:ok" => Ok(raw_with_schema(
+                "mission:ok" => Ok(raw_with_role(
                     "mission",
                     "y2026_1",
-                    &[("drive::Target", "aaaa")],
+                    &[("drive::Target", "publish")],
                 )),
                 unexpected => bail!("unexpected image {unexpected}"),
             },
             |_| bail!("no tools should be fetched"),
             |_| {
-                Ok(raw_with_schema(
+                Ok(raw_with_role(
                     "drive",
                     "y2026_1",
-                    &[("drive::Target", "bbbb")],
+                    &[("drive::Target", "subscribe")],
                 ))
             },
         )?;
 
-        assert_eq!(
-            outcome.report.problems,
-            vec![Problem::ContractSchemaMismatch {
-                family: "drive::Target".to_string(),
-                schema_ids: vec![
-                    ("aaaa".to_string(), vec!["mission".to_string()]),
-                    ("bbbb".to_string(), vec!["drive".to_string()]),
-                ],
-            }]
-        );
-        assert!(!outcome.is_ok());
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
         Ok(())
     }
 
@@ -1805,7 +1842,8 @@ mod tests {
             &tools,
             &[],
             |_| bail!("no platform images should be fetched"),
-            |path| {
+            |tool| {
+                let path = tool.binary_path.as_path();
                 if path == Path::new("/fake/cache/joypad") {
                     Ok(raw_kind_class(
                         "tool",
@@ -1842,7 +1880,8 @@ mod tests {
             &tools,
             &[],
             |_| bail!("no platform images should be fetched"),
-            |path| {
+            |tool| {
+                let path = tool.binary_path.as_path();
                 if path == Path::new("/fake/cache/joypad") {
                     Ok(raw_kind_class(
                         "tool",
@@ -1874,7 +1913,8 @@ mod tests {
             &tools,
             &[],
             |_| bail!("no platform images should be fetched"),
-            |path| {
+            |tool| {
+                let path = tool.binary_path.as_path();
                 if path == Path::new("/fake/cache/joypad") {
                     Ok(raw_kind_class(
                         "runtime",
@@ -1976,7 +2016,8 @@ mod tests {
             &tools,
             &[],
             |_| bail!("no platform images should be fetched"),
-            |path| {
+            |tool| {
+                let path = tool.binary_path.as_path();
                 if path == Path::new("/fake/cache/joypad") {
                     Ok(raw_kind_class(
                         "nonsense",
@@ -2165,12 +2206,12 @@ mod tests {
     }
 
     #[test]
-    fn component_driver_wrong_schema_id_fails_with_mismatch_problem() -> Result<()> {
-        // A component driver (subscribing `drive/target`) and a platform publisher
-        // report different `schema_id`s for the shared contract. The mismatch is
-        // reported per contract, and the driver appears under its concrete instance
-        // id (`left_drive`), not the shared driver artifact (`ddsm115`), so multiple
-        // instances of one driver stay distinct in the report.
+    fn component_driver_and_platform_sharing_a_contract_family_is_a_healthy_graph() -> Result<()> {
+        // D1: a component driver (subscribing `drive::Target`) and a platform
+        // publisher sharing the family is healthy regardless of role. The
+        // driver still appears under its concrete instance id (`left_drive`),
+        // not the shared driver artifact (`ddsm115`), so multiple instances
+        // of one driver stay distinct.
         let images = vec![("mission".to_string(), "mission:ok".to_string())];
         let sources = vec![SourceParticipant::component_driver_with_artifact_id(
             "left_drive".to_string(),
@@ -2183,36 +2224,32 @@ mod tests {
             &[],
             &sources,
             |image_ref| match image_ref {
-                "mission:ok" => Ok(raw_with_schema(
+                "mission:ok" => Ok(raw_with_role(
                     "mission",
                     "y2026_1",
-                    &[("drive::Target", "aaaa")],
+                    &[("drive::Target", "publish")],
                 )),
                 unexpected => bail!("unexpected image {unexpected}"),
             },
             |_| bail!("no tools should be fetched"),
             |_| {
-                Ok(raw_kind_with_schema(
+                Ok(raw_kind_with_role(
                     "driver",
                     "ddsm115",
                     "y2026_1",
-                    &[("drive::Target", "bbbb")],
+                    &[("drive::Target", "subscribe")],
                     "checked",
                 ))
             },
         )?;
 
-        assert_eq!(
-            outcome.report.problems,
-            vec![Problem::ContractSchemaMismatch {
-                family: "drive::Target".to_string(),
-                schema_ids: vec![
-                    ("aaaa".to_string(), vec!["mission".to_string()]),
-                    ("bbbb".to_string(), vec!["left_drive".to_string()]),
-                ],
-            }]
-        );
-        assert!(!outcome.is_ok());
+        assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
+        let participant_ids = outcome
+            .checked_participants
+            .iter()
+            .map(|participant| participant.participant_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(participant_ids.contains(&"left_drive"));
         Ok(())
     }
 
@@ -2534,13 +2571,11 @@ mod tests {
             name: "drive".to_string(),
             package: "phoxal/service-drive".to_string(),
             kind: crate::catalog::ArtifactKind::Service,
-            generation: "y2026_1".to_string(),
             version: "0.1.0".to_string(),
             artifact_ref: "path:framework/service/drive".to_string(),
             sha256: None,
             published: true,
             published_triples: Vec::new(),
-            bus_abi: None,
             config_schema: None,
             changed_contracts: Vec::new(),
             contracts: Vec::new(),
@@ -2623,11 +2658,10 @@ mod tests {
             r#"{
                 "artifact": { "kind": "service", "id": "drive", "ignored": true },
                 "api_version": "y2026_1",
-                "bus_abi": "v0",
                 "required_contracts": [
                     {
                         "family": "drive::Target",
-                        "schema_id": "deadbeef",
+                        "role": "publish",
                         "ignored": true
                     }
                 ],
@@ -2639,7 +2673,6 @@ mod tests {
         assert_eq!(participant.artifact_id, "drive");
         assert_eq!(participant.participant_class, ParticipantClass::Checked);
         assert_eq!(participant.api_version, "y2026_1");
-        assert_eq!(participant.bus_abi.as_deref(), Some("v0"));
         assert_eq!(
             participant
                 .config_schema
@@ -2649,7 +2682,6 @@ mod tests {
             Some("object")
         );
         assert_eq!(participant.contracts[0].family, "drive::Target");
-        assert_eq!(participant.contracts[0].schema_id, "deadbeef");
         Ok(())
     }
 
@@ -2906,13 +2938,16 @@ mod tests {
         raw_kind("service", id, api_version, contracts)
     }
 
-    /// Like `raw`, but each contract carries an explicit `schema_id` so a test can
-    /// force two participants to disagree on a shared `family`.
-    fn raw_with_schema(id: &str, api_version: &str, contracts: &[(&str, &str)]) -> RawEmitApis {
-        raw_kind_with_schema("service", id, api_version, contracts, "checked")
+    /// Like `raw`, but each contract carries an explicit `role` (D1: the
+    /// wire-shape-agreement axis `schema_id` used to gate is gone - two
+    /// participants naming the same `family` are compatible by construction
+    /// regardless of role, so this only exists for tests that want to spell
+    /// out a specific publish/subscribe/serve/ask role).
+    fn raw_with_role(id: &str, api_version: &str, contracts: &[(&str, &str)]) -> RawEmitApis {
+        raw_kind_with_role("service", id, api_version, contracts, "checked")
     }
 
-    fn raw_kind_with_schema(
+    fn raw_kind_with_role(
         kind: &str,
         id: &str,
         api_version: &str,
@@ -2926,12 +2961,11 @@ mod tests {
             },
             participant_class: participant_class.to_string(),
             api_version: api_version.to_string(),
-            bus_abi: None,
             required_contracts: contracts
                 .iter()
-                .map(|(family, schema_id)| RawContract {
+                .map(|(family, role)| RawContract {
                     family: (*family).to_string(),
-                    schema_id: (*schema_id).to_string(),
+                    role: (*role).to_string(),
                 })
                 .collect(),
             config_schema: None,
@@ -2956,15 +2990,14 @@ mod tests {
             },
             participant_class: participant_class.to_string(),
             api_version: api_version.to_string(),
-            bus_abi: None,
             required_contracts: contracts
                 .iter()
                 .map(|family| RawContract {
                     family: (*family).to_string(),
-                    // A single default wire-shape id: every contract in these
-                    // fixtures shares one id, so a shared family agrees unless
-                    // a test deliberately overrides it.
-                    schema_id: "deadbeef".to_string(),
+                    // A single default role: nothing in these fixtures cares
+                    // about role identity (D1: only `family` decides
+                    // compatibility), so every contract shares one.
+                    role: "publish".to_string(),
                 })
                 .collect(),
             config_schema: None,
@@ -2974,7 +3007,6 @@ mod tests {
     fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<ResolvedRobot> {
         Ok(ResolvedRobot {
             robot: Robot::parse_from_string(MINIMAL_ROBOT)?,
-            target_generation: "y2026_1".to_string(),
             channel: Channel::Stable,
             target: crate::resolver::host_target_triple(),
             catalog_revision: None,

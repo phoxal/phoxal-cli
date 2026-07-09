@@ -15,10 +15,9 @@ use phoxal_cli::resolver::{
 
 #[test]
 fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1"))?;
+    let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
 
-    assert_eq!(resolved.target_generation, "y2026_1");
     assert_eq!(resolved.channel.to_string(), "stable");
     assert_eq!(
         resolved
@@ -50,7 +49,7 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
     assert!(resolved.platform_runtimes.iter().all(|runtime| {
         runtime
             .artifact_ref()
-            .contains(&format!("-y2026_1-{}-", resolved.channel))
+            .contains(&format!("-{}-", resolved.channel))
     }));
     assert_eq!(
         resolved
@@ -59,10 +58,7 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
             .find(|runtime| runtime.name == "drive")
             .expect("drive runtime")
             .artifact_ref(),
-        format!(
-            "phoxal-service-drive:0.1.0-y2026_1-stable-{}",
-            host_target_triple()
-        )
+        format!("phoxal-service-drive:0.1.0-stable-{}", host_target_triple())
     );
 
     Ok(())
@@ -70,7 +66,7 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
 
 #[test]
 fn catalog_component_drivers_do_not_enter_platform_service_set() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1"))?;
+    let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
 
     assert!(
@@ -91,7 +87,7 @@ fn catalog_component_drivers_do_not_enter_platform_service_set() -> anyhow::Resu
 
 #[test]
 fn driverless_component_resolves_assets_only() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1"))?;
+    let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
 
     let left_drive = resolved
@@ -113,7 +109,7 @@ fn driverless_component_resolves_assets_only() -> anyhow::Result<()> {
 
 #[test]
 fn component_with_driver_block_resolves_both_assets_and_driver() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
+    let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount",
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount\n      driver:\n        connection: { type: can, bus: 0, node_id: 1 }",
     ))?;
@@ -139,17 +135,13 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
     // exactly the same shape a service captures: the resolved catalog
     // entry's version, the per-scope `ReleaseAsset`, and the resolved target
     // scope (target-independent for assets, the target triple for drivers).
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
+    let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount",
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount\n      driver:\n        connection: { type: can, bus: 0, node_id: 1 }",
     ))?;
     let target = host_target_triple();
-    let mut assets_entry = fixture_component_assets_entry_for_tests(
-        "ddsm115",
-        "y2026_1",
-        "0.1.0",
-        CatalogChannel::Stable,
-    );
+    let mut assets_entry =
+        fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable);
     assets_entry.as_asset_entry_mut().artifacts.insert(
         phoxal_cli::catalog::TARGET_INDEPENDENT_SCOPE.to_string(),
         fixture_artifact_for_tests(
@@ -159,7 +151,6 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
     );
     let mut driver_entry = fixture_component_driver_entry_for_tests(
         "ddsm115",
-        "y2026_1",
         "0.1.0",
         CatalogChannel::Stable,
         &target,
@@ -176,14 +167,13 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
     let catalog = fixture_catalog_for_tests(vec![
         fixture_service_entry_for_tests(
             "drive",
-            "y2026_1",
             "0.1.0",
             CatalogChannel::Stable,
             &target,
             false,
             vec![fixture_contract_for_tests(
-                "drive::Target",
-                "0123456789abcdef",
+                "y2026_1::drive::Target",
+                "publish",
             )],
         ),
         assets_entry,
@@ -214,10 +204,6 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
         assets_runtime.sha256.as_deref(),
         Some("a".repeat(64)).as_deref()
     );
-    assert!(
-        assets_runtime.bus_abi.is_none(),
-        "component_assets carries no bus_abi/contracts (no runtime binary to describe)"
-    );
     assert_eq!(
         assets_runtime.artifact_ref(),
         "phoxal-component-ddsm115-assets-v0.1.0.tar.zst"
@@ -234,10 +220,6 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
         driver_runtime.sha256.as_deref(),
         Some("b".repeat(64)).as_deref()
     );
-    assert!(
-        driver_runtime.bus_abi.is_some(),
-        "component_driver carries inlined bus_abi metadata"
-    );
     assert_eq!(
         driver_runtime.artifact_ref(),
         format!("phoxal-component-ddsm115-driver-v0.1.0-{target}.tar.zst")
@@ -253,7 +235,7 @@ fn catalog_component_with_no_release_asset_yet_still_resolves_with_none_runtime_
     // succeed as if a bundle exists to fetch: resolution succeeds (the
     // package is real and versioned), but `catalog_runtime.sha256` stays
     // `None` so a later staging attempt reports a clear diagnostic.
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1"))?;
+    let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
 
     let left_drive = resolved
@@ -277,29 +259,23 @@ fn declared_driver_with_no_catalog_driver_package_is_a_named_diagnostic() -> any
     // Only the assets package is in this catalog; the instance declares
     // `driver:` but no matching `phoxal/component-ddsm115-driver` package
     // exists in the resolved graph.
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1").replace(
+    let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount",
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount\n      driver:\n        connection: { type: can, bus: 0, node_id: 1 }",
     ))?;
     let catalog = fixture_catalog_for_tests(vec![
         fixture_service_entry_for_tests(
             "drive",
-            "y2026_1",
             "0.1.0",
             CatalogChannel::Stable,
             &host_target_triple(),
             false,
             vec![fixture_contract_for_tests(
-                "drive::Target",
-                "0123456789abcdef",
+                "y2026_1::drive::Target",
+                "publish",
             )],
         ),
-        fixture_component_assets_entry_for_tests(
-            "ddsm115",
-            "y2026_1",
-            "0.1.0",
-            CatalogChannel::Stable,
-        ),
+        fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable),
     ]);
 
     let error = resolve(
@@ -319,7 +295,7 @@ fn declared_driver_with_no_catalog_driver_package_is_a_named_diagnostic() -> any
 
 #[test]
 fn resolves_known_api_to_its_official_set() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1"))?;
+    let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
 
     assert_eq!(
@@ -353,7 +329,7 @@ fn resolves_known_api_to_its_official_set() -> anyhow::Result<()> {
         resolved
             .platform_runtimes
             .iter()
-            .all(|runtime| runtime.artifact_ref().contains("-y2026_1-stable-"))
+            .all(|runtime| runtime.artifact_ref().contains("-stable-"))
     );
 
     Ok(())
@@ -406,7 +382,7 @@ fn missing_user_service_source_dir_fails() -> anyhow::Result<()> {
 
 #[test]
 fn tools_resolve_from_catalog_entries() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml("y2026_1"))?;
+    let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
 
     for tool_name in ["tool-router", "tool-joypad"] {
@@ -469,28 +445,56 @@ fn unused_provider_qualified_path_pin_is_rejected() -> anyhow::Result<()> {
 }
 
 #[test]
-fn loaded_catalog_without_target_channel_gets_not_yet_available_error() -> anyhow::Result<()> {
-    // The lean catalog schema has no separate "declared target triple" list
-    // to mismatch against (only `artifacts`, which is legitimately empty in a
-    // metadata-only catalog and must not by itself fail resolution - see
-    // `catalog::newest_generation_on_channel`). What remains a real,
-    // catalog-wide mismatch a robot can hit is the *channel*: a catalog that
-    // only publishes `preview` has nothing for a robot pinned to `stable`.
-    let robot = Robot::parse_from_string(&minimal_robot_yaml_without_generation())?;
+fn artifacts_generation_field_is_rejected_as_a_dead_field() -> anyhow::Result<()> {
+    // D1 (X-tools slice): the artifact catalog no longer carries a per-entry
+    // API generation, so `artifacts.generation` cannot mean anything against
+    // it anymore. `resolve()` must reject it explicitly rather than silently
+    // ignore it.
+    let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
+        "artifacts:\n  channel: stable",
+        "artifacts:\n  channel: stable\n  generation: y2026_1",
+    ))?;
+    let error = resolve_with_catalog(&robot, std::path::Path::new("."))
+        .expect_err("artifacts.generation should be rejected");
+    let message = error.to_string();
+
+    assert!(message.contains("artifacts.generation"), "{message}");
+    assert!(
+        message.contains("no longer meaningful") || message.contains("no longer exists"),
+        "{message}"
+    );
+    Ok(())
+}
+
+#[test]
+fn loaded_catalog_without_target_channel_resolves_to_no_platform_runtimes() -> anyhow::Result<()> {
+    // D1: there is no separate "declared target/generation" gate left to
+    // proactively fail resolution when the catalog has nothing on the
+    // robot's channel (that check lived entirely inside the now-deleted
+    // generation-ceiling machinery). A catalog with only `preview` entries
+    // simply contributes no matching package for a robot pinned to `stable` -
+    // resolution succeeds with an empty platform runtime set rather than a
+    // hard NotYetAvailable error.
+    // The driverless components resolve fine (their `ddsm115` assets entry is
+    // on the robot's `stable` channel); only the `drive` service is
+    // preview-only, isolating the service-channel-selection axis.
+    let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
     let target = "aarch64-unknown-linux-gnu";
-    let catalog = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
-        "drive",
-        "y2026_1",
-        "0.1.0",
-        CatalogChannel::Preview,
-        target,
-        true,
-        vec![fixture_contract_for_tests(
-            "drive::Target",
-            "0123456789abcdef",
-        )],
-    )]);
-    let error = resolve(
+    let catalog = fixture_catalog_for_tests(vec![
+        fixture_service_entry_for_tests(
+            "drive",
+            "0.1.0",
+            CatalogChannel::Preview,
+            target,
+            true,
+            vec![fixture_contract_for_tests(
+                "y2026_1::drive::Target",
+                "publish",
+            )],
+        ),
+        fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable),
+    ]);
+    let resolved = resolve(
         &robot,
         std::path::Path::new("."),
         Some(&catalog),
@@ -500,28 +504,15 @@ fn loaded_catalog_without_target_channel_gets_not_yet_available_error() -> anyho
             resolve_component_asset_commits: false,
             ..ResolveOptions::default()
         },
-    )
-    .expect_err("catalog with nothing on the robot's channel should fail explicitly");
-    let message = error.to_string();
+    )?;
 
-    assert!(message.contains("NotYetAvailable"), "{message}");
-    assert!(message.contains(&catalog.revision), "{message}");
-    assert!(message.contains(target), "{message}");
-    assert!(message.contains("stable"), "{message}");
-    assert!(
-        message.contains("no released generation assets"),
-        "{message}"
-    );
-    assert!(
-        message.contains("Pass a catalog that includes released assets"),
-        "{message}"
-    );
+    assert!(resolved.platform_runtimes.is_empty());
     Ok(())
 }
 
 #[test]
 fn official_only_robot_without_catalog_keeps_no_catalog_error() -> anyhow::Result<()> {
-    let robot = Robot::parse_from_string(&minimal_robot_yaml_without_generation())?;
+    let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
     let error = resolve(
         &robot,
         std::path::Path::new("."),
@@ -554,7 +545,7 @@ fn path_pins_are_overlay_only() -> anyhow::Result<()> {
     let error = load_robot_with_extras(&base_path).expect_err("base path pin should fail");
     assert!(error.to_string().contains("dev-overlay only"), "{error:#}");
 
-    fs::write(&base_path, minimal_robot_yaml("y2026_1"))?;
+    fs::write(&base_path, minimal_robot_yaml())?;
     fs::write(
         temp.path().join("robot.dev.yaml"),
         "artifacts:\n  pins:\n    phoxal/service-drive:\n      path: ../framework/service/drive\n",
@@ -685,14 +676,13 @@ fn test_catalog() -> CatalogRevision {
         .map(|name| {
             fixture_service_entry_for_tests(
                 name,
-                "y2026_1",
                 "0.1.0",
                 CatalogChannel::Stable,
                 &target,
                 false,
                 vec![fixture_contract_for_tests(
-                    "drive::Target",
-                    "0123456789abcdef",
+                    "y2026_1::drive::Target",
+                    "publish",
                 )],
             )
         })
@@ -700,27 +690,24 @@ fn test_catalog() -> CatalogRevision {
     for name in component_names() {
         entries.push(fixture_component_assets_entry_for_tests(
             name,
-            "y2026_1",
             "0.1.0",
             CatalogChannel::Stable,
         ));
         entries.push(fixture_component_driver_entry_for_tests(
             name,
-            "y2026_1",
             "0.1.0",
             CatalogChannel::Stable,
             &target,
             false,
             vec![fixture_contract_for_tests(
-                "component::State",
-                "fedcba9876543210",
+                "y2026_1::component::State",
+                "publish",
             )],
         ));
     }
     entries.extend([
         fixture_tool_entry_for_tests(
             "router",
-            "y2026_1",
             "0.1.0",
             CatalogChannel::Stable,
             &target,
@@ -729,19 +716,17 @@ fn test_catalog() -> CatalogRevision {
         ),
         fixture_tool_entry_for_tests(
             "joypad",
-            "y2026_1",
             "0.1.0",
             CatalogChannel::Stable,
             &target,
             false,
             vec![fixture_contract_for_tests(
-                "drive::Target",
-                "0123456789abcdef",
+                "y2026_1::drive::Target",
+                "subscribe",
             )],
         ),
         fixture_simulator_entry_for_tests(
             "webots-supervisor",
-            "y2026_1",
             "0.14.0",
             CatalogChannel::Stable,
             &target,
@@ -750,14 +735,13 @@ fn test_catalog() -> CatalogRevision {
         ),
         fixture_simulator_entry_for_tests(
             "webots-controller",
-            "y2026_1",
             "0.14.0",
             CatalogChannel::Stable,
             &target,
             false,
             vec![fixture_contract_for_tests(
-                "component::MotorCommand",
-                "fedcba9876543210",
+                "y2026_1::component::MotorCommand",
+                "publish",
             )],
         ),
     ]);
@@ -799,9 +783,8 @@ fn offline_options() -> ResolveOptions {
     }
 }
 
-fn minimal_robot_yaml(generation: &str) -> String {
-    format!(
-        r#"schema: robot/v0
+fn minimal_robot_yaml() -> String {
+    r#"schema: robot/v0
 robot:
   id: testbot
   namespace: test
@@ -823,24 +806,19 @@ robot:
       mount_link: right_wheel_mount
 artifacts:
   channel: stable
-  generation: {generation}
 "#
-    )
-}
-
-fn minimal_robot_yaml_without_generation() -> String {
-    minimal_robot_yaml("y2026_1").replace("  generation: y2026_1\n", "")
+    .to_string()
 }
 
 fn robot_with_path_pin(key: &str, path: &str) -> String {
-    minimal_robot_yaml("y2026_1").replace(
+    minimal_robot_yaml().replace(
         "artifacts:\n  channel: stable",
         &format!("artifacts:\n  channel: stable\n  pins:\n    {key}:\n      path: {path}"),
     )
 }
 
 fn robot_with_user_service(services: &str) -> String {
-    minimal_robot_yaml("y2026_1").replace(
+    minimal_robot_yaml().replace(
         "artifacts:\n  channel: stable",
         &format!("services:\n{services}\nartifacts:\n  channel: stable"),
     )

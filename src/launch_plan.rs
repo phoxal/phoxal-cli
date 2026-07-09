@@ -115,7 +115,6 @@ pub struct SubstitutionRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubstitutedContract {
     pub family: String,
-    pub schema_id: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -550,9 +549,7 @@ mod tests {
         CheckGraphContext, RawArtifact, RawEmitApis, SourceParticipant,
         platform_artifact_refs_from_resolved, run_check_with_context,
     };
-    use crate::resolver::{
-        ResolveOptions, ResolvedRobot, host_target_triple, resolve, target_generation_for_robot,
-    };
+    use crate::resolver::{ResolveOptions, ResolvedRobot, host_target_triple, resolve};
 
     use super::*;
 
@@ -569,22 +566,18 @@ mod tests {
         let catalog = fixture_catalog_for_tests(vec![
             fixture_service_entry_for_tests(
                 "drive",
-                "y2026_1",
                 "0.1.0",
                 CatalogChannel::Stable,
                 &host_target_triple(),
                 true,
-                vec![fixture_contract_for_tests("drive::Target", "schema-drive")],
+                vec![fixture_contract_for_tests(
+                    "y2026_1::drive::Target",
+                    "publish",
+                )],
             ),
-            fixture_component_assets_entry_for_tests(
-                "ddsm115",
-                "y2026_1",
-                "0.1.0",
-                CatalogChannel::Stable,
-            ),
+            fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable),
             fixture_component_driver_entry_for_tests(
                 "ddsm115",
-                "y2026_1",
                 "0.1.0",
                 CatalogChannel::Stable,
                 &host_target_triple(),
@@ -839,7 +832,6 @@ mod tests {
             participant_kind: graph_check::ParticipantKind::Service,
             participant_class: graph_check::ParticipantClass::Checked,
             api_version: "y2026_1".to_string(),
-            bus_abi: None,
             config_schema: None,
             scope,
             contracts: Vec::new(),
@@ -854,7 +846,6 @@ mod tests {
             },
             participant_class: "checked".to_string(),
             api_version: "y2026_1".to_string(),
-            bus_abi: None,
             required_contracts: Vec::new(),
             config_schema: None,
         }
@@ -886,15 +877,11 @@ robot:
     actuators: []
     encoders: []
   components: {{}}
-artifacts:
-  generation: y2026_1
 "#
         );
         let robot = phoxal::model::robot::v0::Robot::parse_from_string(&yaml)?;
-        let generation = target_generation_for_robot(&robot, None)?;
         Ok(ResolvedRobot {
             robot,
-            target_generation: generation,
             channel: phoxal::model::robot::v0::Channel::Stable,
             target: host_target_triple(),
             catalog_revision: None,
@@ -923,10 +910,8 @@ artifacts:
             binary_name: name.to_string(),
             sha256: "0".repeat(64),
             published: false,
-            generation: "y2026_1".to_string(),
             contracts: Vec::new(),
             config_schema: None,
-            bus_abi: None,
             path_override: None,
             channel: crate::catalog::Channel::Stable,
             target: host_target_triple(),

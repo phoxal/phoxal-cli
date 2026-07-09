@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::catalog::{
     ArtifactEntry, ArtifactKind, AssetEntry, Channel as CatalogChannel, Contract, Manifest,
-    compare_generations, to_catalog_channel,
+    to_catalog_channel,
 };
 use crate::shell;
 use crate::utils::{hash_tree, resolve_project_path};
@@ -60,7 +60,6 @@ impl Default for ResolveOptions {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedRobot {
     pub robot: Robot,
-    pub target_generation: String,
     pub channel: Channel,
     pub target: String,
     pub catalog_revision: Option<String>,
@@ -102,21 +101,17 @@ pub struct LoadedRobot {
 /// public identity is the provider-qualified `package` id
 /// (`phoxal/service-drive`); there is no separate `artifact_id` (docs #21).
 ///
-/// Contract/config metadata (`contracts`, `config_schema`, `bus_abi`) is read
-/// straight off the catalog's inlined [`ArtifactEntry`] - there is no
-/// `.emit-apis.json` sidecar to fetch for an official artifact anymore. These
-/// fields are only meaningful for a catalog-sourced runtime; a path-overridden
-/// runtime clears them (its metadata comes from building its source instead,
-/// see `commands::check::source_participants_from_resolved`).
+/// Contract/config metadata (`contracts`, `config_schema`) is read straight
+/// off the catalog's inlined [`ArtifactEntry`] - there is no `.emit-apis.json`
+/// sidecar to fetch for an official artifact anymore. These fields are only
+/// meaningful for a catalog-sourced runtime; a path-overridden runtime clears
+/// them (its metadata comes from building its source instead, see
+/// `commands::check::source_participants_from_resolved`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedPlatformRuntime {
     pub name: String,
     pub package: String,
     pub kind: ArtifactKind,
-    /// The API generation this artifact authors against. Empty for a
-    /// `ComponentAssets` runtime: an asset bundle carries no wire contracts
-    /// and the catalog's `AssetEntry` has no `api_generation` at all.
-    pub generation: String,
     pub version: String,
     pub artifact_ref: String,
     pub sha256: Option<String>,
@@ -130,7 +125,6 @@ pub struct ResolvedPlatformRuntime {
     pub published_triples: Vec<String>,
     pub contracts: Vec<Contract>,
     pub config_schema: Option<Value>,
-    pub bus_abi: Option<String>,
     pub changed_contracts: Vec<String>,
     pub path_override: Option<PathBuf>,
     /// The channel this entry was selected on. Meaningful only for a
@@ -261,10 +255,8 @@ pub struct ResolvedTool {
     /// (`"0".repeat(64)`) rather than a real digest - mirrors
     /// [`ResolvedPlatformRuntime::published`].
     pub published: bool,
-    pub generation: String,
     pub contracts: Vec<Contract>,
     pub config_schema: Option<Value>,
-    pub bus_abi: Option<String>,
     pub path_override: Option<PathBuf>,
     /// The channel this entry was selected on; see
     /// [`ResolvedPlatformRuntime::channel`].
@@ -589,13 +581,22 @@ pub fn resolve(
     catalog: Option<&Manifest>,
     options: ResolveOptions,
 ) -> Result<ResolvedRobot> {
+    if let Some(generation) = robot.artifacts.generation.as_deref() {
+        bail!(
+            "robot.yaml sets artifacts.generation = '{generation}', which no longer exists: \
+             contract compatibility is per-contract name identity now (D1), not a single \
+             per-artifact API-generation ceiling. Remove artifacts.generation from robot.yaml."
+        );
+    }
     let channel = robot.artifacts.channel;
     let catalog_channel = to_catalog_channel(channel);
     let target = options
         .official_target_triple
         .clone()
         .unwrap_or_else(host_target_triple);
-    let target_generation = target_generation(robot, catalog, catalog_channel, &target)?;
+    if catalog.is_none() && robot_uses_only_catalog_artifacts(robot) {
+        bail!("{}", crate::catalog::unavailable_catalog_error());
+    }
     let platform_names = catalog
         .map(crate::catalog::service_names)
         .unwrap_or_default();
@@ -611,15 +612,11 @@ pub fn resolve(
         .unwrap_or_else(host_target_triple);
 
     let mut platform_runtimes = catalog
-        .map(|catalog| {
-            resolve_catalog_entries(catalog, catalog_channel, &target, &target_generation)
-        })
+        .map(|catalog| resolve_catalog_entries(catalog, catalog_channel, &target))
         .transpose()?
         .unwrap_or_default();
     let mut simulators = catalog
-        .map(|catalog| {
-            resolve_simulators(catalog, catalog_channel, &tool_target, &target_generation)
-        })
+        .map(|catalog| resolve_simulators(catalog, catalog_channel, &tool_target))
         .transpose()?
         .unwrap_or_default();
 
@@ -640,17 +637,10 @@ pub fn resolve(
         catalog,
         catalog_channel,
         &target,
-        &target_generation,
         options.resolve_source_commits,
         options.resolve_component_asset_commits,
     )?;
-    let mut tools = resolve_tools(
-        robot,
-        catalog,
-        catalog_channel,
-        &tool_target,
-        &target_generation,
-    )?;
+    let mut tools = resolve_tools(robot, catalog, catalog_channel, &tool_target)?;
     let path_overrides = apply_path_pins(
         robot,
         project_root,
@@ -663,7 +653,6 @@ pub fn resolve(
 
     Ok(ResolvedRobot {
         robot: robot.clone(),
-        target_generation,
         channel,
         target,
         catalog_revision: catalog.map(|catalog| catalog.revision.clone()),
@@ -837,7 +826,6 @@ fn apply_tool_path_pin(
     tool.published = true;
     tool.contracts = Vec::new();
     tool.config_schema = None;
-    tool.bus_abi = None;
     overrides.push(ResolvedPathOverride {
         key: key.to_string(),
         kind: ResolvedPathOverrideKind::Tool,
@@ -870,8 +858,8 @@ fn apply_simulator_path_pin(
 }
 
 /// Once a path override replaces a catalog-resolved runtime, its catalog
-/// metadata is moot: the participant's contracts/config/bus_abi come from
-/// building its source instead (`commands::check::source_participants_from_resolved`).
+/// metadata is moot: the participant's contracts/config come from building
+/// its source instead (`commands::check::source_participants_from_resolved`).
 fn apply_platform_runtime_path_override(runtime: &mut ResolvedPlatformRuntime, path: &Path) {
     runtime.path_override = Some(path.to_path_buf());
     runtime.artifact_ref = format!("path:{}", path.display());
@@ -880,7 +868,6 @@ fn apply_platform_runtime_path_override(runtime: &mut ResolvedPlatformRuntime, p
     runtime.published_triples = Vec::new();
     runtime.contracts = Vec::new();
     runtime.config_schema = None;
-    runtime.bus_abi = None;
     runtime.changed_contracts.clear();
 }
 
@@ -943,34 +930,6 @@ fn used_path_pin_keys(
     keys
 }
 
-fn target_generation(
-    robot: &Robot,
-    catalog: Option<&Manifest>,
-    channel: CatalogChannel,
-    target: &str,
-) -> Result<String> {
-    if let Some(generation) = robot.artifacts.generation.as_deref() {
-        return Ok(generation.to_string());
-    }
-    if let Some(catalog) = catalog {
-        if let Some(generation) =
-            crate::catalog::newest_generation_on_channel(catalog, channel, target)
-        {
-            return Ok(generation);
-        }
-        if robot_uses_only_catalog_artifacts(robot) {
-            bail!(
-                "{}",
-                catalog_target_generation_not_yet_available(catalog, channel, target)
-            );
-        }
-    }
-    if robot_uses_only_catalog_artifacts(robot) {
-        bail!("{}", crate::catalog::unavailable_catalog_error());
-    }
-    Ok("source".to_string())
-}
-
 fn robot_uses_only_catalog_artifacts(robot: &Robot) -> bool {
     robot.services.is_empty()
         && robot
@@ -980,38 +939,12 @@ fn robot_uses_only_catalog_artifacts(robot: &Robot) -> bool {
             .all(|component| component.driver.is_none())
 }
 
-fn catalog_target_generation_not_yet_available(
-    catalog: &Manifest,
-    channel: CatalogChannel,
-    target: &str,
-) -> anyhow::Error {
-    let channel = crate::catalog::channel_as_str(channel);
-    anyhow!(
-        "NotYetAvailable: loaded artifact catalog revision {} has no released generation assets for target {target} on channel {channel}. Pass a catalog that includes released assets for {target}/{channel}, pin artifacts.generation for source-only development, or deploy a target covered by this catalog.",
-        catalog.revision
-    )
-}
-
-pub(crate) fn target_generation_for_robot(
-    robot: &Robot,
-    catalog: Option<&Manifest>,
-) -> Result<String> {
-    target_generation(
-        robot,
-        catalog,
-        to_catalog_channel(robot.artifacts.channel),
-        &host_target_triple(),
-    )
-}
-
 fn resolve_catalog_entries(
     catalog: &Manifest,
     channel: CatalogChannel,
     target: &str,
-    target_generation: &str,
 ) -> Result<Vec<ResolvedPlatformRuntime>> {
-    let selected = select_latest_artifact_entries(&catalog.services, channel, target_generation);
-    ensure_catalog_schema_agreement(selected.values().copied())?;
+    let selected = select_latest_artifact_entries(&catalog.services, channel);
     selected
         .into_values()
         .map(|entry| {
@@ -1030,9 +963,8 @@ fn resolve_simulators(
     catalog: &Manifest,
     channel: CatalogChannel,
     target: &str,
-    target_generation: &str,
 ) -> Result<Vec<ResolvedPlatformRuntime>> {
-    let selected = select_latest_artifact_entries(&catalog.simulators, channel, target_generation);
+    let selected = select_latest_artifact_entries(&catalog.simulators, channel);
     selected
         .into_values()
         .map(|entry| {
@@ -1047,25 +979,22 @@ fn resolve_simulators(
         .collect()
 }
 
-/// Select, per distinct `package`, the newest entry (by API generation then
-/// semver) on `channel` at or below `target_generation`. Deliberately does
-/// NOT filter by target triple / built-artifact presence: which package
-/// version to resolve is a channel/generation question, while whether a
-/// concrete tarball exists for a given triple is answered later, per runtime,
-/// by [`resolved_runtime_from_artifact_entry`] - a metadata-only catalog (no
-/// triples built yet anywhere) must still resolve every package so `check`
-/// can validate contracts/config against it.
-fn select_latest_artifact_entries<'a>(
-    entries: &'a [ArtifactEntry],
+/// Select, per distinct `package`, the newest entry (by semver) on `channel`
+/// (D1: no API-generation ceiling to pre-filter by - name identity alone
+/// decides contract compatibility, so per-package resolution is purely
+/// semver-ordered now). Deliberately does NOT filter by target triple /
+/// built-artifact presence: which package version to resolve is a channel
+/// question, while whether a concrete tarball exists for a given triple is
+/// answered later, per runtime, by [`resolved_runtime_from_artifact_entry`] -
+/// a metadata-only catalog (no triples built yet anywhere) must still
+/// resolve every package so `check` can validate contracts/config against it.
+fn select_latest_artifact_entries(
+    entries: &[ArtifactEntry],
     channel: CatalogChannel,
-    target_generation: &str,
-) -> BTreeMap<String, &'a ArtifactEntry> {
+) -> BTreeMap<String, &ArtifactEntry> {
     let mut selected = BTreeMap::<String, &ArtifactEntry>::new();
     for entry in entries {
         if !entry.channels.contains_key(&channel) {
-            continue;
-        }
-        if compare_generations(&entry.api_generation, target_generation).is_gt() {
             continue;
         }
         selected
@@ -1098,18 +1027,16 @@ pub(crate) fn resolved_runtime_from_artifact_entry(
             // ref (a `phoxal-cli` convention predating the lean catalog, kept
             // for stable `artifact_ref()` output); other kinds never have.
             Some(channel) => format!(
-                "{}:{}-{}-{}-{}",
+                "{}:{}-{}-{}",
                 filesystem_safe_package_name(&entry.package),
                 entry.version,
-                entry.api_generation,
                 crate::catalog::channel_as_str(channel),
                 target
             ),
             None => format!(
-                "{}:{}-{}-{}",
+                "{}:{}-{}",
                 filesystem_safe_package_name(&entry.package),
                 entry.version,
-                entry.api_generation,
                 target
             ),
         });
@@ -1117,7 +1044,6 @@ pub(crate) fn resolved_runtime_from_artifact_entry(
         name,
         package: entry.package.clone(),
         kind,
-        generation: entry.api_generation.clone(),
         version: entry.version.clone(),
         artifact_ref,
         sha256: built.map(|artifact| artifact.sha256.clone()),
@@ -1125,7 +1051,6 @@ pub(crate) fn resolved_runtime_from_artifact_entry(
         published_triples: entry.artifacts.keys().cloned().collect(),
         contracts: entry.contracts.clone(),
         config_schema: entry.config_schema.clone(),
-        bus_abi: Some(entry.bus_abi.clone()),
         changed_contracts: entry.changed_contracts.clone(),
         path_override: None,
         channel,
@@ -1156,9 +1081,6 @@ fn resolved_runtime_from_asset_entry(
         name,
         package: entry.package.clone(),
         kind: ArtifactKind::ComponentAssets,
-        // AssetEntry carries no api_generation: an asset bundle has no wire
-        // contracts to version.
-        generation: String::new(),
         version: entry.version.clone(),
         artifact_ref,
         sha256: built.map(|artifact| artifact.sha256.clone()),
@@ -1166,7 +1088,6 @@ fn resolved_runtime_from_asset_entry(
         published_triples: entry.artifacts.keys().cloned().collect(),
         contracts: Vec::new(),
         config_schema: None,
-        bus_abi: None,
         changed_contracts: Vec::new(),
         path_override: None,
         channel,
@@ -1174,9 +1095,12 @@ fn resolved_runtime_from_asset_entry(
     })
 }
 
+/// D1: no API-generation axis to compare first anymore - per-package
+/// resolution is purely semver-ordered (name identity alone decides contract
+/// compatibility, so there is nothing left to gate on the contract axis
+/// either; see `phoxal::check`'s module docs).
 fn compare_catalog_entries(left: &ArtifactEntry, right: &ArtifactEntry) -> std::cmp::Ordering {
-    compare_generations(&left.api_generation, &right.api_generation)
-        .then_with(|| compare_versions(&left.version, &right.version))
+    compare_versions(&left.version, &right.version)
 }
 
 fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
@@ -1184,40 +1108,6 @@ fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
         (Ok(left), Ok(right)) => left.cmp(&right),
         _ => left.cmp(right),
     }
-}
-
-/// A catalog-wide sanity check: every runtime binary entry that is about to
-/// be launched together must agree on one `schema_id` per contract family.
-/// Unlike the runtime graph checker (`phoxal::check::check_graph`, which
-/// groups by `(family, topic)` using each participant's own `emit-apis`
-/// report), this operates purely on the catalog's inlined
-/// `contracts: Vec<Contract{family, schema_id}>` - the lean schema carries no
-/// `topic`/`direction`, so `family` alone is the grouping key here.
-fn ensure_catalog_schema_agreement<'a>(
-    entries: impl IntoIterator<Item = &'a ArtifactEntry>,
-) -> Result<()> {
-    let mut schemas = BTreeMap::<&str, BTreeMap<&str, Vec<&str>>>::new();
-    for entry in entries {
-        for contract in &entry.contracts {
-            schemas
-                .entry(contract.family.as_str())
-                .or_default()
-                .entry(contract.schema_id.as_str())
-                .or_default()
-                .push(&entry.package);
-        }
-    }
-    for (family, schema_ids) in schemas {
-        if schema_ids.len() > 1 {
-            let reporters = schema_ids
-                .into_iter()
-                .map(|(schema_id, artifacts)| format!("{schema_id} ({})", artifacts.join(", ")))
-                .collect::<Vec<_>>()
-                .join("; ");
-            bail!("artifact catalog cannot resolve one schema_id for {family}: {reporters}");
-        }
-    }
-    Ok(())
 }
 
 /// Resolve a git `artifacts.pins` ref (component or general) to a concrete
@@ -1338,7 +1228,6 @@ struct ComponentResolveContext<'a> {
     catalog: Option<&'a Manifest>,
     channel: CatalogChannel,
     target: &'a str,
-    target_generation: &'a str,
     resolve_source_commits: bool,
     resolve_component_asset_commits: bool,
 }
@@ -1348,7 +1237,6 @@ fn resolve_components(
     catalog: Option<&Manifest>,
     channel: CatalogChannel,
     target: &str,
-    target_generation: &str,
     resolve_source_commits: bool,
     resolve_component_asset_commits: bool,
 ) -> Result<Vec<ResolvedComponent>> {
@@ -1357,7 +1245,6 @@ fn resolve_components(
         catalog,
         channel,
         target,
-        target_generation,
         resolve_source_commits,
         resolve_component_asset_commits,
     };
@@ -1464,9 +1351,6 @@ fn resolve_component_package(
             .iter()
             .filter(|entry| entry.package == package)
             .filter(|entry| entry.channels.contains_key(&context.channel))
-            .filter(|entry| {
-                compare_generations(&entry.api_generation, context.target_generation).is_le()
-            })
             .max_by(|left, right| compare_catalog_entries(left, right))
             .ok_or_else(|| anyhow!("{package} is not available in the artifact catalog"))?;
         resolved_runtime_from_artifact_entry(kind, entry, None, context.channel, context.target)
@@ -1527,14 +1411,13 @@ fn resolve_tools(
     catalog: Option<&Manifest>,
     channel: CatalogChannel,
     target: &str,
-    target_generation: &str,
 ) -> Result<Vec<ResolvedTool>> {
     let Some(catalog) = catalog else {
         return Ok(Vec::new());
     };
     let _ = robot;
 
-    let selected = select_latest_artifact_entries(&catalog.tools, channel, target_generation);
+    let selected = select_latest_artifact_entries(&catalog.tools, channel);
 
     selected
         .into_values()
@@ -1542,12 +1425,7 @@ fn resolve_tools(
             let built = entry.artifacts.get(target);
             let asset = built
                 .map(|artifact| artifact.tarball.clone())
-                .unwrap_or_else(|| {
-                    format!(
-                        "{}:{}-{}-{}",
-                        entry.package, entry.version, entry.api_generation, target
-                    )
-                });
+                .unwrap_or_else(|| format!("{}:{}-{}", entry.package, entry.version, target));
             let artifact_name =
                 crate::catalog::artifact_name(ArtifactKind::Tool, &entry.package).unwrap_or("");
             Ok(ResolvedTool {
@@ -1562,10 +1440,8 @@ fn resolve_tools(
                     .map(|artifact| artifact.sha256.clone())
                     .unwrap_or_else(|| "0".repeat(64)),
                 published: built.is_some(),
-                generation: entry.api_generation.clone(),
                 contracts: entry.contracts.clone(),
                 config_schema: entry.config_schema.clone(),
-                bus_abi: Some(entry.bus_abi.clone()),
                 path_override: None,
                 channel,
                 target: target.to_string(),
@@ -1670,26 +1546,19 @@ mod tests {
         fixture_catalog_for_tests(vec![
             fixture_service_entry_for_tests(
                 "drive",
-                "y2026_1",
                 "0.1.0",
                 CatalogChannel::Stable,
                 &host_target_triple(),
-                // Published so `target_generation()`'s auto-detection
-                // (`newest_generation_on_channel`) finds a deployable
-                // generation for this host target without robot.yaml pinning
-                // `artifacts.generation` explicitly.
+                // Published so the package resolves for this host target
+                // without robot.yaml needing any pin at all (D1: no
+                // `artifacts.generation` ceiling to auto-detect anymore).
                 true,
                 vec![fixture_contract_for_tests(
-                    "drive::Target",
-                    "0123456789abcdef",
+                    "y2026_1::drive::Target",
+                    "publish",
                 )],
             ),
-            fixture_component_assets_entry_for_tests(
-                "ddsm115",
-                "y2026_1",
-                "0.1.0",
-                CatalogChannel::Stable,
-            ),
+            fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable),
         ])
     }
 
@@ -1949,7 +1818,6 @@ services:
             name: "asset".to_string(),
             package: "phoxal/service-asset".to_string(),
             kind: ArtifactKind::Service,
-            generation: "y2026_1".to_string(),
             version: "0.1.0".to_string(),
             artifact_ref: "service-asset:y2026_1-stable".to_string(),
             sha256: None,
@@ -1958,7 +1826,6 @@ services:
             changed_contracts: Vec::new(),
             contracts: Vec::new(),
             config_schema: None,
-            bus_abi: None,
             path_override: None,
             channel: CatalogChannel::Stable,
             target: "aarch64-unknown-linux-gnu".to_string(),

@@ -21,7 +21,6 @@ pub struct Pull {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PullSummary {
-    pub target_generation: String,
     pub channel: String,
     pub catalog_revision: Option<String>,
     pub tool_count: usize,
@@ -40,8 +39,8 @@ impl Pull {
             &summary,
             || {
                 println!(
-                    "refreshed catalog and {} native artifact(s) for target generation {} (channel {})",
-                    summary.artifact_count, summary.target_generation, summary.channel
+                    "refreshed catalog and {} native artifact(s) (channel {})",
+                    summary.artifact_count, summary.channel
                 );
                 if let Some(revision) = &summary.catalog_revision {
                     println!("catalog revision: {revision}");
@@ -100,7 +99,6 @@ pub fn run(
     )?;
 
     Ok(PullSummary {
-        target_generation: resolved.target_generation.clone(),
         channel: resolved.channel.to_string(),
         catalog_revision: resolved.catalog_revision.clone(),
         tool_count,

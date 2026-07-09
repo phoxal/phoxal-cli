@@ -118,7 +118,6 @@ pub struct DeployReport {
     pub target_arch: String,
     pub official_target_triple: String,
     pub local_target_triple: String,
-    pub target_generation: String,
     pub payload_root: PathBuf,
     pub install_plan: InstallPlan,
     pub rendered_units: BTreeMap<String, String>,
@@ -278,7 +277,6 @@ pub(crate) struct BootstrapScripts {
 pub(crate) struct RenderedPayload {
     pub root: TempDir,
     pub target: TargetTriples,
-    pub target_generation: String,
     pub install_plan: InstallPlan,
     pub rendered_units: BTreeMap<String, String>,
     pub env_files: BTreeMap<String, String>,
@@ -318,7 +316,6 @@ struct OfficialArtifactPlan {
 struct ReleaseRecord {
     schema: String,
     created_at_utc: String,
-    target_generation: String,
     artifacts: Vec<ReleaseArtifact>,
 }
 
@@ -826,11 +823,7 @@ fn prepare_deploy(
         |_| unreachable!("deploy does not check site tools as graph participants"),
         build_emit_apis_from_source,
     )?;
-    crate::commands::check::ensure_check_outcome_ok(
-        &resolved.target_generation,
-        &resolved.channel.to_string(),
-        &outcome,
-    )?;
+    crate::commands::check::ensure_check_outcome_ok(&resolved.channel.to_string(), &outcome)?;
 
     let plan = build_launch_plan(
         LaunchMode::Deploy,
@@ -977,7 +970,6 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
     Ok(RenderedPayload {
         root,
         target,
-        target_generation: resolved.target_generation.clone(),
         install_plan,
         rendered_units,
         env_files,
@@ -2737,7 +2729,6 @@ fn release_record(
     Ok(ReleaseRecord {
         schema: RELEASE_SCHEMA.to_string(),
         created_at_utc: utc_now_string()?,
-        target_generation: resolved.target_generation.clone(),
         artifacts: artifacts.into_values().collect(),
     })
 }
@@ -3044,7 +3035,6 @@ fn report_from_payload(
         target_arch: payload.target.arch,
         official_target_triple: payload.target.official_triple,
         local_target_triple: payload.target.local_triple,
-        target_generation: payload.target_generation,
         payload_root: payload.root.path().to_path_buf(),
         install_plan: payload.install_plan,
         rendered_units: payload.rendered_units,
@@ -3062,7 +3052,6 @@ fn report(report: DeployReport, message_format: MessageFormat) -> Result<()> {
             println!("target_arch: {}", report.target_arch);
             println!("official_target: {}", report.official_target_triple);
             println!("local_target: {}", report.local_target_triple);
-            println!("target_generation: {}", report.target_generation);
             println!("payload_root: {}", report.payload_root.display());
             println!("install plan:");
             println!("{}", serde_json::to_string_pretty(&report.install_plan)?);
@@ -3676,19 +3665,17 @@ mod tests {
                 // - see `resolver::select_latest_artifact_entries`).
                 crate::catalog::fixture_service_entry_for_tests(
                     "fixture_only",
-                    "y2026_1",
                     "0.1.0",
                     crate::catalog::Channel::Preview,
                     "test-only-target",
                     false,
                     vec![crate::catalog::fixture_contract_for_tests(
-                        "fixture::Only",
-                        "0123456789abcdef",
+                        "y2026_1::fixture::Only",
+                        "publish",
                     )],
                 ),
                 fixture_tool_entry_for_tests(
                     "router",
-                    "y2026_1",
                     "0.1.0",
                     CatalogChannel::Stable,
                     "aarch64-unknown-linux-gnu",
@@ -3774,7 +3761,6 @@ robot:
       mount_link: right_wheel
 artifacts:
   channel: stable
-  generation: y2026_1
   catalog: catalog.json
 services:
   navtask:
@@ -3810,7 +3796,6 @@ robot:
       mount_link: camera_mount
 artifacts:
   channel: stable
-  generation: y2026_1
   catalog: catalog.json
 "#
         }
@@ -3839,7 +3824,6 @@ robot:
       mount_link: left_wheel
 artifacts:
   channel: stable
-  generation: y2026_1
   catalog: catalog.json
   pins:
     phoxal/component-catalog_motor-assets:
@@ -3875,7 +3859,6 @@ robot:
         connection: { type: i2c, bus: 1, address: 16 }
 artifacts:
   channel: stable
-  generation: y2026_1
   catalog: catalog.json
 services:
   navtask:
@@ -4584,7 +4567,6 @@ capabilities:
     ) -> Result<ResolvedRobot> {
         Ok(ResolvedRobot {
             robot: Robot::parse_from_string(MINIMAL_RESOLVED_ROBOT_YAML)?,
-            target_generation: "y2026_1".to_string(),
             channel: phoxal::model::robot::v0::Channel::Stable,
             target: crate::resolver::host_target_triple(),
             catalog_revision: None,
@@ -4606,8 +4588,6 @@ robot:
     actuators: []
     encoders: []
   components: {}
-artifacts:
-  generation: y2026_1
 "#;
 
     /// A Catalog-sourced component package with a populated `catalog_runtime`
@@ -4627,7 +4607,6 @@ artifacts:
                 name: component_name.to_string(),
                 package: package.to_string(),
                 kind,
-                generation: "y2026_1".to_string(),
                 version: "0.1.0".to_string(),
                 artifact_ref: format!(
                     "phoxal-component-{component_name}-{}-v0.1.0-aarch64-unknown-linux-gnu.tar.zst",
@@ -4636,8 +4615,6 @@ artifacts:
                 sha256: Some("a".repeat(64)),
                 published: true,
                 published_triples: Vec::new(),
-                bus_abi: (kind == crate::catalog::ArtifactKind::ComponentDriver)
-                    .then(|| "phoxal-bus/v0".to_string()),
                 config_schema: None,
                 changed_contracts: Vec::new(),
                 contracts: Vec::new(),
@@ -4705,10 +4682,8 @@ artifacts:
             binary_name: "phoxal-tool-router".to_string(),
             sha256: "0".repeat(64),
             published: true,
-            generation: "y2026_1".to_string(),
             contracts: Vec::new(),
             config_schema: None,
-            bus_abi: None,
             path_override: Some(PathBuf::from("/fake/router")),
             channel: crate::catalog::Channel::Stable,
             target: "aarch64-unknown-linux-gnu".to_string(),
