@@ -18,12 +18,13 @@
 //!   payload, sync it to the robot, restart `phoxal.target`, and report health.
 //!   Prints the v0 pre-stable warning.
 //! - `service catalog` - print official services from the configured artifact catalog.
-//! - `pull` / `outdated` - refresh or inspect catalog and native asset state.
+//! - `update` - resolve heads and atomically update the project-vendored set.
 //! - `doctor` - check host prerequisites; `self upgrade` - update the CLI.
 //!
-//! There is no lockfile: catalog revisions, tool versions, and component commits
-//! resolve live or from the local cache when a command needs them. `validate`
-//! remains as the lower-level structural/dependency predecessor of `check`.
+//! Official binaries are resolved into the project-local `.phoxal/` store by
+//! `update`; normal commands consume that vendored selection without mutating
+//! it. `validate` remains the lower-level structural/dependency predecessor of
+//! `check`.
 
 #![allow(clippy::module_name_repetitions)]
 

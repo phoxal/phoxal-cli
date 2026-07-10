@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -9,28 +9,14 @@ use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use tar::Archive;
 
-use crate::catalog::{ArtifactKind, LocalManifestUpsert};
+use crate::catalog::ArtifactKind;
 use crate::resolver::{ResolvedPlatformRuntime, ResolvedTool, official_binary_name};
 use crate::ui::Ui;
 use crate::utils::make_executable;
 
-const FRAMEWORK_REPO: &str = "phoxal/framework";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProvisioningMode {
     MissingOnly,
-    Refresh,
-}
-
-impl ProvisioningMode {
-    #[must_use]
-    pub const fn from_pull(pull: bool) -> Self {
-        if pull {
-            Self::Refresh
-        } else {
-            Self::MissingOnly
-        }
-    }
 }
 
 /// A resolved official artifact ready for native (host or robot) staging. The
@@ -39,25 +25,20 @@ impl ProvisioningMode {
 /// ([`Self::package`]/[`Self::tag`]) since a package id's `/` is not a legal
 /// path component (docs #21).
 ///
-/// Contract/config metadata is no longer part of staging at all: the catalog
-/// inlines it in the manifest's `ArtifactEntry` (`resolver::ResolvedPlatformRuntime::contracts`
-/// etc.), so there is no `.emit-apis.json` sidecar to fetch here anymore -
-/// staging is purely "download the tarball, verify it, unpack it."
+/// Catalog staging is location/integrity-only. Participant metadata is read
+/// from the unpacked binary after staging.
 #[derive(Debug, Clone)]
 pub struct NativeArtifactDescriptor {
     pub package_id: String,
     pub kind: ArtifactKind,
     pub name: String,
     pub version: String,
-    pub asset: String,
+    pub url: String,
     pub sha256: String,
+    pub size: u64,
     /// The binary name inside the unpacked tarball. Empty for
     /// `component_assets` - an asset bundle has no binary.
     pub binary_name: String,
-    pub contracts: Vec<crate::catalog::Contract>,
-    pub config_schema: Option<serde_json::Value>,
-    pub changed_contracts: Vec<String>,
-    pub channel: crate::catalog::Channel,
     /// The target triple this tarball was resolved/built for, or
     /// [`crate::catalog::TARGET_INDEPENDENT_SCOPE`] for `component_assets`.
     pub target: String,
@@ -72,9 +53,6 @@ impl NativeArtifactDescriptor {
     /// there is nothing to stage (a path override, or a catalog entry with no
     /// built artifact for this scope yet).
     pub fn from_runtime(runtime: &ResolvedPlatformRuntime) -> Result<Option<Self>> {
-        let Some(sha256) = &runtime.sha256 else {
-            return Ok(None);
-        };
         if runtime.path_override.is_some() {
             return Ok(None);
         }
@@ -87,13 +65,10 @@ impl NativeArtifactDescriptor {
             kind: runtime.kind,
             name: runtime.name.clone(),
             version: runtime.version.clone(),
-            asset: runtime.artifact_ref().to_string(),
-            sha256: sha256.clone(),
+            url: runtime.url.clone().unwrap_or_default(),
+            sha256: runtime.sha256.clone().unwrap_or_default(),
+            size: runtime.size.unwrap_or_default(),
             binary_name,
-            contracts: runtime.contracts.clone(),
-            config_schema: runtime.config_schema.clone(),
-            changed_contracts: runtime.changed_contracts.clone(),
-            channel: runtime.channel,
             target: runtime.target.clone(),
         }))
     }
@@ -107,13 +82,10 @@ impl NativeArtifactDescriptor {
             kind: ArtifactKind::Tool,
             name: crate::resolver::tool_emit_apis_id(&tool.name).to_string(),
             version: tool.resolved.clone(),
-            asset: tool.asset.clone(),
+            url: tool.url.clone().unwrap_or_default(),
             sha256: tool.sha256.clone(),
+            size: tool.size.unwrap_or_default(),
             binary_name: tool.binary_name.clone(),
-            contracts: tool.contracts.clone(),
-            config_schema: tool.config_schema.clone(),
-            changed_contracts: Vec::new(),
-            channel: tool.channel,
             target: tool.target.clone(),
         }))
     }
@@ -124,26 +96,6 @@ impl NativeArtifactDescriptor {
     #[must_use]
     pub fn package(&self) -> String {
         self.package_id.replace('/', "-")
-    }
-
-    #[must_use]
-    pub fn tag(&self) -> String {
-        format!("{}-v{}", self.package(), self.version)
-    }
-
-    fn local_manifest_upsert(&self) -> LocalManifestUpsert {
-        LocalManifestUpsert {
-            kind: self.kind,
-            package: self.package_id.clone(),
-            version: self.version.clone(),
-            contracts: self.contracts.clone(),
-            config_schema: self.config_schema.clone(),
-            changed_contracts: self.changed_contracts.clone(),
-            channel: self.channel,
-            target: self.target.clone(),
-            tarball: self.asset.clone(),
-            sha256: self.sha256.clone(),
-        }
     }
 }
 
@@ -227,6 +179,45 @@ pub fn stage_resolved_artifacts(
         }
     }
     Ok(count)
+}
+
+pub fn descriptors(
+    resolved: &crate::resolver::ResolvedRobot,
+) -> Result<Vec<NativeArtifactDescriptor>> {
+    let mut descriptors = Vec::new();
+    for runtime in resolved
+        .platform_runtimes
+        .iter()
+        .chain(&resolved.simulators)
+    {
+        if let Some(descriptor) = NativeArtifactDescriptor::from_runtime(runtime)? {
+            descriptors.push(descriptor);
+        }
+    }
+    for tool in &resolved.tools {
+        if let Some(descriptor) = NativeArtifactDescriptor::from_tool(tool)? {
+            descriptors.push(descriptor);
+        }
+    }
+    let mut components = std::collections::BTreeSet::new();
+    for component in &resolved.components {
+        for package in std::iter::once(&component.assets).chain(component.driver.as_ref()) {
+            if let Some(runtime) = &package.catalog_runtime
+                && let Some(descriptor) = NativeArtifactDescriptor::from_runtime(runtime)?
+                && components.insert((
+                    descriptor.package_id.clone(),
+                    descriptor.target.clone(),
+                    descriptor.version.clone(),
+                ))
+            {
+                descriptors.push(descriptor);
+            }
+        }
+    }
+    descriptors.sort_by(|left, right| {
+        (&left.package_id, &left.target).cmp(&(&right.package_id, &right.target))
+    });
+    Ok(descriptors)
 }
 
 /// Stage every resolved component's `component_assets` bundle
@@ -327,128 +318,320 @@ fn copy_dir_recursive_into(source: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Stage one native artifact: ensure its tarball is present in the flat
-/// content-addressed cache ([`artifact_tarball_path`]), then lazily unpack it
-/// into its ephemeral `run/exec/` location ([`artifact_exec_dir`]).
-/// `component_assets` descriptors have no binary at all, so "staged" just
-/// means the tarball is unpacked.
+/// Stage one native artifact in the project-local version directory. Missing
+/// blobs are downloaded and verified before unpacking; existing versions are
+/// reused. Component-asset descriptors have no binary, so staging only
+/// ensures the bundle is unpacked.
 pub fn stage_descriptor(
     ui: Option<&Ui>,
     descriptor: &NativeArtifactDescriptor,
     mode: ProvisioningMode,
 ) -> Result<PathBuf> {
-    let exec_dir = artifact_exec_dir(descriptor)?;
-    let binary = exec_dir.join(&descriptor.binary_name);
-    let tarball_path = ensure_tarball_cached(descriptor, mode)?;
-    if mode == ProvisioningMode::MissingOnly && exec_dir.is_dir() {
+    let _lock = ArtifactStoreLock::shared()?;
+    let binary = prepare_descriptor(ui, descriptor, mode)?;
+    retarget_active(descriptor)?;
+    Ok(binary)
+}
+
+pub struct ArtifactStoreLock {
+    file: fs::File,
+    holder_path: Option<PathBuf>,
+}
+
+impl ArtifactStoreLock {
+    pub fn exclusive(command: &str) -> Result<Self> {
+        Self::acquire(true, command)
+    }
+
+    fn shared() -> Result<Self> {
+        Self::acquire(false, "staging")
+    }
+
+    fn acquire(exclusive: bool, command: &str) -> Result<Self> {
+        let state = crate::host_paths::project_state_dir()?;
+        fs::create_dir_all(&state)?;
+        let path = state.join("artifacts.lock");
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let operation = if exclusive {
+                libc::LOCK_EX
+            } else {
+                libc::LOCK_SH
+            } | libc::LOCK_NB;
+            if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+                let holder = fs::read_to_string(state.join("artifacts.lock.holder"))
+                    .unwrap_or_else(|_| "unknown holder".to_string());
+                bail!("artifact store lock is held ({})", holder.trim());
+            }
+        }
+        let holder_path = exclusive.then(|| state.join("artifacts.lock.holder"));
+        if let Some(holder_path) = &holder_path {
+            fs::write(
+                holder_path,
+                format!("pid={} command={command}\n", std::process::id()),
+            )?;
+        }
+        Ok(Self { file, holder_path })
+    }
+}
+
+impl Drop for ArtifactStoreLock {
+    fn drop(&mut self) {
+        if let Some(path) = &self.holder_path {
+            fs::remove_file(path).ok();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+fn prepare_descriptor(
+    ui: Option<&Ui>,
+    descriptor: &NativeArtifactDescriptor,
+    mode: ProvisioningMode,
+) -> Result<PathBuf> {
+    let version_dir = artifact_exec_dir(descriptor)?;
+    let binary = version_dir.join(&descriptor.binary_name);
+    if mode == ProvisioningMode::MissingOnly && version_dir.is_dir() {
         return Ok(binary);
+    }
+    if descriptor.url.is_empty() {
+        bail!(
+            "vendored {} {} for target {} is missing; run `phoxal update` online",
+            descriptor.package_id,
+            descriptor.version,
+            descriptor.target
+        );
     }
 
     if let Some(ui) = ui {
         ui.info(format!(
             "provisioning {} {} from {}",
-            descriptor.kind,
-            descriptor.name,
-            descriptor.tag()
+            descriptor.kind, descriptor.name, descriptor.url
         ));
     }
-    unpack_asset(&tarball_path, &exec_dir)?;
+    let tarball_path = download_blob(descriptor)?;
+    unpack_asset(&tarball_path, &version_dir)?;
+    fs::remove_file(&tarball_path).ok();
     if binary.is_file() {
         make_executable(&binary)?;
     }
     Ok(binary)
 }
 
-/// Ensure `descriptor`'s tarball is present and sha256-valid in the flat
-/// `cache/artifacts/` store, downloading it if missing/mismatched/`Refresh`d.
-/// The tarball file itself IS the cache entry - presence plus a matching
-/// sha256 means "skip re-download". On a fresh download, upserts the local
-/// download manifest ([`crate::catalog::upsert_local_manifest_entry`]) with
-/// this artifact's inlined contracts/config so `check`/`run` can read them
-/// back offline for this cached artifact.
-fn ensure_tarball_cached(
-    descriptor: &NativeArtifactDescriptor,
-    mode: ProvisioningMode,
-) -> Result<PathBuf> {
-    let path = artifact_tarball_path(descriptor)?;
-    let cached_and_valid = mode != ProvisioningMode::Refresh
-        && path.is_file()
-        && sha256_file(&path).is_ok_and(|sha| sha == descriptor.sha256);
-    if !cached_and_valid {
-        let bytes =
-            download_release_asset(&descriptor.tag(), &descriptor.asset, &descriptor.sha256)?;
-        write_file_atomic(&path, &bytes)?;
-        crate::catalog::upsert_local_manifest_entry(descriptor.local_manifest_upsert())
-            .context("failed to update the local download manifest")?;
+/// Download/unpack every descriptor with bounded concurrency, then retarget
+/// all active links only after every blob verified successfully.
+pub fn prepare_and_activate_descriptors(
+    descriptors: &[NativeArtifactDescriptor],
+    ui: Option<&Ui>,
+) -> Result<()> {
+    const CONCURRENCY: usize = 4;
+    for batch in descriptors.chunks(CONCURRENCY) {
+        std::thread::scope(|scope| -> Result<()> {
+            let handles = batch
+                .iter()
+                .map(|descriptor| {
+                    scope.spawn(move || {
+                        prepare_descriptor(None, descriptor, ProvisioningMode::MissingOnly)
+                    })
+                })
+                .collect::<Vec<_>>();
+            for handle in handles {
+                handle
+                    .join()
+                    .map_err(|_| anyhow!("artifact download worker panicked"))??;
+            }
+            Ok(())
+        })?;
+        if let Some(ui) = ui {
+            for descriptor in batch {
+                ui.info(format!(
+                    "verified {} {} [{}] ({} bytes)",
+                    descriptor.package_id, descriptor.version, descriptor.target, descriptor.size
+                ));
+            }
+        }
     }
-    verify_file_sha256(&path, &descriptor.sha256)?;
-    Ok(path)
+    for descriptor in descriptors {
+        retarget_active(descriptor)?;
+    }
+    Ok(())
 }
 
+/// Return the selected binary through its `(package, target)/active` symlink.
 pub fn artifact_binary_path(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
-    Ok(artifact_exec_dir(descriptor)?.join(&descriptor.binary_name))
+    let active = artifact_target_dir(descriptor)?.join("active");
+    Ok(active.join(&descriptor.binary_name))
 }
 
-/// The flat, content-addressed tarball cache path: `cache/artifacts/<asset>`,
-/// named exactly as the published release asset - no per-package
-/// subdirectories.
+/// Temporary download path beside the selected version directory.
 pub fn artifact_tarball_path(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
-    Ok(crate::host_paths::artifacts_dir()?.join(&descriptor.asset))
+    Ok(artifact_target_dir(descriptor)?.join(format!(".{}.partial", descriptor.version)))
 }
 
-/// Where `descriptor`'s tarball is lazily unpacked for use: an ephemeral
-/// location under `run/exec/`, NOT under `cache/artifacts/` - the cache stays
-/// a pure tarball store, and the unpacked bundle is disposable (it can always
-/// be rebuilt from the cached tarball). Keyed by the tarball's own filename
-/// (already a unique, filesystem-safe identity for this exact artifact/
-/// version/target), so re-staging the same descriptor reuses the same dir.
+/// Where `descriptor` is unpacked in the project-local binary store.
 pub fn artifact_exec_dir(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
-    Ok(crate::host_paths::run_dir()?
-        .join("exec")
-        .join(exec_dir_name(&descriptor.asset)))
+    Ok(artifact_target_dir(descriptor)?.join(&descriptor.version))
 }
 
-fn exec_dir_name(asset: &str) -> String {
-    let stem = asset
-        .strip_suffix(".tar.zst")
-        .or_else(|| asset.strip_suffix(".tar.gz"))
-        .or_else(|| asset.strip_suffix(".tar"))
-        .unwrap_or(asset);
-    sanitize_path_segment(stem)
+fn artifact_target_dir(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
+    Ok(crate::host_paths::binaries_dir()?
+        .join(descriptor.package())
+        .join(sanitize_path_segment(&descriptor.target)))
 }
 
-fn release_asset_url(tag: &str, asset: &str) -> String {
-    format!("https://github.com/{FRAMEWORK_REPO}/releases/download/{tag}/{asset}")
+pub fn active_version(descriptor: &NativeArtifactDescriptor) -> Result<Option<String>> {
+    let active = artifact_target_dir(descriptor)?.join("active");
+    match fs::read_link(&active) {
+        Ok(target) => Ok(target
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to read {}", active.display())),
+    }
 }
 
-fn download_release_asset(tag: &str, asset: &str, expected_sha256: &str) -> Result<Vec<u8>> {
-    let url = release_asset_url(tag, asset);
+pub fn count_versions() -> Result<usize> {
+    walk_artifact_targets(false, None).map(|(retained, _)| retained)
+}
+
+pub fn prune_inactive_versions(current: &[NativeArtifactDescriptor]) -> Result<(usize, usize)> {
+    let packages = current
+        .iter()
+        .map(NativeArtifactDescriptor::package)
+        .collect::<std::collections::BTreeSet<_>>();
+    walk_artifact_targets(true, Some(&packages))
+}
+
+fn walk_artifact_targets(
+    prune: bool,
+    current_packages: Option<&std::collections::BTreeSet<String>>,
+) -> Result<(usize, usize)> {
+    let root = crate::host_paths::binaries_dir()?;
+    if !root.is_dir() {
+        return Ok((0, 0));
+    }
+    let mut retained = 0;
+    let mut pruned = 0;
+    for package in fs::read_dir(&root)? {
+        let package = package?;
+        if !package.file_type()?.is_dir() {
+            continue;
+        }
+        if prune
+            && current_packages.is_some_and(|packages| {
+                !packages.contains(&package.file_name().to_string_lossy().into_owned())
+            })
+        {
+            for target in fs::read_dir(package.path())? {
+                let target = target?;
+                if target.file_type()?.is_dir() {
+                    pruned += fs::read_dir(target.path())?
+                        .filter_map(Result::ok)
+                        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                        .count();
+                }
+            }
+            fs::remove_dir_all(package.path())?;
+            continue;
+        }
+        for target in fs::read_dir(package.path())? {
+            let target = target?;
+            if !target.file_type()?.is_dir() {
+                continue;
+            }
+            let active = fs::read_link(target.path().join("active"))
+                .ok()
+                .and_then(|path| path.file_name().map(|name| name.to_os_string()));
+            for version in fs::read_dir(target.path())? {
+                let version = version?;
+                if !version.file_type()?.is_dir() {
+                    continue;
+                }
+                if active
+                    .as_ref()
+                    .is_some_and(|active| active == &version.file_name())
+                {
+                    retained += 1;
+                } else if prune {
+                    fs::remove_dir_all(version.path())?;
+                    pruned += 1;
+                } else {
+                    retained += 1;
+                }
+            }
+        }
+    }
+    Ok((retained, pruned))
+}
+
+fn download_blob(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
+    let url = &descriptor.url;
     let client = reqwest::blocking::Client::builder()
         .user_agent("phoxal-cli")
         .timeout(Duration::from_secs(120))
         .build()?;
-    let mut request = client.get(&url);
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        request = request.bearer_auth(token);
-    }
-    let response = request
+    let response = client
+        .get(url)
         .send()
         .with_context(|| format!("failed to download {url}"))?;
     if !response.status().is_success() {
-        bail!(
-            "download of {asset} from {tag} returned {}",
-            response.status()
-        );
+        bail!("download from {url} returned {}", response.status());
     }
     let bytes = response
         .bytes()
-        .with_context(|| format!("failed to read {asset} body"))?
+        .with_context(|| format!("failed to read {url} body"))?
         .to_vec();
-    let actual = hex::encode(Sha256::digest(&bytes));
-    if actual != expected_sha256 {
-        bail!("sha256 mismatch for {asset}: expected {expected_sha256}, got {actual}");
+    verify_blob_bytes(descriptor, &bytes)?;
+    let path = artifact_tarball_path(descriptor)?;
+    write_file_atomic(&path, &bytes)?;
+    Ok(path)
+}
+
+fn verify_blob_bytes(descriptor: &NativeArtifactDescriptor, bytes: &[u8]) -> Result<()> {
+    if bytes.len() as u64 != descriptor.size {
+        bail!(
+            "size mismatch for {} {}: expected {} bytes, got {}",
+            descriptor.package_id,
+            descriptor.version,
+            descriptor.size,
+            bytes.len()
+        );
     }
-    Ok(bytes)
+    let actual = hex::encode(Sha256::digest(bytes));
+    if actual != descriptor.sha256 {
+        bail!(
+            "sha256 mismatch for {}: expected {}, got {actual}",
+            descriptor.package_id,
+            descriptor.sha256
+        );
+    }
+    Ok(())
+}
+
+fn retarget_active(descriptor: &NativeArtifactDescriptor) -> Result<()> {
+    let target_dir = artifact_target_dir(descriptor)?;
+    fs::create_dir_all(&target_dir)?;
+    let partial = target_dir.join(".active.partial");
+    if fs::symlink_metadata(&partial).is_ok() {
+        fs::remove_file(&partial)?;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&descriptor.version, &partial)?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&descriptor.version, &partial)?;
+    fs::rename(&partial, target_dir.join("active"))
+        .context("failed to atomically retarget the active artifact version")
 }
 
 fn unpack_asset(asset_path: &Path, root: &Path) -> Result<()> {
@@ -519,34 +702,6 @@ fn unpack_with_system_tar(asset_path: &Path, dest: &Path) -> Result<()> {
     }
 }
 
-fn verify_file_sha256(path: &Path, expected: &str) -> Result<()> {
-    let actual = sha256_file(path)?;
-    if actual != expected {
-        bail!(
-            "sha256 mismatch for {}: expected {expected}, got {actual}",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    let mut file =
-        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hasher.finalize()))
-}
-
 fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -578,4 +733,51 @@ fn sanitize_path_segment(value: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host_paths::test_support::ScratchPhoxalHome;
+
+    fn descriptor(version: &str, bytes: &[u8]) -> NativeArtifactDescriptor {
+        NativeArtifactDescriptor {
+            package_id: "phoxal/service-drive".to_string(),
+            kind: ArtifactKind::Service,
+            name: "drive".to_string(),
+            version: version.to_string(),
+            url: "https://example.invalid/drive.tar".to_string(),
+            sha256: hex::encode(Sha256::digest(bytes)),
+            size: bytes.len() as u64,
+            binary_name: "phoxal-service-drive".to_string(),
+            target: "aarch64-unknown-linux-musl".to_string(),
+        }
+    }
+
+    #[test]
+    fn blob_size_and_sha_are_both_enforced() {
+        let bytes = b"verified";
+        let descriptor = descriptor("1.0.0", bytes);
+        verify_blob_bytes(&descriptor, bytes).unwrap();
+        assert!(verify_blob_bytes(&descriptor, b"wrong").is_err());
+        let mut wrong_sha = descriptor;
+        wrong_sha.sha256 = "0".repeat(64);
+        assert!(verify_blob_bytes(&wrong_sha, bytes).is_err());
+    }
+
+    #[test]
+    fn active_symlink_selects_one_version_and_pruning_keeps_it() -> Result<()> {
+        let _root = ScratchPhoxalHome::new()?;
+        let old = descriptor("1.0.0", b"old");
+        let new = descriptor("2.0.0", b"new");
+        fs::create_dir_all(artifact_exec_dir(&old)?)?;
+        fs::create_dir_all(artifact_exec_dir(&new)?)?;
+        retarget_active(&new)?;
+        assert_eq!(active_version(&new)?.as_deref(), Some("2.0.0"));
+        let (retained, pruned) = prune_inactive_versions(std::slice::from_ref(&new))?;
+        assert_eq!((retained, pruned), (1, 1));
+        assert!(artifact_exec_dir(&new)?.is_dir());
+        assert!(!artifact_exec_dir(&old)?.exists());
+        Ok(())
+    }
 }

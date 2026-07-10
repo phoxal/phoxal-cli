@@ -847,7 +847,15 @@ impl SupervisorLock {
     pub fn acquire(run_dir: &Path) -> Result<Self> {
         fs::create_dir_all(run_dir)
             .with_context(|| format!("failed to create {}", run_dir.display()))?;
-        let path = run_dir.join(SUPERVISOR_LOCK_FILE);
+        Self::acquire_path(&run_dir.join(SUPERVISOR_LOCK_FILE))
+    }
+
+    pub fn acquire_path(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let path = path.to_path_buf();
         match try_create_lock(&path) {
             Ok(()) => Ok(Self { path, owned: true }),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {

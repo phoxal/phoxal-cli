@@ -379,6 +379,7 @@ fn recheck_run_target(
     let catalog = crate::commands::load_catalog_for_robot_from_source(
         options.catalog_source.clone(),
         project_root,
+        loaded.robot.artifacts.channel,
         &loaded.extras,
     )?;
     let resolved = resolve(
@@ -386,6 +387,7 @@ fn recheck_run_target(
         project_root,
         catalog.as_ref(),
         ResolveOptions {
+            emit_update_notice: false,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             ..ResolveOptions::default()
@@ -705,9 +707,9 @@ robot:
         .unwrap();
         ResolvedRobot {
             robot,
-            channel: phoxal::model::robot::v0::Channel::Stable,
+            channel: crate::catalog::SelectionChannel::Stable,
             target: "host".to_string(),
-            catalog_revision: None,
+            catalog_snapshot: None,
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),

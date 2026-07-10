@@ -769,6 +769,7 @@ fn prepare_deploy(
     let catalog = crate::commands::load_catalog_for_robot_from_source(
         options.catalog_source.clone(),
         project_root,
+        loaded.robot.artifacts.channel,
         &loaded.extras,
     )?;
     let resolved = resolve(
@@ -776,6 +777,8 @@ fn prepare_deploy(
         project_root,
         catalog.as_ref(),
         ResolveOptions {
+            refresh_channel_head: false,
+            emit_update_notice: options.message_format == MessageFormat::Human,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             official_target_triple: Some(target.official_triple.clone()),
@@ -1881,10 +1884,10 @@ fn stage_official_artifacts(
         }) {
             continue;
         }
-        let plan = official_runtime_plan(root, runtime)?;
+        let plan = official_runtime_plan(root, runtime, require_binaries)?;
         if require_binaries && plan.source_path.is_none() {
             bail!(
-                "NativePending: official artifact {} is not available locally for {}; run `phoxal-cli pull`, set PHOXAL_ARTIFACT_{}_PATH, or set PHOXAL_ARTIFACT_DIR",
+                "NativePending: official artifact {} is not vendored for {}; run `phoxal update`, set PHOXAL_ARTIFACT_{}_PATH, or set PHOXAL_ARTIFACT_DIR",
                 runtime.package,
                 resolved.target,
                 env_key(&runtime.package)
@@ -1901,7 +1904,7 @@ fn stage_official_artifacts(
         let plan = official_tool_plan(root, router)?;
         if require_binaries && plan.source_path.is_none() {
             bail!(
-                "NativePending: official artifact tool-router is not available locally for deploy; run `phoxal-cli pull`, set PHOXAL_ARTIFACT_TOOL_ROUTER_PATH, set PHOXAL_ARTIFACT_DIR, set PHOXAL_TOOL_ROUTER_PATH, or set PHOXAL_TOOL_DIR"
+                "NativePending: official artifact tool-router is not vendored for deploy; run `phoxal update`, set PHOXAL_ARTIFACT_TOOL_ROUTER_PATH, set PHOXAL_ARTIFACT_DIR, set PHOXAL_TOOL_ROUTER_PATH, or set PHOXAL_TOOL_DIR"
             );
         }
         artifacts.insert(router.name.clone(), plan);
@@ -1919,8 +1922,17 @@ fn filesystem_safe_package_name(package: &str) -> String {
 fn official_runtime_plan(
     root: &Path,
     runtime: &ResolvedPlatformRuntime,
+    test_stub_missing: bool,
 ) -> Result<OfficialArtifactPlan> {
     let source_path = locate_official_runtime_binary(runtime)?;
+    #[cfg(test)]
+    let source_path = match source_path {
+        Some(path) => Some(path),
+        None if test_stub_missing => Some(test_official_stub(root, &runtime.name)?),
+        None => None,
+    };
+    #[cfg(not(test))]
+    let _ = test_stub_missing;
     let install_binary_name = filesystem_safe_package_name(&runtime.package);
     if let Some(source) = &source_path {
         let dest = payload_bin(root).join(&install_binary_name);
@@ -2451,7 +2463,7 @@ fn write_robot_yaml(root: &Path, robot: &Robot) -> Result<()> {
 /// `Path`-sourced (dev-overlay-pinned) assets stage from their local checkout
 /// directly. `Catalog`-sourced assets stage from the CLI's native-artifact
 /// cache ONLY - never the network, matching the pre-existing offline
-/// guarantee official service/tool binaries already have (`phoxal-cli pull`
+/// guarantee official service/tool binaries already have (`phoxal update`
 /// populates the cache; deploy, live or `--dry-run`, only ever reads it). A
 /// `Git`-sourced assets package is not staged here (no local checkout in the
 /// deploy flow) - unchanged pre-existing scope.
@@ -2501,9 +2513,9 @@ fn stage_payload_metadata(
 
 /// Locate a Catalog-sourced `component_assets` package's already-staged cache
 /// directory, WITHOUT downloading - deploy (live or `--dry-run`) must never
-/// reach the network for artifacts; `phoxal-cli pull` is what populates this
+/// reach the network for artifacts; `phoxal update` populates this
 /// cache. `Ok(None)` when nothing is cached yet (a fresh clean machine that
-/// has not run `pull`) - the caller skips staging that component's assets
+/// has not run `update`) - the caller skips staging that component's assets
 /// rather than erroring, since deploy's live-artifact `NativePending` gate
 /// (`stage_official_artifacts`) is the authoritative "not available locally"
 /// diagnostic surface; a missing assets-only bundle does not block a
@@ -3590,7 +3602,7 @@ mod tests {
 
     mod phoxal_cli_test_support {
         use super::*;
-        use crate::catalog::{Channel as CatalogChannel, fixture_tool_entry_for_tests};
+        use crate::catalog::{SelectionChannel as CatalogChannel, fixture_tool_entry_for_tests};
 
         pub fn write_basic_project(root: &Path) -> Result<()> {
             write_fixture_catalog(root)?;
@@ -3666,7 +3678,7 @@ mod tests {
                 crate::catalog::fixture_service_entry_for_tests(
                     "fixture_only",
                     "0.1.0",
-                    crate::catalog::Channel::Preview,
+                    crate::catalog::SelectionChannel::Nightly,
                     "test-only-target",
                     false,
                     vec![crate::catalog::fixture_contract_for_tests(
@@ -3775,7 +3787,7 @@ services:
         fn basic_robot_dev_overlay_yaml() -> &'static str {
             r#"artifacts:
   pins:
-    phoxal/component-ddsm115-assets:
+    phoxal/component-ddsm115:
       path: components/ddsm115
 "#
         }
@@ -3803,7 +3815,7 @@ artifacts:
         fn bench_camera_robot_dev_overlay_yaml() -> &'static str {
             r#"artifacts:
   pins:
-    phoxal/component-bench_camera-assets:
+    phoxal/component-bench_camera:
       path: components/bench_camera
 "#
         }
@@ -3826,7 +3838,7 @@ artifacts:
   channel: stable
   catalog: catalog.json
   pins:
-    phoxal/component-catalog_motor-assets:
+    phoxal/component-catalog_motor:
       git: /definitely/not/a/component-assets-repo
       rev: main
 "#
@@ -3869,9 +3881,7 @@ services:
         fn driver_robot_dev_overlay_yaml() -> &'static str {
             r#"artifacts:
   pins:
-    phoxal/component-ddsm115-assets:
-      path: components/ddsm115
-    phoxal/component-ddsm115-driver:
+    phoxal/component-ddsm115:
       path: components/ddsm115
 "#
         }
@@ -4567,9 +4577,9 @@ capabilities:
     ) -> Result<ResolvedRobot> {
         Ok(ResolvedRobot {
             robot: Robot::parse_from_string(MINIMAL_RESOLVED_ROBOT_YAML)?,
-            channel: phoxal::model::robot::v0::Channel::Stable,
+            channel: crate::catalog::SelectionChannel::Stable,
             target: crate::resolver::host_target_triple(),
-            catalog_revision: None,
+            catalog_snapshot: None,
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
@@ -4592,7 +4602,7 @@ robot:
 
     /// A Catalog-sourced component package with a populated `catalog_runtime`
     /// but nothing warmed in the local artifact cache - the shape a fresh
-    /// clean machine sees before any `phoxal-cli pull`.
+    /// clean machine sees before any `phoxal update`.
     fn cold_cache_catalog_component_package(
         package: &str,
         kind: crate::catalog::ArtifactKind,
@@ -4613,13 +4623,12 @@ robot:
                     kind.catalog_kind()
                 ),
                 sha256: Some("a".repeat(64)),
+                url: Some("https://example.invalid/component.tar.zst".to_string()),
+                size: Some(1),
                 published: true,
                 published_triples: Vec::new(),
-                config_schema: None,
-                changed_contracts: Vec::new(),
-                contracts: Vec::new(),
                 path_override: None,
-                channel: crate::catalog::Channel::Stable,
+                channel: crate::catalog::SelectionChannel::Stable,
                 target: "aarch64-unknown-linux-gnu".to_string(),
             }),
         }
@@ -4655,12 +4664,12 @@ robot:
         let _phoxal_home = ScratchPhoxalHome::new()?;
 
         let driver_package = cold_cache_catalog_component_package(
-            "phoxal/component-ddsm115-driver",
+            "phoxal/component-ddsm115",
             crate::catalog::ArtifactKind::ComponentDriver,
             "ddsm115",
         );
         let assets_package = cold_cache_catalog_component_package(
-            "phoxal/component-ddsm115-assets",
+            "phoxal/component-ddsm115",
             crate::catalog::ArtifactKind::ComponentAssets,
             "ddsm115",
         );
@@ -4681,11 +4690,11 @@ robot:
             asset: "phoxal-tool-router-0.1.0-aarch64-unknown-linux-gnu.tar.zst".to_string(),
             binary_name: "phoxal-tool-router".to_string(),
             sha256: "0".repeat(64),
+            url: None,
+            size: None,
             published: true,
-            contracts: Vec::new(),
-            config_schema: None,
             path_override: Some(PathBuf::from("/fake/router")),
-            channel: crate::catalog::Channel::Stable,
+            channel: crate::catalog::SelectionChannel::Stable,
             target: "aarch64-unknown-linux-gnu".to_string(),
         });
 
@@ -4694,7 +4703,7 @@ robot:
         //    lookup a service uses).
         let found = official_runtime_by_artifact_id(&resolved, "ddsm115")
             .expect("catalog driver runtime must be discoverable by its artifact id");
-        assert_eq!(found.package, "phoxal/component-ddsm115-driver");
+        assert_eq!(found.package, "phoxal/component-ddsm115");
 
         // 2) `official_runtime_plan` (what `stage_official_artifacts` calls)
         //    reports the binary as locally absent rather than downloading -
@@ -4702,7 +4711,7 @@ robot:
         //    turns into `NativePending` for a live deploy or a tolerated
         //    "missing" entry for `--dry-run`.
         let root = tempfile::tempdir()?;
-        let plan = official_runtime_plan(root.path(), found)?;
+        let plan = official_runtime_plan(root.path(), found, false)?;
         assert!(
             plan.source_path.is_none(),
             "a cold cache must report no local binary, not download one"

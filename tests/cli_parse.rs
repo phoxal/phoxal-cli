@@ -88,11 +88,10 @@ fn runtime_surface_is_removed() {
 }
 
 #[test]
-fn parses_check_pull_service_and_json_output() {
+fn parses_check_service_and_json_output_and_rejects_pull() {
     let cli = Cli::try_parse_from([
         "phoxal-cli",
         "check",
-        "--pull",
         "--service",
         "avoid_obstacles",
         "--message-format",
@@ -104,21 +103,14 @@ fn parses_check_pull_service_and_json_output() {
         panic!("expected check command");
     };
 
-    assert!(command.pull);
     assert_eq!(command.service.as_deref(), Some("avoid_obstacles"));
     assert_eq!(command.message_format, MessageFormat::Json);
+    assert!(Cli::try_parse_from(["phoxal-cli", "check", "--pull"]).is_err());
 }
 
 #[test]
-fn parses_simulate_pull() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "simulate", "default", "--pull"])
-        .expect("simulate --pull should parse");
-
-    let RootCommand::Simulate(simulate) = cli.command else {
-        panic!("expected simulate command");
-    };
-
-    assert!(simulate.pull);
+fn simulate_pull_is_removed() {
+    assert!(Cli::try_parse_from(["phoxal-cli", "simulate", "default", "--pull"]).is_err());
 }
 
 #[test]
@@ -221,12 +213,11 @@ fn robot_new_is_removed() {
 }
 
 #[test]
-fn parses_pull_and_outdated() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "pull"]).expect("pull parses");
-    assert!(matches!(cli.command, RootCommand::Pull(_)));
-
-    let cli = Cli::try_parse_from(["phoxal-cli", "outdated"]).expect("outdated parses");
-    assert!(matches!(cli.command, RootCommand::Outdated(_)));
+fn parses_update_and_rejects_removed_commands() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "update", "--dry-run"]).expect("update parses");
+    assert!(matches!(cli.command, RootCommand::Update(_)));
+    assert!(Cli::try_parse_from(["phoxal-cli", "pull"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal-cli", "outdated"]).is_err());
 }
 
 #[test]

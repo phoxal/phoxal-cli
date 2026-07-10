@@ -15,7 +15,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use object::{Object, ObjectSection};
-use serde::Deserialize;
+pub use phoxal::participant::metadata::{ParticipantMeta, ParticipantMetaContract};
 
 /// The linker section names `#[derive(phoxal::Api)]` places its metadata
 /// static under, tried in order. `object`'s generic [`Object::section_by_name`]
@@ -24,34 +24,6 @@ use serde::Deserialize;
 /// candidate names are simply disjoint across the object formats this
 /// framework ships binaries for.
 pub const SECTION_NAMES: [&str; 2] = [".phoxal_api_meta", "__phoxal_meta"];
-
-/// One `{"field","role","contract"}` entry from the embedded manifest: one
-/// participant `Api` struct field's role for one contract (a `Server<Req,
-/// Resp>` field contributes two entries - one per side).
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct ParticipantMetaContract {
-    /// The `Api` struct field name that declared this contract (provenance
-    /// only - not part of the contract's identity).
-    #[allow(dead_code)]
-    pub field: String,
-    /// `"publish"`, `"subscribe"`, `"serve"`, or `"ask"`
-    /// (`phoxal::participant::ContractRole`, snake_case).
-    pub role: String,
-    /// The contract's version-qualified body type, exactly as written in the
-    /// participant's source (e.g. `"y2026_1::drive::Target"`).
-    pub contract: String,
-}
-
-/// The embedded metadata manifest for one `#[derive(phoxal::Api)]` struct:
-/// `{"participant_api":"<StructName>","contracts":[...]}`.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct ParticipantMeta {
-    /// The `Api` struct's type name (e.g. `"Api"`), recorded purely as
-    /// provenance by `#[derive(phoxal::Api)]`.
-    #[allow(dead_code)]
-    pub participant_api: String,
-    pub contracts: Vec<ParticipantMetaContract>,
-}
 
 /// Parses `object_bytes` as an object file and returns the bytes of its
 /// `#[derive(phoxal::Api)]` metadata section, trying each candidate section
@@ -92,7 +64,7 @@ pub fn extract_participant_metadata_from_bytes(
             contracts: Vec::new(),
         });
     };
-    serde_json::from_slice(&bytes)
+    phoxal::participant::metadata::parse_participant_metadata(&bytes)
         .with_context(|| format!("phoxal API metadata section in {describe} is not valid JSON"))
 }
 
@@ -148,9 +120,10 @@ mod tests {
         assert_eq!(
             meta.contracts,
             vec![ParticipantMetaContract {
-                field: "target".to_string(),
                 role: "publish".to_string(),
-                contract: "phoxal_api::y2026_1::drive::Target".to_string(),
+                generation: "y2026_1".to_string(),
+                contract: "drive::Target".to_string(),
+                external: false,
             }]
         );
         Ok(())
@@ -224,11 +197,12 @@ mod tests {
     #[test]
     fn extracts_metadata_from_foreign_format_and_arch_object_files() -> Result<()> {
         let payload =
-            br#"{"participant_api":"Api","contracts":[{"field":"state","role":"publish","contract":"y2026_1::drive::Target"}]}"#;
+            br#"{"participant_api":"Api","contracts":[{"role":"publish","generation":"y2026_1","contract":"drive::Target","external":false}]}"#;
         let expected = vec![ParticipantMetaContract {
-            field: "state".to_string(),
             role: "publish".to_string(),
-            contract: "y2026_1::drive::Target".to_string(),
+            generation: "y2026_1".to_string(),
+            contract: "drive::Target".to_string(),
+            external: false,
         }];
 
         // aarch64 ELF (Linux robot / release binary shape), `.phoxal_api_meta`.

@@ -3,8 +3,8 @@
 Consumer CLI for the Phoxal robot framework.
 You run it from a robot project: it reads `robot.yaml`, resolves the graph against a verified generated artifact catalog when official artifacts are needed, and drives the develop, simulate, and deploy loop.
 It owns the resolver and `robot.yaml` discovery.
-There is no lockfile: catalog revisions, host-tool versions, and component commits resolve live or from the local cache on every run.
-Production reproducibility comes from explicit `phoxal_artifacts.pins` plus the deployed `phoxal-release.json` record.
+There is no lockfile or global artifact cache. The project's git-ignored `.phoxal/` tree is the vendored set; `phoxal update` is the explicit channel-head mutation boundary.
+Production reproducibility comes from explicit `artifacts.pins` plus the deployed `phoxal-release.json` record.
 
 ## Commands
 
@@ -19,21 +19,21 @@ phoxal-cli service catalog        # print official services from the configured 
 phoxal-cli run --watch            # supervise the graph and hot-swap checked local edits
 phoxal-cli simulate default       # resolve and report the simulation launch plan
 
-phoxal-cli pull                   # refresh the artifact catalog cache + host tools
-phoxal-cli outdated               # report cached artifacts with newer remote digests
+phoxal-cli update                 # verify downloads and atomically retarget active versions
 phoxal-cli deploy robot@host      # build, render, sync, restart, and report systemd health
 phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build validation
 ```
 
 | Command | What it does |
 |---|---|
-| `check` | Resolve `robot.yaml`, then run each participant's `emit-apis` and fail if participants sharing a contract disagree on its `schema_id` (wire shape) or the producer/consumer topology is unsatisfied. Mixed participant `api_version`s are allowed as long as shared contracts' `schema_id`s agree. Official artifact readiness comes from the generated catalog; git component commits resolve live unless pinned to a commit SHA in `robot.yaml`. `--pull` refreshes the catalog and host tools first; `--service <name>` scopes the build to one user service. |
+| `check` | Resolve `robot.yaml`, stage participants, extract their embedded metadata sections, and validate the graph. `--service <name>` scopes user-service selection. |
 | `generations status` | Report readiness for a catalog generation on the robot target, including changed contracts and per-target artifact status. Use `--generation <g>` to inspect a specific generation. |
 | `run` | Supervise the resolved host-native graph. `--watch` rebuilds changed local participants, re-runs the graph proof, and swaps the checked process in place. `--message-format json` prints exact participant launch command lines and env. |
 | `simulate <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` hot-swaps service edits and re-checks driver metadata/substitutions without launching drivers. |
 | `status [release|resume <participant>]` | Print the supervisor board, or explicitly release a managed child for manual/debugger execution and later resume it under supervision. |
 | `service catalog` | Print official services from the configured artifact catalog. `service run` is intentionally removed; use `run --watch` plus `status release/resume` for debugging. |
-| `pull` / `outdated` | Refresh, or report drift in, cached artifact metadata and host tools for the selected `(target_generation, channel)`. |
+| `update` | Resolve stable/nightly heads, verify downloads, retarget `active`, and prune inactive versions. Supports `--dry-run` and JSON. |
+| `cache clean` | Remove selected project-local `binaries`, `build`, `git`, or `webots` state, with size reporting and `--dry-run`. |
 | `deploy <user@host>` | Probe the robot arch, resolve/check the graph, cross-build local source artifacts for musl, render native systemd units/env/release record, sync to `/opt/phoxal` and `/etc/systemd/system`, restart `phoxal.target`, and report systemd readiness. Prints the v0 pre-stable warning. `--dry-run --target <arch>` renders hostless for validation. |
 | `validate` | Lower-level `robot.yaml` structure and user-service phoxal-dependency checks that back `check`. |
 | `doctor` | Check host prerequisites (Docker, Webots) without changing anything. |
@@ -43,14 +43,14 @@ Commands that emit machine-readable state accept `--message-format human|json`.
 
 ### Dev Path Overrides
 
-Local artifact source overrides use `phoxal_artifacts.pins.<kind-qualified-id> = { path: ... }` and are legal only in dev overlays such as `robot.dev.yaml`:
+Local artifact source overrides use exact provider-qualified package IDs under `artifacts.pins` and are legal only in dev overlays such as `robot.dev.yaml`:
 
 ```yaml
-phoxal_artifacts:
+artifacts:
   pins:
-    service-drive:
+    phoxal/service-drive:
       path: ../framework/service/drive
-    driver-ddsm115:
+    phoxal/component-ddsm115:
       path: ../framework/component/ddsm115
 ```
 
@@ -58,9 +58,9 @@ Load them with `--env dev`. Base `robot.yaml` is fail-closed for `{ path: ... }`
 
 ## Artifact Catalog
 
-`phoxal-cli` consumes the framework-generated `phoxal.artifact-catalog/v0` JSON catalog. Local development and tests use `--catalog <path>`, `PHOXAL_ARTIFACT_CATALOG=<path>`, or `phoxal_artifacts.catalog` in `robot.yaml`; local paths are read directly and verified on every run. HTTPS catalog sources and the default stable URL, `https://raw.githubusercontent.com/phoxal/framework/artifact-catalog-v0-stable/latest.json`, are cached at `~/.phoxal/cache/catalog/phoxal-artifact-catalog.json`.
+`phoxal-cli` consumes the framework-generated `phoxal.catalog/v0` JSON catalog. The default is `https://github.com/phoxal/framework/releases/latest/download/catalog.json`. Local development may use `--catalog <path>`, `PHOXAL_ARTIFACT_CATALOG=<path>`, or `artifacts.catalog`; non-default sources are frozen single-catalog sources.
 
-Without `--pull`, commands use a verified local override or the last verified cache entry. `--pull` is the explicit refresh boundary. There are no published catalog revisions or native release assets yet, so commands that require the public catalog fail with the native-pending diagnostic unless you point them at a generated catalog, for example framework `cargo xtask catalog generate --metadata-only` output.
+Stable resolution follows `heads.stable` to that release's frozen catalog; nightly follows `heads.nightly`. Normal commands retain project-vendored `active` versions and warn about head drift. Use `--offline` or `PHOXAL_OFFLINE=1` to skip catalog probes. Fresh CI can run `phoxal update && phoxal check --strict`; deterministic CI should use explicit version/SHA pins.
 
 > `v0` is pre-stable: artifacts built at different times may not interoperate.
 > Pin exact artifact versions in `robot.yaml` when you need to re-deploy a previously recorded `phoxal-release.json` set.
@@ -121,7 +121,7 @@ scripts/live-simulate-gate.sh --live     # full live run (needs Docker daemon + 
 The smoke phase runs `simulate default --dry-run` to resolve and report the
 planned local launch without writing `.phoxal/run` or a release directory. It
 needs no Docker daemon. The `--live` phase additionally requires Webots on
-`PATH`, then runs `simulate default --pull` so you can confirm the router,
+`PATH`; run `phoxal update` first, then it runs `simulate default` so you can confirm the router,
 Webots, host tools, and bus connectivity. Until native release assets publish,
 official-service launch failures should surface as catalog or native-pending
 diagnostics rather than as missing static catalog entries.
@@ -129,13 +129,14 @@ diagnostics rather than as missing static catalog entries.
 ## Host layout
 
 ```text
-~/.phoxal/cache/                    GitHub releases, component clones, downloaded tools - shared across projects.
-~/.phoxal/cache/catalog/            Verified generated artifact catalog cache.
-~/.phoxal/worlds/                   Optional fallback for shared world files (see Simulate above).
-~/.phoxal/config.yaml               Optional. Today only `zenoh_image: <ref>` replaces the compiled default.
+~/.phoxal/simulator.lock            The only host-global item.
 
-<project>/.phoxal/                  Reserved for caches and future generated simulation assets.
-<project>/.phoxal/cache/state.yaml  Per-project process lifecycle ledger.
+<project>/.phoxal/binaries/<package>/<target>/<version>/  Unpacked official artifacts.
+<project>/.phoxal/binaries/<package>/<target>/active      Atomic selected-version symlink.
+<project>/.phoxal/git/              Git-pinned checkouts.
+<project>/.phoxal/build/            Cross-build state.
+<project>/.phoxal/webots/           Webots staging.
+<project>/.phoxal/run/              Supervisor state.
 ```
 
 ## License

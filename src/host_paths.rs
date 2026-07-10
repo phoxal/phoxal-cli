@@ -1,89 +1,77 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub fn phoxal_home() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("PHOXAL_HOME") {
+pub const PROJECT_ROOT_ENV: &str = "PHOXAL_PROJECT_ROOT";
+
+pub fn project_root() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os(PROJECT_ROOT_ENV) {
         return Ok(PathBuf::from(path));
     }
-    dirs::home_dir()
-        .context("$HOME is not set; cannot locate ~/.phoxal")
-        .map(|home| home.join(".phoxal"))
+    let cwd =
+        std::env::current_dir().context("failed to determine the current project directory")?;
+    let discovered = crate::resolver::discover_robot_yaml(&cwd)
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .ok_or_else(|| anyhow::anyhow!("cannot locate a robot project from {}", cwd.display()));
+    #[cfg(test)]
+    return discovered.or(Ok(cwd));
+    #[cfg(not(test))]
+    discovered
 }
 
-pub fn cache_dir() -> Result<PathBuf> {
-    phoxal_home().map(|path| path.join("cache"))
+pub fn project_state_dir() -> Result<PathBuf> {
+    project_root().map(|root| root.join(".phoxal"))
+}
+
+pub fn binaries_dir() -> Result<PathBuf> {
+    project_state_dir().map(|root| root.join("binaries"))
+}
+
+pub fn git_artifacts_dir() -> Result<PathBuf> {
+    project_state_dir().map(|root| root.join("git"))
+}
+
+pub fn deploy_dir() -> Result<PathBuf> {
+    project_state_dir().map(|root| root.join("build"))
+}
+
+pub fn webots_dir() -> Result<PathBuf> {
+    project_state_dir().map(|root| root.join("webots"))
 }
 
 pub fn run_dir() -> Result<PathBuf> {
-    phoxal_home().map(|path| path.join("run"))
+    project_state_dir().map(|root| root.join("run"))
 }
 
-/// The LOCAL download manifest: a `phoxal::catalog::Manifest` holding only the
-/// entries whose tarball(s) are present in [`artifacts_dir`] - NOT a cached
-/// copy of the remote catalog (see `crate::catalog`). Directly under
-/// `cache/`, not a `cache/catalog/` subdir.
-pub fn local_manifest_path() -> Result<PathBuf> {
-    cache_dir().map(|path| path.join(LOCAL_MANIFEST_FILE))
+pub fn simulator_lock_path() -> Result<PathBuf> {
+    dirs::home_dir()
+        .context("$HOME is not set; cannot locate the simulator lock")
+        .map(|home| home.join(".phoxal").join("simulator.lock"))
 }
 
-/// The flat, content-addressed native-artifact tarball store: one file per
-/// release asset, named exactly as published (`phoxal-driver-bno085-v0.1.5-
-/// <triple>.tar.zst`) - no per-package subdirectories.
-pub fn artifacts_dir() -> Result<PathBuf> {
-    cache_dir().map(|path| path.join("artifacts"))
-}
-
-/// Shallow git checkouts for `robot.yaml` `artifacts.pins` git sources (any
-/// kind, not just components) - see `crate::git_artifact`.
-pub fn git_artifacts_dir() -> Result<PathBuf> {
-    cache_dir().map(|path| path.join("git-artifacts"))
-}
-
-/// The cross-build toolchain + target dir `deploy` caches under
-/// `cache/deploy/` (zigbuild toolchain provisioning, cross-compiled target
-/// directories).
-pub fn deploy_dir() -> Result<PathBuf> {
-    cache_dir().map(|path| path.join("deploy"))
-}
-
-const LOCAL_MANIFEST_FILE: &str = "phoxal-artifacts.json";
-
-/// Test-only support for pointing `PHOXAL_HOME` (and therefore
-/// `cache_dir()`/`run_dir()`/the Webots staging root) at a scratch directory.
-/// `cargo test`'s default thread pool runs unit tests concurrently within one
-/// process, and env vars are process-global, so every test across the crate
-/// that mutates `PHOXAL_HOME` must go through [`test_support::ScratchPhoxalHome`]
-/// - it serializes on a shared lock instead of racing another test's value.
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::ffi::OsString;
     use std::sync::Mutex;
 
-    /// Serializes every test that mutates the process-global `PHOXAL_HOME`.
-    static PHOXAL_HOME_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static PROJECT_ROOT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    /// RAII guard: points `PHOXAL_HOME` at a fresh scratch directory for the
-    /// life of the guard (holding [`PHOXAL_HOME_TEST_LOCK`] so no other test
-    /// observes or clobbers it) and restores the previous value on drop.
     pub(crate) struct ScratchPhoxalHome {
-        _root: tempfile::TempDir,
+        _root: std::path::PathBuf,
         previous: Option<OsString>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl ScratchPhoxalHome {
         pub(crate) fn new() -> anyhow::Result<Self> {
-            let lock = PHOXAL_HOME_TEST_LOCK
+            let lock = PROJECT_ROOT_TEST_LOCK
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let root = tempfile::tempdir()?;
-            let previous = std::env::var_os("PHOXAL_HOME");
-            // SAFETY: test-only, serialized by `PHOXAL_HOME_TEST_LOCK` above;
-            // `Drop` restores the prior value before `root` is removed.
-            unsafe {
-                std::env::set_var("PHOXAL_HOME", root.path());
-            }
+            let root = tempfile::tempdir()?.keep();
+            let previous = std::env::var_os(super::PROJECT_ROOT_ENV);
+            // SAFETY: tests serialize mutations through PROJECT_ROOT_TEST_LOCK.
+            unsafe { std::env::set_var(super::PROJECT_ROOT_ENV, &root) };
             Ok(Self {
                 _root: root,
                 previous,
@@ -94,11 +82,11 @@ pub(crate) mod test_support {
 
     impl Drop for ScratchPhoxalHome {
         fn drop(&mut self) {
-            // SAFETY: see `new`.
+            // SAFETY: tests serialize mutations through PROJECT_ROOT_TEST_LOCK.
             unsafe {
                 match &self.previous {
-                    Some(value) => std::env::set_var("PHOXAL_HOME", value),
-                    None => std::env::remove_var("PHOXAL_HOME"),
+                    Some(value) => std::env::set_var(super::PROJECT_ROOT_ENV, value),
+                    None => std::env::remove_var(super::PROJECT_ROOT_ENV),
                 }
             }
         }

@@ -41,11 +41,6 @@ use crate::utils::cargo_binary_name;
 #[derive(Debug, Args)]
 pub struct Run {
     #[arg(
-        long,
-        help = "Refresh the native artifact cache before launch (the catalog itself is always fetched fresh)."
-    )]
-    pub pull: bool,
-    #[arg(
         long = "driver",
         value_name = "ID",
         help = "Launch only the named component driver. Repeat for a strict bench subset."
@@ -81,7 +76,6 @@ pub enum DriversMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunOptions {
-    pub pull: bool,
     pub drivers: DriversMode,
     pub drivers_subset: Vec<String>,
     pub catalog_source: Option<String>,
@@ -103,7 +97,6 @@ struct PreparedRun {
 impl Run {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let options = RunOptions {
-            pull: self.pull,
             drivers: self.drivers,
             drivers_subset: self.drivers_subset.clone(),
             catalog_source: app.catalog_source.clone(),
@@ -212,6 +205,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     let catalog = crate::commands::load_catalog_for_robot_from_source(
         options.catalog_source.clone(),
         project_root,
+        loaded.robot.artifacts.channel,
         &loaded.extras,
     )?;
     let resolved = resolve(
@@ -219,23 +213,13 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         project_root,
         catalog.as_ref(),
         ResolveOptions {
+            emit_update_notice: options.message_format == MessageFormat::Human,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             ..ResolveOptions::default()
         },
     )?;
 
-    if options.pull
-        && let Err(error) = crate::native_artifacts::stage_resolved_artifacts(
-            Some(ui),
-            &resolved,
-            crate::native_artifacts::ProvisioningMode::Refresh,
-        )
-    {
-        ui.warn(format!(
-            "native artifact refresh failed; using cache/path overrides only: {error:#}"
-        ));
-    }
     // Stage every resolved component's asset bundle into the robot root
     // (`project_root` for `run`) so `PHOXAL_ROBOT_ROOT`-relative asset
     // resolution finds the same `components/<id>/` shape deploy stages under
@@ -737,13 +721,13 @@ fn locate_official_binary(
         && let Some(descriptor) =
             crate::native_artifacts::NativeArtifactDescriptor::from_runtime(runtime)?
     {
-        let cache = crate::native_artifacts::artifact_binary_path(&descriptor)?;
-        return Ok(cache.is_file().then_some(cache));
+        let binary = crate::native_artifacts::artifact_binary_path(&descriptor)?;
+        return Ok(binary.is_file().then_some(binary));
     }
     // No env override, and no resolved runtime to derive a native-artifact
     // descriptor from (a path-overridden or otherwise non-catalog runtime) -
-    // nothing else in the flat `cache/artifacts/` store can identify this
-    // participant's binary; there is no per-package legacy fallback anymore.
+    // the project-local store has no other identity from which to find this
+    // participant's binary.
     Ok(None)
 }
 
@@ -785,7 +769,7 @@ fn native_pending_official_note(
     };
     let target = host_target_triple();
     format!(
-        "NativePending: official artifact {participant_id} is {status} for {target} or not cached; run `phoxal-cli pull`, set PHOXAL_ARTIFACT_{}_PATH, or set PHOXAL_ARTIFACT_DIR",
+        "NativePending: official artifact {participant_id} is {status} for {target} or not vendored; run `phoxal update`, set PHOXAL_ARTIFACT_{}_PATH, or set PHOXAL_ARTIFACT_DIR",
         env_key(participant_id)
     )
 }
@@ -968,7 +952,6 @@ mod tests {
         let plan = plan_with_drivers(&["imu", "left_drive"]);
         let policy = DriverPolicy::from_options(
             &RunOptions {
-                pull: false,
                 drivers: DriversMode::On,
                 drivers_subset: vec!["imu".to_string()],
                 catalog_source: None,
@@ -986,7 +969,6 @@ mod tests {
 
         let err = DriverPolicy::from_options(
             &RunOptions {
-                pull: false,
                 drivers: DriversMode::On,
                 drivers_subset: vec!["missing".to_string()],
                 catalog_source: None,
@@ -1006,7 +988,6 @@ mod tests {
         let plan = plan_with_drivers(&["imu"]);
         let policy = DriverPolicy::from_options(
             &RunOptions {
-                pull: false,
                 drivers: DriversMode::Off,
                 drivers_subset: Vec::new(),
                 catalog_source: None,

@@ -1,103 +1,259 @@
-//! CLI-side consumption of the framework's published `phoxal::catalog`
-//! schema (`phoxal-artifacts.json`).
+//! Consumption and selection of the framework's `phoxal.catalog/v0` index.
 //!
-//! The framework owns the wire schema itself (`Manifest`, `AssetEntry`,
-//! `ArtifactEntry`, `Artifact`, `Channel`, `Contract`) - this module re-exports
-//! those types and adds only the CLI-local concerns layered on top: fetching
-//! the REMOTE catalog (a local path or an HTTPS URL, always fetched fresh -
-//! there is no on-disk cache of the remote fetch; see [`load_catalog`]), the
-//! `ArtifactKind` tag the CLI uses to remember which of the manifest's five
-//! arrays an entry came from (the published schema does not tag entries with
-//! a `kind` - "the array an entry lives in *is* its kind"), and the LOCAL
-//! download manifest ([`upsert_local_manifest_entry`]/[`prune_local_manifest`])
-//! that records which official artifacts are actually present in
-//! `cache/artifacts/` - a wholly different document from the remote catalog,
-//! never a cached copy of it (docs D64: no lockfile, no cached remote
-//! catalog).
-//!
-//! There is no API-generation comparison/ordering here anymore (D1, X-tools
-//! slice): [`ArtifactEntry`] carries no `api_generation`, so there is nothing
-//! left to compare/order by generation. Per-package resolution is purely
-//! semver-ordered now (see `crate::resolver::select_latest_artifact_entries`).
-//! The preview-feature-promotion scanner is gone with it: it existed to warn
-//! when a `preview-<generation>` Cargo feature's generation had been promoted
-//! to the stable channel, which needed [`Channel`] lookup by generation - a
-//! question the catalog can no longer answer at all.
+//! The catalog is a location/integrity index only. The CLI owns artifact kind
+//! and package expectations; participant metadata is always read from staged
+//! binaries and is never synthesized from this document.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
-pub use phoxal::catalog::{Artifact, ArtifactEntry, AssetEntry, Channel, Contract, Manifest};
+pub use phoxal::catalog::{Artifact, Blob, BuildProvenance, Catalog, Heads};
 
-/// A loaded catalog document is one immutable revision of the manifest; kept
-/// as the name most CLI call sites already use for "the loaded catalog".
-pub type CatalogRevision = Manifest;
+pub const DEFAULT_CATALOG_URL: &str =
+    "https://github.com/phoxal/framework/releases/latest/download/catalog.json";
+pub const CATALOG_SOURCE_ENV: &str = "PHOXAL_ARTIFACT_CATALOG";
+pub const OFFLINE_ENV: &str = "PHOXAL_OFFLINE";
+pub const TARGET_INDEPENDENT_SCOPE: &str = "target-independent";
 
-/// [`Channel`] does not implement [`std::fmt::Display`] (it is defined in
-/// `phoxal`, so a local impl would violate the orphan rule) - this is the
-/// CLI's display projection wherever a channel needs to render as text.
-#[must_use]
-pub const fn channel_as_str(channel: Channel) -> &'static str {
-    match channel {
-        Channel::Stable => "stable",
-        Channel::Preview => "preview",
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionChannel {
+    Stable,
+    Nightly,
+}
+
+impl SelectionChannel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Nightly => "nightly",
+        }
     }
 }
 
-/// The catalog is hosted as the `latest.json` asset of the single mutable
-/// `stable` front-door release (docs follow-ups/22 + decision D25), not a git
-/// ref. The per-artifact "warehouse" releases (`--latest=false`) hold the
-/// tarballs the catalog points at.
-pub const DEFAULT_CATALOG_URL: &str =
-    "https://github.com/phoxal/framework/releases/download/stable/latest.json";
-pub const CATALOG_SOURCE_ENV: &str = "PHOXAL_ARTIFACT_CATALOG";
-/// The target scope a [`ArtifactKind::ComponentAssets`] entry declares instead
-/// of a per-triple binary matrix: asset bundles are target-independent files,
-/// not per-architecture binaries (docs #21). Mirrors the framework's own
-/// `xtask::workspace::TARGET_INDEPENDENT_SCOPE`.
-pub const TARGET_INDEPENDENT_SCOPE: &str = "target-independent";
+impl std::fmt::Display for SelectionChannel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Map the dependency's temporary internal enum onto the locked CLI model.
+/// Robot YAML accepts `nightly` only; `load_robot_with_extras` translates it
+/// before framework deserialization while explicitly rejecting `preview`.
+#[must_use]
+pub const fn selection_channel(channel: phoxal::model::robot::v0::Channel) -> SelectionChannel {
+    match channel {
+        phoxal::model::robot::v0::Channel::Stable => SelectionChannel::Stable,
+        phoxal::model::robot::v0::Channel::Preview => SelectionChannel::Nightly,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogLoadOptions {
     pub cli_source: Option<String>,
     pub robot_source: Option<PathBuf>,
+    pub offline: bool,
 }
 
-/// Canonical CLI-local artifact kinds (docs #21): `Driver` becomes the
-/// `component_driver`/`component_assets` split. The published
-/// [`phoxal::catalog::Manifest`] does not carry this tag - it is implied by
-/// which of the manifest's five arrays an entry lives in - so the CLI
-/// reconstructs the same domain concept as a plain enum wherever it needs to
-/// remember which array a given entry came from. The runtime's own
-/// `emit-apis` vocabulary is intentionally different (a driver participant
-/// reports `artifact.kind: "driver"`, not `component_driver`) - see
-/// [`ArtifactKind::emit_apis_kind`] and the vocabulary-reconciliation callers
-/// in `commands::check`.
+impl CatalogLoadOptions {
+    #[must_use]
+    pub fn explicit_source(&self) -> Option<String> {
+        self.cli_source
+            .clone()
+            .or_else(|| std::env::var(CATALOG_SOURCE_ENV).ok())
+            .or_else(|| {
+                self.robot_source
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+            })
+    }
+
+    #[must_use]
+    pub fn is_default_source(&self) -> bool {
+        self.explicit_source().is_none()
+    }
+}
+
+/// Load one catalog without following heads. Custom URLs and local paths are
+/// intentionally frozen single-catalog sources.
+pub fn load_catalog(options: CatalogLoadOptions) -> Result<Option<Catalog>> {
+    if options.offline || offline_from_env() {
+        return Ok(None);
+    }
+    match options.explicit_source() {
+        Some(source) => read_source(&source).map(Some),
+        None => fetch_https(DEFAULT_CATALOG_URL).map(Some).map_err(|error| {
+            anyhow!(
+                "artifact catalog unavailable at {DEFAULT_CATALOG_URL}: {error:#}; no binaries can be resolved on a first run"
+            )
+        }),
+    }
+}
+
+fn offline_from_env() -> bool {
+    std::env::var(OFFLINE_ENV)
+        .is_ok_and(|value| !value.is_empty() && !matches!(value.as_str(), "0" | "false" | "no"))
+}
+
+/// Resolve the snapshot used by a channel at first resolve/update time.
+/// Stable follows the latest catalog's stable head to that release's frozen
+/// catalog; nightly uses the latest snapshot. Non-default sources never chase
+/// their informational head tags.
+pub fn load_pinned_catalog(
+    options: CatalogLoadOptions,
+    channel: SelectionChannel,
+) -> Result<Option<Catalog>> {
+    let is_default = options.is_default_source();
+    let Some(latest) = load_catalog(options)? else {
+        return Ok(None);
+    };
+    if !is_default {
+        return Ok(Some(latest));
+    }
+
+    let head = match channel {
+        SelectionChannel::Stable => {
+            ensure!(
+                !latest.heads.stable.is_empty(),
+                "catalog heads.stable is empty; opt in explicitly with `artifacts.channel: nightly` in robot.yaml"
+            );
+            &latest.heads.stable
+        }
+        SelectionChannel::Nightly => {
+            ensure!(
+                !latest.heads.nightly.is_empty(),
+                "catalog heads.nightly is empty; the framework catalog has no published build snapshot"
+            );
+            &latest.heads.nightly
+        }
+    };
+    if head == &latest.build.tag {
+        return Ok(Some(latest));
+    }
+    let url = snapshot_catalog_url(head)?;
+    fetch_https(&url)
+        .with_context(|| format!("failed to fetch frozen {channel} snapshot {head} from {url}"))
+        .map(Some)
+}
+
+pub fn snapshot_catalog_url(tag: &str) -> Result<String> {
+    ensure!(
+        !tag.is_empty()
+            && tag
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+        "catalog head contains an invalid release tag: {tag:?}"
+    );
+    Ok(format!(
+        "https://github.com/phoxal/framework/releases/download/{tag}/catalog.json"
+    ))
+}
+
+fn read_source(source: &str) -> Result<Catalog> {
+    if source.starts_with("https://") {
+        fetch_https(source)
+            .with_context(|| format!("failed to fetch artifact catalog from {source}"))
+    } else if source.starts_with("http://") {
+        bail!("artifact catalog source must use HTTPS or a local path: {source}");
+    } else {
+        read_catalog_path(Path::new(source))
+    }
+}
+
+pub fn read_catalog_path(path: &Path) -> Result<Catalog> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    parse_catalog(&text).with_context(|| format!("{} is not a valid catalog", path.display()))
+}
+
+fn parse_catalog(text: &str) -> Result<Catalog> {
+    let catalog: Catalog = serde_json::from_str(text).context("catalog was not valid JSON")?;
+    ensure!(
+        catalog.schema == phoxal::catalog::SCHEMA,
+        "unsupported catalog schema {:?}; expected {:?}",
+        catalog.schema,
+        phoxal::catalog::SCHEMA
+    );
+    validate_catalog(&catalog)?;
+    Ok(catalog)
+}
+
+fn validate_catalog(catalog: &Catalog) -> Result<()> {
+    let mut identities = BTreeSet::new();
+    for artifact in &catalog.artifacts {
+        ensure!(
+            !artifact.package.is_empty() && !artifact.version.is_empty(),
+            "catalog contains an artifact with an empty package or version"
+        );
+        ensure!(
+            identities.insert((&artifact.package, &artifact.version)),
+            "catalog contains duplicate ({}, {}) entries",
+            artifact.package,
+            artifact.version
+        );
+        for (target, blob) in &artifact.targets {
+            validate_blob(blob).with_context(|| {
+                format!(
+                    "invalid target blob for {} {} ({target})",
+                    artifact.package, artifact.version
+                )
+            })?;
+        }
+        if let Some(blob) = &artifact.assets {
+            validate_blob(blob).with_context(|| {
+                format!(
+                    "invalid assets blob for {} {}",
+                    artifact.package, artifact.version
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_blob(blob: &Blob) -> Result<()> {
+    ensure!(blob.url.starts_with("https://"), "blob URL must use HTTPS");
+    ensure!(
+        phoxal::catalog::is_sha256(&blob.sha256),
+        "blob sha256 must be lowercase hexadecimal"
+    );
+    ensure!(blob.size > 0, "blob size must be greater than zero");
+    Ok(())
+}
+
+fn fetch_https(url: &str) -> Result<Catalog> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("phoxal-cli")
+        .connect_timeout(REQUEST_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()?;
+    let response = client.get(url).send()?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        bail!("the framework catalog is not published yet: {url} returned HTTP {status}");
+    }
+    if !status.is_success() {
+        bail!("catalog request {url} returned HTTP {status}");
+    }
+    parse_catalog(&response.text()?)
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ArtifactKind {
     Service,
-    /// Target-independent component files: `component.yaml`,
-    /// `simulation.yaml`, `structure.urdf`, meshes, and other asset data.
     ComponentAssets,
-    /// The optional target-specific checked driver binary for a component.
     ComponentDriver,
     Tool,
     Simulator,
 }
 
 impl ArtifactKind {
-    /// The `artifact.kind` string a real participant binary reports from its
-    /// own `emit-apis` output - the runtime's own vocabulary
-    /// (`phoxal-macros`' authoring kind, `phoxal::check::ParticipantKind`).
-    /// Intentionally distinct from the catalog's own kind tag: the runtime
-    /// authoring surface still calls a component driver `"driver"` and knows
-    /// nothing about the CLI's `component_driver`/`component_assets` split.
-    /// `ComponentAssets` has no runtime binary at all, so this value is never
-    /// asserted against a real subprocess for that kind.
     #[must_use]
     pub const fn emit_apis_kind(self) -> &'static str {
         match self {
@@ -109,26 +265,12 @@ impl ArtifactKind {
         }
     }
 
-    /// The CLI's own kind label - the vocabulary this module's diagnostics
-    /// and JSON output expose, distinct from [`Self::emit_apis_kind`].
     #[must_use]
     pub const fn catalog_kind(self) -> &'static str {
         match self {
             Self::Service => "service",
             Self::ComponentAssets => "component_assets",
             Self::ComponentDriver => "component_driver",
-            Self::Tool => "tool",
-            Self::Simulator => "simulator",
-        }
-    }
-
-    /// The package-id prefix segment (the token before `-` in
-    /// `phoxal/<prefix>-<name>`) this kind uses when deriving `artifact_name`
-    /// from `package`.
-    const fn package_prefix(self) -> &'static str {
-        match self {
-            Self::Service => "service",
-            Self::ComponentAssets | Self::ComponentDriver => "component",
             Self::Tool => "tool",
             Self::Simulator => "simulator",
         }
@@ -141,667 +283,412 @@ impl std::fmt::Display for ArtifactKind {
     }
 }
 
-/// The bare artifact name derived from `package` for a given `kind`, stripping
-/// the provider (`phoxal/`), the kind prefix (`service-`, `component-`,
-/// `tool-`, `simulator-`), and - for the two component kinds - the trailing
-/// `-assets`/`-driver` suffix. `phoxal/component-ddsm115-assets` and
-/// `phoxal/component-ddsm115-driver` both derive `ddsm115`;
-/// `phoxal/simulator-webots-supervisor` derives `webots-supervisor` (only the
-/// leading `simulator-` is a prefix, the rest is the name).
+/// The platform model is deliberately explicit and name-driven. Catalog
+/// package parsing never decides what should run.
+pub const OFFICIAL_SERVICES: &[(&str, &str)] = &[
+    ("asset", "phoxal/service-asset"),
+    ("battery", "phoxal/service-battery"),
+    ("drive", "phoxal/service-drive"),
+    ("explore", "phoxal/service-explore"),
+    ("follow", "phoxal/service-follow"),
+    ("frame", "phoxal/service-frame"),
+    ("joint", "phoxal/service-joint"),
+    ("localize", "phoxal/service-localize"),
+    ("map", "phoxal/service-map"),
+    ("mission", "phoxal/service-mission"),
+    ("motion", "phoxal/service-motion"),
+    ("odometry", "phoxal/service-odometry"),
+    ("perception", "phoxal/service-perception"),
+    ("plan", "phoxal/service-plan"),
+    ("power", "phoxal/service-power"),
+    ("presence", "phoxal/service-presence"),
+    ("safety", "phoxal/service-safety"),
+    ("video", "phoxal/service-video"),
+];
+
+pub const OFFICIAL_TOOLS: &[(&str, &str)] = &[
+    ("joypad", "phoxal/tool-joypad"),
+    ("router", "phoxal/tool-router"),
+];
+
+pub const OFFICIAL_SIMULATORS: &[(&str, &str)] = &[
+    ("webots-controller", "phoxal/simulator-webots-controller"),
+    ("webots-supervisor", "phoxal/simulator-webots-supervisor"),
+];
+
 #[must_use]
-pub fn artifact_name(kind: ArtifactKind, package: &str) -> Option<&str> {
-    let name = package.split_once('/').map(|(_, name)| name)?;
-    let prefix = kind.package_prefix();
-    let rest = name.strip_prefix(prefix)?.strip_prefix('-')?;
-    match kind {
-        ArtifactKind::ComponentAssets => rest.strip_suffix("-assets"),
-        ArtifactKind::ComponentDriver => rest.strip_suffix("-driver"),
-        ArtifactKind::Service | ArtifactKind::Tool | ArtifactKind::Simulator => Some(rest),
-    }
-}
-
-/// The provider segment of `package` (`phoxal` in `phoxal/service-drive`).
-#[must_use]
-pub fn provider(package: &str) -> Option<&str> {
-    package.split_once('/').map(|(provider, _)| provider)
-}
-
-/// Map the robot manifest's own channel enum to the catalog's, without an
-/// orphan-rule-violating `From` impl (both types are foreign to this crate
-/// once the catalog schema moved into `phoxal::catalog`).
-#[must_use]
-pub fn to_catalog_channel(channel: phoxal::model::robot::v0::Channel) -> Channel {
-    match channel {
-        phoxal::model::robot::v0::Channel::Stable => Channel::Stable,
-        phoxal::model::robot::v0::Channel::Preview => Channel::Preview,
-    }
-}
-
-/// Load the remote artifact catalog, always fetched fresh into memory -
-/// there is no on-disk cache of this document (docs D64: no lockfile, no
-/// cached copy of the remote catalog). An explicit source (`--catalog`, the
-/// `PHOXAL_ARTIFACT_CATALOG` env var, or `robot.yaml`'s `artifacts.catalog`)
-/// takes precedence; a local path is read directly, an HTTPS URL is fetched
-/// live. With no explicit source, this fetches [`DEFAULT_CATALOG_URL`].
-///
-/// A fully offline session can still validate previously-downloaded official
-/// artifacts by pointing `--catalog` at the LOCAL download manifest
-/// ([`crate::host_paths::local_manifest_path`]) directly - it is itself a
-/// valid `Manifest`, just scoped to what is actually cached locally.
-pub fn load_catalog(options: CatalogLoadOptions) -> Result<Option<Manifest>> {
-    if let Some(source) = explicit_source(options.cli_source, options.robot_source) {
-        return read_source(&source).map(Some);
-    }
-    fetch_default_catalog().map(Some)
-}
-
-fn explicit_source(cli_source: Option<String>, robot_source: Option<PathBuf>) -> Option<String> {
-    cli_source
-        .or_else(|| std::env::var(CATALOG_SOURCE_ENV).ok())
-        .or_else(|| robot_source.map(|path| path.display().to_string()))
-}
-
-fn read_source(source: &str) -> Result<Manifest> {
-    if source.starts_with("https://") {
-        fetch_https(source)
-            .with_context(|| format!("failed to fetch artifact catalog from {source}"))
-    } else if source.starts_with("http://") {
-        bail!("artifact catalog source must use HTTPS or a local path: {source}");
-    } else {
-        read_catalog_path(Path::new(source))
-    }
-}
-
-fn fetch_default_catalog() -> Result<Manifest> {
-    fetch_https(DEFAULT_CATALOG_URL).map_err(unavailable_catalog_error_with_fetch_error)
-}
-
-pub fn read_catalog_path(path: &Path) -> Result<Manifest> {
-    let text =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let manifest: Manifest = serde_json::from_str(&text)
-        .with_context(|| format!("{} is not a valid catalog JSON document", path.display()))?;
-    manifest
-        .verify()
-        .with_context(|| format!("catalog {} failed verification", path.display()))?;
-    Ok(manifest)
-}
-
-fn fetch_https(url: &str) -> Result<Manifest> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("phoxal-cli")
-        .timeout(Duration::from_secs(20))
-        .build()?;
-    let response = client.get(url).send()?;
-    let status = response.status();
-    if !status.is_success() {
-        bail!("artifact catalog request returned {status}");
-    }
-    let text = response.text()?;
-    let manifest: Manifest =
-        serde_json::from_str(&text).context("fetched catalog was not valid JSON")?;
-    manifest.verify()?;
-    Ok(manifest)
-}
-
-/// Serialize `manifest` as pretty JSON and write it to `path` atomically
-/// (write to a unique sibling temp file, then rename into place) so a reader
-/// never observes a half-written manifest. Used by the local download
-/// manifest; the remote catalog itself is never written to disk (see the
-/// [`load_catalog`] docs).
-fn write_manifest_atomic(path: &Path, manifest: &Manifest) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("local manifest path did not have a parent directory")?;
-    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
-    let mut json =
-        serde_json::to_string_pretty(manifest).context("failed to serialize local manifest")?;
-    json.push('\n');
-    let mut partial = tempfile::Builder::new()
-        .prefix(".phoxal-artifacts-")
-        .suffix(".partial")
-        .tempfile_in(parent)
-        .with_context(|| format!("failed to create temp manifest in {}", parent.display()))?;
-    partial
-        .write_all(json.as_bytes())
-        .with_context(|| format!("failed to write {}", partial.path().display()))?;
-    partial
-        .persist(path)
-        .map(|_| ())
-        .map_err(|error| error.error)
-        .with_context(|| format!("failed to finalize {}", path.display()))
-}
-
-/// Every official service name in the manifest, deduplicated and sorted.
-#[must_use]
-pub fn service_names(manifest: &Manifest) -> Vec<String> {
-    manifest
-        .services
+pub fn service_names(_catalog: &Catalog) -> Vec<String> {
+    OFFICIAL_SERVICES
         .iter()
-        .filter_map(|entry| artifact_name(ArtifactKind::Service, &entry.package))
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
+        .map(|(name, _)| (*name).to_string())
         .collect()
 }
 
-pub fn unavailable_catalog_error() -> anyhow::Error {
-    anyhow!(
-        "no artifact catalog revision is available; tried the default catalog URL {DEFAULT_CATALOG_URL}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add artifacts.catalog in robot.yaml, or point --catalog at the local download manifest ({LOCAL_MANIFEST_HINT}) to validate offline against already-cached artifacts."
-    )
-}
-
-fn unavailable_catalog_error_with_fetch_error(source: anyhow::Error) -> anyhow::Error {
-    anyhow!(
-        "no artifact catalog revision is available; fetching the default catalog URL {DEFAULT_CATALOG_URL} failed: {source:#}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add artifacts.catalog in robot.yaml, or point --catalog at the local download manifest ({LOCAL_MANIFEST_HINT}) to validate offline against already-cached artifacts."
-    )
-}
-
-/// Human-readable hint for the local download manifest path, used only in
-/// diagnostics (not resolved against the real `PHOXAL_HOME` - a fixed
-/// `~/.phoxal/...` string reads better in an error message than a
-/// possibly-relocated absolute path).
-const LOCAL_MANIFEST_HINT: &str = "~/.phoxal/cache/phoxal-artifacts.json";
-
-// ---------------------------------------------------------------------------
-// Local download manifest (`cache/phoxal-artifacts.json`).
-//
-// A wholly local document: it records which official artifacts are actually
-// present in `cache/artifacts/`, with their contracts/config inlined exactly
-// like the remote catalog's own `ArtifactEntry`/`AssetEntry` shapes - so
-// `check`/`run` can validate a cached artifact's contracts without any
-// network access, and so the file itself is a valid `--catalog` source for a
-// fully offline session. It is NOT a cache of the remote catalog: an entry
-// only exists here once its tarball has actually been downloaded, and
-// `cache clean` prunes entries whose tarball no longer exists.
-// ---------------------------------------------------------------------------
-
-/// One official artifact's data needed to upsert its entry into the local
-/// download manifest once its tarball lands in `cache/artifacts/`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LocalManifestUpsert {
-    pub kind: ArtifactKind,
-    pub package: String,
-    pub version: String,
-    pub contracts: Vec<Contract>,
-    pub config_schema: Option<serde_json::Value>,
-    pub changed_contracts: Vec<String>,
-    pub channel: Channel,
-    /// The target triple this tarball was built for, or
-    /// [`TARGET_INDEPENDENT_SCOPE`] for a `component_assets` bundle.
-    pub target: String,
-    pub tarball: String,
-    pub sha256: String,
-}
-
-/// Read the local download manifest, or an empty (but validly finalized)
-/// manifest if it does not exist yet.
-pub fn load_local_manifest() -> Result<Manifest> {
-    let path = crate::host_paths::local_manifest_path()?;
-    read_local_manifest_at(&path)
-}
-
-fn read_local_manifest_at(path: &Path) -> Result<Manifest> {
-    if !path.is_file() {
-        return empty_manifest();
+#[must_use]
+pub fn latest_by_package(catalog: &Catalog) -> BTreeMap<&str, &Artifact> {
+    let mut selected = BTreeMap::new();
+    for artifact in &catalog.artifacts {
+        selected
+            .entry(artifact.package.as_str())
+            .and_modify(|current: &mut &Artifact| {
+                if compare_versions(&artifact.version, &current.version).is_gt() {
+                    *current = artifact;
+                }
+            })
+            .or_insert(artifact);
     }
-    read_catalog_path(path)
+    selected
 }
 
-fn empty_manifest() -> Result<Manifest> {
-    Manifest::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
-        .finalize()
-        .context("failed to build an empty local download manifest")
-}
+pub fn select_artifact<'a>(
+    catalog: &'a Catalog,
+    package: &str,
+    pin: Option<&phoxal::model::robot::v0::ArtifactPin>,
+    target: &str,
+) -> Result<&'a Artifact> {
+    use phoxal::model::robot::v0::ArtifactPin;
 
-/// Insert or replace `upsert`'s entry (keyed by `package`) in the local
-/// download manifest and write it back atomically. Called once a tarball has
-/// been freshly downloaded into `cache/artifacts/` (see
-/// `native_artifacts::stage_descriptor`); idempotent to call again with the
-/// same data.
-pub fn upsert_local_manifest_entry(upsert: LocalManifestUpsert) -> Result<()> {
-    let path = crate::host_paths::local_manifest_path()?;
-    let mut manifest = read_local_manifest_at(&path)?;
-
-    if upsert.kind == ArtifactKind::ComponentAssets {
-        let existing = manifest
-            .assets
-            .iter()
-            .find(|entry| entry.package == upsert.package && entry.version == upsert.version);
-        let mut artifacts = existing
-            .map(|entry| entry.artifacts.clone())
-            .unwrap_or_default();
-        artifacts.insert(
-            upsert.target.clone(),
-            Artifact {
-                tarball: upsert.tarball.clone(),
-                sha256: upsert.sha256.clone(),
-            },
-        );
-        let mut channels = existing
-            .map(|entry| entry.channels.clone())
-            .unwrap_or_default();
-        channels.insert(upsert.channel, upsert.version.clone());
-        manifest
-            .assets
-            .retain(|entry| entry.package != upsert.package);
-        manifest.assets.push(AssetEntry {
-            package: upsert.package,
-            version: upsert.version,
-            artifacts,
-            channels,
-        });
-    } else {
-        let list = match upsert.kind {
-            ArtifactKind::Service => &mut manifest.services,
-            ArtifactKind::ComponentDriver => &mut manifest.drivers,
-            ArtifactKind::Tool => &mut manifest.tools,
-            ArtifactKind::Simulator => &mut manifest.simulators,
-            ArtifactKind::ComponentAssets => unreachable!("handled above"),
-        };
-        let existing = list
-            .iter()
-            .find(|entry| entry.package == upsert.package && entry.version == upsert.version);
-        let mut artifacts = existing
-            .map(|entry| entry.artifacts.clone())
-            .unwrap_or_default();
-        artifacts.insert(
-            upsert.target.clone(),
-            Artifact {
-                tarball: upsert.tarball.clone(),
-                sha256: upsert.sha256.clone(),
-            },
-        );
-        let mut channels = existing
-            .map(|entry| entry.channels.clone())
-            .unwrap_or_default();
-        channels.insert(upsert.channel, upsert.version.clone());
-        let entry = ArtifactEntry {
-            package: upsert.package.clone(),
-            version: upsert.version,
-            contracts: upsert.contracts,
-            config_schema: upsert.config_schema,
-            artifacts,
-            channels,
-            changed_contracts: upsert.changed_contracts,
-        };
-        list.retain(|existing| existing.package != upsert.package);
-        list.push(entry);
-    }
-
-    let manifest = manifest
-        .finalize()
-        .context("failed to finalize the local download manifest")?;
-    write_manifest_atomic(&path, &manifest)
-}
-
-/// Drop every local-manifest entry whose tarball(s) are no longer present
-/// under `cache/artifacts/`, and report how many entries were dropped. A
-/// no-op (returns `0`) if the local manifest does not exist. Used by
-/// `phoxal-cli cache clean` after clearing `cache/artifacts/`, and generally
-/// keeps the manifest honest if a tarball is ever removed by hand.
-pub fn prune_local_manifest() -> Result<usize> {
-    let path = crate::host_paths::local_manifest_path()?;
-    if !path.is_file() {
-        return Ok(0);
-    }
-    let manifest = read_catalog_path(&path)?;
-    let artifacts_dir = crate::host_paths::artifacts_dir()?;
-    let tarball_present = |artifacts: &BTreeMap<String, Artifact>| {
-        artifacts
-            .values()
-            .all(|artifact| artifacts_dir.join(&artifact.tarball).is_file())
-    };
-
-    let mut dropped = 0usize;
-    let mut retain_counting = |present: bool| {
-        if !present {
-            dropped += 1;
+    let candidates = catalog
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.package == package)
+        .collect::<Vec<_>>();
+    let selected = match pin {
+        Some(ArtifactPin::Version(pin)) => candidates
+            .into_iter()
+            .find(|artifact| normalize_version(&artifact.version) == normalize_version(&pin.0))
+            .ok_or_else(|| anyhow!("{package} version pin {} is absent from the full catalog index", pin.0))?,
+        Some(ArtifactPin::Sha256(pin)) => {
+            let digest = pin.0.strip_prefix("sha256:").unwrap_or(&pin.0);
+            let matches = candidates
+                .into_iter()
+                .filter(|artifact| {
+                    artifact
+                        .targets
+                        .get(target)
+                        .is_some_and(|blob| blob.sha256 == digest)
+                })
+                .collect::<Vec<_>>();
+            ensure!(
+                matches.len() == 1,
+                "{package} sha256 pin {} matched {} versions for target {target}; expected exactly one",
+                pin.0,
+                matches.len()
+            );
+            matches[0]
         }
-        present
+        Some(ArtifactPin::Path(_) | ArtifactPin::Git(_)) => {
+            bail!("path/git pins bypass catalog selection for {package}")
+        }
+        None => candidates
+            .into_iter()
+            .max_by(|left, right| compare_versions(&left.version, &right.version))
+            .ok_or_else(|| anyhow!(
+                "expected package {package} is absent from snapshot {} (channel head); phoxal-cli {} expects it. Upgrade with `phoxal-cli self upgrade` or switch channel",
+                catalog.build.tag,
+                env!("CARGO_PKG_VERSION")
+            ))?,
     };
-    let mut assets = manifest.assets;
-    assets.retain(|entry| retain_counting(tarball_present(&entry.artifacts)));
-    let mut services = manifest.services;
-    services.retain(|entry| retain_counting(tarball_present(&entry.artifacts)));
-    let mut drivers = manifest.drivers;
-    drivers.retain(|entry| retain_counting(tarball_present(&entry.artifacts)));
-    let mut tools = manifest.tools;
-    tools.retain(|entry| retain_counting(tarball_present(&entry.artifacts)));
-    let mut simulators = manifest.simulators;
-    simulators.retain(|entry| retain_counting(tarball_present(&entry.artifacts)));
-
-    if dropped == 0 {
-        return Ok(0);
-    }
-    let pruned = Manifest::new(assets, services, drivers, tools, simulators)
-        .finalize()
-        .context("failed to finalize the pruned local download manifest")?;
-    write_manifest_atomic(&path, &pruned)?;
-    Ok(dropped)
+    Ok(selected)
 }
 
-/// The number of entries the local download manifest currently holds, with no
-/// side effects - used by `phoxal-cli cache clean --dry-run` to preview how
-/// many entries a real clean would prune (a full `cache clean` always empties
-/// `cache/artifacts/` entirely, so every current entry would lose its
-/// tarball and be dropped).
-pub fn local_manifest_entry_count() -> Result<usize> {
-    let path = crate::host_paths::local_manifest_path()?;
-    if !path.is_file() {
-        return Ok(0);
-    }
-    let manifest = read_catalog_path(&path)?;
-    Ok(manifest.assets.len()
-        + manifest.services.len()
-        + manifest.drivers.len()
-        + manifest.tools.len()
-        + manifest.simulators.len())
+fn normalize_version(value: &str) -> &str {
+    value.strip_prefix('v').unwrap_or(value)
 }
 
-// ---------------------------------------------------------------------------
-// Test fixtures.
-//
-// These are plain `pub fn`s (not `#[cfg(test)]`) because the CLI's own
-// integration tests under `tests/` build the fixtures as an external crate.
-// `CatalogFixtureEntry` exists only so callers can keep writing a single
-// mixed-kind `vec![fixture_service_entry_for_tests(...), ...]` literal even
-// though the published `Manifest` itself requires five separately-typed
-// arrays.
-// ---------------------------------------------------------------------------
+fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    match (
+        semver::Version::parse(normalize_version(left)),
+        semver::Version::parse(normalize_version(right)),
+    ) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        _ => left.cmp(right),
+    }
+}
 
-/// One fixture entry, tagged with which of [`Manifest`]'s five arrays it
-/// belongs in. [`fixture_catalog_for_tests`] partitions a mixed `Vec` of
-/// these into the manifest's real shape.
+// Integration-test fixture helpers. These create only the current v0 wire
+// shape; the kind marker is fixture-only platform-model input.
 #[derive(Clone, Debug, PartialEq)]
-pub enum CatalogFixtureEntry {
-    Asset(AssetEntry),
-    Service(ArtifactEntry),
-    Driver(ArtifactEntry),
-    Tool(ArtifactEntry),
-    Simulator(ArtifactEntry),
+pub struct CatalogFixtureEntry {
+    pub kind: ArtifactKind,
+    pub artifact: Artifact,
 }
 
 impl CatalogFixtureEntry {
-    /// Borrow the inner [`ArtifactEntry`] mutably, for fixture call sites
-    /// that populate `artifacts`/`changed_contracts` after construction.
-    /// Panics for [`Self::Asset`], which wraps an [`AssetEntry`] instead -
-    /// use [`Self::as_asset_entry_mut`] there.
-    pub fn as_artifact_entry_mut(&mut self) -> &mut ArtifactEntry {
-        match self {
-            Self::Service(entry)
-            | Self::Driver(entry)
-            | Self::Tool(entry)
-            | Self::Simulator(entry) => entry,
-            Self::Asset(_) => panic!("fixture asset entry has no ArtifactEntry shape"),
-        }
+    pub fn as_artifact_entry_mut(&mut self) -> &mut Artifact {
+        &mut self.artifact
     }
 
-    /// Borrow the inner [`AssetEntry`] mutably. Panics for any non-asset
-    /// variant.
-    pub fn as_asset_entry_mut(&mut self) -> &mut AssetEntry {
-        match self {
-            Self::Asset(entry) => entry,
-            _ => panic!("fixture entry is not a component_assets entry"),
-        }
+    pub fn as_asset_entry_mut(&mut self) -> &mut Artifact {
+        &mut self.artifact
     }
 }
 
-pub fn fixture_catalog_for_tests(entries: Vec<CatalogFixtureEntry>) -> Manifest {
-    let mut assets = Vec::new();
-    let mut services = Vec::new();
-    let mut drivers = Vec::new();
-    let mut tools = Vec::new();
-    let mut simulators = Vec::new();
+pub fn fixture_catalog_for_tests(entries: Vec<CatalogFixtureEntry>) -> Catalog {
+    let mut artifacts = Vec::<Artifact>::new();
     for entry in entries {
-        match entry {
-            CatalogFixtureEntry::Asset(entry) => assets.push(entry),
-            CatalogFixtureEntry::Service(entry) => services.push(entry),
-            CatalogFixtureEntry::Driver(entry) => drivers.push(entry),
-            CatalogFixtureEntry::Tool(entry) => tools.push(entry),
-            CatalogFixtureEntry::Simulator(entry) => simulators.push(entry),
+        if let Some(existing) = artifacts.iter_mut().find(|artifact| {
+            artifact.package == entry.artifact.package && artifact.version == entry.artifact.version
+        }) {
+            existing.targets.extend(entry.artifact.targets);
+            if entry.artifact.assets.is_some() {
+                existing.assets = entry.artifact.assets;
+            }
+        } else {
+            artifacts.push(entry.artifact);
         }
     }
-    Manifest::new(assets, services, drivers, tools, simulators)
-        .finalize()
-        .expect("fixture manifest should serialize for its checksum")
+    let existing = artifacts
+        .iter()
+        .map(|artifact| artifact.package.clone())
+        .collect::<BTreeSet<_>>();
+    for (_, package) in OFFICIAL_SERVICES
+        .iter()
+        .chain(OFFICIAL_TOOLS)
+        .chain(OFFICIAL_SIMULATORS)
+    {
+        if existing.contains(*package) {
+            continue;
+        }
+        let mut targets = BTreeMap::new();
+        for target in [
+            crate::resolver::host_target_triple(),
+            "aarch64-unknown-linux-gnu".to_string(),
+            "aarch64-unknown-linux-musl".to_string(),
+            "x86_64-unknown-linux-gnu".to_string(),
+        ] {
+            targets.insert(target.clone(), fixture_blob(package, &target));
+        }
+        artifacts.push(Artifact {
+            package: (*package).to_string(),
+            version: "0.1.0".to_string(),
+            targets,
+            assets: None,
+        });
+    }
+    for component in ["ddsm115", "bench_camera", "catalog_motor"] {
+        let package = format!("phoxal/component-{component}");
+        if artifacts.iter().any(|artifact| artifact.package == package) {
+            continue;
+        }
+        let mut targets = BTreeMap::new();
+        for target in [
+            crate::resolver::host_target_triple(),
+            "aarch64-unknown-linux-gnu".to_string(),
+        ] {
+            targets.insert(target.clone(), fixture_blob(&package, &target));
+        }
+        artifacts.push(Artifact {
+            package: package.clone(),
+            version: "0.1.0".to_string(),
+            targets,
+            assets: Some(fixture_blob(&package, TARGET_INDEPENDENT_SCOPE)),
+        });
+    }
+    Catalog::new(
+        BuildProvenance {
+            tag: "build-test".to_string(),
+            run_number: 1,
+            run_id: 1,
+            commit: "test".to_string(),
+            created_at: "2026-07-10T00:00:00Z".to_string(),
+        },
+        artifacts,
+        Heads {
+            stable: "build-test".to_string(),
+            nightly: "build-test".to_string(),
+        },
+    )
 }
 
-fn fixture_channels(
-    channel: Channel,
+fn fixture_blob(package: &str, target: &str) -> Blob {
+    Blob {
+        url: format!(
+            "https://example.invalid/{}/{target}.tar.gz",
+            package.replace('/', "-")
+        ),
+        sha256: "0".repeat(64),
+        size: 1,
+    }
+}
+
+fn fixture_entry(
+    kind: ArtifactKind,
+    package: String,
     version: &str,
-) -> std::collections::BTreeMap<Channel, String> {
-    let mut channels = std::collections::BTreeMap::new();
-    channels.insert(channel, version.to_string());
-    channels
-}
-
-/// `published` controls whether the fixture entry carries a built
-/// [`Artifact`] for `target`: `true` inserts a deterministic placeholder
-/// tarball/sha256 (fixtures that need a specific asset/sha256 can overwrite
-/// `entry.artifacts` afterward via [`CatalogFixtureEntry::as_artifact_entry_mut`]);
-/// `false` leaves `artifacts` empty for `target`, mirroring a metadata-only /
-/// not-yet-published catalog entry.
-fn fixture_artifacts(
     target: &str,
     published: bool,
-    tag: &str,
-) -> std::collections::BTreeMap<String, Artifact> {
-    let mut artifacts = std::collections::BTreeMap::new();
+) -> CatalogFixtureEntry {
+    let mut targets = BTreeMap::new();
+    let mut assets = None;
     if published {
-        artifacts.insert(
-            target.to_string(),
-            Artifact {
-                tarball: format!("{tag}-{target}.tar.zst"),
-                sha256: "0".repeat(64),
-            },
-        );
+        if kind == ArtifactKind::ComponentAssets {
+            assets = Some(fixture_blob(&package, TARGET_INDEPENDENT_SCOPE));
+        } else {
+            targets.insert(target.to_string(), fixture_blob(&package, target));
+        }
     }
-    artifacts
+    CatalogFixtureEntry {
+        kind,
+        artifact: Artifact {
+            package,
+            version: version.to_string(),
+            targets,
+            assets,
+        },
+    }
 }
 
-/// No `generation` parameter (D1, X-tools slice): [`ArtifactEntry`] carries
-/// no `api_generation` field to populate one from anymore.
 pub fn fixture_service_entry_for_tests(
     name: &str,
     version: &str,
-    channel: Channel,
+    _channel: SelectionChannel,
     target: &str,
     published: bool,
-    contracts: Vec<Contract>,
+    _metadata: Vec<()>,
 ) -> CatalogFixtureEntry {
-    let package = format!("phoxal/service-{name}");
-    CatalogFixtureEntry::Service(ArtifactEntry {
-        package: package.clone(),
-        version: version.to_string(),
-        contracts,
-        config_schema: None,
-        artifacts: fixture_artifacts(target, published, &package.replace('/', "-")),
-        channels: fixture_channels(channel, version),
-        changed_contracts: Vec::new(),
-    })
+    fixture_entry(
+        ArtifactKind::Service,
+        format!("phoxal/service-{name}"),
+        version,
+        target,
+        published,
+    )
 }
 
 pub fn fixture_component_driver_entry_for_tests(
     name: &str,
     version: &str,
-    channel: Channel,
+    _channel: SelectionChannel,
     target: &str,
     published: bool,
-    contracts: Vec<Contract>,
+    _metadata: Vec<()>,
 ) -> CatalogFixtureEntry {
-    let package = format!("phoxal/component-{name}-driver");
-    CatalogFixtureEntry::Driver(ArtifactEntry {
-        package: package.clone(),
-        version: version.to_string(),
-        contracts,
-        config_schema: None,
-        artifacts: fixture_artifacts(target, published, &package.replace('/', "-")),
-        channels: fixture_channels(channel, version),
-        changed_contracts: Vec::new(),
-    })
+    fixture_entry(
+        ArtifactKind::ComponentDriver,
+        format!("phoxal/component-{name}"),
+        version,
+        target,
+        published,
+    )
 }
 
 pub fn fixture_component_assets_entry_for_tests(
     name: &str,
     version: &str,
-    channel: Channel,
+    _channel: SelectionChannel,
 ) -> CatalogFixtureEntry {
-    let package = format!("phoxal/component-{name}-assets");
-    CatalogFixtureEntry::Asset(AssetEntry {
-        package,
-        version: version.to_string(),
-        artifacts: std::collections::BTreeMap::new(),
-        channels: fixture_channels(channel, version),
-    })
+    fixture_entry(
+        ArtifactKind::ComponentAssets,
+        format!("phoxal/component-{name}"),
+        version,
+        TARGET_INDEPENDENT_SCOPE,
+        true,
+    )
 }
 
 pub fn fixture_tool_entry_for_tests(
     name: &str,
     version: &str,
-    channel: Channel,
+    _channel: SelectionChannel,
     target: &str,
     published: bool,
-    contracts: Vec<Contract>,
+    _metadata: Vec<()>,
 ) -> CatalogFixtureEntry {
-    let package = format!("phoxal/tool-{name}");
-    CatalogFixtureEntry::Tool(ArtifactEntry {
-        package: package.clone(),
-        version: version.to_string(),
-        contracts,
-        config_schema: None,
-        artifacts: fixture_artifacts(target, published, &package.replace('/', "-")),
-        channels: fixture_channels(channel, version),
-        changed_contracts: Vec::new(),
-    })
+    fixture_entry(
+        ArtifactKind::Tool,
+        format!("phoxal/tool-{name}"),
+        version,
+        target,
+        published,
+    )
 }
 
 pub fn fixture_simulator_entry_for_tests(
     name: &str,
     version: &str,
-    channel: Channel,
+    _channel: SelectionChannel,
     target: &str,
     published: bool,
-    contracts: Vec<Contract>,
+    _metadata: Vec<()>,
 ) -> CatalogFixtureEntry {
-    let package = format!("phoxal/simulator-{name}");
-    CatalogFixtureEntry::Simulator(ArtifactEntry {
-        package: package.clone(),
-        version: version.to_string(),
-        contracts,
-        config_schema: None,
-        artifacts: fixture_artifacts(target, published, &package.replace('/', "-")),
-        channels: fixture_channels(channel, version),
-        changed_contracts: Vec::new(),
-    })
+    fixture_entry(
+        ArtifactKind::Simulator,
+        format!("phoxal/simulator-{name}"),
+        version,
+        target,
+        published,
+    )
 }
 
-/// `role` is `"publish"`, `"subscribe"`, `"serve"`, or `"ask"` (D1: the
-/// catalog's `Contract` is now `{family, role}`, not `{family, schema_id}` -
-/// name identity alone decides compatibility, so there is no schema hash
-/// left to fixture).
-pub fn fixture_contract_for_tests(family: &str, role: &str) -> Contract {
-    Contract {
-        family: family.to_string(),
-        role: role.to_string(),
-    }
-}
+/// Fixture metadata is intentionally discarded because v0 never carries it.
+pub fn fixture_contract_for_tests(_family: &str, _role: &str) {}
 
-/// A placeholder built [`Artifact`] a fixture can insert directly into
-/// `entry.artifacts` (via [`CatalogFixtureEntry::as_artifact_entry_mut`] or
-/// [`CatalogFixtureEntry::as_asset_entry_mut`]) when it needs a specific
-/// tarball name / sha256 rather than the [`fixture_artifacts`] placeholder.
 #[must_use]
-pub fn fixture_artifact_for_tests(tarball: &str, sha256: &str) -> Artifact {
-    Artifact {
-        tarball: tarball.to_string(),
+pub fn fixture_blob_for_tests(url: &str, sha256: &str, size: u64) -> Blob {
+    Blob {
+        url: url.to_string(),
         sha256: sha256.to_string(),
+        size,
     }
+}
+
+#[must_use]
+pub fn fixture_artifact_for_tests(url: &str, sha256: &str) -> Blob {
+    fixture_blob_for_tests(url, sha256, 1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host_paths::test_support::ScratchPhoxalHome;
 
     #[test]
-    fn checksum_verification_rejects_edits() {
-        let mut manifest = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
+    fn stable_snapshot_url_is_validated() {
+        assert_eq!(
+            snapshot_catalog_url("build-20260710-42").unwrap(),
+            "https://github.com/phoxal/framework/releases/download/build-20260710-42/catalog.json"
+        );
+        assert!(snapshot_catalog_url("../bad").is_err());
+    }
+
+    #[test]
+    fn version_and_target_sha_pins_use_the_full_index() {
+        let target = "aarch64-unknown-linux-musl";
+        let mut old = fixture_service_entry_for_tests(
             "drive",
             "0.1.0",
-            Channel::Stable,
-            "aarch64-unknown-linux-gnu",
-            false,
-            vec![fixture_contract_for_tests(
-                "y2026_1::drive::Target",
-                "publish",
-            )],
-        )]);
-        manifest.services[0].package = "phoxal-service-edited".to_string();
-
-        let error = manifest.verify().expect_err("edited catalog should fail");
-        assert!(format!("{error:#}").contains("did not match computed"));
-    }
-
-    #[test]
-    fn artifact_name_strips_provider_kind_prefix_and_component_suffix() {
-        assert_eq!(
-            artifact_name(ArtifactKind::Service, "phoxal/service-drive"),
-            Some("drive")
+            SelectionChannel::Stable,
+            target,
+            true,
+            vec![],
+        );
+        old.artifact.targets.get_mut(target).unwrap().sha256 = "a".repeat(64);
+        let new = fixture_service_entry_for_tests(
+            "drive",
+            "0.2.0",
+            SelectionChannel::Stable,
+            target,
+            true,
+            vec![],
+        );
+        let catalog = fixture_catalog_for_tests(vec![old, new]);
+        let version = phoxal::model::robot::v0::ArtifactPin::Version(
+            phoxal::model::robot::v0::VersionPin("0.1.0".into()),
         );
         assert_eq!(
-            artifact_name(
-                ArtifactKind::ComponentAssets,
-                "phoxal/component-ddsm115-assets"
-            ),
-            Some("ddsm115")
+            select_artifact(&catalog, "phoxal/service-drive", Some(&version), target)
+                .unwrap()
+                .version,
+            "0.1.0"
+        );
+        let sha = phoxal::model::robot::v0::ArtifactPin::Sha256(
+            phoxal::model::robot::v0::Sha256Pin(format!("sha256:{}", "a".repeat(64))),
         );
         assert_eq!(
-            artifact_name(
-                ArtifactKind::ComponentDriver,
-                "phoxal/component-ddsm115-driver"
-            ),
-            Some("ddsm115")
+            select_artifact(&catalog, "phoxal/service-drive", Some(&sha), target)
+                .unwrap()
+                .version,
+            "0.1.0"
         );
-        assert_eq!(
-            artifact_name(
-                ArtifactKind::Simulator,
-                "phoxal/simulator-webots-supervisor"
-            ),
-            Some("webots-supervisor")
-        );
-    }
-
-    #[test]
-    fn local_manifest_upsert_merges_targets_for_same_package_version() -> Result<()> {
-        let _guard = ScratchPhoxalHome::new()?;
-        let first = LocalManifestUpsert {
-            kind: ArtifactKind::Service,
-            package: "phoxal/service-drive".to_string(),
-            version: "0.1.0".to_string(),
-            contracts: Vec::new(),
-            config_schema: None,
-            changed_contracts: Vec::new(),
-            channel: Channel::Stable,
-            target: "aarch64-unknown-linux-gnu".to_string(),
-            tarball: "phoxal-service-drive-v0.1.0-aarch64-unknown-linux-gnu.tar.zst".to_string(),
-            sha256: "0".repeat(64),
-        };
-        let mut second = first.clone();
-        second.target = "x86_64-unknown-linux-gnu".to_string();
-        second.tarball = "phoxal-service-drive-v0.1.0-x86_64-unknown-linux-gnu.tar.zst".to_string();
-        second.sha256 = "1".repeat(64);
-
-        upsert_local_manifest_entry(first)?;
-        upsert_local_manifest_entry(second)?;
-
-        let manifest = load_local_manifest()?;
-        assert_eq!(manifest.services.len(), 1);
-        let entry = &manifest.services[0];
-        assert_eq!(entry.package, "phoxal/service-drive");
-        assert_eq!(entry.artifacts.len(), 2);
-        assert!(entry.artifacts.contains_key("aarch64-unknown-linux-gnu"));
-        assert!(entry.artifacts.contains_key("x86_64-unknown-linux-gnu"));
-        Ok(())
     }
 }

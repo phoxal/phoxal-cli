@@ -30,7 +30,7 @@ use crate::host_paths;
 
 /// The staged Webots root itself: `~/.phoxal/run/simulation/webots`.
 pub fn root() -> Result<PathBuf> {
-    Ok(host_paths::run_dir()?.join("simulation").join("webots"))
+    host_paths::webots_dir()
 }
 
 /// Where generated robot/component PROTOs are written for this play.

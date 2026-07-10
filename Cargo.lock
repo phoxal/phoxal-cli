@@ -2762,11 +2762,12 @@ dependencies = [
 [[package]]
 name = "phoxal"
 version = "0.30.0"
-source = "git+https://github.com/phoxal/framework?branch=feat%2Fapi-refactor-finish#e1c1a9b858f3c71b7f1674048b7c6ddeaa690f43"
+source = "git+https://github.com/phoxal/framework?branch=main#e0258db8fb398a3d6a05ee7e74daa4c57152aad0"
 dependencies = [
  "anyhow",
  "arc-swap",
  "clap",
+ "const_format",
  "derive-new",
  "dotenvy",
  "nalgebra",
@@ -2779,7 +2780,6 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "serde_yaml",
- "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2791,7 +2791,7 @@ dependencies = [
 [[package]]
 name = "phoxal-api"
 version = "0.19.5"
-source = "git+https://github.com/phoxal/framework?branch=feat%2Fapi-refactor-finish#e1c1a9b858f3c71b7f1674048b7c6ddeaa690f43"
+source = "git+https://github.com/phoxal/framework?branch=main#e0258db8fb398a3d6a05ee7e74daa4c57152aad0"
 dependencies = [
  "phoxal-bus",
  "phoxal-macros",
@@ -2802,7 +2802,7 @@ dependencies = [
 [[package]]
 name = "phoxal-bus"
 version = "0.20.1"
-source = "git+https://github.com/phoxal/framework?branch=feat%2Fapi-refactor-finish#e1c1a9b858f3c71b7f1674048b7c6ddeaa690f43"
+source = "git+https://github.com/phoxal/framework?branch=main#e0258db8fb398a3d6a05ee7e74daa4c57152aad0"
 dependencies = [
  "arc-swap",
  "rmp-serde",
@@ -2839,7 +2839,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2 0.11.0",
+ "sha2",
  "tar",
  "tempfile",
  "tokio",
@@ -2862,7 +2862,7 @@ dependencies = [
 [[package]]
 name = "phoxal-macros"
 version = "0.20.0"
-source = "git+https://github.com/phoxal/framework?branch=feat%2Fapi-refactor-finish#e1c1a9b858f3c71b7f1674048b7c6ddeaa690f43"
+source = "git+https://github.com/phoxal/framework?branch=main#e0258db8fb398a3d6a05ee7e74daa4c57152aad0"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3787,17 +3787,6 @@ name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
-]
-
-[[package]]
-name = "sha2"
-version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
