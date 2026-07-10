@@ -264,6 +264,10 @@ fn print_human(summary: &UpdateSummary) -> Result<()> {
 }
 
 #[cfg(unix)]
+// `statvfs` field widths vary by platform (`f_bavail` is u32 on macOS, u64 on
+// Linux), so the `u64::from` below is a real widening on some targets and a
+// no-op on others; allow the lint rather than pick a cast that only moves it.
+#[allow(clippy::useless_conversion)]
 fn free_disk_bytes(path: &Path) -> Result<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
