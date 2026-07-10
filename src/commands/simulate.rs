@@ -299,6 +299,8 @@ fn prepare_with_mode(
 ) -> Result<SimPlan> {
     let resolved = resolve_project(project_start, options.clone(), mode)?;
     if mode == SimulateMode::Live {
+        let descriptors = crate::native_artifacts::descriptors_for(&resolved.resolved, true, true)?;
+        crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, None)?;
         crate::native_artifacts::stage_component_bundles_into_robot_root(
             &resolved.project_root,
             &resolved.project_root,

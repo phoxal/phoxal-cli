@@ -220,6 +220,8 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
             ..ResolveOptions::default()
         },
     )?;
+    let descriptors = crate::native_artifacts::descriptors_for(&resolved, false, true)?;
+    crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
 
     // Stage every resolved component's asset bundle into the robot root
     // (`project_root` for `run`) so `PHOXAL_ROBOT_ROOT`-relative asset

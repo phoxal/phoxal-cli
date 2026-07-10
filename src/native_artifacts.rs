@@ -139,56 +139,35 @@ pub fn stage_component_package(
 pub fn stage_resolved_artifacts(
     ui: Option<&Ui>,
     resolved: &crate::resolver::ResolvedRobot,
-    mode: ProvisioningMode,
+    _mode: ProvisioningMode,
 ) -> Result<usize> {
-    let mut count = 0;
-    for runtime in &resolved.platform_runtimes {
-        if stage_runtime(ui, runtime, mode)?.is_some() {
-            count += 1;
-        }
-    }
-    for simulator in &resolved.simulators {
-        if stage_runtime(ui, simulator, mode)?.is_some() {
-            count += 1;
-        }
-    }
-    for tool in &resolved.tools {
-        if stage_tool(ui, tool, mode)?.is_some() {
-            count += 1;
-        }
-    }
-    // One component id may back several instances (`left_drive`/`right_drive`
-    // both resolve `phoxal/component-ddsm115-*`); stage each distinct package
-    // once. Path/Git-sourced packages have no `catalog_runtime` and are
-    // skipped here - they already have a local source directory.
-    let mut staged_packages = std::collections::BTreeSet::new();
-    for component in &resolved.components {
-        if staged_packages.insert(component.assets.package.clone())
-            && stage_component_package(ui, &component.assets, mode)?.is_some()
-        {
-            count += 1;
-        }
-        if let Some(driver) = &component.driver
-            && staged_packages.insert(driver.package.clone())
-            && stage_component_package(ui, driver, mode)?.is_some()
-        {
-            count += 1;
-        }
-    }
-    Ok(count)
+    let descriptors = descriptors_for(resolved, true, true)?;
+    prepare_descriptors_with_preflight(&descriptors, ui)?;
+    Ok(descriptors.len())
 }
 
 pub fn descriptors(
     resolved: &crate::resolver::ResolvedRobot,
 ) -> Result<Vec<NativeArtifactDescriptor>> {
+    descriptors_for(resolved, true, true)
+}
+
+pub fn descriptors_for(
+    resolved: &crate::resolver::ResolvedRobot,
+    include_simulators: bool,
+    include_component_assets: bool,
+) -> Result<Vec<NativeArtifactDescriptor>> {
     let mut descriptors = Vec::new();
-    for runtime in resolved
-        .platform_runtimes
-        .iter()
-        .chain(&resolved.simulators)
-    {
+    for runtime in &resolved.platform_runtimes {
         if let Some(descriptor) = NativeArtifactDescriptor::from_runtime(runtime)? {
             descriptors.push(descriptor);
+        }
+    }
+    if include_simulators {
+        for runtime in &resolved.simulators {
+            if let Some(descriptor) = NativeArtifactDescriptor::from_runtime(runtime)? {
+                descriptors.push(descriptor);
+            }
         }
     }
     for tool in &resolved.tools {
@@ -198,7 +177,11 @@ pub fn descriptors(
     }
     let mut components = std::collections::BTreeSet::new();
     for component in &resolved.components {
-        for package in std::iter::once(&component.assets).chain(component.driver.as_ref()) {
+        let packages = component
+            .driver
+            .iter()
+            .chain(include_component_assets.then_some(&component.assets));
+        for package in packages {
             if let Some(runtime) = &package.catalog_runtime
                 && let Some(descriptor) = NativeArtifactDescriptor::from_runtime(runtime)?
                 && components.insert((
@@ -215,6 +198,86 @@ pub fn descriptors(
         (&left.package_id, &left.target).cmp(&(&right.package_id, &right.target))
     });
     Ok(descriptors)
+}
+
+pub fn prepare_descriptors_with_preflight(
+    descriptors: &[NativeArtifactDescriptor],
+    ui: Option<&Ui>,
+) -> Result<()> {
+    let actionable = descriptors
+        .iter()
+        .filter(|descriptor| should_prepare_descriptor(descriptor))
+        .cloned()
+        .collect::<Vec<_>>();
+    let missing = actionable
+        .iter()
+        .filter(|descriptor| artifact_exec_dir(descriptor).is_ok_and(|path| !path.is_dir()))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        let total_bytes = missing
+            .iter()
+            .map(|descriptor| descriptor.size)
+            .sum::<u64>();
+        let destination = crate::host_paths::binaries_dir()?;
+        let free = free_disk_bytes(&destination).ok();
+        if let Some(ui) = ui {
+            ui.info(format!(
+                "artifact preflight: {} package target(s), {} bytes, destination {}",
+                missing.len(),
+                total_bytes,
+                destination.display()
+            ));
+            if let Some(free) = free {
+                ui.info(format!("free disk: {free} bytes"));
+            }
+        }
+        if let Some(free) = free
+            && total_bytes > free
+        {
+            bail!(
+                "artifact download needs {total_bytes} bytes but only {free} bytes are free at {}; run `phoxal cache clean --binaries` or free disk space",
+                destination.display()
+            );
+        }
+    }
+    if actionable.is_empty() {
+        return Ok(());
+    }
+    let _lock = ArtifactStoreLock::shared()?;
+    prepare_and_activate_descriptors(&actionable, ui)
+}
+
+fn should_prepare_descriptor(descriptor: &NativeArtifactDescriptor) -> bool {
+    if descriptor.url.is_empty() {
+        return false;
+    }
+    #[cfg(test)]
+    if descriptor.url.starts_with("https://example.invalid/") {
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+fn free_disk_bytes(path: &Path) -> Result<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let existing = path
+        .ancestors()
+        .find(|candidate| candidate.exists())
+        .context("artifact destination has no existing ancestor")?;
+    let path = CString::new(existing.as_os_str().as_bytes())?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let stats = unsafe { stats.assume_init() };
+    Ok(u64::from(stats.f_bavail).saturating_mul(stats.f_frsize))
+}
+
+#[cfg(not(unix))]
+fn free_disk_bytes(_path: &Path) -> Result<u64> {
+    bail!("free-disk reporting is unavailable on this platform")
 }
 
 /// Stage every resolved component's `component_assets` bundle

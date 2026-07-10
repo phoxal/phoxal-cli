@@ -273,6 +273,8 @@ fn run(
             tool_target_triple: target_triple,
         },
     )?;
+    let descriptors = crate::native_artifacts::descriptors_for(&resolved, false, false)?;
+    crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
     let platform_refs = check_artifact_refs_from_resolved(&resolved);
     ensure_catalog_availability(&resolved)?;
     let tool_participants = tool_participants_from_resolved(&resolved)?;

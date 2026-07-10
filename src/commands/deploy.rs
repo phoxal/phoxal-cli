@@ -786,6 +786,10 @@ fn prepare_deploy(
             tool_target_triple: Some(target.official_triple.clone()),
         },
     )?;
+    if !options.dry_run {
+        let descriptors = crate::native_artifacts::descriptors_for(&resolved, false, true)?;
+        crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
+    }
 
     let all_source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
