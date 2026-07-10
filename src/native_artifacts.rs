@@ -744,7 +744,7 @@ fn unpack_with_system_tar(asset_path: &Path, dest: &Path) -> Result<()> {
 fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
-        .context("artifact cache path did not have a parent directory")?;
+        .context("artifact store path did not have a parent directory")?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     let mut partial = tempfile::Builder::new()
         .prefix(".native-artifact-")

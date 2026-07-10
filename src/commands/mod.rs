@@ -89,9 +89,11 @@ pub(crate) fn catalog_or_vendored(
     match loaded {
         Ok(catalog) => Ok(catalog),
         Err(error) if crate::host_paths::binaries_dir().is_ok_and(|path| path.is_dir()) => {
-            eprintln!(
-                "warning: catalog unreachable, continuing with project-vendored files: {error:#}"
-            );
+            if std::env::var_os("PHOXAL_QUIET").is_none() {
+                eprintln!(
+                    "warning: catalog unreachable, continuing with project-vendored files: {error:#}"
+                );
+            }
             Ok(None)
         }
         Err(error) => Err(error),

@@ -56,6 +56,7 @@ pub struct CheckOptions {
     pub overlays: Vec<String>,
     pub target: Option<String>,
     pub emit_update_notice: bool,
+    pub update_notice_json: bool,
 }
 
 /// The CLI's own participant-report shape: known artifact identity (never
@@ -132,7 +133,8 @@ impl CheckCmd {
             catalog_source: app.catalog_source.clone(),
             overlays: self.env.clone(),
             target: self.target.clone(),
-            emit_update_notice: self.message_format == MessageFormat::Human,
+            emit_update_notice: true,
+            update_notice_json: self.message_format == MessageFormat::Json,
         };
         let ui = app.ui;
         let result = tokio::task::spawn_blocking(move || run(&project_root, options, &ui))
@@ -264,6 +266,7 @@ fn run(
         ResolveOptions {
             refresh_channel_head: false,
             emit_update_notice: options.emit_update_notice,
+            update_notice_json: options.update_notice_json,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             official_target_triple: target_triple.clone(),
@@ -312,10 +315,10 @@ fn run(
         },
         |artifact_ref| {
             if let Some(runtime) = official_by_ref.get(artifact_ref) {
-                return fetch_emit_apis_from_native_artifact(runtime);
+                return extract_emit_apis_from_staged_runtime(runtime);
             }
             if let Some(tool) = tools_by_ref.get(artifact_ref) {
-                return fetch_emit_apis_from_native_tool(tool);
+                return extract_emit_apis_from_staged_tool(tool);
             }
             Err(anyhow!(
                 "resolved official artifact {artifact_ref} is not in the catalog"
@@ -538,7 +541,7 @@ pub(crate) fn component_driver_platform_refs_from_resolved(
 /// Every distinct Catalog-sourced component driver's `catalog_runtime`, keyed
 /// by its `artifact_ref` - the same shape as the `official_by_ref` map every
 /// caller already builds from `resolved.platform_runtimes` for the shared
-/// `fetch_emit_apis_from_native_artifact` closure. Callers merge this in so
+/// `extract_emit_apis_from_staged_runtime` closure. Callers merge this in so
 /// one fetch closure resolves services, simulators, AND catalog component
 /// drivers identically.
 pub(crate) fn component_driver_runtimes_by_ref(
@@ -973,7 +976,7 @@ fn validate_json_schema(schema: &Value, value: &Value, path: &str) -> Vec<String
         .collect()
 }
 
-pub(crate) fn fetch_emit_apis_from_native_artifact(
+pub(crate) fn extract_emit_apis_from_staged_runtime(
     runtime: &ResolvedPlatformRuntime,
 ) -> Result<RawEmitApis> {
     #[cfg(test)]
@@ -1006,7 +1009,7 @@ pub(crate) fn fetch_emit_apis_from_native_artifact(
     ))
 }
 
-pub(crate) fn fetch_emit_apis_from_native_tool(
+pub(crate) fn extract_emit_apis_from_staged_tool(
     tool: &crate::resolver::ResolvedTool,
 ) -> Result<RawEmitApis> {
     let binary = crate::native_artifacts::stage_tool(
@@ -1143,7 +1146,7 @@ fn env_key(value: &str) -> String {
 /// never cached. Custom / `path:` / git-sourced participants are
 /// re-evaluated every invocation (docs: the old `cache/emit-apis/` disk cache
 /// is gone; official artifacts already skip this entirely, reading contracts
-/// straight off the catalog - see [`fetch_emit_apis_from_native_artifact`]).
+/// straight off the catalog - see [`extract_emit_apis_from_staged_runtime`]).
 /// The build no longer runs the compiled binary (the `emit-apis` runtime
 /// subcommand this used to execute is gone): it extracts the participant's
 /// compiled-in `#[derive(phoxal::Api)]` metadata section straight from the

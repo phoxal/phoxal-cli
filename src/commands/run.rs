@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use crate::AppContext;
 use crate::commands::MessageFormat;
 use crate::commands::check::{
-    CheckGraphContext, build_emit_apis_from_source, fetch_emit_apis_from_native_artifact,
+    CheckGraphContext, build_emit_apis_from_source, extract_emit_apis_from_staged_runtime,
     platform_artifact_refs_from_resolved, run_check_with_context,
     source_participants_from_resolved,
 };
@@ -213,7 +213,8 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         project_root,
         catalog.as_ref(),
         ResolveOptions {
-            emit_update_notice: options.message_format == MessageFormat::Human,
+            emit_update_notice: true,
+            update_notice_json: options.message_format == MessageFormat::Json,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             ..ResolveOptions::default()
@@ -259,7 +260,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
             let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
                 anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
             })?;
-            fetch_emit_apis_from_native_artifact(runtime)
+            extract_emit_apis_from_staged_runtime(runtime)
         },
         |_| unreachable!("run does not check site tools as graph participants"),
         build_emit_apis_from_source,

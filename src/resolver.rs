@@ -27,9 +27,12 @@ pub struct ResolveOptions {
     /// Move unpinned channel selections to the supplied head snapshot. Only
     /// `phoxal update` sets this; normal commands prefer `active` symlinks.
     pub refresh_channel_head: bool,
-    /// Emit the once-per-invocation human update notice. JSON/watch callers
-    /// disable this to keep machine output clean and avoid repeated notices.
+    /// Emit the once-per-invocation artifact update notice. Watch rebuilds
+    /// disable this so the top-level invocation never repeats it.
     pub emit_update_notice: bool,
+    /// Serialize the notice as an `updates_available` JSON object on stderr.
+    /// Human mode uses a concise warning instead.
+    pub update_notice_json: bool,
     /// Resolve git component `tag` → `commit`. A `tag` that is already a full
     /// commit SHA resolves with no network; a tag/branch ref is resolved live
     /// via `git ls-remote`. Flows that need to locate/stage component driver
@@ -56,6 +59,7 @@ impl Default for ResolveOptions {
         Self {
             refresh_channel_head: false,
             emit_update_notice: true,
+            update_notice_json: false,
             resolve_source_commits: true,
             resolve_component_asset_commits: true,
             official_target_triple: None,
@@ -645,7 +649,10 @@ pub fn resolve(
         && std::env::var_os("PHOXAL_QUIET").is_none()
         && let Some(catalog) = catalog
     {
-        warn_about_newer_versions(robot, catalog, &target, &tool_target);
+        emit_newer_versions_notice(
+            warn_about_newer_versions(robot, catalog, &target, &tool_target),
+            options.update_notice_json,
+        );
     }
 
     let mut platform_runtimes = match catalog {
@@ -1119,7 +1126,12 @@ fn vendored_runtime(
     })
 }
 
-fn warn_about_newer_versions(robot: &Robot, catalog: &Catalog, target: &str, tool_target: &str) {
+fn warn_about_newer_versions(
+    robot: &Robot,
+    catalog: &Catalog,
+    target: &str,
+    tool_target: &str,
+) -> Vec<String> {
     let mut newer = Vec::new();
     for (_, package) in OFFICIAL_SERVICES {
         collect_newer(robot, catalog, package, target, &mut newer);
@@ -1136,11 +1148,24 @@ fn warn_about_newer_versions(robot: &Robot, catalog: &Catalog, target: &str, too
     }
     newer.sort();
     newer.dedup();
-    if !newer.is_empty() {
-        eprintln!(
+    newer
+}
+
+fn emit_newer_versions_notice(newer: Vec<String>, json: bool) {
+    if newer.is_empty() {
+        return;
+    }
+    eprintln!("{}", update_notice_message(&newer, json));
+}
+
+fn update_notice_message(newer: &[String], json: bool) -> String {
+    if json {
+        serde_json::json!({ "updates_available": newer }).to_string()
+    } else {
+        format!(
             "warning: newer artifact versions available: {}; run `phoxal update`",
             newer.join(", ")
-        );
+        )
     }
 }
 
@@ -2042,5 +2067,13 @@ services:
         };
 
         assert_eq!(runtime.artifact_ref(), "service-asset:y2026_1-stable");
+    }
+
+    #[test]
+    fn json_update_notice_has_a_structured_updates_available_field() {
+        let updates = vec!["phoxal/service-drive 1.0.0 -> 1.1.0".to_string()];
+        let value: serde_json::Value =
+            serde_json::from_str(&update_notice_message(&updates, true)).unwrap();
+        assert_eq!(value["updates_available"][0], updates[0]);
     }
 }

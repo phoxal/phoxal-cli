@@ -2,16 +2,14 @@
 //! for ANY `robot.yaml` `artifacts.pins` entry pinned to a git source
 //! (`phoxal::model::robot::v0::ArtifactPin::Git`), not just components.
 //!
-//! Lives under `cache/git-artifacts/<hash>` (see
+//! Lives under the project's `.phoxal/git/<hash>` (see
 //! [`crate::host_paths::git_artifacts_dir`]), one directory per distinct
 //! `(url, rev)` pair so the same pin never spawns more than one checkout.
 //!
 //! A git-sourced artifact is a LOCAL source, exactly like a `path:` pin: it
-//! is never written to `cache/phoxal-artifacts.json` (the local download
-//! manifest only records officially-published, catalog-downloaded tarballs),
-//! and its contracts are (re)computed live every run - by building it and
-//! reading its compiled-in `#[derive(phoxal::Api)]` metadata section, never
-//! by executing it - and are never cached (see
+//! never enters the official binary store. Its contracts are recomputed live
+//! every run by building it and reading its compiled-in
+//! `#[derive(phoxal::Api)]` metadata section, never by executing it (see
 //! `commands::check::build_emit_apis_from_source`).
 
 use std::path::{Path, PathBuf};
@@ -43,7 +41,7 @@ pub fn cache_dir(url: &str, rev: &str) -> Result<PathBuf> {
 }
 
 /// Ensure a shallow checkout of `url` at commit `rev` exists under
-/// `cache/git-artifacts/<hash>`, cloning it if missing; idempotent - reuses an
+/// `.phoxal/git/<hash>`, cloning it if missing; idempotent - reuses an
 /// existing checkout without touching the network again. `rev` must already
 /// be a resolved full commit SHA (see `resolver::resolve_git_ref`): the
 /// checkout is content-addressed by the exact commit, so an unresolved

@@ -25,7 +25,7 @@ use crate::catalog::ArtifactKind;
 use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
-    fetch_emit_apis_from_native_artifact, platform_artifact_refs_from_resolved,
+    extract_emit_apis_from_staged_runtime, platform_artifact_refs_from_resolved,
     run_check_with_context, source_participants_from_resolved,
 };
 use crate::component_driver::component_driver_crate_dir;
@@ -778,7 +778,8 @@ fn prepare_deploy(
         catalog.as_ref(),
         ResolveOptions {
             refresh_channel_head: false,
-            emit_update_notice: options.message_format == MessageFormat::Human,
+            emit_update_notice: true,
+            update_notice_json: options.message_format == MessageFormat::Json,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             official_target_triple: Some(target.official_triple.clone()),
@@ -821,7 +822,7 @@ fn prepare_deploy(
             let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
                 anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
             })?;
-            fetch_emit_apis_from_native_artifact(runtime)
+            extract_emit_apis_from_staged_runtime(runtime)
         },
         |_| unreachable!("deploy does not check site tools as graph participants"),
         build_emit_apis_from_source,
@@ -4634,13 +4635,9 @@ robot:
         }
     }
 
-    /// Points `PHOXAL_HOME` (and therefore the native-artifact cache) at a
-    /// scratch directory so this test's "nothing cached yet" assumption is
-    /// exact, and the cache location is process-isolated for the duration
-    /// of this guard. Shared crate-wide (`host_paths::test_support`) since
-    /// `PHOXAL_HOME` is process-global and `cargo test` runs unit tests
-    /// concurrently; every test that mutates it must serialize on the same
-    /// lock.
+    /// Selects a scratch project-local store so this test's "nothing vendored
+    /// yet" assumption is exact. Shared crate-wide because the project-root
+    /// test override is process-global and unit tests run concurrently.
     use crate::host_paths::test_support::ScratchPhoxalHome;
 
     #[test]

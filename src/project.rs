@@ -218,11 +218,8 @@ impl Project {
         self.dev_robot_dir(robot_hostname).join("logs")
     }
 
-    // The Webots simulation staging tree used to live here
-    // (`dist/simulator/webots/...`, project-scoped). It moved to a single,
-    // home-based, per-play scratch area under `~/.phoxal/run/simulation/webots`
-    // - see `webots_stage_root` - since it is synthesized fresh every play and
-    // was never meant to be a durable, project-scoped artifact.
+    // Webots' generated per-play staging lives under
+    // `<project>/.phoxal/webots`; see `webots_stage_root`.
 }
 
 fn normalize_existing_path(path: &Path) -> Result<PathBuf> {
