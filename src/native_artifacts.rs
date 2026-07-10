@@ -90,12 +90,9 @@ impl NativeArtifactDescriptor {
         }))
     }
 
-    /// The filesystem-safe projection of the provider-qualified package id
-    /// (`phoxal/service-drive` -> `phoxal-service-drive`) used for cache
-    /// directory names, release tags, and asset file names.
-    #[must_use]
-    pub fn package(&self) -> String {
-        self.package_id.replace('/', "-")
+    /// The validated, collision-free local directory key for this package.
+    pub fn package(&self) -> Result<String> {
+        package_storage_key(&self.package_id)
     }
 }
 
@@ -481,13 +478,19 @@ pub fn artifact_tarball_path(descriptor: &NativeArtifactDescriptor) -> Result<Pa
 
 /// Where `descriptor` is unpacked in the project-local binary store.
 pub fn artifact_exec_dir(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
+    validate_path_segment("artifact version", &descriptor.version)?;
     Ok(artifact_target_dir(descriptor)?.join(&descriptor.version))
 }
 
 fn artifact_target_dir(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
+    artifact_target_dir_for(&descriptor.package_id, &descriptor.target)
+}
+
+pub fn artifact_target_dir_for(package: &str, target: &str) -> Result<PathBuf> {
+    validate_path_segment("artifact target", target)?;
     Ok(crate::host_paths::binaries_dir()?
-        .join(descriptor.package())
-        .join(sanitize_path_segment(&descriptor.target)))
+        .join(package_storage_key(package)?)
+        .join(target))
 }
 
 pub fn active_version(descriptor: &NativeArtifactDescriptor) -> Result<Option<String>> {
@@ -509,7 +512,7 @@ pub fn prune_inactive_versions(current: &[NativeArtifactDescriptor]) -> Result<(
     let packages = current
         .iter()
         .map(NativeArtifactDescriptor::package)
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<Result<std::collections::BTreeSet<_>>>()?;
     walk_artifact_targets(true, Some(&packages))
 }
 
@@ -722,17 +725,29 @@ fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("failed to finalize {}", path.display()))
 }
 
-fn sanitize_path_segment(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
+fn package_storage_key(package: &str) -> Result<String> {
+    let segments = package.split('/').collect::<Vec<_>>();
+    anyhow::ensure!(
+        segments.len() == 2,
+        "artifact package must be provider-qualified as <provider>/<name>: {package:?}"
+    );
+    for segment in &segments {
+        validate_path_segment("artifact package segment", segment)?;
+    }
+    Ok(format!("{}%2F{}", segments[0], segments[1]))
+}
+
+fn validate_path_segment(label: &str, value: &str) -> Result<()> {
+    anyhow::ensure!(
+        !value.is_empty()
+            && value != "."
+            && value != ".."
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'+')
+            }),
+        "{label} contains unsafe path characters: {value:?}"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -778,6 +793,27 @@ mod tests {
         assert_eq!((retained, pruned), (1, 1));
         assert!(artifact_exec_dir(&new)?.is_dir());
         assert!(!artifact_exec_dir(&old)?.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn local_identity_is_validated_and_collision_free() -> Result<()> {
+        assert_eq!(
+            package_storage_key("phoxal/service-drive")?,
+            "phoxal%2Fservice-drive"
+        );
+        assert_ne!(
+            package_storage_key("phoxal/service-drive")?,
+            "phoxal-service-drive"
+        );
+        assert!(package_storage_key("../service-drive").is_err());
+        assert!(package_storage_key("phoxal/service/drive").is_err());
+
+        let mut invalid = descriptor("../escape", b"bytes");
+        assert!(artifact_exec_dir(&invalid).is_err());
+        invalid.version = "1.0.0".to_string();
+        invalid.target = "../../escape".to_string();
+        assert!(artifact_exec_dir(&invalid).is_err());
         Ok(())
     }
 }

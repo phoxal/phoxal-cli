@@ -1091,10 +1091,7 @@ fn vendored_runtime(
     channel: SelectionChannel,
     target: &str,
 ) -> Result<ResolvedPlatformRuntime> {
-    let active = crate::host_paths::binaries_dir()?
-        .join(filesystem_safe_package_name(package))
-        .join(target)
-        .join("active");
+    let active = crate::native_artifacts::artifact_target_dir_for(package, target)?.join("active");
     let version = fs::read_link(&active)
         .with_context(|| {
             format!(
@@ -1160,13 +1157,9 @@ fn collect_newer(
     let Ok(selected) = select_artifact(catalog, package, None, target) else {
         return;
     };
-    let active = crate::host_paths::binaries_dir()
+    let active = crate::native_artifacts::artifact_target_dir_for(package, target)
         .ok()
-        .map(|root| {
-            root.join(filesystem_safe_package_name(package))
-                .join(target)
-                .join("active")
-        })
+        .map(|root| root.join("active"))
         .and_then(|path| fs::read_link(path).ok())
         .and_then(|path| {
             path.file_name()
