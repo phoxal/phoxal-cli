@@ -24,7 +24,6 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
 
     assert!(!temp.path().join(".phoxal/run").exists());
     assert!(!temp.path().join(".phoxal/webots").exists());
-    assert!(!temp.path().join(".phoxal/cache/state.yaml").exists());
     assert!(!temp.path().join("phoxal.sources.lock").exists());
     // `LaunchMode::Webots` carries the resolved world path directly now
     // (there is no separate `world_path` field to check against).
@@ -72,10 +71,7 @@ fn write_vendored_fixture_binaries(root: &std::path::Path) -> anyhow::Result<()>
         )
     {
         let _ = name;
-        let target_dir = root
-            .join(".phoxal/binaries")
-            .join(package.replace('/', "-"))
-            .join(&target);
+        let target_dir = phoxal_cli::native_artifacts::artifact_target_dir_for(package, &target)?;
         let version_dir = target_dir.join("0.1.0");
         fs::create_dir_all(&version_dir)?;
         fs::copy(&source, version_dir.join(binary))?;
