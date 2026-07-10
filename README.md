@@ -99,7 +99,6 @@ phoxal-cli simulate <world>
 
 1. `<project>/worlds/<world>.wbt`
 2. `<project>/<world>` (path-as-given, e.g. `worlds/foo.wbt`)
-3. `~/.phoxal/worlds/<world>.wbt` (shared worlds across robots)
 
 Example: `phoxal-cli simulate default` finds `worlds/default.wbt` in the project.
 

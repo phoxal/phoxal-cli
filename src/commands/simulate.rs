@@ -65,7 +65,7 @@ pub(crate) fn simulator_controller_provider_id(robot_id: &str) -> String {
 pub struct Simulate {
     #[arg(
         value_name = "WORLD",
-        help = "World file or bare name (e.g. `default`, or `worlds/foo.wbt`). Resolved against <project>/worlds/<world>.wbt, then <project>/<world>, then ~/.phoxal/worlds/<world>.wbt."
+        help = "World file or bare name (e.g. `default`, or `worlds/foo.wbt`). Resolved against <project>/worlds/<world>.wbt, then <project>/<world>."
     )]
     pub world: String,
     #[arg(
@@ -928,9 +928,7 @@ fn stage_and_prepare_webots_spec(app: &AppContext, sim: &SimPlan) -> Result<Part
     let webots_path = crate::host_doctor::webots_executable_path()
         .map_err(|error| anyhow!("{error}"))
         .context("failed to locate the Webots executable for live simulate")?;
-    // The staged root now lives under `~/.phoxal/run/...` rather than the
-    // project tree, so print it explicitly - it is no longer discoverable by
-    // just looking under the project.
+    // Print the generated project-local staging root explicitly.
     app.ui.info(format!(
         "staged simulation to {}",
         webots_stage_root::root()?.display()
