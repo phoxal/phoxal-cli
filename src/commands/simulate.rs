@@ -465,7 +465,6 @@ pub(crate) fn build_checked_sim_launch_plan(
     let report = graph_check::check_graph(&sim_participants);
     if !report.is_ok() {
         crate::commands::check::ensure_check_outcome_ok(
-            &resolved.target_generation,
             &resolved.channel.to_string(),
             &crate::commands::check::CheckOutcome {
                 missing_images: Vec::new(),
@@ -599,7 +598,7 @@ fn driver_metadata_unavailable(
     error: anyhow::Error,
 ) -> anyhow::Error {
     anyhow!(
-        "DriverMetadataUnavailable: component driver crate '{}' for instance '{}' could not produce emit-apis on this host: {error:#}\n\nCustom and git-sourced driver crates must compile far enough on the dev host for `emit-apis`; keep hardware transport behind a target cfg boundary such as `cfg(target_os = \"linux\")`. Alternatively use a verified artifact catalog entry with inlined driver metadata.",
+        "DriverMetadataUnavailable: component driver crate '{}' for instance '{}' could not build on this host to extract its compiled-in API metadata section: {error:#}\n\nCustom and git-sourced driver crates must compile far enough on the dev host to emit the `#[derive(phoxal::Api)]` linker section; keep hardware transport behind a target cfg boundary such as `cfg(target_os = \"linux\")`. Alternatively use a verified artifact catalog entry with inlined driver metadata.",
         participant.expected_artifact_id,
         participant.name
     )
@@ -613,9 +612,10 @@ fn driver_metadata_unavailable(
 /// own record of a caller-side plan choice, so it can render "component X
 /// simulated by webots-controller" on the sim board and dry-run output.
 ///
-/// A driver's own `emit-apis` reports only `family`/`schema_id` per contract
-/// now (no `topic`/`direction`), so there is nothing left to materialize per
-/// instance here - the record just carries the family for display.
+/// A driver's own contract report carries only `family` per contract now (no
+/// `schema_id`/`topic`/`direction`, D1), so there is nothing left to
+/// materialize per instance here - the record just carries the family for
+/// display.
 pub(crate) fn simulated_component_records(
     participants: &[graph_check::ParticipantApis],
     provider_participant_id: &str,
@@ -638,7 +638,6 @@ pub(crate) fn simulated_component_records(
                         .iter()
                         .map(|contract| SubstitutedContract {
                             family: contract.family.clone(),
-                            schema_id: contract.schema_id.clone(),
                         })
                         .collect(),
                 })
@@ -672,10 +671,7 @@ fn report_plan_only(sim: &SimPlan, message_format: MessageFormat) -> Result<()> 
     crate::commands::print_message(
         &output,
         || {
-            println!(
-                "target_generation: {} (channel {})",
-                sim.ctx.resolved.target_generation, sim.ctx.resolved.channel
-            );
+            println!("channel: {}", sim.ctx.resolved.channel);
             if let Some(revision) = &sim.ctx.resolved.catalog_revision {
                 println!("catalog revision: {revision}");
             }
@@ -741,7 +737,6 @@ fn build_dry_run_output(sim: &SimPlan) -> SimulateDryRunOutput {
     let native_tools = native_tool_labels_from_plan(&sim.plan);
     SimulateDryRunOutput {
         mode: "dry-run",
-        target_generation: sim.ctx.resolved.target_generation.clone(),
         channel: sim.ctx.resolved.channel.to_string(),
         catalog_revision: sim.ctx.resolved.catalog_revision.clone(),
         world_path,
@@ -772,7 +767,6 @@ fn webots_world(mode: &LaunchMode) -> &Path {
 #[derive(Debug, Serialize)]
 struct SimulateDryRunOutput {
     mode: &'static str,
-    target_generation: String,
     channel: String,
     catalog_revision: Option<String>,
     world_path: PathBuf,
@@ -878,8 +872,8 @@ fn substitution_note(substitution: &SubstitutionRecord) -> String {
     )
 }
 
-/// A driver's own `emit-apis` now reports only `family`/`schema_id` per
-/// contract (no `topic`), so there is no per-topic wire detail left to
+/// A driver's own contract report now carries only `family` per contract (no
+/// `schema_id`/`topic`, D1), so there is no per-topic wire detail left to
 /// summarize here - this collapses to the component instance's wildcard,
 /// same as the old "every contract is under this component" shortcut.
 fn substitution_topic_summary(substitution: &SubstitutionRecord) -> String {
@@ -1395,7 +1389,6 @@ mod tests {
     use crate::resolver::{
         ResolvedComponent, ResolvedComponentSource, ResolvedPathOverride, ResolvedPathOverrideKind,
         ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, host_target_triple,
-        target_generation_for_robot,
     };
     use std::fs;
 
@@ -1424,7 +1417,10 @@ mod tests {
             SimulateMode::Live,
         )?;
 
-        assert_eq!(resolved.resolved.target_generation, "y2026_1");
+        assert_eq!(
+            resolved.resolved.channel,
+            phoxal::model::robot::v0::Channel::Stable
+        );
         assert!(resolved.resolved.components.is_empty());
         Ok(())
     }
@@ -1443,7 +1439,10 @@ mod tests {
             SimulateMode::DryRun,
         )?;
 
-        assert_eq!(resolved.resolved.target_generation, "y2026_1");
+        assert_eq!(
+            resolved.resolved.channel,
+            phoxal::model::robot::v0::Channel::Stable
+        );
         Ok(())
     }
 
@@ -1454,7 +1453,10 @@ mod tests {
         add_site_tools(&mut resolved);
         resolved.platform_runtimes.push(platform_runtime(
             "drive",
-            vec![fixture_contract_for_tests("drive::Target", "schema-drive")],
+            vec![fixture_contract_for_tests(
+                "y2026_1::drive::Target",
+                "publish",
+            )],
         ));
         resolved.user_runtimes.push(ResolvedUserRuntime {
             name: "mission".to_string(),
@@ -1638,7 +1640,6 @@ mod tests {
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
                 api_version: "y2026_1".to_string(),
-                bus_abi: None,
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -1775,7 +1776,6 @@ mod tests {
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
                 api_version: "y2026_1".to_string(),
-                bus_abi: None,
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -1857,7 +1857,6 @@ mod tests {
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
                 api_version: "y2026_1".to_string(),
-                bus_abi: None,
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -1946,7 +1945,6 @@ mod tests {
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
                 api_version: "y2026_1".to_string(),
-                bus_abi: None,
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -1957,7 +1955,6 @@ mod tests {
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
                 api_version: "y2026_1".to_string(),
-                bus_abi: None,
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -2025,7 +2022,6 @@ mod tests {
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
                 api_version: "y2026_1".to_string(),
-                bus_abi: None,
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -2036,7 +2032,6 @@ mod tests {
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
                 api_version: "y2026_1".to_string(),
-                bus_abi: None,
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -2226,7 +2221,6 @@ robot:
 
 artifacts:
   channel: stable
-  generation: y2026_1
   catalog: catalog.json
 "#
     }
@@ -2274,7 +2268,6 @@ robot:
 
 artifacts:
   channel: stable
-  generation: y2026_1
   catalog: catalog.json
 "#
     }
@@ -2305,7 +2298,6 @@ artifacts:
         let catalog = fixture_catalog_for_tests(vec![
             fixture_tool_entry_for_tests(
                 "router",
-                "y2026_1",
                 "0.1.0",
                 CatalogChannel::Stable,
                 &host_target_triple(),
@@ -2314,7 +2306,6 @@ artifacts:
             ),
             fixture_tool_entry_for_tests(
                 "joypad",
-                "y2026_1",
                 "0.1.0",
                 CatalogChannel::Stable,
                 &host_target_triple(),
@@ -2326,6 +2317,15 @@ artifacts:
         Ok(path)
     }
 
+    /// Writes a fake component-driver crate whose binary carries a
+    /// hand-rolled `#[derive(phoxal::Api)]`-shaped linker section - not by
+    /// depending on `phoxal`/`phoxal-macros` (too heavy for a per-test throwaway
+    /// crate), but by placing the exact same JSON bytes
+    /// `phoxal-macros` would emit directly under a manually-attributed
+    /// `#[link_section]` static. `build_emit_apis_from_source` extracts
+    /// contracts straight from the built binary's object-file section (the
+    /// `emit-apis` runtime subcommand this used to fake via stdout is gone),
+    /// so the fixture fakes the section instead of the subprocess output.
     fn write_driver_crate(root: &Path, name: &str) -> Result<()> {
         let dir = root.join("components").join(name);
         fs::create_dir_all(dir.join("src"))?;
@@ -2335,10 +2335,12 @@ artifacts:
                 "[package]\nname = \"driver-{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
             ),
         )?;
+        let json = r#"{"participant_api":"Api","contracts":[{"field":"state","role":"subscribe","contract":"component::MotorCommand"}]}"#;
+        let len = json.len();
         fs::write(
             dir.join("src/main.rs"),
             format!(
-                "fn main() {{\n    if std::env::args().nth(1).as_deref() == Some(\"emit-apis\") {{\n        println!(\"{{}}\", r#\"{{\"artifact\":{{\"kind\":\"driver\",\"id\":\"{name}\"}},\"participant_class\":\"checked\",\"api_version\":\"y2026_1\",\"required_contracts\":[{{\"family\":\"component::MotorCommand\",\"topic\":\"component/{{instance}}/motor/{{capability}}/command\",\"direction\":\"subscribe\",\"schema_id\":\"0123456789abcdef\"}}]}}\"#);\n    }}\n}}\n"
+                "#[used]\n#[cfg_attr(target_os = \"macos\", unsafe(link_section = \"__DATA,__phoxal_meta\"))]\n#[cfg_attr(not(target_os = \"macos\"), unsafe(link_section = \".phoxal_api_meta\"))]\nstatic PHOXAL_API_META: [u8; {len}] = *b{json:?};\n\nfn main() {{}}\n"
             ),
         )?;
         Ok(())
@@ -2362,7 +2364,6 @@ artifacts:
             participant_kind: graph_check::ParticipantKind::Service,
             participant_class: graph_check::ParticipantClass::Checked,
             api_version: "y2026_1".to_string(),
-            bus_abi: None,
             config_schema: None,
             scope: graph_check::ParticipantScope::Graph,
             contracts,
@@ -2380,7 +2381,6 @@ artifacts:
             participant_kind: graph_check::ParticipantKind::Driver,
             participant_class: graph_check::ParticipantClass::Checked,
             api_version: "y2026_1".to_string(),
-            bus_abi: None,
             config_schema: None,
             scope: graph_check::ParticipantScope::ComponentInstance(instance.to_string()),
             contracts,
@@ -2397,7 +2397,6 @@ artifacts:
             participant_kind: graph_check::ParticipantKind::Simulator,
             participant_class: graph_check::ParticipantClass::Checked,
             api_version: "y2026_1".to_string(),
-            bus_abi: None,
             config_schema: None,
             scope: graph_check::ParticipantScope::Graph,
             contracts,
@@ -2407,7 +2406,6 @@ artifacts:
     fn motor_command() -> graph_check::Contract {
         graph_check::Contract {
             family: "component::MotorCommand".to_string(),
-            schema_id: "schema-motor".to_string(),
         }
     }
 
@@ -2423,15 +2421,11 @@ robot:
     actuators: []
     encoders: []
   components: {{}}
-artifacts:
-  generation: y2026_1
 "#
         );
         let robot = phoxal::model::robot::v0::Robot::parse_from_string(&yaml)?;
-        let generation = target_generation_for_robot(&robot, None)?;
         Ok(ResolvedRobot {
             robot,
-            target_generation: generation,
             channel: phoxal::model::robot::v0::Channel::Stable,
             target: host_target_triple(),
             catalog_revision: None,
@@ -2499,7 +2493,6 @@ artifacts:
             name: name.to_string(),
             package: format!("phoxal/service-{name}"),
             kind: ArtifactKind::Service,
-            generation: "y2026_1".to_string(),
             version: "0.1.0".to_string(),
             artifact_ref: format!(
                 "service-{name}:0.1.0-y2026_1-stable-{}",
@@ -2511,7 +2504,6 @@ artifacts:
             changed_contracts: Vec::new(),
             contracts,
             config_schema: None,
-            bus_abi: Some("phoxal-bus/v0".to_string()),
             path_override: None,
             channel: crate::catalog::Channel::Stable,
             target: host_target_triple(),
@@ -2523,7 +2515,6 @@ artifacts:
             name: name.to_string(),
             package: format!("phoxal/simulator-{name}"),
             kind: ArtifactKind::Simulator,
-            generation: "y2026_1".to_string(),
             version: "0.1.0".to_string(),
             artifact_ref: format!(
                 "simulator-{name}:0.1.0-y2026_1-stable-{}",
@@ -2535,7 +2526,6 @@ artifacts:
             changed_contracts: Vec::new(),
             contracts: Vec::new(),
             config_schema: None,
-            bus_abi: Some("phoxal-bus/v0".to_string()),
             path_override: None,
             channel: crate::catalog::Channel::Stable,
             target: host_target_triple(),
@@ -2558,10 +2548,8 @@ artifacts:
             binary_name: name.to_string(),
             sha256: "0".repeat(64),
             published: false,
-            generation: "y2026_1".to_string(),
             contracts: Vec::new(),
             config_schema: None,
-            bus_abi: Some("phoxal-bus/v0".to_string()),
             path_override: None,
             channel: crate::catalog::Channel::Stable,
             target: host_target_triple(),
@@ -2728,7 +2716,6 @@ artifacts:
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
                 api_version: "y2026_1".to_string(),
-                bus_abi: None,
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -2822,7 +2809,6 @@ artifacts:
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
                 api_version: "y2026_1".to_string(),
-                bus_abi: None,
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -2833,7 +2819,6 @@ artifacts:
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
                 api_version: "y2026_1".to_string(),
-                bus_abi: None,
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),

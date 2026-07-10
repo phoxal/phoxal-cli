@@ -1,0 +1,18 @@
+[package]
+name = "phoxal-cli-test-api-fixture"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "phoxal-cli-test-api-fixture"
+path = "src/main.rs"
+
+[dependencies]
+phoxal = { workspace = true }
+phoxal-api = { workspace = true }
+
+[lints]
+workspace = true

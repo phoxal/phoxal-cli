@@ -8,13 +8,21 @@
 //! there is no on-disk cache of the remote fetch; see [`load_catalog`]), the
 //! `ArtifactKind` tag the CLI uses to remember which of the manifest's five
 //! arrays an entry came from (the published schema does not tag entries with
-//! a `kind` - "the array an entry lives in *is* its kind"), API-generation
-//! comparison/ordering, the preview-feature promotion scanner, and the LOCAL
+//! a `kind` - "the array an entry lives in *is* its kind"), and the LOCAL
 //! download manifest ([`upsert_local_manifest_entry`]/[`prune_local_manifest`])
 //! that records which official artifacts are actually present in
 //! `cache/artifacts/` - a wholly different document from the remote catalog,
 //! never a cached copy of it (docs D64: no lockfile, no cached remote
 //! catalog).
+//!
+//! There is no API-generation comparison/ordering here anymore (D1, X-tools
+//! slice): [`ArtifactEntry`] carries no `api_generation`, so there is nothing
+//! left to compare/order by generation. Per-package resolution is purely
+//! semver-ordered now (see `crate::resolver::select_latest_artifact_entries`).
+//! The preview-feature-promotion scanner is gone with it: it existed to warn
+//! when a `preview-<generation>` Cargo feature's generation had been promoted
+//! to the stable channel, which needed [`Channel`] lookup by generation - a
+//! question the catalog can no longer answer at all.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
@@ -23,7 +31,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-pub use phoxal::catalog::is_schema_id;
 pub use phoxal::catalog::{Artifact, ArtifactEntry, AssetEntry, Channel, Contract, Manifest};
 
 /// A loaded catalog document is one immutable revision of the manifest; kept
@@ -278,141 +285,6 @@ pub fn service_names(manifest: &Manifest) -> Vec<String> {
         .collect()
 }
 
-/// Every distinct API generation across the manifest's runtime-binary
-/// entries (services/drivers/tools/simulators - `assets` carry no
-/// `api_generation` at all, since an asset bundle has no wire contracts to
-/// version), sorted oldest to newest.
-#[must_use]
-pub fn generations(manifest: &Manifest) -> Vec<String> {
-    let mut generations = manifest
-        .artifact_entries()
-        .map(|entry| entry.api_generation.clone())
-        .collect::<Vec<_>>();
-    generations.sort_by(|left, right| compare_generations(left, right));
-    generations.dedup();
-    generations
-}
-
-/// The newest generation with at least one entry on `channel`.
-///
-/// Deliberately does NOT require a built [`Artifact`] for `target`: which
-/// generation to auto-select is a channel/generation question (mirrors
-/// `resolver::select_latest_artifact_entries`), while whether a concrete
-/// tarball exists for `target` is a later, per-package staging concern. A
-/// metadata-only catalog (`xtask catalog generate --metadata-only`, no
-/// triples built anywhere yet) must still resolve a target generation so
-/// `check` can validate contracts/config against it even before the first
-/// real release populates `artifacts`. `target` is kept for call-site
-/// symmetry with the rest of the resolution API and in case a future catalog
-/// re-introduces a per-target generation split; a robot that truly needs a
-/// specific triple's build to exist finds out at staging time
-/// (`ensure_catalog_availability`, `native_artifacts::stage_runtime`), which
-/// is where the lean schema actually carries that information.
-#[must_use]
-pub fn newest_generation_on_channel(
-    manifest: &Manifest,
-    channel: Channel,
-    _target: &str,
-) -> Option<String> {
-    let mut generations = manifest
-        .artifact_entries()
-        .filter(|entry| entry.channels.contains_key(&channel))
-        .map(|entry| entry.api_generation.clone())
-        .collect::<Vec<_>>();
-    generations.sort_by(|left, right| compare_generations(left, right));
-    generations.dedup();
-    generations.pop()
-}
-
-/// The single channel every entry for `generation` agrees on, or `None` if
-/// there is no such generation or its entries disagree.
-#[must_use]
-pub fn generation_channel(manifest: &Manifest, generation: &str) -> Option<Channel> {
-    let mut channels = manifest
-        .artifact_entries()
-        .filter(|entry| entry.api_generation == generation)
-        .flat_map(|entry| entry.channels.keys().copied())
-        .collect::<Vec<_>>();
-    channels.sort();
-    channels.dedup();
-    match channels.as_slice() {
-        [channel] => Some(*channel),
-        _ => None,
-    }
-}
-
-pub fn compare_generations(left: &str, right: &str) -> std::cmp::Ordering {
-    generation_key(left).cmp(&generation_key(right))
-}
-
-fn generation_key(value: &str) -> (u32, u32, &str) {
-    let Some(rest) = value.strip_prefix('y') else {
-        return (0, 0, value);
-    };
-    let Some((year, generation)) = rest.split_once('_') else {
-        return (0, 0, value);
-    };
-    (
-        year.parse::<u32>().unwrap_or(0),
-        generation.parse::<u32>().unwrap_or(0),
-        value,
-    )
-}
-
-pub fn parse_generation_feature(feature: &str) -> Option<&str> {
-    feature.strip_prefix("preview-")
-}
-
-pub fn promoted_preview_features(
-    manifest_path: &Path,
-    catalog: &Manifest,
-) -> Result<Vec<PromotedPreviewFeature>> {
-    let text = fs::read_to_string(manifest_path)
-        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let mut promoted = Vec::new();
-    for (index, line) in text.lines().enumerate() {
-        if line.trim_start().starts_with('#') {
-            continue;
-        }
-        for feature in preview_features_in_line(line) {
-            let Some(generation) = parse_generation_feature(feature) else {
-                continue;
-            };
-            if generation_channel(catalog, generation) == Some(Channel::Stable) {
-                promoted.push(PromotedPreviewFeature {
-                    generation: generation.to_string(),
-                    manifest_path: manifest_path.to_path_buf(),
-                    line_number: index + 1,
-                    line: line.trim().to_string(),
-                });
-            }
-        }
-    }
-    Ok(promoted)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PromotedPreviewFeature {
-    pub generation: String,
-    pub manifest_path: PathBuf,
-    pub line_number: usize,
-    pub line: String,
-}
-
-fn preview_features_in_line(line: &str) -> Vec<&str> {
-    let mut features = Vec::new();
-    let mut rest = line;
-    while let Some(start) = rest.find("preview-") {
-        rest = &rest[start..];
-        let end = rest
-            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
-            .unwrap_or(rest.len());
-        features.push(&rest[..end]);
-        rest = &rest[end..];
-    }
-    features
-}
-
 pub fn unavailable_catalog_error() -> anyhow::Error {
     anyhow!(
         "no artifact catalog revision is available; tried the default catalog URL {DEFAULT_CATALOG_URL}. Pass --catalog <path-or-https-url>, set {CATALOG_SOURCE_ENV}, add artifacts.catalog in robot.yaml, or point --catalog at the local download manifest ({LOCAL_MANIFEST_HINT}) to validate offline against already-cached artifacts."
@@ -435,9 +307,9 @@ const LOCAL_MANIFEST_HINT: &str = "~/.phoxal/cache/phoxal-artifacts.json";
 // Local download manifest (`cache/phoxal-artifacts.json`).
 //
 // A wholly local document: it records which official artifacts are actually
-// present in `cache/artifacts/`, with their contracts/config/bus_abi inlined
-// exactly like the remote catalog's own `ArtifactEntry`/`AssetEntry` shapes -
-// so `check`/`run` can validate a cached artifact's contracts without any
+// present in `cache/artifacts/`, with their contracts/config inlined exactly
+// like the remote catalog's own `ArtifactEntry`/`AssetEntry` shapes - so
+// `check`/`run` can validate a cached artifact's contracts without any
 // network access, and so the file itself is a valid `--catalog` source for a
 // fully offline session. It is NOT a cache of the remote catalog: an entry
 // only exists here once its tarball has actually been downloaded, and
@@ -451,12 +323,8 @@ pub struct LocalManifestUpsert {
     pub kind: ArtifactKind,
     pub package: String,
     pub version: String,
-    /// Empty for [`ArtifactKind::ComponentAssets`] - an asset bundle carries
-    /// no API generation.
-    pub generation: String,
     pub contracts: Vec<Contract>,
     pub config_schema: Option<serde_json::Value>,
-    pub bus_abi: Option<String>,
     pub changed_contracts: Vec<String>,
     pub channel: Channel,
     /// The target triple this tarball was built for, or
@@ -551,10 +419,8 @@ pub fn upsert_local_manifest_entry(upsert: LocalManifestUpsert) -> Result<()> {
         let entry = ArtifactEntry {
             package: upsert.package.clone(),
             version: upsert.version,
-            api_generation: upsert.generation,
             contracts: upsert.contracts,
             config_schema: upsert.config_schema,
-            bus_abi: upsert.bus_abi.unwrap_or_default(),
             artifacts,
             channels,
             changed_contracts: upsert.changed_contracts,
@@ -734,10 +600,10 @@ fn fixture_artifacts(
     artifacts
 }
 
-#[allow(clippy::too_many_arguments)]
+/// No `generation` parameter (D1, X-tools slice): [`ArtifactEntry`] carries
+/// no `api_generation` field to populate one from anymore.
 pub fn fixture_service_entry_for_tests(
     name: &str,
-    generation: &str,
     version: &str,
     channel: Channel,
     target: &str,
@@ -748,20 +614,16 @@ pub fn fixture_service_entry_for_tests(
     CatalogFixtureEntry::Service(ArtifactEntry {
         package: package.clone(),
         version: version.to_string(),
-        api_generation: generation.to_string(),
         contracts,
         config_schema: None,
-        bus_abi: "phoxal-bus/v0".to_string(),
         artifacts: fixture_artifacts(target, published, &package.replace('/', "-")),
         channels: fixture_channels(channel, version),
         changed_contracts: Vec::new(),
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn fixture_component_driver_entry_for_tests(
     name: &str,
-    generation: &str,
     version: &str,
     channel: Channel,
     target: &str,
@@ -772,10 +634,8 @@ pub fn fixture_component_driver_entry_for_tests(
     CatalogFixtureEntry::Driver(ArtifactEntry {
         package: package.clone(),
         version: version.to_string(),
-        api_generation: generation.to_string(),
         contracts,
         config_schema: None,
-        bus_abi: "phoxal-bus/v0".to_string(),
         artifacts: fixture_artifacts(target, published, &package.replace('/', "-")),
         channels: fixture_channels(channel, version),
         changed_contracts: Vec::new(),
@@ -784,11 +644,9 @@ pub fn fixture_component_driver_entry_for_tests(
 
 pub fn fixture_component_assets_entry_for_tests(
     name: &str,
-    generation: &str,
     version: &str,
     channel: Channel,
 ) -> CatalogFixtureEntry {
-    let _ = generation; // AssetEntry carries no api_generation (docs: asset bundles have no wire contracts).
     let package = format!("phoxal/component-{name}-assets");
     CatalogFixtureEntry::Asset(AssetEntry {
         package,
@@ -798,10 +656,8 @@ pub fn fixture_component_assets_entry_for_tests(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn fixture_tool_entry_for_tests(
     name: &str,
-    generation: &str,
     version: &str,
     channel: Channel,
     target: &str,
@@ -812,20 +668,16 @@ pub fn fixture_tool_entry_for_tests(
     CatalogFixtureEntry::Tool(ArtifactEntry {
         package: package.clone(),
         version: version.to_string(),
-        api_generation: generation.to_string(),
         contracts,
         config_schema: None,
-        bus_abi: "phoxal-bus/v0".to_string(),
         artifacts: fixture_artifacts(target, published, &package.replace('/', "-")),
         channels: fixture_channels(channel, version),
         changed_contracts: Vec::new(),
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn fixture_simulator_entry_for_tests(
     name: &str,
-    generation: &str,
     version: &str,
     channel: Channel,
     target: &str,
@@ -836,20 +688,22 @@ pub fn fixture_simulator_entry_for_tests(
     CatalogFixtureEntry::Simulator(ArtifactEntry {
         package: package.clone(),
         version: version.to_string(),
-        api_generation: generation.to_string(),
         contracts,
         config_schema: None,
-        bus_abi: "phoxal-bus/v0".to_string(),
         artifacts: fixture_artifacts(target, published, &package.replace('/', "-")),
         channels: fixture_channels(channel, version),
         changed_contracts: Vec::new(),
     })
 }
 
-pub fn fixture_contract_for_tests(family: &str, schema_id: &str) -> Contract {
+/// `role` is `"publish"`, `"subscribe"`, `"serve"`, or `"ask"` (D1: the
+/// catalog's `Contract` is now `{family, role}`, not `{family, schema_id}` -
+/// name identity alone decides compatibility, so there is no schema hash
+/// left to fixture).
+pub fn fixture_contract_for_tests(family: &str, role: &str) -> Contract {
     Contract {
         family: family.to_string(),
-        schema_id: schema_id.to_string(),
+        role: role.to_string(),
     }
 }
 
@@ -874,53 +728,19 @@ mod tests {
     fn checksum_verification_rejects_edits() {
         let mut manifest = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
             "drive",
-            "y2026_1",
             "0.1.0",
             Channel::Stable,
             "aarch64-unknown-linux-gnu",
             false,
             vec![fixture_contract_for_tests(
-                "drive::Target",
-                "0123456789abcdef",
+                "y2026_1::drive::Target",
+                "publish",
             )],
         )]);
         manifest.services[0].package = "phoxal-service-edited".to_string();
 
         let error = manifest.verify().expect_err("edited catalog should fail");
         assert!(format!("{error:#}").contains("did not match computed"));
-    }
-
-    #[test]
-    fn preview_feature_scanner_finds_promoted_generation_lines() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let manifest_path = temp.path().join("Cargo.toml");
-        fs::write(
-            &manifest_path,
-            r#"[dependencies]
-phoxal-api = { version = "0.19", features = ["preview-y2026_2"] }
-"#,
-        )?;
-        let mut entry = fixture_service_entry_for_tests(
-            "drive",
-            "y2026_2",
-            "0.2.0",
-            Channel::Stable,
-            "aarch64-unknown-linux-gnu",
-            true,
-            vec![fixture_contract_for_tests(
-                "drive::Target",
-                "0123456789abcdef",
-            )],
-        );
-        let catalog = fixture_catalog_for_tests(vec![entry.clone()]);
-        let _ = entry.as_artifact_entry_mut();
-
-        let promoted = promoted_preview_features(&manifest_path, &catalog)?;
-
-        assert_eq!(promoted.len(), 1);
-        assert_eq!(promoted[0].generation, "y2026_2");
-        assert_eq!(promoted[0].line_number, 2);
-        Ok(())
     }
 
     #[test]
@@ -959,10 +779,8 @@ phoxal-api = { version = "0.19", features = ["preview-y2026_2"] }
             kind: ArtifactKind::Service,
             package: "phoxal/service-drive".to_string(),
             version: "0.1.0".to_string(),
-            generation: "y2026_1".to_string(),
             contracts: Vec::new(),
             config_schema: None,
-            bus_abi: Some("phoxal-bus/v0".to_string()),
             changed_contracts: Vec::new(),
             channel: Channel::Stable,
             target: "aarch64-unknown-linux-gnu".to_string(),

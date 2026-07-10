@@ -39,7 +39,7 @@ pub struct ServiceCatalogSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ServiceCatalogEntry {
     pub id: String,
-    pub api_generations: Vec<String>,
+    pub versions: Vec<String>,
     pub participant_kind: &'static str,
 }
 
@@ -64,9 +64,9 @@ impl Catalog {
             || {
                 for entry in &summary.entries {
                     println!(
-                        "{} -> api_generations [{}] ({})",
+                        "{} -> versions [{}] ({})",
                         entry.id,
-                        entry.api_generations.join(", "),
+                        entry.versions.join(", "),
                         entry.participant_kind
                     );
                 }
@@ -99,7 +99,7 @@ pub fn service_catalog_summary(
             .iter()
             .map(|entry| ServiceCatalogEntry {
                 id: entry.package.clone(),
-                api_generations: vec![entry.api_generation.clone()],
+                versions: vec![entry.version.clone()],
                 participant_kind: "service",
             })
             .collect(),
@@ -128,7 +128,7 @@ mod tests {
         assert_eq!(summary.entries.len(), 1);
         let entry = &summary.entries[0];
         assert_eq!(entry.id, "phoxal/service-drive");
-        assert_eq!(entry.api_generations, vec!["y2026_1".to_string()]);
+        assert_eq!(entry.versions, vec!["0.1.0".to_string()]);
         assert_eq!(entry.participant_kind, "service");
 
         Ok(())
@@ -156,14 +156,13 @@ artifacts:
     fn write_catalog(root: &Path) -> Result<String> {
         let catalog = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
             "drive",
-            "y2026_1",
             "0.1.0",
             CatalogChannel::Stable,
             &crate::resolver::host_target_triple(),
             false,
             vec![fixture_contract_for_tests(
-                "drive::Target",
-                "0123456789abcdef",
+                "y2026_1::drive::Target",
+                "publish",
             )],
         )]);
         let path = root.join("catalog.json");

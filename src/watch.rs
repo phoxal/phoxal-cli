@@ -419,11 +419,7 @@ fn recheck_run_target(
         |_| unreachable!("run watch does not check site tools as graph participants"),
         build_emit_apis_from_source,
     )?;
-    crate::commands::check::ensure_check_outcome_ok(
-        &resolved.target_generation,
-        &resolved.channel.to_string(),
-        &outcome,
-    )?;
+    crate::commands::check::ensure_check_outcome_ok(&resolved.channel.to_string(), &outcome)?;
     let plan = build_launch_plan(
         LaunchMode::Run,
         &[CheckedRobotLaunchInput {
@@ -709,7 +705,6 @@ robot:
         .unwrap();
         ResolvedRobot {
             robot,
-            target_generation: "y2026_1".to_string(),
             channel: phoxal::model::robot::v0::Channel::Stable,
             target: "host".to_string(),
             catalog_revision: None,

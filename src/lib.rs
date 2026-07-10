@@ -8,8 +8,9 @@
 //!
 //! The command surface (see [`commands`]) is:
 //!
-//! - `check` - collect each participant's `emit-apis` metadata, then validate
-//!   per-contract wire-shape (`schema_id`) agreement and topology with the shared
+//! - `check` - collect each participant's compiled-in contract metadata
+//!   (extracted straight from its built binary's linker section, never by
+//!   executing it - [`participant_metadata`]) and validate it with the shared
 //!   [`phoxal::check`] graph core; git component commits resolve live unless
 //!   pinned to a commit SHA in `robot.yaml`.
 //! - `simulate <world>` - resolve and print or run the host-native simulation plan.
@@ -17,7 +18,6 @@
 //!   payload, sync it to the robot, restart `phoxal.target`, and report health.
 //!   Prints the v0 pre-stable warning.
 //! - `service catalog` - print official services from the configured artifact catalog.
-//! - `generations status` - inspect catalog readiness for the robot target.
 //! - `pull` / `outdated` - refresh or inspect catalog and native asset state.
 //! - `doctor` - check host prerequisites; `self upgrade` - update the CLI.
 //!
@@ -38,6 +38,7 @@ pub mod launch_env;
 pub mod launch_plan;
 pub mod native_artifacts;
 pub mod native_pending;
+pub mod participant_metadata;
 pub mod process;
 pub mod project;
 pub mod resolver;

@@ -9,8 +9,10 @@
 //! A git-sourced artifact is a LOCAL source, exactly like a `path:` pin: it
 //! is never written to `cache/phoxal-artifacts.json` (the local download
 //! manifest only records officially-published, catalog-downloaded tarballs),
-//! and its contracts are (re)computed live from its own `emit-apis` every run
-//! - never cached (see `commands::check::build_emit_apis_from_source`).
+//! and its contracts are (re)computed live every run - by building it and
+//! reading its compiled-in `#[derive(phoxal::Api)]` metadata section, never
+//! by executing it - and are never cached (see
+//! `commands::check::build_emit_apis_from_source`).
 
 use std::path::{Path, PathBuf};
 

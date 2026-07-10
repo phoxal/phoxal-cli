@@ -80,7 +80,6 @@ robot:
 
 artifacts:
   channel: stable
-  generation: y2026_1
 "#
 }
 
@@ -89,7 +88,6 @@ fn write_catalog(root: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let catalog = fixture_catalog_for_tests(vec![
         fixture_tool_entry_for_tests(
             "router",
-            "y2026_1",
             "0.1.0",
             CatalogChannel::Stable,
             &host_target_triple(),
@@ -98,7 +96,6 @@ fn write_catalog(root: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
         ),
         fixture_tool_entry_for_tests(
             "joypad",
-            "y2026_1",
             "0.1.0",
             CatalogChannel::Stable,
             &host_target_triple(),

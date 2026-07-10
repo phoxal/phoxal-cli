@@ -281,11 +281,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         build_emit_apis_from_source,
     )?;
     if !outcome.is_ok() {
-        crate::commands::check::ensure_check_outcome_ok(
-            &resolved.target_generation,
-            &resolved.channel.to_string(),
-            &outcome,
-        )?;
+        crate::commands::check::ensure_check_outcome_ok(&resolved.channel.to_string(), &outcome)?;
     }
     let plan = build_launch_plan(
         LaunchMode::Run,
