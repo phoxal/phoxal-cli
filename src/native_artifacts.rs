@@ -505,19 +505,33 @@ pub fn active_version(descriptor: &NativeArtifactDescriptor) -> Result<Option<St
 }
 
 pub fn count_versions() -> Result<usize> {
-    walk_artifact_targets(false, None).map(|(retained, _)| retained)
+    walk_artifact_targets(false, false, None).map(|(retained, _)| retained)
 }
 
 pub fn prune_inactive_versions(current: &[NativeArtifactDescriptor]) -> Result<(usize, usize)> {
+    classify_inactive_versions(current, true)
+}
+
+pub fn preview_prune_inactive_versions(
+    current: &[NativeArtifactDescriptor],
+) -> Result<(usize, usize)> {
+    classify_inactive_versions(current, false)
+}
+
+fn classify_inactive_versions(
+    current: &[NativeArtifactDescriptor],
+    remove: bool,
+) -> Result<(usize, usize)> {
     let packages = current
         .iter()
         .map(NativeArtifactDescriptor::package)
         .collect::<Result<std::collections::BTreeSet<_>>>()?;
-    walk_artifact_targets(true, Some(&packages))
+    walk_artifact_targets(true, remove, Some(&packages))
 }
 
 fn walk_artifact_targets(
-    prune: bool,
+    classify_inactive: bool,
+    remove: bool,
     current_packages: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<(usize, usize)> {
     let root = crate::host_paths::binaries_dir()?;
@@ -531,7 +545,7 @@ fn walk_artifact_targets(
         if !package.file_type()?.is_dir() {
             continue;
         }
-        if prune
+        if classify_inactive
             && current_packages.is_some_and(|packages| {
                 !packages.contains(&package.file_name().to_string_lossy().into_owned())
             })
@@ -545,7 +559,9 @@ fn walk_artifact_targets(
                         .count();
                 }
             }
-            fs::remove_dir_all(package.path())?;
+            if remove {
+                fs::remove_dir_all(package.path())?;
+            }
             continue;
         }
         for target in fs::read_dir(package.path())? {
@@ -566,8 +582,10 @@ fn walk_artifact_targets(
                     .is_some_and(|active| active == &version.file_name())
                 {
                     retained += 1;
-                } else if prune {
-                    fs::remove_dir_all(version.path())?;
+                } else if classify_inactive {
+                    if remove {
+                        fs::remove_dir_all(version.path())?;
+                    }
                     pruned += 1;
                 } else {
                     retained += 1;
@@ -576,6 +594,24 @@ fn walk_artifact_targets(
         }
     }
     Ok((retained, pruned))
+}
+
+pub fn existing_target_scopes(package: &str) -> Result<Vec<String>> {
+    let package_dir = crate::host_paths::binaries_dir()?.join(package_storage_key(package)?);
+    if !package_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut targets = Vec::new();
+    for entry in fs::read_dir(package_dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            let target = entry.file_name().to_string_lossy().into_owned();
+            validate_path_segment("stored artifact target", &target)?;
+            targets.push(target);
+        }
+    }
+    targets.sort();
+    Ok(targets)
 }
 
 fn download_blob(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
@@ -793,6 +829,24 @@ mod tests {
         assert_eq!((retained, pruned), (1, 1));
         assert!(artifact_exec_dir(&new)?.is_dir());
         assert!(!artifact_exec_dir(&old)?.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn prune_preview_reports_without_mutating() -> Result<()> {
+        let _root = ScratchPhoxalHome::new()?;
+        let old = descriptor("1.0.0", b"old");
+        let new = descriptor("2.0.0", b"new");
+        fs::create_dir_all(artifact_exec_dir(&old)?)?;
+        fs::create_dir_all(artifact_exec_dir(&new)?)?;
+        retarget_active(&new)?;
+
+        assert_eq!(
+            preview_prune_inactive_versions(std::slice::from_ref(&new))?,
+            (1, 1)
+        );
+        assert!(artifact_exec_dir(&old)?.is_dir());
+        assert!(artifact_exec_dir(&new)?.is_dir());
         Ok(())
     }
 

@@ -101,7 +101,8 @@ fn update(
     )?;
 
     let destination = project_root.join(".phoxal/binaries");
-    let descriptors = crate::native_artifacts::descriptors(&resolved)?;
+    let mut descriptors = crate::native_artifacts::descriptors(&resolved)?;
+    include_existing_target_scopes(&mut descriptors, &catalog)?;
     let updates = descriptors
         .iter()
         .map(|descriptor| PackageUpdate {
@@ -143,7 +144,7 @@ fn update(
         .collect::<Vec<_>>();
 
     let (retained_versions, pruned_versions) = if dry_run {
-        (crate::native_artifacts::count_versions()?, 0)
+        crate::native_artifacts::preview_prune_inactive_versions(&descriptors)?
     } else {
         let _lock = crate::native_artifacts::ArtifactStoreLock::exclusive("update")?;
         fs::create_dir_all(&destination)?;
@@ -172,6 +173,53 @@ fn update(
         coherence: "deferred to W6",
         config: "deferred to W7",
     })
+}
+
+fn include_existing_target_scopes(
+    descriptors: &mut Vec<crate::native_artifacts::NativeArtifactDescriptor>,
+    catalog: &crate::catalog::Catalog,
+) -> Result<()> {
+    let current = descriptors.clone();
+    for descriptor in current {
+        if descriptor.target == crate::catalog::TARGET_INDEPENDENT_SCOPE {
+            continue;
+        }
+        let artifact = catalog
+            .artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.package == descriptor.package_id && artifact.version == descriptor.version
+            })
+            .with_context(|| {
+                format!(
+                    "resolved {} {} is absent from snapshot {}",
+                    descriptor.package_id, descriptor.version, catalog.build.tag
+                )
+            })?;
+        for target in crate::native_artifacts::existing_target_scopes(&descriptor.package_id)? {
+            if descriptors.iter().any(|existing| {
+                existing.package_id == descriptor.package_id && existing.target == target
+            }) {
+                continue;
+            }
+            let blob = artifact.targets.get(&target).with_context(|| {
+                format!(
+                    "snapshot {} has no {} blob for retained target {target}; switch channel or update phoxal-cli",
+                    catalog.build.tag, descriptor.package_id
+                )
+            })?;
+            let mut retained_target = descriptor.clone();
+            retained_target.target = target;
+            retained_target.url = blob.url.clone();
+            retained_target.sha256 = blob.sha256.clone();
+            retained_target.size = blob.size;
+            descriptors.push(retained_target);
+        }
+    }
+    descriptors.sort_by(|left, right| {
+        (&left.package_id, &left.target).cmp(&(&right.package_id, &right.target))
+    });
+    Ok(())
 }
 
 fn print_human(summary: &UpdateSummary) -> Result<()> {
@@ -233,4 +281,61 @@ fn free_disk_bytes(path: &Path) -> Result<u64> {
 #[cfg(not(unix))]
 fn free_disk_bytes(_path: &Path) -> Result<u64> {
     bail!("free-disk reporting is unavailable on this platform")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::{
+        SelectionChannel, fixture_blob_for_tests, fixture_catalog_for_tests,
+        fixture_service_entry_for_tests,
+    };
+    use crate::host_paths::test_support::ScratchPhoxalHome;
+    use crate::native_artifacts::NativeArtifactDescriptor;
+
+    #[test]
+    fn update_includes_existing_target_scopes() -> Result<()> {
+        let _root = ScratchPhoxalHome::new()?;
+        let host = "aarch64-apple-darwin";
+        let robot = "aarch64-unknown-linux-musl";
+        let package = "phoxal/service-drive";
+        fs::create_dir_all(crate::native_artifacts::artifact_target_dir_for(
+            package, robot,
+        )?)?;
+
+        let mut entry = fixture_service_entry_for_tests(
+            "drive",
+            "1.2.3",
+            SelectionChannel::Stable,
+            host,
+            true,
+            Vec::new(),
+        );
+        entry.artifact.targets.insert(
+            robot.to_string(),
+            fixture_blob_for_tests("https://example.invalid/robot", &"b".repeat(64), 42),
+        );
+        let catalog = fixture_catalog_for_tests(vec![entry]);
+        let mut descriptors = vec![NativeArtifactDescriptor {
+            package_id: package.to_string(),
+            kind: crate::catalog::ArtifactKind::Service,
+            name: "drive".to_string(),
+            version: "1.2.3".to_string(),
+            url: "https://example.invalid/host".to_string(),
+            sha256: "a".repeat(64),
+            size: 21,
+            binary_name: "phoxal-service-drive".to_string(),
+            target: host.to_string(),
+        }];
+
+        include_existing_target_scopes(&mut descriptors, &catalog)?;
+
+        let retained = descriptors
+            .iter()
+            .find(|descriptor| descriptor.target == robot)
+            .expect("existing robot target is included in the update");
+        assert_eq!(retained.url, "https://example.invalid/robot");
+        assert_eq!(retained.size, 42);
+        Ok(())
+    }
 }
