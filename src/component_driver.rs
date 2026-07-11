@@ -27,12 +27,17 @@ pub(crate) fn component_driver_crate_dir(
 
 /// Locate the on-disk source directory for a component instance's resolved
 /// `component_assets` package (`component.yaml`, `structure.urdf`,
-/// `simulation.yaml`, `meshes/`). Always present - see [`ResolvedComponent`].
+/// `simulation.yaml`, `meshes/`). `None` when the component is driverless
+/// (passive) and has no official assets package - see [`ResolvedComponent`].
 pub(crate) fn component_assets_dir(
     component: &ResolvedComponent,
     project_root: &Path,
-) -> Result<PathBuf> {
-    resolved_component_package_dir(&component.assets, project_root)
+) -> Result<Option<PathBuf>> {
+    component
+        .assets
+        .as_ref()
+        .map(|assets| resolved_component_package_dir(assets, project_root))
+        .transpose()
 }
 
 /// A component's `Git` source now routes through the general

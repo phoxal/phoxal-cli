@@ -1296,7 +1296,17 @@ pub(crate) fn stage_simulation_for_robot(
         if component_type_dirs.contains_key(&component.source_name) {
             continue;
         }
-        let crate_dir = component_assets_dir(component, project_root)?;
+        let crate_dir = component_assets_dir(component, project_root)?.ok_or_else(|| {
+            anyhow!(
+                "component instance '{}' (type '{}') has no resolved component_assets package; \
+                 simulation needs its component.yaml/structure.urdf to stage the robot model. \
+                 Passive components without an official assets package cannot be simulated yet - \
+                 pin artifacts.pins.phoxal/component-{} to a path/git override that provides one.",
+                component.instance,
+                component.source_name,
+                component.source_name
+            )
+        })?;
         let component_model = phoxal::model::component::Component::read_from_dir(&crate_dir)
             .with_context(|| {
                 format!(
@@ -2543,7 +2553,7 @@ robot:
             resolved.components.push(ResolvedComponent {
                 instance: (*instance).to_string(),
                 source_name: "ddsm115".to_string(),
-                assets: crate::resolver::ResolvedComponentPackage {
+                assets: Some(crate::resolver::ResolvedComponentPackage {
                     package: "phoxal/component-ddsm115".to_string(),
                     kind: crate::catalog::ArtifactKind::ComponentAssets,
                     source: ResolvedComponentSource::Path {
@@ -2551,7 +2561,7 @@ robot:
                     },
                     path_override: None,
                     catalog_runtime: None,
-                },
+                }),
                 driver: Some(crate::resolver::ResolvedComponentPackage {
                     package: "phoxal/component-ddsm115".to_string(),
                     kind: crate::catalog::ArtifactKind::ComponentDriver,
