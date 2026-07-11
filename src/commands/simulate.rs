@@ -12,8 +12,9 @@ use crate::catalog::Catalog;
 use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
-    extract_emit_apis_from_staged_runtime, platform_artifact_refs_from_resolved,
-    run_check_with_context, source_participants_from_resolved,
+    check_artifact_refs_from_resolved, extract_emit_apis_from_staged_runtime,
+    extract_emit_apis_from_staged_tool, fetch_emit_apis_from_tool, run_check_with_context,
+    source_participants_from_resolved, tool_participants_from_resolved,
 };
 use crate::component_driver::{component_assets_dir, component_driver_crate_dir};
 use crate::launch_plan::{
@@ -308,21 +309,15 @@ fn prepare_with_mode(
         )
         .context("failed to stage component assets into the simulation robot root")?;
     }
-    let mut plan = build_checked_sim_launch_plan(
+    let plan = build_checked_sim_launch_plan(
         &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,
         &resolved.manifest_extras,
         resolved.catalog.as_ref(),
+        options.joypad,
+        options.message_format,
     )?;
-    if !options.joypad {
-        // `tool-joypad` is opt-in for simulate now (see the display-label doc
-        // on `native_tool_labels_from_plan`), so drop it from the actual
-        // launch plan too (not just the dry-run display list) - otherwise
-        // live simulate would still try to launch it and hit the
-        // config-deserialization failure this change avoids.
-        plan.site.retain(|site| site.id != SITE_TOOL_JOYPAD);
-    }
     let source_participants = sim_source_participants(
         &resolved.project_root,
         &resolved.resolved,
@@ -419,16 +414,39 @@ pub(crate) fn build_checked_sim_launch_plan(
     resolved: &ResolvedRobot,
     manifest_extras: &RobotManifestExtras,
     catalog: Option<&Catalog>,
+    joypad: bool,
+    message_format: MessageFormat,
 ) -> Result<LaunchPlan> {
     let source_participants = sim_source_participants(project_root, resolved, catalog)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
+    let metadata_source_participants = source_participants
+        .iter()
+        .filter(|participant| {
+            participant.kind != SourceParticipantKind::Tool
+                || participant.name == crate::launch_plan::SITE_TOOL_ROUTER
+                || (joypad && participant.name == SITE_TOOL_JOYPAD)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     // A Catalog-sourced component driver is a platform ref here too (docs
     // #21), exactly like `check`/`run`/`deploy` - synthesized from catalog
     // metadata rather than built from source. Only a Path/Git-overridden
     // driver crate reaches the `build` closure below.
-    let mut platform_refs = platform_artifact_refs_from_resolved(resolved);
-    platform_refs
-        .extend(crate::commands::check::component_driver_platform_refs_from_resolved(resolved));
+    let platform_refs = check_artifact_refs_from_resolved(resolved)
+        .into_iter()
+        .filter(|artifact| {
+            artifact.kind != crate::catalog::ArtifactKind::Tool
+                || artifact.name == crate::launch_plan::SITE_TOOL_ROUTER
+                || (joypad && artifact.name == SITE_TOOL_JOYPAD)
+        })
+        .collect::<Vec<_>>();
+    let tool_participants = tool_participants_from_resolved(resolved)?
+        .into_iter()
+        .filter(|tool| {
+            tool.name == crate::launch_plan::SITE_TOOL_ROUTER
+                || (joypad && tool.name == SITE_TOOL_JOYPAD)
+        })
+        .collect::<Vec<_>>();
     let mut official_by_ref = resolved
         .platform_runtimes
         .iter()
@@ -437,19 +455,29 @@ pub(crate) fn build_checked_sim_launch_plan(
     official_by_ref.extend(crate::commands::check::component_driver_runtimes_by_ref(
         resolved,
     ));
+    let tools_by_ref = resolved
+        .tools
+        .iter()
+        .map(|tool| (tool.asset.clone(), tool))
+        .collect::<BTreeMap<_, _>>();
 
     let metadata_outcome = run_check_with_context(
         &platform_refs,
-        &[],
-        &source_participants,
+        &tool_participants,
+        &metadata_source_participants,
         CheckGraphContext { manifest_extras },
         |artifact_ref| {
-            let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
-                anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
-            })?;
-            extract_emit_apis_from_staged_runtime(runtime)
+            if let Some(runtime) = official_by_ref.get(artifact_ref) {
+                return extract_emit_apis_from_staged_runtime(runtime);
+            }
+            if let Some(tool) = tools_by_ref.get(artifact_ref) {
+                return extract_emit_apis_from_staged_tool(tool);
+            }
+            Err(anyhow!(
+                "resolved official artifact {artifact_ref} is not in the catalog"
+            ))
         },
-        |_| unreachable!("simulate does not check site tools as graph participants"),
+        fetch_emit_apis_from_tool,
         |participant| {
             if participant.kind == SourceParticipantKind::ComponentDriver {
                 return build_emit_apis_from_source(participant)
@@ -460,11 +488,21 @@ pub(crate) fn build_checked_sim_launch_plan(
     )?;
 
     let mut checked_participants = metadata_outcome.checked_participants.clone();
+    let mut contract_surfaces = metadata_outcome.contract_surfaces.clone();
     remap_simulator_participant_ids(&mut checked_participants, &resolved.robot.robot.id)?;
-    checked_participants.extend(official_simulator_participants(resolved)?);
+    remap_simulator_surface_ids(&checked_participants, &mut contract_surfaces);
+    let (official_simulators, official_simulator_surfaces) =
+        official_simulator_participants(resolved)?;
+    checked_participants.extend(official_simulators);
+    contract_surfaces.extend(official_simulator_surfaces);
     let controller_provider_id = simulator_controller_provider_id(&resolved.robot.robot.id);
     let substitutions = simulated_component_records(&checked_participants, &controller_provider_id);
     let sim_participants = sim_checked_participants(&checked_participants);
+    let sim_ids = sim_participants
+        .iter()
+        .map(|participant| participant.participant_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    contract_surfaces.retain(|surface| sim_ids.contains(surface.participant_id.as_str()));
     let report = graph_check::check_graph(&sim_participants);
     if !report.is_ok() {
         crate::commands::check::ensure_check_outcome_ok(
@@ -473,11 +511,12 @@ pub(crate) fn build_checked_sim_launch_plan(
                 missing_images: Vec::new(),
                 report: report.clone(),
                 checked_participants: sim_participants.clone(),
+                contract_surfaces: Vec::new(),
             },
         )?;
     }
 
-    build_launch_plan(
+    let mut plan = build_launch_plan(
         LaunchMode::Webots {
             world: world.to_path_buf(),
         },
@@ -489,14 +528,32 @@ pub(crate) fn build_checked_sim_launch_plan(
             substitutions: &substitutions,
             source_participants: &source_participants,
         }],
-    )
+    )?;
+    if !joypad {
+        plan.site.retain(|site| site.id != SITE_TOOL_JOYPAD);
+    }
+    let coherence_graph = crate::commands::check::robot_contract_surfaces(
+        &resolved.robot.robot.id,
+        &contract_surfaces,
+    );
+    let coherence = crate::commands::check::coherence_for_launch_plan(&plan, &[coherence_graph])?;
+    crate::commands::check::enforce_coherence(
+        crate::commands::check::CoherenceVerb::Simulate,
+        &coherence,
+        message_format,
+    )?;
+    Ok(plan)
 }
 
 fn official_simulator_participants(
     resolved: &ResolvedRobot,
-) -> Result<Vec<graph_check::ParticipantApis>> {
+) -> Result<(
+    Vec<graph_check::ParticipantApis>,
+    Vec<graph_check::ParticipantContractSurface>,
+)> {
     let robot_id = resolved.robot.robot.id.as_str();
     let mut participants = Vec::new();
+    let mut surfaces = Vec::new();
     for runtime in resolved
         .simulators
         .iter()
@@ -516,12 +573,13 @@ fn official_simulator_participants(
                 runtime.name
             );
         }
-        let mut participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
-            format!(
-                "failed to interpret emit-apis for simulator {}",
-                runtime.name
-            )
-        })?;
+        let mut participant =
+            graph_check::ParticipantApis::try_from(raw.clone()).with_context(|| {
+                format!(
+                    "failed to interpret emit-apis for simulator {}",
+                    runtime.name
+                )
+            })?;
         participant.participant_id =
             simulator_participant_id_for_resolved_artifact(&runtime.name, robot_id).ok_or_else(
                 || {
@@ -533,9 +591,36 @@ fn official_simulator_participants(
                     )
                 },
             )?;
+        surfaces.push(crate::commands::check::contract_surface(
+            &raw,
+            participant.participant_id.clone(),
+        ));
         participants.push(participant);
     }
-    Ok(participants)
+    Ok((participants, surfaces))
+}
+
+fn remap_simulator_surface_ids(
+    participants: &[graph_check::ParticipantApis],
+    surfaces: &mut [graph_check::ParticipantContractSurface],
+) {
+    let simulator_ids = participants
+        .iter()
+        .filter(|participant| {
+            participant.participant_kind == graph_check::ParticipantKind::Simulator
+        })
+        .map(|participant| {
+            (
+                participant.artifact_id.as_str(),
+                participant.participant_id.as_str(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for surface in surfaces {
+        if let Some(participant_id) = simulator_ids.get(surface.participant_id.as_str()) {
+            surface.participant_id = (*participant_id).to_string();
+        }
+    }
 }
 
 fn remap_simulator_participant_ids(

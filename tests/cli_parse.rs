@@ -96,6 +96,7 @@ fn parses_check_service_and_json_output_and_rejects_pull() {
         "avoid_obstacles",
         "--message-format",
         "json",
+        "--strict",
     ])
     .expect("check command should parse");
 
@@ -105,6 +106,7 @@ fn parses_check_service_and_json_output_and_rejects_pull() {
 
     assert_eq!(command.service.as_deref(), Some("avoid_obstacles"));
     assert_eq!(command.message_format, MessageFormat::Json);
+    assert!(command.strict);
     assert!(Cli::try_parse_from(["phoxal-cli", "check", "--pull"]).is_err());
 }
 
