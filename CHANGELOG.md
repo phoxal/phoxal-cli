@@ -4,13 +4,21 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.8.1) - 2026-07-11
+
+
+### Fixed
+
+- *(resolver)* Component_assets optional for driverless components (#113)
+- *(resolver)* Read official component-driver binary as phoxal-component-<id> (#115)
+
 ## [0.8.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.8.0) - 2026-07-11
 
 
 ### Added
 
 - *(deploy)* Phoxal-deploy group grant instead of per-user sudoers (#110) [**breaking**]
-- *(check)* Validate user-runtime config against its real emitted JSON Schema (#109)
+- *(check)* Validate user-runtime config against its real emitted schema (W7) [hold: needs slotted catalog] (#109)
 
 ### Refactored
 
