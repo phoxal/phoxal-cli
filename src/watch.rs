@@ -389,7 +389,6 @@ fn recheck_run_target(
         catalog.as_ref(),
         ResolveOptions {
             emit_update_notice: false,
-            update_notice_json: false,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             ..ResolveOptions::default()

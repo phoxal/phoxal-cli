@@ -30,9 +30,6 @@ pub struct ResolveOptions {
     /// Emit the once-per-invocation artifact update notice. Watch rebuilds
     /// disable this so the top-level invocation never repeats it.
     pub emit_update_notice: bool,
-    /// Serialize the notice as an `updates_available` JSON object on stderr.
-    /// Human mode uses a concise warning instead.
-    pub update_notice_json: bool,
     /// Resolve git component `tag` → `commit`. A `tag` that is already a full
     /// commit SHA resolves with no network; a tag/branch ref is resolved live
     /// via `git ls-remote`. Flows that need to locate/stage component driver
@@ -59,7 +56,6 @@ impl Default for ResolveOptions {
         Self {
             refresh_channel_head: false,
             emit_update_notice: true,
-            update_notice_json: false,
             resolve_source_commits: true,
             resolve_component_asset_commits: true,
             official_target_triple: None,
@@ -649,10 +645,12 @@ pub fn resolve(
         && std::env::var_os("PHOXAL_QUIET").is_none()
         && let Some(catalog) = catalog
     {
-        emit_newer_versions_notice(
-            warn_about_newer_versions(robot, catalog, &target, &tool_target),
-            options.update_notice_json,
-        );
+        offer_newer_versions_notice(warn_about_newer_versions(
+            robot,
+            catalog,
+            &target,
+            &tool_target,
+        ));
     }
 
     let mut platform_runtimes = match catalog {
@@ -1151,22 +1149,11 @@ fn warn_about_newer_versions(
     newer
 }
 
-fn emit_newer_versions_notice(newer: Vec<String>, json: bool) {
+fn offer_newer_versions_notice(newer: Vec<String>) {
     if newer.is_empty() {
         return;
     }
-    eprintln!("{}", update_notice_message(&newer, json));
-}
-
-fn update_notice_message(newer: &[String], json: bool) -> String {
-    if json {
-        serde_json::json!({ "updates_available": newer }).to_string()
-    } else {
-        format!(
-            "warning: newer artifact versions available: {}; run `phoxal update`",
-            newer.join(", ")
-        )
-    }
+    crate::update_notice::offer(crate::update_notice::UpdateNotice::Artifacts(newer));
 }
 
 fn collect_newer(
@@ -2067,13 +2054,5 @@ services:
         };
 
         assert_eq!(runtime.artifact_ref(), "service-asset:y2026_1-stable");
-    }
-
-    #[test]
-    fn json_update_notice_has_a_structured_updates_available_field() {
-        let updates = vec!["phoxal/service-drive 1.0.0 -> 1.1.0".to_string()];
-        let value: serde_json::Value =
-            serde_json::from_str(&update_notice_message(&updates, true)).unwrap();
-        assert_eq!(value["updates_available"][0], updates[0]);
     }
 }

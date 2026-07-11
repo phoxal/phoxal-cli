@@ -58,7 +58,6 @@ pub struct CheckOptions {
     pub overlays: Vec<String>,
     pub target: Option<String>,
     pub emit_update_notice: bool,
-    pub update_notice_json: bool,
     pub strict: bool,
 }
 
@@ -353,7 +352,6 @@ impl CheckCmd {
             overlays: self.env.clone(),
             target: self.target.clone(),
             emit_update_notice: true,
-            update_notice_json: self.message_format == MessageFormat::Json,
             strict: self.strict,
         };
         let ui = app.ui;
@@ -504,7 +502,6 @@ fn run(
         ResolveOptions {
             refresh_channel_head: false,
             emit_update_notice: options.emit_update_notice,
-            update_notice_json: options.update_notice_json,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             official_target_triple: target_triple.clone(),

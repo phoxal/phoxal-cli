@@ -780,7 +780,6 @@ fn prepare_deploy(
         ResolveOptions {
             refresh_channel_head: false,
             emit_update_notice: true,
-            update_notice_json: options.message_format == MessageFormat::Json,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             official_target_triple: Some(target.official_triple.clone()),
