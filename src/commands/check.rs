@@ -3052,8 +3052,7 @@ mod tests {
                         "role": "publish",
                         "generation": "y2026_1",
                         "contract": "drive::Target",
-                        "external": false,
-                        "ignored": true
+                        "external": false
                     }
                 ],
                 "config_schema": { "type": "object" }
