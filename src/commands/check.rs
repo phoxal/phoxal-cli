@@ -1277,6 +1277,7 @@ pub(crate) fn extract_emit_apis_from_staged_runtime(
             crate::participant_metadata::ParticipantMeta {
                 participant_api: "fixture".to_string(),
                 contracts: Vec::new(),
+                config_schema: serde_json::json!({ "type": "null" }),
             },
         ));
     }
@@ -1311,6 +1312,7 @@ pub(crate) fn extract_emit_apis_from_staged_tool(
             crate::participant_metadata::ParticipantMeta {
                 participant_api: "fixture".to_string(),
                 contracts: Vec::new(),
+                config_schema: serde_json::json!({ "type": "null" }),
             },
         ));
     }
@@ -1347,10 +1349,8 @@ fn default_participant_class_for_kind(artifact_kind: &str) -> String {
 /// built artifact file - never by executing it (the `emit-apis` runtime
 /// subcommand this used to run is gone). A binary's own linker section
 /// carries only its contracts, not its artifact identity (`kind`/`id`) or a
-/// config schema (`ParticipantConfig::SCHEMA_JSON` is a fixed `"{}"`
-/// placeholder for every participant today, pending a host-side `build.rs`
-/// materialization step - RECONCILIATION correction #12), so both are
-/// supplied from what is already known about `tool` rather than self-reported.
+/// artifact identity, so the identity is supplied from what is already known
+/// about `tool`; contracts and the config schema both come from the section.
 pub(crate) fn fetch_emit_apis_from_tool(tool: &ToolParticipant) -> Result<RawEmitApis> {
     let meta = crate::participant_metadata::extract_participant_metadata(&tool.binary_path)
         .with_context(|| {
@@ -1387,12 +1387,7 @@ fn raw_emit_apis_from_extracted_metadata(
         // is no one dated value left to put here.
         api_version: String::new(),
         required_contracts: meta.contracts,
-        // `ParticipantConfig::SCHEMA_JSON` is a fixed `"{}"` placeholder for
-        // every participant today (RECONCILIATION correction #12: the real
-        // `schemars` schema needs a host-side `build.rs` step a proc-macro
-        // cannot do) - identical to what the catalog itself carries for an
-        // official artifact, so a source-built participant reports the same.
-        config_schema: Some(serde_json::json!({})),
+        config_schema: Some(meta.config_schema),
     }
 }
 
@@ -3109,50 +3104,84 @@ mod tests {
 
     #[test]
     fn user_service_config_is_validated_against_emitted_schema() -> Result<()> {
+        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("api-fixture");
         let sources = vec![SourceParticipant::user_service(
             "avoid".to_string(),
-            PathBuf::from("/fake/project/runtimes/avoid"),
+            fixture_dir,
         )];
-        let extras = RobotManifestExtras {
-            user_runtimes: BTreeMap::from([(
-                "avoid".to_string(),
-                crate::resolver::UserRuntimeManifestExtras {
-                    config: Some(serde_json::json!({ "gain": "fast" })),
+        let emitted = build_emit_apis_by_building(&sources[0])?;
+        assert_eq!(
+            emitted.config_schema,
+            Some(serde_json::json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "title": "Config",
+                "type": "object",
+                "properties": { "gain": { "type": "number", "format": "double" } },
+                "required": ["gain"]
+            }))
+        );
+
+        let check_config = |config: Value| -> Result<CheckOutcome> {
+            let extras = RobotManifestExtras {
+                user_runtimes: BTreeMap::from([(
+                    "avoid".to_string(),
+                    crate::resolver::UserRuntimeManifestExtras {
+                        config: Some(config),
+                    },
+                )]),
+                ..RobotManifestExtras::default()
+            };
+
+            run_check_with_context(
+                &[],
+                &[],
+                &sources,
+                CheckGraphContext {
+                    manifest_extras: &extras,
                 },
-            )]),
-            ..RobotManifestExtras::default()
+                |_| bail!("no platform images should be fetched"),
+                |_| bail!("no tools should be fetched"),
+                |_| Ok(emitted.clone()),
+            )
         };
 
-        let outcome = run_check_with_context(
-            &[],
-            &[],
-            &sources,
-            CheckGraphContext {
-                manifest_extras: &extras,
-            },
-            |_| bail!("no platform images should be fetched"),
-            |_| bail!("no tools should be fetched"),
-            |_| {
-                let mut raw = raw("avoid", "y2026_1", &[]);
-                raw.config_schema = Some(serde_json::json!({
-                    "type": "object",
-                    "required": ["gain"],
-                    "properties": {
-                        "gain": { "type": "number" }
-                    },
-                    "additionalProperties": false
-                }));
-                Ok(raw)
-            },
-        )?;
-
-        assert_eq!(outcome.report.problems.len(), 1);
+        let missing = check_config(serde_json::json!({}))?;
         assert!(matches!(
-            &outcome.report.problems[0],
-            Problem::InvalidConfig { runtime_id, errors }
+            missing
+                .report
+                .problems
+                .iter()
+                .find(|problem| matches!(problem, Problem::InvalidConfig { .. })),
+            Some(Problem::InvalidConfig { runtime_id, errors })
                 if runtime_id == "avoid"
                     && errors.iter().any(|error| error.contains("gain"))
         ));
+
+        let mistyped = check_config(serde_json::json!({ "gain": "fast" }))?;
+        assert!(matches!(
+            mistyped
+                .report
+                .problems
+                .iter()
+                .find(|problem| matches!(problem, Problem::InvalidConfig { .. })),
+            Some(Problem::InvalidConfig { runtime_id, errors })
+                if runtime_id == "avoid"
+                    && errors.iter().any(|error| error.contains("gain"))
+        ));
+
+        let valid = check_config(serde_json::json!({ "gain": 1.5 }))?;
+        assert!(
+            valid
+                .report
+                .problems
+                .iter()
+                .all(|problem| !matches!(problem, Problem::InvalidConfig { .. })),
+            "{:?}",
+            valid.report.problems
+        );
         Ok(())
     }
 

@@ -2835,6 +2835,7 @@ version = "0.0.0"
 dependencies = [
  "phoxal",
  "phoxal-api",
+ "serde",
 ]
 
 [[package]]
