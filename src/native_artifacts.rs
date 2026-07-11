@@ -837,7 +837,13 @@ fn package_storage_key(package: &str) -> Result<String> {
     for segment in &segments {
         validate_path_segment("artifact package segment", segment)?;
     }
-    Ok(format!("{}%2F{}", segments[0], segments[1]))
+    // Filesystem-safe, matching the rest of the system (framework release
+    // tags/assets, `resolver`/`deploy`'s `filesystem_safe_package_name`): a
+    // provider-qualified `phoxal/service-drive` stores as `phoxal-service-drive`.
+    // The theoretical `a/b-c` vs `a-b/c` collision cannot occur while providers
+    // are single-segment (today only `phoxal`), and it is already accepted
+    // system-wide for the identical packages' tags and asset filenames.
+    Ok(format!("{}-{}", segments[0], segments[1]))
 }
 
 fn validate_path_segment(label: &str, value: &str) -> Result<()> {
@@ -918,12 +924,11 @@ mod tests {
     }
 
     #[test]
-    fn local_identity_is_validated_and_collision_free() -> Result<()> {
+    fn local_identity_is_validated_and_filesystem_safe() -> Result<()> {
+        // Matches `filesystem_safe_package_name` used everywhere else in the
+        // system, so a package maps to the same on-disk name in the store, the
+        // resolver, the deploy install plan, and the framework's release tags.
         assert_eq!(
-            package_storage_key("phoxal/service-drive")?,
-            "phoxal%2Fservice-drive"
-        );
-        assert_ne!(
             package_storage_key("phoxal/service-drive")?,
             "phoxal-service-drive"
         );
