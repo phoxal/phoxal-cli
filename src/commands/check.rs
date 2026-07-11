@@ -254,7 +254,7 @@ pub(crate) fn coherence_for_launch_plan(
                 .iter()
                 .map(|participant| participant.launch.participant_id.as_str())
                 .collect::<std::collections::BTreeSet<_>>();
-            ids.extend(plan.site.iter().map(|site| tool_emit_apis_id(&site.id)));
+            ids.extend(plan.site.iter().map(|site| site.id.as_str()));
             let graph_surfaces = graph
                 .surfaces
                 .iter()
@@ -815,7 +815,7 @@ pub(crate) fn check_artifact_refs_from_resolved(
             .filter(|tool| tool.path_override.is_none())
             .filter(|tool| tool_env_override(tool).is_none())
             .map(|tool| PlatformArtifactRef {
-                name: tool_emit_apis_id(&tool.name).to_string(),
+                name: tool.name.clone(),
                 kind: ArtifactKind::Tool,
                 artifact_ref: tool.asset.clone(),
                 instances: Vec::new(),
@@ -1054,9 +1054,14 @@ pub fn run_check_with_deployed_user_service_images(
                 });
             }
         };
+        let expected_artifact_id = if artifact.kind == ArtifactKind::Tool {
+            tool_emit_apis_id(&artifact.name)
+        } else {
+            &artifact.name
+        };
         validate_artifact_identity(
             artifact.kind_label(),
-            &artifact.name,
+            expected_artifact_id,
             artifact.kind.emit_apis_kind(),
             &raw,
         )?;
@@ -1069,7 +1074,7 @@ pub fn run_check_with_deployed_user_service_images(
                 )
             })?;
         if artifact.instances.is_empty() {
-            contract_surfaces.push(contract_surface(&raw, participant.participant_id.clone()));
+            contract_surfaces.push(contract_surface(&raw, artifact.name.clone()));
             participants.push(participant);
         } else {
             // A catalog component driver is fetched once but launched once
@@ -1103,7 +1108,7 @@ pub fn run_check_with_deployed_user_service_images(
                     service.name, service.image_ref
                 )
             })?;
-        contract_surfaces.push(contract_surface(&raw, participant.participant_id.clone()));
+        contract_surfaces.push(contract_surface(&raw, service.name.clone()));
         if let Some(problem) = validate_user_service_config(
             &service.name,
             participant.config_schema.as_ref(),
@@ -1132,7 +1137,7 @@ pub fn run_check_with_deployed_user_service_images(
                     tool.binary_path.display()
                 )
             })?;
-        contract_surfaces.push(contract_surface(&raw, participant.participant_id.clone()));
+        contract_surfaces.push(contract_surface(&raw, tool.name.clone()));
         participants.push(participant);
     }
 
@@ -1172,10 +1177,12 @@ pub fn run_check_with_deployed_user_service_images(
         {
             config_problems.push(problem);
         }
-        contract_surfaces.push(contract_surface(
-            &raw,
-            participant_apis.participant_id.clone(),
-        ));
+        let surface_participant_id = if participant.kind == SourceParticipantKind::Tool {
+            participant.name.clone()
+        } else {
+            participant_apis.participant_id.clone()
+        };
+        contract_surfaces.push(contract_surface(&raw, surface_participant_id));
         participants.push(participant_apis);
     }
 

@@ -816,7 +816,7 @@ fn prepare_deploy(
     ensure_no_native_c_source_dependencies(&checked_source_participants)?;
     let platform_refs = check_artifact_refs_from_resolved(&resolved)
         .into_iter()
-        .filter(|artifact| artifact.kind != ArtifactKind::Tool || artifact.name == "router")
+        .filter(|artifact| artifact.kind != ArtifactKind::Tool || artifact.name == SITE_TOOL_ROUTER)
         .collect::<Vec<_>>();
     let tool_participants = tool_participants_from_resolved(&resolved)?
         .into_iter()

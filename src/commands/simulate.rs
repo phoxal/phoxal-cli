@@ -436,8 +436,8 @@ pub(crate) fn build_checked_sim_launch_plan(
         .into_iter()
         .filter(|artifact| {
             artifact.kind != crate::catalog::ArtifactKind::Tool
-                || artifact.name == "router"
-                || (joypad && artifact.name == "joypad")
+                || artifact.name == crate::launch_plan::SITE_TOOL_ROUTER
+                || (joypad && artifact.name == SITE_TOOL_JOYPAD)
         })
         .collect::<Vec<_>>();
     let tool_participants = tool_participants_from_resolved(resolved)?
