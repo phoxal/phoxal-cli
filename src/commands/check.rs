@@ -123,6 +123,22 @@ pub struct RobotCoherenceDiagnostic {
     pub mismatches: Vec<CoherenceMismatchDiagnostic>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RobotContractSurfaces {
+    pub robot_id: String,
+    pub surfaces: Vec<graph_check::ParticipantContractSurface>,
+}
+
+pub(crate) fn robot_contract_surfaces(
+    robot_id: &str,
+    surfaces: &[graph_check::ParticipantContractSurface],
+) -> RobotContractSurfaces {
+    RobotContractSurfaces {
+        robot_id: robot_id.to_string(),
+        surfaces: surfaces.to_vec(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CoherenceMismatchDiagnostic {
@@ -224,23 +240,28 @@ pub(crate) fn evaluate_robot_coherence(
 
 pub(crate) fn coherence_for_launch_plan(
     plan: &crate::launch_plan::LaunchPlan,
-    surfaces: &[graph_check::ParticipantContractSurface],
-) -> Vec<RobotCoherenceDiagnostic> {
+    graphs: &[RobotContractSurfaces],
+) -> Result<Vec<RobotCoherenceDiagnostic>> {
     plan.robots
         .iter()
         .map(|robot| {
+            let graph = graphs
+                .iter()
+                .find(|graph| graph.robot_id == robot.id)
+                .ok_or_else(|| anyhow!("robot {} has no checked contract graph", robot.id))?;
             let mut ids = robot
                 .participants
                 .iter()
                 .map(|participant| participant.launch.participant_id.as_str())
                 .collect::<std::collections::BTreeSet<_>>();
             ids.extend(plan.site.iter().map(|site| tool_emit_apis_id(&site.id)));
-            let graph_surfaces = surfaces
+            let graph_surfaces = graph
+                .surfaces
                 .iter()
                 .filter(|surface| ids.contains(surface.participant_id.as_str()))
                 .cloned()
                 .collect::<Vec<_>>();
-            evaluate_robot_coherence(&robot.id, &graph_surfaces)
+            Ok(evaluate_robot_coherence(&robot.id, &graph_surfaces))
         })
         .collect()
 }
@@ -1274,10 +1295,11 @@ pub(crate) fn extract_emit_apis_from_staged_tool(
     tool: &crate::resolver::ResolvedTool,
 ) -> Result<RawEmitApis> {
     #[cfg(test)]
-    if tool
-        .url
-        .as_deref()
-        .is_some_and(|url| url.starts_with("https://example.invalid/"))
+    if !tool.published
+        || tool
+            .url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("https://example.invalid/"))
     {
         return Ok(raw_emit_apis_from_extracted_metadata(
             "tool",

@@ -9,10 +9,11 @@ use tokio::time::MissedTickBehavior;
 
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
-    extract_emit_apis_from_staged_runtime, platform_artifact_refs_from_resolved,
-    run_check_with_context, source_participants_from_resolved,
+    check_artifact_refs_from_resolved, extract_emit_apis_from_staged_runtime,
+    extract_emit_apis_from_staged_tool, fetch_emit_apis_from_tool, run_check_with_context,
+    source_participants_from_resolved, tool_participants_from_resolved,
 };
-use crate::commands::run::{RunOptions, source_spec_from_launch_record};
+use crate::commands::run::{DriverPolicy, RunOptions, source_spec_from_launch_record};
 use crate::commands::simulate::{
     SimulateMode, SimulateOptions, build_checked_sim_launch_plan, resolve_project,
 };
@@ -400,26 +401,40 @@ fn recheck_run_target(
     // of the whole source graph rather than just the changed one.
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
-    let platform_refs = platform_artifact_refs_from_resolved(&resolved);
-    let official_by_ref = resolved
+    let platform_refs = check_artifact_refs_from_resolved(&resolved);
+    let tool_participants = tool_participants_from_resolved(&resolved)?;
+    let mut official_by_ref = resolved
         .platform_runtimes
         .iter()
         .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
         .collect::<BTreeMap<_, _>>();
+    official_by_ref.extend(crate::commands::check::component_driver_runtimes_by_ref(
+        &resolved,
+    ));
+    let tools_by_ref = resolved
+        .tools
+        .iter()
+        .map(|tool| (tool.asset.clone(), tool))
+        .collect::<BTreeMap<_, _>>();
     let outcome = run_check_with_context(
         &platform_refs,
-        &[],
+        &tool_participants,
         &source_participants,
         CheckGraphContext {
             manifest_extras: &loaded.extras,
         },
         |artifact_ref| {
-            let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
-                anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
-            })?;
-            extract_emit_apis_from_staged_runtime(runtime)
+            if let Some(runtime) = official_by_ref.get(artifact_ref) {
+                return extract_emit_apis_from_staged_runtime(runtime);
+            }
+            if let Some(tool) = tools_by_ref.get(artifact_ref) {
+                return extract_emit_apis_from_staged_tool(tool);
+            }
+            Err(anyhow!(
+                "resolved official artifact {artifact_ref} is not in the catalog"
+            ))
         },
-        |_| unreachable!("run watch does not check site tools as graph participants"),
+        fetch_emit_apis_from_tool,
         build_emit_apis_from_source,
     )?;
     crate::commands::check::ensure_check_outcome_ok(&resolved.channel.to_string(), &outcome)?;
@@ -434,8 +449,19 @@ fn recheck_run_target(
             source_participants: &source_participants,
         }],
     )?;
+    let driver_policy = DriverPolicy::from_options(options, &plan)?;
+    let mut coherence_plan = plan.clone();
+    for robot in &mut coherence_plan.robots {
+        robot
+            .participants
+            .retain(|participant| driver_policy.launches(participant));
+    }
+    let coherence_graph = crate::commands::check::robot_contract_surfaces(
+        &resolved.robot.robot.id,
+        &outcome.contract_surfaces,
+    );
     let coherence =
-        crate::commands::check::coherence_for_launch_plan(&plan, &outcome.contract_surfaces);
+        crate::commands::check::coherence_for_launch_plan(&coherence_plan, &[coherence_graph])?;
     crate::commands::check::enforce_coherence(
         crate::commands::check::CoherenceVerb::Run,
         &coherence,

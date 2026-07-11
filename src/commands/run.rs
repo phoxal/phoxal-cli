@@ -294,18 +294,16 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     let driver_policy = DriverPolicy::from_options(&options, &plan)?;
     let mut coherence_plan = plan.clone();
     for robot in &mut coherence_plan.robots {
-        robot.participants.retain(|participant| {
-            !matches!(
-                participant.execution,
-                ParticipantExecution::ComponentDriver { .. }
-            ) || driver_policy.decision(&participant.launch.participant_id)
-                == DriverDecision::Launch
-        });
+        robot
+            .participants
+            .retain(|participant| driver_policy.launches(participant));
     }
-    let coherence = crate::commands::check::coherence_for_launch_plan(
-        &coherence_plan,
+    let coherence_graph = crate::commands::check::robot_contract_surfaces(
+        &resolved.robot.robot.id,
         &outcome.contract_surfaces,
     );
+    let coherence =
+        crate::commands::check::coherence_for_launch_plan(&coherence_plan, &[coherence_graph])?;
     crate::commands::check::enforce_coherence(
         crate::commands::check::CoherenceVerb::Run,
         &coherence,
@@ -445,6 +443,13 @@ impl DriverPolicy {
             }
             DriversMode::On => DriverDecision::Launch,
         }
+    }
+
+    pub(crate) fn launches(&self, participant: &ParticipantLaunchRecord) -> bool {
+        !matches!(
+            participant.execution,
+            ParticipantExecution::ComponentDriver { .. }
+        ) || self.decision(&participant.launch.participant_id) == DriverDecision::Launch
     }
 }
 

@@ -532,7 +532,11 @@ pub(crate) fn build_checked_sim_launch_plan(
     if !joypad {
         plan.site.retain(|site| site.id != SITE_TOOL_JOYPAD);
     }
-    let coherence = crate::commands::check::coherence_for_launch_plan(&plan, &contract_surfaces);
+    let coherence_graph = crate::commands::check::robot_contract_surfaces(
+        &resolved.robot.robot.id,
+        &contract_surfaces,
+    );
+    let coherence = crate::commands::check::coherence_for_launch_plan(&plan, &[coherence_graph])?;
     crate::commands::check::enforce_coherence(
         crate::commands::check::CoherenceVerb::Simulate,
         &coherence,

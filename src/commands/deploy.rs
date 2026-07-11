@@ -869,8 +869,11 @@ fn prepare_deploy(
             source_participants: &checked_source_participants,
         }],
     )?;
-    let coherence =
-        crate::commands::check::coherence_for_launch_plan(&plan, &outcome.contract_surfaces);
+    let coherence_graph = crate::commands::check::robot_contract_surfaces(
+        &resolved.robot.robot.id,
+        &outcome.contract_surfaces,
+    );
+    let coherence = crate::commands::check::coherence_for_launch_plan(&plan, &[coherence_graph])?;
     crate::commands::check::enforce_coherence(
         crate::commands::check::CoherenceVerb::Deploy,
         &coherence,
