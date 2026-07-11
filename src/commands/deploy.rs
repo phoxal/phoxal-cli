@@ -43,15 +43,19 @@ use crate::supervisor::{START_LIMIT_BURST, START_LIMIT_INTERVAL};
 use crate::utils::{cargo_binary_name, hash_tree, make_executable};
 
 const OPT_ROOT: &str = "/opt/phoxal";
-const OPT_BIN: &str = "/opt/phoxal/bin";
-const OPT_ENV: &str = "/opt/phoxal/env";
+const ACTIVE_ROOT: &str = "/opt/phoxal/active";
+const OPT_BIN: &str = "/opt/phoxal/active/bin";
+const OPT_ENV: &str = "/opt/phoxal/active/env";
+const RELEASES_ROOT: &str = "/opt/phoxal/releases";
 const SYSTEMD_DIR: &str = "/etc/systemd/system";
 const IDENTITY_DIR: &str = "/var/lib/phoxal/identity";
 const HELPER_PATH: &str = "/usr/local/sbin/phoxal-systemd-helper";
 const SUDOERS_PATH: &str = "/etc/sudoers.d/phoxal-deploy";
 const PAYLOAD_STAGING_PREFIX: &str = "/tmp/phoxal-payload-";
-const UNIT_STAGING_PREFIX: &str = "/tmp/phoxal-units-";
 const RELEASE_SCHEMA: &str = "phoxal.release/v0";
+const DOWNLOAD_DESCRIPTOR_SCHEMA: &str = "phoxal.deploy-download/v0";
+const DOWNLOAD_CONCURRENCY: usize = 4;
+const DOWNLOAD_RETRIES: usize = 3;
 const SUDO_PASSWORD_ENV: &str = "PHOXAL_SUDO_PASSWORD";
 const COMPONENT_FILE: &str = "component.yaml";
 const STRUCTURE_FILE: &str = "structure.urdf";
@@ -124,6 +128,7 @@ pub struct DeployReport {
     pub rendered_units: BTreeMap<String, String>,
     pub env_files: BTreeMap<String, String>,
     pub release_json: Value,
+    pub delivery: Option<OfficialDelivery>,
     pub health: Option<HealthReport>,
 }
 
@@ -140,6 +145,7 @@ pub struct InstallPlan {
     pub health_deadline_seconds: u64,
     pub watchdog_sec: u64,
     pub missing_official_artifacts: Vec<String>,
+    pub release_generation: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +192,13 @@ pub(crate) struct RemoteProbe {
     pub helper_grant: bool,
     /// The installed helper differs from this build's expected script.
     pub helper_stale: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OfficialDelivery {
+    RobotDownload,
+    HostTransferFallback,
 }
 
 impl RemoteProbe {
@@ -262,8 +275,22 @@ pub(crate) trait DeployTransport {
         sudo_password: Option<&SudoPassword>,
     ) -> Result<()>;
     fn list_installed_units(&mut self) -> Result<Vec<String>>;
+    fn github_release_reachable(&mut self, url: &str) -> Result<bool>;
+    fn prepare_host_transfer_fallback(
+        &mut self,
+        payload: &mut RenderedPayload,
+        ui: &crate::Ui,
+    ) -> Result<()>;
     fn sync_payload(&mut self, payload: &RenderedPayload) -> Result<()>;
+    fn download_official_artifacts(
+        &mut self,
+        generation: &str,
+        artifacts: &[DownloadArtifact],
+    ) -> Result<()>;
     fn install_units(&mut self, payload: &RenderedPayload, stale_units: &[String]) -> Result<()>;
+    fn activate_release(&mut self, generation: &str) -> Result<()>;
+    fn rollback_release(&mut self) -> Result<()>;
+    fn finalize_units(&mut self, stale_units: &[String]) -> Result<()>;
     fn restart(&mut self) -> Result<()>;
     fn health_report(&mut self, units: &[String], deadline: Duration) -> Result<HealthReport>;
 }
@@ -282,6 +309,9 @@ pub(crate) struct RenderedPayload {
     pub rendered_units: BTreeMap<String, String>,
     pub env_files: BTreeMap<String, String>,
     pub release_json: Value,
+    pub download_descriptor: DownloadDescriptor,
+    official_plans: BTreeMap<String, OfficialArtifactPlan>,
+    pub delivery: Option<OfficialDelivery>,
     pub unit_names: Vec<String>,
     pub bootstrap: BootstrapScripts,
 }
@@ -308,9 +338,33 @@ struct OfficialArtifactPlan {
     kind: ArtifactKind,
     version: String,
     sha256: String,
+    url: String,
+    size: u64,
+    target: String,
+    archive_binary_name: String,
     install_binary_name: String,
     source_path: Option<PathBuf>,
     missing_label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadDescriptor {
+    pub schema: String,
+    pub concurrency: usize,
+    pub retries: usize,
+    pub artifacts: Vec<DownloadArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadArtifact {
+    pub package: String,
+    pub version: String,
+    pub target: String,
+    pub url: String,
+    pub size: u64,
+    pub sha256: String,
+    pub archive_binary_name: String,
+    pub install_binary_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -328,6 +382,10 @@ struct ReleaseArtifact {
     version: Option<String>,
     source: Value,
     sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
 }
 
 impl Deploy {
@@ -443,23 +501,82 @@ where
         .context("failed to list installed phoxal units")?;
     let stale = stale_units(&installed, &payload.unit_names);
     payload.install_plan.stale_units_to_remove = stale.clone();
+    validate_download_descriptor(&payload.download_descriptor)?;
+
+    let reachability_url = payload
+        .download_descriptor
+        .artifacts
+        .first()
+        .map(|artifact| artifact.url.as_str())
+        .filter(|url| !url.is_empty())
+        .context("resolved deploy has no published official release URL")?;
+    let delivery = if transport
+        .github_release_reachable(reachability_url)
+        .context("failed to preflight GitHub release reachability from the robot")?
+    {
+        OfficialDelivery::RobotDownload
+    } else {
+        transport
+            .prepare_host_transfer_fallback(&mut payload, ui)
+            .context("failed to prepare host-transfer fallback artifacts")?;
+        OfficialDelivery::HostTransferFallback
+    };
+    payload.delivery = Some(delivery);
 
     transport
         .sync_payload(&payload)
         .context("failed to sync phoxal payload")?;
+    if delivery == OfficialDelivery::RobotDownload {
+        transport
+            .download_official_artifacts(
+                &payload.install_plan.release_generation,
+                &payload.download_descriptor.artifacts,
+            )
+            .context("robot failed to download official release artifacts")?;
+    }
     transport
         .install_units(&payload, &stale)
         .context("failed to install systemd units")?;
     transport
+        .activate_release(&payload.install_plan.release_generation)
+        .context("failed to activate transactional release")?;
+    let health = match restart_and_check(transport, &payload.unit_names, options.health_timeout) {
+        Ok(health) => health,
+        Err(deploy_error) => {
+            let rollback = transport
+                .rollback_release()
+                .and_then(|()| transport.restart());
+            return match rollback {
+                Ok(()) => Err(anyhow!(
+                    "{deploy_error:#}\nrelease rolled back to the previous generation"
+                )),
+                Err(rollback_error) => Err(anyhow!(
+                    "{deploy_error:#}\nrelease activation failed and rollback also failed: {rollback_error:#}"
+                )),
+            };
+        }
+    };
+    transport
+        .finalize_units(&stale)
+        .context("failed to finalize systemd units after healthy activation")?;
+    Ok(report_from_payload("deploy", payload, Some(health)))
+}
+
+fn restart_and_check<T: DeployTransport>(
+    transport: &mut T,
+    units: &[String],
+    deadline: Duration,
+) -> Result<HealthReport> {
+    transport
         .restart()
         .context("failed to restart phoxal.target")?;
     let health = transport
-        .health_report(&payload.unit_names, options.health_timeout)
+        .health_report(units, deadline)
         .context("failed to collect deploy health")?;
     if !health.is_ok() {
         bail!("{}", format_health_failure(&health));
     }
-    Ok(report_from_payload("deploy", payload, Some(health)))
+    Ok(health)
 }
 
 /// Fail before cross-building/packaging/rsyncing anything if sudo on the
@@ -753,7 +870,7 @@ fn prepare_deploy(
     project_start: &Path,
     options: &DeployOptions,
     target: TargetTriples,
-    require_official_binaries: bool,
+    _require_official_binaries: bool,
     remote_user: &str,
     ui: &crate::Ui,
 ) -> Result<RenderedPayload> {
@@ -788,10 +905,94 @@ fn prepare_deploy(
         },
     )?;
     if !options.dry_run {
-        let descriptors = crate::native_artifacts::descriptors_for(&resolved, false, true)?;
+        let host_resolved = resolve(
+            &loaded.robot,
+            project_root,
+            catalog.as_ref(),
+            ResolveOptions {
+                refresh_channel_head: false,
+                emit_update_notice: false,
+                update_notice_json: false,
+                resolve_source_commits: false,
+                resolve_component_asset_commits: false,
+                official_target_triple: Some(crate::resolver::host_target_triple()),
+                tool_target_triple: Some(crate::resolver::host_target_triple()),
+            },
+        )?;
+        ensure_cross_target_release_match(&resolved, &host_resolved)?;
+        let descriptors = crate::native_artifacts::descriptors_for(&host_resolved, false, true)?;
         crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
+        prepare_deploy_after_host_staging(
+            project_root,
+            options,
+            target,
+            remote_user,
+            ui,
+            &loaded,
+            robot_path.clone(),
+            resolved,
+            host_resolved,
+        )
+    } else {
+        prepare_deploy_after_host_staging(
+            project_root,
+            options,
+            target,
+            remote_user,
+            ui,
+            &loaded,
+            robot_path.clone(),
+            resolved.clone(),
+            resolved,
+        )
     }
+}
 
+fn ensure_cross_target_release_match(robot: &ResolvedRobot, host: &ResolvedRobot) -> Result<()> {
+    let robot_versions = official_runtimes_including_component_drivers(robot)
+        .into_iter()
+        .map(|runtime| (runtime.package.as_str(), runtime.version.as_str()))
+        .chain(
+            robot
+                .tools
+                .iter()
+                .map(|tool| (tool.package.as_str(), tool.resolved.as_str())),
+        )
+        .collect::<BTreeMap<_, _>>();
+    let host_versions = official_runtimes_including_component_drivers(host)
+        .into_iter()
+        .map(|runtime| (runtime.package.as_str(), runtime.version.as_str()))
+        .chain(
+            host.tools
+                .iter()
+                .map(|tool| (tool.package.as_str(), tool.resolved.as_str())),
+        )
+        .collect::<BTreeMap<_, _>>();
+    for (package, robot_version) in robot_versions {
+        let host_version = host_versions
+            .get(package)
+            .with_context(|| format!("host-target coherence evidence is missing {package}"))?;
+        if *host_version != robot_version {
+            bail!(
+                "CrossTargetReleaseMismatch: robot target resolved {package} {robot_version}, but host-target coherence evidence resolved {host_version}; run `phoxal update` for both target scopes before deploy"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_deploy_after_host_staging(
+    project_root: &Path,
+    options: &DeployOptions,
+    target: TargetTriples,
+    remote_user: &str,
+    ui: &crate::Ui,
+    loaded: &crate::resolver::LoadedRobot,
+    robot_path: PathBuf,
+    resolved: ResolvedRobot,
+    host_resolved: ResolvedRobot,
+) -> Result<RenderedPayload> {
     let all_source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
     let checked_source_participants = all_source_participants
@@ -814,23 +1015,23 @@ fn prepare_deploy(
         .cloned()
         .collect::<Vec<_>>();
     ensure_no_native_c_source_dependencies(&checked_source_participants)?;
-    let platform_refs = check_artifact_refs_from_resolved(&resolved)
+    let platform_refs = check_artifact_refs_from_resolved(&host_resolved)
         .into_iter()
         .filter(|artifact| artifact.kind != ArtifactKind::Tool || artifact.name == SITE_TOOL_ROUTER)
         .collect::<Vec<_>>();
-    let tool_participants = tool_participants_from_resolved(&resolved)?
+    let tool_participants = tool_participants_from_resolved(&host_resolved)?
         .into_iter()
         .filter(|tool| tool.name == SITE_TOOL_ROUTER)
         .collect::<Vec<_>>();
-    let mut official_by_ref = resolved
+    let mut official_by_ref = host_resolved
         .platform_runtimes
         .iter()
         .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
         .collect::<BTreeMap<_, _>>();
     official_by_ref.extend(crate::commands::check::component_driver_runtimes_by_ref(
-        &resolved,
+        &host_resolved,
     ));
-    let tools_by_ref = resolved
+    let tools_by_ref = host_resolved
         .tools
         .iter()
         .map(|tool| (tool.asset.clone(), tool))
@@ -894,7 +1095,6 @@ fn prepare_deploy(
         plan: &plan,
         target,
         health_timeout: options.health_timeout,
-        require_official_binaries,
         remote_user,
         ui,
     })
@@ -906,7 +1106,6 @@ struct RenderPayloadInput<'a> {
     plan: &'a LaunchPlan,
     target: TargetTriples,
     health_timeout: Duration,
-    require_official_binaries: bool,
     remote_user: &'a str,
     ui: &'a crate::Ui,
 }
@@ -918,7 +1117,6 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
         plan,
         target,
         health_timeout,
-        require_official_binaries,
         remote_user,
         ui,
     } = input;
@@ -942,8 +1140,7 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
         &target,
         ui,
     )?;
-    let official_plans =
-        stage_official_artifacts(root.path(), resolved, plan, require_official_binaries)?;
+    let official_plans = stage_official_artifacts(root.path(), resolved, plan, false)?;
 
     let identity_files = identity_install_plan(project_root, robot)?;
     let mut env_files = BTreeMap::new();
@@ -962,6 +1159,14 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
     write_robot_yaml(root.path(), robot)?;
     let metadata_files = stage_payload_metadata(project_root, root.path(), robot, resolved)?;
 
+    let download_descriptor = download_descriptor(&official_plans);
+    let descriptor_text = serde_json::to_string_pretty(&download_descriptor)
+        .context("failed to encode deploy download descriptor")?;
+    write_text(
+        &payload_opt(root.path()).join("download-descriptor.json"),
+        &(descriptor_text + "\n"),
+    )?;
+
     let release = release_record(resolved, plan, &source_builds, &official_plans)?;
     let release_json_text =
         serde_json::to_string_pretty(&release).context("failed to encode release record")?;
@@ -976,18 +1181,15 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
         .filter_map(|artifact| artifact.missing_label.clone())
         .collect::<Vec<_>>();
     let mut direct_writes = vec![
-        format!("{OPT_ROOT}/robot.yaml"),
-        format!("{OPT_ROOT}/phoxal-release.json"),
+        format!("{ACTIVE_ROOT}/robot.yaml"),
+        format!("{ACTIVE_ROOT}/phoxal-release.json"),
     ];
     direct_writes.extend(metadata_files);
+    let release_generation = release_generation(&release_json_text)?;
     let install_plan = InstallPlan {
         helper_path: HELPER_PATH.to_string(),
         sudoers_path: SUDOERS_PATH.to_string(),
-        scoped_delete: vec![
-            format!("{OPT_BIN}/"),
-            format!("{OPT_ENV}/"),
-            format!("{OPT_ROOT}/components/"),
-        ],
+        scoped_delete: Vec::new(),
         direct_writes,
         identity_files,
         units: unit_names.clone(),
@@ -1001,6 +1203,7 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
         health_deadline_seconds: health_timeout.as_secs(),
         watchdog_sec: WATCHDOG_SEC,
         missing_official_artifacts,
+        release_generation,
     };
 
     let install_plan_text =
@@ -1017,6 +1220,9 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
         rendered_units,
         env_files,
         release_json,
+        download_descriptor,
+        official_plans,
+        delivery: None,
         unit_names,
         bootstrap,
     })
@@ -1028,6 +1234,120 @@ fn create_payload_dirs(root: &Path) -> Result<()> {
             .with_context(|| format!("failed to create {}", path.display()))?;
     }
     Ok(())
+}
+
+fn download_descriptor(
+    official_plans: &BTreeMap<String, OfficialArtifactPlan>,
+) -> DownloadDescriptor {
+    DownloadDescriptor {
+        schema: DOWNLOAD_DESCRIPTOR_SCHEMA.to_string(),
+        concurrency: DOWNLOAD_CONCURRENCY,
+        retries: DOWNLOAD_RETRIES,
+        artifacts: official_plans
+            .values()
+            .map(|artifact| DownloadArtifact {
+                package: artifact.artifact_id.clone(),
+                version: artifact.version.clone(),
+                target: artifact.target.clone(),
+                url: artifact.url.clone(),
+                size: artifact.size,
+                sha256: artifact.sha256.clone(),
+                archive_binary_name: artifact.archive_binary_name.clone(),
+                install_binary_name: artifact.install_binary_name.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn validate_download_descriptor(descriptor: &DownloadDescriptor) -> Result<()> {
+    if descriptor.artifacts.is_empty() {
+        bail!("resolved deploy has no official artifacts to download");
+    }
+    for artifact in &descriptor.artifacts {
+        if !artifact.url.starts_with("https://")
+            || artifact.size == 0
+            || !phoxal::catalog::is_sha256(&artifact.sha256)
+        {
+            bail!(
+                "NativePending: official artifact {} {} has no complete immutable blob for {}; run `phoxal update` and verify the catalog publishes this robot target",
+                artifact.package,
+                artifact.version,
+                artifact.target
+            );
+        }
+    }
+    Ok(())
+}
+
+fn stage_official_fallback(payload: &mut RenderedPayload, ui: &crate::Ui) -> Result<()> {
+    let descriptors = payload
+        .official_plans
+        .values()
+        .map(
+            |artifact| crate::native_artifacts::NativeArtifactDescriptor {
+                package_id: artifact.artifact_id.clone(),
+                kind: artifact.kind,
+                name: artifact.artifact_id.clone(),
+                version: artifact.version.clone(),
+                url: artifact.url.clone(),
+                sha256: artifact.sha256.clone(),
+                size: artifact.size,
+                binary_name: artifact.archive_binary_name.clone(),
+                target: artifact.target.clone(),
+            },
+        )
+        .collect::<Vec<_>>();
+    crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
+    for (descriptor, artifact) in descriptors.iter().zip(payload.official_plans.values_mut()) {
+        let source = crate::native_artifacts::artifact_binary_path(descriptor)?;
+        let dest = payload_bin(payload.root.path()).join(&artifact.install_binary_name);
+        fs::copy(&source, &dest).with_context(|| {
+            format!(
+                "failed to stage fallback artifact {} from {}",
+                artifact.artifact_id,
+                source.display()
+            )
+        })?;
+        make_executable(&dest)?;
+        artifact.source_path = Some(source);
+    }
+    Ok(())
+}
+
+fn run_bounded<T, F>(items: &[T], concurrency: usize, operation: F) -> Result<()>
+where
+    T: Sync,
+    F: Fn(&T) -> Result<()> + Sync,
+{
+    if concurrency == 0 {
+        bail!("download concurrency must be greater than zero");
+    }
+    for batch in items.chunks(concurrency) {
+        std::thread::scope(|scope| -> Result<()> {
+            let handles = batch
+                .iter()
+                .map(|item| scope.spawn(|| operation(item)))
+                .collect::<Vec<_>>();
+            for handle in handles {
+                handle
+                    .join()
+                    .map_err(|_| anyhow!("robot download worker panicked"))??;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+fn release_generation(release_json: &str) -> Result<String> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_nanos();
+    let mut digest = Sha256::new();
+    digest.update(release_json.as_bytes());
+    digest.update(nonce.to_le_bytes());
+    Ok(hex::encode(digest.finalize())[..16].to_string())
 }
 
 fn payload_opt(root: &Path) -> PathBuf {
@@ -1043,7 +1363,7 @@ fn payload_env(root: &Path) -> PathBuf {
 }
 
 fn payload_systemd(root: &Path) -> PathBuf {
-    root.join("etc/systemd/system")
+    root.join("opt/phoxal/systemd")
 }
 
 fn stage_source_artifacts(
@@ -1960,158 +2280,82 @@ fn filesystem_safe_package_name(package: &str) -> String {
 }
 
 fn official_runtime_plan(
-    root: &Path,
+    _root: &Path,
     runtime: &ResolvedPlatformRuntime,
-    test_stub_missing: bool,
+    _test_stub_missing: bool,
 ) -> Result<OfficialArtifactPlan> {
-    let source_path = locate_official_runtime_binary(runtime)?;
-    #[cfg(test)]
-    let source_path = match source_path {
-        Some(path) => Some(path),
-        None if test_stub_missing => Some(test_official_stub(root, &runtime.name)?),
-        None => None,
-    };
-    #[cfg(not(test))]
-    let _ = test_stub_missing;
+    let descriptor = crate::native_artifacts::NativeArtifactDescriptor::from_runtime(runtime)?;
     let install_binary_name = filesystem_safe_package_name(&runtime.package);
-    if let Some(source) = &source_path {
-        let dest = payload_bin(root).join(&install_binary_name);
-        fs::copy(source, &dest).with_context(|| {
-            format!(
-                "failed to stage official artifact {} from {}",
-                runtime.package,
-                source.display()
+    let (url, size, sha256, target, archive_binary_name) = descriptor.map_or_else(
+        || {
+            (
+                String::new(),
+                0,
+                runtime.sha256.clone().unwrap_or_else(|| "0".repeat(64)),
+                runtime.target.clone(),
+                crate::resolver::official_binary_name(runtime.kind, &runtime.name),
             )
-        })?;
-        make_executable(&dest)?;
-    }
-    let sha256 = source_path
-        .as_deref()
-        .map(sha256_file)
-        .transpose()?
-        .or_else(|| runtime.sha256.clone())
-        .unwrap_or_else(|| "0".repeat(64));
+        },
+        |descriptor| {
+            (
+                descriptor.url,
+                descriptor.size,
+                descriptor.sha256,
+                descriptor.target,
+                descriptor.binary_name,
+            )
+        },
+    );
     Ok(OfficialArtifactPlan {
         artifact_id: runtime.package.clone(),
         kind: runtime.kind,
         version: runtime.version.clone(),
         sha256,
+        url,
+        size,
+        target,
+        archive_binary_name,
         install_binary_name,
-        source_path,
+        source_path: None,
         missing_label: (!runtime.published).then(|| format!("{} (missing)", runtime.package)),
     })
 }
 
-fn official_tool_plan(root: &Path, tool: &ResolvedTool) -> Result<OfficialArtifactPlan> {
-    let source_path = locate_tool_binary(tool)?;
-    #[cfg(test)]
-    let source_path = match source_path {
-        Some(path) => Some(path),
-        None => Some(test_official_stub(root, &tool.name)?),
-    };
-    if let Some(source) = &source_path {
-        let dest = payload_bin(root).join(&tool.name);
-        fs::copy(source, &dest).with_context(|| {
-            format!(
-                "failed to stage official tool {} from {}",
-                tool.name,
-                source.display()
+fn official_tool_plan(_root: &Path, tool: &ResolvedTool) -> Result<OfficialArtifactPlan> {
+    let descriptor = crate::native_artifacts::NativeArtifactDescriptor::from_tool(tool)?;
+    let (url, size, sha256, target, archive_binary_name) = descriptor.map_or_else(
+        || {
+            (
+                String::new(),
+                0,
+                tool.sha256.clone(),
+                tool.target.clone(),
+                tool.binary_name.clone(),
             )
-        })?;
-        make_executable(&dest)?;
-    }
-    let sha256 = source_path
-        .as_deref()
-        .map(sha256_file)
-        .transpose()?
-        .unwrap_or_else(|| tool.sha256.clone());
+        },
+        |descriptor| {
+            (
+                descriptor.url,
+                descriptor.size,
+                descriptor.sha256,
+                descriptor.target,
+                descriptor.binary_name,
+            )
+        },
+    );
     Ok(OfficialArtifactPlan {
         artifact_id: tool.package.clone(),
         kind: ArtifactKind::Tool,
         version: tool.resolved.clone(),
         sha256,
+        url,
+        size,
+        target,
+        archive_binary_name,
         install_binary_name: tool.name.clone(),
-        source_path,
-        missing_label: None,
+        source_path: None,
+        missing_label: (!tool.published).then(|| format!("{} (missing)", tool.package)),
     })
-}
-
-#[cfg(test)]
-fn test_official_stub(root: &Path, name: &str) -> Result<PathBuf> {
-    let path = root.join("_test-official").join(name);
-    write_text(&path, "#!/bin/sh\nexit 0\n")?;
-    make_executable(&path)?;
-    Ok(path)
-}
-
-fn locate_official_runtime_binary(runtime: &ResolvedPlatformRuntime) -> Result<Option<PathBuf>> {
-    if let Some(path) = env_path_override("PHOXAL_ARTIFACT", &runtime.package) {
-        return Ok(Some(path));
-    }
-    if let Ok(dir) = std::env::var("PHOXAL_ARTIFACT_DIR") {
-        for name in [
-            filesystem_safe_package_name(&runtime.package),
-            crate::resolver::official_binary_name(runtime.kind, &runtime.name),
-        ] {
-            let path = PathBuf::from(&dir).join(name);
-            if path.is_file() {
-                return Ok(Some(path));
-            }
-        }
-    }
-    let Some(descriptor) =
-        crate::native_artifacts::NativeArtifactDescriptor::from_runtime(runtime)?
-    else {
-        return Ok(None);
-    };
-    let cache = crate::native_artifacts::artifact_binary_path(&descriptor)?;
-    Ok(cache.is_file().then_some(cache))
-}
-
-fn locate_tool_binary(tool: &ResolvedTool) -> Result<Option<PathBuf>> {
-    if let Some(path) = env_path_override("PHOXAL_ARTIFACT", &tool.name) {
-        return Ok(Some(path));
-    }
-    if let Some(path) = env_path_override("PHOXAL_TOOL", &tool.name) {
-        return Ok(Some(path));
-    }
-    if let Ok(dir) = std::env::var("PHOXAL_ARTIFACT_DIR") {
-        let path = PathBuf::from(&dir).join(&tool.binary_name);
-        if path.is_file() {
-            return Ok(Some(path));
-        }
-    }
-    if let Ok(dir) = std::env::var("PHOXAL_TOOL_DIR") {
-        let path = PathBuf::from(&dir).join(&tool.name);
-        if path.is_file() {
-            return Ok(Some(path));
-        }
-        let path = PathBuf::from(&dir).join(&tool.binary_name);
-        if path.is_file() {
-            return Ok(Some(path));
-        }
-    }
-    // Tools never go through the graph check's emit-apis fetch (which stages
-    // runtime assets as a side effect), so stage the target-triple asset
-    // explicitly here.
-    crate::native_artifacts::stage_tool(
-        None,
-        tool,
-        crate::native_artifacts::ProvisioningMode::MissingOnly,
-    )
-    .with_context(|| {
-        format!(
-            "failed to stage official tool {} from the catalog",
-            tool.name
-        )
-    })
-}
-
-fn env_path_override(prefix: &str, id: &str) -> Option<PathBuf> {
-    let key = format!("{prefix}_{}_PATH", env_key(id));
-    std::env::var_os(key)
-        .map(PathBuf::from)
-        .filter(|path| path.is_file())
 }
 
 fn env_key(value: &str) -> String {
@@ -2197,7 +2441,7 @@ fn router_env(
     variables.insert(env::PARTICIPANT_ID.to_string(), site.id.clone());
     variables.insert(env::NAMESPACE.to_string(), namespace.to_string());
     variables.insert(env::ROBOT_ID.to_string(), robot_id.to_string());
-    variables.insert(env::ROBOT_ROOT.to_string(), OPT_ROOT.to_string());
+    variables.insert(env::ROBOT_ROOT.to_string(), ACTIVE_ROOT.to_string());
     variables.insert(
         env::CONFIG.to_string(),
         serde_json::to_string(&router_config_with_identity_paths(
@@ -2712,7 +2956,7 @@ fn copy_metadata_file(source: &Path, dest: &Path, label: &str) -> Result<()> {
 }
 
 fn opt_remote_path(relative_path: &Path) -> String {
-    format!("{OPT_ROOT}/{}", relative_path.display())
+    format!("{ACTIVE_ROOT}/{}", relative_path.display())
 }
 
 fn release_record(
@@ -2793,6 +3037,8 @@ fn release_source_artifact(artifact: &SourceBuildArtifact) -> ReleaseArtifact {
         version: None,
         source: artifact.source.clone(),
         sha256: artifact.sha256.clone(),
+        target: None,
+        url: None,
     }
 }
 
@@ -2803,6 +3049,8 @@ fn release_official_artifact(artifact: &OfficialArtifactPlan) -> ReleaseArtifact
         version: Some(artifact.version.clone()),
         source: Value::String("catalog".to_string()),
         sha256: artifact.sha256.clone(),
+        target: Some(artifact.target.clone()),
+        url: Some(artifact.url.clone()),
     }
 }
 
@@ -2861,8 +3109,7 @@ fn helper_script() -> String {
 set -eu
 unit_dir="{SYSTEMD_DIR}"
 opt_root="{OPT_ROOT}"
-opt_bin="{OPT_BIN}"
-opt_env="{OPT_ENV}"
+releases_root="{RELEASES_ROOT}"
 
 valid_unit() {{
   case "$1" in
@@ -2882,16 +3129,6 @@ valid_stage_suffix() {{
   return 0
 }}
 
-valid_unit_source() {{
-  case "$1" in
-    {UNIT_STAGING_PREFIX}*/*) ;;
-    *) return 1 ;;
-  esac
-  dir="${{1%/*}}"
-  suffix="${{dir#{UNIT_STAGING_PREFIX}}}"
-  valid_stage_suffix "$suffix"
-}}
-
 valid_payload_source() {{
   case "$1" in
     {PAYLOAD_STAGING_PREFIX}*) ;;
@@ -2901,98 +3138,104 @@ valid_payload_source() {{
   valid_stage_suffix "$suffix"
 }}
 
-sync_payload_dir() {{
-  local src dest mode entry name
-  src="$1"
-  dest="$2"
-  mode="$3"
-  install -d -o phoxal -g phoxal -m 0755 "$dest"
-  for entry in "$dest"/* "$dest"/.[!.]* "$dest"/..?*; do
-    [ -e "$entry" ] || continue
-    name="${{entry##*/}}"
-    if [ ! -e "$src/$name" ]; then
-      rm -rf "$entry"
-    fi
-  done
-  if [ -d "$src" ]; then
-    for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
-      [ -e "$entry" ] || continue
-      name="${{entry##*/}}"
-      test -f "$entry"
-      install -o phoxal -g phoxal -m "$mode" "$entry" "$dest/$name"
-    done
-  fi
+valid_generation() {{
+  case "$1" in
+    ""|*[!A-Fa-f0-9]*) return 1 ;;
+  esac
+  [ "${{#1}}" -eq 16 ]
 }}
 
-sync_payload_tree() {{
-  # local is load-bearing: this function recurses, and without it the
-  # recursive call clobbers the caller's loop state (only the first
-  # component subtree would ever be installed).
-  local src dest mode entry name
-  src="$1"
-  dest="$2"
-  mode="$3"
-  install -d -o phoxal -g phoxal -m 0755 "$dest"
-  for entry in "$dest"/* "$dest"/.[!.]* "$dest"/..?*; do
-    [ -e "$entry" ] || continue
-    name="${{entry##*/}}"
-    if [ ! -e "$src/$name" ]; then
-      rm -rf "$entry"
-    fi
-  done
-  if [ -d "$src" ]; then
-    for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
-      [ -e "$entry" ] || continue
-      name="${{entry##*/}}"
-      if [ -d "$entry" ]; then
-        sync_payload_tree "$entry" "$dest/$name" "$mode"
-      else
-        test -f "$entry"
-        install -o phoxal -g phoxal -m "$mode" "$entry" "$dest/$name"
-      fi
-    done
-  fi
+valid_name() {{
+  case "$1" in
+    ""|*[!A-Za-z0-9_.@+-]*) return 1 ;;
+  esac
 }}
 
-sync_payload_root_metadata() {{
-  local src dest entry name
-  src="$1"
-  dest="$2"
-  for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
-    [ -e "$entry" ] || continue
-    name="${{entry##*/}}"
-    case "$name" in
-      bin|env|components|robot.yaml|phoxal-release.json) continue ;;
-    esac
-    if [ -d "$entry" ]; then
-      sync_payload_tree "$entry" "$dest/$name" 0644
-    else
-      test -f "$entry"
-      install -o phoxal -g phoxal -m 0644 "$entry" "$dest/$name"
-    fi
-  done
+release_partial() {{
+  printf '%s/%s.partial' "$releases_root" "$1"
 }}
 
 case "${{1:-}}" in
-  install-payload)
+  prepare-release)
     source="${{2:-}}"
+    generation="${{3:-}}"
     valid_payload_source "$source" || exit 64
+    valid_generation "$generation" || exit 64
     test -d "$source"
-    install -d -o phoxal -g phoxal -m 0755 "$opt_root" "$opt_bin" "$opt_env"
-    sync_payload_dir "$source/bin" "$opt_bin" 0755
-    sync_payload_dir "$source/env" "$opt_env" 0644
-    sync_payload_tree "$source/components" "$opt_root/components" 0644
-    sync_payload_root_metadata "$source" "$opt_root"
-    install -o phoxal -g phoxal -m 0644 "$source/robot.yaml" "$opt_root/robot.yaml"
-    install -o phoxal -g phoxal -m 0644 "$source/phoxal-release.json" "$opt_root/phoxal-release.json"
+    partial="$(release_partial "$generation")"
+    install -d -o phoxal -g phoxal -m 0755 "$opt_root" "$releases_root"
+    rm -rf "$partial"
+    install -d -o phoxal -g phoxal -m 0755 "$partial"
+    cp -a "$source/." "$partial/"
+    chown -R phoxal:phoxal "$partial"
+    ;;
+  download-artifact)
+    generation="${{2:-}}"
+    expected_size="${{3:-}}"
+    expected_sha="${{4:-}}"
+    archive_binary="${{5:-}}"
+    install_binary="${{6:-}}"
+    valid_generation "$generation" || exit 64
+    valid_name "$archive_binary" || exit 64
+    valid_name "$install_binary" || exit 64
+    case "$expected_size" in ""|*[!0-9]*) exit 64 ;; esac
+    case "$expected_sha" in ""|*[!a-f0-9]*) exit 64 ;; esac
+    [ "${{#expected_sha}}" -eq 64 ]
+    url="$(cat)"
+    case "$url" in https://*) ;; *) exit 64 ;; esac
+    partial_root="$(release_partial "$generation")"
+    test -d "$partial_root"
+    downloads="$partial_root/.downloads"
+    install -d -o phoxal -g phoxal -m 0755 "$downloads" "$partial_root/bin"
+    partial="$downloads/$expected_sha.partial"
+    archive="$downloads/$expected_sha.archive"
+    unpack="$downloads/$expected_sha.unpack"
+    rm -f "$partial" "$archive"
+    rm -rf "$unpack"
+    curl --fail --location --silent --show-error --retry {curl_retries} --retry-all-errors --connect-timeout 10 --max-time 120 --output "$partial" "$url"
+    actual_size="$(wc -c < "$partial" | tr -d ' ')"
+    [ "$actual_size" = "$expected_size" ]
+    actual_sha="$(sha256sum "$partial" | awk '{{print $1}}')"
+    [ "$actual_sha" = "$expected_sha" ]
+    mv "$partial" "$archive"
+    install -d -o phoxal -g phoxal -m 0755 "$unpack"
+    tar -xf "$archive" -C "$unpack"
+    binary="$(find "$unpack" -type f -name "$archive_binary" -print -quit)"
+    test -n "$binary"
+    install -o phoxal -g phoxal -m 0755 "$binary" "$partial_root/bin/$install_binary"
+    rm -rf "$archive" "$unpack"
+    ;;
+  activate-release)
+    generation="${{2:-}}"
+    valid_generation "$generation" || exit 64
+    partial="$(release_partial "$generation")"
+    release="$releases_root/$generation"
+    test -d "$partial"
+    test ! -e "$release"
+    rm -rf "$partial/.downloads"
+    mv "$partial" "$release"
+    old="$(readlink "$opt_root/active" 2>/dev/null || true)"
+    if [ -n "$old" ]; then
+      ln -s "$old" "$opt_root/.previous.partial"
+      mv -Tf "$opt_root/.previous.partial" "$opt_root/previous"
+    fi
+    ln -s "releases/$generation" "$opt_root/.active.partial"
+    mv -Tf "$opt_root/.active.partial" "$opt_root/active"
+    ;;
+  rollback-release)
+    previous="$(readlink "$opt_root/previous" 2>/dev/null || true)"
+    test -n "$previous"
+    failed="$(readlink "$opt_root/active")"
+    ln -s "$previous" "$opt_root/.active.partial"
+    mv -Tf "$opt_root/.active.partial" "$opt_root/active"
+    ln -s "$failed" "$opt_root/.previous.partial"
+    mv -Tf "$opt_root/.previous.partial" "$opt_root/previous"
+    systemctl daemon-reload
     ;;
   install-unit)
     unit="${{2:-}}"
-    source="${{3:-}}"
     valid_unit "$unit"
-    valid_unit_source "$source" || exit 64
-    test -f "$source"
-    install -o root -g root -m 0644 "$source" "$unit_dir/$unit"
+    ln -sfn "{ACTIVE_ROOT}/systemd/$unit" "$unit_dir/$unit"
     ;;
   remove-unit)
     unit="${{2:-}}"
@@ -3020,7 +3263,8 @@ case "${{1:-}}" in
     exit 64
     ;;
 esac
-"#
+"#,
+        curl_retries = DOWNLOAD_RETRIES - 1,
     )
 }
 
@@ -3037,7 +3281,7 @@ fi
 if ! id phoxal >/dev/null 2>&1; then
   useradd --system --gid phoxal --home-dir /var/lib/phoxal --create-home --shell /usr/sbin/nologin phoxal
 fi
-install -d -o phoxal -g phoxal -m 0755 {OPT_ROOT} {OPT_BIN} {OPT_ENV}
+install -d -o phoxal -g phoxal -m 0755 {OPT_ROOT} {RELEASES_ROOT}
 install -d -o phoxal -g phoxal -m 0700 {IDENTITY_DIR}
 install -d -o phoxal -g phoxal -m 0755 /var/lib/phoxal
 cat > {HELPER_PATH} <<'PHOXAL_HELPER'
@@ -3092,6 +3336,7 @@ fn report_from_payload(
         rendered_units: payload.rendered_units,
         env_files: payload.env_files,
         release_json: payload.release_json,
+        delivery: payload.delivery,
         health,
     }
 }
@@ -3119,6 +3364,9 @@ fn report(report: DeployReport, message_format: MessageFormat) -> Result<()> {
             }
             println!("release.json:");
             println!("{}", serde_json::to_string_pretty(&report.release_json)?);
+            if let Some(delivery) = report.delivery {
+                println!("official_delivery: {delivery:?}");
+            }
             if let Some(health) = &report.health {
                 println!("health:");
                 println!("{}", serde_json::to_string_pretty(health)?);
@@ -3158,15 +3406,20 @@ fn format_health_failure(report: &HealthReport) -> String {
     message
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SshTransport {
     host: String,
     ui: crate::Ui,
+    pending_units: Vec<String>,
 }
 
 impl SshTransport {
     fn new(host: String, ui: crate::Ui) -> Self {
-        Self { host, ui }
+        Self {
+            host,
+            ui,
+            pending_units: Vec::new(),
+        }
     }
 
     fn ssh_output<I, S>(&self, args: I) -> Result<std::process::Output>
@@ -3269,6 +3522,59 @@ impl SshTransport {
         self.ssh_status(command)
     }
 
+    fn github_release_reachable_from_robot(&self, url: &str) -> Result<bool> {
+        let mut command = deploy_command("ssh");
+        command
+            .arg(&self.host)
+            .arg("url=$(cat); curl --head --fail --location --silent --show-error --connect-timeout 5 --max-time 15 \"$url\" >/dev/null")
+            .stdin(Stdio::piped());
+        let mut child = command.spawn().with_context(|| {
+            format!("failed to start GitHub reachability probe on {}", self.host)
+        })?;
+        child
+            .stdin
+            .take()
+            .context("reachability probe stdin was unavailable")?
+            .write_all(url.as_bytes())?;
+        Ok(child.wait()?.success())
+    }
+
+    fn download_artifact(&self, generation: &str, artifact: &DownloadArtifact) -> Result<()> {
+        let size = artifact.size.to_string();
+        let mut command = deploy_command("ssh");
+        command
+            .arg(&self.host)
+            .args([
+                "sudo",
+                HELPER_PATH,
+                "download-artifact",
+                generation,
+                size.as_str(),
+                artifact.sha256.as_str(),
+                artifact.archive_binary_name.as_str(),
+                artifact.install_binary_name.as_str(),
+            ])
+            .stdin(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to start robot download for {}", artifact.package))?;
+        child
+            .stdin
+            .take()
+            .context("robot download stdin was unavailable")?
+            .write_all(artifact.url.as_bytes())?;
+        let status = child.wait()?;
+        if status.success() {
+            Ok(())
+        } else {
+            bail!(
+                "robot download failed for {} {} with status {status}",
+                artifact.package,
+                artifact.version
+            )
+        }
+    }
+
     /// `sudo -n true` tests blanket sudo, but the sudoers fragment grant is
     /// per-command - so probe the helper grant itself. Running the installed
     /// helper with no arguments hits its unknown-verb branch and exits 64,
@@ -3360,7 +3666,11 @@ where
             payload_opt(payload.root.path()).join("").into_os_string(),
             remote_dest,
         ])?;
-        remote.run_helper(&["install-payload", remote_tmp])?;
+        remote.run_helper(&[
+            "prepare-release",
+            remote_tmp,
+            &payload.install_plan.release_generation,
+        ])?;
         Ok(())
     })();
     let _ = remote.run_ssh_status(["rm", "-rf", remote_tmp]);
@@ -3518,39 +3828,64 @@ impl DeployTransport for SshTransport {
             .collect())
     }
 
+    fn github_release_reachable(&mut self, url: &str) -> Result<bool> {
+        self.github_release_reachable_from_robot(url)
+    }
+
+    fn prepare_host_transfer_fallback(
+        &mut self,
+        payload: &mut RenderedPayload,
+        ui: &crate::Ui,
+    ) -> Result<()> {
+        stage_official_fallback(payload, ui)
+    }
+
     fn sync_payload(&mut self, payload: &RenderedPayload) -> Result<()> {
         let remote_tmp = remote_staging_dir(PAYLOAD_STAGING_PREFIX);
         sync_payload_via_helper(self, payload, &remote_tmp)
     }
 
+    fn download_official_artifacts(
+        &mut self,
+        generation: &str,
+        artifacts: &[DownloadArtifact],
+    ) -> Result<()> {
+        let transport = self.clone();
+        run_bounded(artifacts, DOWNLOAD_CONCURRENCY, |artifact| {
+            transport.download_artifact(generation, artifact)
+        })
+    }
+
     fn install_units(&mut self, payload: &RenderedPayload, stale_units: &[String]) -> Result<()> {
-        let remote_tmp = remote_staging_dir(UNIT_STAGING_PREFIX);
-        self.ssh_status(["rm", "-rf", &remote_tmp])?;
-        self.ssh_status(["mkdir", "-p", &remote_tmp])?;
-        self.rsync(vec![
-            OsString::from("-az"),
-            payload_systemd(payload.root.path())
-                .join("")
-                .into_os_string(),
-            OsString::from(format!("{}:{remote_tmp}/", self.host)),
-        ])?;
+        let _ = stale_units;
         for unit in &payload.unit_names {
-            let remote_unit_path = format!("{remote_tmp}/{unit}");
-            self.run_helper(&["install-unit", unit, &remote_unit_path])?;
+            self.run_helper(&["install-unit", unit])?;
         }
+        self.pending_units = payload.unit_names.clone();
+        Ok(())
+    }
+
+    fn activate_release(&mut self, generation: &str) -> Result<()> {
+        self.run_helper(&["activate-release", generation])
+    }
+
+    fn rollback_release(&mut self) -> Result<()> {
+        self.run_helper(&["rollback-release"])
+    }
+
+    fn finalize_units(&mut self, stale_units: &[String]) -> Result<()> {
         for unit in stale_units {
             self.run_helper(&["disable-unit", unit])?;
             self.run_helper(&["remove-unit", unit])?;
         }
-        self.run_helper(&["daemon-reload"])?;
-        for unit in &payload.unit_names {
-            self.run_helper(&["enable-unit", unit])?;
-        }
-        self.ssh_status(["rm", "-rf", &remote_tmp])?;
-        Ok(())
+        self.run_helper(&["daemon-reload"])
     }
 
     fn restart(&mut self) -> Result<()> {
+        self.run_helper(&["daemon-reload"])?;
+        for unit in self.pending_units.clone() {
+            self.run_helper(&["enable-unit", &unit])?;
+        }
         self.run_helper(&["restart-target"])
     }
 
@@ -3731,7 +4066,15 @@ mod tests {
                     "0.1.0",
                     CatalogChannel::Stable,
                     "aarch64-unknown-linux-gnu",
-                    false,
+                    true,
+                    Vec::new(),
+                ),
+                fixture_tool_entry_for_tests(
+                    "router",
+                    "0.1.0",
+                    CatalogChannel::Stable,
+                    &crate::resolver::host_target_triple(),
+                    true,
                     Vec::new(),
                 ),
             ]);
@@ -4006,6 +4349,13 @@ capabilities:
         synced: bool,
         stale_removed: Vec<String>,
         restarted: bool,
+        github_reachable: bool,
+        downloaded: Vec<DownloadArtifact>,
+        activated: Option<String>,
+        rolled_back: bool,
+        finalized: bool,
+        fallback_prepared: bool,
+        download_fails: bool,
     }
 
     impl FakeTransport {
@@ -4030,6 +4380,13 @@ capabilities:
                 synced: false,
                 stale_removed: Vec::new(),
                 restarted: false,
+                github_reachable: true,
+                downloaded: Vec::new(),
+                activated: None,
+                rolled_back: false,
+                finalized: false,
+                fallback_prepared: false,
+                download_fails: false,
             }
         }
     }
@@ -4068,8 +4425,33 @@ capabilities:
             Ok(self.installed_units.clone())
         }
 
+        fn github_release_reachable(&mut self, _url: &str) -> Result<bool> {
+            Ok(self.github_reachable)
+        }
+
+        fn prepare_host_transfer_fallback(
+            &mut self,
+            _payload: &mut RenderedPayload,
+            _ui: &crate::Ui,
+        ) -> Result<()> {
+            self.fallback_prepared = true;
+            Ok(())
+        }
+
         fn sync_payload(&mut self, _payload: &RenderedPayload) -> Result<()> {
             self.synced = true;
+            Ok(())
+        }
+
+        fn download_official_artifacts(
+            &mut self,
+            _generation: &str,
+            artifacts: &[DownloadArtifact],
+        ) -> Result<()> {
+            if self.download_fails {
+                bail!("simulated verification failure");
+            }
+            self.downloaded = artifacts.to_vec();
             Ok(())
         }
 
@@ -4079,6 +4461,22 @@ capabilities:
             stale_units: &[String],
         ) -> Result<()> {
             self.stale_removed = stale_units.to_vec();
+            Ok(())
+        }
+
+        fn activate_release(&mut self, generation: &str) -> Result<()> {
+            self.activated = Some(generation.to_string());
+            Ok(())
+        }
+
+        fn rollback_release(&mut self) -> Result<()> {
+            self.rolled_back = true;
+            Ok(())
+        }
+
+        fn finalize_units(&mut self, stale_units: &[String]) -> Result<()> {
+            self.stale_removed = stale_units.to_vec();
+            self.finalized = true;
             Ok(())
         }
 
@@ -4349,11 +4747,11 @@ capabilities:
         phoxal::model::robot::Robot::parse_from_string(&payload_robot)
             .expect("payload robot.yaml must round-trip through the version dispatcher");
         assert!(participant_unit.contains("WatchdogSec=10s"));
-        assert!(participant_unit.contains("ExecStart=/opt/phoxal/bin/navtask"));
+        assert!(participant_unit.contains("ExecStart=/opt/phoxal/active/bin/navtask"));
         assert!(
             payload
                 .env_files
-                .contains_key("/opt/phoxal/env/navtask.env")
+                .contains_key("/opt/phoxal/active/env/navtask.env")
         );
         assert_eq!(payload.release_json["schema"], RELEASE_SCHEMA);
         let release_artifact_ids = payload.release_json["artifacts"]
@@ -4367,12 +4765,19 @@ capabilities:
             "official tool release record should use package identity: {:?}",
             payload.release_json["artifacts"]
         );
-        assert!(
-            payload
-                .install_plan
-                .scoped_delete
-                .contains(&"/opt/phoxal/bin/".to_string())
+        assert!(payload.install_plan.scoped_delete.is_empty());
+        assert_eq!(
+            payload.download_descriptor.schema,
+            DOWNLOAD_DESCRIPTOR_SCHEMA
         );
+        let official = payload.release_json["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|artifact| artifact["id"] == "phoxal/tool-router")
+            .unwrap();
+        assert_eq!(official["target"], "aarch64-unknown-linux-gnu");
+        assert!(official["url"].as_str().unwrap().starts_with("https://"));
         assert!(
             payload
                 .install_plan
@@ -4415,19 +4820,19 @@ capabilities:
             payload
                 .install_plan
                 .direct_writes
-                .contains(&"/opt/phoxal/structure.urdf".to_string())
+                .contains(&"/opt/phoxal/active/structure.urdf".to_string())
         );
         assert!(
             payload
                 .install_plan
                 .direct_writes
-                .contains(&"/opt/phoxal/components/bench_camera/component.yaml".to_string())
+                .contains(&"/opt/phoxal/active/components/bench_camera/component.yaml".to_string())
         );
         assert!(
             payload
                 .install_plan
                 .direct_writes
-                .contains(&"/opt/phoxal/components/bench_camera/structure.urdf".to_string())
+                .contains(&"/opt/phoxal/active/components/bench_camera/structure.urdf".to_string())
         );
         Ok(())
     }
@@ -4501,16 +4906,20 @@ capabilities:
         assert_eq!(rsync[3], format!("robot@test:{remote_tmp}/"));
         assert_eq!(
             remote.helper_calls,
-            vec![vec!["install-payload".to_string(), remote_tmp]]
+            vec![vec![
+                "prepare-release".to_string(),
+                remote_tmp,
+                payload.install_plan.release_generation.clone(),
+            ]]
         );
         Ok(())
     }
 
     #[test]
-    fn helper_script_install_payload_rejects_unsafe_staging_sources() {
+    fn helper_script_prepare_release_rejects_unsafe_staging_sources() {
         let script = helper_script();
 
-        assert!(script.contains("install-payload)"), "{script}");
+        assert!(script.contains("prepare-release)"), "{script}");
         assert!(
             script.contains("valid_payload_source \"$source\" || exit 64"),
             "{script}"
@@ -4527,47 +4936,29 @@ capabilities:
     }
 
     #[test]
-    fn helper_script_install_payload_copies_chowns_and_deletes_opt_payload() {
+    fn helper_script_prepares_downloads_and_atomically_activates() {
         let script = helper_script();
 
         assert!(
-            script.contains("sync_payload_dir \"$source/bin\" \"$opt_bin\" 0755"),
+            script.contains("cp -a \"$source/.\" \"$partial/\""),
+            "{script}"
+        );
+        assert!(script.contains("$expected_sha.partial"), "{script}");
+        assert!(script.contains("--retry 2 --retry-all-errors"), "{script}");
+        assert!(
+            script.contains("[ \"$actual_size\" = \"$expected_size\" ]"),
             "{script}"
         );
         assert!(
-            script.contains("sync_payload_dir \"$source/env\" \"$opt_env\" 0644"),
+            script.contains("[ \"$actual_sha\" = \"$expected_sha\" ]"),
             "{script}"
         );
+        assert!(script.contains("mv \"$partial\" \"$archive\""), "{script}");
         assert!(
-            script
-                .contains("sync_payload_tree \"$source/components\" \"$opt_root/components\" 0644"),
+            script.contains("mv -Tf \"$opt_root/.active.partial\" \"$opt_root/active\""),
             "{script}"
         );
-        assert!(
-            script.contains("sync_payload_root_metadata \"$source\" \"$opt_root\""),
-            "{script}"
-        );
-        assert!(
-            script.contains("sync_payload_tree \"$entry\" \"$dest/$name\" \"$mode\""),
-            "{script}"
-        );
-        assert!(
-            script.contains("install -o phoxal -g phoxal -m \"$mode\" \"$entry\" \"$dest/$name\""),
-            "{script}"
-        );
-        assert!(script.contains("rm -rf \"$entry\""), "{script}");
-        assert!(
-            script.contains(
-                "install -o phoxal -g phoxal -m 0644 \"$source/robot.yaml\" \"$opt_root/robot.yaml\""
-            ),
-            "{script}"
-        );
-        assert!(
-            script.contains(
-                "install -o phoxal -g phoxal -m 0644 \"$source/phoxal-release.json\" \"$opt_root/phoxal-release.json\""
-            ),
-            "{script}"
-        );
+        assert!(script.contains("rollback-release)"), "{script}");
     }
 
     #[test]
@@ -4581,6 +4972,28 @@ capabilities:
             .expect("restart-target should restart phoxal.target");
 
         assert!(reset < restart, "{script}");
+    }
+
+    #[test]
+    fn download_executor_is_bounded_and_processes_every_artifact() -> Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let active = AtomicUsize::new(0);
+        let maximum = AtomicUsize::new(0);
+        let completed = AtomicUsize::new(0);
+        let artifacts = (0..11).collect::<Vec<_>>();
+        run_bounded(&artifacts, DOWNLOAD_CONCURRENCY, |_| {
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            maximum.fetch_max(now, Ordering::SeqCst);
+            std::thread::yield_now();
+            completed.fetch_add(1, Ordering::SeqCst);
+            active.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        })?;
+
+        assert_eq!(completed.load(Ordering::SeqCst), artifacts.len());
+        assert!(maximum.load(Ordering::SeqCst) <= DOWNLOAD_CONCURRENCY);
+        Ok(())
     }
 
     #[test]
@@ -4607,8 +5020,8 @@ capabilities:
         assert!(left.contains("SupplementaryGroups=dialout"));
         assert!(right.contains("DeviceAllow=/dev/i2c-1 rw"));
         assert!(right.contains("SupplementaryGroups=i2c"));
-        assert!(left.contains("ExecStart=/opt/phoxal/bin/driver-ddsm115"));
-        assert!(right.contains("ExecStart=/opt/phoxal/bin/driver-ddsm115"));
+        assert!(left.contains("ExecStart=/opt/phoxal/active/bin/driver-ddsm115"));
+        assert!(right.contains("ExecStart=/opt/phoxal/active/bin/driver-ddsm115"));
         Ok(())
     }
 
@@ -4902,6 +5315,59 @@ robot:
         assert!(transport.bootstrapped);
         assert!(transport.synced);
         assert!(transport.restarted);
+        assert!(!transport.downloaded.is_empty());
+        assert!(!transport.fallback_prepared);
+        assert!(transport.activated.is_some());
+        assert!(transport.finalized);
+        assert_eq!(report.delivery, Some(OfficialDelivery::RobotDownload));
+        Ok(())
+    }
+
+    #[test]
+    fn unreachable_github_uses_host_transfer_fallback() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_basic_project(temp.path())?;
+        let mut transport = FakeTransport::healthy();
+        transport.github_reachable = false;
+
+        let report = deploy_with_transport(
+            temp.path(),
+            &live_options(),
+            &mut transport,
+            false,
+            &crate::Ui,
+        )?;
+
+        assert!(transport.fallback_prepared);
+        assert!(transport.downloaded.is_empty());
+        assert!(transport.activated.is_some());
+        assert_eq!(
+            report.delivery,
+            Some(OfficialDelivery::HostTransferFallback)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_artifact_verification_never_activates() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_basic_project(temp.path())?;
+        let mut transport = FakeTransport::healthy();
+        transport.download_fails = true;
+
+        let error = deploy_with_transport(
+            temp.path(),
+            &live_options(),
+            &mut transport,
+            false,
+            &crate::Ui,
+        )
+        .expect_err("verification failure must abort before activation");
+
+        assert!(error.to_string().contains("robot failed to download"));
+        assert!(transport.activated.is_none());
+        assert!(!transport.restarted);
+        assert!(!transport.rolled_back);
         Ok(())
     }
 
@@ -5267,6 +5733,9 @@ robot:
         assert!(message.contains("HealthReportFailed"), "{message}");
         assert!(message.contains("navtask"), "{message}");
         assert!(message.contains("boom"), "{message}");
+        assert!(message.contains("rolled back"), "{message}");
+        assert!(transport.rolled_back);
+        assert!(!transport.finalized);
         Ok(())
     }
 }
