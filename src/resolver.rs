@@ -1714,12 +1714,13 @@ mod identity_tests {
     }
 
     #[test]
-    fn official_binary_name_uses_package_shape_for_component_driver() {
-        // docs #21: the driver binary is `phoxal-component-<id>-driver`, NOT
-        // `phoxal-component_driver-<id>` (the catalog kind tag).
+    fn official_binary_name_uses_component_crate_binary_for_component_driver() {
+        // The framework packages the component crate's own binary, named
+        // `phoxal-component-<id>` (NOT `phoxal-component-<id>-driver` and NOT
+        // `phoxal-component_driver-<id>`); that file is what we read.
         assert_eq!(
             official_binary_name(ArtifactKind::ComponentDriver, "ddsm115"),
-            "phoxal-component-ddsm115-driver"
+            "phoxal-component-ddsm115"
         );
     }
 
@@ -1743,15 +1744,15 @@ mod identity_tests {
 /// The official binary name a resolved artifact's packaged tarball contains.
 /// For most kinds this is `phoxal-<catalog_kind>-<name>`
 /// (`phoxal-service-drive`, `phoxal-tool-router`,
-/// `phoxal-simulator-webots-supervisor`). A `ComponentDriver` is the one
-/// exception: its catalog `kind` (`component_driver`) is not its binary name -
-/// docs #21 names the driver binary `phoxal-component-<id>-driver`, matching
-/// the package-id shape (`phoxal/component-<id>-driver`) rather than the
-/// catalog kind tag. `ComponentAssets` has no runtime binary at all and must
-/// never reach this function.
+/// `phoxal-simulator-webots-supervisor`). A `ComponentDriver`'s binary is
+/// `phoxal-component-<id>` (its catalog `kind` tag `component_driver` is not
+/// part of the binary name): the framework packages the component crate's own
+/// binary, named `phoxal-component-<id>`, and that is the file we read.
+/// `ComponentAssets` has no runtime binary at all and must never reach this
+/// function.
 pub(crate) fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
     match kind {
-        ArtifactKind::ComponentDriver => format!("phoxal-component-{name}-driver"),
+        ArtifactKind::ComponentDriver => format!("phoxal-component-{name}"),
         ArtifactKind::ComponentAssets => {
             unreachable!("component_assets has no runtime binary to name")
         }
