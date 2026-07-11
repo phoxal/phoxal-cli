@@ -99,9 +99,13 @@ fn driverless_component_resolves_assets_only() -> anyhow::Result<()> {
     assert!(!left_drive.has_driver);
     assert!(left_drive.driver.is_none());
     assert_eq!(left_drive.source_name, "ddsm115");
-    assert_eq!(left_drive.assets.package, "phoxal/component-ddsm115");
+    let assets = left_drive
+        .assets
+        .as_ref()
+        .expect("ddsm115 assets package resolves from the catalog");
+    assert_eq!(assets.package, "phoxal/component-ddsm115");
     assert_eq!(
-        left_drive.assets.source,
+        assets.source,
         phoxal_cli::resolver::ResolvedComponentSource::Catalog
     );
 
@@ -123,7 +127,14 @@ fn component_with_driver_block_resolves_both_assets_and_driver() -> anyhow::Resu
         .expect("left_drive component resolved");
     assert!(left_drive.has_driver);
     assert_eq!(left_drive.source_name, "ddsm115");
-    assert_eq!(left_drive.assets.package, "phoxal/component-ddsm115");
+    assert_eq!(
+        left_drive
+            .assets
+            .as_ref()
+            .expect("ddsm115 assets package resolves from the catalog")
+            .package,
+        "phoxal/component-ddsm115"
+    );
     let driver = left_drive.driver.as_ref().expect("driver package resolved");
     assert_eq!(driver.package, "phoxal/component-ddsm115");
 
@@ -178,6 +189,8 @@ fn component_version_pin_resolves_the_full_index_for_assets_and_driver() -> anyh
     assert_eq!(
         component
             .assets
+            .as_ref()
+            .expect("assets package resolved")
             .catalog_runtime
             .as_ref()
             .expect("pinned assets runtime")
@@ -256,9 +269,9 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
         .find(|component| component.instance == "left_drive")
         .expect("left_drive component resolved");
 
-    assert_eq!(left_drive.assets.source, ResolvedComponentSource::Catalog);
-    let assets_runtime = left_drive
-        .assets
+    let assets = left_drive.assets.as_ref().expect("assets package resolved");
+    assert_eq!(assets.source, ResolvedComponentSource::Catalog);
+    let assets_runtime = assets
         .catalog_runtime
         .as_ref()
         .expect("catalog-sourced assets package captures a catalog_runtime");
@@ -318,6 +331,8 @@ fn catalog_component_with_no_release_asset_yet_still_resolves_with_none_runtime_
         .expect("left_drive component resolved");
     let runtime = left_drive
         .assets
+        .as_ref()
+        .expect("assets package resolved (the catalog entry exists, just unpublished)")
         .catalog_runtime
         .as_ref()
         .expect("catalog_runtime is populated even with no release asset yet");
@@ -712,7 +727,11 @@ fn component_asset_path_pin_forks_the_assets_package() -> anyhow::Result<()> {
         .expect("left_drive component resolved");
 
     assert_eq!(
-        left_drive.assets.path_override(),
+        left_drive
+            .assets
+            .as_ref()
+            .expect("assets package resolved")
+            .path_override(),
         Some(temp.path().join("../framework/component/ddsm115").as_path())
     );
     assert_eq!(

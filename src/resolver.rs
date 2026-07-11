@@ -167,8 +167,15 @@ pub struct ResolvedComponent {
     pub instance: String,
     /// The logical component id (`component: <id>` in `robot.yaml`).
     pub source_name: String,
-    /// The resolved `component_assets` package. Always present.
-    pub assets: ResolvedComponentPackage,
+    /// The resolved `component_assets` package. `Some` when an official
+    /// `phoxal/component-<id>` assets package resolved for this component.
+    /// `None` for a driverless (passive) component - e.g. a mechanical
+    /// mount like a caster wheel - whose assets package doesn't exist in
+    /// the catalog; that's a valid configuration, not an error. A
+    /// component that declares a `driver:` block always has `Some` here
+    /// (a missing assets package for a driven component is still a hard
+    /// resolution failure).
+    pub assets: Option<ResolvedComponentPackage>,
     /// The resolved `component_driver` package. Present only when the
     /// instance declares `driver` and a driver package resolves for this
     /// component; see [`ComponentDriverUnavailable`].
@@ -793,7 +800,10 @@ fn apply_path_pins(
 
 fn is_component_package_key(key: &str, components: &[ResolvedComponent]) -> bool {
     components.iter().any(|component| {
-        component.assets.package == key
+        component
+            .assets
+            .as_ref()
+            .is_some_and(|assets| assets.package == key)
             || component
                 .driver
                 .as_ref()
@@ -853,8 +863,10 @@ fn apply_component_path_pin(
 ) -> bool {
     let mut used = false;
     for component in components.iter_mut() {
-        if component.assets.package == key {
-            component.assets.path_override = Some(path.to_path_buf());
+        if let Some(assets) = component.assets.as_mut()
+            && assets.package == key
+        {
+            assets.path_override = Some(path.to_path_buf());
             used = true;
         }
         if let Some(driver) = component.driver.as_mut()
@@ -983,7 +995,8 @@ fn used_path_pin_keys(
     keys.extend(
         components
             .iter()
-            .map(|component| component.assets.package.clone()),
+            .filter_map(|component| component.assets.as_ref())
+            .map(|assets| assets.package.clone()),
     );
     keys.extend(
         components
@@ -1422,19 +1435,27 @@ fn resolve_components(
         let component_id = &instance.component;
         let package = format!("{PHOXAL_PROVIDER}/component-{component_id}");
 
-        let assets = resolve_component_package(
+        let has_driver = instance.driver.is_some();
+        let assets = match resolve_component_package(
             &context,
             &package,
             ArtifactKind::ComponentAssets,
             context.resolve_component_asset_commits,
-        )
-        .with_context(|| {
-            format!(
-                "robot.components.{instance_name}.component '{component_id}' failed to resolve its component_assets package"
-            )
-        })?;
+        ) {
+            Ok(assets) => Some(assets),
+            // A driverless (passive) component - a mechanical part like a
+            // caster wheel - has no official `component_assets` package to
+            // resolve; that's valid, not an error. A component with a
+            // driver still needs its assets, so that case keeps the
+            // existing hard-fail.
+            Err(_) if !has_driver => None,
+            Err(err) => {
+                return Err(err.context(format!(
+                    "robot.components.{instance_name}.component '{component_id}' failed to resolve its component_assets package"
+                )));
+            }
+        };
 
-        let has_driver = instance.driver.is_some();
         let driver = if has_driver {
             match resolve_component_package(
                 &context,
@@ -1810,7 +1831,12 @@ mod tests {
             .iter()
             .find(|component| component.source_name == "ddsm115")
             .expect("ddsm115 component resolved");
-        match &git_component.assets.source {
+        match &git_component
+            .assets
+            .as_ref()
+            .expect("ddsm115 has a driver; assets must resolve")
+            .source
+        {
             ResolvedComponentSource::Git { rev, .. } => {
                 assert!(
                     rev.is_empty(),
@@ -1876,12 +1902,139 @@ artifacts:
             .iter()
             .find(|component| component.source_name == "ddsm115")
             .expect("ddsm115 component resolved");
-        match &git_component.assets.source {
+        match &git_component
+            .assets
+            .as_ref()
+            .expect("ddsm115 has a driver; assets must resolve")
+            .source
+        {
             ResolvedComponentSource::Git { rev, .. } => {
                 assert_eq!(rev, sha);
             }
             other => panic!("expected a git component source, got {other:?}"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn driverless_component_with_no_official_assets_package_resolves_with_none_assets()
+    -> anyhow::Result<()> {
+        // A passive mechanical component (e.g. robot-v1's `front_caster`,
+        // `component: passive_caster`) declares no `driver:` block and has
+        // no official `phoxal/component-<id>` assets package in the catalog
+        // at all - that's a valid, real-world configuration. Resolution
+        // must succeed with `assets: None`, not hard-fail (this was the
+        // reported bug: `check` failed with "expected package
+        // phoxal/component-passive_caster is absent from snapshot ...").
+        let robot = Robot::parse_from_string(
+            r#"schema: robot/v0
+robot:
+  id: testbot
+  namespace: test
+  kinematic:
+    kind: differential
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+  components:
+    front_caster:
+      component: passive_caster
+      mount_link: front_caster_mount
+artifacts:
+  channel: stable
+"#,
+        )?;
+        // `test_catalog()` carries no `phoxal/component-passive_caster`
+        // entry at all - exactly the "absent from snapshot" case the bug
+        // report hit.
+        let catalog = test_catalog();
+        let resolved = resolve(
+            &robot,
+            std::path::Path::new("."),
+            Some(&catalog),
+            ResolveOptions {
+                resolve_source_commits: false,
+                resolve_component_asset_commits: false,
+                ..ResolveOptions::default()
+            },
+        )?;
+
+        let caster = resolved
+            .components
+            .iter()
+            .find(|component| component.instance == "front_caster")
+            .expect("front_caster component resolved");
+        assert!(!caster.has_driver);
+        assert!(caster.driver.is_none());
+        assert!(
+            caster.assets.is_none(),
+            "a driverless component with no official assets package must resolve with \
+             assets: None, got {:?}",
+            caster.assets
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn driven_component_with_no_official_assets_package_still_hard_fails() -> anyhow::Result<()> {
+        // The opposite case: a component that DOES declare a `driver:`
+        // block still needs its assets package - a missing assets package
+        // for a driven (active) component remains a hard resolution error,
+        // not a silent `None`.
+        let robot = Robot::parse_from_string(
+            r#"schema: robot/v0
+robot:
+  id: testbot
+  namespace: test
+  kinematic:
+    kind: differential
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+  components:
+    left_drive:
+      component: unknown_driven_component
+      mount_link: left_wheel_mount
+      driver:
+        connection: { type: can, bus: 0, node_id: 1 }
+artifacts:
+  channel: stable
+"#,
+        )?;
+        let catalog = test_catalog();
+        let error = resolve(
+            &robot,
+            std::path::Path::new("."),
+            Some(&catalog),
+            ResolveOptions {
+                resolve_source_commits: false,
+                resolve_component_asset_commits: false,
+                ..ResolveOptions::default()
+            },
+        )
+        .expect_err("a driven component with no catalog entry at all must hard-fail");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(
+                "robot.components.left_drive.component 'unknown_driven_component' failed to \
+                 resolve its component_assets package"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "expected package phoxal/component-unknown_driven_component is absent from \
+                 snapshot"
+            ),
+            "{message}"
+        );
         Ok(())
     }
 

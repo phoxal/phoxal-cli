@@ -1046,7 +1046,11 @@ fn hydrate_catalog_blobs(
         hydrate_runtime(runtime, catalog)?;
     }
     for component in &mut resolved.components {
-        if let Some(runtime) = component.assets.catalog_runtime.as_mut() {
+        if let Some(runtime) = component
+            .assets
+            .as_mut()
+            .and_then(|assets| assets.catalog_runtime.as_mut())
+        {
             hydrate_runtime(runtime, catalog)?;
         }
         if let Some(runtime) = component
@@ -2910,14 +2914,17 @@ fn stage_payload_metadata(
     let mut staged_components = BTreeSet::new();
     for component in &resolved.components {
         let component_id = &component.source_name;
-        let source_dir = match &component.assets.source {
-            ResolvedComponentSource::Path { .. } => Some(
-                crate::component_driver::component_assets_dir(component, project_root)?,
-            ),
-            ResolvedComponentSource::Catalog => {
-                locate_cached_component_assets_dir(&component.assets)?
-            }
-            ResolvedComponentSource::Git { .. } => None,
+        // A driverless (passive) component with no official assets package
+        // has nothing to stage here - `component.assets` is `None`.
+        let source_dir = match component.assets.as_ref() {
+            None => None,
+            Some(assets) => match &assets.source {
+                ResolvedComponentSource::Path { .. } => {
+                    crate::component_driver::component_assets_dir(component, project_root)?
+                }
+                ResolvedComponentSource::Catalog => locate_cached_component_assets_dir(assets)?,
+                ResolvedComponentSource::Git { .. } => None,
+            },
         };
         let Some(source_dir) = source_dir else {
             continue;
@@ -5480,7 +5487,7 @@ robot:
         let mut resolved = resolved_with_components(vec![ResolvedComponent {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: assets_package.clone(),
+            assets: Some(assets_package.clone()),
             driver: Some(driver_package),
             has_driver: true,
         }])?;

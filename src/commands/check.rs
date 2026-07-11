@@ -2701,11 +2701,11 @@ mod tests {
             ResolvedComponent {
                 instance: "left_drive".to_string(),
                 source_name: "ddsm115".to_string(),
-                assets: fixture_component_package(
+                assets: Some(fixture_component_package(
                     "phoxal/component-ddsm115",
                     crate::catalog::ArtifactKind::ComponentAssets,
                     "components/ddsm115",
-                ),
+                )),
                 driver: Some(fixture_component_package(
                     "phoxal/component-ddsm115",
                     crate::catalog::ArtifactKind::ComponentDriver,
@@ -2716,11 +2716,11 @@ mod tests {
             ResolvedComponent {
                 instance: "caster".to_string(),
                 source_name: "passive_caster".to_string(),
-                assets: fixture_component_package(
+                assets: Some(fixture_component_package(
                     "phoxal/component-passive_caster",
                     crate::catalog::ArtifactKind::ComponentAssets,
                     "components/passive_caster",
-                ),
+                )),
                 driver: None,
                 has_driver: false,
             },
@@ -2775,11 +2775,11 @@ mod tests {
         let resolved = resolved_with_components(vec![ResolvedComponent {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: fixture_catalog_component_package(
+            assets: Some(fixture_catalog_component_package(
                 "phoxal/component-ddsm115",
                 crate::catalog::ArtifactKind::ComponentAssets,
                 "ddsm115",
-            ),
+            )),
             driver: Some(fixture_catalog_component_package(
                 "phoxal/component-ddsm115",
                 crate::catalog::ArtifactKind::ComponentDriver,
@@ -2829,11 +2829,11 @@ mod tests {
             ResolvedComponent {
                 instance: "left_drive".to_string(),
                 source_name: "ddsm115".to_string(),
-                assets: fixture_catalog_component_package(
+                assets: Some(fixture_catalog_component_package(
                     "phoxal/component-ddsm115",
                     crate::catalog::ArtifactKind::ComponentAssets,
                     "ddsm115",
-                ),
+                )),
                 driver: Some(fixture_catalog_component_package(
                     "phoxal/component-ddsm115",
                     crate::catalog::ArtifactKind::ComponentDriver,
@@ -2844,11 +2844,11 @@ mod tests {
             ResolvedComponent {
                 instance: "right_drive".to_string(),
                 source_name: "ddsm115".to_string(),
-                assets: fixture_catalog_component_package(
+                assets: Some(fixture_catalog_component_package(
                     "phoxal/component-ddsm115",
                     crate::catalog::ArtifactKind::ComponentAssets,
                     "ddsm115",
-                ),
+                )),
                 driver: Some(fixture_catalog_component_package(
                     "phoxal/component-ddsm115",
                     crate::catalog::ArtifactKind::ComponentDriver,
@@ -2933,11 +2933,11 @@ mod tests {
         let resolved = resolved_with_components(vec![ResolvedComponent {
             instance: "caster".to_string(),
             source_name: "passive_caster".to_string(),
-            assets: fixture_catalog_component_package(
+            assets: Some(fixture_catalog_component_package(
                 "phoxal/component-passive_caster",
                 crate::catalog::ArtifactKind::ComponentAssets,
                 "passive_caster",
-            ),
+            )),
             driver: None,
             has_driver: false,
         }])?;

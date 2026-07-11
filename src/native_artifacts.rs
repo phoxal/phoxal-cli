@@ -177,10 +177,11 @@ pub fn descriptors_for(
     }
     let mut components = std::collections::BTreeSet::new();
     for component in &resolved.components {
-        let packages = component
-            .driver
-            .iter()
-            .chain(include_component_assets.then_some(&component.assets));
+        let packages = component.driver.iter().chain(
+            include_component_assets
+                .then_some(component.assets.as_ref())
+                .flatten(),
+        );
         for package in packages {
             if let Some(runtime) = &package.catalog_runtime
                 && let Some(descriptor) = NativeArtifactDescriptor::from_runtime(runtime)?
@@ -306,8 +307,15 @@ pub fn stage_component_bundles_into_robot_root(
         if !staged.insert(component_id.clone()) {
             continue;
         }
-        let source_dir = crate::component_driver::component_assets_dir(component, project_root)
-            .with_context(|| format!("failed to locate component assets for '{component_id}'"))?;
+        let Some(source_dir) =
+            crate::component_driver::component_assets_dir(component, project_root).with_context(
+                || format!("failed to locate component assets for '{component_id}'"),
+            )?
+        else {
+            // Driverless (passive) component with no official assets
+            // package - nothing to stage.
+            continue;
+        };
         let dest_dir = robot_root.join("components").join(component_id);
         if source_dir == dest_dir {
             continue;
