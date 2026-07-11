@@ -3,8 +3,8 @@
 //!
 //! This used to be `<robot-project-root>/dist/simulator/webots`
 //! (`project::Project::staged_webots_root` up to the previous design), but a
-//! staged content is generated and must not be committed; `phoxal init`
-//! therefore ignores the entire project-local `.phoxal/` tree.
+//! staged content is generated and must not be committed, so the entire
+//! project-local `.phoxal/` tree belongs in the project's `.gitignore`.
 //!
 //! Every play wipes and recreates this root (see [`wipe_and_recreate`])
 //! since a previous play's stale worlds/protos/meshes/controllers must never

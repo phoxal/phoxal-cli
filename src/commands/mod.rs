@@ -12,7 +12,6 @@ pub mod cache;
 pub mod check;
 pub mod deploy;
 pub mod doctor;
-pub mod init;
 pub mod logs;
 pub mod run;
 pub mod self_cmd;
@@ -229,8 +228,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum RootCommand {
-    #[command(about = "Initialize a robot project and ignore project-local Phoxal state.")]
-    Init(init::Init),
     #[command(
         about = "Check the robot graph's participants and config against phoxal::check.",
         long_about = "Check the robot graph's participants and config against phoxal::check.\n\n\
@@ -276,7 +273,6 @@ impl RootCommand {
 
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match self {
-            Self::Init(command) => command.run(app).await,
             Self::Check(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
             Self::Simulate(command) => command.run(app).await,
