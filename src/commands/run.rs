@@ -215,7 +215,6 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         catalog.as_ref(),
         ResolveOptions {
             emit_update_notice: true,
-            update_notice_json: options.message_format == MessageFormat::Json,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             ..ResolveOptions::default()
