@@ -180,15 +180,21 @@ pub struct HealthUnitReport {
 pub(crate) struct RemoteProbe {
     pub arch: String,
     pub bootstrap_required: bool,
-    /// The account `ssh <host>` lands as; sudoers grants are written for this
-    /// user, since it is the one that runs `sudo phoxal-systemd-helper`.
+    /// The account `ssh <host>` lands as; bootstrap enrolls this user into
+    /// the `phoxal-deploy` group, since it is the one that runs
+    /// `sudo phoxal-systemd-helper`.
     pub remote_user: String,
     /// `sudo -n true` succeeded: any root work can run fully non-interactively.
     pub sudo_noninteractive: bool,
-    /// A non-interactive `sudo phoxal-systemd-helper` call is authorized for
-    /// this user - either through blanket passwordless sudo or through the
-    /// installed sudoers fragment. `sudo -n true` tests blanket sudo only;
-    /// the fragment grant is per-command, so it gets its own probe.
+    /// The group-model grant is fully in place and works for this user: the
+    /// helper is installed and executable, this user is a member of the
+    /// `phoxal-deploy` group, and a non-interactive
+    /// `sudo phoxal-systemd-helper` call is authorized through the static
+    /// sudoers fragment. Blanket passwordless sudo (`sudo_noninteractive`)
+    /// does NOT set this by itself: a device with blanket sudo but no
+    /// `phoxal-deploy` membership (e.g. bootstrapped under the old per-user
+    /// sudoers model) must still trigger the bootstrap repair path so it
+    /// converges to the group model.
     pub helper_grant: bool,
     /// The installed helper differs from this build's expected script.
     pub helper_stale: bool,
@@ -203,10 +209,13 @@ pub enum OfficialDelivery {
 
 impl RemoteProbe {
     /// Root work is needed when the host was never bootstrapped, or when the
-    /// installed helper/sudoers grant does not cover the deploying user (a
-    /// stale grant - e.g. the host was bootstrapped by a different user), or
-    /// when the helper script itself is stale. Re-running the bootstrap script
-    /// is the repair: it rewrites the helper and the fragment idempotently.
+    /// deploying user is not covered by the group-model grant (e.g. a new
+    /// operator who has never deployed to this host, or a device still on
+    /// the old per-user sudoers model), or when the helper script itself is
+    /// stale. Re-running the bootstrap script is the repair: it rewrites the
+    /// helper, (re)writes the static `phoxal-deploy` group sudoers fragment,
+    /// and enrolls this user into the `phoxal-deploy` group, all
+    /// idempotently.
     fn root_work_required(&self) -> bool {
         self.bootstrap_required || !self.helper_grant || self.helper_stale
     }
@@ -299,6 +308,10 @@ pub(crate) trait DeployTransport {
 pub(crate) struct BootstrapScripts {
     pub helper_script: String,
     pub sudoers_fragment: String,
+    /// The deploying user to enroll into the `phoxal-deploy` group.
+    /// Validated against a conservative username charset before it reaches
+    /// here, since the bootstrap script interpolates it directly into shell.
+    pub remote_user: String,
 }
 
 #[derive(Debug)]
@@ -595,10 +608,11 @@ fn restart_and_check<T: DeployTransport>(
 ///
 /// 1. `sudo -n true` works (blanket NOPASSWD or a cached credential):
 ///    proceed - bootstrap or grant repair can run non-interactively.
-/// 2. No blanket sudo, but the helper is installed and its per-command
-///    sudoers grant covers this user (`helper_grant`), and the helper hash
-///    matches this build: proceed - the steady-state deploy needs no root
-///    work; every `run_helper` call goes through the fragment.
+/// 2. No blanket sudo, but the group-model grant is fully in place for this
+///    user (`helper_grant`: helper installed, user enrolled in
+///    `phoxal-deploy`, sudoers fragment authorizes the call), and the helper
+///    hash matches this build: proceed - the steady-state deploy needs no
+///    root work; every `run_helper` call goes through the fragment.
 /// 3. Root work is required (first bootstrap, a stale/missing grant, or a
 ///    stale helper that the bootstrap script repairs) and `PHOXAL_SUDO_PASSWORD`
 ///    is set or local `/dev/tty` is available: validate a password now, then
@@ -656,11 +670,11 @@ where
         );
     }
     let root_work = if probe.bootstrap_required {
-        "needs root once (first deploy: install /opt/phoxal, the phoxal-systemd-helper, and its sudoers grant)"
+        "needs root once (first deploy: install /opt/phoxal, the phoxal-systemd-helper, and the phoxal-deploy group sudoers grant)"
     } else if probe.helper_stale {
-        "needs root once (repair: the installed phoxal-systemd-helper is stale for this phoxal-cli build, so the deploy must rewrite the helper and its sudoers grant)"
+        "needs root once (repair: the installed phoxal-systemd-helper is stale for this phoxal-cli build, so the deploy must rewrite the helper and the phoxal-deploy group sudoers grant)"
     } else {
-        "needs root once (repair: the phoxal-systemd-helper is installed but its sudoers grant does not cover this user, so the deploy must rewrite the grant)"
+        "needs root once (repair: this user is not covered by the phoxal-deploy group grant, so the deploy must install the phoxal-deploy group sudoers grant and add this user to the group)"
     };
     bail!(
         "DeploySudoRequiresPassword: {host} {root_work} and sudo is not passwordless for {user}. Fix: rerun `phoxal-cli deploy` interactively (from a real TTY so phoxal-cli can read /dev/tty), pre-authorize {user} on {host} with a NOPASSWD sudoers entry, or for automation set {SUDO_PASSWORD_ENV} for this command (NOPASSWD or an interactive run is preferred).",
@@ -1227,12 +1241,18 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
     let project_root = ctx.project_root.as_path();
     let resolved = &ctx.resolved;
     let source_participants = ctx.source_participants.as_slice();
+    // The hostless `--dry-run` sentinel is never installed anywhere (see its
+    // doc comment), so it is exempt from the real-username charset check.
+    if remote_user != DRY_RUN_REMOTE_USER {
+        validate_remote_username(remote_user)?;
+    }
     let root = tempfile::tempdir().context("failed to create deploy payload directory")?;
     create_payload_dirs(root.path())?;
 
     let bootstrap = BootstrapScripts {
         helper_script: helper_script(),
-        sudoers_fragment: sudoers_fragment(remote_user),
+        sudoers_fragment: sudoers_fragment(),
+        remote_user: remote_user.to_string(),
     };
 
     let source_builds = stage_source_artifacts(
@@ -3372,8 +3392,33 @@ esac
     )
 }
 
-fn sudoers_fragment(remote_user: &str) -> String {
-    format!("{remote_user} ALL=(root) NOPASSWD: {HELPER_PATH} *\n")
+/// The grant is a static group rule, not a per-user line: every deploying
+/// user is enrolled into the `phoxal-deploy` group instead of the sudoers
+/// fragment naming a user directly, so a second operator's deploy no longer
+/// silently revokes the first operator's grant by rewriting the fragment.
+fn sudoers_fragment() -> String {
+    format!("%phoxal-deploy ALL=(root) NOPASSWD: {HELPER_PATH} *\n")
+}
+
+/// A conservative allowlist for a username interpolated directly into the
+/// bootstrap shell script (`usermod -aG phoxal-deploy <remote_user>`):
+/// ASCII alphanumerics plus `_ . @ -`, non-empty. This is intentionally
+/// stricter than what some systems permit for usernames - it only needs to
+/// admit real remote-login usernames, not every value `useradd` would
+/// accept.
+fn validate_remote_username(remote_user: &str) -> Result<()> {
+    let valid = !remote_user.is_empty()
+        && remote_user
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'@' | b'-'));
+    if !valid {
+        bail!(
+            "DeployInvalidRemoteUser: {remote_user:?} is not a valid remote username (expected \
+             ASCII letters, digits, or the characters _ . @ -, non-empty); refusing to bootstrap \
+             the phoxal-deploy group grant for it"
+        );
+    }
+    Ok(())
 }
 
 fn bootstrap_script(scripts: &BootstrapScripts) -> String {
@@ -3385,6 +3430,10 @@ fi
 if ! id phoxal >/dev/null 2>&1; then
   useradd --system --gid phoxal --home-dir /var/lib/phoxal --create-home --shell /usr/sbin/nologin phoxal
 fi
+if ! getent group phoxal-deploy >/dev/null; then
+  groupadd --system phoxal-deploy
+fi
+usermod -aG phoxal-deploy {remote_user}
 install -d -o phoxal -g phoxal -m 0755 {OPT_ROOT} {RELEASES_ROOT}
 install -d -o phoxal -g phoxal -m 0700 {IDENTITY_DIR}
 install -d -o phoxal -g phoxal -m 0755 /var/lib/phoxal
@@ -3401,6 +3450,7 @@ chmod 0440 {SUDOERS_PATH}
 {HELPER_PATH} daemon-reload
 systemctl enable phoxal.target || true
 "#,
+        remote_user = scripts.remote_user,
         helper = scripts.helper_script,
         sudoers = scripts.sudoers_fragment,
     )
@@ -3679,11 +3729,14 @@ impl SshTransport {
         }
     }
 
-    /// `sudo -n true` tests blanket sudo, but the sudoers fragment grant is
-    /// per-command - so probe the helper grant itself. Running the installed
-    /// helper with no arguments hits its unknown-verb branch and exits 64,
-    /// so exit 0 or 64 proves sudo authorized this user for the helper; a
-    /// sudo password failure exits 1 without ever running the helper.
+    /// `sudo -n true` tests blanket sudo, but the group-model grant needs
+    /// all three of: the helper installed and executable, this user enrolled
+    /// in the `phoxal-deploy` group, and the sudoers fragment actually
+    /// authorizing the call for that group - so probe the grant itself
+    /// rather than infer it from blanket sudo. Running the installed helper
+    /// with no arguments hits its unknown-verb branch and exits 64, so exit
+    /// 0 or 64 proves sudo authorized this user for the helper; a sudo
+    /// password failure exits 1 without ever running the helper.
     fn probe_helper_grant(&self) -> bool {
         let helper_installed = self
             .ssh_output(["test", "-x", HELPER_PATH])
@@ -3692,8 +3745,23 @@ impl SshTransport {
         if !helper_installed {
             return false;
         }
+        if !self.probe_phoxal_deploy_group_membership() {
+            return false;
+        }
         self.ssh_output(["sudo", "-n", HELPER_PATH])
             .map(|output| matches!(output.status.code(), Some(0) | Some(64)))
+            .unwrap_or(false)
+    }
+
+    /// Exact-word match against `id -nG` output - a substring match would
+    /// wrongly accept e.g. a group named `phoxal-deploy-readonly`.
+    fn probe_phoxal_deploy_group_membership(&self) -> bool {
+        self.ssh_stdout(["id", "-nG"])
+            .map(|output| {
+                output
+                    .split_whitespace()
+                    .any(|group| group == "phoxal-deploy")
+            })
             .unwrap_or(false)
     }
 
@@ -3815,12 +3883,12 @@ impl DeployTransport for SshTransport {
             .map(|output| output.status.success())
             .unwrap_or(false);
         let helper_stale = self.probe_helper_stale();
-        let helper_grant = if sudo_noninteractive {
-            // Blanket passwordless sudo covers every helper call.
-            true
-        } else {
-            self.probe_helper_grant()
-        };
+        // Blanket passwordless sudo must NOT short-circuit this to true: a
+        // device with blanket sudo but no `phoxal-deploy` membership (e.g.
+        // bootstrapped under the old per-user model) needs the bootstrap
+        // repair path to run so it converges to the group model - which it
+        // can do non-interactively here since blanket sudo covers it.
+        let helper_grant = self.probe_helper_grant();
         Ok(RemoteProbe {
             arch,
             bootstrap_required,
@@ -4446,6 +4514,7 @@ capabilities:
         health: HealthReport,
         bootstrapped: bool,
         bootstrap_fragment_seen: Option<String>,
+        bootstrap_remote_user_seen: Option<String>,
         validation_results: VecDeque<bool>,
         validation_password_stdin: Vec<Vec<u8>>,
         bootstrap_sudo_command_seen: Option<Vec<String>>,
@@ -4479,6 +4548,7 @@ capabilities:
                 health: HealthReport { units: Vec::new() },
                 bootstrapped: false,
                 bootstrap_fragment_seen: None,
+                bootstrap_remote_user_seen: None,
                 validation_results: VecDeque::from([true]),
                 validation_password_stdin: Vec::new(),
                 bootstrap_sudo_command_seen: None,
@@ -4518,6 +4588,7 @@ capabilities:
         ) -> Result<()> {
             self.bootstrapped = true;
             self.bootstrap_fragment_seen = Some(helper.sudoers_fragment.clone());
+            self.bootstrap_remote_user_seen = Some(helper.remote_user.clone());
             self.bootstrap_sudo_command_seen = Some(args_to_strings(sudo_bootstrap_args(
                 "/tmp/phoxal-bootstrap.TEST.sh",
             )));
@@ -5095,6 +5166,112 @@ capabilities:
             .write_all(helper_script().as_bytes())?;
         assert!(child.wait()?.success());
         Ok(())
+    }
+
+    fn test_bootstrap_scripts(remote_user: &str) -> BootstrapScripts {
+        BootstrapScripts {
+            helper_script: helper_script(),
+            sudoers_fragment: sudoers_fragment(),
+            remote_user: remote_user.to_string(),
+        }
+    }
+
+    #[test]
+    fn bootstrap_script_creates_phoxal_deploy_group_and_enrolls_remote_user() {
+        let script = bootstrap_script(&test_bootstrap_scripts("jetson-op"));
+        assert!(
+            script.contains("if ! getent group phoxal-deploy >/dev/null; then"),
+            "{script}"
+        );
+        assert!(
+            script.contains("groupadd --system phoxal-deploy"),
+            "{script}"
+        );
+        assert!(
+            script.contains("usermod -aG phoxal-deploy jetson-op"),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_script_writes_the_static_group_fragment() {
+        let script = bootstrap_script(&test_bootstrap_scripts("jetson-op"));
+        assert!(
+            script.contains(
+                "%phoxal-deploy ALL=(root) NOPASSWD: /usr/local/sbin/phoxal-systemd-helper *"
+            ),
+            "{script}"
+        );
+        // The static fragment must not mention the enrolled user by name.
+        assert!(!script.contains("jetson-op ALL=(root)"), "{script}");
+    }
+
+    #[test]
+    fn bootstrap_script_is_valid_posix_shell() -> Result<()> {
+        let script = bootstrap_script(&test_bootstrap_scripts("jetson-op"));
+        let mut child = Command::new("sh").arg("-n").stdin(Stdio::piped()).spawn()?;
+        child
+            .stdin
+            .take()
+            .context("shell syntax-check stdin missing")?
+            .write_all(script.as_bytes())?;
+        assert!(child.wait()?.success(), "{script}");
+        Ok(())
+    }
+
+    #[test]
+    fn validate_remote_username_accepts_conservative_charset() {
+        for user in ["robot", "jetson-op", "user.name", "user_name", "a@b-c.d"] {
+            assert!(
+                validate_remote_username(user).is_ok(),
+                "{user} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_remote_username_rejects_hostile_input() {
+        for user in [
+            "",
+            "evil'; rm -rf /",
+            "user name",
+            "user$(whoami)",
+            "user\nrm -rf /",
+            "user;ls",
+            "user`ls`",
+        ] {
+            let error = validate_remote_username(user)
+                .err()
+                .unwrap_or_else(|| panic!("{user:?} should be rejected"));
+            assert!(
+                error.to_string().contains("DeployInvalidRemoteUser"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_payload_rejects_a_hostile_remote_user() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_basic_project(temp.path()).expect("write project");
+        let mut transport = FakeTransport::healthy();
+        transport.probe.remote_user = "evil'; rm -rf /".to_string();
+        let error = deploy_with_transport(
+            temp.path(),
+            &live_options(),
+            &mut transport,
+            false,
+            &crate::Ui,
+        )
+        .expect_err("a hostile remote user must be rejected before bootstrapping anything");
+        assert!(
+            error.to_string().contains("DeployInvalidRemoteUser"),
+            "{error}"
+        );
+        assert!(
+            !transport.bootstrapped,
+            "bootstrap must never run with an unvalidated remote user"
+        );
     }
 
     #[test]
@@ -5703,10 +5880,11 @@ robot:
 
     #[test]
     fn sudo_probe_row4_stale_grant_without_tty_fails_fast_naming_repair() {
-        // Bootstrapped host, but the grant covers a different user (`sudo -n
-        // true` fails and the helper grant probe fails): blanket-sudo success
-        // must not be inferred from the helper being installed - fail fast
-        // and name the grant repair rather than the first install.
+        // Bootstrapped host, but this user is not covered by the group grant
+        // (`sudo -n true` fails and the helper grant probe fails):
+        // blanket-sudo success must not be inferred from the helper being
+        // installed - fail fast and name the group-grant repair rather than
+        // the first install.
         let probe = probe(false, false, false);
         let mut transport = FakeTransport::healthy();
         let mut source = ScriptedSudoPasswordSource::none();
@@ -5717,7 +5895,11 @@ robot:
         let message = error.to_string();
         assert!(message.contains("DeploySudoRequiresPassword"), "{message}");
         assert!(message.contains("robot@jetson"), "{message}");
-        assert!(message.contains("does not cover this user"), "{message}");
+        assert!(
+            message.contains("not covered by the phoxal-deploy group grant"),
+            "{message}"
+        );
+        assert!(message.contains("add this user to the group"), "{message}");
         assert!(!message.contains("first deploy"), "{message}");
         assert!(message.contains("NOPASSWD"), "{message}");
     }
@@ -5739,16 +5921,20 @@ robot:
     }
 
     #[test]
-    fn sudoers_fragment_names_the_probed_remote_user() {
-        let fragment = sudoers_fragment("jure");
+    fn sudoers_fragment_is_the_static_group_grant() {
+        let fragment = sudoers_fragment();
         assert_eq!(
             fragment,
-            "jure ALL=(root) NOPASSWD: /usr/local/sbin/phoxal-systemd-helper *\n"
+            "%phoxal-deploy ALL=(root) NOPASSWD: /usr/local/sbin/phoxal-systemd-helper *\n"
         );
+        // Calling it again (as a second operator's deploy would) must
+        // produce the identical fragment - nobody's grant gets revoked by
+        // someone else's deploy.
+        assert_eq!(fragment, sudoers_fragment());
     }
 
     #[test]
-    fn deploy_with_transport_renders_fragment_for_probed_user() -> Result<()> {
+    fn deploy_with_transport_writes_static_fragment_and_enrolls_probed_user() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let mut transport = FakeTransport::healthy();
@@ -5766,7 +5952,11 @@ robot:
             .expect("bootstrap should have been called with a fragment");
         assert_eq!(
             fragment,
-            "jetson-op ALL=(root) NOPASSWD: /usr/local/sbin/phoxal-systemd-helper *\n"
+            "%phoxal-deploy ALL=(root) NOPASSWD: /usr/local/sbin/phoxal-systemd-helper *\n"
+        );
+        assert_eq!(
+            transport.bootstrap_remote_user_seen,
+            Some("jetson-op".to_string())
         );
         Ok(())
     }
@@ -5774,10 +5964,11 @@ robot:
     #[test]
     fn stale_helper_grant_triggers_bootstrap_repair_over_tty() -> Result<()> {
         // Bootstrapped host (bootstrap_required false), but the grant probe
-        // failed - e.g. user A bootstrapped and user B deploys. With a local
-        // tty the deploy must re-run the bootstrap script (it rewrites the
-        // helper and the fragment idempotently) and the rewritten fragment
-        // must name the new deploying user.
+        // failed - e.g. this user has never deployed to this host, or the
+        // host is still on the old per-user model. With a local tty the
+        // deploy must re-run the bootstrap script (it rewrites the helper
+        // and the fragment idempotently) and enroll the new deploying user
+        // into the phoxal-deploy group.
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let mut transport = FakeTransport::healthy();
@@ -5796,14 +5987,55 @@ robot:
         )?;
         assert!(
             transport.bootstrapped,
-            "a stale grant must re-run bootstrap even though /opt/phoxal exists"
+            "a missing/stale grant must re-run bootstrap even though /opt/phoxal exists"
         );
         let fragment = transport
             .bootstrap_fragment_seen
             .expect("bootstrap should have been called with a fragment");
         assert_eq!(
             fragment,
-            "user-b ALL=(root) NOPASSWD: /usr/local/sbin/phoxal-systemd-helper *\n"
+            "%phoxal-deploy ALL=(root) NOPASSWD: /usr/local/sbin/phoxal-systemd-helper *\n"
+        );
+        assert_eq!(
+            transport.bootstrap_remote_user_seen,
+            Some("user-b".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn blanket_sudo_without_group_membership_still_triggers_bootstrap_repair() -> Result<()> {
+        // A device with blanket passwordless sudo but no phoxal-deploy
+        // membership (e.g. deployed under the old per-user model) must
+        // still take the bootstrap/repair path so it converges to the group
+        // model. Because sudo_noninteractive is true, this proceeds and
+        // runs the repair non-interactively, without touching the local tty
+        // or a password source at all.
+        let temp = tempfile::tempdir()?;
+        write_basic_project(temp.path())?;
+        let mut transport = FakeTransport::healthy();
+        transport.probe.bootstrap_required = false;
+        transport.probe.sudo_noninteractive = true;
+        transport.probe.helper_grant = false;
+        transport.probe.remote_user = "legacy-user".to_string();
+        let mut source = ScriptedSudoPasswordSource::none();
+        deploy_with_transport_with_sudo(
+            temp.path(),
+            &live_options(),
+            &mut transport,
+            false,
+            &mut source,
+            &crate::Ui,
+        )?;
+        assert!(
+            transport.bootstrapped,
+            "blanket sudo without phoxal-deploy membership must still repair, not skip bootstrap"
+        );
+        assert_eq!(source.env_calls, 0);
+        assert_eq!(source.prompt_calls, 0);
+        assert_eq!(
+            transport.bootstrap_remote_user_seen,
+            Some("legacy-user".to_string())
         );
         Ok(())
     }
