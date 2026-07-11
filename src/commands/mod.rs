@@ -37,10 +37,21 @@ pub fn print_message<T: Serialize>(
     match format {
         MessageFormat::Human => human(),
         MessageFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(value)?);
+            let value = json_message_value(value)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(())
         }
     }
+}
+
+fn json_message_value<T: Serialize>(value: &T) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(value)?;
+    if let Some(updates) = crate::update_notice::take_json_updates()
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("updates_available".to_string(), updates);
+    }
+    Ok(value)
 }
 
 /// Load the artifact catalog for a robot project. There is no `refresh`
@@ -203,7 +214,13 @@ pub struct Cli {
         help = "Use only project-vendored artifacts and skip catalog probes."
     )]
     pub offline: bool,
-    #[arg(long, global = true, help = "Suppress update notices.")]
+    #[arg(
+        long,
+        env = "PHOXAL_QUIET",
+        global = true,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        help = "Suppress update notices (recommended for CI)."
+    )]
     pub quiet: bool,
 
     #[command(subcommand)]
@@ -278,7 +295,7 @@ impl RootCommand {
 }
 
 pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
-    crate::update_notice::begin(crate::update_notice::NoticePolicy {
+    let policy = crate::update_notice::NoticePolicy {
         artifact_consuming: cli.command.update_notice_format().is_some(),
         message_format: cli
             .command
@@ -286,7 +303,11 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
             .unwrap_or(MessageFormat::Human),
         quiet: cli.quiet,
         interactive: std::io::stderr().is_terminal(),
-    });
+    };
+    crate::update_notice::begin(policy);
+    if policy.artifact_consuming && !policy.quiet && policy.interactive {
+        crate::update_notice::start_cli_check();
+    }
     let result = cli.command.run(app).await;
     crate::update_notice::finish();
     result
@@ -362,5 +383,46 @@ mod tests {
         )?;
         assert!(ran_human);
         Ok(())
+    }
+
+    #[test]
+    fn update_and_non_artifact_verbs_are_excluded_from_update_notices() {
+        let update = Cli::try_parse_from(["phoxal-cli", "update"]).unwrap();
+        assert_eq!(update.command.update_notice_format(), None);
+
+        let version = Cli::try_parse_from(["phoxal-cli", "version"]).unwrap();
+        assert_eq!(version.command.update_notice_format(), None);
+    }
+
+    #[test]
+    fn artifact_consuming_verb_exposes_its_message_format_to_notice_gate() {
+        let check =
+            Cli::try_parse_from(["phoxal-cli", "check", "--message-format", "json"]).unwrap();
+        assert_eq!(
+            check.command.update_notice_format(),
+            Some(MessageFormat::Json)
+        );
+    }
+
+    #[test]
+    fn json_output_path_embeds_the_structured_updates_available_field() {
+        crate::update_notice::begin(crate::update_notice::NoticePolicy {
+            artifact_consuming: true,
+            message_format: MessageFormat::Json,
+            quiet: false,
+            interactive: true,
+        });
+        crate::update_notice::offer(crate::update_notice::UpdateNotice::Artifacts(vec![
+            "phoxal/service-drive 1.0.0 -> 1.1.0".to_string(),
+        ]));
+
+        let value = json_message_value(&serde_json::json!({ "status": "ok" })).unwrap();
+
+        assert_eq!(value["status"], "ok");
+        assert_eq!(
+            value["updates_available"][0],
+            "phoxal/service-drive 1.0.0 -> 1.1.0"
+        );
+        crate::update_notice::finish();
     }
 }
