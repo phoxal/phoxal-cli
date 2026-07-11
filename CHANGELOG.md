@@ -10,7 +10,7 @@ All notable changes documented here. The format follows
 ### Added
 
 - *(deploy)* Phoxal-deploy group grant instead of per-user sudoers (#110) [**breaking**]
-- *(check)* Validate user-runtime config against its real emitted schema (W7) [hold: needs slotted catalog] (#109)
+- *(check)* Validate user-runtime config against its real emitted JSON Schema (#109)
 
 ### Refactored
 
