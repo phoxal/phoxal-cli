@@ -797,10 +797,12 @@ fn validate_deploy_options(options: &DeployOptions) -> Result<()> {
                 "--dry-run needs either <user@host> (its arch is probed read-only) or --target <arch> for a hostless render"
             );
         }
-        if let Some(host) = options.host.as_deref() {
-            if host.trim().is_empty() || host.chars().any(char::is_whitespace) {
-                bail!("deploy host must be a non-empty SSH destination without whitespace");
-            }
+        if options
+            .host
+            .as_deref()
+            .is_some_and(|host| host.trim().is_empty() || host.chars().any(char::is_whitespace))
+        {
+            bail!("deploy host must be a non-empty SSH destination without whitespace");
         }
     } else {
         let host = options
