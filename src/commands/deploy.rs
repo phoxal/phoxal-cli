@@ -890,7 +890,7 @@ fn prepare_deploy(
         loaded.robot.artifacts.channel,
         &loaded.extras,
     )?;
-    let resolved = resolve(
+    let mut resolved = resolve(
         &loaded.robot,
         project_root,
         catalog.as_ref(),
@@ -904,8 +904,11 @@ fn prepare_deploy(
             tool_target_triple: Some(target.official_triple.clone()),
         },
     )?;
+    if let Some(catalog) = catalog.as_ref() {
+        hydrate_catalog_blobs(&mut resolved, catalog)?;
+    }
     if !options.dry_run {
-        let host_resolved = resolve(
+        let mut host_resolved = resolve(
             &loaded.robot,
             project_root,
             catalog.as_ref(),
@@ -919,6 +922,10 @@ fn prepare_deploy(
                 tool_target_triple: Some(crate::resolver::host_target_triple()),
             },
         )?;
+        let catalog = catalog
+            .as_ref()
+            .context("deploy requires the pinned catalog to recover immutable release URLs")?;
+        hydrate_catalog_blobs(&mut host_resolved, catalog)?;
         ensure_cross_target_release_match(&resolved, &host_resolved)?;
         let descriptors = crate::native_artifacts::descriptors_for(&host_resolved, false, true)?;
         crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
@@ -946,6 +953,88 @@ fn prepare_deploy(
             resolved,
         )
     }
+}
+
+fn hydrate_catalog_blobs(
+    resolved: &mut ResolvedRobot,
+    catalog: &crate::catalog::Catalog,
+) -> Result<()> {
+    fn hydrate_runtime(
+        runtime: &mut ResolvedPlatformRuntime,
+        catalog: &crate::catalog::Catalog,
+    ) -> Result<()> {
+        if runtime.path_override.is_some() || runtime.version == "source" {
+            return Ok(());
+        }
+        let artifact = catalog
+            .artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.package == runtime.package && artifact.version == runtime.version
+            })
+            .with_context(|| {
+                format!(
+                    "pinned catalog is missing {} {}",
+                    runtime.package, runtime.version
+                )
+            })?;
+        let blob = if runtime.kind == ArtifactKind::ComponentAssets {
+            artifact.assets.as_ref()
+        } else {
+            artifact.targets.get(&runtime.target)
+        };
+        let Some(blob) = blob else {
+            runtime.published = false;
+            return Ok(());
+        };
+        runtime.sha256 = Some(blob.sha256.clone());
+        runtime.url = Some(blob.url.clone());
+        runtime.size = Some(blob.size);
+        runtime.published = true;
+        runtime.published_triples = artifact.targets.keys().cloned().collect();
+        Ok(())
+    }
+
+    for runtime in &mut resolved.platform_runtimes {
+        hydrate_runtime(runtime, catalog)?;
+    }
+    for component in &mut resolved.components {
+        if let Some(runtime) = component.assets.catalog_runtime.as_mut() {
+            hydrate_runtime(runtime, catalog)?;
+        }
+        if let Some(runtime) = component
+            .driver
+            .as_mut()
+            .and_then(|driver| driver.catalog_runtime.as_mut())
+        {
+            hydrate_runtime(runtime, catalog)?;
+        }
+    }
+    for tool in &mut resolved.tools {
+        if tool.path_override.is_some() || tool.resolved == "source" {
+            continue;
+        }
+        let artifact = catalog
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.package == tool.package && artifact.version == tool.resolved)
+            .with_context(|| {
+                format!(
+                    "pinned catalog is missing {} {}",
+                    tool.package, tool.resolved
+                )
+            })?;
+        let Some(blob) = artifact.targets.get(&tool.target) else {
+            tool.published = false;
+            continue;
+        };
+        tool.asset = blob.url.clone();
+        tool.sha256 = blob.sha256.clone();
+        tool.url = Some(blob.url.clone());
+        tool.size = Some(blob.size);
+        tool.published = true;
+    }
+    Ok(())
 }
 
 fn ensure_cross_target_release_match(robot: &ResolvedRobot, host: &ResolvedRobot) -> Result<()> {
@@ -4356,6 +4445,8 @@ capabilities:
         finalized: bool,
         fallback_prepared: bool,
         download_fails: bool,
+        active_generation: Option<String>,
+        previous_generation: Option<String>,
     }
 
     impl FakeTransport {
@@ -4387,6 +4478,8 @@ capabilities:
                 finalized: false,
                 fallback_prepared: false,
                 download_fails: false,
+                active_generation: Some("releases/previous-generation".to_string()),
+                previous_generation: None,
             }
         }
     }
@@ -4465,11 +4558,14 @@ capabilities:
         }
 
         fn activate_release(&mut self, generation: &str) -> Result<()> {
+            self.previous_generation = self.active_generation.take();
+            self.active_generation = Some(format!("releases/{generation}"));
             self.activated = Some(generation.to_string());
             Ok(())
         }
 
         fn rollback_release(&mut self) -> Result<()> {
+            std::mem::swap(&mut self.active_generation, &mut self.previous_generation);
             self.rolled_back = true;
             Ok(())
         }
@@ -4975,6 +5071,18 @@ capabilities:
     }
 
     #[test]
+    fn helper_script_is_valid_posix_shell() -> Result<()> {
+        let mut child = Command::new("sh").arg("-n").stdin(Stdio::piped()).spawn()?;
+        child
+            .stdin
+            .take()
+            .context("shell syntax-check stdin missing")?
+            .write_all(helper_script().as_bytes())?;
+        assert!(child.wait()?.success());
+        Ok(())
+    }
+
+    #[test]
     fn download_executor_is_bounded_and_processes_every_artifact() -> Result<()> {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -5319,6 +5427,10 @@ robot:
         assert!(!transport.fallback_prepared);
         assert!(transport.activated.is_some());
         assert!(transport.finalized);
+        assert_eq!(
+            transport.previous_generation.as_deref(),
+            Some("releases/previous-generation")
+        );
         assert_eq!(report.delivery, Some(OfficialDelivery::RobotDownload));
         Ok(())
     }
@@ -5736,6 +5848,16 @@ robot:
         assert!(message.contains("rolled back"), "{message}");
         assert!(transport.rolled_back);
         assert!(!transport.finalized);
+        assert_eq!(
+            transport.active_generation.as_deref(),
+            Some("releases/previous-generation")
+        );
+        assert!(
+            transport
+                .previous_generation
+                .as_deref()
+                .is_some_and(|generation| generation != "releases/previous-generation")
+        );
         Ok(())
     }
 }
