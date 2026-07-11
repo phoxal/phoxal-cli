@@ -449,7 +449,13 @@ fn participant_launch(
 fn robot_root_for_mode(mode: &LaunchMode, project_root: &Path) -> PathBuf {
     match mode {
         LaunchMode::Run | LaunchMode::Webots { .. } => project_root.to_path_buf(),
-        LaunchMode::Deploy => PathBuf::from("/opt/phoxal"),
+        // The deployed robot root is the active generation symlink, not the
+        // flat `/opt/phoxal` - robot.yaml, structure.urdf, and phoxal-release.json
+        // are staged per-generation under `/opt/phoxal/active/` (see deploy's
+        // ACTIVE_ROOT), so a participant reading `$PHOXAL_ROBOT_ROOT/robot.yaml`
+        // must resolve through `active`. Pointing at `/opt/phoxal` makes every
+        // participant fail with "failed to read robot file /opt/phoxal/robot.yaml".
+        LaunchMode::Deploy => PathBuf::from("/opt/phoxal/active"),
     }
 }
 
@@ -741,6 +747,20 @@ mod tests {
             build_launch_plan(LaunchMode::Deploy, &inputs).expect_err("deploy is one robot");
         assert!(error.to_string().contains("exactly one robot"), "{error:#}");
         Ok(())
+    }
+
+    #[test]
+    fn deploy_robot_root_is_the_active_generation() {
+        // Regression: deployed participants read robot.yaml/structure.urdf via
+        // `$PHOXAL_ROBOT_ROOT`, and those files are staged per-generation under
+        // `/opt/phoxal/active/` (the transactional-release symlink). Pointing the
+        // root at the flat `/opt/phoxal` made every participant on a real robot
+        // die with "failed to read robot file /opt/phoxal/robot.yaml". It must
+        // resolve through the active generation, matching deploy's ACTIVE_ROOT.
+        assert_eq!(
+            robot_root_for_mode(&LaunchMode::Deploy, Path::new("/tmp/project")),
+            PathBuf::from("/opt/phoxal/active"),
+        );
     }
 
     #[test]
