@@ -1,7 +1,8 @@
 //! Compile-time participant metadata extraction (X-tools slice).
 //!
-//! `#[derive(phoxal::Api)]` embeds one JSON manifest per participant binary in
-//! a dedicated linker section - `__DATA,__phoxal_meta` on Mach-O,
+//! A `#[phoxal::service]`/driver/tool/simulator attribute embeds one JSON
+//! manifest per participant binary in a dedicated linker section -
+//! `__DATA,__phoxal_meta` on Mach-O,
 //! `.phoxal_api_meta` everywhere else (`phoxal-macros/src/authoring.rs`'s
 //! `link_section_attrs`). `phoxal-cli` no longer executes a built artifact's
 //! `emit-apis` subcommand to learn its contract surface (that runtime
@@ -17,7 +18,7 @@ use anyhow::{Context, Result};
 use object::{Object, ObjectSection};
 pub use phoxal::participant::metadata::{ParticipantMeta, ParticipantMetaContract};
 
-/// The linker section names `#[derive(phoxal::Api)]` places its metadata
+/// The linker section names a participant attribute places its metadata
 /// static under, tried in order. `object`'s generic [`Object::section_by_name`]
 /// matches on the section name alone (Mach-O segment qualification is not
 /// part of the match), so no per-format branching is needed here - the two
@@ -26,14 +27,12 @@ pub use phoxal::participant::metadata::{ParticipantMeta, ParticipantMetaContract
 pub const SECTION_NAMES: [&str; 2] = [".phoxal_api_meta", "__phoxal_meta"];
 
 /// Parses `object_bytes` as an object file and returns the bytes of its
-/// `#[derive(phoxal::Api)]` metadata section, trying each candidate section
+/// participant metadata section, trying each candidate section
 /// name in [`SECTION_NAMES`] in turn. `Ok(None)` means the object file parsed
 /// fine but carries no such section at all - the expected, valid shape for a
-/// participant whose `Api` is `()` (privileged tools default to this), which
-/// never derives `#[derive(phoxal::Api)]` and so never emits the linker
-/// section in the first place. A malformed/unrecognized *object file* is
-/// still a hard error. `describe` names the source (a file path) for error
-/// messages.
+/// binary with no participant attribute. A malformed/unrecognized *object
+/// file* is still a hard error. `describe` names the source (a file path) for
+/// error messages.
 fn read_meta_section(object_bytes: &[u8], describe: &str) -> Result<Option<Vec<u8>>> {
     let file = object::File::parse(object_bytes)
         .with_context(|| format!("{describe} is not a recognized object file (ELF/Mach-O/...)"))?;
@@ -52,8 +51,8 @@ fn read_meta_section(object_bytes: &[u8], describe: &str) -> Result<Option<Vec<u
 
 /// Parses the embedded participant metadata out of an in-memory object file
 /// (an ELF/Mach-O binary of any target architecture). Reads nothing, runs
-/// nothing. A binary with no section at all (an `Api = ()` participant - see
-/// [`read_meta_section`]) parses as an empty contract list, not an error.
+/// nothing. A binary with no section at all (see [`read_meta_section`]) parses
+/// as an empty contract list and no-config schema, not an error.
 pub fn extract_participant_metadata_from_bytes(
     object_bytes: &[u8],
     describe: &str,
@@ -62,10 +61,12 @@ pub fn extract_participant_metadata_from_bytes(
         return Ok(ParticipantMeta {
             participant_api: "()".to_string(),
             contracts: Vec::new(),
+            config_schema: serde_json::json!({ "type": "null" }),
         });
     };
-    phoxal::participant::metadata::parse_participant_metadata(&bytes)
-        .with_context(|| format!("phoxal API metadata section in {describe} is not valid JSON"))
+    phoxal::participant::metadata::parse_participant_metadata(&bytes).with_context(|| {
+        format!("phoxal participant metadata section in {describe} is not valid JSON")
+    })
 }
 
 /// Extracts and parses `binary_path`'s embedded participant metadata: reads
@@ -118,6 +119,16 @@ mod tests {
         let meta = extract_participant_metadata(&binary_path)?;
         assert_eq!(meta.participant_api, "Api");
         assert_eq!(
+            meta.config_schema,
+            serde_json::json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "title": "Config",
+                "type": "object",
+                "properties": { "gain": { "type": "number", "format": "double" } },
+                "required": ["gain"]
+            })
+        );
+        assert_eq!(
             meta.contracts,
             vec![ParticipantMetaContract {
                 role: "publish".to_string(),
@@ -131,9 +142,9 @@ mod tests {
 
     /// A privileged tool defaults to `Api = ()`, so it never derives
     /// `#[derive(phoxal::Api)]` and its binary carries no metadata section at
-    /// all - a valid, expected shape (zero contracts), not an extraction
-    /// error. Proven end-to-end against `phoxal-cli`'s own compiled binary,
-    /// which has no `Api` struct.
+    /// all - a valid, expected shape (zero contracts and a no-config schema), not
+    /// an extraction error. Proven end-to-end against `phoxal-cli`'s own compiled
+    /// binary, which has no participant attribute.
     #[test]
     fn a_real_binary_with_no_section_parses_as_zero_contracts() -> Result<()> {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -197,7 +208,7 @@ mod tests {
     #[test]
     fn extracts_metadata_from_foreign_format_and_arch_object_files() -> Result<()> {
         let payload =
-            br#"{"participant_api":"Api","contracts":[{"role":"publish","generation":"y2026_1","contract":"drive::Target","external":false}]}"#;
+            br#"{"participant_api":"Api","contracts":[{"role":"publish","generation":"y2026_1","contract":"drive::Target","external":false}],"config_schema":{"type":"null"}}"#;
         let expected = vec![ParticipantMetaContract {
             role: "publish".to_string(),
             generation: "y2026_1".to_string(),

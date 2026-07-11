@@ -2740,8 +2740,8 @@ dependencies = [
 
 [[package]]
 name = "phoxal"
-version = "0.31.0"
-source = "git+https://github.com/phoxal/framework?branch=main#82214645166c75137f1b3893d7192bbbe0ed54fc"
+version = "0.32.0"
+source = "git+https://github.com/phoxal/framework?branch=main#61eab14e8cf29eb3883a8a8856834091871ad798"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2754,7 +2754,6 @@ dependencies = [
  "phoxal-bus",
  "phoxal-macros",
  "rmp-serde",
- "schemars 1.2.1",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -2769,8 +2768,8 @@ dependencies = [
 
 [[package]]
 name = "phoxal-api"
-version = "0.20.0"
-source = "git+https://github.com/phoxal/framework?branch=main#82214645166c75137f1b3893d7192bbbe0ed54fc"
+version = "0.20.1"
+source = "git+https://github.com/phoxal/framework?branch=main#61eab14e8cf29eb3883a8a8856834091871ad798"
 dependencies = [
  "phoxal-bus",
  "phoxal-macros",
@@ -2781,7 +2780,7 @@ dependencies = [
 [[package]]
 name = "phoxal-bus"
 version = "0.21.0"
-source = "git+https://github.com/phoxal/framework?branch=main#82214645166c75137f1b3893d7192bbbe0ed54fc"
+source = "git+https://github.com/phoxal/framework?branch=main#61eab14e8cf29eb3883a8a8856834091871ad798"
 dependencies = [
  "arc-swap",
  "rmp-serde",
@@ -2836,16 +2835,18 @@ version = "0.0.0"
 dependencies = [
  "phoxal",
  "phoxal-api",
+ "serde",
 ]
 
 [[package]]
 name = "phoxal-macros"
-version = "0.20.1"
-source = "git+https://github.com/phoxal/framework?branch=main#82214645166c75137f1b3893d7192bbbe0ed54fc"
+version = "0.21.0"
+source = "git+https://github.com/phoxal/framework?branch=main#61eab14e8cf29eb3883a8a8856834091871ad798"
 dependencies = [
  "heck",
  "proc-macro2",
  "quote",
+ "serde_derive_internals",
  "syn",
 ]
 
@@ -4903,7 +4904,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

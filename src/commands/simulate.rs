@@ -2400,7 +2400,7 @@ artifacts:
     }
 
     /// Writes a fake component-driver crate whose binary carries a
-    /// hand-rolled `#[derive(phoxal::Api)]`-shaped linker section - not by
+    /// hand-rolled participant-metadata linker section - not by
     /// depending on `phoxal`/`phoxal-macros` (too heavy for a per-test throwaway
     /// crate), but by placing the exact same JSON bytes
     /// `phoxal-macros` would emit directly under a manually-attributed
@@ -2417,7 +2417,7 @@ artifacts:
                 "[package]\nname = \"driver-{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
             ),
         )?;
-        let json = r#"{"participant_api":"Api","contracts":[{"role":"subscribe","generation":"y2026_1","contract":"component::MotorCommand","external":false}]}"#;
+        let json = r#"{"participant_api":"Api","contracts":[{"role":"subscribe","generation":"y2026_1","contract":"component::MotorCommand","external":false}],"config_schema":{"type":"null"}}"#;
         let len = json.len();
         fs::write(
             dir.join("src/main.rs"),
