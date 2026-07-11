@@ -386,7 +386,6 @@ pub(crate) fn resolve_project(
         catalog.as_ref(),
         ResolveOptions {
             emit_update_notice: true,
-            update_notice_json: options.message_format == MessageFormat::Json,
             resolve_source_commits: true,
             resolve_component_asset_commits: mode == SimulateMode::Live,
             official_target_triple: official_target,

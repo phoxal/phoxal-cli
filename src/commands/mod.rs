@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -246,6 +247,16 @@ pub enum RootCommand {
 }
 
 impl RootCommand {
+    fn update_notice_format(&self) -> Option<MessageFormat> {
+        match self {
+            Self::Check(command) => Some(command.message_format),
+            Self::Simulate(command) => Some(command.message_format),
+            Self::Run(command) => Some(command.message_format),
+            Self::Deploy(command) => Some(command.message_format),
+            _ => None,
+        }
+    }
+
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match self {
             Self::Init(command) => command.run(app).await,
@@ -267,7 +278,18 @@ impl RootCommand {
 }
 
 pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
-    cli.command.run(app).await
+    crate::update_notice::begin(crate::update_notice::NoticePolicy {
+        artifact_consuming: cli.command.update_notice_format().is_some(),
+        message_format: cli
+            .command
+            .update_notice_format()
+            .unwrap_or(MessageFormat::Human),
+        quiet: cli.quiet,
+        interactive: std::io::stderr().is_terminal(),
+    });
+    let result = cli.command.run(app).await;
+    crate::update_notice::finish();
+    result
 }
 
 #[cfg(test)]
