@@ -929,7 +929,6 @@ fn prepare_deploy(
             ResolveOptions {
                 refresh_channel_head: false,
                 emit_update_notice: false,
-                update_notice_json: false,
                 resolve_source_commits: false,
                 resolve_component_asset_commits: false,
                 official_target_triple: Some(crate::resolver::host_target_triple()),
