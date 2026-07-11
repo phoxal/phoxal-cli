@@ -47,6 +47,8 @@ pub struct CheckCmd {
         help = "Resolve official artifacts for this target instead of the host (e.g. aarch64, x86_64, or a full triple). Use it to validate a Linux robot from a non-Linux host."
     )]
     pub target: Option<String>,
+    #[arg(long, help = "Promote coherence warnings to a failing check result.")]
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -57,6 +59,7 @@ pub struct CheckOptions {
     pub target: Option<String>,
     pub emit_update_notice: bool,
     pub update_notice_json: bool,
+    pub strict: bool,
 }
 
 /// The CLI's own participant-report shape: known artifact identity (never
@@ -65,14 +68,13 @@ pub struct CheckOptions {
 /// contract list. No `bus_abi` (D1, X-tools slice: dissolved into the
 /// generation-qualified contract key, `phoxal::check::ParticipantApis` no
 /// longer carries it either).
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RawEmitApis {
     pub artifact: RawArtifact,
     #[serde(default = "default_participant_class")]
     pub participant_class: String,
     pub api_version: String,
-    #[serde(alias = "contracts")]
-    pub required_contracts: Vec<RawContract>,
+    pub required_contracts: Vec<crate::participant_metadata::ParticipantMetaContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<Value>,
 }
@@ -87,22 +89,12 @@ pub struct RawArtifact {
     pub id: String,
 }
 
-/// One contract this participant plays a role in: `family` is the
-/// version-qualified contract name (e.g. `"y2026_1::drive::Target"`, D1) and
-/// `role` is `"publish"`/`"subscribe"`/`"serve"`/`"ask"`
-/// (`phoxal::participant::ContractRole`). No `schema_id`: name identity alone
-/// decides compatibility now.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct RawContract {
-    pub family: String,
-    pub role: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckOutcome {
     pub missing_images: Vec<String>,
     pub report: graph_check::Report,
     pub checked_participants: Vec<graph_check::ParticipantApis>,
+    pub contract_surfaces: Vec<graph_check::ParticipantContractSurface>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -125,6 +117,212 @@ impl CheckOutcome {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RobotCoherenceDiagnostic {
+    pub robot_id: String,
+    pub mismatches: Vec<CoherenceMismatchDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CoherenceMismatchDiagnostic {
+    PubSubDisjoint {
+        participant_id: String,
+        contract: String,
+        subscribed: Vec<String>,
+        published: Vec<String>,
+        remedy: &'static str,
+    },
+    UnservedAsk {
+        participant_id: String,
+        contract: String,
+        generation: String,
+        served: Vec<String>,
+        remedy: &'static str,
+    },
+}
+
+const COHERENCE_REMEDY: &str = "align the generation, mark a genuinely external consumer edge #[phoxal(external)], or update the lagging artifact";
+
+impl CoherenceMismatchDiagnostic {
+    fn from_mismatch(mismatch: &graph_check::CoherenceMismatch) -> Self {
+        match mismatch {
+            graph_check::CoherenceMismatch::PubSubDisjoint {
+                participant_id,
+                contract,
+                subscribed,
+                published,
+            } => Self::PubSubDisjoint {
+                participant_id: participant_id.clone(),
+                contract: contract.clone(),
+                subscribed: subscribed.iter().cloned().collect(),
+                published: published.iter().cloned().collect(),
+                remedy: COHERENCE_REMEDY,
+            },
+            graph_check::CoherenceMismatch::UnservedAsk {
+                participant_id,
+                contract,
+                generation,
+                served,
+            } => Self::UnservedAsk {
+                participant_id: participant_id.clone(),
+                contract: contract.clone(),
+                generation: generation.clone(),
+                served: served.iter().cloned().collect(),
+                remedy: COHERENCE_REMEDY,
+            },
+        }
+    }
+
+    fn human_line(&self) -> String {
+        match self {
+            Self::PubSubDisjoint {
+                participant_id,
+                contract,
+                subscribed,
+                published,
+                remedy,
+            } => format!(
+                "participant {participant_id} subscribes to {contract} at [{}], but the in-set publishers use [{}]; remedy: {remedy}",
+                subscribed.join(", "),
+                published.join(", ")
+            ),
+            Self::UnservedAsk {
+                participant_id,
+                contract,
+                generation,
+                served,
+                remedy,
+            } => {
+                let served = if served.is_empty() {
+                    "none".to_string()
+                } else {
+                    served.join(", ")
+                };
+                format!(
+                    "participant {participant_id} asks {contract} at {generation}, but the in-set servers provide [{served}]; remedy: {remedy}"
+                )
+            }
+        }
+    }
+}
+
+pub(crate) fn evaluate_robot_coherence(
+    robot_id: &str,
+    surfaces: &[graph_check::ParticipantContractSurface],
+) -> RobotCoherenceDiagnostic {
+    let report = graph_check::check_coherence(surfaces);
+    RobotCoherenceDiagnostic {
+        robot_id: robot_id.to_string(),
+        mismatches: report
+            .mismatches
+            .iter()
+            .map(CoherenceMismatchDiagnostic::from_mismatch)
+            .collect(),
+    }
+}
+
+pub(crate) fn coherence_for_launch_plan(
+    plan: &crate::launch_plan::LaunchPlan,
+    surfaces: &[graph_check::ParticipantContractSurface],
+) -> Vec<RobotCoherenceDiagnostic> {
+    plan.robots
+        .iter()
+        .map(|robot| {
+            let mut ids = robot
+                .participants
+                .iter()
+                .map(|participant| participant.launch.participant_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            ids.extend(plan.site.iter().map(|site| tool_emit_apis_id(&site.id)));
+            let graph_surfaces = surfaces
+                .iter()
+                .filter(|surface| ids.contains(surface.participant_id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            evaluate_robot_coherence(&robot.id, &graph_surfaces)
+        })
+        .collect()
+}
+
+fn coherence_is_ok(diagnostics: &[RobotCoherenceDiagnostic]) -> bool {
+    diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.mismatches.is_empty())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoherenceVerb {
+    Check,
+    Deploy,
+    Run,
+    Simulate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoherenceDisposition {
+    Pass,
+    Warning,
+    Failure,
+}
+
+pub(crate) fn coherence_disposition(
+    verb: CoherenceVerb,
+    strict: bool,
+    diagnostics: &[RobotCoherenceDiagnostic],
+) -> CoherenceDisposition {
+    if coherence_is_ok(diagnostics) {
+        CoherenceDisposition::Pass
+    } else if verb == CoherenceVerb::Check && !strict {
+        CoherenceDisposition::Warning
+    } else {
+        CoherenceDisposition::Failure
+    }
+}
+
+fn format_coherence_error(diagnostics: &[RobotCoherenceDiagnostic]) -> String {
+    let mut message = String::from("participant contract coherence check failed:");
+    for diagnostic in diagnostics
+        .iter()
+        .filter(|diagnostic| !diagnostic.mismatches.is_empty())
+    {
+        message.push_str("\n  robot ");
+        message.push_str(&diagnostic.robot_id);
+        message.push(':');
+        for mismatch in &diagnostic.mismatches {
+            message.push_str("\n    - ");
+            message.push_str(&mismatch.human_line());
+        }
+    }
+    message
+}
+
+pub(crate) fn enforce_coherence(
+    verb: CoherenceVerb,
+    diagnostics: &[RobotCoherenceDiagnostic],
+    message_format: MessageFormat,
+) -> Result<()> {
+    if coherence_disposition(verb, true, diagnostics) == CoherenceDisposition::Pass {
+        return Ok(());
+    }
+    if message_format == MessageFormat::Json {
+        #[derive(Serialize)]
+        struct CoherenceFailure<'a> {
+            status: &'static str,
+            coherence: &'a [RobotCoherenceDiagnostic],
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&CoherenceFailure {
+                status: "error",
+                coherence: diagnostics,
+            })?
+        );
+        bail!("participant contract coherence check failed")
+    }
+    bail!("{}", format_coherence_error(diagnostics))
+}
+
 impl CheckCmd {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let project_root = app.project.root().to_path_buf();
@@ -135,6 +333,7 @@ impl CheckCmd {
             target: self.target.clone(),
             emit_update_notice: true,
             update_notice_json: self.message_format == MessageFormat::Json,
+            strict: self.strict,
         };
         let ui = app.ui;
         let result = tokio::task::spawn_blocking(move || run(&project_root, options, &ui))
@@ -149,12 +348,27 @@ impl CheckCmd {
         );
 
         ensure_check_outcome_ok(&result.channel, &result.outcome)?;
+        match coherence_disposition(CoherenceVerb::Check, result.strict, &result.coherence) {
+            CoherenceDisposition::Pass => {}
+            CoherenceDisposition::Warning if self.message_format == MessageFormat::Human => {
+                eprintln!("warning: {}", format_coherence_error(&result.coherence));
+            }
+            CoherenceDisposition::Warning => {}
+            CoherenceDisposition::Failure => {
+                enforce_coherence(CoherenceVerb::Check, &result.coherence, self.message_format)?;
+            }
+        }
 
         let output = CheckOutput {
-            status: "ok",
+            status: if coherence_is_ok(&result.coherence) {
+                "ok"
+            } else {
+                "warning"
+            },
             channel: result.channel.clone(),
             catalog_snapshot: result.catalog_snapshot.clone(),
             participant_count: result.participant_count,
+            coherence: result.coherence.clone(),
         };
         crate::commands::print_message(
             &output,
@@ -180,6 +394,7 @@ struct CheckOutput {
     channel: String,
     catalog_snapshot: Option<String>,
     participant_count: usize,
+    coherence: Vec<RobotCoherenceDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +403,8 @@ struct CheckRunResult {
     catalog_snapshot: Option<String>,
     participant_count: usize,
     outcome: CheckOutcome,
+    coherence: Vec<RobotCoherenceDiagnostic>,
+    strict: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,11 +547,17 @@ fn run(
         |participant| build_emit_apis_from_source_for_check(participant, ui),
     )?;
 
+    let coherence = vec![evaluate_robot_coherence(
+        &resolved.robot.robot.id,
+        &outcome.contract_surfaces,
+    )];
     Ok(CheckRunResult {
         channel: resolved.channel.to_string(),
         catalog_snapshot: resolved.catalog_snapshot,
         participant_count,
         outcome,
+        coherence,
+        strict: options.strict,
     })
 }
 
@@ -559,7 +782,9 @@ pub(crate) fn component_driver_runtimes_by_ref(
         .collect()
 }
 
-fn check_artifact_refs_from_resolved(resolved: &ResolvedRobot) -> Vec<PlatformArtifactRef> {
+pub(crate) fn check_artifact_refs_from_resolved(
+    resolved: &ResolvedRobot,
+) -> Vec<PlatformArtifactRef> {
     let mut refs = platform_artifact_refs_from_resolved(resolved);
     refs.extend(component_driver_platform_refs_from_resolved(resolved));
     refs.extend(
@@ -787,6 +1012,7 @@ pub fn run_check_with_deployed_user_service_images(
 ) -> Result<CheckOutcome> {
     let mut missing_images = Vec::new();
     let mut participants = Vec::new();
+    let mut contract_surfaces = Vec::new();
     let mut config_problems = Vec::new();
 
     for artifact in inputs.platform_artifact_refs {
@@ -813,14 +1039,16 @@ pub fn run_check_with_deployed_user_service_images(
             artifact.kind.emit_apis_kind(),
             &raw,
         )?;
-        let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
-            format!(
-                "failed to interpret emit-apis for {} {} ({image_ref})",
-                artifact.kind_label(),
-                artifact.name
-            )
-        })?;
+        let participant =
+            graph_check::ParticipantApis::try_from(raw.clone()).with_context(|| {
+                format!(
+                    "failed to interpret emit-apis for {} {} ({image_ref})",
+                    artifact.kind_label(),
+                    artifact.name
+                )
+            })?;
         if artifact.instances.is_empty() {
+            contract_surfaces.push(contract_surface(&raw, participant.participant_id.clone()));
             participants.push(participant);
         } else {
             // A catalog component driver is fetched once but launched once
@@ -833,6 +1061,7 @@ pub fn run_check_with_deployed_user_service_images(
                 instance_participant.participant_id = instance.clone();
                 instance_participant.scope =
                     graph_check::ParticipantScope::ComponentInstance(instance.clone());
+                contract_surfaces.push(contract_surface(&raw, instance.clone()));
                 participants.push(instance_participant);
             }
         }
@@ -846,12 +1075,14 @@ pub fn run_check_with_deployed_user_service_images(
             )
         })?;
         validate_service_artifact_identity("user service", &service.name, &raw)?;
-        let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
-            format!(
-                "failed to interpret emit-apis for user service {} ({})",
-                service.name, service.image_ref
-            )
-        })?;
+        let participant =
+            graph_check::ParticipantApis::try_from(raw.clone()).with_context(|| {
+                format!(
+                    "failed to interpret emit-apis for user service {} ({})",
+                    service.name, service.image_ref
+                )
+            })?;
+        contract_surfaces.push(contract_surface(&raw, participant.participant_id.clone()));
         if let Some(problem) = validate_user_service_config(
             &service.name,
             participant.config_schema.as_ref(),
@@ -872,13 +1103,15 @@ pub fn run_check_with_deployed_user_service_images(
         })?;
         let expected_id = tool_emit_apis_id(&tool.name);
         validate_artifact_identity("tool", expected_id, "tool", &raw)?;
-        let participant = graph_check::ParticipantApis::try_from(raw).with_context(|| {
-            format!(
-                "failed to interpret emit-apis for tool {} ({})",
-                tool.name,
-                tool.binary_path.display()
-            )
-        })?;
+        let participant =
+            graph_check::ParticipantApis::try_from(raw.clone()).with_context(|| {
+                format!(
+                    "failed to interpret emit-apis for tool {} ({})",
+                    tool.name,
+                    tool.binary_path.display()
+                )
+            })?;
+        contract_surfaces.push(contract_surface(&raw, participant.participant_id.clone()));
         participants.push(participant);
     }
 
@@ -892,8 +1125,8 @@ pub fn run_check_with_deployed_user_service_images(
             )
         })?;
         validate_source_artifact_identity(participant, &raw)?;
-        let mut participant_apis =
-            graph_check::ParticipantApis::try_from(raw).with_context(|| {
+        let mut participant_apis = graph_check::ParticipantApis::try_from(raw.clone())
+            .with_context(|| {
                 format!(
                     "failed to interpret emit-apis for {} {} ({})",
                     participant.kind_label(),
@@ -918,6 +1151,10 @@ pub fn run_check_with_deployed_user_service_images(
         {
             config_problems.push(problem);
         }
+        contract_surfaces.push(contract_surface(
+            &raw,
+            participant_apis.participant_id.clone(),
+        ));
         participants.push(participant_apis);
     }
 
@@ -927,7 +1164,29 @@ pub fn run_check_with_deployed_user_service_images(
         missing_images,
         report,
         checked_participants: participants,
+        contract_surfaces,
     })
+}
+
+pub(crate) fn contract_surface(
+    raw: &RawEmitApis,
+    participant_id: String,
+) -> graph_check::ParticipantContractSurface {
+    graph_check::ParticipantContractSurface {
+        participant_id,
+        contracts: raw
+            .required_contracts
+            .iter()
+            .map(
+                |contract| crate::participant_metadata::ParticipantMetaContract {
+                    role: contract.role.clone(),
+                    generation: contract.generation.clone(),
+                    contract: contract.contract.clone(),
+                    external: contract.external,
+                },
+            )
+            .collect(),
+    }
 }
 
 fn validate_user_service_config(
@@ -1014,6 +1273,21 @@ pub(crate) fn extract_emit_apis_from_staged_runtime(
 pub(crate) fn extract_emit_apis_from_staged_tool(
     tool: &crate::resolver::ResolvedTool,
 ) -> Result<RawEmitApis> {
+    #[cfg(test)]
+    if tool
+        .url
+        .as_deref()
+        .is_some_and(|url| url.starts_with("https://example.invalid/"))
+    {
+        return Ok(raw_emit_apis_from_extracted_metadata(
+            "tool",
+            crate::resolver::tool_emit_apis_id(&tool.name),
+            crate::participant_metadata::ParticipantMeta {
+                participant_api: "fixture".to_string(),
+                contracts: Vec::new(),
+            },
+        ));
+    }
     let binary = crate::native_artifacts::stage_tool(
         None,
         tool,
@@ -1086,14 +1360,7 @@ fn raw_emit_apis_from_extracted_metadata(
         // `Api` may mix contracts from several generations freely, so there
         // is no one dated value left to put here.
         api_version: String::new(),
-        required_contracts: meta
-            .contracts
-            .into_iter()
-            .map(|contract| RawContract {
-                family: format!("{}::{}", contract.generation, contract.contract),
-                role: contract.role,
-            })
-            .collect(),
+        required_contracts: meta.contracts,
         // `ParticipantConfig::SCHEMA_JSON` is a fixed `"{}"` placeholder for
         // every participant today (RECONCILIATION correction #12: the real
         // `schemars` schema needs a host-side `build.rs` step a proc-macro
@@ -1347,7 +1614,7 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
             .required_contracts
             .into_iter()
             .map(|contract| graph_check::Contract {
-                family: contract.family,
+                family: format!("{}::{}", contract.generation, contract.contract),
             })
             .collect::<Vec<_>>();
 
@@ -1447,6 +1714,123 @@ mod tests {
     use graph_check::{ParticipantClass, Problem};
     use phoxal::model::robot::v0::Robot;
     use std::collections::BTreeMap;
+
+    fn coherence_surface(
+        participant_id: &str,
+        contracts: &[(&str, &str, &str)],
+    ) -> graph_check::ParticipantContractSurface {
+        graph_check::ParticipantContractSurface {
+            participant_id: participant_id.to_string(),
+            contracts: contracts
+                .iter()
+                .map(|(role, generation, contract)| {
+                    crate::participant_metadata::ParticipantMetaContract {
+                        role: (*role).to_string(),
+                        generation: (*generation).to_string(),
+                        contract: (*contract).to_string(),
+                        external: false,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn assert_severity_matrix(diagnostics: &[RobotCoherenceDiagnostic], coherent: bool) {
+        let check = if coherent {
+            CoherenceDisposition::Pass
+        } else {
+            CoherenceDisposition::Warning
+        };
+        let hard = if coherent {
+            CoherenceDisposition::Pass
+        } else {
+            CoherenceDisposition::Failure
+        };
+        assert_eq!(
+            coherence_disposition(CoherenceVerb::Check, false, diagnostics),
+            check
+        );
+        assert_eq!(
+            coherence_disposition(CoherenceVerb::Check, true, diagnostics),
+            hard
+        );
+        for verb in [
+            CoherenceVerb::Deploy,
+            CoherenceVerb::Run,
+            CoherenceVerb::Simulate,
+        ] {
+            assert_eq!(coherence_disposition(verb, false, diagnostics), hard);
+        }
+    }
+
+    #[test]
+    fn coherent_contract_set_passes_every_verb() {
+        let surfaces = vec![
+            coherence_surface("producer", &[("publish", "y2026_1", "drive::Target")]),
+            coherence_surface("consumer", &[("subscribe", "y2026_1", "drive::Target")]),
+            coherence_surface("server", &[("serve", "y2026_1", "map::Get")]),
+            coherence_surface("client", &[("ask", "y2026_1", "map::Get")]),
+        ];
+        let diagnostics = vec![evaluate_robot_coherence("robot-a", &surfaces)];
+        assert_severity_matrix(&diagnostics, true);
+    }
+
+    #[test]
+    fn pub_sub_disjoint_warns_for_check_and_fails_strict_and_launch_verbs() {
+        let surfaces = vec![
+            coherence_surface("producer", &[("publish", "y2026_1", "drive::Target")]),
+            coherence_surface("consumer", &[("subscribe", "y2026_2", "drive::Target")]),
+        ];
+        let diagnostics = vec![evaluate_robot_coherence("robot-a", &surfaces)];
+        assert!(matches!(
+            diagnostics[0].mismatches.as_slice(),
+            [CoherenceMismatchDiagnostic::PubSubDisjoint { .. }]
+        ));
+        assert_severity_matrix(&diagnostics, false);
+    }
+
+    #[test]
+    fn unserved_ask_warns_for_check_and_fails_strict_and_launch_verbs() {
+        let surfaces = vec![
+            coherence_surface("server", &[("serve", "y2026_1", "map::Get")]),
+            coherence_surface("client", &[("ask", "y2026_2", "map::Get")]),
+        ];
+        let diagnostics = vec![evaluate_robot_coherence("robot-a", &surfaces)];
+        assert!(matches!(
+            diagnostics[0].mismatches.as_slice(),
+            [CoherenceMismatchDiagnostic::UnservedAsk { .. }]
+        ));
+        assert_severity_matrix(&diagnostics, false);
+    }
+
+    #[test]
+    fn robot_graphs_are_checked_independently_not_pooled() {
+        let robot_a = vec![
+            coherence_surface("a-producer", &[("publish", "y2026_1", "drive::Target")]),
+            coherence_surface("a-consumer", &[("subscribe", "y2026_2", "drive::Target")]),
+        ];
+        let robot_b = vec![coherence_surface(
+            "b-producer",
+            &[("publish", "y2026_2", "drive::Target")],
+        )];
+
+        let diagnostics = [
+            evaluate_robot_coherence("robot-a", &robot_a),
+            evaluate_robot_coherence("robot-b", &robot_b),
+        ];
+        assert_eq!(diagnostics[0].mismatches.len(), 1);
+        assert!(diagnostics[1].mismatches.is_empty());
+
+        let pooled = robot_a
+            .into_iter()
+            .chain(robot_b)
+            .collect::<Vec<graph_check::ParticipantContractSurface>>();
+        assert!(
+            evaluate_robot_coherence("incorrect-pool", &pooled)
+                .mismatches
+                .is_empty()
+        );
+    }
 
     fn fixture_component_package(
         package: &str,
@@ -2644,8 +3028,10 @@ mod tests {
                 "api_version": "y2026_1",
                 "required_contracts": [
                     {
-                        "family": "drive::Target",
                         "role": "publish",
+                        "generation": "y2026_1",
+                        "contract": "drive::Target",
+                        "external": false,
                         "ignored": true
                     }
                 ],
@@ -2665,7 +3051,7 @@ mod tests {
                 .and_then(Value::as_str),
             Some("object")
         );
-        assert_eq!(participant.contracts[0].family, "drive::Target");
+        assert_eq!(participant.contracts[0].family, "y2026_1::drive::Target");
         Ok(())
     }
 
@@ -2947,10 +3333,20 @@ mod tests {
             api_version: api_version.to_string(),
             required_contracts: contracts
                 .iter()
-                .map(|(family, role)| RawContract {
-                    family: (*family).to_string(),
-                    role: (*role).to_string(),
-                })
+                .map(
+                    |(family, role)| crate::participant_metadata::ParticipantMetaContract {
+                        role: (*role).to_string(),
+                        generation: family
+                            .split_once("::")
+                            .map_or(api_version, |(generation, _)| generation)
+                            .to_string(),
+                        contract: family
+                            .split_once("::")
+                            .map_or(*family, |(_, contract)| contract)
+                            .to_string(),
+                        external: false,
+                    },
+                )
                 .collect(),
             config_schema: None,
         }
@@ -2976,13 +3372,23 @@ mod tests {
             api_version: api_version.to_string(),
             required_contracts: contracts
                 .iter()
-                .map(|family| RawContract {
-                    family: (*family).to_string(),
-                    // A single default role: nothing in these fixtures cares
-                    // about role identity (D1: only `family` decides
-                    // compatibility), so every contract shares one.
-                    role: "publish".to_string(),
-                })
+                .map(
+                    |family| crate::participant_metadata::ParticipantMetaContract {
+                        // A single default role: nothing in these fixtures cares
+                        // about role identity (D1: only `family` decides
+                        // compatibility), so every contract shares one.
+                        role: "publish".to_string(),
+                        generation: family
+                            .split_once("::")
+                            .map_or(api_version, |(generation, _)| generation)
+                            .to_string(),
+                        contract: family
+                            .split_once("::")
+                            .map_or(*family, |(_, contract)| contract)
+                            .to_string(),
+                        external: false,
+                    },
+                )
                 .collect(),
             config_schema: None,
         }

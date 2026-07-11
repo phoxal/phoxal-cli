@@ -25,8 +25,9 @@ use crate::catalog::ArtifactKind;
 use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
-    extract_emit_apis_from_staged_runtime, platform_artifact_refs_from_resolved,
-    run_check_with_context, source_participants_from_resolved,
+    check_artifact_refs_from_resolved, extract_emit_apis_from_staged_runtime,
+    extract_emit_apis_from_staged_tool, fetch_emit_apis_from_tool, run_check_with_context,
+    source_participants_from_resolved, tool_participants_from_resolved,
 };
 use crate::component_driver::component_driver_crate_dir;
 use crate::launch_env::{EncodedParticipantEnv, encode_participant_env};
@@ -803,10 +804,24 @@ fn prepare_deploy(
         })
         .cloned()
         .collect::<Vec<_>>();
+    let coherence_source_participants = all_source_participants
+        .iter()
+        .filter(|participant| {
+            !matches!(participant.kind, SourceParticipantKind::Simulator)
+                && (participant.kind != SourceParticipantKind::Tool
+                    || participant.name == SITE_TOOL_ROUTER)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     ensure_no_native_c_source_dependencies(&checked_source_participants)?;
-    let mut platform_refs = platform_artifact_refs_from_resolved(&resolved);
-    platform_refs
-        .extend(crate::commands::check::component_driver_platform_refs_from_resolved(&resolved));
+    let platform_refs = check_artifact_refs_from_resolved(&resolved)
+        .into_iter()
+        .filter(|artifact| artifact.kind != ArtifactKind::Tool || artifact.name == "router")
+        .collect::<Vec<_>>();
+    let tool_participants = tool_participants_from_resolved(&resolved)?
+        .into_iter()
+        .filter(|tool| tool.name == SITE_TOOL_ROUTER)
+        .collect::<Vec<_>>();
     let mut official_by_ref = resolved
         .platform_runtimes
         .iter()
@@ -815,20 +830,30 @@ fn prepare_deploy(
     official_by_ref.extend(crate::commands::check::component_driver_runtimes_by_ref(
         &resolved,
     ));
+    let tools_by_ref = resolved
+        .tools
+        .iter()
+        .map(|tool| (tool.asset.clone(), tool))
+        .collect::<BTreeMap<_, _>>();
     let outcome = run_check_with_context(
         &platform_refs,
-        &[],
-        &checked_source_participants,
+        &tool_participants,
+        &coherence_source_participants,
         CheckGraphContext {
             manifest_extras: &loaded.extras,
         },
         |artifact_ref| {
-            let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
-                anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
-            })?;
-            extract_emit_apis_from_staged_runtime(runtime)
+            if let Some(runtime) = official_by_ref.get(artifact_ref) {
+                return extract_emit_apis_from_staged_runtime(runtime);
+            }
+            if let Some(tool) = tools_by_ref.get(artifact_ref) {
+                return extract_emit_apis_from_staged_tool(tool);
+            }
+            Err(anyhow!(
+                "resolved official artifact {artifact_ref} is not in the catalog"
+            ))
         },
-        |_| unreachable!("deploy does not check site tools as graph participants"),
+        fetch_emit_apis_from_tool,
         build_emit_apis_from_source,
     )?;
     crate::commands::check::ensure_check_outcome_ok(&resolved.channel.to_string(), &outcome)?;
@@ -843,6 +868,13 @@ fn prepare_deploy(
             substitutions: &[],
             source_participants: &checked_source_participants,
         }],
+    )?;
+    let coherence =
+        crate::commands::check::coherence_for_launch_plan(&plan, &outcome.contract_surfaces);
+    crate::commands::check::enforce_coherence(
+        crate::commands::check::CoherenceVerb::Deploy,
+        &coherence,
+        options.message_format,
     )?;
 
     let project_root = project_root.to_path_buf();

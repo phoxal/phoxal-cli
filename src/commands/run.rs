@@ -15,9 +15,10 @@ use tokio::sync::mpsc;
 use crate::AppContext;
 use crate::commands::MessageFormat;
 use crate::commands::check::{
-    CheckGraphContext, build_emit_apis_from_source, extract_emit_apis_from_staged_runtime,
-    platform_artifact_refs_from_resolved, run_check_with_context,
-    source_participants_from_resolved,
+    CheckGraphContext, build_emit_apis_from_source, check_artifact_refs_from_resolved,
+    extract_emit_apis_from_staged_runtime, extract_emit_apis_from_staged_tool,
+    fetch_emit_apis_from_tool, run_check_with_context, source_participants_from_resolved,
+    tool_participants_from_resolved,
 };
 use crate::component_driver::component_driver_crate_dir;
 use crate::launch_env::encode_participant_env;
@@ -240,9 +241,8 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
 
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
-    let mut platform_refs = platform_artifact_refs_from_resolved(&resolved);
-    platform_refs
-        .extend(crate::commands::check::component_driver_platform_refs_from_resolved(&resolved));
+    let platform_refs = check_artifact_refs_from_resolved(&resolved);
+    let tool_participants = tool_participants_from_resolved(&resolved)?;
     let mut official_by_ref = resolved
         .platform_runtimes
         .iter()
@@ -251,20 +251,30 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     official_by_ref.extend(crate::commands::check::component_driver_runtimes_by_ref(
         &resolved,
     ));
+    let tools_by_ref = resolved
+        .tools
+        .iter()
+        .map(|tool| (tool.asset.clone(), tool))
+        .collect::<BTreeMap<_, _>>();
     let outcome = run_check_with_context(
         &platform_refs,
-        &[],
+        &tool_participants,
         &source_participants,
         CheckGraphContext {
             manifest_extras: &loaded.extras,
         },
         |artifact_ref| {
-            let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
-                anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
-            })?;
-            extract_emit_apis_from_staged_runtime(runtime)
+            if let Some(runtime) = official_by_ref.get(artifact_ref) {
+                return extract_emit_apis_from_staged_runtime(runtime);
+            }
+            if let Some(tool) = tools_by_ref.get(artifact_ref) {
+                return extract_emit_apis_from_staged_tool(tool);
+            }
+            Err(anyhow!(
+                "resolved official artifact {artifact_ref} is not in the catalog"
+            ))
         },
-        |_| unreachable!("run does not check site tools as graph participants"),
+        fetch_emit_apis_from_tool,
         build_emit_apis_from_source,
     )?;
     if !outcome.is_ok() {
@@ -281,8 +291,26 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
             source_participants: &source_participants,
         }],
     )?;
-
     let driver_policy = DriverPolicy::from_options(&options, &plan)?;
+    let mut coherence_plan = plan.clone();
+    for robot in &mut coherence_plan.robots {
+        robot.participants.retain(|participant| {
+            !matches!(
+                participant.execution,
+                ParticipantExecution::ComponentDriver { .. }
+            ) || driver_policy.decision(&participant.launch.participant_id)
+                == DriverDecision::Launch
+        });
+    }
+    let coherence = crate::commands::check::coherence_for_launch_plan(
+        &coherence_plan,
+        &outcome.contract_surfaces,
+    );
+    crate::commands::check::enforce_coherence(
+        crate::commands::check::CoherenceVerb::Run,
+        &coherence,
+        options.message_format,
+    )?;
     let board = BoardBackend::new();
     let router_ownership = router_ownership(local_router_reachable(&default_connect_endpoint()));
     let mut specs = Vec::new();

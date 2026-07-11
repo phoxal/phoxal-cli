@@ -434,6 +434,13 @@ fn recheck_run_target(
             source_participants: &source_participants,
         }],
     )?;
+    let coherence =
+        crate::commands::check::coherence_for_launch_plan(&plan, &outcome.contract_surfaces);
+    crate::commands::check::enforce_coherence(
+        crate::commands::check::CoherenceVerb::Run,
+        &coherence,
+        crate::commands::MessageFormat::Human,
+    )?;
     Ok(WatchOutcome::Swaps(specs_for_target(&plan, target)?))
 }
 
@@ -449,6 +456,8 @@ fn recheck_sim_target(
         &resolved.resolved,
         &resolved.manifest_extras,
         resolved.catalog.as_ref(),
+        options.joypad,
+        options.message_format,
     )?;
     if target.kind == WatchTargetKind::Driver {
         return Ok(WatchOutcome::MetadataOnly);
