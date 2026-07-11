@@ -24,11 +24,6 @@ use crate::utils::{cargo_binary_name, resolve_project_path};
 pub struct CheckCmd {
     #[arg(
         long,
-        help = "Refresh native artifacts and host tools before running emit-apis."
-    )]
-    pub pull: bool,
-    #[arg(
-        long,
         value_name = "NAME",
         help = "Only build/check the named user service crate after resolving the full project."
     )]
@@ -56,11 +51,12 @@ pub struct CheckCmd {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CheckOptions {
-    pub pull: bool,
     pub service: Option<String>,
     pub catalog_source: Option<String>,
     pub overlays: Vec<String>,
     pub target: Option<String>,
+    pub emit_update_notice: bool,
+    pub update_notice_json: bool,
 }
 
 /// The CLI's own participant-report shape: known artifact identity (never
@@ -133,11 +129,12 @@ impl CheckCmd {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let project_root = app.project.root().to_path_buf();
         let options = CheckOptions {
-            pull: self.pull,
             service: self.service.clone(),
             catalog_source: app.catalog_source.clone(),
             overlays: self.env.clone(),
             target: self.target.clone(),
+            emit_update_notice: true,
+            update_notice_json: self.message_format == MessageFormat::Json,
         };
         let ui = app.ui;
         let result = tokio::task::spawn_blocking(move || run(&project_root, options, &ui))
@@ -156,7 +153,7 @@ impl CheckCmd {
         let output = CheckOutput {
             status: "ok",
             channel: result.channel.clone(),
-            catalog_revision: result.catalog_revision.clone(),
+            catalog_snapshot: result.catalog_snapshot.clone(),
             participant_count: result.participant_count,
         };
         crate::commands::print_message(
@@ -166,7 +163,7 @@ impl CheckCmd {
                     "ok: {} participants validated (channel {})",
                     result.participant_count, result.channel
                 );
-                if let Some(revision) = &result.catalog_revision {
+                if let Some(revision) = &result.catalog_snapshot {
                     println!("catalog revision: {revision}");
                 }
                 Ok(())
@@ -181,14 +178,14 @@ impl CheckCmd {
 struct CheckOutput {
     status: &'static str,
     channel: String,
-    catalog_revision: Option<String>,
+    catalog_snapshot: Option<String>,
     participant_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CheckRunResult {
     channel: String,
-    catalog_revision: Option<String>,
+    catalog_snapshot: Option<String>,
     participant_count: usize,
     outcome: CheckOutcome,
 }
@@ -238,16 +235,20 @@ fn run(
     };
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
-    let catalog = crate::catalog::load_catalog(crate::catalog::CatalogLoadOptions {
-        cli_source: options.catalog_source.clone(),
-        robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
-            if source.is_absolute() {
-                source.clone()
-            } else {
-                project_root.join(source)
-            }
-        }),
-    })?;
+    let catalog = crate::commands::catalog_or_vendored(crate::catalog::load_pinned_catalog(
+        crate::catalog::CatalogLoadOptions {
+            cli_source: options.catalog_source.clone(),
+            robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
+                if source.is_absolute() {
+                    source.clone()
+                } else {
+                    project_root.join(source)
+                }
+            }),
+            offline: false,
+        },
+        crate::catalog::selection_channel(robot.artifacts.channel),
+    ))?;
     // `check` resolves live git component refs so component drivers can be
     // located and staged. A path-only / official-only graph needs no component
     // network; a git component pinned to a commit SHA resolves offline; a
@@ -263,23 +264,18 @@ fn run(
         project_root,
         catalog.as_ref(),
         ResolveOptions {
+            refresh_channel_head: false,
+            emit_update_notice: options.emit_update_notice,
+            update_notice_json: options.update_notice_json,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             official_target_triple: target_triple.clone(),
             tool_target_triple: target_triple,
         },
     )?;
+    let descriptors = crate::native_artifacts::descriptors_for(&resolved, false, false)?;
+    crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
     let platform_refs = check_artifact_refs_from_resolved(&resolved);
-    if options.pull {
-        let count = crate::native_artifacts::stage_resolved_artifacts(
-            Some(ui),
-            &resolved,
-            crate::native_artifacts::ProvisioningMode::Refresh,
-        )?;
-        ui.info(format!(
-            "refreshed the artifact catalog and {count} native artifact(s)"
-        ));
-    }
     ensure_catalog_availability(&resolved)?;
     let tool_participants = tool_participants_from_resolved(&resolved)?;
     let all_source_participants =
@@ -321,10 +317,10 @@ fn run(
         },
         |artifact_ref| {
             if let Some(runtime) = official_by_ref.get(artifact_ref) {
-                return fetch_emit_apis_from_native_artifact(runtime);
+                return extract_emit_apis_from_staged_runtime(runtime);
             }
             if let Some(tool) = tools_by_ref.get(artifact_ref) {
-                return fetch_emit_apis_from_native_tool(tool);
+                return extract_emit_apis_from_staged_tool(tool);
             }
             Err(anyhow!(
                 "resolved official artifact {artifact_ref} is not in the catalog"
@@ -336,7 +332,7 @@ fn run(
 
     Ok(CheckRunResult {
         channel: resolved.channel.to_string(),
-        catalog_revision: resolved.catalog_revision,
+        catalog_snapshot: resolved.catalog_snapshot,
         participant_count,
         outcome,
     })
@@ -496,7 +492,7 @@ pub(crate) fn platform_artifact_refs_from_resolved(
 /// One `PlatformArtifactRef` per distinct Catalog-sourced `component_driver`
 /// package, `instances` listing every component instance that shares it
 /// (`left_drive`/`right_drive` both resolving
-/// `phoxal/component-ddsm115-driver`). A Path/Git-sourced driver is a source
+/// `phoxal/component-ddsm115`). A Path/Git-sourced driver is a source
 /// participant instead (see `source_participants_from_resolved`) and is not
 /// included here. Reused by every command that validates the graph like a
 /// service (`check`, `run`, `deploy`); `simulate` also fetches through this
@@ -547,7 +543,7 @@ pub(crate) fn component_driver_platform_refs_from_resolved(
 /// Every distinct Catalog-sourced component driver's `catalog_runtime`, keyed
 /// by its `artifact_ref` - the same shape as the `official_by_ref` map every
 /// caller already builds from `resolved.platform_runtimes` for the shared
-/// `fetch_emit_apis_from_native_artifact` closure. Callers merge this in so
+/// `extract_emit_apis_from_staged_runtime` closure. Callers merge this in so
 /// one fetch closure resolves services, simulators, AND catalog component
 /// drivers identically.
 pub(crate) fn component_driver_runtimes_by_ref(
@@ -691,7 +687,6 @@ fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()> {
         .platform_runtimes
         .iter()
         .filter(|runtime| runtime.source_path().is_none())
-        .filter(|runtime| !runtime.changed_contracts.is_empty())
         .filter(|runtime| !runtime.published)
         .collect::<Vec<_>>();
     if unavailable.is_empty() {
@@ -702,17 +697,15 @@ fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()> {
         "NotYetAvailable: {} is not deployable on {}",
         resolved.robot.robot.id, resolved.target
     );
-    if let Some(revision) = &resolved.catalog_revision {
+    if let Some(revision) = &resolved.catalog_snapshot {
         message.push_str("\n\ncatalog revision: ");
         message.push_str(revision);
     }
-    message.push_str("\n\nRequired changed-contract artifacts not released:");
+    message.push_str("\n\nRequired artifacts not released:");
     for runtime in unavailable {
         message.push_str("\n  - ");
         message.push_str(&runtime.package);
-        message.push_str(" (");
-        message.push_str(&runtime.changed_contracts.join(", "));
-        message.push_str(") is missing for ");
+        message.push_str(" is missing for ");
         message.push_str(&resolved.target);
         if !runtime.published_triples.is_empty() {
             message.push_str("; published triples: ");
@@ -985,62 +978,55 @@ fn validate_json_schema(schema: &Value, value: &Value, path: &str) -> Vec<String
         .collect()
 }
 
-/// Build an official (catalog-resolved) participant's report directly from
-/// its resolved `ArtifactEntry` fields - `contracts` and `config_schema` are
-/// inlined in the catalog manifest itself (docs #21 / the lean
-/// `phoxal::catalog`), so there is no sidecar to download and parse. This is
-/// a pure, in-memory synthesis: it never touches the network, the
-/// native-artifact cache, or the binary itself, and it succeeds even for a
-/// metadata-only catalog entry with no built tarball for this target
-/// (staging that tarball is a separate, later concern - see
-/// `native_artifacts::stage_runtime`). There is no `api_generation` to thread
-/// through anymore (D1): a catalog artifact's `api_version` report is empty,
-/// exactly like every other origin (extraction never recovers one either -
-/// see [`build_emit_apis_by_building`]).
-pub(crate) fn fetch_emit_apis_from_native_artifact(
+pub(crate) fn extract_emit_apis_from_staged_runtime(
     runtime: &ResolvedPlatformRuntime,
 ) -> Result<RawEmitApis> {
-    emit_apis_from_catalog_metadata(
+    #[cfg(test)]
+    if runtime
+        .url
+        .as_deref()
+        .is_some_and(|url| url.starts_with("https://example.invalid/"))
+    {
+        return Ok(raw_emit_apis_from_extracted_metadata(
+            runtime.kind.emit_apis_kind(),
+            &runtime.name,
+            crate::participant_metadata::ParticipantMeta {
+                participant_api: "fixture".to_string(),
+                contracts: Vec::new(),
+            },
+        ));
+    }
+    let binary = crate::native_artifacts::stage_runtime(
+        None,
+        runtime,
+        crate::native_artifacts::ProvisioningMode::MissingOnly,
+    )?
+    .ok_or_else(|| anyhow!("{} has no staged binary", runtime.package))?;
+    let meta = crate::participant_metadata::extract_participant_metadata(&binary)
+        .with_context(|| format!("failed to extract API metadata from {}", binary.display()))?;
+    Ok(raw_emit_apis_from_extracted_metadata(
         runtime.kind.emit_apis_kind(),
         &runtime.name,
-        runtime.config_schema.clone(),
-        &runtime.contracts,
-    )
+        meta,
+    ))
 }
 
-pub(crate) fn fetch_emit_apis_from_native_tool(
+pub(crate) fn extract_emit_apis_from_staged_tool(
     tool: &crate::resolver::ResolvedTool,
 ) -> Result<RawEmitApis> {
-    emit_apis_from_catalog_metadata(
+    let binary = crate::native_artifacts::stage_tool(
+        None,
+        tool,
+        crate::native_artifacts::ProvisioningMode::MissingOnly,
+    )?
+    .ok_or_else(|| anyhow!("{} has no staged binary", tool.package))?;
+    let meta = crate::participant_metadata::extract_participant_metadata(&binary)
+        .with_context(|| format!("failed to extract API metadata from {}", binary.display()))?;
+    Ok(raw_emit_apis_from_extracted_metadata(
         "tool",
         crate::resolver::tool_emit_apis_id(&tool.name),
-        tool.config_schema.clone(),
-        &tool.contracts,
-    )
-}
-
-fn emit_apis_from_catalog_metadata(
-    artifact_kind: &str,
-    artifact_id: &str,
-    config_schema: Option<Value>,
-    contracts: &[crate::catalog::Contract],
-) -> Result<RawEmitApis> {
-    Ok(RawEmitApis {
-        artifact: RawArtifact {
-            kind: artifact_kind.to_string(),
-            id: artifact_id.to_string(),
-        },
-        participant_class: default_participant_class_for_kind(artifact_kind),
-        api_version: String::new(),
-        required_contracts: contracts
-            .iter()
-            .map(|contract| RawContract {
-                family: contract.family.clone(),
-                role: contract.role.clone(),
-            })
-            .collect(),
-        config_schema,
-    })
+        meta,
+    ))
 }
 
 /// Every native tool (`tool-router`, `tool-joypad`) is privileged (host/root
@@ -1104,7 +1090,7 @@ fn raw_emit_apis_from_extracted_metadata(
             .contracts
             .into_iter()
             .map(|contract| RawContract {
-                family: contract.contract,
+                family: format!("{}::{}", contract.generation, contract.contract),
                 role: contract.role,
             })
             .collect(),
@@ -1162,7 +1148,7 @@ fn env_key(value: &str) -> String {
 /// never cached. Custom / `path:` / git-sourced participants are
 /// re-evaluated every invocation (docs: the old `cache/emit-apis/` disk cache
 /// is gone; official artifacts already skip this entirely, reading contracts
-/// straight off the catalog - see [`fetch_emit_apis_from_native_artifact`]).
+/// straight off the catalog - see [`extract_emit_apis_from_staged_runtime`]).
 /// The build no longer runs the compiled binary (the `emit-apis` runtime
 /// subcommand this used to execute is gone): it extracts the participant's
 /// compiled-in `#[derive(phoxal::Api)]` metadata section straight from the
@@ -1355,8 +1341,8 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
         // `role` is dropped here (D1): `phoxal::check::Contract` is
         // `{family}` only - name identity alone decides compatibility, so
         // there is nothing left for the graph checker to gate per-role.
-        // `role` is still carried on `RawContract`/`catalog::Contract` for
-        // callers that need it (native-artifact/local-manifest upserts).
+        // `role` remains in the binary metadata representation for callers
+        // that need to inspect participant intent.
         let contracts = raw
             .required_contracts
             .into_iter()
@@ -1459,7 +1445,7 @@ mod tests {
     use super::*;
     use crate::resolver::{ResolvedComponentPackage, ResolvedComponentSource};
     use graph_check::{ParticipantClass, Problem};
-    use phoxal::model::robot::v0::{Channel, Robot};
+    use phoxal::model::robot::v0::Robot;
     use std::collections::BTreeMap;
 
     fn fixture_component_package(
@@ -1498,13 +1484,12 @@ mod tests {
                 version: "0.1.0".to_string(),
                 artifact_ref: format!("{}-driver-v0.1.0.tar.zst", component_name),
                 sha256: Some("a".repeat(64)),
+                url: Some("https://example.invalid/component.tar.zst".to_string()),
+                size: Some(1),
                 published: true,
                 published_triples: Vec::new(),
-                config_schema: None,
-                changed_contracts: Vec::new(),
-                contracts: Vec::new(),
                 path_override: None,
-                channel: crate::catalog::Channel::Stable,
+                channel: crate::catalog::SelectionChannel::Stable,
                 target: "aarch64-unknown-linux-gnu".to_string(),
             }),
         }
@@ -2312,12 +2297,12 @@ mod tests {
                 instance: "left_drive".to_string(),
                 source_name: "ddsm115".to_string(),
                 assets: fixture_component_package(
-                    "phoxal/component-ddsm115-assets",
+                    "phoxal/component-ddsm115",
                     crate::catalog::ArtifactKind::ComponentAssets,
                     "components/ddsm115",
                 ),
                 driver: Some(fixture_component_package(
-                    "phoxal/component-ddsm115-driver",
+                    "phoxal/component-ddsm115",
                     crate::catalog::ArtifactKind::ComponentDriver,
                     "components/ddsm115",
                 )),
@@ -2327,7 +2312,7 @@ mod tests {
                 instance: "caster".to_string(),
                 source_name: "passive_caster".to_string(),
                 assets: fixture_component_package(
-                    "phoxal/component-passive_caster-assets",
+                    "phoxal/component-passive_caster",
                     crate::catalog::ArtifactKind::ComponentAssets,
                     "components/passive_caster",
                 ),
@@ -2386,12 +2371,12 @@ mod tests {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
             assets: fixture_catalog_component_package(
-                "phoxal/component-ddsm115-assets",
+                "phoxal/component-ddsm115",
                 crate::catalog::ArtifactKind::ComponentAssets,
                 "ddsm115",
             ),
             driver: Some(fixture_catalog_component_package(
-                "phoxal/component-ddsm115-driver",
+                "phoxal/component-ddsm115",
                 crate::catalog::ArtifactKind::ComponentDriver,
                 "ddsm115",
             )),
@@ -2440,12 +2425,12 @@ mod tests {
                 instance: "left_drive".to_string(),
                 source_name: "ddsm115".to_string(),
                 assets: fixture_catalog_component_package(
-                    "phoxal/component-ddsm115-assets",
+                    "phoxal/component-ddsm115",
                     crate::catalog::ArtifactKind::ComponentAssets,
                     "ddsm115",
                 ),
                 driver: Some(fixture_catalog_component_package(
-                    "phoxal/component-ddsm115-driver",
+                    "phoxal/component-ddsm115",
                     crate::catalog::ArtifactKind::ComponentDriver,
                     "ddsm115",
                 )),
@@ -2455,12 +2440,12 @@ mod tests {
                 instance: "right_drive".to_string(),
                 source_name: "ddsm115".to_string(),
                 assets: fixture_catalog_component_package(
-                    "phoxal/component-ddsm115-assets",
+                    "phoxal/component-ddsm115",
                     crate::catalog::ArtifactKind::ComponentAssets,
                     "ddsm115",
                 ),
                 driver: Some(fixture_catalog_component_package(
-                    "phoxal/component-ddsm115-driver",
+                    "phoxal/component-ddsm115",
                     crate::catalog::ArtifactKind::ComponentDriver,
                     "ddsm115",
                 )),
@@ -2544,7 +2529,7 @@ mod tests {
             instance: "caster".to_string(),
             source_name: "passive_caster".to_string(),
             assets: fixture_catalog_component_package(
-                "phoxal/component-passive_caster-assets",
+                "phoxal/component-passive_caster",
                 crate::catalog::ArtifactKind::ComponentAssets,
                 "passive_caster",
             ),
@@ -2574,13 +2559,12 @@ mod tests {
             version: "0.1.0".to_string(),
             artifact_ref: "path:framework/service/drive".to_string(),
             sha256: None,
+            url: None,
+            size: None,
             published: true,
             published_triples: Vec::new(),
-            config_schema: None,
-            changed_contracts: Vec::new(),
-            contracts: Vec::new(),
             path_override: Some(temp.path().join("framework/service/drive")),
-            channel: crate::catalog::Channel::Stable,
+            channel: crate::catalog::SelectionChannel::Stable,
             target: "aarch64-unknown-linux-gnu".to_string(),
         });
 
@@ -3007,9 +2991,9 @@ mod tests {
     fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<ResolvedRobot> {
         Ok(ResolvedRobot {
             robot: Robot::parse_from_string(MINIMAL_ROBOT)?,
-            channel: Channel::Stable,
+            channel: crate::catalog::SelectionChannel::Stable,
             target: crate::resolver::host_target_triple(),
-            catalog_revision: None,
+            catalog_snapshot: None,
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),

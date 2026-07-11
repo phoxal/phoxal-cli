@@ -40,7 +40,12 @@ impl Validate {
             .context("robot.yaml did not have a parent directory")?;
         let loaded = crate::resolver::load_robot_with_extras(&robot_path)?;
         let robot = loaded.robot;
-        let catalog = crate::commands::load_catalog_for_robot(app, project_root, &loaded.extras)?;
+        let catalog = crate::commands::load_catalog_for_robot(
+            app,
+            project_root,
+            robot.artifacts.channel,
+            &loaded.extras,
+        )?;
         let platform_names = catalog
             .as_ref()
             .map(crate::catalog::service_names)
@@ -187,19 +192,23 @@ fn phoxal_dependency(dep: &TomlValue) -> PhoxalDependency {
     PhoxalDependency::Unparsable
 }
 
-fn print_text_report(robot: &Robot, catalog: Option<&crate::catalog::CatalogRevision>) {
+fn print_text_report(robot: &Robot, catalog: Option<&crate::catalog::Catalog>) {
     println!("robot: {}", robot.robot.id);
-    println!("channel: {}", robot.artifacts.channel);
+    println!(
+        "channel: {}",
+        crate::catalog::selection_channel(robot.artifacts.channel)
+    );
     println!("platform_services:");
-    for runtime in catalog
-        .into_iter()
-        .flat_map(|catalog| catalog.services.iter())
-    {
-        let artifact_ref = format!(
-            "{}:{}-{}",
-            runtime.package, runtime.version, robot.artifacts.channel
+    for (_, package) in crate::catalog::OFFICIAL_SERVICES {
+        let found = catalog.and_then(|catalog| {
+            crate::catalog::latest_by_package(catalog)
+                .get(package)
+                .map(|artifact| artifact.version.as_str())
+        });
+        println!(
+            "  - {package} -> {}",
+            found.map_or("missing", |version| version)
         );
-        println!("  - {} -> {}", runtime.package, artifact_ref);
     }
     println!("services:");
     for (name, runtime) in &robot.services {
@@ -219,22 +228,20 @@ fn print_text_report(robot: &Robot, catalog: Option<&crate::catalog::CatalogRevi
     }
 }
 
-fn print_json_report(
-    robot: &Robot,
-    catalog: Option<&crate::catalog::CatalogRevision>,
-) -> Result<()> {
+fn print_json_report(robot: &Robot, catalog: Option<&crate::catalog::Catalog>) -> Result<()> {
     let report = serde_json::json!({
         "robot": robot.robot.id,
-        "channel": robot.artifacts.channel,
-        "platform_services": catalog.into_iter().flat_map(|catalog| catalog.services.iter()).map(|runtime| {
-            let artifact_ref = format!(
-                "{}:{}-{}",
-                runtime.package, runtime.version, robot.artifacts.channel
-            );
+        "channel": crate::catalog::selection_channel(robot.artifacts.channel).as_str(),
+        "platform_services": crate::catalog::OFFICIAL_SERVICES.iter().map(|(_, package)| {
+            let version = catalog.and_then(|catalog| {
+                crate::catalog::latest_by_package(catalog)
+                    .get(package)
+                    .map(|artifact| artifact.version.clone())
+            });
             serde_json::json!({
-                "name": runtime.package,
-                "version": runtime.version,
-                "artifact_ref": artifact_ref,
+                "name": package,
+                "version": version,
+                "found": version.is_some(),
             })
         }).collect::<Vec<_>>(),
         "services": robot.services.iter().map(|(name, runtime)| {

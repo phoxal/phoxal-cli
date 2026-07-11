@@ -9,7 +9,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
-    fetch_emit_apis_from_native_artifact, platform_artifact_refs_from_resolved,
+    extract_emit_apis_from_staged_runtime, platform_artifact_refs_from_resolved,
     run_check_with_context, source_participants_from_resolved,
 };
 use crate::commands::run::{RunOptions, source_spec_from_launch_record};
@@ -379,6 +379,7 @@ fn recheck_run_target(
     let catalog = crate::commands::load_catalog_for_robot_from_source(
         options.catalog_source.clone(),
         project_root,
+        loaded.robot.artifacts.channel,
         &loaded.extras,
     )?;
     let resolved = resolve(
@@ -386,6 +387,8 @@ fn recheck_run_target(
         project_root,
         catalog.as_ref(),
         ResolveOptions {
+            emit_update_notice: false,
+            update_notice_json: false,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             ..ResolveOptions::default()
@@ -414,7 +417,7 @@ fn recheck_run_target(
             let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
                 anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
             })?;
-            fetch_emit_apis_from_native_artifact(runtime)
+            extract_emit_apis_from_staged_runtime(runtime)
         },
         |_| unreachable!("run watch does not check site tools as graph participants"),
         build_emit_apis_from_source,
@@ -705,9 +708,9 @@ robot:
         .unwrap();
         ResolvedRobot {
             robot,
-            channel: phoxal::model::robot::v0::Channel::Stable,
+            channel: crate::catalog::SelectionChannel::Stable,
             target: "host".to_string(),
-            catalog_revision: None,
+            catalog_snapshot: None,
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),

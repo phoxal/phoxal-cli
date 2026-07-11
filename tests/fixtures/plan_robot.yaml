@@ -30,23 +30,15 @@ robot:
 artifacts:
   channel: stable
   pins:
-    phoxal/component-oak_d_lite-assets:
+    phoxal/component-oak_d_lite:
       git: https://github.com/phoxal/framework
       rev: main
       directory: component/oak_d_lite
-    phoxal/component-oak_d_lite-driver:
-      git: https://github.com/phoxal/framework
-      rev: main
-      directory: component/oak_d_lite/driver
-    phoxal/component-ddsm115-assets:
+    phoxal/component-ddsm115:
       git: https://github.com/phoxal/framework
       rev: main
       directory: component/ddsm115
-    phoxal/component-ddsm115-driver:
-      git: https://github.com/phoxal/framework
-      rev: main
-      directory: component/ddsm115/driver
-    phoxal/component-passive_caster-assets:
+    phoxal/component-passive_caster:
       path: ./components/passive_caster
 
 services:

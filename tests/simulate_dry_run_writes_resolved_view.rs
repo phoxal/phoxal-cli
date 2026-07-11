@@ -1,7 +1,7 @@
 use std::fs;
 
 use phoxal_cli::catalog::{
-    Channel as CatalogChannel, fixture_catalog_for_tests, fixture_tool_entry_for_tests,
+    SelectionChannel as CatalogChannel, fixture_catalog_for_tests, fixture_tool_entry_for_tests,
 };
 use phoxal_cli::commands::simulate::{SimulateOptions, prepare};
 use phoxal_cli::resolver::host_target_triple;
@@ -10,6 +10,7 @@ use phoxal_cli::resolver::host_target_triple;
 fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     write_robot_project(temp.path())?;
+    write_vendored_fixture_binaries(temp.path())?;
     let catalog_path = write_catalog(temp.path())?;
 
     let plan = prepare(
@@ -23,7 +24,6 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
 
     assert!(!temp.path().join(".phoxal/run").exists());
     assert!(!temp.path().join(".phoxal/webots").exists());
-    assert!(!temp.path().join(".phoxal/cache/state.yaml").exists());
     assert!(!temp.path().join("phoxal.sources.lock").exists());
     // `LaunchMode::Webots` carries the resolved world path directly now
     // (there is no separate `world_path` field to check against).
@@ -42,8 +42,44 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
         .map(|site| site.id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(site_ids, vec![phoxal_cli::launch_plan::SITE_TOOL_ROUTER]);
-    assert!(plan.ctx.resolved.platform_runtimes.is_empty());
+    assert_eq!(
+        plan.ctx.resolved.platform_runtimes.len(),
+        phoxal_cli::catalog::OFFICIAL_SERVICES.len()
+    );
 
+    Ok(())
+}
+
+fn write_vendored_fixture_binaries(root: &std::path::Path) -> anyhow::Result<()> {
+    // `prepare` is called directly rather than through AppContext in this
+    // integration test, so point project-local path helpers at its fixture.
+    unsafe { std::env::set_var(phoxal_cli::host_paths::PROJECT_ROOT_ENV, root) };
+    let source = std::env::current_exe()?;
+    let target = host_target_triple();
+    for (name, package, binary) in phoxal_cli::catalog::OFFICIAL_SERVICES
+        .iter()
+        .map(|(name, package)| (*name, *package, format!("phoxal-service-{name}")))
+        .chain(
+            phoxal_cli::catalog::OFFICIAL_TOOLS
+                .iter()
+                .map(|(name, package)| (*name, *package, format!("phoxal-tool-{name}"))),
+        )
+        .chain(
+            phoxal_cli::catalog::OFFICIAL_SIMULATORS
+                .iter()
+                .map(|(name, package)| (*name, *package, format!("phoxal-simulator-{name}"))),
+        )
+    {
+        let _ = name;
+        let target_dir = phoxal_cli::native_artifacts::artifact_target_dir_for(package, &target)?;
+        let version_dir = target_dir.join("0.1.0");
+        fs::create_dir_all(&version_dir)?;
+        fs::copy(&source, version_dir.join(binary))?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("0.1.0", target_dir.join("active"))?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir("0.1.0", target_dir.join("active"))?;
+    }
     Ok(())
 }
 

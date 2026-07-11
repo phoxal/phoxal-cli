@@ -282,11 +282,8 @@ fn parse_version_tag(tag: &str) -> Result<Version> {
 }
 
 fn download_asset(client: &Client, url: &str, destination: &Path) -> Result<Option<()>> {
-    let mut request = client.get(url);
-    if let Some(token) = github_token() {
-        request = request.bearer_auth(token);
-    }
-    let mut response = request
+    let mut response = client
+        .get(url)
         .send()
         .with_context(|| format!("failed to download {url}"))?;
     let status = response.status();
@@ -302,12 +299,6 @@ fn download_asset(client: &Client, url: &str, destination: &Path) -> Result<Opti
         .copy_to(&mut file)
         .with_context(|| format!("failed to write {}", destination.display()))?;
     Ok(Some(()))
-}
-
-fn github_token() -> Option<String> {
-    std::env::var("GITHUB_TOKEN")
-        .ok()
-        .filter(|token| !token.trim().is_empty())
 }
 
 fn verify_checksum(archive_path: &Path, checksum_path: &Path, archive_name: &str) -> Result<()> {

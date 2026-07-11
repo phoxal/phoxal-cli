@@ -8,11 +8,11 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 
 use crate::AppContext;
-use crate::catalog::CatalogRevision;
+use crate::catalog::Catalog;
 use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
-    fetch_emit_apis_from_native_artifact, platform_artifact_refs_from_resolved,
+    extract_emit_apis_from_staged_runtime, platform_artifact_refs_from_resolved,
     run_check_with_context, source_participants_from_resolved,
 };
 use crate::component_driver::{component_assets_dir, component_driver_crate_dir};
@@ -65,7 +65,7 @@ pub(crate) fn simulator_controller_provider_id(robot_id: &str) -> String {
 pub struct Simulate {
     #[arg(
         value_name = "WORLD",
-        help = "World file or bare name (e.g. `default`, or `worlds/foo.wbt`). Resolved against <project>/worlds/<world>.wbt, then <project>/<world>, then ~/.phoxal/worlds/<world>.wbt."
+        help = "World file or bare name (e.g. `default`, or `worlds/foo.wbt`). Resolved against <project>/worlds/<world>.wbt, then <project>/<world>."
     )]
     pub world: String,
     #[arg(
@@ -75,11 +75,6 @@ pub struct Simulate {
     pub dry_run: bool,
     #[arg(long, hide = true)]
     pub joypad: bool,
-    #[arg(
-        long,
-        help = "Refresh native service artifacts and host tools instead of reusing compatible cached artifacts."
-    )]
-    pub pull: bool,
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
     pub message_format: MessageFormat,
     #[arg(
@@ -111,7 +106,6 @@ pub enum SimulateMode {
 pub struct SimulateOptions {
     pub world: String,
     pub joypad: bool,
-    pub pull: bool,
     pub catalog_source: Option<String>,
     pub message_format: MessageFormat,
     pub watch: bool,
@@ -138,7 +132,7 @@ pub(crate) struct ResolvedSimulation {
     pub(crate) world_path: PathBuf,
     pub(crate) resolved: ResolvedRobot,
     pub(crate) manifest_extras: RobotManifestExtras,
-    pub(crate) catalog: Option<CatalogRevision>,
+    pub(crate) catalog: Option<Catalog>,
 }
 
 impl Simulate {
@@ -146,7 +140,6 @@ impl Simulate {
         let options = SimulateOptions {
             world: self.world.clone(),
             joypad: self.joypad,
-            pull: self.pull,
             catalog_source: app.catalog_source.clone(),
             message_format: self.message_format,
             watch: self.watch,
@@ -193,6 +186,8 @@ pub async fn run(
 
             let run_dir = crate::host_paths::run_dir()?;
             let _lock = SupervisorLock::acquire(&run_dir)?;
+            let _simulator_lock =
+                SupervisorLock::acquire_path(&crate::host_paths::simulator_lock_path()?)?;
             let state_file = supervisor_state_path()?;
             let action_file = supervisor_actions_path()?;
             let board = BoardBackend::new();
@@ -304,6 +299,8 @@ fn prepare_with_mode(
 ) -> Result<SimPlan> {
     let resolved = resolve_project(project_start, options.clone(), mode)?;
     if mode == SimulateMode::Live {
+        let descriptors = crate::native_artifacts::descriptors_for(&resolved.resolved, true, true)?;
+        crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, None)?;
         crate::native_artifacts::stage_component_bundles_into_robot_root(
             &resolved.project_root,
             &resolved.project_root,
@@ -361,16 +358,20 @@ pub(crate) fn resolve_project(
     };
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
-    let catalog = crate::catalog::load_catalog(crate::catalog::CatalogLoadOptions {
-        cli_source: options.catalog_source.clone(),
-        robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
-            if source.is_absolute() {
-                source.clone()
-            } else {
-                project_root.join(source)
-            }
-        }),
-    })?;
+    let catalog = crate::commands::catalog_or_vendored(crate::catalog::load_pinned_catalog(
+        crate::catalog::CatalogLoadOptions {
+            cli_source: options.catalog_source.clone(),
+            robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
+                if source.is_absolute() {
+                    source.clone()
+                } else {
+                    project_root.join(source)
+                }
+            }),
+            offline: false,
+        },
+        crate::catalog::selection_channel(robot.artifacts.channel),
+    ))?;
 
     // Always resolve live git component driver commits so driver metadata can
     // be staged. Component asset git refs are resolved only for live simulate,
@@ -389,6 +390,8 @@ pub(crate) fn resolve_project(
         &project_root,
         catalog.as_ref(),
         ResolveOptions {
+            emit_update_notice: true,
+            update_notice_json: options.message_format == MessageFormat::Json,
             resolve_source_commits: true,
             resolve_component_asset_commits: mode == SimulateMode::Live,
             official_target_triple: official_target,
@@ -415,7 +418,7 @@ pub(crate) fn build_checked_sim_launch_plan(
     world: &Path,
     resolved: &ResolvedRobot,
     manifest_extras: &RobotManifestExtras,
-    catalog: Option<&CatalogRevision>,
+    catalog: Option<&Catalog>,
 ) -> Result<LaunchPlan> {
     let source_participants = sim_source_participants(project_root, resolved, catalog)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
@@ -444,7 +447,7 @@ pub(crate) fn build_checked_sim_launch_plan(
             let runtime = official_by_ref.get(artifact_ref).ok_or_else(|| {
                 anyhow!("resolved official artifact {artifact_ref} is not in the catalog")
             })?;
-            fetch_emit_apis_from_native_artifact(runtime)
+            extract_emit_apis_from_staged_runtime(runtime)
         },
         |_| unreachable!("simulate does not check site tools as graph participants"),
         |participant| {
@@ -499,7 +502,7 @@ fn official_simulator_participants(
         .iter()
         .filter(|runtime| runtime.source_path().is_none())
     {
-        let raw = fetch_emit_apis_from_native_artifact(runtime).with_context(|| {
+        let raw = extract_emit_apis_from_staged_runtime(runtime).with_context(|| {
             format!(
                 "failed to synthesize catalog emit-apis for simulator {}",
                 runtime.name
@@ -585,7 +588,7 @@ pub(crate) fn simulator_participant_id_for_resolved_artifact(
 pub(crate) fn sim_source_participants(
     project_root: &Path,
     resolved: &ResolvedRobot,
-    _catalog: Option<&CatalogRevision>,
+    _catalog: Option<&Catalog>,
 ) -> Result<Vec<SourceParticipant>> {
     let mut participants =
         source_participants_from_resolved(project_root, resolved, component_driver_crate_dir)?;
@@ -672,7 +675,7 @@ fn report_plan_only(sim: &SimPlan, message_format: MessageFormat) -> Result<()> 
         &output,
         || {
             println!("channel: {}", sim.ctx.resolved.channel);
-            if let Some(revision) = &sim.ctx.resolved.catalog_revision {
+            if let Some(revision) = &sim.ctx.resolved.catalog_snapshot {
                 println!("catalog revision: {revision}");
             }
             println!(
@@ -684,7 +687,7 @@ fn report_plan_only(sim: &SimPlan, message_format: MessageFormat) -> Result<()> 
             }
             println!("world: {}", output.world_path.display());
             println!("router: {}", output.bus_connect);
-            // Out of the project tree now (`~/.phoxal/run/simulation/webots`,
+            // Out of the project tree now (`<project>/.phoxal/webots`,
             // see `webots_stage_root`), so print it explicitly for discoverability
             // even though nothing is written in dry-run mode.
             if let Ok(root) = webots_stage_root::root() {
@@ -738,7 +741,7 @@ fn build_dry_run_output(sim: &SimPlan) -> SimulateDryRunOutput {
     SimulateDryRunOutput {
         mode: "dry-run",
         channel: sim.ctx.resolved.channel.to_string(),
-        catalog_revision: sim.ctx.resolved.catalog_revision.clone(),
+        catalog_snapshot: sim.ctx.resolved.catalog_snapshot.clone(),
         world_path,
         bus_connect: DEFAULT_ROUTER_CONNECT.to_string(),
         platform_service_count: sim.ctx.resolved.platform_runtimes.len(),
@@ -768,7 +771,7 @@ fn webots_world(mode: &LaunchMode) -> &Path {
 struct SimulateDryRunOutput {
     mode: &'static str,
     channel: String,
-    catalog_revision: Option<String>,
+    catalog_snapshot: Option<String>,
     world_path: PathBuf,
     bus_connect: String,
     platform_service_count: usize,
@@ -925,9 +928,7 @@ fn stage_and_prepare_webots_spec(app: &AppContext, sim: &SimPlan) -> Result<Part
     let webots_path = crate::host_doctor::webots_executable_path()
         .map_err(|error| anyhow!("{error}"))
         .context("failed to locate the Webots executable for live simulate")?;
-    // The staged root now lives under `~/.phoxal/run/...` rather than the
-    // project tree, so print it explicitly - it is no longer discoverable by
-    // just looking under the project.
+    // Print the generated project-local staging root explicitly.
     app.ui.info(format!(
         "staged simulation to {}",
         webots_stage_root::root()?.display()
@@ -950,7 +951,7 @@ fn stage_and_prepare_webots_spec(app: &AppContext, sim: &SimPlan) -> Result<Part
 
 /// Stage the two Webots controller BINARIES (supervisor + per-robot
 /// controller) into the standard Webots layout,
-/// `~/.phoxal/run/simulation/webots/controllers/<controller-name>/<controller-name>`
+/// `<project>/.phoxal/webots/controllers/<controller-name>/<controller-name>`
 /// (`webots_stage_root` names these paths). Webots looks up a world node's
 /// `controller "<name>"` field under exactly this `controllers/<name>/<name>`
 /// path; when the executable is missing it silently falls back to its own
@@ -1071,7 +1072,7 @@ fn webots_controller_name_for_simulator_artifact(artifact_name: &str) -> Option<
 /// path-overridden) simulator runtime, mirroring how
 /// `commands::run::locate_official_binary` resolves every other official
 /// artifact. Errors clearly rather than leaving the controller silently
-/// unstaged when the artifact was never pulled into the cache.
+/// unstaged when the artifact was never vendored into the project store.
 fn provisioned_official_simulator_binary(runtime: &ResolvedPlatformRuntime) -> Result<PathBuf> {
     let descriptor = crate::native_artifacts::NativeArtifactDescriptor::from_runtime(runtime)
         .with_context(|| {
@@ -1082,14 +1083,14 @@ fn provisioned_official_simulator_binary(runtime: &ResolvedPlatformRuntime) -> R
         })?
         .ok_or_else(|| {
             anyhow!(
-                "simulator '{}' has no built native artifact for this target (missing tarball/sha256); run `phoxal-cli pull` or pin a path override",
+                "simulator '{}' has no built native artifact for this target; run `phoxal update` or pin a path override",
                 runtime.name
             )
         })?;
     let cached = crate::native_artifacts::artifact_binary_path(&descriptor)?;
     if !cached.is_file() {
         bail!(
-            "NativePending: simulator '{}' binary is not in the artifact cache ({}); run `phoxal-cli pull` to fetch it",
+            "NativePending: simulator '{}' binary is not vendored ({}); run `phoxal update` to fetch it",
             runtime.name,
             cached.display()
         );
@@ -1381,7 +1382,7 @@ fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::catalog::{
-        ArtifactKind, Channel as CatalogChannel, fixture_catalog_for_tests,
+        ArtifactKind, SelectionChannel as CatalogChannel, fixture_catalog_for_tests,
         fixture_contract_for_tests, fixture_tool_entry_for_tests,
     };
     use crate::host_paths::test_support::ScratchPhoxalHome;
@@ -1419,7 +1420,7 @@ mod tests {
 
         assert_eq!(
             resolved.resolved.channel,
-            phoxal::model::robot::v0::Channel::Stable
+            crate::catalog::SelectionChannel::Stable
         );
         assert!(resolved.resolved.components.is_empty());
         Ok(())
@@ -1441,7 +1442,7 @@ mod tests {
 
         assert_eq!(
             resolved.resolved.channel,
-            phoxal::model::robot::v0::Channel::Stable
+            crate::catalog::SelectionChannel::Stable
         );
         Ok(())
     }
@@ -1820,9 +1821,8 @@ mod tests {
         // EXTERNPROTO and the supervisor's static node, with no static robot
         // instance node.
         //
-        // Staging now lands under `~/.phoxal/run/simulation/webots` (home,
-        // not project-scoped), so this must run under a scratch `PHOXAL_HOME`
-        // rather than touching the real developer machine's staging root.
+        // Staging lands under `<project>/.phoxal/webots`, so this test selects
+        // a scratch project root rather than touching the working project.
         let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         fs::write(
@@ -2278,9 +2278,7 @@ artifacts:
     fn robot_yaml_with_component_dev_overlay() -> &'static str {
         r#"artifacts:
   pins:
-    phoxal/component-ddsm115-assets:
-      path: components/ddsm115
-    phoxal/component-ddsm115-driver:
+    phoxal/component-ddsm115:
       path: components/ddsm115
 "#
     }
@@ -2335,7 +2333,7 @@ artifacts:
                 "[package]\nname = \"driver-{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
             ),
         )?;
-        let json = r#"{"participant_api":"Api","contracts":[{"field":"state","role":"subscribe","contract":"component::MotorCommand"}]}"#;
+        let json = r#"{"participant_api":"Api","contracts":[{"role":"subscribe","generation":"y2026_1","contract":"component::MotorCommand","external":false}]}"#;
         let len = json.len();
         fs::write(
             dir.join("src/main.rs"),
@@ -2426,9 +2424,9 @@ robot:
         let robot = phoxal::model::robot::v0::Robot::parse_from_string(&yaml)?;
         Ok(ResolvedRobot {
             robot,
-            channel: phoxal::model::robot::v0::Channel::Stable,
+            channel: crate::catalog::SelectionChannel::Stable,
             target: host_target_triple(),
-            catalog_revision: None,
+            catalog_snapshot: None,
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
@@ -2462,7 +2460,7 @@ robot:
                 instance: (*instance).to_string(),
                 source_name: "ddsm115".to_string(),
                 assets: crate::resolver::ResolvedComponentPackage {
-                    package: "phoxal/component-ddsm115-assets".to_string(),
+                    package: "phoxal/component-ddsm115".to_string(),
                     kind: crate::catalog::ArtifactKind::ComponentAssets,
                     source: ResolvedComponentSource::Path {
                         path: PathBuf::from("components/ddsm115"),
@@ -2471,7 +2469,7 @@ robot:
                     catalog_runtime: None,
                 },
                 driver: Some(crate::resolver::ResolvedComponentPackage {
-                    package: "phoxal/component-ddsm115-driver".to_string(),
+                    package: "phoxal/component-ddsm115".to_string(),
                     kind: crate::catalog::ArtifactKind::ComponentDriver,
                     source: ResolvedComponentSource::Path {
                         path: PathBuf::from("components/ddsm115"),
@@ -2485,10 +2483,7 @@ robot:
         Ok(resolved)
     }
 
-    fn platform_runtime(
-        name: &str,
-        contracts: Vec<crate::catalog::Contract>,
-    ) -> ResolvedPlatformRuntime {
+    fn platform_runtime(name: &str, _contracts: Vec<()>) -> ResolvedPlatformRuntime {
         ResolvedPlatformRuntime {
             name: name.to_string(),
             package: format!("phoxal/service-{name}"),
@@ -2499,13 +2494,12 @@ robot:
                 host_target_triple()
             ),
             sha256: None,
+            url: None,
+            size: None,
             published: false,
             published_triples: Vec::new(),
-            changed_contracts: Vec::new(),
-            contracts,
-            config_schema: None,
             path_override: None,
-            channel: crate::catalog::Channel::Stable,
+            channel: crate::catalog::SelectionChannel::Stable,
             target: host_target_triple(),
         }
     }
@@ -2521,13 +2515,12 @@ robot:
                 host_target_triple()
             ),
             sha256: None,
+            url: None,
+            size: None,
             published: false,
             published_triples: Vec::new(),
-            changed_contracts: Vec::new(),
-            contracts: Vec::new(),
-            config_schema: None,
             path_override: None,
-            channel: crate::catalog::Channel::Stable,
+            channel: crate::catalog::SelectionChannel::Stable,
             target: host_target_triple(),
         }
     }
@@ -2547,11 +2540,11 @@ robot:
             asset: format!("{name}-0.1.0-{}.tar.gz", host_target_triple()),
             binary_name: name.to_string(),
             sha256: "0".repeat(64),
+            url: None,
+            size: None,
             published: false,
-            contracts: Vec::new(),
-            config_schema: None,
             path_override: None,
-            channel: crate::catalog::Channel::Stable,
+            channel: crate::catalog::SelectionChannel::Stable,
             target: host_target_triple(),
         }
     }
@@ -2578,7 +2571,7 @@ robot:
 
     /// Bug 1 regression test: staging must produce a real, executable
     /// controller binary at the standard Webots layout
-    /// (`~/.phoxal/run/simulation/webots/controllers/<name>/<name>`) for BOTH
+    /// (`<project>/.phoxal/webots/controllers/<name>/<name>`) for BOTH
     /// the supervisor and the per-robot controller when the simulators are
     /// path-overridden (the live-gate case), by actually running `cargo
     /// build` against fake stand-in crates - not just asserting a path string
@@ -2670,15 +2663,12 @@ robot:
         Ok(())
     }
 
-    /// The staging LOCATION change (Part 4 follow-up): the staged root must
-    /// resolve under `~/.phoxal/run/simulation/webots` (relocatable via
-    /// `PHOXAL_HOME`), never under the project tree, and each mounted
+    /// The staged root must resolve under `<project>/.phoxal/webots`, and each mounted
     /// component type's staged `meshes/<component_type>` entry must be a
     /// SYMLINK to the component's resolved mesh source directory - not a
-    /// copy - so the cache/path-pin stays the single source of truth.
+    /// copy - so the vendored/path-pinned source stays authoritative.
     #[test]
-    fn stage_simulation_for_robot_resolves_under_home_and_symlinks_component_meshes() -> Result<()>
-    {
+    fn stage_simulation_uses_project_store_and_symlinks_component_meshes() -> Result<()> {
         let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         fs::write(
@@ -2743,8 +2733,8 @@ robot:
 
         let root = webots_stage_root::root()?;
         assert!(
-            root.ends_with("run/simulation/webots"),
-            "staged root should resolve under run/simulation/webots, got {}",
+            root.ends_with(".phoxal/webots"),
+            "staged root should resolve under project-local .phoxal/webots, got {}",
             root.display()
         );
         assert!(

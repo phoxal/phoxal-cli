@@ -541,7 +541,7 @@ mod tests {
     use anyhow::bail;
 
     use crate::catalog::{
-        Channel as CatalogChannel, fixture_catalog_for_tests,
+        SelectionChannel as CatalogChannel, fixture_catalog_for_tests,
         fixture_component_assets_entry_for_tests, fixture_component_driver_entry_for_tests,
         fixture_contract_for_tests, fixture_service_entry_for_tests,
     };
@@ -627,11 +627,16 @@ mod tests {
                 manifest_extras: &extras,
             },
             |artifact_ref| {
-                if artifact_ref.contains("service-drive") {
-                    Ok(raw_emit_apis("service", "drive"))
-                } else {
-                    bail!("unexpected platform artifact {artifact_ref}")
-                }
+                let participant = platform_refs
+                    .iter()
+                    .find(|participant| participant.artifact_ref == artifact_ref)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("unexpected platform artifact {artifact_ref}")
+                    })?;
+                Ok(raw_emit_apis(
+                    participant.kind.emit_apis_kind(),
+                    &participant.name,
+                ))
             },
             |_| bail!("no tools in this check fixture"),
             |source| match source.kind {
@@ -678,9 +683,21 @@ mod tests {
             .iter()
             .map(|participant| participant.launch.participant_id.as_str())
             .collect::<Vec<_>>();
+        for (service, _) in crate::catalog::OFFICIAL_SERVICES {
+            assert!(
+                participant_ids.contains(service),
+                "missing platform service {service}: {participant_ids:?}"
+            );
+        }
+        assert!(participant_ids.contains(&"left_drive"));
+        assert!(participant_ids.contains(&"right_drive"));
         assert_eq!(
-            participant_ids,
-            vec!["drive", "left_drive", "mission", "right_drive"]
+            participant_ids
+                .iter()
+                .filter(|id| **id == "mission")
+                .count(),
+            2,
+            "official and user mission participants are both represented"
         );
         let left_drive = robot
             .participants
@@ -882,9 +899,9 @@ robot:
         let robot = phoxal::model::robot::v0::Robot::parse_from_string(&yaml)?;
         Ok(ResolvedRobot {
             robot,
-            channel: phoxal::model::robot::v0::Channel::Stable,
+            channel: crate::catalog::SelectionChannel::Stable,
             target: host_target_triple(),
-            catalog_revision: None,
+            catalog_snapshot: None,
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
@@ -909,11 +926,11 @@ robot:
             asset: format!("{name}-0.1.0-{}.tar.gz", host_target_triple()),
             binary_name: name.to_string(),
             sha256: "0".repeat(64),
+            url: None,
+            size: None,
             published: false,
-            contracts: Vec::new(),
-            config_schema: None,
             path_override: None,
-            channel: crate::catalog::Channel::Stable,
+            channel: crate::catalog::SelectionChannel::Stable,
             target: host_target_triple(),
         }
     }

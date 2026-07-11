@@ -11,14 +11,14 @@ pub mod cache;
 pub mod check;
 pub mod deploy;
 pub mod doctor;
+pub mod init;
 pub mod logs;
-pub mod outdated;
-pub mod pull;
 pub mod run;
 pub mod self_cmd;
 pub mod service;
 pub mod simulate;
 pub mod status;
+pub mod update;
 pub mod validate;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -49,16 +49,23 @@ pub fn print_message<T: Serialize>(
 pub(crate) fn load_catalog_for_robot(
     app: &AppContext,
     project_root: &std::path::Path,
+    channel: phoxal::model::robot::v0::Channel,
     manifest_extras: &RobotManifestExtras,
-) -> Result<Option<crate::catalog::CatalogRevision>> {
-    load_catalog_for_robot_from_source(app.catalog_source.clone(), project_root, manifest_extras)
+) -> Result<Option<crate::catalog::Catalog>> {
+    load_catalog_for_robot_from_source(
+        app.catalog_source.clone(),
+        project_root,
+        channel,
+        manifest_extras,
+    )
 }
 
 pub(crate) fn load_catalog_for_robot_from_source(
     catalog_source: Option<String>,
     project_root: &std::path::Path,
+    channel: phoxal::model::robot::v0::Channel,
     manifest_extras: &RobotManifestExtras,
-) -> Result<Option<crate::catalog::CatalogRevision>> {
+) -> Result<Option<crate::catalog::Catalog>> {
     let robot_source = manifest_extras.catalog_source.as_ref().map(|source| {
         if source.is_absolute() {
             source.clone()
@@ -66,10 +73,31 @@ pub(crate) fn load_catalog_for_robot_from_source(
             project_root.join(source)
         }
     });
-    crate::catalog::load_catalog(crate::catalog::CatalogLoadOptions {
-        cli_source: catalog_source,
-        robot_source,
-    })
+    catalog_or_vendored(crate::catalog::load_pinned_catalog(
+        crate::catalog::CatalogLoadOptions {
+            cli_source: catalog_source,
+            robot_source,
+            offline: false,
+        },
+        crate::catalog::selection_channel(channel),
+    ))
+}
+
+pub(crate) fn catalog_or_vendored(
+    loaded: Result<Option<crate::catalog::Catalog>>,
+) -> Result<Option<crate::catalog::Catalog>> {
+    match loaded {
+        Ok(catalog) => Ok(catalog),
+        Err(error) if crate::host_paths::binaries_dir().is_ok_and(|path| path.is_dir()) => {
+            if std::env::var_os("PHOXAL_QUIET").is_none() {
+                eprintln!(
+                    "warning: catalog unreachable, continuing with project-vendored files: {error:#}"
+                );
+            }
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Version string shared by the `--version` flag and the `version` subcommand,
@@ -167,6 +195,15 @@ pub struct Cli {
         help = "Artifact catalog override. Local paths are read directly; HTTPS sources (including the default) are always fetched fresh - there is no on-disk cache of this fetch."
     )]
     pub catalog_source: Option<String>,
+    #[arg(
+        long,
+        env = crate::catalog::OFFLINE_ENV,
+        global = true,
+        help = "Use only project-vendored artifacts and skip catalog probes."
+    )]
+    pub offline: bool,
+    #[arg(long, global = true, help = "Suppress update notices.")]
+    pub quiet: bool,
 
     #[command(subcommand)]
     pub command: RootCommand,
@@ -174,6 +211,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum RootCommand {
+    #[command(about = "Initialize a robot project and ignore project-local Phoxal state.")]
+    Init(init::Init),
     #[command(
         about = "Check the robot graph's participants and config against phoxal::check.",
         long_about = "Check the robot graph's participants and config against phoxal::check.\n\n\
@@ -192,14 +231,10 @@ pub enum RootCommand {
     Status(status::Status),
     #[command(about = "Deploy the checked graph as a native systemd payload.")]
     Deploy(deploy::Deploy),
-    #[command(about = "Refresh the catalog and native artifact cache.")]
-    Pull(pull::Pull),
-    #[command(
-        about = "Manage the ~/.phoxal cache (native artifacts, git checkouts, deploy toolchain)."
-    )]
+    #[command(about = "Resolve channel heads and atomically update project-vendored artifacts.")]
+    Update(update::Update),
+    #[command(about = "Clean selected project-local .phoxal state.")]
     Cache(cache::CacheCmd),
-    #[command(about = "Report native artifact drift.")]
-    Outdated(outdated::Outdated),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
     #[command(about = "Inspect the user-service catalog.")]
@@ -213,6 +248,7 @@ pub enum RootCommand {
 impl RootCommand {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match self {
+            Self::Init(command) => command.run(app).await,
             Self::Check(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
             Self::Simulate(command) => command.run(app).await,
@@ -220,9 +256,8 @@ impl RootCommand {
             Self::Logs(command) => command.run(app).await,
             Self::Status(command) => command.run(app).await,
             Self::Deploy(command) => command.run(app).await,
-            Self::Pull(command) => command.run(app).await,
+            Self::Update(command) => command.run(app).await,
             Self::Cache(command) => command.run(app).await,
-            Self::Outdated(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
             Self::Service(command) => command.run(app).await,
             Self::Version(command) => command.run(),

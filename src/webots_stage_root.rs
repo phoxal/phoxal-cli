@@ -1,26 +1,19 @@
-//! The Webots simulation staging root (Part 4/5 follow-up): a single,
-//! home-based, per-play scratch area under `~/.phoxal/run/simulation/webots`
-//! (relocatable via `PHOXAL_HOME`, see [`crate::host_paths`]).
+//! The Webots simulation staging root: a per-play project-local scratch area
+//! under `.phoxal/webots` (see [`crate::host_paths`]).
 //!
 //! This used to be `<robot-project-root>/dist/simulator/webots`
 //! (`project::Project::staged_webots_root` up to the previous design), but a
-//! project-scoped staging tree fought the fact that Webots runs exactly one
-//! world per `simulate` invocation and the staged content (a synthesized
-//! world + generated PROTOs + the resolved robot's controller/mesh assets) is
-//! never meant to be a durable part of the project checkout. Moving it under
-//! `~/.phoxal/run/` keeps it out of the project tree entirely (nothing to
-//! `.gitignore`, nothing to accidentally commit) while staying discoverable
-//! and host-local like the rest of `run_dir()`'s contents (the supervisor
-//! lock/state/action files are siblings, not children, of `simulation/`).
+//! staged content is generated and must not be committed; `phoxal init`
+//! therefore ignores the entire project-local `.phoxal/` tree.
 //!
 //! Every play wipes and recreates this root (see [`wipe_and_recreate`])
 //! since a previous play's stale worlds/protos/meshes/controllers must never
 //! linger, given there is exactly one Webots world per run, so a clean slate
 //! is both correct and cheap. Within the root, `worlds/` and `protos/` still
 //! hold real generated files (they are synthesized fresh every play, so
-//! there is nothing in the cache to link to), while `controllers/<name>/<name>`
-//! and `meshes/<component>` are symlinks into the cache/path-pinned source so
-//! the cache stays the single source of truth (see `commands::simulate`).
+//! there is nothing to link to), while `controllers/<name>/<name>` and
+//! `meshes/<component>` are symlinks into the vendored/path-pinned source so
+//! that source stays authoritative (see `commands::simulate`).
 
 use std::path::PathBuf;
 
@@ -28,9 +21,9 @@ use anyhow::{Context, Result};
 
 use crate::host_paths;
 
-/// The staged Webots root itself: `~/.phoxal/run/simulation/webots`.
+/// The staged Webots root itself: `<project>/.phoxal/webots`.
 pub fn root() -> Result<PathBuf> {
-    Ok(host_paths::run_dir()?.join("simulation").join("webots"))
+    host_paths::webots_dir()
 }
 
 /// Where generated robot/component PROTOs are written for this play.

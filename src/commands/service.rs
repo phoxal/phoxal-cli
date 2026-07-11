@@ -90,16 +90,21 @@ pub fn service_catalog_summary(
     let catalog = crate::commands::load_catalog_for_robot_from_source(
         catalog_source,
         project_root,
+        loaded.robot.artifacts.channel,
         &loaded.extras,
     )?
-    .ok_or_else(crate::catalog::unavailable_catalog_error)?;
+    .ok_or_else(|| anyhow::anyhow!("artifact catalog unavailable"))?;
     Ok(ServiceCatalogSummary {
-        entries: catalog
-            .services
+        entries: crate::catalog::OFFICIAL_SERVICES
             .iter()
-            .map(|entry| ServiceCatalogEntry {
-                id: entry.package.clone(),
-                versions: vec![entry.version.clone()],
+            .map(|(_, package)| ServiceCatalogEntry {
+                id: (*package).to_string(),
+                versions: catalog
+                    .artifacts
+                    .iter()
+                    .filter(|entry| entry.package == *package)
+                    .map(|entry| entry.version.clone())
+                    .collect(),
                 participant_kind: "service",
             })
             .collect(),
@@ -113,7 +118,7 @@ mod tests {
 
     use super::*;
     use crate::catalog::{
-        Channel as CatalogChannel, fixture_catalog_for_tests, fixture_contract_for_tests,
+        SelectionChannel as CatalogChannel, fixture_catalog_for_tests, fixture_contract_for_tests,
         fixture_service_entry_for_tests,
     };
 
@@ -125,8 +130,15 @@ mod tests {
 
         let summary = service_catalog_summary(temp.path(), Some(catalog))?;
 
-        assert_eq!(summary.entries.len(), 1);
-        let entry = &summary.entries[0];
+        assert_eq!(
+            summary.entries.len(),
+            crate::catalog::OFFICIAL_SERVICES.len()
+        );
+        let entry = summary
+            .entries
+            .iter()
+            .find(|entry| entry.id == "phoxal/service-drive")
+            .expect("drive is part of the platform model");
         assert_eq!(entry.id, "phoxal/service-drive");
         assert_eq!(entry.versions, vec!["0.1.0".to_string()]);
         assert_eq!(entry.participant_kind, "service");
