@@ -434,7 +434,24 @@ fn participant_launch(
         },
         clock: match mode {
             LaunchMode::Run | LaunchMode::Deploy => ClockMode::Real,
-            LaunchMode::Webots { .. } => ClockMode::Simulation,
+            // In a Webots simulation the supervisor and per-robot controllers
+            // ARE the clock authority: they are Webots controllers that
+            // self-drive via `wb_robot_step` (both spawn `synchronization TRUE`,
+            // so Webots will not advance until each has stepped) and the
+            // supervisor publishes `simulation/clock` from that advance. They
+            // must therefore run on the REAL scheduler. Only pure-bus
+            // participants (services, component drivers) follow the published
+            // clock in Simulation mode. Giving a simulator ClockMode::Simulation
+            // deadlocks it: its `#[step]` would block waiting for the very
+            // `simulation/clock` feed it is supposed to produce, so the whole
+            // simulation freezes with no clock ever ticking.
+            LaunchMode::Webots { .. } => {
+                if checked.participant_kind == graph_check::ParticipantKind::Simulator {
+                    ClockMode::Real
+                } else {
+                    ClockMode::Simulation
+                }
+            }
         },
         config: input
             .manifest_extras
