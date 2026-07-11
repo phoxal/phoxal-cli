@@ -76,13 +76,13 @@ pub struct Deploy {
     pub host: Option<String>,
     #[arg(
         long,
-        help = "Render, validate, and cross-build without contacting a host."
+        help = "Render, validate, and cross-build without mutating the host (a host, if given, is probed read-only)."
     )]
     pub dry_run: bool,
     #[arg(
         long,
         value_name = "ARCH",
-        help = "Dry-run target arch: aarch64 or x86_64. mender/rauc are reserved; compose/balena are unsupported."
+        help = "Override the dry-run target arch (aarch64 or x86_64); by default a dry-run probes the host's arch. Required for a hostless dry-run. mender/rauc reserved; compose/balena unsupported."
     )]
     pub target: Option<String>,
     #[arg(
@@ -418,20 +418,31 @@ pub(crate) fn run(
 ) -> Result<DeployReport> {
     validate_deploy_options(&options)?;
     if options.dry_run {
-        let target = target_from_selector(
-            options
-                .target
-                .as_deref()
-                .context("--dry-run requires --target <arch>")?,
-        )?;
-        let payload = prepare_deploy(
-            project_start,
-            &options,
-            target,
-            false,
-            DRY_RUN_REMOTE_USER,
-            ui,
-        )?;
+        // A dry-run against a host probes that host's arch (and reachability,
+        // remote user) read-only - no mutation - so it validates against the
+        // real machine instead of a hand-specified triple. `--target` overrides
+        // the probe, and is required only for a hostless render (CI / offline).
+        let (target, remote_user) = match options.host.as_deref() {
+            Some(host) => {
+                let mut transport = SshTransport::new(host.to_string(), *ui);
+                let probe = transport.probe().context("failed to probe deploy host")?;
+                let target = match options.target.as_deref() {
+                    Some(selector) => target_from_selector(selector)?,
+                    None => target_from_uname_arch(&probe.arch)?,
+                };
+                (target, probe.remote_user)
+            }
+            None => {
+                let target = target_from_selector(
+                    options
+                        .target
+                        .as_deref()
+                        .context("--dry-run without a host requires --target <arch>")?,
+                )?;
+                (target, DRY_RUN_REMOTE_USER.to_string())
+            }
+        };
+        let payload = prepare_deploy(project_start, &options, target, false, &remote_user, ui)?;
         return Ok(report_from_payload("dry-run", payload, None));
     }
 
@@ -781,11 +792,15 @@ fn sudo_bootstrap_args(remote_path: &str) -> Vec<&str> {
 
 fn validate_deploy_options(options: &DeployOptions) -> Result<()> {
     if options.dry_run {
-        if options.host.is_some() {
-            bail!("--dry-run is hostless; omit <user@host>");
+        if options.host.is_none() && options.target.is_none() {
+            bail!(
+                "--dry-run needs either <user@host> (its arch is probed read-only) or --target <arch> for a hostless render"
+            );
         }
-        if options.target.is_none() {
-            bail!("--dry-run requires --target <arch>");
+        if let Some(host) = options.host.as_deref() {
+            if host.trim().is_empty() || host.chars().any(char::is_whitespace) {
+                bail!("deploy host must be a non-empty SSH destination without whitespace");
+            }
         }
     } else {
         let host = options
