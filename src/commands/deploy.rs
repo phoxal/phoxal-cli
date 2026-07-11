@@ -789,6 +789,23 @@ fn deploy_command(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
+/// Each remote command must create a fresh SSH login session. In particular,
+/// the first helper call after bootstrap must not reuse a ControlMaster whose
+/// server-side process still has the supplementary groups from before
+/// `usermod -aG phoxal-deploy` ran.
+fn deploy_ssh_command() -> Command {
+    let mut command = deploy_command("ssh");
+    command.args([
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
+        "-o",
+        "ControlPersist=no",
+    ]);
+    command
+}
+
 // The prompt must be a single non-empty token: these argv vectors travel over
 // `ssh <host> <args...>`, which flattens them into one shell line - an empty
 // `-p ""` argument vanishes and `-p` then swallows the next token as the
@@ -892,9 +909,10 @@ fn target_for_arch(arch: &str) -> TargetTriples {
     }
 }
 
-/// Placeholder sudoers grantee for `--dry-run`, which renders no host and so
-/// never probes a real remote user. The rendered fragment is inspectable but
-/// is never installed anywhere, since dry-run never contacts a host.
+/// Placeholder deploy-group enrollee for `--dry-run`, which renders no host
+/// and so never probes a real remote user. The rendered fragment is
+/// inspectable but is never installed anywhere, since dry-run never contacts
+/// a host.
 const DRY_RUN_REMOTE_USER: &str = "<deploy-user>";
 
 fn prepare_deploy(
@@ -3433,7 +3451,7 @@ fi
 if ! getent group phoxal-deploy >/dev/null; then
   groupadd --system phoxal-deploy
 fi
-usermod -aG phoxal-deploy {remote_user}
+usermod -aG phoxal-deploy -- {remote_user}
 install -d -o phoxal -g phoxal -m 0755 {OPT_ROOT} {RELEASES_ROOT}
 install -d -o phoxal -g phoxal -m 0700 {IDENTITY_DIR}
 install -d -o phoxal -g phoxal -m 0755 /var/lib/phoxal
@@ -3581,7 +3599,7 @@ impl SshTransport {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut command = deploy_command("ssh");
+        let mut command = deploy_ssh_command();
         command.arg(&self.host).args(args);
         command
             .output()
@@ -3597,7 +3615,7 @@ impl SshTransport {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut command = deploy_command("ssh");
+        let mut command = deploy_ssh_command();
         command
             .arg(&self.host)
             .args(args)
@@ -3677,7 +3695,7 @@ impl SshTransport {
     }
 
     fn github_release_reachable_from_robot(&self, url: &str) -> Result<bool> {
-        let mut command = deploy_command("ssh");
+        let mut command = deploy_ssh_command();
         command
             .arg(&self.host)
             .arg("url=$(cat); curl --head --fail --location --silent --show-error --connect-timeout 5 --max-time 15 \"$url\" >/dev/null")
@@ -3695,7 +3713,7 @@ impl SshTransport {
 
     fn download_artifact(&self, generation: &str, artifact: &DownloadArtifact) -> Result<()> {
         let size = artifact.size.to_string();
-        let mut command = deploy_command("ssh");
+        let mut command = deploy_ssh_command();
         command
             .arg(&self.host)
             .args([
@@ -3914,7 +3932,7 @@ impl DeployTransport for SshTransport {
 
         // Transfer the script over a plain (non-sudo) ssh first. The sudo
         // password, when needed, is reserved for the script execution stdin.
-        let mut upload_command = deploy_command("ssh");
+        let mut upload_command = deploy_ssh_command();
         upload_command
             .arg(&self.host)
             .arg(format!("cat > {remote_path}"))
@@ -3940,7 +3958,7 @@ impl DeployTransport for SshTransport {
             );
         }
 
-        let mut run = deploy_command("ssh");
+        let mut run = deploy_ssh_command();
         run.arg(&self.host).args(sudo_bootstrap_args(&remote_path));
         if sudo_password.is_some() {
             run.stdin(Stdio::piped());
@@ -5168,6 +5186,14 @@ capabilities:
         Ok(())
     }
 
+    #[test]
+    fn helper_script_hash_is_stable() {
+        assert_eq!(
+            helper_script_sha256(),
+            "25bcda1025ee69432973de5310a61569312aeaa89e29e8e1e0f882185502530f"
+        );
+    }
+
     fn test_bootstrap_scripts(remote_user: &str) -> BootstrapScripts {
         BootstrapScripts {
             helper_script: helper_script(),
@@ -5188,8 +5214,36 @@ capabilities:
             "{script}"
         );
         assert!(
-            script.contains("usermod -aG phoxal-deploy jetson-op"),
+            script.contains("usermod -aG phoxal-deploy -- jetson-op"),
             "{script}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_script_terminates_usermod_options_before_remote_user() {
+        let script = bootstrap_script(&test_bootstrap_scripts("-operator"));
+        assert!(
+            script.contains("usermod -aG phoxal-deploy -- -operator"),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn deploy_ssh_commands_disable_connection_multiplexing() {
+        let command = deploy_ssh_command();
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            [
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
+                "-o",
+                "ControlPersist=no",
+            ]
         );
     }
 
