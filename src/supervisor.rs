@@ -2244,6 +2244,24 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn closed_action_receiver_is_consumed_once_then_stays_pending() {
+        let (action_tx, action_rx) = mpsc::channel(1);
+        drop(action_tx);
+        let mut action_rx = Some(action_rx);
+
+        assert!(recv_action(&mut action_rx).await.is_none());
+        assert!(action_rx.is_none());
+
+        // A closed receiver is terminal, not a stream of immediate `None`s;
+        // otherwise it would win every supervisor `select!` pass and spin.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), recv_action(&mut action_rx))
+                .await
+                .is_err()
+        );
+    }
+
     #[test]
     fn router_ownership_distinguishes_external_from_managed() {
         assert_eq!(router_ownership(true), RouterOwnership::External);

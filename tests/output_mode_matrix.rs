@@ -85,6 +85,23 @@ fn json_mode_keeps_stderr_empty_on_a_top_level_failure() {
 }
 
 #[test]
+fn human_mode_still_reports_a_top_level_failure() {
+    let missing = tempfile::tempdir().expect("tempdir").path().join("missing");
+    let output = bin()
+        .args(["--project-path", missing.to_str().unwrap(), "version"])
+        .output()
+        .expect("failing human invocation should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("error"), "expected human error: {stderr:?}");
+    assert!(
+        stderr.contains("failed to resolve project path"),
+        "expected the top-level context: {stderr:?}"
+    );
+}
+
+#[test]
 fn welcome_flag_does_not_defeat_the_machine_verb_suppression() {
     // `version` is a machine verb: identity/welcome stay suppressed even
     // under `--welcome` and even in human mode.

@@ -359,12 +359,13 @@ impl CheckCmd {
             .await
             .context("check worker failed")??;
 
-        // Emit the v0 pre-stable warning to stderr BEFORE the hard outcome check
-        // so a failing `phoxal check` still surfaces it. This goes to stderr
-        // only; JSON stdout (below) stays clean.
-        eprintln!(
-            "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
-        );
+        // Keep the human warning before the hard outcome check, but JSON's
+        // output contract reserves stderr for no bytes at all.
+        if self.message_format == MessageFormat::Human {
+            eprintln!(
+                "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
+            );
+        }
 
         ensure_check_outcome_ok(&result.channel, &result.outcome)?;
         match coherence_disposition(CoherenceVerb::Check, result.strict, &result.coherence) {

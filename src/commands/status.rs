@@ -68,7 +68,10 @@ impl Status {
                         self.message_format,
                     )?;
                 }
-                Err(error) => eprintln!("{error:#}"),
+                Err(error) if self.message_format == MessageFormat::Human => {
+                    eprintln!("{error:#}");
+                }
+                Err(_) => {}
             }
         }
     }
