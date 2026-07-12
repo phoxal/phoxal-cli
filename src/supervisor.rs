@@ -11,6 +11,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use phoxal::bus::{Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::y2026_1 as api;
+// The simulation clock is re-minted in `y2026_9` (adds the authoritative
+// `step`/`running` fields the TUI top bar reads directly - see
+// `ClockSample`/`start_clock_barrier_feed`); every other `y2026_1` contract
+// this module subscribes to (`presence::Heartbeat`, `logs::Event`) is
+// unaffected and stays on its original generation.
+use phoxal_api::y2026_9 as api9;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -601,6 +607,17 @@ pub struct SupervisorOptions {
     /// followed by orderly `request_participant_stop` + `shutdown_all`, then a
     /// normal `SupervisorOutcome` reflecting the board's failed participants.
     pub cancel_rx: Option<oneshot::Receiver<String>>,
+    /// The live-telemetry handle for this session's display (CLI-UX Phase
+    /// 3/4): read every redraw (`display.redraw`) for the TUI's sim-clock top
+    /// bar, host/process resource meters, router Traffic table, and joypad
+    /// Devices panel, and written into by `handle_input`'s
+    /// `DisplayAction::JoypadConnect`/`JoypadRescan`. Defaults to an empty,
+    /// disconnected [`crate::telemetry::TelemetryBackend`] (every test in
+    /// this module, and `Display::None`/`Display::Logger` sessions, which
+    /// never read it) - a caller that wants live telemetry constructs one
+    /// with `crate::telemetry::start_host_feed` etc. and passes the SAME
+    /// handle here.
+    pub telemetry: crate::telemetry::TelemetryBackend,
 }
 
 impl Default for SupervisorOptions {
@@ -614,6 +631,7 @@ impl Default for SupervisorOptions {
             display: crate::display::Display::None,
             display_activate_rx: None,
             cancel_rx: None,
+            telemetry: crate::telemetry::TelemetryBackend::default(),
         }
     }
 }
@@ -1245,7 +1263,7 @@ pub async fn supervise_until_shutdown(
             }
             event = display.next_input(), if display_active => {
                 if let Some(event) = event {
-                    match display.handle_input(event, &board.snapshot()) {
+                    match display.handle_input(event, &board.snapshot(), &options.telemetry) {
                         crate::display::DisplayAction::None => {}
                         crate::display::DisplayAction::Quit => {
                             clean_shutdown = true;
@@ -1253,6 +1271,12 @@ pub async fn supervise_until_shutdown(
                         }
                         crate::display::DisplayAction::Restart(id) => {
                             handle_action(&mut running, &board, SupervisorAction::Restart { id }).await?;
+                        }
+                        crate::display::DisplayAction::JoypadConnect(id) => {
+                            options.telemetry.send_joypad_command(crate::telemetry::JoypadCommand::Connect(id));
+                        }
+                        crate::display::DisplayAction::JoypadRescan => {
+                            options.telemetry.send_joypad_command(crate::telemetry::JoypadCommand::Rescan);
                         }
                     }
                 }
@@ -1303,7 +1327,7 @@ pub async fn supervise_until_shutdown(
                 }
                 board.fail_stale_heartbeats(HEARTBEAT_STALE_TIMEOUT);
                 if display_active {
-                    display.redraw(&board.snapshot());
+                    display.redraw(&board.snapshot(), &options.telemetry);
                 }
                 if let Some(state_file) = &options.state_file {
                     board.write_snapshot(state_file)?;
@@ -1906,22 +1930,41 @@ async fn presence_heartbeat_subscriber_loop(
     }
 }
 
-/// Observed state of the simulation clock feed for the readiness barrier
-/// (`await_readiness_barrier`): whether any sample has been seen at all, and
-/// whether `now_ns` has advanced past the very first observed sample. A
+/// One `y2026_9::simulation::Clock` sample, as surfaced to the TUI top bar
+/// (`tui::render::simulation_clock_slot`) - `step`/`running` are read
+/// DIRECTLY from here, not inferred from `now_ns` silence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClockSample {
+    pub now_ns: u64,
+    pub step: u64,
+    pub running: bool,
+}
+
+/// Observed state of the simulation clock feed. Serves two consumers off the
+/// SAME subscription: the readiness barrier (`await_readiness_barrier`) reads
+/// `first_sample_ns`/`advanced` - whether any sample has been seen at all,
+/// and whether `now_ns` has advanced past the very first observed sample (a
 /// sample alone is not enough - Webots opens a world PAUSED, so
 /// `simulation/clock` can be present-but-frozen; only a strictly increasing
-/// `now_ns` proves the simulation is actually running.
+/// `now_ns` proves the simulation is actually running) - while the TUI's
+/// display layer (`crate::telemetry::TelemetryBackend`) reads `latest` every
+/// redraw, updated unconditionally on every sample regardless of the
+/// barrier's own advance-detection state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClockObservation {
     pub first_sample_ns: Option<u64>,
     pub advanced: bool,
+    pub latest: Option<ClockSample>,
 }
 
-/// Start a background feed of `simulation/clock` samples for the readiness
-/// barrier. Returns a `watch::Receiver` the barrier polls cheaply (no async
-/// subscription plumbing in the barrier's own loop) plus the feed task's
-/// handle so the caller can abort it once the barrier is done with it.
+/// Start a background feed of `y2026_9::simulation::Clock` samples. Returns a
+/// `watch::Receiver` both the readiness barrier and the TUI's telemetry layer
+/// poll cheaply (no async subscription plumbing in either caller's own loop)
+/// plus the feed task's handle. The barrier only needs the feed for its own
+/// startup window; a caller that also wants the TUI top bar's live
+/// step/running readout (`commands::simulate`) keeps the task running for the
+/// rest of the session instead of aborting it once the barrier completes -
+/// see `TelemetryBackend::set_clock_feed`.
 pub fn start_clock_barrier_feed(
     namespace: String,
     robot_id: String,
@@ -1959,16 +2002,23 @@ async fn clock_barrier_feed_loop(
     })
     .await
     .map_err(|error| anyhow!("failed to open bus clock subscription: {error}"))?;
-    let topic = Topic::<Subscribe<api::simulation::Clock>>::new_static(
-        <api::simulation::Clock as phoxal::bus::ContractBody>::TOPIC,
+    let topic = Topic::<Subscribe<api9::simulation::Clock>>::new_static(
+        <api9::simulation::Clock as phoxal::bus::ContractBody>::TOPIC,
     );
-    let subscriber = Subscriber::<api::simulation::Clock>::new(&bus, &topic, 32).await?;
+    let subscriber = Subscriber::<api9::simulation::Clock>::new(&bus, &topic, 32).await?;
     loop {
         let received = subscriber.recv().await?;
-        tx.send_modify(|observation| match observation.first_sample_ns {
-            None => observation.first_sample_ns = Some(received.body.now_ns),
-            Some(first) if received.body.now_ns > first => observation.advanced = true,
-            _ => {}
+        tx.send_modify(|observation| {
+            match observation.first_sample_ns {
+                None => observation.first_sample_ns = Some(received.body.now_ns),
+                Some(first) if received.body.now_ns > first => observation.advanced = true,
+                _ => {}
+            }
+            observation.latest = Some(ClockSample {
+                now_ns: received.body.now_ns,
+                step: received.body.step,
+                running: received.body.running,
+            });
         });
     }
 }
@@ -2520,6 +2570,7 @@ mod tests {
                 display: crate::display::Display::None,
                 display_activate_rx: None,
                 cancel_rx: None,
+                telemetry: crate::telemetry::TelemetryBackend::default(),
             },
         )
         .await?;
@@ -2675,6 +2726,7 @@ mod tests {
                 display: crate::display::Display::None,
                 display_activate_rx: None,
                 cancel_rx: None,
+                telemetry: crate::telemetry::TelemetryBackend::default(),
             },
         )
         .await?;
@@ -2891,6 +2943,7 @@ mod tests {
         let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation {
             first_sample_ns: Some(0),
             advanced: true,
+            ..ClockObservation::default()
         });
 
         let expected = vec![
@@ -2990,6 +3043,7 @@ mod tests {
         let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation {
             first_sample_ns: Some(0),
             advanced: false,
+            ..ClockObservation::default()
         });
 
         let expected = vec!["simulator-webots-supervisor".to_string()];
@@ -3028,6 +3082,7 @@ mod tests {
         let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation {
             first_sample_ns: Some(0),
             advanced: true,
+            ..ClockObservation::default()
         });
 
         let expected = vec!["simulator-webots-supervisor".to_string()];

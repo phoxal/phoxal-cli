@@ -268,6 +268,20 @@ impl Run {
             .collect::<Vec<_>>();
         let identity = crate::identity::IdentitySummary::discover(&prepared.ctx.project_root);
         let display = crate::display::Display::for_mode("run", identity);
+        // Live telemetry (CLI-UX Phase 3): only worth subscribing when a real
+        // TUI is up to read it - `--message-format json`/non-interactive
+        // sessions never touch `telemetry`, so skip the extra bus
+        // connections entirely rather than feed a display that can't render
+        // them. `run` has no simulation clock (`telemetry::TelemetryBackend`
+        // is never given one here - see `commands::simulate` for the
+        // sim-clock feed), so the TUI's clock slot stays empty in this mode
+        // by design (`tui::render::simulation_clock_slot`).
+        let telemetry = crate::telemetry::TelemetryBackend::new();
+        let _telemetry_tasks = if matches!(display, crate::display::Display::Tui(_)) {
+            start_telemetry_feeds(&prepared.robot_log_targets, &telemetry)
+        } else {
+            Vec::new()
+        };
         let (display_activate_tx, display_activate_rx) = tokio::sync::oneshot::channel();
         let stepper_handle = spawn_run_stepper(
             stepper,
@@ -285,6 +299,7 @@ impl Run {
                 action_rx,
                 display,
                 display_activate_rx: Some(display_activate_rx),
+                telemetry,
                 ..SupervisorOptions::default()
             },
         )
@@ -309,8 +324,8 @@ impl Run {
 }
 
 /// Partition an already-built `run` spec list into the staged startup order
-/// (Part 2): router < other tools (`tool-joypad`; `tool-telemetry` once
-/// published) < drivers < services. Each stage's members all spawn together,
+/// (Part 2): router < other tools (`tool-joypad`, `tool-telemetry`) < drivers
+/// < services. Each stage's members all spawn together,
 /// then the whole stage must be OBSERVED ready (transport probe for the
 /// router - see its `bus_participant: false` - heartbeat for everything
 /// else) before the next stage spawns; see `supervisor::SupervisionStage`
@@ -336,6 +351,52 @@ fn stages_for_run(specs: Vec<ParticipantSpec>) -> Vec<SupervisionStage> {
         SupervisionStage::new("starting tools", tools, RUN_STAGE_READY_TIMEOUT),
         SupervisionStage::new("starting drivers", drivers, RUN_STAGE_READY_TIMEOUT),
         SupervisionStage::new("starting services", services, RUN_STAGE_READY_TIMEOUT),
+    ]
+}
+
+/// Start the host/process/router-metrics/joypad-devices telemetry feeds
+/// (CLI-UX Phase 3/4) against the first robot's bus namespace - the site
+/// tools they subscribe to (`tool-telemetry`, `tool-router`, `tool-joypad`)
+/// are session-scoped, not per-robot, exactly like `prepare_site_tools`'s own
+/// namespace/robot_id choice. Harmless to call even when one or more of
+/// those tools never resolved (`launch_plan::build_site_launches`'s graceful
+/// telemetry-absence path, or `--drivers off`-style opt-outs): a subscriber
+/// for a topic nobody publishes to simply never receives a sample, which is
+/// exactly the graceful-absence rendering the TUI already handles (`cpu
+/// n/a`). Shared by both `run` and `commands::simulate` (`simulate` wires in
+/// the sim-clock feed separately - see `TelemetryBackend::set_clock_feed`).
+pub(crate) fn start_telemetry_feeds(
+    robot_log_targets: &[(String, String)],
+    telemetry: &crate::telemetry::TelemetryBackend,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let Some((namespace, robot_id)) = robot_log_targets.first() else {
+        return Vec::new();
+    };
+    vec![
+        crate::telemetry::start_host_feed(
+            namespace.clone(),
+            robot_id.clone(),
+            default_connect_endpoint(),
+            telemetry.clone(),
+        ),
+        crate::telemetry::start_process_feed(
+            namespace.clone(),
+            robot_id.clone(),
+            default_connect_endpoint(),
+            telemetry.clone(),
+        ),
+        crate::telemetry::start_router_metrics_feed(
+            namespace.clone(),
+            robot_id.clone(),
+            default_connect_endpoint(),
+            telemetry.clone(),
+        ),
+        crate::telemetry::start_joypad_devices_feed(
+            namespace.clone(),
+            robot_id.clone(),
+            default_connect_endpoint(),
+            telemetry.clone(),
+        ),
     ]
 }
 
@@ -701,10 +762,12 @@ pub(crate) fn prepare_site_tools(
                 // the old spawn-is-ready behavior, gated in the staged
                 // startup by the transport probe (`router_ownership`/
                 // `local_router_reachable`) instead of a heartbeat. Every
-                // OTHER site tool (`tool-joypad` today; `tool-telemetry` once
-                // published - see the `// TODO(cli-ux telemetry slice)` in
-                // `launch_plan::build_site_launches`) is a real bus
-                // participant and can be gated like any other stage member.
+                // OTHER site tool (`tool-joypad`, `tool-telemetry`) is a real
+                // bus participant and can be gated like any other stage
+                // member. `tool-telemetry` simply never appears in
+                // `plan.site` at all when the catalog snapshot in use
+                // predates it (`launch_plan::build_site_launches`), so this
+                // loop never has to special-case its absence.
                 bus_participant: site.id != SITE_TOOL_ROUTER,
             }),
             None => board.set_state(

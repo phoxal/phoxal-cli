@@ -32,8 +32,9 @@ use crate::commands::check::{
 use crate::component_driver::component_driver_crate_dir;
 use crate::launch_env::{EncodedParticipantEnv, encode_participant_env};
 use crate::launch_plan::{
-    CheckedRobotLaunchInput, LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
-    PlanContext, SITE_TOOL_ROUTER, SiteLaunch, build_launch_plan,
+    CheckedRobotLaunchInput, DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, ParticipantExecution,
+    ParticipantLaunchRecord, PlanContext, SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SiteLaunch,
+    build_launch_plan,
 };
 use crate::resolver::{
     ResolveOptions, ResolvedComponentSource, ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool,
@@ -2404,19 +2405,29 @@ fn stage_official_artifacts(
         }
         artifacts.insert(runtime.package.clone(), plan);
     }
-    let router = resolved
-        .tools
-        .iter()
-        .find(|tool| tool.name == SITE_TOOL_ROUTER)
-        .context("resolved deploy graph is missing tool-router")?;
-    if router.path_override.is_none() {
-        let plan = official_tool_plan(root, router)?;
+    // Every standard site tool (`tool-router`, and - CLI-UX Phase 4 -
+    // `tool-joypad`/`tool-telemetry`) stages the same way: locate its
+    // resolved tool entry and, unless it is a local path-pin override, plan
+    // its official binary. Generalized from a router-only block now that
+    // deploy ships every standard site tool, not just the router.
+    for site in &plan.site {
+        let tool = resolved
+            .tools
+            .iter()
+            .find(|tool| tool.name == site.id)
+            .with_context(|| format!("resolved deploy graph is missing site tool {}", site.id))?;
+        if tool.path_override.is_some() {
+            continue;
+        }
+        let plan = official_tool_plan(root, tool)?;
         if require_binaries && plan.source_path.is_none() {
+            let key = env_key(&tool.name);
             bail!(
-                "NativePending: official artifact tool-router is not vendored for deploy; run `phoxal update`, set PHOXAL_ARTIFACT_TOOL_ROUTER_PATH, set PHOXAL_ARTIFACT_DIR, set PHOXAL_TOOL_ROUTER_PATH, or set PHOXAL_TOOL_DIR"
+                "NativePending: official artifact {} is not vendored for deploy; run `phoxal update`, set PHOXAL_ARTIFACT_{key}_PATH, set PHOXAL_ARTIFACT_DIR, set PHOXAL_TOOL_{key}_PATH, or set PHOXAL_TOOL_DIR",
+                tool.name,
             );
         }
-        artifacts.insert(router.name.clone(), plan);
+        artifacts.insert(tool.name.clone(), plan);
     }
     Ok(artifacts)
 }
@@ -2563,13 +2574,19 @@ fn render_env_files(
         .robots
         .first()
         .context("deploy launch plan has no robot")?;
-    let router = plan
-        .site
-        .iter()
-        .find(|site| site.id == SITE_TOOL_ROUTER)
-        .context("deploy launch plan has no tool-router")?;
-    let router_env = router_env(router, &robot.namespace, &robot.id, identity_files)?;
-    write_env_file(root, "router.env", &router_env, env_files)?;
+    for site in &plan.site {
+        if site.id == SITE_TOOL_ROUTER {
+            let router_env = router_env(site, &robot.namespace, &robot.id, identity_files)?;
+            write_env_file(root, "router.env", &router_env, env_files)?;
+            continue;
+        }
+        // Every OTHER standard site tool (`tool-joypad`, `tool-telemetry`) -
+        // a real bus client, so unlike the router (transport-only, no
+        // `PHOXAL_CONNECT` of its own) it needs the same connect endpoint
+        // every regular participant gets from `launch_plan::participant_launch`.
+        let encoded = site_tool_env(site, &robot.namespace, &robot.id)?;
+        write_env_file(root, &format!("{}.env", site.id), &encoded, env_files)?;
+    }
 
     for participant in &robot.participants {
         let encoded = encode_participant_env(&participant.launch)?;
@@ -2603,6 +2620,32 @@ fn router_env(
         .with_context(|| format!("failed to encode PHOXAL_CONFIG for {}", site.id))?,
     );
     variables.insert(env::CLOCK.to_string(), "real".to_string());
+    Ok(EncodedParticipantEnv::from_variables(variables))
+}
+
+/// The env for every standard site tool OTHER than the router (`tool-joypad`,
+/// `tool-telemetry`) - a real bus client, unlike the router itself, so it
+/// needs `PHOXAL_CONNECT` set to the same `DEFAULT_ROUTER_CONNECT` every
+/// regular participant's `ParticipantLaunch.bus.connect_endpoints` carries
+/// (`launch_plan::participant_launch`); router transport being local/in-process
+/// is what makes `router_env` the one exception with no `CONNECT` variable.
+fn site_tool_env(
+    site: &SiteLaunch,
+    namespace: &str,
+    robot_id: &str,
+) -> Result<EncodedParticipantEnv> {
+    let mut variables = BTreeMap::new();
+    variables.insert(env::PARTICIPANT_ID.to_string(), site.id.clone());
+    variables.insert(env::NAMESPACE.to_string(), namespace.to_string());
+    variables.insert(env::ROBOT_ID.to_string(), robot_id.to_string());
+    variables.insert(env::ROBOT_ROOT.to_string(), ACTIVE_ROOT.to_string());
+    variables.insert(
+        env::CONFIG.to_string(),
+        serde_json::to_string(&site.phoxal_config)
+            .with_context(|| format!("failed to encode PHOXAL_CONFIG for {}", site.id))?,
+    );
+    variables.insert(env::CLOCK.to_string(), "real".to_string());
+    variables.insert(env::CONNECT.to_string(), DEFAULT_ROUTER_CONNECT.to_string());
     Ok(EncodedParticipantEnv::from_variables(variables))
 }
 
@@ -2674,6 +2717,37 @@ fn render_units(
     )?;
     unit_names.push("phoxal-router.service".to_string());
 
+    // Every OTHER standard site tool (`tool-joypad`, `tool-telemetry` -
+    // CLI-UX Phase 4) gets its own unit too, ordered AFTER the router
+    // (`site_tool_unit`'s `After=`/`Wants=`) and matching the staged
+    // readiness the CLI supervisor itself uses (router before the other
+    // tools - `commands::run::stages_for_run`). `plan.site` already omits
+    // `tool-telemetry` entirely when the catalog snapshot in use predates it
+    // (`launch_plan::build_site_launches`), so this loop never renders a unit
+    // for a tool that was never resolved.
+    for site in &plan.site {
+        if site.id == SITE_TOOL_ROUTER {
+            continue;
+        }
+        let unit_name = site_tool_unit_name(&site.id);
+        let binary = if source_builds.contains_key(&site.id) {
+            site.id.clone()
+        } else {
+            official_plans
+                .get(&site.id)
+                .map(|artifact| artifact.install_binary_name.clone())
+                .unwrap_or_else(|| site.id.clone())
+        };
+        let privileges = unit_privileges_for_tool(&site.id);
+        write_unit(
+            root,
+            &unit_name,
+            &site_tool_unit(&site.id, &binary, &privileges),
+            rendered_units,
+        )?;
+        unit_names.push(unit_name);
+    }
+
     let robot = plan
         .robots
         .first()
@@ -2713,6 +2787,76 @@ fn router_unit(binary: &str) -> String {
         "[Unit]\nDescription=Phoxal Zenoh router\nAfter=network-online.target\nWants=network-online.target\nPartOf=phoxal.target\nStartLimitIntervalSec={}\nStartLimitBurst={START_LIMIT_BURST}\n\n[Service]\nType=notify\nEnvironmentFile={OPT_ENV}/router.env\nExecStart={OPT_BIN}/{binary}\nRestart=on-failure\nRestartSec=2s\nWatchdogSec={WATCHDOG_SEC}s\nUser=phoxal\nGroup=phoxal\nNoNewPrivileges=true\n\n[Install]\nWantedBy=phoxal.target\n",
         START_LIMIT_INTERVAL.as_secs()
     )
+}
+
+/// The unit for a standard site tool OTHER than the router (`tool-joypad`,
+/// `tool-telemetry`) - shaped exactly like `participant_unit` (same
+/// `Type=notify` readiness contract, same restart/watchdog/hardening
+/// defaults: no `MemoryMax`/`CPUQuota` here either, consistent with every
+/// other unit this deploy renders) but ordered after the router by unit
+/// name rather than a `ParticipantLaunchRecord`, since a site tool has no
+/// graph-checked participant record of its own.
+///
+/// No-controller idle policy (design doc): a site tool with nothing to do
+/// yet (`tool-joypad` with no gamepad plugged in) is expected to start and
+/// idle cleanly rather than exit - the framework tool itself already stays
+/// up in that case (see `tool/joypad`'s own graceful-absence handling), so
+/// `Restart=on-failure` never actually flaps for it; this unit adds no
+/// additional restart-suppression logic because none is needed.
+fn site_tool_unit(id: &str, binary: &str, privileges: &UnitPrivileges) -> String {
+    let mut unit = format!(
+        "[Unit]\nDescription=Phoxal tool {id}\nAfter=network-online.target phoxal-router.service\nWants=network-online.target\nPartOf=phoxal.target\nStartLimitIntervalSec={}\nStartLimitBurst={START_LIMIT_BURST}\n\n[Service]\nType=notify\nEnvironmentFile={OPT_ENV}/{id}.env\nExecStart={OPT_BIN}/{binary}\n\nRestart=on-failure\nRestartSec=2s\nTimeoutStopSec=5s\nWatchdogSec={WATCHDOG_SEC}s\n\nUser=phoxal\nGroup=phoxal\nNoNewPrivileges=true\n",
+        START_LIMIT_INTERVAL.as_secs()
+    );
+    if !privileges.supplementary_groups.is_empty() {
+        unit.push_str("SupplementaryGroups=");
+        unit.push_str(&privileges.supplementary_groups.join(" "));
+        unit.push('\n');
+    }
+    if !privileges.device_allow.is_empty() {
+        unit.push_str("DevicePolicy=strict\n");
+        for device in &privileges.device_allow {
+            unit.push_str("DeviceAllow=");
+            unit.push_str(device);
+            unit.push_str(" rw\n");
+        }
+    }
+    if !privileges.capabilities.is_empty() {
+        let caps = privileges.capabilities.join(" ");
+        unit.push_str("AmbientCapabilities=");
+        unit.push_str(&caps);
+        unit.push('\n');
+        unit.push_str("CapabilityBoundingSet=");
+        unit.push_str(&caps);
+        unit.push('\n');
+    }
+    unit.push_str("\n[Install]\nWantedBy=phoxal.target\n");
+    unit
+}
+
+fn site_tool_unit_name(id: &str) -> String {
+    format!("phoxal-{id}.service")
+}
+
+/// The tool-privilege model (CLI-UX Phase 4): a second, hardcoded privilege
+/// path for a standard site tool, alongside `unit_privileges`'s
+/// component-driver-derived path for a robot participant. `tool-joypad`
+/// needs `/dev/input` access to read gamepad hardware - granted
+/// unconditionally (the `input` supplementary group plus
+/// `DeviceAllow=/dev/input/* rw`) for the current development-grade robots,
+/// with no manifest/config switch to gate it (design doc). Every other site
+/// tool (`tool-telemetry`; the router has its own always-privilege-free unit)
+/// needs no extra grant.
+fn unit_privileges_for_tool(tool_id: &str) -> UnitPrivileges {
+    if tool_id == SITE_TOOL_JOYPAD {
+        UnitPrivileges {
+            supplementary_groups: vec!["input".to_string()],
+            device_allow: vec!["/dev/input/*".to_string()],
+            capabilities: Vec::new(),
+        }
+    } else {
+        UnitPrivileges::default()
+    }
 }
 
 fn participant_unit(
@@ -5561,8 +5705,15 @@ robot:
         Ok(())
     }
 
+    /// CLI-UX Phase 4: deploy now ships EVERY standard site tool
+    /// (`tool-router`, `tool-joypad`, `tool-telemetry`), not just the
+    /// router - each gets its own unit ordered after the router, and
+    /// `tool-joypad` carries the `/dev/input` tool-privilege grant
+    /// (`unit_privileges_for_tool`). `write_basic_project`'s fixture catalog
+    /// auto-fills every `OFFICIAL_TOOLS`/`OFFICIAL_OPTIONAL_TOOLS` entry
+    /// (`catalog::fixture_catalog_for_tests`), so all three resolve here.
     #[test]
-    fn privileged_tool_graph_renders_router_only_not_joypad() -> Result<()> {
+    fn privileged_tool_graph_renders_router_joypad_and_telemetry_units() -> Result<()> {
         let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
@@ -5579,11 +5730,33 @@ robot:
                 .rendered_units
                 .contains_key("/etc/systemd/system/phoxal-router.service")
         );
+        let joypad_unit = payload
+            .rendered_units
+            .get("/etc/systemd/system/phoxal-tool-joypad.service")
+            .expect("tool-joypad unit must render");
+        assert!(joypad_unit.contains("After=network-online.target phoxal-router.service"));
+        assert!(joypad_unit.contains("SupplementaryGroups=input"));
+        assert!(joypad_unit.contains("DeviceAllow=/dev/input/* rw"));
+        let telemetry_unit = payload
+            .rendered_units
+            .get("/etc/systemd/system/phoxal-tool-telemetry.service")
+            .expect("tool-telemetry unit must render");
+        assert!(telemetry_unit.contains("After=network-online.target phoxal-router.service"));
+        assert!(!telemetry_unit.contains("SupplementaryGroups="));
+        assert!(!telemetry_unit.contains("DeviceAllow="));
+        // Stale-unit cleanup and unit installation both key off `unit_names`
+        // generically - proving the new units are IN that list (not just
+        // rendered as file content) is what actually wires them into
+        // install/health-check/restart.
         assert!(
-            !payload
-                .rendered_units
-                .keys()
-                .any(|unit| unit.contains("joypad"))
+            payload
+                .unit_names
+                .contains(&"phoxal-tool-joypad.service".to_string())
+        );
+        assert!(
+            payload
+                .unit_names
+                .contains(&"phoxal-tool-telemetry.service".to_string())
         );
         Ok(())
     }

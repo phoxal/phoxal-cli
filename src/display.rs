@@ -17,6 +17,7 @@ use crate::identity::IdentitySummary;
 use crate::logger::LineLogger;
 use crate::output_mode::OutputMode;
 use crate::supervisor::BoardSnapshot;
+use crate::telemetry::TelemetryBackend;
 use crate::theme::Theme;
 use crate::tui::{TerminalGuard, TitleInfo, TuiDisplay};
 
@@ -35,6 +36,12 @@ pub enum DisplayAction {
     /// every other in-process action (a hot-reload `Swap`, `status
     /// release`/`resume`) already goes through.
     Restart(String),
+    /// `↵` on a device row in the joypad Devices tab - publish
+    /// `joypad::Connect { id }`. The selection shown afterward comes from the
+    /// tool's own next `Devices` publish (the ack), never set locally here.
+    JoypadConnect(String),
+    /// `r` in the joypad Devices tab - publish `joypad::Rescan {}`.
+    JoypadRescan,
 }
 
 /// The live display for one supervised session. `Tui` is boxed: it carries a
@@ -105,9 +112,9 @@ impl Display {
         }
     }
 
-    pub fn redraw(&mut self, board: &BoardSnapshot) {
+    pub fn redraw(&mut self, board: &BoardSnapshot, telemetry: &TelemetryBackend) {
         match self {
-            Self::Tui(tui) => tui.redraw(board),
+            Self::Tui(tui) => tui.redraw(board, telemetry),
             Self::Logger(logger) => logger.redraw(board),
             Self::None => {}
         }
@@ -123,9 +130,14 @@ impl Display {
         }
     }
 
-    pub fn handle_input(&mut self, event: Event, board: &BoardSnapshot) -> DisplayAction {
+    pub fn handle_input(
+        &mut self,
+        event: Event,
+        board: &BoardSnapshot,
+        telemetry: &TelemetryBackend,
+    ) -> DisplayAction {
         match self {
-            Self::Tui(tui) => tui.handle_input(event, board),
+            Self::Tui(tui) => tui.handle_input(event, board, telemetry),
             Self::Logger(_) | Self::None => DisplayAction::None,
         }
     }
@@ -139,6 +151,6 @@ mod tests {
     fn none_variant_is_a_no_op_display() {
         let mut display = Display::none();
         assert!(display.activate().is_ok());
-        display.redraw(&BoardSnapshot::default());
+        display.redraw(&BoardSnapshot::default(), &TelemetryBackend::default());
     }
 }

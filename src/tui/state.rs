@@ -7,10 +7,46 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::display::DisplayAction;
+use crate::launch_plan::{SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER};
 use crate::supervisor::BoardSnapshot;
+use crate::telemetry::TelemetrySnapshot;
 use crate::tui::groups::{
     Group, GroupSection, bespoke_tab_label, build_groups, suggested_participant,
 };
+
+/// Sort key for the `tool-router` Traffic table (`s` cycles through these in
+/// order); default is the busiest-first view an operator opens the tab to
+/// see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrafficSort {
+    #[default]
+    Rate,
+    Topic,
+    Producer,
+    Status,
+}
+
+impl TrafficSort {
+    #[must_use]
+    const fn cycle(self) -> Self {
+        match self {
+            Self::Rate => Self::Topic,
+            Self::Topic => Self::Producer,
+            Self::Producer => Self::Status,
+            Self::Status => Self::Rate,
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Rate => "rate",
+            Self::Topic => "topic",
+            Self::Producer => "producer",
+            Self::Status => "status",
+        }
+    }
+}
 
 /// One flattened navigator row: a group heading (not selectable) or a
 /// participant id (selectable).
@@ -58,6 +94,18 @@ pub struct AppState {
     pub log_follow: bool,
     pub overview_scroll: usize,
     pub show_help: bool,
+    /// Cursor into `telemetry.joypad.available` for the `tool-joypad` Devices
+    /// tab's pure list navigation - purely local UI state, NOT the actual
+    /// selection (that comes from the tool's own `Devices` ack; see
+    /// `crate::telemetry::JoypadDevicesSample`'s docs).
+    pub joypad_cursor: usize,
+    /// Sort key for the `tool-router` Traffic table, cycled by `s`.
+    pub traffic_sort: TrafficSort,
+    /// Filter buffer for the Traffic table, separate from `nav_filter`/
+    /// `log_filter` so switching tabs never clobbers another tab's filter.
+    pub traffic_filter: String,
+    /// Scroll offset into the sorted/filtered Traffic table.
+    pub traffic_scroll: usize,
     /// Becomes `true` the first time the user moves the cursor themselves;
     /// until then, `sync` keeps steering the cursor at the suggested
     /// (failed/degraded, else starting) row so the navigator opens already
@@ -80,6 +128,10 @@ impl Default for AppState {
             log_follow: true,
             overview_scroll: 0,
             show_help: false,
+            joypad_cursor: 0,
+            traffic_sort: TrafficSort::default(),
+            traffic_filter: String::new(),
+            traffic_scroll: 0,
             user_moved_cursor: false,
         }
     }
@@ -127,7 +179,15 @@ impl AppState {
 
     /// Handle one key event, returning what the supervisor loop must act on
     /// (`DisplayAction::None` for anything purely internal to the TUI).
-    pub fn handle_key(&mut self, key: KeyEvent, board: &BoardSnapshot) -> DisplayAction {
+    /// `telemetry` is only consulted by the detail focus's bespoke tabs (the
+    /// joypad Devices list's cursor bound, and which device id `↵` resolves
+    /// to) - navigation, filtering, and every other key path ignore it.
+    pub fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        board: &BoardSnapshot,
+        telemetry: &TelemetrySnapshot,
+    ) -> DisplayAction {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return DisplayAction::Quit;
         }
@@ -146,13 +206,31 @@ impl AppState {
         }
         match self.focus {
             Focus::Navigator => self.handle_navigator_key(key, board),
-            Focus::Detail => self.handle_detail_key(key),
+            Focus::Detail => self.handle_detail_key(key, telemetry),
         }
+    }
+
+    /// Whether the current view+tab is the router's Traffic bespoke tab -
+    /// shared by the filter-buffer routing and the sort/filter key bindings,
+    /// and by `render`'s footer-hint selection.
+    #[must_use]
+    pub fn on_router_traffic_tab(&self) -> bool {
+        self.tab == DetailTab::Bespoke
+            && matches!(&self.view, View::Runtime(id) if id == SITE_TOOL_ROUTER)
+    }
+
+    /// Whether the current view+tab is the joypad Devices bespoke tab.
+    #[must_use]
+    pub fn on_joypad_devices_tab(&self) -> bool {
+        self.tab == DetailTab::Bespoke
+            && matches!(&self.view, View::Runtime(id) if id == SITE_TOOL_JOYPAD)
     }
 
     fn handle_filter_key(&mut self, key: KeyEvent) -> DisplayAction {
         let buffer = if self.focus == Focus::Detail && self.tab == DetailTab::Logs {
             &mut self.log_filter
+        } else if self.focus == Focus::Detail && self.on_router_traffic_tab() {
+            &mut self.traffic_filter
         } else {
             &mut self.nav_filter
         };
@@ -179,6 +257,8 @@ impl AppState {
                     self.tab = DetailTab::Overview;
                     self.overview_scroll = 0;
                     self.log_scroll = 0;
+                    self.joypad_cursor = 0;
+                    self.traffic_scroll = 0;
                     self.focus = Focus::Detail;
                 }
             }
@@ -192,12 +272,14 @@ impl AppState {
         DisplayAction::None
     }
 
-    fn handle_detail_key(&mut self, key: KeyEvent) -> DisplayAction {
+    fn handle_detail_key(&mut self, key: KeyEvent, telemetry: &TelemetrySnapshot) -> DisplayAction {
         let View::Runtime(id) = &self.view else {
             self.focus = Focus::Navigator;
             return DisplayAction::None;
         };
         let tabs = available_tabs(id);
+        let on_router_traffic_tab = self.on_router_traffic_tab();
+        let on_joypad_devices_tab = self.on_joypad_devices_tab();
         match key.code {
             KeyCode::Char('q') => return DisplayAction::Quit,
             KeyCode::Esc => {
@@ -206,15 +288,54 @@ impl AppState {
             }
             KeyCode::Left => self.tab = cycle_tab(&tabs, self.tab, -1),
             KeyCode::Right => self.tab = cycle_tab(&tabs, self.tab, 1),
+            KeyCode::Up if on_joypad_devices_tab => self.move_joypad_cursor(-1, telemetry),
+            KeyCode::Down if on_joypad_devices_tab => self.move_joypad_cursor(1, telemetry),
+            KeyCode::Up if on_router_traffic_tab => {
+                self.traffic_scroll = self.traffic_scroll.saturating_sub(1);
+            }
+            KeyCode::Down if on_router_traffic_tab => {
+                self.traffic_scroll = self.traffic_scroll.saturating_add(1);
+            }
             KeyCode::Up => self.scroll(-1),
             KeyCode::Down => self.scroll(1),
+            KeyCode::Enter if on_joypad_devices_tab => {
+                if let Some(device) = telemetry
+                    .joypad
+                    .as_ref()
+                    .and_then(|devices| devices.available.get(self.joypad_cursor))
+                {
+                    return DisplayAction::JoypadConnect(device.id.clone());
+                }
+            }
+            KeyCode::Char('r') if on_joypad_devices_tab => return DisplayAction::JoypadRescan,
+            KeyCode::Char('s') if on_router_traffic_tab => {
+                self.traffic_sort = self.traffic_sort.cycle();
+            }
             KeyCode::Char('f') if self.tab == DetailTab::Logs => {
                 self.log_follow = !self.log_follow;
             }
-            KeyCode::Char('/') if self.tab == DetailTab::Logs => self.filtering = true,
+            KeyCode::Char('/') if self.tab == DetailTab::Logs || on_router_traffic_tab => {
+                self.filtering = true;
+            }
             _ => {}
         }
         DisplayAction::None
+    }
+
+    /// Move the joypad Devices list cursor by `delta`, clamped to the
+    /// current device count (0 if the list is empty or not yet observed -
+    /// `Enter` then simply has nothing to resolve, see `handle_detail_key`).
+    fn move_joypad_cursor(&mut self, delta: isize, telemetry: &TelemetrySnapshot) {
+        let len = telemetry
+            .joypad
+            .as_ref()
+            .map_or(0, |devices| devices.available.len());
+        if len == 0 {
+            self.joypad_cursor = 0;
+            return;
+        }
+        let next = (self.joypad_cursor as isize + delta).rem_euclid(len as isize) as usize;
+        self.joypad_cursor = next;
     }
 
     fn move_cursor(&mut self, delta: isize) {
@@ -330,7 +451,7 @@ mod tests {
         let board = board_with(&[("drive", ParticipantKind::Service, ParticipantState::Ready)]);
         state.sync(&board);
         assert!(matches!(
-            state.handle_key(ctrl_c(), &board),
+            state.handle_key(ctrl_c(), &board, &TelemetrySnapshot::default()),
             DisplayAction::Quit
         ));
     }
@@ -341,7 +462,11 @@ mod tests {
         let board = board_with(&[("drive", ParticipantKind::Service, ParticipantState::Ready)]);
         state.sync(&board);
         assert!(matches!(
-            state.handle_key(key(KeyCode::Char('q')), &board),
+            state.handle_key(
+                key(KeyCode::Char('q')),
+                &board,
+                &TelemetrySnapshot::default()
+            ),
             DisplayAction::Quit
         ));
     }
@@ -366,13 +491,13 @@ mod tests {
         ]);
         state.sync(&board);
         let first = state.selected_id().map(str::to_string);
-        state.handle_key(key(KeyCode::Down), &board);
+        state.handle_key(key(KeyCode::Down), &board, &TelemetrySnapshot::default());
         let second = state.selected_id().map(str::to_string);
         assert_ne!(
             first, second,
             "moving down must land on a different participant"
         );
-        state.handle_key(key(KeyCode::Down), &board);
+        state.handle_key(key(KeyCode::Down), &board, &TelemetrySnapshot::default());
         assert_eq!(
             state.selected_id().map(str::to_string),
             first,
@@ -385,7 +510,7 @@ mod tests {
         let mut state = AppState::new();
         let board = board_with(&[("drive", ParticipantKind::Service, ParticipantState::Ready)]);
         state.sync(&board);
-        state.handle_key(key(KeyCode::Enter), &board);
+        state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
         assert_eq!(state.view, View::Runtime("drive".to_string()));
         assert_eq!(state.focus, Focus::Detail);
         assert_eq!(state.tab, DetailTab::Overview);
@@ -396,8 +521,8 @@ mod tests {
         let mut state = AppState::new();
         let board = board_with(&[("drive", ParticipantKind::Service, ParticipantState::Ready)]);
         state.sync(&board);
-        state.handle_key(key(KeyCode::Enter), &board);
-        state.handle_key(key(KeyCode::Esc), &board);
+        state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
+        state.handle_key(key(KeyCode::Esc), &board, &TelemetrySnapshot::default());
         assert_eq!(state.view, View::Home);
         assert_eq!(state.focus, Focus::Navigator);
     }
@@ -407,7 +532,11 @@ mod tests {
         let mut state = AppState::new();
         let board = board_with(&[("drive", ParticipantKind::Service, ParticipantState::Ready)]);
         state.sync(&board);
-        let action = state.handle_key(key(KeyCode::Char('r')), &board);
+        let action = state.handle_key(
+            key(KeyCode::Char('r')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
         assert!(matches!(action, DisplayAction::Restart(id) if id == "drive"));
     }
 
@@ -432,13 +561,13 @@ mod tests {
             ParticipantState::Ready,
         )]);
         state.sync(&board);
-        state.handle_key(key(KeyCode::Enter), &board);
+        state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
         assert_eq!(state.tab, DetailTab::Overview);
-        state.handle_key(key(KeyCode::Right), &board);
+        state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
         assert_eq!(state.tab, DetailTab::Logs);
-        state.handle_key(key(KeyCode::Right), &board);
+        state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
         assert_eq!(state.tab, DetailTab::Bespoke);
-        state.handle_key(key(KeyCode::Right), &board);
+        state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
         assert_eq!(state.tab, DetailTab::Overview, "must wrap back around");
     }
 
@@ -447,12 +576,24 @@ mod tests {
         let mut state = AppState::new();
         let board = board_with(&[("drive", ParticipantKind::Service, ParticipantState::Ready)]);
         state.sync(&board);
-        state.handle_key(key(KeyCode::Char('/')), &board);
+        state.handle_key(
+            key(KeyCode::Char('/')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
         assert!(state.filtering);
-        state.handle_key(key(KeyCode::Char('d')), &board);
-        state.handle_key(key(KeyCode::Char('r')), &board);
+        state.handle_key(
+            key(KeyCode::Char('d')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
+        state.handle_key(
+            key(KeyCode::Char('r')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
         assert_eq!(state.nav_filter, "dr");
-        state.handle_key(key(KeyCode::Enter), &board);
+        state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
         assert!(!state.filtering);
     }
 
@@ -461,10 +602,161 @@ mod tests {
         let mut state = AppState::new();
         let board = board_with(&[("drive", ParticipantKind::Service, ParticipantState::Ready)]);
         state.sync(&board);
-        state.handle_key(key(KeyCode::Char('?')), &board);
+        state.handle_key(
+            key(KeyCode::Char('?')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
         assert!(state.show_help);
         // Any other key dismisses help rather than navigating.
-        state.handle_key(key(KeyCode::Down), &board);
+        state.handle_key(key(KeyCode::Down), &board, &TelemetrySnapshot::default());
         assert!(!state.show_help);
+    }
+
+    fn joypad_telemetry() -> TelemetrySnapshot {
+        let mut telemetry = TelemetrySnapshot::default();
+        telemetry.joypad = Some(crate::telemetry::JoypadDevicesSample {
+            available: vec![
+                crate::telemetry::JoypadDevice {
+                    id: "pad-a".to_string(),
+                    name: "Pad A".to_string(),
+                    connected: true,
+                },
+                crate::telemetry::JoypadDevice {
+                    id: "pad-b".to_string(),
+                    name: "Pad B".to_string(),
+                    connected: true,
+                },
+            ],
+            selected: None,
+            last_error: None,
+        });
+        telemetry
+    }
+
+    fn open_joypad_devices_tab(state: &mut AppState, board: &BoardSnapshot) {
+        state.sync(board);
+        state.handle_key(key(KeyCode::Enter), board, &TelemetrySnapshot::default());
+        // Overview -> Logs -> Bespoke (Devices).
+        state.handle_key(key(KeyCode::Right), board, &TelemetrySnapshot::default());
+        state.handle_key(key(KeyCode::Right), board, &TelemetrySnapshot::default());
+        assert_eq!(state.tab, DetailTab::Bespoke);
+        assert!(state.on_joypad_devices_tab());
+    }
+
+    #[test]
+    fn joypad_enter_publishes_connect_for_the_device_under_the_cursor() {
+        let mut state = AppState::new();
+        let board = board_with(&[(
+            SITE_TOOL_JOYPAD,
+            ParticipantKind::Tool,
+            ParticipantState::Ready,
+        )]);
+        open_joypad_devices_tab(&mut state, &board);
+        let telemetry = joypad_telemetry();
+
+        // Cursor starts at 0 (pad-a); down moves it to pad-b.
+        let action = state.handle_key(key(KeyCode::Down), &board, &telemetry);
+        assert!(matches!(action, DisplayAction::None));
+        assert_eq!(state.joypad_cursor, 1);
+
+        let action = state.handle_key(key(KeyCode::Enter), &board, &telemetry);
+        assert!(matches!(action, DisplayAction::JoypadConnect(id) if id == "pad-b"));
+    }
+
+    #[test]
+    fn joypad_r_publishes_rescan() {
+        let mut state = AppState::new();
+        let board = board_with(&[(
+            SITE_TOOL_JOYPAD,
+            ParticipantKind::Tool,
+            ParticipantState::Ready,
+        )]);
+        open_joypad_devices_tab(&mut state, &board);
+        let telemetry = joypad_telemetry();
+
+        let action = state.handle_key(key(KeyCode::Char('r')), &board, &telemetry);
+        assert!(matches!(action, DisplayAction::JoypadRescan));
+    }
+
+    #[test]
+    fn joypad_cursor_wraps_and_stays_zero_with_no_devices() {
+        let mut state = AppState::new();
+        let board = board_with(&[(
+            SITE_TOOL_JOYPAD,
+            ParticipantKind::Tool,
+            ParticipantState::Ready,
+        )]);
+        open_joypad_devices_tab(&mut state, &board);
+
+        // No devices observed yet: the cursor stays at 0, Enter has nothing
+        // to resolve to (a `Connect` action never fires against an empty
+        // list).
+        let empty = TelemetrySnapshot::default();
+        state.handle_key(key(KeyCode::Down), &board, &empty);
+        assert_eq!(state.joypad_cursor, 0);
+        let action = state.handle_key(key(KeyCode::Enter), &board, &empty);
+        assert!(matches!(action, DisplayAction::None));
+
+        // Two devices: down wraps from the last back to the first.
+        let telemetry = joypad_telemetry();
+        state.handle_key(key(KeyCode::Down), &board, &telemetry);
+        assert_eq!(state.joypad_cursor, 1);
+        state.handle_key(key(KeyCode::Down), &board, &telemetry);
+        assert_eq!(state.joypad_cursor, 0, "must wrap back to the first device");
+    }
+
+    #[test]
+    fn router_traffic_tab_slash_routes_into_the_traffic_filter_buffer() {
+        let mut state = AppState::new();
+        let board = board_with(&[(
+            SITE_TOOL_ROUTER,
+            ParticipantKind::Tool,
+            ParticipantState::Ready,
+        )]);
+        state.sync(&board);
+        state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
+        // Overview -> Logs -> Bespoke (Traffic).
+        state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
+        state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
+        assert!(state.on_router_traffic_tab());
+
+        state.handle_key(
+            key(KeyCode::Char('/')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
+        assert!(state.filtering);
+        state.handle_key(
+            key(KeyCode::Char('x')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
+        assert_eq!(state.traffic_filter, "x");
+        assert!(
+            state.nav_filter.is_empty(),
+            "typing in the Traffic filter must not leak into the navigator filter"
+        );
+    }
+
+    #[test]
+    fn router_traffic_tab_s_cycles_sort() {
+        let mut state = AppState::new();
+        let board = board_with(&[(
+            SITE_TOOL_ROUTER,
+            ParticipantKind::Tool,
+            ParticipantState::Ready,
+        )]);
+        state.sync(&board);
+        state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
+        state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
+        state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
+        assert_eq!(state.traffic_sort, TrafficSort::Rate);
+        state.handle_key(
+            key(KeyCode::Char('s')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
+        assert_eq!(state.traffic_sort, TrafficSort::Topic);
     }
 }

@@ -15,6 +15,13 @@ use crate::resolver::{ResolvedRobot, ResolvedTool, RobotManifestExtras};
 pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
 pub const SITE_TOOL_ROUTER: &str = "tool-router";
 pub const SITE_TOOL_JOYPAD: &str = "tool-joypad";
+/// The host-resource-meter tool (CLI-UX Phase 3/4): a standard, OBSERVABLE
+/// bus participant exactly like `tool-joypad`, published in every mode (Run,
+/// Deploy, Webots) - a host meter is useful everywhere, including a deployed
+/// robot, unlike the joypad peripheral. Degrades GRACEFULLY when the active
+/// catalog snapshot predates it: see `resolver::OFFICIAL_OPTIONAL_TOOLS` and
+/// `build_site_launches`.
+pub const SITE_TOOL_TELEMETRY: &str = "tool-telemetry";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -158,17 +165,30 @@ fn build_site_launches(
         artifact_ref: router,
         phoxal_config: router_config,
     }];
-    if !matches!(mode, LaunchMode::Deploy) {
-        let joypad = merge_site_tool_artifact(SITE_TOOL_JOYPAD, robots)?;
+    // `tool-joypad` is a standard site tool in every mode, including Deploy
+    // (CLI-UX Phase 4): a deployed robot ships the peripheral tool the same
+    // way it ships every other official site tool, ordered after the router
+    // in its own systemd unit (`commands::deploy::render_units`).
+    let joypad = merge_site_tool_artifact(SITE_TOOL_JOYPAD, robots)?;
+    site.push(SiteLaunch {
+        id: SITE_TOOL_JOYPAD.to_string(),
+        artifact_ref: joypad,
+        phoxal_config: serde_json::json!({}),
+    });
+    // `tool-telemetry` is a standard OBSERVABLE site tool too, but degrades
+    // GRACEFULLY rather than failing the whole launch plan: unlike router and
+    // joypad (`merge_site_tool_artifact`, hard-required), a catalog snapshot
+    // that predates telemetry's addition to the framework simply has no
+    // resolved entry for it (`resolver::OFFICIAL_OPTIONAL_TOOLS`), so it is
+    // omitted from the site set here instead of erroring. Every downstream
+    // consumer (`commands::run::prepare_site_tools`, the TUI host meter)
+    // already treats "this optional tool is absent" as a normal state.
+    if let Some(telemetry) = merge_optional_site_tool_artifact(SITE_TOOL_TELEMETRY, robots) {
         site.push(SiteLaunch {
-            id: SITE_TOOL_JOYPAD.to_string(),
-            artifact_ref: joypad,
+            id: SITE_TOOL_TELEMETRY.to_string(),
+            artifact_ref: telemetry,
             phoxal_config: serde_json::json!({}),
         });
-        // TODO(cli-ux telemetry slice): add tool-telemetry to the standard
-        // set once published - a standard observable site tool exactly like
-        // `tool-joypad` above, gated in the same "other tools" staged-startup
-        // stage (see `commands::run::stages_for_run`).
     }
     Ok(site)
 }
@@ -192,6 +212,38 @@ fn merge_site_tool_artifact(
         }
     }
     artifact_ref.ok_or_else(|| anyhow!("site tool {tool_name} was not resolved"))
+}
+
+/// The optional-tool counterpart to [`merge_site_tool_artifact`]: `None` if
+/// ANY robot's resolved graph lacks `tool_name` (the catalog-absent case -
+/// tolerated, not an error) rather than bailing. A conflicting artifact ref
+/// across robots that DO have it resolved is still a genuine inconsistency
+/// and bails, same as the required path.
+fn merge_optional_site_tool_artifact(
+    tool_name: &str,
+    robots: &[CheckedRobotLaunchInput<'_>],
+) -> Option<String> {
+    let mut artifact_ref: Option<String> = None;
+    for robot in robots {
+        let tool = robot
+            .resolved
+            .tools
+            .iter()
+            .find(|tool| tool.name == tool_name)?;
+        let current = tool_artifact_ref(tool);
+        match &artifact_ref {
+            Some(existing) if existing != &current => {
+                tracing::warn!(
+                    tool = tool_name,
+                    "optional site tool resolves to conflicting artifacts across robots; omitting it from the site set"
+                );
+                return None;
+            }
+            Some(_) => {}
+            None => artifact_ref = Some(current),
+        }
+    }
+    artifact_ref
 }
 
 fn resolved_tool<'a>(resolved: &'a ResolvedRobot, tool_name: &str) -> Result<&'a ResolvedTool> {

@@ -48,6 +48,7 @@ use tokio::sync::mpsc;
 
 use crate::display::DisplayAction;
 use crate::supervisor::{BoardSnapshot, RoutedLogLine};
+use crate::telemetry::TelemetryBackend;
 use crate::theme::Theme;
 
 pub use logs::LogRouter;
@@ -133,11 +134,18 @@ impl TuiDisplay {
     /// Drain every routed log line queued since the last redraw, then draw
     /// one frame if activated. Draining happens regardless of activation so
     /// scrollback keeps accumulating even before the alternate screen opens.
-    pub fn redraw(&mut self, board: &BoardSnapshot) {
+    /// `telemetry` is snapshotted once here and both fed into the
+    /// per-runtime history the reserved `RuntimeLogState` slots keep
+    /// (`LogRouter::record_telemetry`) and passed straight through to
+    /// `render::draw` for the non-historical readouts (sim clock, host meter,
+    /// per-participant CPU/RAM, joypad selection).
+    pub fn redraw(&mut self, board: &BoardSnapshot, telemetry: &TelemetryBackend) {
         while let Ok(line) = self.log_rx.try_recv() {
             self.logs.record(line);
         }
         self.state.sync(board);
+        let snapshot = telemetry.snapshot();
+        self.logs.record_telemetry(&snapshot);
         let Some(activated) = &mut self.activated else {
             return;
         };
@@ -146,7 +154,7 @@ impl TuiDisplay {
         let state = &self.state;
         let logs = &mut self.logs;
         let _ = activated.terminal.draw(|frame| {
-            render::draw(frame, theme, title, board, logs, state);
+            render::draw(frame, theme, title, board, logs, state, &snapshot);
         });
     }
 
@@ -158,7 +166,12 @@ impl TuiDisplay {
         activated.input_rx.recv().await
     }
 
-    pub fn handle_input(&mut self, event: Event, board: &BoardSnapshot) -> DisplayAction {
+    pub fn handle_input(
+        &mut self,
+        event: Event,
+        board: &BoardSnapshot,
+        telemetry: &TelemetryBackend,
+    ) -> DisplayAction {
         let Event::Key(key) = event else {
             if let Event::Resize(_, _) = event {
                 // Nothing to recompute eagerly - the next redraw tick reads
@@ -172,7 +185,7 @@ impl TuiDisplay {
         if key.kind != KeyEventKind::Press {
             return DisplayAction::None;
         }
-        self.state.handle_key(key, board)
+        self.state.handle_key(key, board, &telemetry.snapshot())
     }
 }
 
@@ -202,7 +215,7 @@ mod tests {
             ),
         );
         // Must not panic even though `activate` was never called.
-        display.redraw(&board);
+        display.redraw(&board, &TelemetryBackend::default());
         assert!(display.activated.is_none());
     }
 

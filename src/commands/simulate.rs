@@ -394,11 +394,22 @@ pub async fn run(
                 sim.plan.robots.first().context(
                     "sim launch plan has no robot for the readiness barrier's clock feed",
                 )?;
-            let (mut clock_rx, clock_task) = start_clock_barrier_feed(
+            let (mut clock_rx, _clock_task) = start_clock_barrier_feed(
                 barrier_robot.namespace.clone(),
                 barrier_robot.id.clone(),
                 default_connect_endpoint(),
             );
+            // The SAME clock feed backs both the readiness barrier below
+            // (`&mut clock_rx`, first-sample/advanced detection) and the
+            // TUI's live top-bar step/running readout
+            // (`TelemetryBackend::set_clock_feed`, `latest` field) - cloning
+            // the `watch::Receiver` here is cheap and leaves the barrier's own
+            // mutable borrow untouched. Unlike the old behavior, the feed
+            // task is no longer aborted once the barrier completes: it keeps
+            // running (as `_clock_task`, unbound) for the rest of the
+            // session so the TUI keeps seeing fresh samples.
+            let telemetry = crate::telemetry::TelemetryBackend::new();
+            telemetry.set_clock_feed(clock_rx.clone());
 
             let (action_rx, watch_handle) = if options.watch {
                 let (action_tx, action_rx) = mpsc::channel(16);
@@ -439,6 +450,24 @@ pub async fn run(
                 .collect::<Vec<_>>();
             let identity = crate::identity::IdentitySummary::discover(&sim.ctx.project_root);
             let display = crate::display::Display::for_mode("simulation", identity);
+            // Live telemetry (CLI-UX Phase 3/4): only worth subscribing when
+            // a real TUI is up to read it, same gate as `commands::run`. The
+            // sim clock feed (`telemetry.set_clock_feed` above) is wired
+            // unconditionally since it costs nothing extra - the SAME task
+            // already exists for the readiness barrier - but host/process/
+            // router/joypad each open their own bus connection, so those
+            // stay Tui-gated.
+            let site_targets: Vec<(String, String)> = sim
+                .plan
+                .robots
+                .iter()
+                .map(|robot| (robot.namespace.clone(), robot.id.clone()))
+                .collect();
+            let _telemetry_tasks = if matches!(display, crate::display::Display::Tui(_)) {
+                crate::commands::run::start_telemetry_feeds(&site_targets, &telemetry)
+            } else {
+                Vec::new()
+            };
             let (display_activate_tx, display_activate_rx) = oneshot::channel();
             let supervise_task = tokio::spawn(supervise_until_shutdown(
                 stages,
@@ -451,6 +480,7 @@ pub async fn run(
                     cancel_rx: Some(cancel_rx),
                     display,
                     display_activate_rx: Some(display_activate_rx),
+                    telemetry,
                     ..SupervisorOptions::default()
                 },
             ));
@@ -496,7 +526,6 @@ pub async fn run(
             // still be visible in the TUI/logger, not just a frozen stepper
             // line.
             let _ = display_activate_tx.send(());
-            clock_task.abort();
             let terminal_failure_task = match &barrier_result {
                 Err(error) => {
                     let _ = cancel_tx.send(error.to_string());

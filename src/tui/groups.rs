@@ -2,16 +2,9 @@
 //! a [`BoardSnapshot`]: one stable heading per group, in a fixed order, each
 //! showing only its present members - never an empty heading.
 
-use crate::launch_plan::{SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER};
+use crate::launch_plan::{SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SITE_TOOL_TELEMETRY};
 use crate::participant_kind::ParticipantKind;
 use crate::supervisor::{BoardSnapshot, ParticipantStatus};
-
-/// A tool id folded into System even though its board `kind` is `Tool` (or,
-/// for the synthetic Webots row, has no board entry of its own at all - see
-/// [`build_groups`]). Not yet published (Part 4's `tool-telemetry`), but the
-/// mapping is hardcoded ahead of time per the design doc: "hardcode the
-/// tool -> tab mapping; no generic abstraction".
-const SITE_TOOL_TELEMETRY: &str = "tool-telemetry";
 
 /// The synthetic Webots application row's id, shared with
 /// `commands::simulate::WEBOTS_SITE_ID` (kept as a local literal rather than

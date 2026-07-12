@@ -53,6 +53,7 @@ pub mod shell;
 pub mod simulate_staging;
 pub mod stepper;
 pub mod supervisor;
+pub mod telemetry;
 pub mod theme;
 pub mod tui;
 pub mod ui;

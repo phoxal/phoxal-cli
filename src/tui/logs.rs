@@ -8,7 +8,9 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use crate::launch_plan::{SITE_TOOL_ROUTER, SITE_TOOL_TELEMETRY};
 use crate::supervisor::{LogSource, RoutedLogLine};
+use crate::telemetry::{RouterMetricsSample, TelemetrySnapshot};
 
 /// One rendered log line plus which routing source produced it (design doc:
 /// "dedup by ROUTING, not text-compare").
@@ -23,17 +25,30 @@ pub struct DisplayedLine {
 /// over a long session.
 const LOG_CAPACITY: usize = 2000;
 
-/// One runtime's TUI-side state: its bounded log scrollback, plus reserved
-/// (always-empty today) slots for a later slice's telemetry/traffic panels.
-///
-/// `telemetry_series`/`latest_traffic_sample` are deliberate insertion
-/// points (design doc Part 3/4d): nothing in this slice writes or reads them
-/// yet - a later slice fills them from the framework's `y2026_9` contracts
-/// and renders them on the Resources/Traffic bespoke tabs
-/// (`crate::tui::render::draw_bespoke_placeholder`). `#[allow(dead_code)]`
-/// documents that this is intentional rather than leftover.
+/// Bound on the Resources tab's rolling host-sample history: at the ~1s
+/// `tool-telemetry` sample cadence, 120 points covers a 2-minute window -
+/// enough for a sparkline to read as a trend without growing unboundedly
+/// over a long session.
+const TELEMETRY_SERIES_CAPACITY: usize = 120;
+
+/// One `telemetry::Host` sample recorded into a Resources tab's rolling
+/// history (`RuntimeLogState::telemetry_series`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HostPoint {
+    pub cpu_pct: f32,
+    pub ram_used_bytes: u64,
+    pub ram_total_bytes: u64,
+}
+
+/// One runtime's TUI-side state: its bounded log scrollback, plus the
+/// telemetry/traffic panel slots the design doc reserved (Part 3/4d) - a
+/// rolling `telemetry_series` history for the `tool-telemetry` Resources tab,
+/// fed by `LogRouter::record_telemetry` off `telemetry::Host` samples, and
+/// `latest_traffic_sample` for the `tool-router` Traffic tab, holding the
+/// router's own most recent `router::Metrics` snapshot (a "latest", not a
+/// series, since the Traffic table itself already renders the full topic
+/// breakdown from one sample).
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct RuntimeLogState {
     pub lines: VecDeque<DisplayedLine>,
     /// Whether at least one `LogSource::Bus` line has been recorded for this
@@ -42,12 +57,8 @@ pub struct RuntimeLogState {
     /// `LogRouter::record`), since the bus is assumed to carry everything
     /// this participant logs from that point on.
     bus_seen: bool,
-    /// Reserved for Phase 3c (`y2026_9::process`): CPU%/RAM samples over
-    /// time for the Resources tab. Always empty in this slice.
-    pub telemetry_series: Vec<()>,
-    /// Reserved for the Traffic tab's latest sample. Always `None` in this
-    /// slice.
-    pub latest_traffic_sample: Option<()>,
+    pub telemetry_series: Vec<HostPoint>,
+    pub latest_traffic_sample: Option<RouterMetricsSample>,
 }
 
 /// The TUI's full log-routing state: one [`RuntimeLogState`] per participant
@@ -107,6 +118,57 @@ impl LogRouter {
         self.runtimes
             .get_mut(id)
             .map_or(&[][..], |state| state.lines.make_contiguous())
+    }
+
+    /// Fold one telemetry snapshot into the reserved panel slots (called once
+    /// per redraw, right after `record`ing this tick's log lines): pushes a
+    /// `HostPoint` onto `tool-telemetry`'s rolling history when a NEW `Host`
+    /// sample has arrived (deduped against the last pushed point, so a
+    /// redraw tick that observes no new sample - the common case at a 500ms
+    /// tick against a ~1s publish cadence - does not flatten the series with
+    /// repeats), and overwrites `tool-router`'s latest traffic sample
+    /// unconditionally.
+    pub fn record_telemetry(&mut self, telemetry: &TelemetrySnapshot) {
+        if let Some(host) = telemetry.host {
+            let point = HostPoint {
+                cpu_pct: host.cpu_pct,
+                ram_used_bytes: host.ram_used_bytes,
+                ram_total_bytes: host.ram_total_bytes,
+            };
+            let state = self
+                .runtimes
+                .entry(SITE_TOOL_TELEMETRY.to_string())
+                .or_default();
+            if state.telemetry_series.last() != Some(&point) {
+                state.telemetry_series.push(point);
+                if state.telemetry_series.len() > TELEMETRY_SERIES_CAPACITY {
+                    state.telemetry_series.remove(0);
+                }
+            }
+        }
+        if let Some(router) = &telemetry.router {
+            self.runtimes
+                .entry(SITE_TOOL_ROUTER.to_string())
+                .or_default()
+                .latest_traffic_sample = Some(router.clone());
+        }
+    }
+
+    /// The rolling host-sample history for `id`'s Resources tab (empty until
+    /// the first `Host` sample has been recorded).
+    #[must_use]
+    pub fn telemetry_series_for(&self, id: &str) -> &[HostPoint] {
+        self.runtimes
+            .get(id)
+            .map_or(&[][..], |state| state.telemetry_series.as_slice())
+    }
+
+    /// The router's latest `router::Metrics` sample for the Traffic tab -
+    /// `None` before the first sample arrives (graceful absence, same as the
+    /// host meter).
+    #[must_use]
+    pub fn latest_traffic_sample_for(&self, id: &str) -> Option<&RouterMetricsSample> {
+        self.runtimes.get(id)?.latest_traffic_sample.as_ref()
     }
 }
 
