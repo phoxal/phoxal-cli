@@ -23,7 +23,7 @@ pub struct Update {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PackageUpdate {
     pub package: String,
-    pub target: String,
+    pub target: Option<String>,
     pub old: Option<String>,
     pub new: String,
     pub bytes: u64,
@@ -41,8 +41,6 @@ pub struct UpdateSummary {
     pub free_disk_bytes: Option<u64>,
     pub updates: Vec<PackageUpdate>,
     pub pins_skipped: Vec<String>,
-    pub retained_versions: usize,
-    pub pruned_versions: usize,
     pub coherence: &'static str,
     pub config: &'static str,
 }
@@ -100,7 +98,7 @@ fn update(
         },
     )?;
 
-    let destination = project_root.join(".phoxal/binaries");
+    let destination = project_root.join(".phoxal/artifacts");
     let mut descriptors = crate::native_artifacts::descriptors(&resolved)?;
     include_existing_target_scopes(&mut descriptors, &catalog)?;
     let updates = descriptors
@@ -143,9 +141,7 @@ fn update(
         .cloned()
         .collect::<Vec<_>>();
 
-    let (retained_versions, pruned_versions) = if dry_run {
-        crate::native_artifacts::preview_prune_inactive_versions(&descriptors)?
-    } else {
+    if !dry_run {
         let _lock = crate::native_artifacts::ArtifactStoreLock::exclusive("update")?;
         fs::create_dir_all(&destination)?;
         ui.info(format!(
@@ -155,8 +151,7 @@ fn update(
             destination.display()
         ));
         crate::native_artifacts::prepare_and_activate_descriptors(&descriptors, Some(ui))?;
-        crate::native_artifacts::prune_inactive_versions(&descriptors)?
-    };
+    }
 
     Ok(UpdateSummary {
         dry_run,
@@ -168,8 +163,6 @@ fn update(
         free_disk_bytes,
         updates,
         pins_skipped,
-        retained_versions,
-        pruned_versions,
         coherence: "deferred to W6",
         config: "deferred to W7",
     })
@@ -181,7 +174,7 @@ fn include_existing_target_scopes(
 ) -> Result<()> {
     let current = descriptors.clone();
     for descriptor in current {
-        if descriptor.target == crate::catalog::TARGET_INDEPENDENT_SCOPE {
+        if descriptor.target.is_none() {
             continue;
         }
         let artifact = catalog
@@ -198,7 +191,8 @@ fn include_existing_target_scopes(
             })?;
         for target in crate::native_artifacts::existing_target_scopes(&descriptor.package_id)? {
             if descriptors.iter().any(|existing| {
-                existing.package_id == descriptor.package_id && existing.target == target
+                existing.package_id == descriptor.package_id
+                    && existing.target.as_deref() == Some(target.as_str())
             }) {
                 continue;
             }
@@ -209,7 +203,7 @@ fn include_existing_target_scopes(
                 )
             })?;
             let mut retained_target = descriptor.clone();
-            retained_target.target = target;
+            retained_target.target = Some(target);
             retained_target.url = blob.url.clone();
             retained_target.sha256 = blob.sha256.clone();
             retained_target.size = blob.size;
@@ -241,7 +235,7 @@ fn print_human(summary: &UpdateSummary) -> Result<()> {
             println!(
                 "  {} [{}]: {} -> {} ({} bytes)",
                 update.package,
-                update.target,
+                update.target.as_deref().unwrap_or("assets"),
                 update.old.as_deref().unwrap_or("missing"),
                 update.new,
                 update.bytes
@@ -254,12 +248,6 @@ fn print_human(summary: &UpdateSummary) -> Result<()> {
     if !changed {
         println!("no updates available");
     }
-    println!(
-        "retained {} version(s), pruned {}{}",
-        summary.retained_versions,
-        summary.pruned_versions,
-        if summary.dry_run { " (dry run)" } else { "" }
-    );
     Ok(())
 }
 
@@ -303,9 +291,14 @@ mod tests {
         let host = "aarch64-apple-darwin";
         let robot = "aarch64-unknown-linux-musl";
         let package = "phoxal/service-drive";
-        fs::create_dir_all(crate::native_artifacts::artifact_target_dir_for(
-            package, robot,
-        )?)?;
+        let package_dir = crate::host_paths::artifacts_dir()?
+            .join("phoxal")
+            .join("service-drive");
+        fs::create_dir_all(package_dir.join("versions/1.1.0/targets").join(robot))?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("versions/1.1.0", package_dir.join("active"))?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir("versions/1.1.0", package_dir.join("active"))?;
 
         let mut entry = fixture_service_entry_for_tests(
             "drive",
@@ -329,14 +322,14 @@ mod tests {
             sha256: "a".repeat(64),
             size: 21,
             binary_name: "phoxal-service-drive".to_string(),
-            target: host.to_string(),
+            target: Some(host.to_string()),
         }];
 
         include_existing_target_scopes(&mut descriptors, &catalog)?;
 
         let retained = descriptors
             .iter()
-            .find(|descriptor| descriptor.target == robot)
+            .find(|descriptor| descriptor.target.as_deref() == Some(robot))
             .expect("existing robot target is included in the update");
         assert_eq!(retained.url, "https://example.invalid/robot");
         assert_eq!(retained.size, 42);

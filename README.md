@@ -34,8 +34,8 @@ phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build va
 | `logs [participant]` | Stream participant bus log events from a reachable robot. `-f`/`--follow` keeps streaming; omit `participant` for every participant. |
 | `status [release|resume <participant>]` | Print the local supervisor board, or explicitly release a managed child for manual/debugger execution and later resume it under supervision. |
 | `service catalog` | Print official services from the configured artifact catalog. |
-| `update` | Resolve stable/nightly heads, verify downloads, retarget `active`, and prune inactive versions. Supports `--dry-run` and JSON. |
-| `cache clean` | Remove selected project-local `binaries`, `build`, `git`, or `webots` state, with size reporting and `--dry-run`. |
+| `update` | Resolve stable/nightly heads, verify downloads, and retarget `active`. Supports `--dry-run` and JSON; cleanup remains explicit through `cache clean --artifacts`. |
+| `cache clean` | Remove selected project-local `artifacts`, `build`, `git`, or `webots` state, with size reporting and `--dry-run`. |
 | `deploy <user@host>` | Probe the robot arch, resolve/check the graph, cross-build local source artifacts for musl, render native systemd units/env/release record, sync to `/opt/phoxal` and `/etc/systemd/system`, restart `phoxal.target`, and report systemd readiness. Prints the v0 pre-stable warning. `--dry-run --target <arch>` renders hostless for validation. |
 | `doctor` | Check host prerequisites (Webots, Rust toolchain) without changing anything. |
 | `version` | Print the CLI version, wire codec, and participant metadata section names. |
@@ -132,8 +132,9 @@ diagnostics rather than as missing static catalog entries.
 ```text
 ~/.phoxal/simulator.lock            The only host-global item.
 
-<project>/.phoxal/binaries/<package>/<target>/<version>/  Unpacked official artifacts.
-<project>/.phoxal/binaries/<package>/<target>/active      Atomic selected-version symlink.
+<project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/targets/<target>/  Unpacked target artifacts.
+<project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/assets/             Unpacked component assets.
+<project>/.phoxal/artifacts/<provider>/<package>/active                                 Atomic selected-version symlink.
 <project>/.phoxal/git/              Git-pinned checkouts.
 <project>/.phoxal/build/            Cross-build state.
 <project>/.phoxal/webots/           Webots staging.

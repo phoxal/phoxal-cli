@@ -214,7 +214,7 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
     // The resolver must capture, for a Catalog-sourced component package,
     // exactly the same shape a service captures: the resolved catalog
     // entry's version, the per-scope `ReleaseAsset`, and the resolved target
-    // scope (target-independent for assets, the target triple for drivers).
+    // scope (assets for metadata, the target triple for drivers).
     let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount",
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount\n      driver:\n        connection: { type: can, bus: 0, node_id: 1 }",

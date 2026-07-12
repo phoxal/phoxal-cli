@@ -39,9 +39,9 @@ pub struct NativeArtifactDescriptor {
     /// The binary name inside the unpacked tarball. Empty for
     /// `component_assets` - an asset bundle has no binary.
     pub binary_name: String,
-    /// The target triple this tarball was resolved/built for, or
-    /// [`crate::catalog::TARGET_INDEPENDENT_SCOPE`] for `component_assets`.
-    pub target: String,
+    /// The target triple this tarball was resolved/built for. `None` identifies
+    /// the catalog's distinct component-assets blob.
+    pub target: Option<String>,
 }
 
 impl NativeArtifactDescriptor {
@@ -86,13 +86,8 @@ impl NativeArtifactDescriptor {
             sha256: tool.sha256.clone(),
             size: tool.size.unwrap_or_default(),
             binary_name: tool.binary_name.clone(),
-            target: tool.target.clone(),
+            target: Some(tool.target.clone()),
         }))
-    }
-
-    /// The validated, collision-free local directory key for this package.
-    pub fn package(&self) -> Result<String> {
-        package_storage_key(&self.package_id)
     }
 }
 
@@ -219,7 +214,7 @@ pub fn prepare_descriptors_with_preflight(
             .iter()
             .map(|descriptor| descriptor.size)
             .sum::<u64>();
-        let destination = crate::host_paths::binaries_dir()?;
+        let destination = crate::host_paths::artifacts_dir()?;
         let free = free_disk_bytes(&destination).ok();
         if let Some(ui) = ui {
             ui.info(format!(
@@ -236,7 +231,7 @@ pub fn prepare_descriptors_with_preflight(
             && total_bytes > free
         {
             bail!(
-                "artifact download needs {total_bytes} bytes but only {free} bytes are free at {}; run `phoxal cache clean --binaries` or free disk space",
+                "artifact download needs {total_bytes} bytes but only {free} bytes are free at {}; run `phoxal cache clean --artifacts` or free disk space",
                 destination.display()
             );
         }
@@ -244,7 +239,7 @@ pub fn prepare_descriptors_with_preflight(
     if actionable.is_empty() {
         return Ok(());
     }
-    let _lock = ArtifactStoreLock::shared()?;
+    let _lock = ArtifactStoreLock::exclusive("provision")?;
     prepare_and_activate_descriptors(&actionable, ui)
 }
 
@@ -302,6 +297,7 @@ pub fn stage_component_bundles_into_robot_root(
     resolved: &crate::resolver::ResolvedRobot,
 ) -> Result<()> {
     let mut staged = std::collections::BTreeSet::new();
+    let mut bundles = Vec::new();
     for component in &resolved.components {
         let component_id = &component.source_name;
         if !staged.insert(component_id.clone()) {
@@ -320,6 +316,13 @@ pub fn stage_component_bundles_into_robot_root(
         if source_dir == dest_dir {
             continue;
         }
+        bundles.push((source_dir, dest_dir));
+    }
+    let _lock = crate::host_paths::artifacts_dir()
+        .is_ok_and(|path| path.is_dir())
+        .then(ArtifactStoreLock::shared)
+        .transpose()?;
+    for (source_dir, dest_dir) in bundles {
         copy_component_bundle_files(&source_dir, &dest_dir)?;
     }
     Ok(())
@@ -399,7 +402,7 @@ pub fn stage_descriptor(
     descriptor: &NativeArtifactDescriptor,
     mode: ProvisioningMode,
 ) -> Result<PathBuf> {
-    let _lock = ArtifactStoreLock::shared()?;
+    let _lock = ArtifactStoreLock::exclusive("provision")?;
     let binary = prepare_descriptor(ui, descriptor, mode)?;
     retarget_active(descriptor)?;
     Ok(binary)
@@ -407,7 +410,8 @@ pub fn stage_descriptor(
 
 pub struct ArtifactStoreLock {
     file: fs::File,
-    holder_path: Option<PathBuf>,
+    path: PathBuf,
+    exclusive: bool,
 }
 
 impl ArtifactStoreLock {
@@ -415,56 +419,155 @@ impl ArtifactStoreLock {
         Self::acquire(true, command)
     }
 
-    fn shared() -> Result<Self> {
+    pub fn shared() -> Result<Self> {
         Self::acquire(false, "staging")
     }
 
     fn acquire(exclusive: bool, command: &str) -> Result<Self> {
-        let state = crate::host_paths::project_state_dir()?;
-        fs::create_dir_all(&state)?;
-        let path = state.join("artifacts.lock");
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-        #[cfg(unix)]
+        let store = crate::host_paths::artifacts_dir()?;
+        fs::create_dir_all(&store)?;
+        let path = store.join(".lock");
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(windows)]
         {
-            use std::os::fd::AsRawFd;
-            let operation = if exclusive {
-                libc::LOCK_EX
-            } else {
-                libc::LOCK_SH
-            } | libc::LOCK_NB;
-            if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
-                let holder = fs::read_to_string(state.join("artifacts.lock.holder"))
-                    .unwrap_or_else(|_| "unknown holder".to_string());
-                bail!("artifact store lock is held ({})", holder.trim());
-            }
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+            options.custom_flags(FILE_FLAG_DELETE_ON_CLOSE);
         }
-        let holder_path = exclusive.then(|| state.join("artifacts.lock.holder"));
-        if let Some(holder_path) = &holder_path {
-            fs::write(
-                holder_path,
-                format!("pid={} command={command}\n", std::process::id()),
-            )?;
-        }
-        Ok(Self { file, holder_path })
+        let file = options.open(&path)?;
+        try_advisory_lock(&file, exclusive)
+            .with_context(|| format!("artifact store lock is held (requested by {command})"))?;
+        Ok(Self {
+            file,
+            path,
+            exclusive,
+        })
     }
 }
 
 impl Drop for ArtifactStoreLock {
     fn drop(&mut self) {
-        if let Some(path) = &self.holder_path {
-            fs::remove_file(path).ok();
+        if !self.exclusive {
+            let _ = unlock_advisory(&self.file);
+            if try_advisory_lock(&self.file, true).is_err() {
+                return;
+            }
         }
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
-        }
+        fs::remove_file(&self.path).ok();
+        let _ = unlock_advisory(&self.file);
     }
+}
+
+#[cfg(unix)]
+fn try_advisory_lock(file: &fs::File, exclusive: bool) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let operation = if exclusive {
+        libc::LOCK_EX
+    } else {
+        libc::LOCK_SH
+    } | libc::LOCK_NB;
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn unlock_advisory(file: &fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn try_advisory_lock(file: &fs::File, exclusive: bool) -> std::io::Result<()> {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+
+    const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x0000_0001;
+    const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x0000_0002;
+    let flags = LOCKFILE_FAIL_IMMEDIATELY
+        | if exclusive {
+            LOCKFILE_EXCLUSIVE_LOCK
+        } else {
+            0
+        };
+    let mut overlapped = WindowsOverlapped::default();
+    let result = unsafe {
+        LockFileEx(
+            file.as_raw_handle().cast::<c_void>(),
+            flags,
+            0,
+            u32::MAX,
+            u32::MAX,
+            &mut overlapped,
+        )
+    };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn unlock_advisory(file: &fs::File) -> std::io::Result<()> {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+
+    let mut overlapped = WindowsOverlapped::default();
+    let result = unsafe {
+        UnlockFileEx(
+            file.as_raw_handle().cast::<c_void>(),
+            0,
+            u32::MAX,
+            u32::MAX,
+            &mut overlapped,
+        )
+    };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+struct WindowsOverlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    event: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn LockFileEx(
+        file: *mut std::ffi::c_void,
+        flags: u32,
+        reserved: u32,
+        bytes_low: u32,
+        bytes_high: u32,
+        overlapped: *mut WindowsOverlapped,
+    ) -> i32;
+    fn UnlockFileEx(
+        file: *mut std::ffi::c_void,
+        reserved: u32,
+        bytes_low: u32,
+        bytes_high: u32,
+        overlapped: *mut WindowsOverlapped,
+    ) -> i32;
 }
 
 fn prepare_descriptor(
@@ -479,10 +582,10 @@ fn prepare_descriptor(
     }
     if descriptor.url.is_empty() {
         bail!(
-            "vendored {} {} for target {} is missing; run `phoxal update` online",
+            "vendored {} {} for {} is missing; run `phoxal update` online",
             descriptor.package_id,
             descriptor.version,
-            descriptor.target
+            descriptor_scope_label(descriptor)
         );
     }
 
@@ -508,6 +611,19 @@ pub fn prepare_and_activate_descriptors(
     ui: Option<&Ui>,
 ) -> Result<()> {
     const CONCURRENCY: usize = 4;
+    let mut package_versions = std::collections::BTreeMap::new();
+    for descriptor in descriptors {
+        if let Some(existing) = package_versions.insert(&descriptor.package_id, &descriptor.version)
+        {
+            anyhow::ensure!(
+                existing == &descriptor.version,
+                "artifact package {} resolved multiple versions in one atomic update: {} and {}",
+                descriptor.package_id,
+                existing,
+                descriptor.version
+            );
+        }
+    }
     for batch in descriptors.chunks(CONCURRENCY) {
         std::thread::scope(|scope| -> Result<()> {
             let handles = batch
@@ -529,7 +645,10 @@ pub fn prepare_and_activate_descriptors(
             for descriptor in batch {
                 ui.info(format!(
                     "verified {} {} [{}] ({} bytes)",
-                    descriptor.package_id, descriptor.version, descriptor.target, descriptor.size
+                    descriptor.package_id,
+                    descriptor.version,
+                    descriptor_scope_label(descriptor),
+                    descriptor.size
                 ));
             }
         }
@@ -540,36 +659,71 @@ pub fn prepare_and_activate_descriptors(
     Ok(())
 }
 
-/// Return the selected binary through its `(package, target)/active` symlink.
+/// Return the selected binary through its package-scoped `active` symlink.
 pub fn artifact_binary_path(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
-    let active = artifact_target_dir(descriptor)?.join("active");
-    Ok(active.join(&descriptor.binary_name))
+    let _lock = ArtifactStoreLock::shared()?;
+    let target = descriptor
+        .target
+        .as_deref()
+        .context("component assets do not contain a native binary")?;
+    validate_path_segment("artifact target", target)?;
+    let version = active_version_unlocked(&descriptor.package_id)?
+        .context("vendored artifact package has no active version")?;
+    Ok(artifact_package_dir(&descriptor.package_id)?
+        .join("versions")
+        .join(version)
+        .join("targets")
+        .join(target)
+        .join(&descriptor.binary_name))
 }
 
 /// Temporary download path beside the selected version directory.
 pub fn artifact_tarball_path(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
-    Ok(artifact_target_dir(descriptor)?.join(format!(".{}.partial", descriptor.version)))
+    let scope = descriptor.target.as_deref().unwrap_or("assets");
+    validate_path_segment("artifact scope", scope)?;
+    Ok(artifact_package_dir(&descriptor.package_id)?
+        .join("versions")
+        .join(format!(".{}-{scope}.partial", descriptor.version)))
 }
 
-/// Where `descriptor` is unpacked in the project-local binary store.
+/// Where `descriptor` is unpacked in the project-local artifact store.
 pub fn artifact_exec_dir(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
     validate_path_segment("artifact version", &descriptor.version)?;
-    Ok(artifact_target_dir(descriptor)?.join(&descriptor.version))
-}
-
-fn artifact_target_dir(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
-    artifact_target_dir_for(&descriptor.package_id, &descriptor.target)
+    let version = artifact_package_dir(&descriptor.package_id)?
+        .join("versions")
+        .join(&descriptor.version);
+    match descriptor.target.as_deref() {
+        Some(target) => {
+            validate_path_segment("artifact target", target)?;
+            Ok(version.join("targets").join(target))
+        }
+        None => Ok(version.join("assets")),
+    }
 }
 
 pub fn artifact_target_dir_for(package: &str, target: &str) -> Result<PathBuf> {
     validate_path_segment("artifact target", target)?;
-    Ok(crate::host_paths::binaries_dir()?
-        .join(package_storage_key(package)?)
+    Ok(artifact_package_dir(package)?
+        .join("active")
+        .join("targets")
         .join(target))
 }
 
+pub fn artifact_assets_dir_for(package: &str) -> Result<PathBuf> {
+    Ok(artifact_package_dir(package)?.join("active").join("assets"))
+}
+
 pub fn active_version(descriptor: &NativeArtifactDescriptor) -> Result<Option<String>> {
-    let active = artifact_target_dir(descriptor)?.join("active");
+    active_version_for(&descriptor.package_id)
+}
+
+pub fn active_version_for(package: &str) -> Result<Option<String>> {
+    let _lock = ArtifactStoreLock::shared()?;
+    active_version_unlocked(package)
+}
+
+fn active_version_unlocked(package: &str) -> Result<Option<String>> {
+    let active = artifact_package_dir(package)?.join("active");
     match fs::read_link(&active) {
         Ok(target) => Ok(target
             .file_name()
@@ -580,16 +734,19 @@ pub fn active_version(descriptor: &NativeArtifactDescriptor) -> Result<Option<St
 }
 
 pub fn count_versions() -> Result<usize> {
-    walk_artifact_targets(false, false, None).map(|(retained, _)| retained)
+    let _lock = ArtifactStoreLock::shared()?;
+    walk_artifact_versions(false, false, None).map(|(retained, _)| retained)
 }
 
 pub fn prune_inactive_versions(current: &[NativeArtifactDescriptor]) -> Result<(usize, usize)> {
+    let _lock = ArtifactStoreLock::exclusive("prune")?;
     classify_inactive_versions(current, true)
 }
 
 pub fn preview_prune_inactive_versions(
     current: &[NativeArtifactDescriptor],
 ) -> Result<(usize, usize)> {
+    let _lock = ArtifactStoreLock::shared()?;
     classify_inactive_versions(current, false)
 }
 
@@ -599,55 +756,57 @@ fn classify_inactive_versions(
 ) -> Result<(usize, usize)> {
     let packages = current
         .iter()
-        .map(NativeArtifactDescriptor::package)
-        .collect::<Result<std::collections::BTreeSet<_>>>()?;
-    walk_artifact_targets(true, remove, Some(&packages))
+        .map(|descriptor| descriptor.package_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    walk_artifact_versions(true, remove, Some(&packages))
 }
 
-fn walk_artifact_targets(
+fn walk_artifact_versions(
     classify_inactive: bool,
     remove: bool,
     current_packages: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<(usize, usize)> {
-    let root = crate::host_paths::binaries_dir()?;
+    let root = crate::host_paths::artifacts_dir()?;
     if !root.is_dir() {
         return Ok((0, 0));
     }
     let mut retained = 0;
     let mut pruned = 0;
-    for package in fs::read_dir(&root)? {
-        let package = package?;
-        if !package.file_type()?.is_dir() {
+    for provider in fs::read_dir(&root)? {
+        let provider = provider?;
+        if !provider.file_type()?.is_dir() {
             continue;
         }
-        if classify_inactive
-            && current_packages.is_some_and(|packages| {
-                !packages.contains(&package.file_name().to_string_lossy().into_owned())
-            })
-        {
-            for target in fs::read_dir(package.path())? {
-                let target = target?;
-                if target.file_type()?.is_dir() {
-                    pruned += fs::read_dir(target.path())?
-                        .filter_map(Result::ok)
-                        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-                        .count();
-                }
-            }
-            if remove {
-                fs::remove_dir_all(package.path())?;
-            }
-            continue;
-        }
-        for target in fs::read_dir(package.path())? {
-            let target = target?;
-            if !target.file_type()?.is_dir() {
+        for package in fs::read_dir(provider.path())? {
+            let package = package?;
+            if !package.file_type()?.is_dir() {
                 continue;
             }
-            let active = fs::read_link(target.path().join("active"))
+            let package_id = format!(
+                "{}/{}",
+                provider.file_name().to_string_lossy(),
+                package.file_name().to_string_lossy()
+            );
+            let versions = package.path().join("versions");
+            if !versions.is_dir() {
+                continue;
+            }
+            let keep_package =
+                current_packages.is_none_or(|packages| packages.contains(&package_id));
+            if classify_inactive && !keep_package {
+                pruned += fs::read_dir(&versions)?
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .count();
+                if remove {
+                    fs::remove_dir_all(package.path())?;
+                }
+                continue;
+            }
+            let active = fs::read_link(package.path().join("active"))
                 .ok()
                 .and_then(|path| path.file_name().map(|name| name.to_os_string()));
-            for version in fs::read_dir(target.path())? {
+            for version in fs::read_dir(&versions)? {
                 let version = version?;
                 if !version.file_type()?.is_dir() {
                     continue;
@@ -672,12 +831,14 @@ fn walk_artifact_targets(
 }
 
 pub fn existing_target_scopes(package: &str) -> Result<Vec<String>> {
-    let package_dir = crate::host_paths::binaries_dir()?.join(package_storage_key(package)?);
-    if !package_dir.is_dir() {
+    let targets_dir = artifact_package_dir(package)?
+        .join("active")
+        .join("targets");
+    if !targets_dir.is_dir() {
         return Ok(Vec::new());
     }
     let mut targets = Vec::new();
-    for entry in fs::read_dir(package_dir)? {
+    for entry in fs::read_dir(targets_dir)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             let target = entry.file_name().to_string_lossy().into_owned();
@@ -734,22 +895,30 @@ fn verify_blob_bytes(descriptor: &NativeArtifactDescriptor, bytes: &[u8]) -> Res
 }
 
 fn retarget_active(descriptor: &NativeArtifactDescriptor) -> Result<()> {
-    let target_dir = artifact_target_dir(descriptor)?;
-    fs::create_dir_all(&target_dir)?;
-    let partial = target_dir.join(".active.partial");
+    let package_dir = artifact_package_dir(&descriptor.package_id)?;
+    fs::create_dir_all(package_dir.join("versions"))?;
+    let partial = package_dir.join(".active.partial");
     if fs::symlink_metadata(&partial).is_ok() {
         fs::remove_file(&partial)?;
     }
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&descriptor.version, &partial)?;
+    std::os::unix::fs::symlink(Path::new("versions").join(&descriptor.version), &partial)?;
     #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&descriptor.version, &partial)?;
-    fs::rename(&partial, target_dir.join("active"))
+    std::os::windows::fs::symlink_dir(Path::new("versions").join(&descriptor.version), &partial)?;
+    fs::rename(&partial, package_dir.join("active"))
         .context("failed to atomically retarget the active artifact version")
 }
 
 fn unpack_asset(asset_path: &Path, root: &Path) -> Result<()> {
-    let partial = root.with_extension("partial");
+    let partial = root
+        .parent()
+        .context("artifact scope has no parent")?
+        .join(format!(
+            ".{}.partial",
+            root.file_name()
+                .context("artifact scope has no directory name")?
+                .to_string_lossy()
+        ));
     if partial.exists() {
         fs::remove_dir_all(&partial)
             .with_context(|| format!("failed to remove {}", partial.display()))?;
@@ -836,7 +1005,7 @@ fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("failed to finalize {}", path.display()))
 }
 
-fn package_storage_key(package: &str) -> Result<String> {
+fn package_storage_key(package: &str) -> Result<(String, String)> {
     let segments = package.split('/').collect::<Vec<_>>();
     anyhow::ensure!(
         segments.len() == 2,
@@ -845,13 +1014,18 @@ fn package_storage_key(package: &str) -> Result<String> {
     for segment in &segments {
         validate_path_segment("artifact package segment", segment)?;
     }
-    // Filesystem-safe, matching the rest of the system (framework release
-    // tags/assets, `resolver`/`deploy`'s `filesystem_safe_package_name`): a
-    // provider-qualified `phoxal/service-drive` stores as `phoxal-service-drive`.
-    // The theoretical `a/b-c` vs `a-b/c` collision cannot occur while providers
-    // are single-segment (today only `phoxal`), and it is already accepted
-    // system-wide for the identical packages' tags and asset filenames.
-    Ok(format!("{}-{}", segments[0], segments[1]))
+    Ok((segments[0].to_string(), segments[1].to_string()))
+}
+
+fn artifact_package_dir(package: &str) -> Result<PathBuf> {
+    let (provider, package) = package_storage_key(package)?;
+    Ok(crate::host_paths::artifacts_dir()?
+        .join(provider)
+        .join(package))
+}
+
+fn descriptor_scope_label(descriptor: &NativeArtifactDescriptor) -> &str {
+    descriptor.target.as_deref().unwrap_or("assets")
 }
 
 fn validate_path_segment(label: &str, value: &str) -> Result<()> {
@@ -882,7 +1056,7 @@ mod tests {
             sha256: hex::encode(Sha256::digest(bytes)),
             size: bytes.len() as u64,
             binary_name: "phoxal-service-drive".to_string(),
-            target: "aarch64-unknown-linux-musl".to_string(),
+            target: Some("aarch64-unknown-linux-musl".to_string()),
         }
     }
 
@@ -938,7 +1112,7 @@ mod tests {
         // resolver, the deploy install plan, and the framework's release tags.
         assert_eq!(
             package_storage_key("phoxal/service-drive")?,
-            "phoxal-service-drive"
+            ("phoxal".to_string(), "service-drive".to_string())
         );
         assert!(package_storage_key("../service-drive").is_err());
         assert!(package_storage_key("phoxal/service/drive").is_err());
@@ -946,8 +1120,57 @@ mod tests {
         let mut invalid = descriptor("../escape", b"bytes");
         assert!(artifact_exec_dir(&invalid).is_err());
         invalid.version = "1.0.0".to_string();
-        invalid.target = "../../escape".to_string();
+        invalid.target = Some("../../escape".to_string());
         assert!(artifact_exec_dir(&invalid).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn layout_is_provider_scoped_and_version_atomic() -> Result<()> {
+        let _root = ScratchPhoxalHome::new()?;
+        let target = descriptor("1.2.3", b"target");
+        let mut assets = target.clone();
+        assets.kind = ArtifactKind::ComponentAssets;
+        assets.binary_name.clear();
+        assets.target = None;
+
+        assert!(artifact_exec_dir(&target)?.ends_with(
+            "artifacts/phoxal/service-drive/versions/1.2.3/targets/aarch64-unknown-linux-musl"
+        ));
+        assert!(
+            artifact_exec_dir(&assets)?
+                .ends_with("artifacts/phoxal/service-drive/versions/1.2.3/assets")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lock_file_self_heals_and_is_removed_after_exclusive_work() -> Result<()> {
+        let _root = ScratchPhoxalHome::new()?;
+        let lock_path = crate::host_paths::artifacts_dir()?.join(".lock");
+        fs::create_dir_all(lock_path.parent().context("lock has no parent")?)?;
+        fs::write(&lock_path, b"stale")?;
+
+        let lock = ArtifactStoreLock::exclusive("test")?;
+        assert!(lock_path.is_file());
+        drop(lock);
+
+        assert!(!lock_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn last_shared_holder_removes_lock_file() -> Result<()> {
+        let _root = ScratchPhoxalHome::new()?;
+        let lock_path = crate::host_paths::artifacts_dir()?.join(".lock");
+        let first = ArtifactStoreLock::shared()?;
+        let second = ArtifactStoreLock::shared()?;
+
+        drop(first);
+        assert!(lock_path.is_file());
+        drop(second);
+
+        assert!(!lock_path.exists());
         Ok(())
     }
 }

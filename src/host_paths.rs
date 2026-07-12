@@ -24,8 +24,8 @@ pub fn project_state_dir() -> Result<PathBuf> {
     project_root().map(|root| root.join(".phoxal"))
 }
 
-pub fn binaries_dir() -> Result<PathBuf> {
-    project_state_dir().map(|root| root.join("binaries"))
+pub fn artifacts_dir() -> Result<PathBuf> {
+    project_state_dir().map(|root| root.join("artifacts"))
 }
 
 pub fn git_artifacts_dir() -> Result<PathBuf> {

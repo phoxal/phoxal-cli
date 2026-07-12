@@ -131,9 +131,9 @@ pub struct ResolvedPlatformRuntime {
     pub path_override: Option<PathBuf>,
     /// The channel snapshot this entry belongs to.
     pub channel: SelectionChannel,
-    /// The target triple this entry was resolved/built for
-    /// (`crate::catalog::TARGET_INDEPENDENT_SCOPE` for `component_assets`).
-    pub target: String,
+    /// The target triple this entry was resolved/built for. `None` identifies
+    /// the catalog's distinct component-assets blob.
+    pub target: Option<String>,
 }
 
 impl ResolvedPlatformRuntime {
@@ -205,8 +205,8 @@ pub struct ResolvedComponentPackage {
     pub source: ResolvedComponentSource,
     pub path_override: Option<PathBuf>,
     /// Present exactly when `source == Catalog` and the catalog resolved a
-    /// matching entry for the needed scope (target-independent for assets,
-    /// `context.target` for drivers). Carries the same shape a
+    /// matching entry for the needed scope (assets or `context.target`).
+    /// Carries the same shape a
     /// service/simulator resolves to ([`ResolvedPlatformRuntime`]) so
     /// components stage through the identical native-artifact machinery
     /// (`native_artifacts::NativeArtifactDescriptor`) instead of a parallel
@@ -692,13 +692,16 @@ pub fn resolve(
     let tool_target = options
         .tool_target_triple
         .unwrap_or_else(host_target_triple);
-    if catalog.is_none() && !project_root.join(".phoxal/binaries").is_dir() {
+    if catalog.is_none() && !project_root.join(".phoxal/artifacts").is_dir() {
         bail!(
             "artifact catalog is unavailable and this project has no vendored binaries; run `phoxal update` online"
         );
     }
     let prefer_vendored = !options.refresh_channel_head
-        && crate::host_paths::binaries_dir().is_ok_and(|path| path.is_dir());
+        && crate::host_paths::artifacts_dir().is_ok_and(|path| path.is_dir());
+    let _artifact_lock = prefer_vendored
+        .then(crate::native_artifacts::ArtifactStoreLock::shared)
+        .transpose()?;
     if options.emit_update_notice
         && prefer_vendored
         && std::env::var_os("PHOXAL_QUIET").is_none()
@@ -1081,7 +1084,7 @@ fn resolve_catalog_entries(
                     name,
                     package,
                     channel,
-                    target,
+                    target: Some(target),
                     pin_target: target,
                     assets: false,
                     prefer_vendored,
@@ -1109,7 +1112,7 @@ fn resolve_simulators(
                     name,
                     package,
                     channel,
-                    target,
+                    target: Some(target),
                     pin_target: target,
                     assets: false,
                     prefer_vendored,
@@ -1146,10 +1149,10 @@ fn resolve_vendored_entries(
                     published_triples: Vec::new(),
                     path_override: None,
                     channel,
-                    target: target.to_string(),
+                    target: Some(target.to_string()),
                 });
             }
-            vendored_runtime(name, package, kind, channel, target)
+            vendored_runtime(name, package, kind, channel, Some(target))
         })
         .collect()
 }
@@ -1159,33 +1162,39 @@ fn vendored_runtime(
     package: &str,
     kind: ArtifactKind,
     channel: SelectionChannel,
-    target: &str,
+    target: Option<&str>,
 ) -> Result<ResolvedPlatformRuntime> {
-    let active = crate::native_artifacts::artifact_target_dir_for(package, target)?.join("active");
-    let version = fs::read_link(&active)
-        .with_context(|| {
-            format!(
-                "catalog unreachable and vendored package {package} has no active version for {target}; run `phoxal update` online"
-            )
-        })?
-        .file_name()
-        .context("active artifact symlink has no version name")?
-        .to_string_lossy()
-        .into_owned();
+    let version = crate::native_artifacts::active_version_for(package)?.with_context(|| {
+        format!(
+            "catalog unreachable and vendored package {package} has no active version; run `phoxal update` online"
+        )
+    })?;
+    let scope = match target {
+        Some(target) => crate::native_artifacts::artifact_target_dir_for(package, target)?,
+        None => crate::native_artifacts::artifact_assets_dir_for(package)?,
+    };
+    anyhow::ensure!(
+        scope.is_dir(),
+        "catalog unreachable and vendored package {package} active version {version} has no {}; run `phoxal update` online",
+        target.map_or("assets", |target| target)
+    );
     Ok(ResolvedPlatformRuntime {
         name: name.to_string(),
         package: package.to_string(),
         kind,
         version: version.clone(),
-        artifact_ref: format!("vendored:{package}@{version}:{target}"),
+        artifact_ref: format!(
+            "vendored:{package}@{version}:{}",
+            target.unwrap_or("assets")
+        ),
         sha256: None,
         url: None,
         size: None,
         published: true,
-        published_triples: vec![target.to_string()],
+        published_triples: target.into_iter().map(str::to_string).collect(),
         path_override: None,
         channel,
-        target: target.to_string(),
+        target: target.map(str::to_string),
     })
 }
 
@@ -1234,14 +1243,9 @@ fn collect_newer(
     let Ok(selected) = select_artifact(catalog, package, None, target) else {
         return;
     };
-    let active = crate::native_artifacts::artifact_target_dir_for(package, target)
+    let active = crate::native_artifacts::active_version_for(package)
         .ok()
-        .map(|root| root.join("active"))
-        .and_then(|path| fs::read_link(path).ok())
-        .and_then(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        });
+        .flatten();
     if active
         .as_deref()
         .is_some_and(|version| version != selected.version)
@@ -1259,7 +1263,7 @@ struct ExpectedArtifact<'a> {
     name: &'a str,
     package: &'a str,
     channel: SelectionChannel,
-    target: &'a str,
+    target: Option<&'a str>,
     pin_target: &'a str,
     assets: bool,
     prefer_vendored: bool,
@@ -1297,7 +1301,7 @@ fn resolved_runtime_from_expected_package(
             published_triples: Vec::new(),
             path_override: None,
             channel,
-            target: target.to_string(),
+            target: target.map(str::to_string),
         });
     }
     if prefer_vendored
@@ -1315,14 +1319,17 @@ fn resolved_runtime_from_expected_package(
     let built = if assets {
         entry.assets.as_ref()
     } else {
-        entry.targets.get(target)
+        entry
+            .targets
+            .get(target.context("target artifact is missing a target triple")?)
     };
     let artifact_ref = built.map_or_else(
         || {
             format!(
-                "{}:{}-{target}",
+                "{}:{}-{}",
                 filesystem_safe_package_name(package),
-                entry.version
+                entry.version,
+                target.unwrap_or("assets")
             )
         },
         |blob| blob.url.clone(),
@@ -1340,7 +1347,7 @@ fn resolved_runtime_from_expected_package(
         published_triples: entry.targets.keys().cloned().collect(),
         path_override: None,
         channel,
-        target: target.to_string(),
+        target: target.map(str::to_string),
     })
 }
 
@@ -1543,7 +1550,7 @@ fn resolve_components(
 /// `component_driver`) for `package`: an `artifacts.pins` entry takes
 /// precedence (`Git`/`Path`/version/sha256 pin form), otherwise it resolves
 /// from the catalog. A catalog resolution also captures the matched entry's
-/// built artifact for the needed scope (target-independent for assets, the
+/// built artifact for the needed scope (assets or the
 /// resolved target triple for drivers) into `catalog_runtime`, exactly like a
 /// service/simulator captures `artifact_ref`/`sha256`/`published` - see
 /// [`resolved_runtime_from_artifact_entry`]. If the entry exists but has no
@@ -1566,9 +1573,9 @@ fn resolve_component_package(
     }
 
     let (target, assets) = if kind == ArtifactKind::ComponentAssets {
-        (crate::catalog::TARGET_INDEPENDENT_SCOPE, true)
+        (None, true)
     } else {
-        (context.target, false)
+        (Some(context.target), false)
     };
     let component_name = package.strip_prefix("phoxal/component-").unwrap_or(package);
     let catalog_runtime = match context.catalog {
@@ -1651,7 +1658,8 @@ fn resolve_tools(
         return OFFICIAL_TOOLS
             .iter()
             .map(|(name, package)| {
-                let runtime = vendored_runtime(name, package, ArtifactKind::Tool, channel, target)?;
+                let runtime =
+                    vendored_runtime(name, package, ArtifactKind::Tool, channel, Some(target))?;
                 Ok(ResolvedTool {
                     name: format!("tool-{name}"),
                     package: (*package).to_string(),
@@ -1697,8 +1705,13 @@ fn resolve_tools(
             }
             if prefer_vendored
                 && !robot.artifacts.pins.contains_key(*package)
-                && let Ok(runtime) =
-                    vendored_runtime(artifact_name, package, ArtifactKind::Tool, channel, target)
+                && let Ok(runtime) = vendored_runtime(
+                    artifact_name,
+                    package,
+                    ArtifactKind::Tool,
+                    channel,
+                    Some(target),
+                )
             {
                 return Ok(ResolvedTool {
                     name: format!("tool-{artifact_name}"),
@@ -2256,7 +2269,7 @@ services:
             published_triples: Vec::new(),
             path_override: None,
             channel: CatalogChannel::Stable,
-            target: "aarch64-unknown-linux-gnu".to_string(),
+            target: Some("aarch64-unknown-linux-gnu".to_string()),
         };
 
         assert_eq!(runtime.artifact_ref(), "service-asset:y2026_1-stable");

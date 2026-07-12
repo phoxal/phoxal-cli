@@ -1196,7 +1196,12 @@ fn provisioned_official_simulator_binary(runtime: &ResolvedPlatformRuntime) -> R
                 runtime.name
             )
         })?;
-    let cached = crate::native_artifacts::artifact_binary_path(&descriptor)?;
+    let cached = crate::native_artifacts::artifact_binary_path(&descriptor).with_context(|| {
+        format!(
+            "failed to locate vendored simulator '{}' in the artifact store",
+            runtime.name
+        )
+    })?;
     if !cached.is_file() {
         bail!(
             "NativePending: simulator '{}' binary is not vendored ({}); run `phoxal update` to fetch it",
@@ -2627,7 +2632,7 @@ robot:
             published_triples: Vec::new(),
             path_override: None,
             channel: crate::catalog::SelectionChannel::Stable,
-            target: host_target_triple(),
+            target: Some(host_target_triple()),
         }
     }
 
@@ -2648,7 +2653,7 @@ robot:
             published_triples: Vec::new(),
             path_override: None,
             channel: crate::catalog::SelectionChannel::Stable,
-            target: host_target_triple(),
+            target: Some(host_target_triple()),
         }
     }
 

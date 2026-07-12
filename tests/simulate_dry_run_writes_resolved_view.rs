@@ -1,5 +1,6 @@
 use std::fs;
 
+use anyhow::Context;
 use phoxal_cli::catalog::{
     SelectionChannel as CatalogChannel, fixture_catalog_for_tests, fixture_tool_entry_for_tests,
 };
@@ -71,14 +72,20 @@ fn write_vendored_fixture_binaries(root: &std::path::Path) -> anyhow::Result<()>
         )
     {
         let _ = name;
-        let target_dir = phoxal_cli::native_artifacts::artifact_target_dir_for(package, &target)?;
-        let version_dir = target_dir.join("0.1.0");
+        let (provider, package_name) = package
+            .split_once('/')
+            .context("fixture package must be provider-qualified")?;
+        let package_dir = root
+            .join(".phoxal/artifacts")
+            .join(provider)
+            .join(package_name);
+        let version_dir = package_dir.join("versions/0.1.0/targets").join(&target);
         fs::create_dir_all(&version_dir)?;
         fs::copy(&source, version_dir.join(binary))?;
         #[cfg(unix)]
-        std::os::unix::fs::symlink("0.1.0", target_dir.join("active"))?;
+        std::os::unix::fs::symlink("versions/0.1.0", package_dir.join("active"))?;
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir("0.1.0", target_dir.join("active"))?;
+        std::os::windows::fs::symlink_dir("versions/0.1.0", package_dir.join("active"))?;
     }
     Ok(())
 }
