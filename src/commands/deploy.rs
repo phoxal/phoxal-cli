@@ -1028,7 +1028,10 @@ fn hydrate_catalog_blobs(
         let blob = if runtime.kind == ArtifactKind::ComponentAssets {
             artifact.assets.as_ref()
         } else {
-            artifact.targets.get(&runtime.target)
+            runtime
+                .target
+                .as_ref()
+                .and_then(|target| artifact.targets.get(target))
         };
         let Some(blob) = blob else {
             runtime.published = false;
@@ -1439,11 +1442,12 @@ fn stage_official_fallback(payload: &mut RenderedPayload, ui: &crate::Ui) -> Res
                 sha256: artifact.sha256.clone(),
                 size: artifact.size,
                 binary_name: artifact.archive_binary_name.clone(),
-                target: artifact.target.clone(),
+                target: Some(artifact.target.clone()),
             },
         )
         .collect::<Vec<_>>();
     crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
+    let _lock = crate::native_artifacts::ArtifactStoreLock::shared()?;
     for (descriptor, artifact) in descriptors.iter().zip(payload.official_plans.values_mut()) {
         let source = crate::native_artifacts::artifact_binary_path(descriptor)?;
         let dest = payload_bin(payload.root.path()).join(&artifact.install_binary_name);
@@ -2438,7 +2442,10 @@ fn official_runtime_plan(
                 String::new(),
                 0,
                 runtime.sha256.clone().unwrap_or_else(|| "0".repeat(64)),
-                runtime.target.clone(),
+                runtime
+                    .target
+                    .clone()
+                    .unwrap_or_else(|| "assets".to_string()),
                 crate::resolver::official_binary_name(runtime.kind, &runtime.name),
             )
         },
@@ -2447,7 +2454,7 @@ fn official_runtime_plan(
                 descriptor.url,
                 descriptor.size,
                 descriptor.sha256,
-                descriptor.target,
+                descriptor.target.unwrap_or_else(|| "assets".to_string()),
                 descriptor.binary_name,
             )
         },
@@ -2484,7 +2491,7 @@ fn official_tool_plan(_root: &Path, tool: &ResolvedTool) -> Result<OfficialArtif
                 descriptor.url,
                 descriptor.size,
                 descriptor.sha256,
-                descriptor.target,
+                descriptor.target.unwrap_or_else(|| "assets".to_string()),
                 descriptor.binary_name,
             )
         },
@@ -2903,6 +2910,16 @@ fn stage_payload_metadata(
     robot: &Robot,
     resolved: &ResolvedRobot,
 ) -> Result<Vec<String>> {
+    let reads_catalog_assets = resolved.components.iter().any(|component| {
+        component
+            .assets
+            .as_ref()
+            .is_some_and(|assets| matches!(&assets.source, ResolvedComponentSource::Catalog))
+    });
+    let _artifact_lock = (reads_catalog_assets
+        && crate::host_paths::artifacts_dir().is_ok_and(|path| path.is_dir()))
+    .then(crate::native_artifacts::ArtifactStoreLock::shared)
+    .transpose()?;
     let mut staged_files = Vec::new();
     staged_files.push(stage_declared_metadata_file(
         project_root,
@@ -5443,7 +5460,7 @@ robot:
                 published_triples: Vec::new(),
                 path_override: None,
                 channel: crate::catalog::SelectionChannel::Stable,
-                target: "aarch64-unknown-linux-gnu".to_string(),
+                target: Some("aarch64-unknown-linux-gnu".to_string()),
             }),
         }
     }

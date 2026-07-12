@@ -32,14 +32,14 @@ impl CacheCmd {
 #[derive(Debug, Args)]
 pub struct Clean {
     #[arg(long)]
-    pub binaries: bool,
+    pub artifacts: bool,
     #[arg(long)]
     pub build: bool,
     #[arg(long)]
     pub git: bool,
     #[arg(long)]
     pub webots: bool,
-    #[arg(long, conflicts_with_all = ["binaries", "build", "git", "webots"])]
+    #[arg(long, conflicts_with_all = ["artifacts", "build", "git", "webots"])]
     pub all: bool,
     #[arg(long)]
     pub dry_run: bool,
@@ -65,9 +65,21 @@ impl Clean {
         let state = app.project.root().join(".phoxal");
         let scopes = self.scopes()?;
         let dry_run = self.dry_run;
-        let summary = tokio::task::spawn_blocking(move || clean(&state, &scopes, dry_run))
-            .await
-            .context("cache clean worker failed")??;
+        let summary = tokio::task::spawn_blocking(move || {
+            let _artifact_lock = scopes
+                .contains(&"artifacts")
+                .then(|| {
+                    if dry_run {
+                        crate::native_artifacts::ArtifactStoreLock::shared()
+                    } else {
+                        crate::native_artifacts::ArtifactStoreLock::exclusive("cache clean")
+                    }
+                })
+                .transpose()?;
+            clean(&state, &scopes, dry_run)
+        })
+        .await
+        .context("cache clean worker failed")??;
         crate::commands::print_message(
             &summary,
             || {
@@ -105,8 +117,8 @@ impl Clean {
 
     fn scopes(&self) -> Result<Vec<&'static str>> {
         let mut scopes = Vec::new();
-        if self.all || self.binaries {
-            scopes.push("binaries");
+        if self.all || self.artifacts {
+            scopes.push("artifacts");
         }
         if self.all || self.build {
             scopes.push("build");
@@ -119,7 +131,7 @@ impl Clean {
         }
         ensure!(
             !scopes.is_empty(),
-            "choose a clean scope: --binaries, --build, --git, --webots, or --all"
+            "choose a clean scope: --artifacts, --build, --git, --webots, or --all"
         );
         Ok(scopes)
     }
@@ -139,7 +151,16 @@ fn clean(state: &Path, scopes: &[&str], dry_run: bool) -> Result<CleanSummary> {
         }
         let bytes = dir_size(&path)?;
         if !dry_run {
-            remove_path(&path)?;
+            if *scope == "artifacts" {
+                for child in fs::read_dir(&path)? {
+                    let child = child?;
+                    if child.file_name() != ".lock" {
+                        remove_path(&child.path())?;
+                    }
+                }
+            } else {
+                remove_path(&path)?;
+            }
         }
         total_bytes += bytes;
         entries.push(CleanedEntry { path, bytes });

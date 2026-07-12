@@ -1895,7 +1895,7 @@ mod tests {
                 published_triples: Vec::new(),
                 path_override: None,
                 channel: crate::catalog::SelectionChannel::Stable,
-                target: "aarch64-unknown-linux-gnu".to_string(),
+                target: Some("aarch64-unknown-linux-gnu".to_string()),
             }),
         }
     }
@@ -2970,7 +2970,7 @@ mod tests {
             published_triples: Vec::new(),
             path_override: Some(temp.path().join("framework/service/drive")),
             channel: crate::catalog::SelectionChannel::Stable,
-            target: "aarch64-unknown-linux-gnu".to_string(),
+            target: Some("aarch64-unknown-linux-gnu".to_string()),
         });
 
         let platform_refs = platform_artifact_refs_from_resolved(&resolved);

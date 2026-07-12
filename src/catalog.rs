@@ -17,7 +17,6 @@ pub const DEFAULT_CATALOG_URL: &str =
     "https://github.com/phoxal/framework/releases/latest/download/catalog.json";
 pub const CATALOG_SOURCE_ENV: &str = "PHOXAL_ARTIFACT_CATALOG";
 pub const OFFLINE_ENV: &str = "PHOXAL_OFFLINE";
-pub const TARGET_INDEPENDENT_SCOPE: &str = "target-independent";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -482,7 +481,7 @@ pub fn fixture_catalog_for_tests(entries: Vec<CatalogFixtureEntry>) -> Catalog {
             package: package.clone(),
             version: "0.1.0".to_string(),
             targets,
-            assets: Some(fixture_blob(&package, TARGET_INDEPENDENT_SCOPE)),
+            assets: Some(fixture_blob(&package, "assets")),
         });
     }
     Catalog::new(
@@ -523,7 +522,7 @@ fn fixture_entry(
     let mut assets = None;
     if published {
         if kind == ArtifactKind::ComponentAssets {
-            assets = Some(fixture_blob(&package, TARGET_INDEPENDENT_SCOPE));
+            assets = Some(fixture_blob(&package, "assets"));
         } else {
             targets.insert(target.to_string(), fixture_blob(&package, target));
         }
@@ -582,7 +581,7 @@ pub fn fixture_component_assets_entry_for_tests(
         ArtifactKind::ComponentAssets,
         format!("phoxal/component-{name}"),
         version,
-        TARGET_INDEPENDENT_SCOPE,
+        "assets",
         true,
     )
 }
