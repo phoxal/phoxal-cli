@@ -4936,6 +4936,7 @@ capabilities:
 
     #[test]
     fn dry_run_renders_units_env_release_and_install_plan() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let payload = prepare_deploy(
@@ -5013,6 +5014,7 @@ capabilities:
 
     #[test]
     fn payload_stages_path_component_metadata_and_structures() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         phoxal_cli_test_support::write_bench_camera_project(temp.path())?;
         let payload = prepare_deploy(
@@ -5063,6 +5065,7 @@ capabilities:
 
     #[test]
     fn payload_without_path_components_has_no_components_dir() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         phoxal_cli_test_support::write_catalog_only_project(temp.path())?;
         // This fixture's component pin is a git (not path) pin with a bogus
@@ -5092,6 +5095,7 @@ capabilities:
 
     #[test]
     fn sync_payload_stages_opt_tree_and_invokes_install_payload_helper() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let payload = prepare_deploy(
@@ -5330,6 +5334,7 @@ capabilities:
 
     #[test]
     fn render_payload_rejects_a_hostile_remote_user() {
+        let _phoxal_home = ScratchPhoxalHome::new().expect("scratch phoxal home");
         let temp = tempfile::tempdir().expect("tempdir");
         write_basic_project(temp.path()).expect("write project");
         let mut transport = FakeTransport::healthy();
@@ -5376,6 +5381,7 @@ capabilities:
 
     #[test]
     fn driver_graph_renders_one_unit_per_instance_with_privileges() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         phoxal_cli_test_support::write_driver_project(temp.path())?;
         let payload = prepare_deploy(
@@ -5558,6 +5564,7 @@ robot:
 
     #[test]
     fn privileged_tool_graph_renders_router_only_not_joypad() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let payload = prepare_deploy(
@@ -5584,6 +5591,7 @@ robot:
 
     #[test]
     fn rejected_non_immutable_artifact_gets_designed_error() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         phoxal_cli_test_support::write_native_dep_project(temp.path())?;
         let error = prepare_deploy(
@@ -5665,6 +5673,7 @@ robot:
 
     #[test]
     fn stale_unit_removal_is_computed_by_tree_comparison() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let mut transport = FakeTransport::healthy();
@@ -5707,6 +5716,7 @@ robot:
 
     #[test]
     fn unreachable_github_uses_host_transfer_fallback() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let mut transport = FakeTransport::healthy();
@@ -5732,6 +5742,7 @@ robot:
 
     #[test]
     fn failed_artifact_verification_never_activates() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let mut transport = FakeTransport::healthy();
@@ -5895,6 +5906,7 @@ robot:
 
     #[test]
     fn row3_deploy_bootstrap_uses_sudo_s_and_writes_password_once() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let mut transport = FakeTransport::healthy();
@@ -6013,6 +6025,7 @@ robot:
 
     #[test]
     fn deploy_with_transport_writes_static_fragment_and_enrolls_probed_user() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let mut transport = FakeTransport::healthy();
@@ -6047,6 +6060,7 @@ robot:
         // deploy must re-run the bootstrap script (it rewrites the helper
         // and the fragment idempotently) and enroll the new deploying user
         // into the phoxal-deploy group.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let mut transport = FakeTransport::healthy();
@@ -6089,6 +6103,7 @@ robot:
         // model. Because sudo_noninteractive is true, this proceeds and
         // runs the repair non-interactively, without touching the local tty
         // or a password source at all.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let mut transport = FakeTransport::healthy();
@@ -6120,6 +6135,7 @@ robot:
 
     #[test]
     fn stale_helper_hash_triggers_bootstrap_repair_with_existing_grant() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let mut transport = FakeTransport::healthy();
@@ -6145,6 +6161,7 @@ robot:
 
     #[test]
     fn failed_health_push_exits_nonzero_with_diagnosis() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_basic_project(temp.path())?;
         let mut transport = FakeTransport::healthy();

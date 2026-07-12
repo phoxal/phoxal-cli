@@ -1792,7 +1792,11 @@ mod tests {
     fn live_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
         // With no lockfile, a path-only / official-only project resolves live
         // with no network for either mode: there is nothing to look up remotely
-        // (no git components), so resolution succeeds and writes no lock.
+        // (no git components), so resolution succeeds and writes no lock. A
+        // scratch home still isolates the process-global `PHOXAL_PROJECT_ROOT`
+        // so `resolve()`'s ambient `artifacts_dir()` check can't race a
+        // concurrent test's real store lock.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_robot_project(temp.path())?;
 
@@ -1815,6 +1819,7 @@ mod tests {
 
     #[test]
     fn dry_run_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_robot_project(temp.path())?;
 
@@ -2502,6 +2507,7 @@ mod tests {
         // the driver's component as "simulated by" the controller, because
         // that label is a CLI-side display fact computed from the plan, not
         // a checked one.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_robot_project_with_component(temp.path())?;
         let catalog_path = write_catalog_with_driver(temp.path())?;
@@ -2533,6 +2539,7 @@ mod tests {
 
     #[test]
     fn custom_driver_metadata_unavailable_is_named() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_robot_project_with_custom_component(temp.path())?;
         let catalog_path = write_catalog_with_driver(temp.path())?;

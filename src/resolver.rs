@@ -1851,6 +1851,7 @@ mod tests {
         fixture_component_assets_entry_for_tests, fixture_contract_for_tests,
         fixture_service_entry_for_tests,
     };
+    use crate::host_paths::test_support::ScratchPhoxalHome;
 
     fn test_catalog() -> Catalog {
         fixture_catalog_for_tests(vec![
@@ -1879,6 +1880,7 @@ mod tests {
         // A git component pin is resolved with an empty commit; if resolution
         // tried to reach the network it would either hang or fail, so an empty
         // commit proves no ls-remote was attempted.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let robot = Robot::parse_from_string(GIT_COMPONENT_ROBOT)?;
         let catalog = test_catalog();
         let resolved = resolve(
@@ -1947,6 +1949,7 @@ artifacts:
         // A `rev` that is already a full commit SHA is an explicit pin: it must
         // resolve with no network (no `git ls-remote`), so a live-resolution
         // flow works offline when components are pinned to a SHA.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let sha = "0123456789abcdef0123456789abcdef01234567";
         let robot = Robot::parse_from_string(
             &GIT_COMPONENT_ROBOT.replace("rev: main", &format!("rev: {sha}")),
@@ -1992,6 +1995,7 @@ artifacts:
         // must succeed with `assets: None`, not hard-fail (this was the
         // reported bug: `check` failed with "expected package
         // phoxal/component-passive_caster is absent from snapshot ...").
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let robot = Robot::parse_from_string(
             r#"schema: robot/v0
 robot:
@@ -2050,6 +2054,7 @@ artifacts:
         // block still needs its assets package - a missing assets package
         // for a driven (active) component remains a hard resolution error,
         // not a silent `None`.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let robot = Robot::parse_from_string(
             r#"schema: robot/v0
 robot:

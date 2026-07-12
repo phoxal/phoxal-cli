@@ -572,12 +572,14 @@ mod tests {
         CheckGraphContext, RawArtifact, RawEmitApis, SourceParticipant,
         platform_artifact_refs_from_resolved, run_check_with_context,
     };
+    use crate::host_paths::test_support::ScratchPhoxalHome;
     use crate::resolver::{ResolveOptions, ResolvedRobot, host_target_triple, resolve};
 
     use super::*;
 
     #[test]
     fn launch_plan_covers_site_singletons_services_and_component_instances() -> anyhow::Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         std::fs::create_dir_all(temp.path().join("runtimes/mission"))?;
         std::fs::write(
