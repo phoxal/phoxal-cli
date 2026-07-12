@@ -1511,9 +1511,6 @@ fn build_emit_apis_from_source_with_diagnostics(
 fn report_source_emit_apis_progress(ui: Option<&crate::Ui>, message: String) {
     if let Some(ui) = ui {
         ui.info(message);
-    } else {
-        // This low-level builder is also used by tests and callers without a `Ui`.
-        eprintln!("check: {message}");
     }
 }
 
