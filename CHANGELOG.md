@@ -4,6 +4,18 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.8.2) - 2026-07-12
+
+
+### Fixed
+
+- *(simulate)* Make live Webots simulation work end to end (#116)
+- *(simulate)* Clean Webots shutdown, native IMPORTABLE, in-project base pins (#118)
+
+### Refactored
+
+- *(artifacts)* Version-atomic store, self-cleaning lock, retire target-independent (#119)
+
 ## [0.8.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.8.1) - 2026-07-11
 
 
