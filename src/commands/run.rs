@@ -80,6 +80,7 @@ fn spawn_run_stepper(
     stepper: crate::stepper::Stepper,
     board: BoardBackend,
     stage_phases: Vec<crate::stepper::StagePhase>,
+    display_activate_tx: tokio::sync::oneshot::Sender<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut stepper = stepper
@@ -87,13 +88,22 @@ fn spawn_run_stepper(
             .await;
         if stepper.has_failed() {
             // A phase already failed and printed its own `✗` line - leave it
-            // visible instead of papering over it with `Initialized`.
+            // visible instead of papering over it with `Initialized`. The
+            // display still hands off here (not returning early) so a
+            // startup failure is visible in the TUI/logger too, not just a
+            // frozen stepper line.
+            let _ = display_activate_tx.send(());
             return;
         }
         let initialized = RUN_PHASES.len() - 1;
         stepper.start(initialized);
         stepper.complete(initialized);
         stepper.clear();
+        // Hand off to whichever display `Display::for_mode` selected (Part
+        // 2) only now that every stepper line is done redrawing - entering
+        // the TUI's alternate screen any earlier would race its indicatif
+        // output.
+        let _ = display_activate_tx.send(());
     })
 }
 
@@ -256,7 +266,15 @@ impl Run {
                 crate::stepper::StagePhase::new(!stage.specs.is_empty(), stage.ready_ids.clone())
             })
             .collect::<Vec<_>>();
-        let stepper_handle = spawn_run_stepper(stepper, prepared.board.clone(), stage_phases);
+        let identity = crate::identity::IdentitySummary::discover(&prepared.ctx.project_root);
+        let display = crate::display::Display::for_mode("run", identity);
+        let (display_activate_tx, display_activate_rx) = tokio::sync::oneshot::channel();
+        let stepper_handle = spawn_run_stepper(
+            stepper,
+            prepared.board.clone(),
+            stage_phases,
+            display_activate_tx,
+        );
 
         let outcome = supervise_until_shutdown(
             stages,
@@ -265,6 +283,8 @@ impl Run {
                 state_file: Some(state_file),
                 action_file: Some(action_file),
                 action_rx,
+                display,
+                display_activate_rx: Some(display_activate_rx),
                 ..SupervisorOptions::default()
             },
         )

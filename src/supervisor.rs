@@ -182,6 +182,33 @@ fn trim_cell(value: &str, width: usize) -> String {
     value.chars().take(width - 1).collect::<String>() + "."
 }
 
+/// Where a routed log line came from - the ROUTING metadata a later TUI/logger
+/// dedups on instead of comparing line text (see [`BoardBackend::route_log`]
+/// and [`RoutedLogLine`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogSource {
+    /// A structured `logs/{participant_id}` bus event
+    /// ([`bus_log_subscriber_loop`]) - the primary source once a participant
+    /// is far enough along to publish on the bus.
+    Bus,
+    /// A captured stdout/stderr line from the supervised child process
+    /// ([`spawn_output_reader`]) - the only source before the bus connects
+    /// (panics, pre-`#[setup]` startup), otherwise redundant with `Bus`.
+    Raw,
+}
+
+/// One routed log line, broadcast to [`BoardBackend::set_log_sink`]'s
+/// subscriber (a live TUI) in addition to the bounded 8-line history kept on
+/// the board itself. Kept separate from [`ParticipantStatus::last_log_lines`]
+/// so a full-scrollback consumer (the TUI's own bounded ring buffer, see
+/// `crate::tui::logs`) never has to poll a snapshot for log history.
+#[derive(Debug, Clone)]
+pub struct RoutedLogLine {
+    pub participant: String,
+    pub source: LogSource,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BoardBackend {
     inner: Arc<Mutex<BoardSnapshot>>,
@@ -204,6 +231,13 @@ pub struct BoardBackend {
     /// `reset_participant_liveness` on every (re)spawn so a fresh incarnation
     /// must earn `Ready` again before the sweep applies to it.
     ready_once: Arc<Mutex<BTreeSet<String>>>,
+    /// Optional live sink for [`RoutedLogLine`]s - set by a TUI display
+    /// (`crate::display::Display::attach`) once it has entered the terminal,
+    /// so it can maintain its own bounded per-runtime scrollback (Part 3)
+    /// without polling the board's own 8-line history. `None` outside a TUI
+    /// session (Plain/Json output, or any test) - [`Self::route_log`] simply
+    /// skips the broadcast in that case.
+    log_sink: Arc<Mutex<Option<mpsc::UnboundedSender<RoutedLogLine>>>>,
 }
 
 impl BoardBackend {
@@ -373,6 +407,34 @@ impl BoardBackend {
         }
     }
 
+    /// Register the live [`RoutedLogLine`] sink for this session's display
+    /// (a TUI). Replaces any previous sink - only one live display exists per
+    /// session.
+    pub fn set_log_sink(&self, sender: mpsc::UnboundedSender<RoutedLogLine>) {
+        *self.log_sink.lock().expect("log sink mutex poisoned") = Some(sender);
+    }
+
+    /// Record a log line from a known routing source: updates the board's own
+    /// bounded 8-line history exactly like [`Self::append_log`] (so
+    /// `--message-format json`'s `status` snapshot and the legacy board model
+    /// stay unchanged), then additionally forwards it to the live sink
+    /// registered by [`Self::set_log_sink`], if any. This is the single
+    /// funnel both [`bus_log_subscriber_loop`] and [`spawn_output_reader`]
+    /// use, so a live TUI dedups by ROUTING (which of the two called this)
+    /// rather than by comparing rendered text - see [`LogSource`].
+    pub fn route_log(&self, id: &str, source: LogSource, text: impl Into<String>) {
+        let text = text.into();
+        self.append_log(id, text.clone());
+        let sink = self.log_sink.lock().expect("log sink mutex poisoned");
+        if let Some(sender) = sink.as_ref() {
+            let _ = sender.send(RoutedLogLine {
+                participant: id.to_string(),
+                source,
+                text,
+            });
+        }
+    }
+
     pub fn set_launch_command(&self, id: &str, command: ParticipantLaunchCommand) {
         let mut snapshot = self.inner.lock().expect("board mutex poisoned");
         if let Some(status) = snapshot.participants.get_mut(id) {
@@ -514,7 +576,25 @@ pub struct SupervisorOptions {
     pub action_file: Option<PathBuf>,
     pub action_rx: Option<mpsc::Receiver<SupervisorAction>>,
     pub requested_stop: Option<RequestedStop>,
-    pub render_board: bool,
+    /// The live display for this session (Part 2): a full-screen TUI, an
+    /// append-only line logger, or nothing (`--message-format json`) - see
+    /// `crate::display::Display`. Driven from inside this function's own
+    /// `select!` loop so redraws/input never starve poll/restart/cancel.
+    /// Defaults to [`crate::display::Display::None`] (silent) so a caller
+    /// that does not care about interactive display (every test in this
+    /// module) does not have to construct one.
+    pub display: crate::display::Display,
+    /// Gate on when `display` may start redrawing/reading input, fired once
+    /// by the caller's own startup stepper when it reaches `Initialized` (see
+    /// `commands::run::spawn_run_stepper` / `commands::simulate::run`). Kept
+    /// separate from `display` itself so a `display` that is a live TUI can
+    /// still be constructed (and start capturing routed log lines via
+    /// `BoardBackend::set_log_sink`, Part 3) well before it is safe to enter
+    /// the alternate screen - entering it while the stepper's own indicatif
+    /// lines are still redrawing would corrupt both. `None` means "active
+    /// immediately" (every test in this module, and any caller with nothing
+    /// to hand off from).
+    pub display_activate_rx: Option<oneshot::Receiver<()>>,
     /// Fires when readiness or the running contract graph reaches a terminal
     /// failure and needs the whole session torn down instead of left running
     /// unhealthy forever. The sent `String` is a human-readable reason,
@@ -531,7 +611,8 @@ impl Default for SupervisorOptions {
             action_file: None,
             action_rx: None,
             requested_stop: None,
-            render_board: true,
+            display: crate::display::Display::None,
+            display_activate_rx: None,
             cancel_rx: None,
         }
     }
@@ -563,6 +644,15 @@ pub enum SupervisorAction {
         id: String,
     },
     Resume {
+        id: String,
+    },
+    /// Stop and respawn a participant from its own current spec, unchanged -
+    /// the TUI's `r restart` (see `crate::display::DisplayAction::Restart`).
+    /// Handled the same way as `Swap` with the participant's own spec cloned
+    /// back in, rather than a new field on `RunningParticipant`, so it reuses
+    /// the exact same stop/spawn/board-note sequence a hot-reload swap
+    /// already goes through.
+    Restart {
         id: String,
     },
 }
@@ -639,6 +729,11 @@ impl RunningParticipant {
         }
         command
             .envs(self.spec.env.iter().map(|(key, value)| (key, value)))
+            // No terminal input for any child: the TUI (Part 4) owns terminal
+            // input exclusively (there is no Interact/raw-io tab), and a
+            // child that inherited this process's stdin could otherwise race
+            // it for keystrokes.
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = command
@@ -918,7 +1013,9 @@ where
         let mut lines = BufReader::new(reader).lines();
         loop {
             match lines.next_line().await {
-                Ok(Some(line)) => board.append_log(&id, format!("{stream}: {line}")),
+                Ok(Some(line)) => {
+                    board.route_log(&id, LogSource::Raw, format!("{stream}: {line}"));
+                }
                 Ok(None) => break,
                 Err(error) => {
                     board.append_log(&id, format!("supervisor: failed to read {stream}: {error}"));
@@ -1090,9 +1187,31 @@ pub async fn supervise_until_shutdown(
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut clean_shutdown = false;
-    let mut board_ticks = 0_u64;
     let mut action_rx = options.action_rx.take();
     let mut cancel_rx = options.cancel_rx.take();
+    let mut display = options.display;
+    let mut display_activate_rx = options.display_activate_rx.take();
+    // A live TUI display starts capturing routed log lines (Part 3) the
+    // instant it exists, well before `display_active` below lets it actually
+    // draw anything - so its scrollback is not empty the moment it activates.
+    if let crate::display::Display::Tui(tui) = &display {
+        board.set_log_sink(tui.log_sender());
+    }
+    let mut display_active = display_activate_rx.is_none();
+    if display_active {
+        // No hand-off gate was given (every test in this module, and any
+        // future caller with nothing to wait on) - activate synchronously so
+        // the invariant "display_active implies the display has been
+        // activated" holds from the very first loop iteration onward, same
+        // as the gated path below establishes it mid-loop.
+        if let Err(error) = display.activate() {
+            board.append_log(
+                "supervisor",
+                format!("supervisor: display activation failed, falling back to silent: {error:#}"),
+            );
+            display = crate::display::Display::None;
+        }
+    }
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -1112,6 +1231,30 @@ pub async fn supervise_until_shutdown(
             action = recv_action(&mut action_rx) => {
                 if let Some(action) = action {
                     handle_action(&mut running, &board, action).await?;
+                }
+            }
+            () = recv_activate(&mut display_activate_rx), if !display_active => {
+                display_active = true;
+                if let Err(error) = display.activate() {
+                    board.append_log(
+                        "supervisor",
+                        format!("supervisor: display activation failed, falling back to silent: {error:#}"),
+                    );
+                    display = crate::display::Display::None;
+                }
+            }
+            event = display.next_input(), if display_active => {
+                if let Some(event) = event {
+                    match display.handle_input(event, &board.snapshot()) {
+                        crate::display::DisplayAction::None => {}
+                        crate::display::DisplayAction::Quit => {
+                            clean_shutdown = true;
+                            break;
+                        }
+                        crate::display::DisplayAction::Restart(id) => {
+                            handle_action(&mut running, &board, SupervisorAction::Restart { id }).await?;
+                        }
+                    }
                 }
             }
             // Recreated fresh every loop pass (same pattern as `recv_cancel`/
@@ -1159,9 +1302,8 @@ pub async fn supervise_until_shutdown(
                     participant.poll(&board, &options.restart_policy).await?;
                 }
                 board.fail_stale_heartbeats(HEARTBEAT_STALE_TIMEOUT);
-                board_ticks = board_ticks.saturating_add(1);
-                if options.render_board && board_ticks % 2 == 1 {
-                    eprintln!("{}", board.snapshot().render());
+                if display_active {
+                    display.redraw(&board.snapshot());
                 }
                 if let Some(state_file) = &options.state_file {
                     board.write_snapshot(state_file)?;
@@ -1285,6 +1427,20 @@ async fn recv_cancel(cancel_rx: &mut Option<oneshot::Receiver<String>>) -> Optio
     result.ok()
 }
 
+/// Resolve at most once, mirroring [`recv_cancel`]: the caller's
+/// `select!` arm additionally guards this with `if !display_active`, so once
+/// it has fired the branch is never polled again structurally either, but
+/// taking the receiver here too keeps the two mechanisms consistent and
+/// makes a stray `None` sender-dropped case terminal rather than spinning.
+async fn recv_activate(display_activate_rx: &mut Option<oneshot::Receiver<()>>) {
+    let result = match display_activate_rx.as_mut() {
+        Some(receiver) => receiver.await,
+        None => return std::future::pending().await,
+    };
+    display_activate_rx.take();
+    let _ = result;
+}
+
 async fn handle_action(
     running: &mut [RunningParticipant],
     board: &BoardBackend,
@@ -1320,6 +1476,19 @@ async fn handle_action(
                 return Ok(());
             };
             participant.resume(board).await
+        }
+        SupervisorAction::Restart { id } => {
+            let Some(participant) = running
+                .iter_mut()
+                .find(|participant| participant.spec.id == id)
+            else {
+                board.append_log(&id, "supervisor: restart requested for unknown participant");
+                return Ok(());
+            };
+            let spec = participant.spec.clone();
+            participant
+                .swap(spec, board, "manual restart".to_string())
+                .await
         }
     }
 }
@@ -1658,7 +1827,7 @@ async fn bus_log_subscriber_loop(
     loop {
         let received = subscriber.recv().await?;
         let id = received.metadata.source.participant;
-        board.append_log(&id, render_log_event(&received.body));
+        board.route_log(&id, LogSource::Bus, render_log_event(&received.body));
     }
 }
 
@@ -2348,7 +2517,8 @@ mod tests {
                 action_file: None,
                 action_rx: None,
                 requested_stop: None,
-                render_board: false,
+                display: crate::display::Display::None,
+                display_activate_rx: None,
                 cancel_rx: None,
             },
         )
@@ -2412,7 +2582,6 @@ mod tests {
             board.clone(),
             SupervisorOptions {
                 requested_stop: Some(RequestedStop::new("webots", Duration::from_secs(1))),
-                render_board: false,
                 cancel_rx: Some(cancel_rx),
                 ..SupervisorOptions::default()
             },
@@ -2503,7 +2672,8 @@ mod tests {
                 action_file: None,
                 action_rx: None,
                 requested_stop: None,
-                render_board: false,
+                display: crate::display::Display::None,
+                display_activate_rx: None,
                 cancel_rx: None,
             },
         )
@@ -2983,7 +3153,6 @@ mod tests {
             stages,
             board.clone(),
             SupervisorOptions {
-                render_board: false,
                 cancel_rx: Some(cancel_rx),
                 ..SupervisorOptions::default()
             },
@@ -3056,7 +3225,6 @@ mod tests {
                     start_limit_interval: Duration::from_secs(60),
                     start_limit_burst: 1000,
                 },
-                render_board: false,
                 cancel_rx: Some(cancel_rx),
                 ..SupervisorOptions::default()
             },
@@ -3119,7 +3287,6 @@ mod tests {
             stages,
             board.clone(),
             SupervisorOptions {
-                render_board: false,
                 cancel_rx: Some(cancel_rx),
                 ..SupervisorOptions::default()
             },
@@ -3171,7 +3338,6 @@ mod tests {
                 stages,
                 board.clone(),
                 SupervisorOptions {
-                    render_board: false,
                     ..SupervisorOptions::default()
                 },
             ),

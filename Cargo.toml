@@ -100,6 +100,9 @@ webots-proto = { workspace = true }
 jsonschema = { version = "0.46.6", default-features = false }
 zeroize = { workspace = true }
 object = "0.36"
+ratatui = "0.29"
+crossterm = "0.28"
+unicode-width = "0.2"
 
 [dev-dependencies]
 object = { version = "0.36", features = ["write"] }

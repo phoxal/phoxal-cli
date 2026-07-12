@@ -437,6 +437,9 @@ pub async fn run(
                     )
                 })
                 .collect::<Vec<_>>();
+            let identity = crate::identity::IdentitySummary::discover(&sim.ctx.project_root);
+            let display = crate::display::Display::for_mode("simulation", identity);
+            let (display_activate_tx, display_activate_rx) = oneshot::channel();
             let supervise_task = tokio::spawn(supervise_until_shutdown(
                 stages,
                 board.clone(),
@@ -446,6 +449,8 @@ pub async fn run(
                     action_rx,
                     requested_stop: Some(requested_stop),
                     cancel_rx: Some(cancel_rx),
+                    display,
+                    display_activate_rx: Some(display_activate_rx),
                     ..SupervisorOptions::default()
                 },
             ));
@@ -485,6 +490,12 @@ pub async fn run(
                 }
                 Err(error) => stepper.fail(9, format!("{error:#}")),
             }
+            // Hand off to whichever display `Display::for_mode` selected
+            // (Part 2) only now that every stepper line is done redrawing,
+            // regardless of which arm above ran - a startup failure must
+            // still be visible in the TUI/logger, not just a frozen stepper
+            // line.
+            let _ = display_activate_tx.send(());
             clock_task.abort();
             let terminal_failure_task = match &barrier_result {
                 Err(error) => {
