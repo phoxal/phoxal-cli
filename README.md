@@ -45,7 +45,7 @@ Commands that emit machine-readable state accept `--message-format human|json`.
 
 ### Dev Path Overrides
 
-Local artifact source overrides use exact provider-qualified package IDs under `artifacts.pins` and are legal only in dev overlays such as `robot.dev.yaml`:
+Local artifact source overrides use exact provider-qualified package IDs under `artifacts.pins`. Paths that stay inside the project are allowed in the base `robot.yaml`; absolute paths and paths that escape the project are legal only in dev overlays such as `robot.dev.yaml`:
 
 ```yaml
 artifacts:
@@ -56,7 +56,7 @@ artifacts:
       path: ../framework/component/ddsm115
 ```
 
-Load them with `--env dev`. Base `robot.yaml` is fail-closed for `{ path: ... }` pins so production manifests stay catalog/release based. Unknown or unused pin keys are errors.
+Load escaping overrides with `--env dev`. Base `robot.yaml` remains fail-closed for absolute or escaping `{ path: ... }` pins so production manifests stay catalog/release based. Unknown or unused pin keys are errors.
 
 ## Artifact Catalog
 
