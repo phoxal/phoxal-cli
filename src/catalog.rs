@@ -227,6 +227,20 @@ fn validate_blob(blob: &Blob) -> Result<()> {
 }
 
 fn fetch_https(url: &str) -> Result<Catalog> {
+    let progress = crate::progress::spinner(format!("fetching artifact catalog from {url}"));
+    match fetch_https_inner(url) {
+        Ok(catalog) => {
+            progress.finish_and_clear();
+            Ok(catalog)
+        }
+        Err(error) => {
+            progress.abandon_with_message(format!("failed to fetch artifact catalog: {error:#}"));
+            Err(error)
+        }
+    }
+}
+
+fn fetch_https_inner(url: &str) -> Result<Catalog> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("phoxal-cli")
         .connect_timeout(REQUEST_TIMEOUT)
@@ -309,6 +323,18 @@ pub const OFFICIAL_TOOLS: &[(&str, &str)] = &[
     ("joypad", "phoxal/tool-joypad"),
     ("router", "phoxal/tool-router"),
 ];
+
+/// Official native tools that degrade GRACEFULLY when the active catalog
+/// snapshot predates them, unlike [`OFFICIAL_TOOLS`] (router/joypad - hard
+/// required; `resolver::resolve` fails the whole robot if either is absent
+/// from the catalog). `tool-telemetry` was added to the framework alongside
+/// the `y2026_9` CLI-UX contracts, so an older pinned catalog snapshot
+/// legitimately has no entry for it yet; `resolver::resolve_optional_tools`
+/// simply omits a tool here from `ResolvedRobot::tools` instead of failing,
+/// and every downstream consumer (`launch_plan::build_site_launches`, the
+/// TUI's host meter) already treats "this optional tool is absent" as a
+/// normal, not a failure, state.
+pub const OFFICIAL_OPTIONAL_TOOLS: &[(&str, &str)] = &[("telemetry", "phoxal/tool-telemetry")];
 
 pub const OFFICIAL_SIMULATORS: &[(&str, &str)] = &[
     ("webots-controller", "phoxal/simulator-webots-controller"),
@@ -444,6 +470,7 @@ pub fn fixture_catalog_for_tests(entries: Vec<CatalogFixtureEntry>) -> Catalog {
     for (_, package) in OFFICIAL_SERVICES
         .iter()
         .chain(OFFICIAL_TOOLS)
+        .chain(OFFICIAL_OPTIONAL_TOOLS)
         .chain(OFFICIAL_SIMULATORS)
     {
         if existing.contains(*package) {

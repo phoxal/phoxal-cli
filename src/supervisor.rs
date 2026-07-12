@@ -11,6 +11,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use phoxal::bus::{Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::y2026_1 as api;
+// The simulation clock is re-minted in `y2026_9` (adds the authoritative
+// `step`/`running` fields the TUI top bar reads directly - see
+// `ClockSample`/`start_clock_barrier_feed`); every other `y2026_1` contract
+// this module subscribes to (`presence::Heartbeat`, `logs::Event`) is
+// unaffected and stays on its original generation.
+use phoxal_api::y2026_9 as api9;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -19,6 +25,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, timeout};
 
 use crate::launch_plan::DEFAULT_ROUTER_CONNECT;
+pub use crate::participant_kind::ParticipantKind;
 
 pub const SUPERVISOR_LOCK_FILE: &str = "supervisor.lock";
 pub const SUPERVISOR_STATE_FILE: &str = "supervisor-state.json";
@@ -35,27 +42,6 @@ pub const START_LIMIT_BURST: usize = 5;
 /// trips it; a genuinely dead/hung participant still gets caught within one
 /// supervisor board render cycle of the deadline passing.
 pub const HEARTBEAT_STALE_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ParticipantKind {
-    SiteTool,
-    OfficialArtifact,
-    UserService,
-    ComponentDriver,
-}
-
-impl ParticipantKind {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::SiteTool => "site-tool",
-            Self::OfficialArtifact => "official",
-            Self::UserService => "user-service",
-            Self::ComponentDriver => "driver",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -94,6 +80,13 @@ pub struct ParticipantLaunchCommand {
 pub struct ParticipantStatus {
     pub id: String,
     pub kind: ParticipantKind,
+    /// Whether this participant runs from a locally resolved directory
+    /// (user-authored source, or a local path-pin override) rather than a
+    /// fetched catalog artifact. Orthogonal to `kind` - see
+    /// `crate::participant_kind` module docs. Defaults to `false`
+    /// (catalog) via [`Self::new`]; set explicitly with [`Self::with_local`].
+    #[serde(default)]
+    pub local: bool,
     pub state: ParticipantState,
     pub restart_count: u32,
     pub note: Option<String>,
@@ -108,6 +101,7 @@ impl ParticipantStatus {
         Self {
             id: id.into(),
             kind,
+            local: false,
             state,
             restart_count: 0,
             note: None,
@@ -115,6 +109,12 @@ impl ParticipantStatus {
             last_log_lines: Vec::new(),
             launch_command: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_local(mut self, local: bool) -> Self {
+        self.local = local;
+        self
     }
 }
 
@@ -145,6 +145,10 @@ impl BoardSnapshot {
 
     #[must_use]
     pub fn render(&self) -> String {
+        // The kind column carries a trailing `*` for a participant running
+        // from a local directory (user-authored source, or a local path-pin
+        // override) rather than a fetched catalog artifact - see
+        // `ParticipantStatus::local`.
         let mut out = String::from(
             "participant                 kind          state       restarts  note  last log\n",
         );
@@ -154,10 +158,15 @@ impl BoardSnapshot {
         for participant in self.participants.values() {
             let note = participant.note.as_deref().unwrap_or("-");
             let last = participant.last_log_line.as_deref().unwrap_or("-");
+            let kind_label = format!(
+                "{}{}",
+                participant.kind.label(),
+                if participant.local { "*" } else { "" }
+            );
             out.push_str(&format!(
                 "{:<27} {:<13} {:<11} {:>8}  {}  {}\n",
                 trim_cell(&participant.id, 27),
-                participant.kind.label(),
+                kind_label,
                 participant.state.label(),
                 participant.restart_count,
                 trim_cell(note, 44),
@@ -177,6 +186,33 @@ fn trim_cell(value: &str, width: usize) -> String {
         return ".".to_string();
     }
     value.chars().take(width - 1).collect::<String>() + "."
+}
+
+/// Where a routed log line came from - the ROUTING metadata a later TUI/logger
+/// dedups on instead of comparing line text (see [`BoardBackend::route_log`]
+/// and [`RoutedLogLine`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogSource {
+    /// A structured `logs/{participant_id}` bus event
+    /// ([`bus_log_subscriber_loop`]) - the primary source once a participant
+    /// is far enough along to publish on the bus.
+    Bus,
+    /// A captured stdout/stderr line from the supervised child process
+    /// ([`spawn_output_reader`]) - the only source before the bus connects
+    /// (panics, pre-`#[setup]` startup), otherwise redundant with `Bus`.
+    Raw,
+}
+
+/// One routed log line, broadcast to [`BoardBackend::set_log_sink`]'s
+/// subscriber (a live TUI) in addition to the bounded 8-line history kept on
+/// the board itself. Kept separate from [`ParticipantStatus::last_log_lines`]
+/// so a full-scrollback consumer (the TUI's own bounded ring buffer, see
+/// `crate::tui::logs`) never has to poll a snapshot for log history.
+#[derive(Debug, Clone)]
+pub struct RoutedLogLine {
+    pub participant: String,
+    pub source: LogSource,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -201,6 +237,13 @@ pub struct BoardBackend {
     /// `reset_participant_liveness` on every (re)spawn so a fresh incarnation
     /// must earn `Ready` again before the sweep applies to it.
     ready_once: Arc<Mutex<BTreeSet<String>>>,
+    /// Optional live sink for [`RoutedLogLine`]s - set by a TUI display
+    /// (`crate::display::Display::attach`) once it has entered the terminal,
+    /// so it can maintain its own bounded per-runtime scrollback (Part 3)
+    /// without polling the board's own 8-line history. `None` outside a TUI
+    /// session (Plain/Json output, or any test) - [`Self::route_log`] simply
+    /// skips the broadcast in that case.
+    log_sink: Arc<Mutex<Option<mpsc::UnboundedSender<RoutedLogLine>>>>,
 }
 
 impl BoardBackend {
@@ -230,11 +273,7 @@ impl BoardBackend {
             .participants
             .entry(id.to_string())
             .or_insert_with(|| {
-                ParticipantStatus::new(
-                    id,
-                    ParticipantKind::OfficialArtifact,
-                    ParticipantState::Starting,
-                )
+                ParticipantStatus::new(id, ParticipantKind::Service, ParticipantState::Starting)
             });
         if matches!(
             status.state,
@@ -344,11 +383,7 @@ impl BoardBackend {
             .participants
             .entry(id.to_string())
             .or_insert_with(|| {
-                ParticipantStatus::new(
-                    id,
-                    ParticipantKind::OfficialArtifact,
-                    ParticipantState::Ready,
-                )
+                ParticipantStatus::new(id, ParticipantKind::Service, ParticipantState::Ready)
             });
         status.note = Some(note.into());
     }
@@ -367,11 +402,7 @@ impl BoardBackend {
             .participants
             .entry(id.to_string())
             .or_insert_with(|| {
-                ParticipantStatus::new(
-                    id,
-                    ParticipantKind::OfficialArtifact,
-                    ParticipantState::Ready,
-                )
+                ParticipantStatus::new(id, ParticipantKind::Service, ParticipantState::Ready)
             });
         status.last_log_line = Some(line.clone());
         status.last_log_lines.push(line);
@@ -379,6 +410,34 @@ impl BoardBackend {
         if status.last_log_lines.len() > MAX_LAST_LINES {
             let drop_count = status.last_log_lines.len() - MAX_LAST_LINES;
             status.last_log_lines.drain(0..drop_count);
+        }
+    }
+
+    /// Register the live [`RoutedLogLine`] sink for this session's display
+    /// (a TUI). Replaces any previous sink - only one live display exists per
+    /// session.
+    pub fn set_log_sink(&self, sender: mpsc::UnboundedSender<RoutedLogLine>) {
+        *self.log_sink.lock().expect("log sink mutex poisoned") = Some(sender);
+    }
+
+    /// Record a log line from a known routing source: updates the board's own
+    /// bounded 8-line history exactly like [`Self::append_log`] (so
+    /// `--message-format json`'s `status` snapshot and the legacy board model
+    /// stay unchanged), then additionally forwards it to the live sink
+    /// registered by [`Self::set_log_sink`], if any. This is the single
+    /// funnel both [`bus_log_subscriber_loop`] and [`spawn_output_reader`]
+    /// use, so a live TUI dedups by ROUTING (which of the two called this)
+    /// rather than by comparing rendered text - see [`LogSource`].
+    pub fn route_log(&self, id: &str, source: LogSource, text: impl Into<String>) {
+        let text = text.into();
+        self.append_log(id, text.clone());
+        let sink = self.log_sink.lock().expect("log sink mutex poisoned");
+        if let Some(sender) = sink.as_ref() {
+            let _ = sender.send(RoutedLogLine {
+                participant: id.to_string(),
+                source,
+                text,
+            });
         }
     }
 
@@ -432,6 +491,11 @@ impl BoardBackend {
 pub struct ParticipantSpec {
     pub id: String,
     pub kind: ParticipantKind,
+    /// Whether this participant runs from a locally resolved directory
+    /// (user-authored source, or a local path-pin override) rather than a
+    /// fetched catalog artifact. Orthogonal to `kind` - see
+    /// `crate::participant_kind` module docs.
+    pub local: bool,
     pub executable: PathBuf,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
@@ -518,13 +582,42 @@ pub struct SupervisorOptions {
     pub action_file: Option<PathBuf>,
     pub action_rx: Option<mpsc::Receiver<SupervisorAction>>,
     pub requested_stop: Option<RequestedStop>,
-    pub render_board: bool,
+    /// The live display for this session (Part 2): a full-screen TUI, an
+    /// append-only line logger, or nothing (`--message-format json`) - see
+    /// `crate::display::Display`. Driven from inside this function's own
+    /// `select!` loop so redraws/input never starve poll/restart/cancel.
+    /// Defaults to [`crate::display::Display::None`] (silent) so a caller
+    /// that does not care about interactive display (every test in this
+    /// module) does not have to construct one.
+    pub display: crate::display::Display,
+    /// Gate on when `display` may start redrawing/reading input, fired once
+    /// by the caller's own startup stepper when it reaches `Initialized` (see
+    /// `commands::run::spawn_run_stepper` / `commands::simulate::run`). Kept
+    /// separate from `display` itself so a `display` that is a live TUI can
+    /// still be constructed (and start capturing routed log lines via
+    /// `BoardBackend::set_log_sink`, Part 3) well before it is safe to enter
+    /// the alternate screen - entering it while the stepper's own indicatif
+    /// lines are still redrawing would corrupt both. `None` means "active
+    /// immediately" (every test in this module, and any caller with nothing
+    /// to hand off from).
+    pub display_activate_rx: Option<oneshot::Receiver<()>>,
     /// Fires when readiness or the running contract graph reaches a terminal
     /// failure and needs the whole session torn down instead of left running
     /// unhealthy forever. The sent `String` is a human-readable reason,
     /// followed by orderly `request_participant_stop` + `shutdown_all`, then a
     /// normal `SupervisorOutcome` reflecting the board's failed participants.
     pub cancel_rx: Option<oneshot::Receiver<String>>,
+    /// The live-telemetry handle for this session's display (CLI-UX Phase
+    /// 3/4): read every redraw (`display.redraw`) for the TUI's sim-clock top
+    /// bar, host/process resource meters, router Traffic table, and joypad
+    /// Devices panel, and written into by `handle_input`'s
+    /// `DisplayAction::JoypadConnect`/`JoypadRescan`. Defaults to an empty,
+    /// disconnected [`crate::telemetry::TelemetryBackend`] (every test in
+    /// this module, and `Display::None`/`Display::Logger` sessions, which
+    /// never read it) - a caller that wants live telemetry constructs one
+    /// with `crate::telemetry::start_host_feed` etc. and passes the SAME
+    /// handle here.
+    pub telemetry: crate::telemetry::TelemetryBackend,
 }
 
 impl Default for SupervisorOptions {
@@ -535,8 +628,10 @@ impl Default for SupervisorOptions {
             action_file: None,
             action_rx: None,
             requested_stop: None,
-            render_board: true,
+            display: crate::display::Display::None,
+            display_activate_rx: None,
             cancel_rx: None,
+            telemetry: crate::telemetry::TelemetryBackend::default(),
         }
     }
 }
@@ -567,6 +662,15 @@ pub enum SupervisorAction {
         id: String,
     },
     Resume {
+        id: String,
+    },
+    /// Stop and respawn a participant from its own current spec, unchanged -
+    /// the TUI's `r restart` (see `crate::display::DisplayAction::Restart`).
+    /// Handled the same way as `Swap` with the participant's own spec cloned
+    /// back in, rather than a new field on `RunningParticipant`, so it reuses
+    /// the exact same stop/spawn/board-note sequence a hot-reload swap
+    /// already goes through.
+    Restart {
         id: String,
     },
 }
@@ -643,6 +747,11 @@ impl RunningParticipant {
         }
         command
             .envs(self.spec.env.iter().map(|(key, value)| (key, value)))
+            // No terminal input for any child: the TUI (Part 4) owns terminal
+            // input exclusively (there is no Interact/raw-io tab), and a
+            // child that inherited this process's stdin could otherwise race
+            // it for keystrokes.
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = command
@@ -922,7 +1031,9 @@ where
         let mut lines = BufReader::new(reader).lines();
         loop {
             match lines.next_line().await {
-                Ok(Some(line)) => board.append_log(&id, format!("{stream}: {line}")),
+                Ok(Some(line)) => {
+                    board.route_log(&id, LogSource::Raw, format!("{stream}: {line}"));
+                }
                 Ok(None) => break,
                 Err(error) => {
                     board.append_log(&id, format!("supervisor: failed to read {stream}: {error}"));
@@ -939,15 +1050,62 @@ async fn join_reader(task: Option<JoinHandle<()>>) {
     }
 }
 
-pub async fn supervise_until_shutdown(
+/// One stage of a mode-specific staged startup: the participants to spawn at
+/// this stage, plus every board id (spawned here or not - a
+/// SIMULATION-MANAGED participant with no `ParticipantSpec` of its own can
+/// still gate a later stage) that must reach `Ready` before the next stage's
+/// members are spawned. `run`'s stages are `router < other tools < drivers <
+/// services`; `simulation run`'s are `router < other tools < Webots app <
+/// simulation supervisor (wait-only) < services < robot/controllers
+/// (wait-only)`. The final "clock advancing" gate is NOT a stage here - it
+/// stays the existing clock-coupled [`await_readiness_barrier`], called by
+/// the caller once every stage below has completed (see the
+/// `commands::simulate` module docs for why).
+#[derive(Debug, Clone, Default)]
+pub struct SupervisionStage {
+    /// Human-readable name for this stage, used in the stalled-stage error
+    /// message and the startup stepper.
+    pub label: String,
+    pub specs: Vec<ParticipantSpec>,
+    /// Board ids that must be observed `Ready` before the next stage spawns.
+    /// Defaults to every spawned spec's own id that is a bus participant
+    /// (see [`Self::new`]); extend with [`Self::with_extra_ready_ids`] for a
+    /// wait-only id that has no `ParticipantSpec` of its own.
+    pub ready_ids: Vec<String>,
+    pub timeout: Duration,
+}
+
+impl SupervisionStage {
+    #[must_use]
+    pub fn new(label: impl Into<String>, specs: Vec<ParticipantSpec>, timeout: Duration) -> Self {
+        let ready_ids = specs
+            .iter()
+            .filter(|spec| spec.bus_participant)
+            .map(|spec| spec.id.clone())
+            .collect();
+        Self {
+            label: label.into(),
+            specs,
+            ready_ids,
+            timeout,
+        }
+    }
+
+    #[must_use]
+    pub fn with_extra_ready_ids(mut self, ids: impl IntoIterator<Item = String>) -> Self {
+        self.ready_ids.extend(ids);
+        self
+    }
+}
+
+async fn spawn_stage(
+    running: &mut Vec<RunningParticipant>,
+    board: &BoardBackend,
     specs: Vec<ParticipantSpec>,
-    board: BoardBackend,
-    mut options: SupervisorOptions,
-) -> Result<SupervisorOutcome> {
-    let mut running = Vec::new();
+) {
     for spec in specs {
         let id = spec.id.clone();
-        match RunningParticipant::spawn(spec, &board).await {
+        match RunningParticipant::spawn(spec, board).await {
             Ok(participant) => running.push(participant),
             Err(error) => {
                 board.set_state(
@@ -958,13 +1116,121 @@ pub async fn supervise_until_shutdown(
             }
         }
     }
+}
+
+/// Wait until every id in `stage_ids` has been OBSERVED `Ready` on the
+/// board, or `timeout` elapses. The clock-independent half of
+/// [`await_readiness_barrier`] (factored out so `run`'s staged startup can
+/// reuse it without simulation's clock coupling): returns `Ok(())` on
+/// success with no side effects; on an explicit terminal `Failed` readiness
+/// it returns `Err` immediately (never waits out the timeout for a graph
+/// that already ended unhealthy); on timeout it marks every still-missing id
+/// `Failed` on the board (so `SupervisorOutcome::graph_healthy` reflects the
+/// stall) and returns `Err` naming exactly what never showed up.
+pub async fn await_participants_ready(
+    board: &BoardBackend,
+    stage_ids: &[String],
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<()> {
+    if stage_ids.is_empty() {
+        return Ok(());
+    }
+    let deadline = Instant::now() + timeout;
+    let mut interval = tokio::time::interval(poll_interval);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let snapshot = board.snapshot();
+        let failed = failed_expected_participants(&snapshot, stage_ids);
+        if !failed.is_empty() {
+            bail!(
+                "stage ended unhealthy; failed participants: {}",
+                failed.join(", ")
+            );
+        }
+        let missing = missing_ready_participants(&snapshot, stage_ids);
+        if missing.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            for id in &missing {
+                board.set_state(
+                    id,
+                    ParticipantState::Failed,
+                    Some(format!(
+                        "stage readiness timed out after {}s: never observed ready",
+                        timeout.as_secs()
+                    )),
+                );
+            }
+            bail!(
+                "stage readiness timed out after {}s: participant(s) never observed ready: {}",
+                timeout.as_secs(),
+                missing.join(", ")
+            );
+        }
+    }
+}
+
+pub async fn supervise_until_shutdown(
+    stages: Vec<SupervisionStage>,
+    board: BoardBackend,
+    mut options: SupervisorOptions,
+) -> Result<SupervisorOutcome> {
+    let mut running = Vec::new();
+    let mut stage_queue: VecDeque<SupervisionStage> = stages.into();
+
+    // Spawn every leading stage that has nothing to wait for back-to-back
+    // (uncommon in practice - every real stage waits on at least the router
+    // or a heartbeat - but keeps a zero-wait stage from stalling a whole
+    // startup on an empty `select!` branch), then park on the first stage
+    // that actually gates the next one.
+    let mut pending_stage: Option<(String, Vec<String>, Instant)> = None;
+    while let Some(stage) = stage_queue.pop_front() {
+        let SupervisionStage {
+            label,
+            specs,
+            ready_ids,
+            timeout: stage_timeout,
+        } = stage;
+        spawn_stage(&mut running, &board, specs).await;
+        if ready_ids.is_empty() {
+            continue;
+        }
+        pending_stage = Some((label, ready_ids, Instant::now() + stage_timeout));
+        break;
+    }
 
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut clean_shutdown = false;
-    let mut board_ticks = 0_u64;
+    let mut stage_error = None;
     let mut action_rx = options.action_rx.take();
     let mut cancel_rx = options.cancel_rx.take();
+    let mut display = options.display;
+    let mut display_activate_rx = options.display_activate_rx.take();
+    // A live TUI display starts capturing routed log lines (Part 3) the
+    // instant it exists, well before `display_active` below lets it actually
+    // draw anything - so its scrollback is not empty the moment it activates.
+    if let crate::display::Display::Tui(tui) = &display {
+        board.set_log_sink(tui.log_sender());
+    }
+    let mut display_active = display_activate_rx.is_none();
+    if display_active {
+        // No hand-off gate was given (every test in this module, and any
+        // future caller with nothing to wait on) - activate synchronously so
+        // the invariant "display_active implies the display has been
+        // activated" holds from the very first loop iteration onward, same
+        // as the gated path below establishes it mid-loop.
+        if let Err(error) = display.activate() {
+            board.append_log(
+                "supervisor",
+                format!("supervisor: display activation failed, falling back to silent: {error:#}"),
+            );
+            display = crate::display::Display::None;
+        }
+    }
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -986,6 +1252,73 @@ pub async fn supervise_until_shutdown(
                     handle_action(&mut running, &board, action).await?;
                 }
             }
+            () = recv_activate(&mut display_activate_rx), if !display_active => {
+                display_active = true;
+                if let Err(error) = display.activate() {
+                    board.append_log(
+                        "supervisor",
+                        format!("supervisor: display activation failed, falling back to silent: {error:#}"),
+                    );
+                    display = crate::display::Display::None;
+                }
+            }
+            event = display.next_input(), if display_active => {
+                if let Some(event) = event {
+                    match display.handle_input(event, &board.snapshot(), &options.telemetry) {
+                        crate::display::DisplayAction::None => {}
+                        crate::display::DisplayAction::Quit => {
+                            clean_shutdown = true;
+                            break;
+                        }
+                        crate::display::DisplayAction::Restart(id) => {
+                            handle_action(&mut running, &board, SupervisorAction::Restart { id }).await?;
+                        }
+                        crate::display::DisplayAction::JoypadConnect(id) => {
+                            options.telemetry.send_joypad_command(crate::telemetry::JoypadCommand::Connect(id));
+                        }
+                        crate::display::DisplayAction::JoypadRescan => {
+                            options.telemetry.send_joypad_command(crate::telemetry::JoypadCommand::Rescan);
+                        }
+                    }
+                }
+            }
+            // Recreated fresh every loop pass (same pattern as `recv_cancel`/
+            // `recv_action` above): the ONLY state that must survive a
+            // cancelled poll is the stage's own deadline, which lives in
+            // `pending_stage` outside this future, not inside it - so
+            // recreating the await is safe and never resets the timeout.
+            result = await_participants_ready(
+                &board,
+                pending_stage.as_ref().map_or(&[][..], |(_, ids, _)| ids.as_slice()),
+                pending_stage.as_ref().map_or(Duration::ZERO, |(_, _, deadline)| deadline.saturating_duration_since(Instant::now())),
+                Duration::from_millis(200),
+            ), if pending_stage.is_some() => {
+                let (label, _, _) = pending_stage.take().expect("guarded by is_some");
+                match result {
+                    Ok(()) => {
+                        board.append_log("supervisor", format!("supervisor: stage '{label}' ready"));
+                        while let Some(stage) = stage_queue.pop_front() {
+                            let SupervisionStage { label, specs, ready_ids, timeout: stage_timeout } = stage;
+                            spawn_stage(&mut running, &board, specs).await;
+                            if ready_ids.is_empty() {
+                                continue;
+                            }
+                            pending_stage = Some((label, ready_ids, Instant::now() + stage_timeout));
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let reason = format!("stage '{label}' stalled: {error:#}");
+                        board.append_log(
+                            "supervisor",
+                            format!("supervisor: {reason}"),
+                        );
+                        stage_error = Some(anyhow!(reason));
+                        clean_shutdown = false;
+                        break;
+                    }
+                }
+            }
             _ = ticker.tick() => {
                 if let Some(action_file) = &options.action_file {
                     for action in drain_action_file(action_file)? {
@@ -996,9 +1329,8 @@ pub async fn supervise_until_shutdown(
                     participant.poll(&board, &options.restart_policy).await?;
                 }
                 board.fail_stale_heartbeats(HEARTBEAT_STALE_TIMEOUT);
-                board_ticks = board_ticks.saturating_add(1);
-                if options.render_board && board_ticks % 2 == 1 {
-                    eprintln!("{}", board.snapshot().render());
+                if display_active {
+                    display.redraw(&board.snapshot(), &options.telemetry);
                 }
                 if let Some(state_file) = &options.state_file {
                     board.write_snapshot(state_file)?;
@@ -1016,6 +1348,9 @@ pub async fn supervise_until_shutdown(
     shutdown_all(&mut running, &board).await;
     if let Some(state_file) = &options.state_file {
         board.write_snapshot(state_file)?;
+    }
+    if let Some(error) = stage_error {
+        return Err(error);
     }
     Ok(SupervisorOutcome {
         clean_shutdown,
@@ -1102,10 +1437,14 @@ async fn request_participant_stop(
 async fn recv_action(
     action_rx: &mut Option<mpsc::Receiver<SupervisorAction>>,
 ) -> Option<SupervisorAction> {
-    match action_rx {
+    let action = match action_rx {
         Some(action_rx) => action_rx.recv().await,
-        None => std::future::pending().await,
+        None => return std::future::pending().await,
+    };
+    if action.is_none() {
+        action_rx.take();
     }
+    action
 }
 
 /// Resolve at most once (a oneshot can only fire once, unlike `action_rx`'s
@@ -1120,6 +1459,20 @@ async fn recv_cancel(cancel_rx: &mut Option<oneshot::Receiver<String>>) -> Optio
     };
     cancel_rx.take();
     result.ok()
+}
+
+/// Resolve at most once, mirroring [`recv_cancel`]: the caller's
+/// `select!` arm additionally guards this with `if !display_active`, so once
+/// it has fired the branch is never polled again structurally either, but
+/// taking the receiver here too keeps the two mechanisms consistent and
+/// makes a stray `None` sender-dropped case terminal rather than spinning.
+async fn recv_activate(display_activate_rx: &mut Option<oneshot::Receiver<()>>) {
+    let result = match display_activate_rx.as_mut() {
+        Some(receiver) => receiver.await,
+        None => return std::future::pending().await,
+    };
+    display_activate_rx.take();
+    let _ = result;
 }
 
 async fn handle_action(
@@ -1157,6 +1510,19 @@ async fn handle_action(
                 return Ok(());
             };
             participant.resume(board).await
+        }
+        SupervisorAction::Restart { id } => {
+            let Some(participant) = running
+                .iter_mut()
+                .find(|participant| participant.spec.id == id)
+            else {
+                board.append_log(&id, "supervisor: restart requested for unknown participant");
+                return Ok(());
+            };
+            let spec = participant.spec.clone();
+            participant
+                .swap(spec, board, "manual restart".to_string())
+                .await
         }
     }
 }
@@ -1495,7 +1861,7 @@ async fn bus_log_subscriber_loop(
     loop {
         let received = subscriber.recv().await?;
         let id = received.metadata.source.participant;
-        board.append_log(&id, render_log_event(&received.body));
+        board.route_log(&id, LogSource::Bus, render_log_event(&received.body));
     }
 }
 
@@ -1574,22 +1940,41 @@ async fn presence_heartbeat_subscriber_loop(
     }
 }
 
-/// Observed state of the simulation clock feed for the readiness barrier
-/// (`await_readiness_barrier`): whether any sample has been seen at all, and
-/// whether `now_ns` has advanced past the very first observed sample. A
+/// One `y2026_9::simulation::Clock` sample, as surfaced to the TUI top bar
+/// (`tui::render::simulation_clock_slot`) - `step`/`running` are read
+/// DIRECTLY from here, not inferred from `now_ns` silence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClockSample {
+    pub now_ns: u64,
+    pub step: u64,
+    pub running: bool,
+}
+
+/// Observed state of the simulation clock feed. Serves two consumers off the
+/// SAME subscription: the readiness barrier (`await_readiness_barrier`) reads
+/// `first_sample_ns`/`advanced` - whether any sample has been seen at all,
+/// and whether `now_ns` has advanced past the very first observed sample (a
 /// sample alone is not enough - Webots opens a world PAUSED, so
 /// `simulation/clock` can be present-but-frozen; only a strictly increasing
-/// `now_ns` proves the simulation is actually running.
+/// `now_ns` proves the simulation is actually running) - while the TUI's
+/// display layer (`crate::telemetry::TelemetryBackend`) reads `latest` every
+/// redraw, updated unconditionally on every sample regardless of the
+/// barrier's own advance-detection state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClockObservation {
     pub first_sample_ns: Option<u64>,
     pub advanced: bool,
+    pub latest: Option<ClockSample>,
 }
 
-/// Start a background feed of `simulation/clock` samples for the readiness
-/// barrier. Returns a `watch::Receiver` the barrier polls cheaply (no async
-/// subscription plumbing in the barrier's own loop) plus the feed task's
-/// handle so the caller can abort it once the barrier is done with it.
+/// Start a background feed of `y2026_9::simulation::Clock` samples. Returns a
+/// `watch::Receiver` both the readiness barrier and the TUI's telemetry layer
+/// poll cheaply (no async subscription plumbing in either caller's own loop)
+/// plus the feed task's handle. The barrier only needs the feed for its own
+/// startup window; a caller that also wants the TUI top bar's live
+/// step/running readout (`commands::simulate`) keeps the task running for the
+/// rest of the session instead of aborting it once the barrier completes -
+/// see `TelemetryBackend::set_clock_feed`.
 pub fn start_clock_barrier_feed(
     namespace: String,
     robot_id: String,
@@ -1627,16 +2012,23 @@ async fn clock_barrier_feed_loop(
     })
     .await
     .map_err(|error| anyhow!("failed to open bus clock subscription: {error}"))?;
-    let topic = Topic::<Subscribe<api::simulation::Clock>>::new_static(
-        <api::simulation::Clock as phoxal::bus::ContractBody>::TOPIC,
+    let topic = Topic::<Subscribe<api9::simulation::Clock>>::new_static(
+        <api9::simulation::Clock as phoxal::bus::ContractBody>::TOPIC,
     );
-    let subscriber = Subscriber::<api::simulation::Clock>::new(&bus, &topic, 32).await?;
+    let subscriber = Subscriber::<api9::simulation::Clock>::new(&bus, &topic, 32).await?;
     loop {
         let received = subscriber.recv().await?;
-        tx.send_modify(|observation| match observation.first_sample_ns {
-            None => observation.first_sample_ns = Some(received.body.now_ns),
-            Some(first) if received.body.now_ns > first => observation.advanced = true,
-            _ => {}
+        tx.send_modify(|observation| {
+            match observation.first_sample_ns {
+                None => observation.first_sample_ns = Some(received.body.now_ns),
+                Some(first) if received.body.now_ns > first => observation.advanced = true,
+                _ => {}
+            }
+            observation.latest = Some(ClockSample {
+                now_ns: received.body.now_ns,
+                step: received.body.step,
+                running: received.body.running,
+            });
         });
     }
 }
@@ -1677,12 +2069,13 @@ impl BarrierGap {
     }
 }
 
-fn barrier_gap(
-    board: &BoardSnapshot,
-    expected_bus_ids: &[String],
-    clock: ClockObservation,
-) -> BarrierGap {
-    let missing_participants = expected_bus_ids
+/// Ids in `expected_bus_ids` not yet OBSERVED `Ready` on the board. Shared by
+/// [`barrier_gap`] (the clock-coupled simulation readiness barrier) and
+/// [`await_participants_ready`] (the clock-independent staged-startup
+/// primitive) - both wait on the identical "has this participant reached
+/// Ready" condition, differing only in whether a clock feed gates them too.
+fn missing_ready_participants(board: &BoardSnapshot, expected_bus_ids: &[String]) -> Vec<String> {
+    expected_bus_ids
         .iter()
         .filter(|id| {
             !board
@@ -1691,7 +2084,15 @@ fn barrier_gap(
                 .is_some_and(|status| status.state == ParticipantState::Ready)
         })
         .cloned()
-        .collect();
+        .collect()
+}
+
+fn barrier_gap(
+    board: &BoardSnapshot,
+    expected_bus_ids: &[String],
+    clock: ClockObservation,
+) -> BarrierGap {
+    let missing_participants = missing_ready_participants(board, expected_bus_ids);
     let clock_gap = match clock {
         ClockObservation {
             first_sample_ns: None,
@@ -1814,7 +2215,8 @@ mod tests {
     fn spec(id: &str) -> ParticipantSpec {
         ParticipantSpec {
             id: id.to_string(),
-            kind: ParticipantKind::UserService,
+            kind: ParticipantKind::Service,
+            local: false,
             executable: PathBuf::from("/bin/echo"),
             args: Vec::new(),
             cwd: None,
@@ -1829,7 +2231,8 @@ mod tests {
     fn sleep_spec(id: &str) -> ParticipantSpec {
         ParticipantSpec {
             id: id.to_string(),
-            kind: ParticipantKind::UserService,
+            kind: ParticipantKind::Service,
+            local: false,
             executable: PathBuf::from("/bin/sh"),
             args: vec!["-c".to_string(), "sleep 30".to_string()],
             cwd: None,
@@ -1839,6 +2242,24 @@ mod tests {
             note: None,
             bus_participant: true,
         }
+    }
+
+    #[tokio::test]
+    async fn closed_action_receiver_is_consumed_once_then_stays_pending() {
+        let (action_tx, action_rx) = mpsc::channel(1);
+        drop(action_tx);
+        let mut action_rx = Some(action_rx);
+
+        assert!(recv_action(&mut action_rx).await.is_none());
+        assert!(action_rx.is_none());
+
+        // A closed receiver is terminal, not a stream of immediate `None`s;
+        // otherwise it would win every supervisor `select!` pass and spin.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), recv_action(&mut action_rx))
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -1865,7 +2286,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "mission",
-            ParticipantKind::UserService,
+            ParticipantKind::Service,
             ParticipantState::Ready,
         ));
         board.write_snapshot(&path)?;
@@ -1922,7 +2343,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "mission",
-            ParticipantKind::UserService,
+            ParticipantKind::Service,
             ParticipantState::Starting,
         ));
         let mut participant = RunningParticipant::spawn(sleep_spec("mission"), &board).await?;
@@ -1959,7 +2380,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "webots",
-            ParticipantKind::SiteTool,
+            ParticipantKind::Tool,
             ParticipantState::Starting,
         ));
         let participant = RunningParticipant::spawn(webots, &board).await?;
@@ -1990,7 +2411,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "webots",
-            ParticipantKind::SiteTool,
+            ParticipantKind::Tool,
             ParticipantState::Starting,
         ));
         let participant = RunningParticipant::spawn(webots, &board).await?;
@@ -2026,7 +2447,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "webots",
-            ParticipantKind::SiteTool,
+            ParticipantKind::Tool,
             ParticipantState::Starting,
         ));
         let mut participant = RunningParticipant::spawn(webots, &board).await?;
@@ -2069,7 +2490,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "webots",
-            ParticipantKind::SiteTool,
+            ParticipantKind::Tool,
             ParticipantState::Starting,
         ));
         let participant = RunningParticipant::spawn(webots, &board).await?;
@@ -2106,7 +2527,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "mission",
-            ParticipantKind::UserService,
+            ParticipantKind::Service,
             ParticipantState::Starting,
         ));
         let mut participant = RunningParticipant::spawn(sleep_spec("mission"), &board).await?;
@@ -2141,12 +2562,13 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "flap",
-            ParticipantKind::UserService,
+            ParticipantKind::Service,
             ParticipantState::Starting,
         ));
         let specs = vec![ParticipantSpec {
             id: "flap".to_string(),
-            kind: ParticipantKind::UserService,
+            kind: ParticipantKind::Service,
+            local: false,
             executable: PathBuf::from("/bin/sh"),
             args: vec!["-c".to_string(), "echo fail; exit 7".to_string()],
             cwd: None,
@@ -2157,7 +2579,11 @@ mod tests {
             bus_participant: true,
         }];
         let outcome = supervise_until_shutdown(
-            specs,
+            vec![SupervisionStage::new(
+                "stage",
+                specs,
+                Duration::from_secs(5),
+            )],
             board.clone(),
             SupervisorOptions {
                 restart_policy: RestartPolicy {
@@ -2169,8 +2595,10 @@ mod tests {
                 action_file: None,
                 action_rx: None,
                 requested_stop: None,
-                render_board: false,
+                display: crate::display::Display::None,
+                display_activate_rx: None,
                 cancel_rx: None,
+                telemetry: crate::telemetry::TelemetryBackend::default(),
             },
         )
         .await?;
@@ -2194,17 +2622,17 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "webots",
-            ParticipantKind::SiteTool,
+            ParticipantKind::Tool,
             ParticipantState::Starting,
         ));
         board.upsert(ParticipantStatus::new(
             "simulator-webots-controller-robot",
-            ParticipantKind::OfficialArtifact,
+            ParticipantKind::Service,
             ParticipantState::Ready,
         ));
 
         let mut webots = sleep_spec("webots");
-        webots.kind = ParticipantKind::SiteTool;
+        webots.kind = ParticipantKind::Tool;
         webots.args = vec![
             "-c".to_string(),
             "trap 'exit 0' TERM; while :; do sleep 1; done".to_string(),
@@ -2225,11 +2653,14 @@ mod tests {
             ));
         });
         let supervise = tokio::spawn(supervise_until_shutdown(
-            vec![webots],
+            vec![SupervisionStage::new(
+                "stage",
+                vec![webots],
+                Duration::from_secs(5),
+            )],
             board.clone(),
             SupervisorOptions {
                 requested_stop: Some(RequestedStop::new("webots", Duration::from_secs(1))),
-                render_board: false,
                 cancel_rx: Some(cancel_rx),
                 ..SupervisorOptions::default()
             },
@@ -2269,7 +2700,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "mission",
-            ParticipantKind::UserService,
+            ParticipantKind::Service,
             ParticipantState::Ready,
         ));
         let expected = vec!["mission".to_string()];
@@ -2287,12 +2718,13 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "logger",
-            ParticipantKind::UserService,
+            ParticipantKind::Service,
             ParticipantState::Starting,
         ));
         let specs = vec![ParticipantSpec {
             id: "logger".to_string(),
-            kind: ParticipantKind::UserService,
+            kind: ParticipantKind::Service,
+            local: false,
             executable: PathBuf::from("/bin/sh"),
             args: vec!["-c".to_string(), "echo local-line; exit 2".to_string()],
             cwd: None,
@@ -2303,7 +2735,11 @@ mod tests {
             bus_participant: true,
         }];
         let _ = supervise_until_shutdown(
-            specs,
+            vec![SupervisionStage::new(
+                "stage",
+                specs,
+                Duration::from_secs(5),
+            )],
             board.clone(),
             SupervisorOptions {
                 restart_policy: RestartPolicy {
@@ -2315,8 +2751,10 @@ mod tests {
                 action_file: None,
                 action_rx: None,
                 requested_stop: None,
-                render_board: false,
+                display: crate::display::Display::None,
+                display_activate_rx: None,
                 cancel_rx: None,
+                telemetry: crate::telemetry::TelemetryBackend::default(),
             },
         )
         .await?;
@@ -2342,7 +2780,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "mission",
-            ParticipantKind::UserService,
+            ParticipantKind::Service,
             ParticipantState::Starting,
         ));
         board.record_heartbeat("mission", api::presence::Readiness::Initializing);
@@ -2370,7 +2808,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "slow-setup",
-            ParticipantKind::UserService,
+            ParticipantKind::Service,
             ParticipantState::Starting,
         ));
         board.record_heartbeat("slow-setup", api::presence::Readiness::Initializing);
@@ -2404,7 +2842,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "was-ready",
-            ParticipantKind::UserService,
+            ParticipantKind::Service,
             ParticipantState::Starting,
         ));
         board.record_heartbeat("was-ready", api::presence::Readiness::Ready);
@@ -2437,7 +2875,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "mission",
-            ParticipantKind::UserService,
+            ParticipantKind::Service,
             ParticipantState::Starting,
         ));
         let mut participant = RunningParticipant::spawn(sleep_spec("mission"), &board).await?;
@@ -2492,7 +2930,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "mission",
-            ParticipantKind::UserService,
+            ParticipantKind::Service,
             ParticipantState::Failed,
         ));
         // A heartbeat that was in flight when the process independently died
@@ -2516,12 +2954,12 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "simulator-webots-supervisor",
-            ParticipantKind::SiteTool,
+            ParticipantKind::Tool,
             ParticipantState::Starting,
         ));
         board.upsert(ParticipantStatus::new(
             "simulator-webots-controller-robot",
-            ParticipantKind::SiteTool,
+            ParticipantKind::Tool,
             ParticipantState::Starting,
         ));
         // The supervisor checks in...
@@ -2533,6 +2971,7 @@ mod tests {
         let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation {
             first_sample_ns: Some(0),
             advanced: true,
+            ..ClockObservation::default()
         });
 
         let expected = vec![
@@ -2589,7 +3028,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "simulator-webots-controller-robot",
-            ParticipantKind::OfficialArtifact,
+            ParticipantKind::Service,
             ParticipantState::Starting,
         ));
         board.record_heartbeat(
@@ -2624,7 +3063,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "simulator-webots-supervisor",
-            ParticipantKind::SiteTool,
+            ParticipantKind::Tool,
             ParticipantState::Ready,
         ));
         // A sample was observed (Webots opened the world), but it never
@@ -2632,6 +3071,7 @@ mod tests {
         let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation {
             first_sample_ns: Some(0),
             advanced: false,
+            ..ClockObservation::default()
         });
 
         let expected = vec!["simulator-webots-supervisor".to_string()];
@@ -2660,7 +3100,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "simulator-webots-supervisor",
-            ParticipantKind::SiteTool,
+            ParticipantKind::Tool,
             ParticipantState::Starting,
         ));
         board.record_heartbeat(
@@ -2670,6 +3110,7 @@ mod tests {
         let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation {
             first_sample_ns: Some(0),
             advanced: true,
+            ..ClockObservation::default()
         });
 
         let expected = vec!["simulator-webots-supervisor".to_string()];
@@ -2682,5 +3123,317 @@ mod tests {
         )
         .await
         .expect("everything is ready; the barrier must not error");
+    }
+
+    #[tokio::test]
+    async fn await_participants_ready_succeeds_once_everything_is_observed() {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "mission",
+            ParticipantKind::Service,
+            ParticipantState::Starting,
+        ));
+        board.record_heartbeat("mission", api::presence::Readiness::Ready);
+
+        await_participants_ready(
+            &board,
+            &["mission".to_string()],
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("everything is ready; must not error");
+    }
+
+    #[tokio::test]
+    async fn await_participants_ready_times_out_and_marks_missing_failed() {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "mission",
+            ParticipantKind::Service,
+            ParticipantState::Starting,
+        ));
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            await_participants_ready(
+                &board,
+                &["mission".to_string()],
+                Duration::from_millis(150),
+                Duration::from_millis(10),
+            ),
+        )
+        .await
+        .expect("must return within its own timeout, never hang")
+        .expect_err("a participant that never appears must fail the wait");
+
+        assert!(
+            error.to_string().contains("mission"),
+            "error should name the missing participant: {error}"
+        );
+        assert_eq!(
+            board.snapshot().participants["mission"].state,
+            ParticipantState::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn await_participants_ready_fails_immediately_on_explicit_terminal_failure() {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "mission",
+            ParticipantKind::Service,
+            ParticipantState::Starting,
+        ));
+        board.record_heartbeat("mission", api::presence::Readiness::Failed);
+
+        let error = tokio::time::timeout(
+            Duration::from_millis(200),
+            await_participants_ready(
+                &board,
+                &["mission".to_string()],
+                Duration::from_secs(60),
+                Duration::from_millis(10),
+            ),
+        )
+        .await
+        .expect("explicit Failed readiness must bypass the stage timeout")
+        .expect_err("explicit Failed readiness must fail the wait");
+
+        assert_eq!(
+            error.to_string(),
+            "stage ended unhealthy; failed participants: mission"
+        );
+    }
+
+    /// The core staged-startup acceptance: nothing in a later stage spawns
+    /// until the previous stage is OBSERVED ready (not merely spawned).
+    /// "two" (`sleep_spec`, `bus_participant: true`) never gets a heartbeat
+    /// from this test until it manually sends one, so its absence from the
+    /// board proves stage two has not spawned yet.
+    #[tokio::test]
+    async fn staged_startup_gates_the_next_stage_on_observed_readiness() -> Result<()> {
+        let board = BoardBackend::new();
+        // Every real caller (`prepare_site_tools`/`prepare_robot_participants`)
+        // upserts a `Starting` board entry BEFORE a spec ever reaches the
+        // supervisor - `BoardBackend::append_log`'s missing-entry fallback
+        // defaults to `Ready`, so a spec spawned with no pre-existing entry
+        // would look observed-ready immediately, defeating the gate this
+        // test proves. Mirror that real contract for "one" only - "two"
+        // deliberately stays un-upserted, so its absence from the board is
+        // this test's proof that stage two has not spawned yet.
+        board.upsert(ParticipantStatus::new(
+            "one",
+            ParticipantKind::Service,
+            ParticipantState::Starting,
+        ));
+        let stages = vec![
+            SupervisionStage::new("stage-one", vec![sleep_spec("one")], Duration::from_secs(5)),
+            SupervisionStage::new("stage-two", vec![sleep_spec("two")], Duration::from_secs(5)),
+        ];
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let supervise = tokio::spawn(supervise_until_shutdown(
+            stages,
+            board.clone(),
+            SupervisorOptions {
+                cancel_rx: Some(cancel_rx),
+                ..SupervisorOptions::default()
+            },
+        ));
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !board.snapshot().participants.contains_key("two"),
+            "stage two must not spawn until stage one is observed ready"
+        );
+
+        board.record_heartbeat("one", api::presence::Readiness::Ready);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !board.snapshot().participants.contains_key("two") {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("stage two must spawn once stage one is observed ready");
+
+        let _ = cancel_tx.send("test teardown".to_string());
+        let outcome = tokio::time::timeout(Duration::from_secs(3), supervise)
+            .await
+            .expect("supervisor must exit promptly")
+            .expect("supervisor task panicked")?;
+        assert!(!outcome.clean_shutdown);
+        Ok(())
+    }
+
+    /// A crashing member of the CURRENT (still-waiting) stage must keep
+    /// restarting while that stage's own readiness wait is pending - the
+    /// wait runs as one branch of the same `select!` as poll/restart, not
+    /// inline before it, so it can never freeze supervision.
+    #[tokio::test]
+    async fn restart_still_happens_while_a_stage_readiness_wait_is_pending() -> Result<()> {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "flap",
+            ParticipantKind::Service,
+            ParticipantState::Starting,
+        ));
+        let flappy = ParticipantSpec {
+            id: "flap".to_string(),
+            kind: ParticipantKind::Service,
+            local: false,
+            executable: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_string(), "exit 7".to_string()],
+            cwd: None,
+            env: Vec::new(),
+            shutdown_grace: Duration::from_millis(10),
+            process_group: false,
+            note: None,
+            // Never heartbeats, so this stage's own wait never completes -
+            // the whole observation window below runs with `pending_stage`
+            // `Some`, proving restart still happens during that wait.
+            bus_participant: true,
+        };
+        let stages = vec![SupervisionStage::new(
+            "stage-one",
+            vec![flappy],
+            Duration::from_secs(30),
+        )];
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let supervise = tokio::spawn(supervise_until_shutdown(
+            stages,
+            board.clone(),
+            SupervisorOptions {
+                restart_policy: RestartPolicy {
+                    restart_delay: Duration::from_millis(20),
+                    start_limit_interval: Duration::from_secs(60),
+                    start_limit_burst: 1000,
+                },
+                cancel_rx: Some(cancel_rx),
+                ..SupervisorOptions::default()
+            },
+        ));
+
+        // Poll/restart only happen on the supervisor's 500ms ticker branch,
+        // so the observation window must span several ticks to prove
+        // restarts keep accumulating - too short a window would just prove
+        // "no crash happened yet", not "restart runs concurrently with the
+        // wait".
+        tokio::time::sleep(Duration::from_millis(1700)).await;
+        let restart_count = board.snapshot().participants["flap"].restart_count;
+        assert!(
+            restart_count >= 2,
+            "expected multiple restarts while the stage-one readiness wait was still pending, got {restart_count}"
+        );
+        // "flap" is mid crash-loop, so its state at this exact instant is
+        // either `Starting` (just respawned) or `Restarting` (waiting out
+        // `restart_delay`) - never `Ready`, since it never heartbeats.
+        assert!(
+            matches!(
+                board.snapshot().participants["flap"].state,
+                ParticipantState::Starting | ParticipantState::Restarting
+            ),
+            "flap never heartbeats, so stage one's own wait must still be pending: {:?}",
+            board.snapshot().participants["flap"].state
+        );
+
+        let _ = cancel_tx.send("test teardown".to_string());
+        tokio::time::timeout(Duration::from_secs(3), supervise)
+            .await
+            .expect("supervisor must exit promptly")
+            .expect("supervisor task panicked")?;
+        Ok(())
+    }
+
+    /// A coordinated-shutdown signal (the same `select!` shape a real
+    /// Ctrl-C's `tokio::signal::ctrl_c()` branch uses - sending a real SIGINT
+    /// from a unit test would affect the whole test process, so `cancel_rx`
+    /// is the safe structural equivalent already used elsewhere in this
+    /// module, e.g. `terminal_graph_failure_after_readiness_requests_orderly_teardown`)
+    /// arriving WHILE a stage readiness wait is still pending must still
+    /// break the loop and tear down promptly, proving the wait branch never
+    /// starves the other `select!` branches.
+    #[tokio::test]
+    async fn cancellation_during_a_stage_wait_still_tears_down_promptly() -> Result<()> {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "one",
+            ParticipantKind::Service,
+            ParticipantState::Starting,
+        ));
+        let stages = vec![SupervisionStage::new(
+            "stage-one",
+            vec![sleep_spec("one")],
+            Duration::from_secs(30),
+        )];
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let supervise = tokio::spawn(supervise_until_shutdown(
+            stages,
+            board.clone(),
+            SupervisorOptions {
+                cancel_rx: Some(cancel_rx),
+                ..SupervisorOptions::default()
+            },
+        ));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            board.snapshot().participants["one"].state,
+            ParticipantState::Starting,
+            "stage one must still be waiting on its own readiness"
+        );
+
+        let _ = cancel_tx.send("test coordinated shutdown".to_string());
+        // The proof is promptness itself: `supervise_until_shutdown` must
+        // return well inside the timeout even though "one"'s own stage wait
+        // was still pending when the cancel arrived - a plain (non-requested)
+        // teardown via `shutdown_all` stops the child but does not relabel
+        // its board state (that relabeling is `RequestedStop`-specific, see
+        // `request_participant_stop`), so this deliberately does not assert
+        // a final state beyond `clean_shutdown`.
+        let outcome = tokio::time::timeout(Duration::from_secs(3), supervise)
+            .await
+            .expect("supervisor must exit promptly even mid-stage-wait")
+            .expect("supervisor task panicked")?;
+        assert!(!outcome.clean_shutdown);
+        Ok(())
+    }
+
+    /// A stage that never reaches readiness fails the whole run, naming the
+    /// stalled participant(s) as failed on the board and in the outcome -
+    /// the staged-startup counterpart of the simulate readiness barrier's own
+    /// timeout behavior.
+    #[tokio::test]
+    async fn stalled_stage_times_out_and_marks_missing_participants_failed() -> Result<()> {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "one",
+            ParticipantKind::Service,
+            ParticipantState::Starting,
+        ));
+        let stages = vec![SupervisionStage::new(
+            "stage-one",
+            vec![sleep_spec("one")],
+            Duration::from_millis(150),
+        )];
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            supervise_until_shutdown(
+                stages,
+                board.clone(),
+                SupervisorOptions {
+                    ..SupervisorOptions::default()
+                },
+            ),
+        )
+        .await
+        .expect("a stalled stage must fail within its own timeout, never hang")
+        .expect_err("a stalled stage must fail the supervisor");
+
+        assert!(
+            error.to_string().contains("stage 'stage-one' stalled"),
+            "the failure must preserve the stalled stage label: {error:#}"
+        );
+        assert_eq!(board.snapshot().failed_participants(), vec!["one"]);
+        Ok(())
     }
 }

@@ -359,12 +359,13 @@ impl CheckCmd {
             .await
             .context("check worker failed")??;
 
-        // Emit the v0 pre-stable warning to stderr BEFORE the hard outcome check
-        // so a failing `phoxal check` still surfaces it. This goes to stderr
-        // only; JSON stdout (below) stays clean.
-        eprintln!(
-            "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
-        );
+        // Keep the human warning before the hard outcome check, but JSON's
+        // output contract reserves stderr for no bytes at all.
+        if self.message_format == MessageFormat::Human {
+            eprintln!(
+                "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
+            );
+        }
 
         ensure_check_outcome_ok(&result.channel, &result.outcome)?;
         match coherence_disposition(CoherenceVerb::Check, result.strict, &result.coherence) {
@@ -672,6 +673,19 @@ impl SourceParticipant {
     }
 }
 
+/// A source participant's role plus whether it has a known official/catalog
+/// identity it locally overrides. Deliberately kept as its own enum rather
+/// than collapsed into the shared `participant_kind::ParticipantKind`: every
+/// `SourceParticipant` already carries a `crate_dir`, so it is inherently
+/// "local" in the supervisor's sense - the real orthogonal bit this domain
+/// needs is "does an official/catalog identity exist for this name" (see
+/// `official`), not "is it local". `UserService` has no catalog counterpart
+/// at all (a robot developer's own service); `OfficialService` is a known
+/// official service whose source the robot developer is locally overriding;
+/// `Tool`/`Simulator` are always the latter shape (a source override of a
+/// known official artifact - see `kind_label`); `ComponentDriver` has no
+/// such axis. Use [`Self::shared_kind`] to bridge into the shared enum for
+/// call sites (`supervisor`, `watch`) that only care about the role split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceParticipantKind {
     UserService,
@@ -679,6 +693,28 @@ pub enum SourceParticipantKind {
     ComponentDriver,
     Tool,
     Simulator,
+}
+
+impl SourceParticipantKind {
+    #[must_use]
+    pub const fn shared_kind(self) -> crate::participant_kind::ParticipantKind {
+        use crate::participant_kind::ParticipantKind;
+        match self {
+            Self::UserService | Self::OfficialService => ParticipantKind::Service,
+            Self::ComponentDriver => ParticipantKind::Driver,
+            Self::Tool => ParticipantKind::Tool,
+            Self::Simulator => ParticipantKind::Simulator,
+        }
+    }
+
+    /// Whether this source participant has a known official/catalog identity
+    /// it is locally overriding, vs one invented purely by the user with no
+    /// catalog counterpart at all (only `UserService`). See the type docs for
+    /// why this is named `official`, not `local`.
+    #[must_use]
+    pub const fn official(self) -> bool {
+        !matches!(self, Self::UserService)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1475,9 +1511,6 @@ fn build_emit_apis_from_source_with_diagnostics(
 fn report_source_emit_apis_progress(ui: Option<&crate::Ui>, message: String) {
     if let Some(ui) = ui {
         ui.info(message);
-    } else {
-        // This low-level builder is also used by tests and callers without a `Ui`.
-        eprintln!("check: {message}");
     }
 }
 
@@ -1487,12 +1520,7 @@ fn report_source_emit_apis_progress(ui: Option<&crate::Ui>, message: String) {
 /// [`validate_source_artifact_identity`] (which still checks a fake/injected
 /// report against it in tests).
 fn expected_kind_for_source_participant(kind: SourceParticipantKind) -> &'static str {
-    match kind {
-        SourceParticipantKind::UserService | SourceParticipantKind::OfficialService => "service",
-        SourceParticipantKind::ComponentDriver => "driver",
-        SourceParticipantKind::Tool => "tool",
-        SourceParticipantKind::Simulator => "simulator",
-    }
+    kind.shared_kind().label()
 }
 
 fn build_emit_apis_by_building(participant: &SourceParticipant) -> Result<RawEmitApis> {
@@ -1526,7 +1554,16 @@ fn build_emit_apis_by_building(participant: &SourceParticipant) -> Result<RawEmi
 /// would miss it. Cargo's own artifact messages are workspace-aware
 /// regardless of layout.
 fn build_and_locate_binary(crate_dir: &Path, binary_name: &str) -> Result<PathBuf> {
-    let output = crate::shell::run_output(
+    // `run_output` fully captures the child's stdout/stderr (nothing is
+    // inherited), so an animated spinner here never collides with cargo's
+    // own live compiler output - unlike `run::build_source_binary`, whose
+    // `cargo build` inherits the terminal so its errors stream live and gets
+    // a static themed line instead (see that function's doc comment).
+    let progress = crate::progress::spinner(format!(
+        "building `{binary_name}` in {}",
+        crate_dir.display()
+    ));
+    let result = crate::shell::run_output(
         "cargo",
         [
             "build",
@@ -1537,7 +1574,17 @@ fn build_and_locate_binary(crate_dir: &Path, binary_name: &str) -> Result<PathBu
         ],
         Some(crate_dir),
     )
-    .with_context(|| format!("failed to spawn `cargo build --bin {binary_name}`"))?;
+    .with_context(|| format!("failed to spawn `cargo build --bin {binary_name}`"));
+    let output = match result {
+        Ok(output) => {
+            progress.finish_and_clear();
+            output
+        }
+        Err(error) => {
+            progress.abandon_with_message(format!("failed to build `{binary_name}`: {error:#}"));
+            return Err(error);
+        }
+    };
     if !output.status.success() {
         bail!(
             "failed to build `{binary_name}` in {}\nstdout:\n{}\nstderr:\n{}",

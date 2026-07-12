@@ -36,13 +36,23 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
     }
     // `tool-joypad` is peripheral teleop and no longer launches by default
     // for `simulate` (opt in via `--joypad`); see `commands::simulate::prepare_with_mode`.
+    // `tool-telemetry` (CLI-UX Phase 3/4) IS a standard observable site tool
+    // in every mode including `simulate` (no opt-in flag, unlike joypad) -
+    // it resolves here because `fixture_catalog_for_tests` auto-fills every
+    // `resolver::OFFICIAL_OPTIONAL_TOOLS` entry alongside the required ones.
     let site_ids = plan
         .plan
         .site
         .iter()
         .map(|site| site.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(site_ids, vec![phoxal_cli::launch_plan::SITE_TOOL_ROUTER]);
+    assert_eq!(
+        site_ids,
+        vec![
+            phoxal_cli::launch_plan::SITE_TOOL_ROUTER,
+            phoxal_cli::launch_plan::SITE_TOOL_TELEMETRY,
+        ]
+    );
     assert_eq!(
         plan.ctx.resolved.platform_runtimes.len(),
         phoxal_cli::catalog::OFFICIAL_SERVICES.len()

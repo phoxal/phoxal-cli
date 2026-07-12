@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use clap::Args;
+use clap::{Args, Subcommand};
 use phoxal::bus::{Codec, ContractBody, MessagePack, QueryFailure};
 use phoxal::check as graph_check;
 use phoxal::raw::{Bus, BusConfig};
@@ -33,9 +33,9 @@ use crate::simulate_staging::{
 };
 use crate::supervisor::{
     BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
-    RequestedStop, RouterOwnership, SupervisorLock, SupervisorOptions, await_readiness_barrier,
-    await_terminal_graph_failure, default_connect_endpoint, local_router_reachable,
-    router_ownership, start_bus_log_subscriber, start_clock_barrier_feed,
+    RequestedStop, RouterOwnership, SupervisionStage, SupervisorLock, SupervisorOptions,
+    await_readiness_barrier, await_terminal_graph_failure, default_connect_endpoint,
+    local_router_reachable, router_ownership, start_bus_log_subscriber, start_clock_barrier_feed,
     start_presence_heartbeat_subscriber, supervise_until_shutdown, supervisor_actions_path,
     supervisor_state_path,
 };
@@ -78,8 +78,54 @@ pub(crate) fn simulator_controller_provider_id(robot_id: &str) -> String {
     format!("simulator-webots-controller-{robot_id}")
 }
 
+/// The `simulation` command group: `run` (this repo's original `simulate
+/// <world>` verb, renamed) and `join` (a multi-robot join stub - see
+/// [`SimulationJoin`]). Deliberately a clean cut, no `simulate` alias and no
+/// bare `simulation <world>` shorthand - see the group's module docs.
 #[derive(Debug, Args)]
-pub struct Simulate {
+pub struct Simulation {
+    #[command(subcommand)]
+    pub command: SimulationSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SimulationSubcommand {
+    #[command(about = "Resolve and report a Webots simulation launch plan.")]
+    Run(SimulationRun),
+    #[command(about = "Join a running multi-robot simulation session (not available yet).")]
+    Join(SimulationJoin),
+}
+
+impl Simulation {
+    pub async fn run(&self, app: &AppContext) -> Result<()> {
+        match &self.command {
+            SimulationSubcommand::Run(command) => command.run(app).await,
+            SimulationSubcommand::Join(command) => command.run(app).await,
+        }
+    }
+
+    #[must_use]
+    pub fn message_format(&self) -> MessageFormat {
+        match &self.command {
+            SimulationSubcommand::Run(command) => command.message_format,
+            SimulationSubcommand::Join(_) => MessageFormat::Human,
+        }
+    }
+
+    /// Only `simulation run` consumes artifacts (catalog/resolver), so only
+    /// it participates in the update-notice check; `simulation join` is a
+    /// pure stub today and never touches a robot project.
+    #[must_use]
+    pub fn update_notice_format(&self) -> Option<MessageFormat> {
+        match &self.command {
+            SimulationSubcommand::Run(command) => Some(command.message_format),
+            SimulationSubcommand::Join(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct SimulationRun {
     #[arg(
         value_name = "WORLD",
         help = "World file or bare name (e.g. `default`, or `worlds/foo.wbt`). Resolved against <project>/worlds/<world>.wbt, then <project>/<world>."
@@ -111,6 +157,23 @@ pub struct Simulate {
         help = "Resolve the robot's official artifacts for this target instead of the host (e.g. aarch64, x86_64, or a full triple). The simulator itself still runs on the host. Use it to plan a Linux robot's simulation from a non-Linux host."
     )]
     pub target: Option<String>,
+}
+
+/// `phoxal-cli simulation join`: joins a running multi-robot simulation
+/// session. Multi-robot join lands as its own slice - this is a stub that
+/// prints a clear "not available yet" message and exits 0 (it is not an
+/// error to ask for a feature that is on the roadmap but not yet wired up;
+/// scripts should not need to special-case this verb's exit status).
+#[derive(Debug, Args)]
+pub struct SimulationJoin {}
+
+impl SimulationJoin {
+    pub async fn run(&self, app: &AppContext) -> Result<()> {
+        app.ui.info(
+            "simulation join: not available yet - multi-robot join lands in a separate slice",
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,7 +215,7 @@ pub(crate) struct ResolvedSimulation {
     pub(crate) catalog: Option<Catalog>,
 }
 
-impl Simulate {
+impl SimulationRun {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let options = SimulateOptions {
             world: self.world.clone(),
@@ -172,6 +235,28 @@ impl Simulate {
     }
 }
 
+/// `simulation run`'s startup stepper phases (Part 4), in order. Indices
+/// 3-8 map 1:1 onto `stages_for_simulate`'s six `SupervisionStage`s, driven
+/// live from the board by `Stepper::drive_participant_phases`; index 9 wraps
+/// the existing clock-coupled `await_readiness_barrier` call unchanged (see
+/// its own docs for why it stays a separate, final gate rather than folding
+/// into the staged supervisor). Indices 0-2 share `run`'s documented
+/// simplification (`commands::run::RUN_PHASES`) - they complete together
+/// right when `prepare_with_mode` returns rather than live-updating mid-phase.
+const SIMULATION_PHASES: [&str; 11] = [
+    "Downloading artifacts",
+    "Validating robot",
+    "Building artifacts",
+    "Starting router",
+    "Starting tools",
+    "Starting Webots",
+    "Starting simulation supervisor",
+    "Starting services",
+    "Spawning robot in Webots",
+    "Waiting for simulation clock",
+    "Initialized",
+];
+
 pub async fn run(
     app: &AppContext,
     options: SimulateOptions,
@@ -188,6 +273,8 @@ pub async fn run(
             Ok(sim)
         }
         SimulateMode::Live => {
+            let mut stepper = crate::stepper::Stepper::new(SIMULATION_PHASES);
+            stepper.start(0);
             let project_root = app.project.root().to_path_buf();
             let ui = app.ui;
             let prepared_options = options.clone();
@@ -196,6 +283,14 @@ pub async fn run(
             })
             .await
             .context("simulate preparation worker failed")??;
+            // See `SIMULATION_PHASES`' docs: download/validate/build happen
+            // together inside `prepare_with_mode`, so all three complete
+            // here rather than live.
+            stepper.complete(0);
+            stepper.start(1);
+            stepper.complete(1);
+            stepper.start(2);
+            stepper.complete(2);
 
             crate::host_doctor::preflight()
                 .map_err(|error| anyhow!("{error}"))
@@ -259,7 +354,11 @@ pub async fn run(
                         .info("tool-router will be managed by this simulation session");
                 }
             }
-            crate::commands::run::report_launch_commands(&specs, options.message_format)?;
+            crate::commands::run::report_launch_commands(
+                &sim.plan,
+                &specs,
+                options.message_format,
+            )?;
 
             let _log_tasks = sim
                 .plan
@@ -295,11 +394,22 @@ pub async fn run(
                 sim.plan.robots.first().context(
                     "sim launch plan has no robot for the readiness barrier's clock feed",
                 )?;
-            let (mut clock_rx, clock_task) = start_clock_barrier_feed(
+            let (mut clock_rx, _clock_task) = start_clock_barrier_feed(
                 barrier_robot.namespace.clone(),
                 barrier_robot.id.clone(),
                 default_connect_endpoint(),
             );
+            // The SAME clock feed backs both the readiness barrier below
+            // (`&mut clock_rx`, first-sample/advanced detection) and the
+            // TUI's live top-bar step/running readout
+            // (`TelemetryBackend::set_clock_feed`, `latest` field) - cloning
+            // the `watch::Receiver` here is cheap and leaves the barrier's own
+            // mutable borrow untouched. Unlike the old behavior, the feed
+            // task is no longer aborted once the barrier completes: it keeps
+            // running (as `_clock_task`, unbound) for the rest of the
+            // session so the TUI keeps seeing fresh samples.
+            let telemetry = crate::telemetry::TelemetryBackend::new();
+            telemetry.set_clock_feed(clock_rx.clone());
 
             let (action_rx, watch_handle) = if options.watch {
                 let (action_tx, action_rx) = mpsc::channel(16);
@@ -328,8 +438,39 @@ pub async fn run(
             // stop every other child instead of leaving an unhealthy session
             // running forever.
             let (cancel_tx, cancel_rx) = oneshot::channel();
+            let stages = stages_for_simulate(specs, &sim.plan);
+            let stage_phases = stages
+                .iter()
+                .map(|stage| {
+                    crate::stepper::StagePhase::new(
+                        !stage.specs.is_empty() || !stage.ready_ids.is_empty(),
+                        stage.ready_ids.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let identity = crate::identity::IdentitySummary::discover(&sim.ctx.project_root);
+            let display = crate::display::Display::for_mode("simulation", identity);
+            // Live telemetry (CLI-UX Phase 3/4): only worth subscribing when
+            // a real TUI is up to read it, same gate as `commands::run`. The
+            // sim clock feed (`telemetry.set_clock_feed` above) is wired
+            // unconditionally since it costs nothing extra - the SAME task
+            // already exists for the readiness barrier - but host/process/
+            // router/joypad each open their own bus connection, so those
+            // stay Tui-gated.
+            let site_targets: Vec<(String, String)> = sim
+                .plan
+                .robots
+                .iter()
+                .map(|robot| (robot.namespace.clone(), robot.id.clone()))
+                .collect();
+            let _telemetry_tasks = if matches!(display, crate::display::Display::Tui(_)) {
+                crate::commands::run::start_telemetry_feeds(&site_targets, &telemetry)
+            } else {
+                Vec::new()
+            };
+            let (display_activate_tx, display_activate_rx) = oneshot::channel();
             let supervise_task = tokio::spawn(supervise_until_shutdown(
-                specs,
+                stages,
                 board.clone(),
                 SupervisorOptions {
                     state_file: Some(state_file),
@@ -337,19 +478,54 @@ pub async fn run(
                     action_rx,
                     requested_stop: Some(requested_stop),
                     cancel_rx: Some(cancel_rx),
+                    display,
+                    display_activate_rx: Some(display_activate_rx),
+                    telemetry,
                     ..SupervisorOptions::default()
                 },
             ));
 
-            let barrier_result = await_readiness_barrier(
-                &board,
-                &expected_bus_ids,
-                &mut clock_rx,
-                SIMULATE_READINESS_TIMEOUT,
-                std::time::Duration::from_millis(200),
-            )
-            .await;
-            clock_task.abort();
+            // Phases 3-8 (Router/Tools/Webots/Supervisor/Services/Robot)
+            // progress live off the same board the staged supervisor above
+            // is driving, purely cosmetic and read-only (see
+            // `Stepper::drive_participant_phases`'s docs); phase 9 is the
+            // existing clock-coupled barrier, unchanged. `tokio::join!` runs
+            // both concurrently so the stepper's stage-by-stage display and
+            // the barrier's all-at-once participant+clock check finish
+            // together rather than one blocking the other.
+            stepper.start(9);
+            let (stepper_after_stages, barrier_result) = tokio::join!(
+                stepper.drive_participant_phases(&board, 3, stage_phases),
+                await_readiness_barrier(
+                    &board,
+                    &expected_bus_ids,
+                    &mut clock_rx,
+                    SIMULATE_READINESS_TIMEOUT,
+                    std::time::Duration::from_millis(200),
+                )
+            );
+            let mut stepper = stepper_after_stages;
+            match &barrier_result {
+                Ok(()) if !stepper.has_failed() => {
+                    stepper.complete(9);
+                    stepper.start(10);
+                    stepper.complete(10);
+                    stepper.clear();
+                }
+                Ok(()) => {
+                    // A phase 3-8 stage already failed and printed its own
+                    // `✗` line even though the barrier itself reported
+                    // success - leave that failure visible rather than
+                    // papering over it with a false `Initialized`.
+                }
+                Err(error) => stepper.fail(9, format!("{error:#}")),
+            }
+            // Hand off to whichever display `Display::for_mode` selected
+            // (Part 2) only now that every stepper line is done redrawing,
+            // regardless of which arm above ran - a startup failure must
+            // still be visible in the TUI/logger, not just a frozen stepper
+            // line.
+            let _ = display_activate_tx.send(());
             let terminal_failure_task = match &barrier_result {
                 Err(error) => {
                     let _ = cancel_tx.send(error.to_string());
@@ -1047,12 +1223,64 @@ fn simulation_managed_participant_ids(plan: &LaunchPlan) -> Vec<String> {
         .collect()
 }
 
+/// Partition `simulation run`'s already-built spec list (site tools +
+/// services + the Webots app, in that order - see the call site) plus the
+/// plan's SIMULATION-MANAGED (wait-only, spec-less) ids into the staged
+/// startup order (Part 2): router < other tools < Webots app < simulation
+/// supervisor (wait-only) < services < robot/controllers (wait-only). The
+/// final "clock advancing" gate is NOT a stage here - it stays the existing
+/// clock-coupled `await_readiness_barrier`, called by `run` (above) once
+/// every stage below has completed; the deferred-spawn machinery (the
+/// `SpawnSet` bus responder, importable PROTOs, controller-readiness
+/// observation) is unchanged, this only reorders WHEN the CLI hands specs to
+/// the supervisor and adds explicit wait-only stages for the participants
+/// Webots itself spawns.
+fn stages_for_simulate(specs: Vec<ParticipantSpec>, plan: &LaunchPlan) -> Vec<SupervisionStage> {
+    let mut router = Vec::new();
+    let mut tools = Vec::new();
+    let mut webots = Vec::new();
+    let mut services = Vec::new();
+    for spec in specs {
+        if spec.id == crate::launch_plan::SITE_TOOL_ROUTER {
+            router.push(spec);
+        } else if spec.id == WEBOTS_SITE_ID {
+            webots.push(spec);
+        } else if spec.kind == ParticipantKind::Tool {
+            tools.push(spec);
+        } else {
+            services.push(spec);
+        }
+    }
+    let (supervisor_ids, controller_ids): (Vec<String>, Vec<String>) =
+        simulation_managed_participant_ids(plan)
+            .into_iter()
+            .partition(|id| id == SIMULATOR_SUPERVISOR_PROVIDER_ID);
+    vec![
+        SupervisionStage::new("starting router", router, SIMULATE_READINESS_TIMEOUT),
+        SupervisionStage::new("starting tools", tools, SIMULATE_READINESS_TIMEOUT),
+        SupervisionStage::new("starting Webots", webots, SIMULATE_READINESS_TIMEOUT),
+        SupervisionStage::new(
+            "waiting for the simulation supervisor",
+            Vec::new(),
+            SIMULATE_READINESS_TIMEOUT,
+        )
+        .with_extra_ready_ids(supervisor_ids),
+        SupervisionStage::new("starting services", services, SIMULATE_READINESS_TIMEOUT),
+        SupervisionStage::new(
+            "waiting for robot controllers",
+            Vec::new(),
+            SIMULATE_READINESS_TIMEOUT,
+        )
+        .with_extra_ready_ids(controller_ids),
+    ]
+}
+
 fn prepare_substitution_notes(plan: &LaunchPlan, board: &BoardBackend) {
     for robot in &plan.robots {
         for substitution in &robot.substitutions {
             let mut status = ParticipantStatus::new(
                 &substitution.component_instance,
-                ParticipantKind::ComponentDriver,
+                ParticipantKind::Driver,
                 ParticipantState::Ready,
             );
             status.note = Some(substitution_note(substitution));
@@ -1151,7 +1379,8 @@ fn stage_and_prepare_webots_spec(
     ));
     let spec = ParticipantSpec {
         id: WEBOTS_SITE_ID.to_string(),
-        kind: ParticipantKind::SiteTool,
+        kind: ParticipantKind::Tool,
+        local: false,
         executable: webots_path,
         args: webots_launch_args(&staged.staged_world_path),
         cwd: None,

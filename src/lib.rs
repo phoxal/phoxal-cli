@@ -13,7 +13,7 @@
 //!   executing it - [`participant_metadata`]) and validate it with the shared
 //!   [`phoxal::check`] graph core; git component commits resolve live unless
 //!   pinned to a commit SHA in `robot.yaml`.
-//! - `simulate <world>` - resolve and print or run the host-native simulation plan.
+//! - `simulation run <world>` - resolve and print or run the host-native simulation plan.
 //! - `deploy <user@host>` - render the checked launch plan into a native systemd
 //!   payload, sync it to the robot, restart `phoxal.target`, and report health.
 //!   Prints the v0 pre-stable warning.
@@ -32,20 +32,30 @@ pub mod catalog;
 pub mod commands;
 pub(crate) mod component_driver;
 pub mod context;
+pub mod display;
 pub(crate) mod git_artifact;
 pub mod host_doctor;
 pub mod host_paths;
+pub mod identity;
 pub mod launch_env;
 pub mod launch_plan;
+pub mod logger;
 pub mod native_artifacts;
 pub mod native_pending;
+pub mod output_mode;
+pub mod participant_kind;
 pub mod participant_metadata;
 pub mod process;
+pub mod progress;
 pub mod project;
 pub mod resolver;
 pub mod shell;
 pub mod simulate_staging;
+pub mod stepper;
 pub mod supervisor;
+pub mod telemetry;
+pub mod theme;
+pub mod tui;
 pub mod ui;
 pub(crate) mod update_notice;
 pub mod utils;

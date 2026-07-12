@@ -100,7 +100,9 @@ pub(crate) fn catalog_or_vendored(
     match loaded {
         Ok(catalog) => Ok(catalog),
         Err(error) if crate::host_paths::artifacts_dir().is_ok_and(|path| path.is_dir()) => {
-            if std::env::var_os("PHOXAL_QUIET").is_none() {
+            if std::env::var_os("PHOXAL_QUIET").is_none()
+                && !crate::progress::current_mode().is_json()
+            {
                 eprintln!(
                     "warning: catalog unreachable, continuing with project-vendored files: {error:#}"
                 );
@@ -221,6 +223,18 @@ pub struct Cli {
         help = "Suppress update notices (recommended for CI)."
     )]
     pub quiet: bool,
+    #[arg(
+        long,
+        global = true,
+        help = "Force append-only stderr output: no spinner/progress redraw, no identity/welcome decoration beyond the plain identity line."
+    )]
+    pub plain: bool,
+    #[arg(
+        long,
+        global = true,
+        help = "Print the phoxal welcome card instead of the compact identity line (suppressed under the same conditions as the identity line - see `phoxal-cli --help`)."
+    )]
+    pub welcome: bool,
 
     #[command(subcommand)]
     pub command: RootCommand,
@@ -236,8 +250,8 @@ pub enum RootCommand {
     Check(check::CheckCmd),
     #[command(about = "Validate robot.yaml structure and user-service phoxal dependencies.")]
     Validate(validate::Validate),
-    #[command(about = "Resolve and report a Webots simulation launch plan.")]
-    Simulate(simulate::Simulate),
+    #[command(about = "Simulate a robot in Webots (see `simulation run`/`simulation join`).")]
+    Simulation(simulate::Simulation),
     #[command(about = "Run the resolved robot graph with the host-native supervisor.")]
     Run(run::Run),
     #[command(about = "Stream participant bus logs from a reachable robot.")]
@@ -264,10 +278,61 @@ impl RootCommand {
     fn update_notice_format(&self) -> Option<MessageFormat> {
         match self {
             Self::Check(command) => Some(command.message_format),
-            Self::Simulate(command) => Some(command.message_format),
+            Self::Simulation(command) => command.update_notice_format(),
             Self::Run(command) => Some(command.message_format),
             Self::Deploy(command) => Some(command.message_format),
             _ => None,
+        }
+    }
+
+    /// A "machine verb" answers a terse, scriptable question (the CLI's own
+    /// version, a log stream, a status snapshot, the service catalog, or
+    /// self-management) rather than driving the develop/simulate/deploy loop
+    /// against a robot project. The identity header and `--welcome` card are
+    /// suppressed for these (see [`crate::identity::IdentityPolicy`]) so they
+    /// never precede output a script might be parsing.
+    fn is_machine_verb(&self) -> bool {
+        matches!(
+            self,
+            Self::Version(_)
+                | Self::Logs(_)
+                | Self::Status(_)
+                | Self::Service(_)
+                | Self::SelfCmd(_)
+        )
+    }
+
+    /// The `--message-format` every verb answers with, defaulting to
+    /// [`MessageFormat::Human`] for the handful of verbs (`validate`,
+    /// `logs`, `doctor`) that have no format flag of their own. Broader than
+    /// [`Self::update_notice_format`] (which only covers the four
+    /// artifact-consuming verbs): this feeds [`crate::output_mode::OutputMode`]
+    /// and [`crate::identity::IdentityPolicy`], which both need to know
+    /// `--json` was requested regardless of which verb it was.
+    fn message_format(&self) -> MessageFormat {
+        match self {
+            Self::Check(command) => command.message_format,
+            Self::Validate(_) => MessageFormat::Human,
+            Self::Simulation(command) => command.message_format(),
+            Self::Run(command) => command.message_format,
+            Self::Logs(_) => MessageFormat::Human,
+            Self::Status(command) => command.message_format,
+            Self::Deploy(command) => command.message_format,
+            Self::Update(command) => command.message_format,
+            Self::Cache(command) => {
+                let cache::CacheSubcommand::Clean(clean) = &command.command;
+                clean.message_format
+            }
+            Self::Doctor(_) => MessageFormat::Human,
+            Self::Service(command) => {
+                let service::ServiceSubcommand::Catalog(catalog) = &command.command;
+                catalog.message_format
+            }
+            Self::Version(command) => command.message_format,
+            Self::SelfCmd(command) => {
+                let self_cmd::SelfSubcommand::Upgrade(upgrade) = &command.command;
+                upgrade.message_format
+            }
         }
     }
 
@@ -275,7 +340,7 @@ impl RootCommand {
         match self {
             Self::Check(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
-            Self::Simulate(command) => command.run(app).await,
+            Self::Simulation(command) => command.run(app).await,
             Self::Run(command) => command.run(app).await,
             Self::Logs(command) => command.run(app).await,
             Self::Status(command) => command.run(app).await,
@@ -290,7 +355,19 @@ impl RootCommand {
     }
 }
 
+impl Cli {
+    /// The invocation-wide output contract, exposed so the binary can silence
+    /// tracing and its top-level error reporter before dispatch starts.
+    #[must_use]
+    pub fn message_format(&self) -> MessageFormat {
+        self.command.message_format()
+    }
+}
+
 pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
+    let interactive = std::io::stderr().is_terminal();
+    let message_format = cli.command.message_format();
+
     let policy = crate::update_notice::NoticePolicy {
         artifact_consuming: cli.command.update_notice_format().is_some(),
         message_format: cli
@@ -298,14 +375,43 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
             .update_notice_format()
             .unwrap_or(MessageFormat::Human),
         quiet: cli.quiet,
-        interactive: std::io::stderr().is_terminal(),
+        interactive,
     };
     crate::update_notice::begin(policy);
     if policy.artifact_consuming && !policy.quiet && policy.interactive {
         crate::update_notice::start_cli_check();
     }
+
+    // Output-mode matrix (see `crate::output_mode`): computed once here from
+    // the same inputs the notice policy above uses, and pushed into the
+    // process-wide progress state so every long-running operation below
+    // (catalog fetch, artifact download, git resolve, cargo builds, the
+    // simulate readiness wait) can ask for a spinner/bar without a handle
+    // threaded through its call chain.
+    let output_mode =
+        crate::output_mode::OutputMode::compute(interactive, cli.plain, cli.quiet, message_format);
+    crate::progress::set_mode(output_mode);
+
+    // Identity header / `--welcome` card: gated independently of the output
+    // mode above (see `crate::identity::IdentityPolicy` - `--plain` is
+    // deliberately not part of this rule).
+    let identity_policy = crate::identity::IdentityPolicy {
+        interactive,
+        quiet: cli.quiet,
+        message_format,
+        machine_verb: cli.command.is_machine_verb(),
+        welcome: cli.welcome,
+    };
+    crate::identity::print(
+        identity_policy,
+        app.project.root(),
+        crate::theme::Theme::detect_stderr(),
+        version_summary().cli_version,
+    );
+
     let result = cli.command.run(app).await;
     crate::update_notice::finish();
+    crate::progress::clear_mode();
     result
 }
 
