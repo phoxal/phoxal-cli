@@ -21,6 +21,7 @@ use crate::component_driver::component_driver_crate_dir;
 use crate::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchPlan, PlanContext, build_launch_plan,
 };
+use crate::participant_kind::ParticipantKind;
 use crate::resolver::{
     ResolveOptions, ResolvedRobot, discover_robot_yaml, load_robot_with_extras,
     load_robot_with_extras_and_overlays, resolve,
@@ -37,24 +38,11 @@ pub(crate) enum WatchMode {
     Sim,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum WatchTargetKind {
-    Service,
-    Driver,
-    Tool,
-    Simulator,
-}
-
-impl WatchTargetKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Service => "service",
-            Self::Driver => "driver",
-            Self::Tool => "tool",
-            Self::Simulator => "simulator",
-        }
-    }
-}
+/// The shared `ParticipantKind` (`Service`/`Driver`/`Tool`/`Simulator`) - a
+/// watch target only ever needs the role split, never a local/catalog bit
+/// (every watch target is by construction a locally-changing source
+/// directory), so this is a plain alias rather than a wrapping type.
+pub(crate) type WatchTargetKind = ParticipantKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WatchTarget {
@@ -519,14 +507,7 @@ pub(crate) fn watch_targets_from_sources(
 ) -> Vec<WatchTarget> {
     let mut grouped = BTreeMap::<(WatchTargetKind, PathBuf, String), WatchTarget>::new();
     for participant in source_participants {
-        let kind = match participant.kind {
-            SourceParticipantKind::UserService | SourceParticipantKind::OfficialService => {
-                WatchTargetKind::Service
-            }
-            SourceParticipantKind::ComponentDriver => WatchTargetKind::Driver,
-            SourceParticipantKind::Tool => WatchTargetKind::Tool,
-            SourceParticipantKind::Simulator => WatchTargetKind::Simulator,
-        };
+        let kind = participant.kind.shared_kind();
         if !watch_kind_in_mode(kind, mode, participant.name.as_str(), live_ids) {
             continue;
         }
@@ -696,7 +677,8 @@ mod tests {
         };
         let spec = ParticipantSpec {
             id: "mission".to_string(),
-            kind: crate::supervisor::ParticipantKind::UserService,
+            kind: crate::supervisor::ParticipantKind::Service,
+            local: true,
             executable: PathBuf::from("/bin/echo"),
             args: Vec::new(),
             cwd: None,

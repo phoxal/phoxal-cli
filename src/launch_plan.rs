@@ -165,6 +165,10 @@ fn build_site_launches(
             artifact_ref: joypad,
             phoxal_config: serde_json::json!({}),
         });
+        // TODO(cli-ux telemetry slice): add tool-telemetry to the standard
+        // set once published - a standard observable site tool exactly like
+        // `tool-joypad` above, gated in the same "other tools" staged-startup
+        // stage (see `commands::run::stages_for_run`).
     }
     Ok(site)
 }

@@ -1669,13 +1669,12 @@ fn build_source_artifact(
 }
 
 fn source_kind(kind: SourceParticipantKind) -> ArtifactKind {
-    match kind {
-        SourceParticipantKind::UserService | SourceParticipantKind::OfficialService => {
-            ArtifactKind::Service
-        }
-        SourceParticipantKind::ComponentDriver => ArtifactKind::ComponentDriver,
-        SourceParticipantKind::Tool => ArtifactKind::Tool,
-        SourceParticipantKind::Simulator => ArtifactKind::Simulator,
+    use crate::participant_kind::ParticipantKind;
+    match kind.shared_kind() {
+        ParticipantKind::Service => ArtifactKind::Service,
+        ParticipantKind::Driver => ArtifactKind::ComponentDriver,
+        ParticipantKind::Tool => ArtifactKind::Tool,
+        ParticipantKind::Simulator => ArtifactKind::Simulator,
     }
 }
 

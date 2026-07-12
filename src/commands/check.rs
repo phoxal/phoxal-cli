@@ -672,6 +672,19 @@ impl SourceParticipant {
     }
 }
 
+/// A source participant's role plus whether it has a known official/catalog
+/// identity it locally overrides. Deliberately kept as its own enum rather
+/// than collapsed into the shared `participant_kind::ParticipantKind`: every
+/// `SourceParticipant` already carries a `crate_dir`, so it is inherently
+/// "local" in the supervisor's sense - the real orthogonal bit this domain
+/// needs is "does an official/catalog identity exist for this name" (see
+/// `official`), not "is it local". `UserService` has no catalog counterpart
+/// at all (a robot developer's own service); `OfficialService` is a known
+/// official service whose source the robot developer is locally overriding;
+/// `Tool`/`Simulator` are always the latter shape (a source override of a
+/// known official artifact - see `kind_label`); `ComponentDriver` has no
+/// such axis. Use [`Self::shared_kind`] to bridge into the shared enum for
+/// call sites (`supervisor`, `watch`) that only care about the role split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceParticipantKind {
     UserService,
@@ -679,6 +692,28 @@ pub enum SourceParticipantKind {
     ComponentDriver,
     Tool,
     Simulator,
+}
+
+impl SourceParticipantKind {
+    #[must_use]
+    pub const fn shared_kind(self) -> crate::participant_kind::ParticipantKind {
+        use crate::participant_kind::ParticipantKind;
+        match self {
+            Self::UserService | Self::OfficialService => ParticipantKind::Service,
+            Self::ComponentDriver => ParticipantKind::Driver,
+            Self::Tool => ParticipantKind::Tool,
+            Self::Simulator => ParticipantKind::Simulator,
+        }
+    }
+
+    /// Whether this source participant has a known official/catalog identity
+    /// it is locally overriding, vs one invented purely by the user with no
+    /// catalog counterpart at all (only `UserService`). See the type docs for
+    /// why this is named `official`, not `local`.
+    #[must_use]
+    pub const fn official(self) -> bool {
+        !matches!(self, Self::UserService)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1487,12 +1522,7 @@ fn report_source_emit_apis_progress(ui: Option<&crate::Ui>, message: String) {
 /// [`validate_source_artifact_identity`] (which still checks a fake/injected
 /// report against it in tests).
 fn expected_kind_for_source_participant(kind: SourceParticipantKind) -> &'static str {
-    match kind {
-        SourceParticipantKind::UserService | SourceParticipantKind::OfficialService => "service",
-        SourceParticipantKind::ComponentDriver => "driver",
-        SourceParticipantKind::Tool => "tool",
-        SourceParticipantKind::Simulator => "simulator",
-    }
+    kind.shared_kind().label()
 }
 
 fn build_emit_apis_by_building(participant: &SourceParticipant) -> Result<RawEmitApis> {

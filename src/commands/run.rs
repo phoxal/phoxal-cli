@@ -33,12 +33,69 @@ use crate::resolver::{
 };
 use crate::supervisor::{
     BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
-    RouterOwnership, SupervisorLock, SupervisorOptions, default_connect_endpoint,
+    RouterOwnership, SupervisionStage, SupervisorLock, SupervisorOptions, default_connect_endpoint,
     local_router_reachable, router_ownership, start_bus_log_subscriber,
     start_presence_heartbeat_subscriber, supervise_until_shutdown, supervisor_actions_path,
     supervisor_state_path,
 };
 use crate::utils::cargo_binary_name;
+
+/// How long a `run` staged-startup stage may wait for its members to be
+/// OBSERVED ready before the whole run fails naming the stalled stage - see
+/// `stages_for_run` and `supervisor::SupervisionStage`. Every `run`
+/// participant is CLI-managed and expected to clear its own `#[setup]`
+/// quickly on a loaded host; generous enough to absorb ordinary scheduling
+/// jitter without masking a genuinely hung participant.
+const RUN_STAGE_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// `run`'s startup stepper phases (Part 4), in order. Indices 3-6 map
+/// 1:1 onto `stages_for_run`'s four `SupervisionStage`s; `spawn_run_stepper`
+/// drives those live from the board. Indices 0-2 (download/validate/build)
+/// happen synchronously inside `prepare_run`, which does not yet report
+/// intermediate progress back to the caller - they complete together right
+/// when `prepare_run` returns rather than live-updating mid-phase; this is a
+/// known, deliberate simplification (threading a live/skip signal out of
+/// `prepare_run`'s artifact-download and source-build internals is future
+/// work, not required for the stepper to exist and hand off correctly).
+const RUN_PHASES: [&str; 8] = [
+    "Downloading artifacts",
+    "Validating robot",
+    "Building artifacts",
+    "Starting router",
+    "Starting tools",
+    "Starting drivers",
+    "Starting services",
+    "Initialized",
+];
+
+/// Drive `RUN_PHASES`' participant-observing phases (indices 3-6, plus the
+/// final `Initialized`) by polling the board for each stage's expected ids
+/// in turn, mirroring the staged supervisor's own gating (`stages_for_run`)
+/// without needing an event channel out of `supervise_until_shutdown` - this
+/// task is read-only and purely cosmetic; it never affects the actual staged
+/// startup, only what the operator sees while it happens. Consumes `stepper`
+/// (already having rendered phases 0-2) and clears the whole sequence once
+/// `Initialized` completes, hand off to the existing board render.
+fn spawn_run_stepper(
+    stepper: crate::stepper::Stepper,
+    board: BoardBackend,
+    stage_phases: Vec<crate::stepper::StagePhase>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut stepper = stepper
+            .drive_participant_phases(&board, 3, stage_phases)
+            .await;
+        if stepper.has_failed() {
+            // A phase already failed and printed its own `✗` line - leave it
+            // visible instead of papering over it with `Initialized`.
+            return;
+        }
+        let initialized = RUN_PHASES.len() - 1;
+        stepper.start(initialized);
+        stepper.complete(initialized);
+        stepper.clear();
+    })
+}
 
 #[derive(Debug, Args)]
 pub struct Run {
@@ -119,10 +176,20 @@ impl Run {
         let action_file = supervisor_actions_path()?;
         let project_root = app.project.root().to_path_buf();
         let ui = app.ui;
+
+        let mut stepper = crate::stepper::Stepper::new(RUN_PHASES);
+        stepper.start(0);
         let prepared =
             tokio::task::spawn_blocking(move || prepare_run(&project_root, options, &ui))
                 .await
                 .context("run preparation worker failed")??;
+        // See `RUN_PHASES`' docs: download/validate/build happen together
+        // inside `prepare_run`, so all three complete here rather than live.
+        stepper.complete(0);
+        stepper.start(1);
+        stepper.complete(1);
+        stepper.start(2);
+        stepper.complete(2);
 
         app.ui.info(format!(
             "launch plan resolved: {} robot(s), {} site tool(s)",
@@ -133,7 +200,7 @@ impl Run {
             RouterOwnership::External => app.ui.info("reusing reachable external tool-router"),
             RouterOwnership::Managed => app.ui.info("tool-router will be managed by this session"),
         }
-        report_launch_commands(&prepared.specs, message_format)?;
+        report_launch_commands(&prepared.plan, &prepared.specs, message_format)?;
 
         let _log_tasks = prepared
             .robot_log_targets
@@ -182,8 +249,17 @@ impl Run {
             (None, None)
         };
 
+        let stages = stages_for_run(prepared.specs);
+        let stage_phases = stages
+            .iter()
+            .map(|stage| {
+                crate::stepper::StagePhase::new(!stage.specs.is_empty(), stage.ready_ids.clone())
+            })
+            .collect::<Vec<_>>();
+        let stepper_handle = spawn_run_stepper(stepper, prepared.board.clone(), stage_phases);
+
         let outcome = supervise_until_shutdown(
-            prepared.specs,
+            stages,
             prepared.board.clone(),
             SupervisorOptions {
                 state_file: Some(state_file),
@@ -196,6 +272,10 @@ impl Run {
         if let Some(handle) = watch_handle {
             handle.abort();
         }
+        // Purely cosmetic (see `spawn_run_stepper`'s docs) - abort it rather
+        // than await it so a stalled/failed startup does not hang the
+        // command waiting on a stepper phase that will never complete.
+        stepper_handle.abort();
         let outcome = outcome?;
 
         if !outcome.graph_healthy() {
@@ -206,6 +286,37 @@ impl Run {
         }
         Ok(())
     }
+}
+
+/// Partition an already-built `run` spec list into the staged startup order
+/// (Part 2): router < other tools (`tool-joypad`; `tool-telemetry` once
+/// published) < drivers < services. Each stage's members all spawn together,
+/// then the whole stage must be OBSERVED ready (transport probe for the
+/// router - see its `bus_participant: false` - heartbeat for everything
+/// else) before the next stage spawns; see `supervisor::SupervisionStage`
+/// and `supervisor::await_participants_ready`.
+fn stages_for_run(specs: Vec<ParticipantSpec>) -> Vec<SupervisionStage> {
+    let mut router = Vec::new();
+    let mut tools = Vec::new();
+    let mut drivers = Vec::new();
+    let mut services = Vec::new();
+    for spec in specs {
+        if spec.id == SITE_TOOL_ROUTER {
+            router.push(spec);
+        } else {
+            match spec.kind {
+                ParticipantKind::Tool => tools.push(spec),
+                ParticipantKind::Driver => drivers.push(spec),
+                ParticipantKind::Service | ParticipantKind::Simulator => services.push(spec),
+            }
+        }
+    }
+    vec![
+        SupervisionStage::new("starting router", router, RUN_STAGE_READY_TIMEOUT),
+        SupervisionStage::new("starting tools", tools, RUN_STAGE_READY_TIMEOUT),
+        SupervisionStage::new("starting drivers", drivers, RUN_STAGE_READY_TIMEOUT),
+        SupervisionStage::new("starting services", services, RUN_STAGE_READY_TIMEOUT),
+    ]
 }
 
 fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Result<PreparedRun> {
@@ -375,13 +486,45 @@ struct LaunchCommandEntry {
     env: BTreeMap<String, String>,
 }
 
+/// The pre-staged-startup (Phase 0) launch-report `kind` string, preserved
+/// byte-for-byte for `--message-format json` backward compatibility even
+/// though the board's own `ParticipantKind` is now the finer-grained shared
+/// `Tool`/`Service`/`Driver`/`Simulator` split plus a `local` bit (Part 1) -
+/// see `participant_kind`'s module docs. A site launch (the router, the
+/// joypad, the Webots app in `simulate`) has no `ParticipantExecution` of
+/// its own and is always `"site-tool"`; everything else follows the
+/// pre-consolidation mapping this report has always used.
+fn legacy_launch_kind_label(execution: Option<&ParticipantExecution>) -> &'static str {
+    match execution {
+        None => "site-tool",
+        Some(
+            ParticipantExecution::OfficialArtifact { .. }
+            | ParticipantExecution::SourceArtifact { .. },
+        ) => "official",
+        Some(ParticipantExecution::UserService { .. }) => "user-service",
+        Some(ParticipantExecution::ComponentDriver { .. }) => "driver",
+    }
+}
+
 pub(crate) fn report_launch_commands(
+    plan: &LaunchPlan,
     specs: &[ParticipantSpec],
     message_format: MessageFormat,
 ) -> Result<()> {
     if message_format != MessageFormat::Json {
         return Ok(());
     }
+    let executions_by_id = plan
+        .robots
+        .iter()
+        .flat_map(|robot| &robot.participants)
+        .map(|participant| {
+            (
+                participant.launch.participant_id.as_str(),
+                &participant.execution,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let output = LaunchCommandReport {
         participants: specs
             .iter()
@@ -389,7 +532,7 @@ pub(crate) fn report_launch_commands(
                 let launch = spec.launch_command();
                 LaunchCommandEntry {
                     id: spec.id.clone(),
-                    kind: spec.kind.label(),
+                    kind: legacy_launch_kind_label(executions_by_id.get(spec.id.as_str()).copied()),
                     command_line: launch.command_line,
                     env: launch.env,
                 }
@@ -511,7 +654,8 @@ pub(crate) fn prepare_site_tools(
         } else {
             ParticipantState::Ready
         };
-        let mut status = ParticipantStatus::new(&site.id, ParticipantKind::SiteTool, initial_state);
+        let mut status = ParticipantStatus::new(&site.id, ParticipantKind::Tool, initial_state)
+            .with_local(site_tool_is_local(resolved, &site.id));
         if !should_launch {
             status.note = Some("external router reused".to_string());
         }
@@ -522,7 +666,8 @@ pub(crate) fn prepare_site_tools(
         match locate_tool_binary(resolved, &site.id)? {
             Some(path) => specs.push(ParticipantSpec {
                 id: site.id.clone(),
-                kind: ParticipantKind::SiteTool,
+                kind: ParticipantKind::Tool,
+                local: site_tool_is_local(resolved, &site.id),
                 executable: path,
                 args: Vec::new(),
                 cwd: None,
@@ -530,11 +675,17 @@ pub(crate) fn prepare_site_tools(
                 shutdown_grace: Duration::from_secs(5),
                 process_group: false,
                 note: None,
-                // Not a contract-graph participant (transport/peripheral, see
-                // the comment above): excluded from `expected_bus_ids` and
-                // marked `Ready` on successful spawn in
-                // `supervisor::spawn_child`, exactly like the Webots app.
-                bus_participant: false,
+                // The router's own framework runner bus is in-process (no
+                // `PHOXAL_CONNECT`), so its heartbeat is structurally
+                // unobservable by the CLI's presence subscriber - it keeps
+                // the old spawn-is-ready behavior, gated in the staged
+                // startup by the transport probe (`router_ownership`/
+                // `local_router_reachable`) instead of a heartbeat. Every
+                // OTHER site tool (`tool-joypad` today; `tool-telemetry` once
+                // published - see the `// TODO(cli-ux telemetry slice)` in
+                // `launch_plan::build_site_launches`) is a real bus
+                // participant and can be gated like any other stage member.
+                bus_participant: site.id != SITE_TOOL_ROUTER,
             }),
             None => board.set_state(
                 &site.id,
@@ -563,7 +714,7 @@ pub(crate) fn prepare_robot_participants(
     for robot in &plan.robots {
         for participant in &robot.participants {
             let id = participant.launch.participant_id.clone();
-            let kind = participant_kind(&participant.execution);
+            let (kind, local) = participant_kind(&participant.execution);
             if participant.launch_ownership == LaunchOwnership::SimulationManaged {
                 // Webots (via the supervisor) owns this participant's
                 // lifecycle - the CLI never spawns or restarts it, and has no
@@ -581,7 +732,8 @@ pub(crate) fn prepare_robot_participants(
                 // detected failure instead of a permanently green board.
                 // `commands::simulate` renders its controllerArgs into the
                 // staged world instead of a `ParticipantSpec` (Part 5).
-                let mut status = ParticipantStatus::new(&id, kind, ParticipantState::Starting);
+                let mut status =
+                    ParticipantStatus::new(&id, kind, ParticipantState::Starting).with_local(local);
                 status.note = Some(
                     "SimulationManaged: launched by Webots via the supervisor, not the CLI supervisor"
                         .to_string(),
@@ -589,11 +741,9 @@ pub(crate) fn prepare_robot_participants(
                 board.upsert(status);
                 continue;
             }
-            board.upsert(ParticipantStatus::new(
-                &id,
-                kind,
-                ParticipantState::Starting,
-            ));
+            board.upsert(
+                ParticipantStatus::new(&id, kind, ParticipantState::Starting).with_local(local),
+            );
             match &participant.execution {
                 ParticipantExecution::OfficialArtifact { .. } => {
                     let runtime = official_by_name
@@ -603,6 +753,7 @@ pub(crate) fn prepare_robot_participants(
                         Some(path) => specs.push(ParticipantSpec {
                             id,
                             kind,
+                            local,
                             executable: path,
                             args: Vec::new(),
                             cwd: None,
@@ -629,6 +780,7 @@ pub(crate) fn prepare_robot_participants(
                     specs.push(ParticipantSpec {
                         id,
                         kind,
+                        local,
                         executable: binary,
                         args: Vec::new(),
                         cwd: Some(crate_dir.clone()),
@@ -644,6 +796,7 @@ pub(crate) fn prepare_robot_participants(
                     specs.push(ParticipantSpec {
                         id,
                         kind,
+                        local,
                         executable: binary,
                         args: Vec::new(),
                         cwd: Some(crate_dir.clone()),
@@ -678,6 +831,7 @@ pub(crate) fn prepare_robot_participants(
                     specs.push(ParticipantSpec {
                         id,
                         kind,
+                        local,
                         executable: binary,
                         args: Vec::new(),
                         cwd: Some(crate_dir.clone()),
@@ -694,15 +848,31 @@ pub(crate) fn prepare_robot_participants(
     Ok(())
 }
 
-fn participant_kind(execution: &ParticipantExecution) -> ParticipantKind {
+/// The board `ParticipantKind` plus whether the participant runs from a
+/// locally resolved directory, for a checked participant's `execution`.
+/// `SourceArtifact`'s own `kind: String` (`"tool"`/`"simulator"`/`"service"`,
+/// set by `launch_plan::participant_execution` from
+/// `check::SourceParticipantKind::shared_kind`) recovers the real role for a
+/// locally source-overridden official artifact - a Run-mode launch plan only
+/// ever contains Service and Driver participants (`Tool` and `Simulator`
+/// checked participants are excluded upstream by
+/// `launch_plan::is_robot_launch_participant`), so `"service"` is the only
+/// value seen here in practice, but Sim-mode plans reuse this same helper via
+/// `source_spec_from_launch_record` (through `watch`), where a
+/// source-overridden simulator is possible.
+fn participant_kind(execution: &ParticipantExecution) -> (ParticipantKind, bool) {
     match execution {
-        ParticipantExecution::OfficialArtifact { .. } => ParticipantKind::OfficialArtifact,
-        ParticipantExecution::UserService { .. } => ParticipantKind::UserService,
-        ParticipantExecution::SourceArtifact { kind, .. } if kind == "service" => {
-            ParticipantKind::OfficialArtifact
+        ParticipantExecution::OfficialArtifact { .. } => (ParticipantKind::Service, false),
+        ParticipantExecution::UserService { .. } => (ParticipantKind::Service, true),
+        ParticipantExecution::SourceArtifact { kind, .. } => {
+            let kind = match kind.as_str() {
+                "tool" => ParticipantKind::Tool,
+                "simulator" => ParticipantKind::Simulator,
+                _ => ParticipantKind::Service,
+            };
+            (kind, true)
         }
-        ParticipantExecution::SourceArtifact { .. } => ParticipantKind::OfficialArtifact,
-        ParticipantExecution::ComponentDriver { .. } => ParticipantKind::ComponentDriver,
+        ParticipantExecution::ComponentDriver { .. } => (ParticipantKind::Driver, true),
     }
 }
 
@@ -711,7 +881,7 @@ pub(crate) fn source_spec_from_launch_record(
     ui: &crate::Ui,
 ) -> Result<Option<ParticipantSpec>> {
     let id = participant.launch.participant_id.clone();
-    let kind = participant_kind(&participant.execution);
+    let (kind, local) = participant_kind(&participant.execution);
     let crate_dir = match &participant.execution {
         ParticipantExecution::UserService { crate_dir }
         | ParticipantExecution::SourceArtifact { crate_dir, .. }
@@ -722,6 +892,7 @@ pub(crate) fn source_spec_from_launch_record(
     Ok(Some(ParticipantSpec {
         id,
         kind,
+        local,
         executable: binary,
         args: Vec::new(),
         cwd: Some(crate_dir.clone()),
@@ -749,6 +920,18 @@ fn site_env(site: &SiteLaunch, namespace: &str, robot_id: &str) -> Result<Vec<(S
         envs.push((env::CONNECT.to_string(), default_connect_endpoint()));
     }
     Ok(envs)
+}
+
+/// Whether a site tool (`tool-router`/`tool-joypad`) is resolved from a local
+/// path-pin override rather than a fetched catalog artifact. Best-effort:
+/// `false` if the tool is missing from `resolved.tools` (surfaced properly by
+/// `locate_tool_binary`'s own lookup instead).
+fn site_tool_is_local(resolved: &ResolvedRobot, name: &str) -> bool {
+    resolved
+        .tools
+        .iter()
+        .find(|tool| tool.name == name)
+        .is_some_and(|tool| tool.path_override.is_some())
 }
 
 fn locate_tool_binary(resolved: &ResolvedRobot, name: &str) -> Result<Option<PathBuf>> {
@@ -1309,5 +1492,41 @@ robot:
         assert_eq!(status.note.as_deref(), Some("external router reused"));
 
         Ok(())
+    }
+
+    /// The `--message-format json` launch report's `kind` string is a
+    /// Phase-0 contract that must stay byte-identical even though the
+    /// board's own `ParticipantKind` is now the finer-grained shared
+    /// `Tool`/`Service`/`Driver`/`Simulator` split plus a `local` bit (Part
+    /// 1 kind consolidation) - see `legacy_launch_kind_label`'s docs.
+    #[test]
+    fn legacy_launch_kind_label_matches_the_pre_consolidation_strings() {
+        assert_eq!(legacy_launch_kind_label(None), "site-tool");
+        assert_eq!(
+            legacy_launch_kind_label(Some(&ParticipantExecution::OfficialArtifact {
+                artifact_ref: "phoxal/service-drive@1.0.0".to_string(),
+            })),
+            "official"
+        );
+        assert_eq!(
+            legacy_launch_kind_label(Some(&ParticipantExecution::SourceArtifact {
+                kind: "service".to_string(),
+                crate_dir: PathBuf::from("/tmp/drive"),
+            })),
+            "official",
+            "a locally source-overridden official artifact stayed bucketed as \"official\" pre-consolidation"
+        );
+        assert_eq!(
+            legacy_launch_kind_label(Some(&ParticipantExecution::UserService {
+                crate_dir: PathBuf::from("/tmp/mission"),
+            })),
+            "user-service"
+        );
+        assert_eq!(
+            legacy_launch_kind_label(Some(&ParticipantExecution::ComponentDriver {
+                crate_dir: PathBuf::from("/tmp/ddsm115"),
+            })),
+            "driver"
+        );
     }
 }

@@ -111,8 +111,29 @@ fn parses_check_service_and_json_output_and_rejects_pull() {
 }
 
 #[test]
-fn simulate_pull_is_removed() {
-    assert!(Cli::try_parse_from(["phoxal-cli", "simulate", "default", "--pull"]).is_err());
+fn simulation_run_pull_is_removed() {
+    assert!(Cli::try_parse_from(["phoxal-cli", "simulation", "run", "default", "--pull"]).is_err());
+}
+
+#[test]
+fn bare_simulate_verb_is_gone() {
+    // Clean cut (Phase 1b): no `simulate` alias, no bare `simulation <world>`
+    // shorthand - only `simulation run <world>` / `simulation join`.
+    assert!(Cli::try_parse_from(["phoxal-cli", "simulate", "default"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal-cli", "simulation", "default"]).is_err());
+}
+
+#[test]
+fn parses_simulation_join_stub() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "simulation", "join"])
+        .expect("simulation join should parse");
+    let RootCommand::Simulation(simulation) = cli.command else {
+        panic!("expected simulation command");
+    };
+    assert!(matches!(
+        simulation.command,
+        phoxal_cli::commands::simulate::SimulationSubcommand::Join(_)
+    ));
 }
 
 #[test]
@@ -127,18 +148,22 @@ fn parses_watch_and_overlay_flags() {
 
     let cli = Cli::try_parse_from([
         "phoxal-cli",
-        "simulate",
+        "simulation",
+        "run",
         "default",
         "--watch",
         "--env",
         "dev",
     ])
-    .expect("simulate watch should parse");
-    let RootCommand::Simulate(simulate) = cli.command else {
-        panic!("expected simulate command");
+    .expect("simulation run watch should parse");
+    let RootCommand::Simulation(simulation) = cli.command else {
+        panic!("expected simulation command");
     };
-    assert!(simulate.watch);
-    assert_eq!(simulate.env, vec!["dev"]);
+    let phoxal_cli::commands::simulate::SimulationSubcommand::Run(run) = simulation.command else {
+        panic!("expected simulation run subcommand");
+    };
+    assert!(run.watch);
+    assert_eq!(run.env, vec!["dev"]);
 }
 
 #[test]

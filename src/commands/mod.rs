@@ -248,8 +248,8 @@ pub enum RootCommand {
     Check(check::CheckCmd),
     #[command(about = "Validate robot.yaml structure and user-service phoxal dependencies.")]
     Validate(validate::Validate),
-    #[command(about = "Resolve and report a Webots simulation launch plan.")]
-    Simulate(simulate::Simulate),
+    #[command(about = "Simulate a robot in Webots (see `simulation run`/`simulation join`).")]
+    Simulation(simulate::Simulation),
     #[command(about = "Run the resolved robot graph with the host-native supervisor.")]
     Run(run::Run),
     #[command(about = "Stream participant bus logs from a reachable robot.")]
@@ -276,7 +276,7 @@ impl RootCommand {
     fn update_notice_format(&self) -> Option<MessageFormat> {
         match self {
             Self::Check(command) => Some(command.message_format),
-            Self::Simulate(command) => Some(command.message_format),
+            Self::Simulation(command) => command.update_notice_format(),
             Self::Run(command) => Some(command.message_format),
             Self::Deploy(command) => Some(command.message_format),
             _ => None,
@@ -311,7 +311,7 @@ impl RootCommand {
         match self {
             Self::Check(command) => command.message_format,
             Self::Validate(_) => MessageFormat::Human,
-            Self::Simulate(command) => command.message_format,
+            Self::Simulation(command) => command.message_format(),
             Self::Run(command) => command.message_format,
             Self::Logs(_) => MessageFormat::Human,
             Self::Status(command) => command.message_format,
@@ -338,7 +338,7 @@ impl RootCommand {
         match self {
             Self::Check(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
-            Self::Simulate(command) => command.run(app).await,
+            Self::Simulation(command) => command.run(app).await,
             Self::Run(command) => command.run(app).await,
             Self::Logs(command) => command.run(app).await,
             Self::Status(command) => command.run(app).await,
