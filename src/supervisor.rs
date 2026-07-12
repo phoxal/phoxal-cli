@@ -495,6 +495,7 @@ impl RunningParticipant {
         &mut self,
         board: &BoardBackend,
         budget: Duration,
+        terminate_sent: bool,
     ) -> Result<bool> {
         let Some(child) = self.child.as_mut() else {
             return Ok(false);
@@ -507,11 +508,21 @@ impl RunningParticipant {
         join_reader(self.stdout_task.take()).await;
         join_reader(self.stderr_task.take()).await;
         self.failed = true;
-        board.set_state(
-            &self.spec.id,
-            ParticipantState::Stopped,
-            Some(format!("stopped after requested SIGTERM ({status})")),
-        );
+        if requested_stop_exit_is_clean(&status, terminate_sent) {
+            board.set_state(
+                &self.spec.id,
+                ParticipantState::Stopped,
+                Some(format!("stopped after requested SIGTERM ({status})")),
+            );
+        } else {
+            board.set_state(
+                &self.spec.id,
+                ParticipantState::Failed,
+                Some(format!(
+                    "exited independently during requested stop ({status})"
+                )),
+            );
+        }
         Ok(true)
     }
 
@@ -679,6 +690,24 @@ impl RunningParticipant {
     }
 }
 
+fn requested_stop_exit_is_clean(status: &std::process::ExitStatus, terminate_sent: bool) -> bool {
+    if !terminate_sent {
+        return false;
+    }
+    if status.success() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal() == Some(libc::SIGTERM)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 fn spawn_output_reader<R>(
     board: BoardBackend,
     id: String,
@@ -793,6 +822,14 @@ async fn request_participant_stop(
         return;
     };
     if participant.child.is_none() {
+        if participant.restart_at.take().is_some() {
+            participant.failed = true;
+            board.set_state(
+                &participant.spec.id,
+                ParticipantState::Failed,
+                Some("crashed before requested stop while restart was pending".to_string()),
+            );
+        }
         return;
     }
 
@@ -808,19 +845,25 @@ async fn request_participant_stop(
         );
         return;
     };
-    match send_terminate(pid).await {
-        Ok(()) => board.append_log(
-            &participant.spec.id,
-            "supervisor: SIGTERM sent; waiting for child exit",
-        ),
-        Err(error) => board.append_log(
-            &participant.spec.id,
-            format!("supervisor: failed to send SIGTERM; waiting before fallback: {error:#}"),
-        ),
-    }
+    let terminate_sent = match send_terminate(pid).await {
+        Ok(()) => {
+            board.append_log(
+                &participant.spec.id,
+                "supervisor: SIGTERM sent; waiting for child exit",
+            );
+            true
+        }
+        Err(error) => {
+            board.append_log(
+                &participant.spec.id,
+                format!("supervisor: failed to send SIGTERM; waiting before fallback: {error:#}"),
+            );
+            false
+        }
+    };
 
     match participant
-        .wait_for_requested_stop(board, requested_stop.grace)
+        .wait_for_requested_stop(board, requested_stop.grace, terminate_sent)
         .await
     {
         Ok(true) => {}
@@ -1387,6 +1430,85 @@ mod tests {
         let status = snapshot.participants.get("webots").expect("webots");
         assert_eq!(status.state, ParticipantState::Stopped);
         assert!(snapshot.failed_participants().is_empty());
+        assert!(!running[0].is_active());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webots_crash_reaped_during_requested_stop_is_failed() -> Result<()> {
+        let mut webots = sleep_spec("webots");
+        webots.args = vec!["-c".to_string(), "exit 7".to_string()];
+        webots.process_group = true;
+
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "webots",
+            ParticipantKind::SiteTool,
+            ParticipantState::Starting,
+        ));
+        let participant = RunningParticipant::spawn(webots, &board).await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut running = vec![participant];
+
+        request_participant_stop(
+            &mut running,
+            &board,
+            RequestedStop::new("webots", Duration::from_secs(1)),
+        )
+        .await;
+
+        let snapshot = board.snapshot();
+        let status = snapshot.participants.get("webots").expect("webots");
+        assert_eq!(status.state, ParticipantState::Failed);
+        let outcome = SupervisorOutcome {
+            clean_shutdown: true,
+            failed_participants: snapshot.failed_participants(),
+        };
+        assert!(!outcome.graph_healthy());
+        assert_eq!(outcome.failed_participants, vec!["webots"]);
+        assert!(!running[0].is_active());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webots_crash_already_waiting_to_restart_is_failed_at_stop() -> Result<()> {
+        let mut webots = sleep_spec("webots");
+        webots.args = vec!["-c".to_string(), "exit 7".to_string()];
+        webots.process_group = true;
+
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "webots",
+            ParticipantKind::SiteTool,
+            ParticipantState::Starting,
+        ));
+        let mut participant = RunningParticipant::spawn(webots, &board).await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        participant
+            .poll(
+                &board,
+                &RestartPolicy {
+                    restart_delay: Duration::from_secs(30),
+                    ..RestartPolicy::default()
+                },
+            )
+            .await?;
+        assert!(participant.child.is_none());
+        assert!(participant.restart_at.is_some());
+        let mut running = vec![participant];
+
+        request_participant_stop(
+            &mut running,
+            &board,
+            RequestedStop::new("webots", Duration::from_secs(1)),
+        )
+        .await;
+
+        let snapshot = board.snapshot();
+        let status = snapshot.participants.get("webots").expect("webots");
+        assert_eq!(status.state, ParticipantState::Failed);
+        assert_eq!(snapshot.failed_participants(), vec!["webots"]);
+        assert!(running[0].restart_at.is_none());
         assert!(!running[0].is_active());
         Ok(())
     }
