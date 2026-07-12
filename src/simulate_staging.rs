@@ -28,6 +28,7 @@ use phoxal::model::simulation::Simulation as SimulationModel;
 use phoxal::model::structure::Structure;
 use phoxal::model::v0::Robot as RobotBundle;
 use phoxal::participant::launch::ParticipantLaunch;
+use phoxal_api::y2026_8::simulation::RobotSpawn;
 use serde::Serialize;
 
 use crate::launch_env::to_controller_args;
@@ -70,14 +71,6 @@ pub struct RobotToStage<'a> {
     pub controller_launch: ParticipantLaunch,
 }
 
-/// The supervisor's spawn descriptor for one robot: the shape the framework
-/// supervisor half consumes exactly through the simulation spawn bus contract.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct SpawnDescriptor {
-    pub robot_id: String,
-    pub node_string: String,
-}
-
 /// The supervisor `--config` payload. Spawn data is deliberately absent.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SupervisorConfig {
@@ -90,7 +83,7 @@ pub struct StagedSimulationWorld {
     pub staged_world_path: PathBuf,
     pub supervisor_launch: ParticipantLaunch,
     pub controller_launches: Vec<(String, ParticipantLaunch)>,
-    pub spawn_descriptors: Vec<SpawnDescriptor>,
+    pub spawn_descriptors: Vec<RobotSpawn>,
 }
 
 /// Stage a simulation world for the given robots: generate each robot's
@@ -220,7 +213,7 @@ pub fn stage_simulation_world(
         })?;
         let node_string = render_node_to_string(&instance_node)?;
 
-        spawn_descriptors.push(SpawnDescriptor {
+        spawn_descriptors.push(RobotSpawn {
             robot_id: robot.robot_id.clone(),
             node_string,
         });

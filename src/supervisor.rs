@@ -395,13 +395,36 @@ impl BoardBackend {
     }
 
     pub fn write_snapshot(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
         let json = serde_json::to_string_pretty(&self.snapshot())
             .context("failed to serialize supervisor status")?;
-        fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))
+        let mut temp = tempfile::Builder::new()
+            .prefix(".supervisor-state-")
+            .tempfile_in(parent)
+            .with_context(|| {
+                format!(
+                    "failed to create temporary supervisor status in {}",
+                    parent.display()
+                )
+            })?;
+        temp.write_all(json.as_bytes()).with_context(|| {
+            format!(
+                "failed to write temporary supervisor status for {}",
+                path.display()
+            )
+        })?;
+        temp.flush().with_context(|| {
+            format!(
+                "failed to flush temporary supervisor status for {}",
+                path.display()
+            )
+        })?;
+        temp.persist(path)
+            .map(|_| ())
+            .map_err(|error| error.error)
+            .with_context(|| format!("failed to replace {}", path.display()))
     }
 }
 
@@ -496,13 +519,11 @@ pub struct SupervisorOptions {
     pub action_rx: Option<mpsc::Receiver<SupervisorAction>>,
     pub requested_stop: Option<RequestedStop>,
     pub render_board: bool,
-    /// Fires when an external readiness barrier (see
-    /// `commands::simulate::await_readiness_barrier`) times out and needs the
-    /// whole session torn down instead of left running unhealthy forever. The
-    /// sent `String` is a human-readable reason, logged and treated exactly
-    /// like an operator `ctrl_c`: an orderly `request_participant_stop` +
-    /// `shutdown_all`, then a normal `SupervisorOutcome` reflecting whatever
-    /// the board already recorded as failed.
+    /// Fires when readiness or the running contract graph reaches a terminal
+    /// failure and needs the whole session torn down instead of left running
+    /// unhealthy forever. The sent `String` is a human-readable reason,
+    /// followed by orderly `request_participant_stop` + `shutdown_all`, then a
+    /// normal `SupervisorOutcome` reflecting the board's failed participants.
     pub cancel_rx: Option<oneshot::Receiver<String>>,
 }
 
@@ -954,7 +975,7 @@ pub async fn supervise_until_shutdown(
                 if let Some(reason) = reason {
                     board.append_log(
                         "supervisor",
-                        format!("supervisor: readiness barrier requested shutdown: {reason}"),
+                        format!("supervisor: coordinated shutdown requested: {reason}"),
                     );
                     clean_shutdown = false;
                     break;
@@ -1088,15 +1109,17 @@ async fn recv_action(
 }
 
 /// Resolve at most once (a oneshot can only fire once, unlike `action_rx`'s
-/// `mpsc::Receiver`) - `.take()` so a dropped sender (the readiness barrier
-/// succeeded and simply let its `oneshot::Sender` go out of scope) or a fired
-/// cancel both permanently settle to the pending branch afterward, instead of
-/// re-polling an already-completed `oneshot::Receiver` (which panics).
+/// `mpsc::Receiver`). Keep the receiver in its `Option` while awaiting so a
+/// competing `tokio::select!` branch cannot cancel this future and accidentally
+/// drop the coordinated teardown channel. Take it only after it resolves so an
+/// already-completed receiver is never polled twice.
 async fn recv_cancel(cancel_rx: &mut Option<oneshot::Receiver<String>>) -> Option<String> {
-    match cancel_rx.take() {
-        Some(receiver) => receiver.await.ok(),
-        None => std::future::pending().await,
-    }
+    let result = match cancel_rx.as_mut() {
+        Some(receiver) => receiver.await,
+        None => return std::future::pending().await,
+    };
+    cancel_rx.take();
+    result.ok()
 }
 
 async fn handle_action(
@@ -1687,6 +1710,39 @@ fn barrier_gap(
     }
 }
 
+fn failed_expected_participants(board: &BoardSnapshot, expected_bus_ids: &[String]) -> Vec<String> {
+    expected_bus_ids
+        .iter()
+        .filter(|id| {
+            board
+                .participants
+                .get(id.as_str())
+                .is_some_and(|status| status.state == ParticipantState::Failed)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Wait until an expected contract-graph participant reaches terminal
+/// `Failed`. Recoverable child crashes are represented as `Restarting`, so
+/// this deliberately does not fire while a restart is pending or after a
+/// participant has recovered to `Starting`/`Ready`.
+pub async fn await_terminal_graph_failure(
+    board: &BoardBackend,
+    expected_bus_ids: &[String],
+    poll_interval: Duration,
+) -> Vec<String> {
+    let mut interval = tokio::time::interval(poll_interval);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let failed = failed_expected_participants(&board.snapshot(), expected_bus_ids);
+        if !failed.is_empty() {
+            return failed;
+        }
+    }
+}
+
 /// Wait for the simulate readiness barrier: every id in `expected_bus_ids`
 /// (the Webots supervisor, every expected controller, and every CLI-managed
 /// bus participant) observed `Ready`, plus the clock feed's first sample and
@@ -1710,6 +1766,13 @@ pub async fn await_readiness_barrier(
     loop {
         interval.tick().await;
         let snapshot = board.snapshot();
+        let failed = failed_expected_participants(&snapshot, expected_bus_ids);
+        if !failed.is_empty() {
+            bail!(
+                "graph ended unhealthy; failed participants: {}",
+                failed.join(", ")
+            );
+        }
         let gap = barrier_gap(&snapshot, expected_bus_ids, *clock.borrow());
         if gap.is_empty() {
             return Ok(());
@@ -1791,6 +1854,26 @@ mod tests {
             teardown_order(&specs),
             vec!["mission", "tool-joypad", "tool-router"]
         );
+    }
+
+    #[test]
+    fn snapshot_write_atomically_replaces_existing_json_without_changing_shape() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join(SUPERVISOR_STATE_FILE);
+        fs::write(&path, b"{\"partial\":")?;
+
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "mission",
+            ParticipantKind::UserService,
+            ParticipantState::Ready,
+        ));
+        board.write_snapshot(&path)?;
+
+        let written: BoardSnapshot = serde_json::from_slice(&fs::read(&path)?)?;
+        assert_eq!(written, board.snapshot());
+        assert_eq!(fs::read_dir(temp.path())?.count(), 1);
+        Ok(())
     }
 
     #[test]
@@ -2107,6 +2190,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_graph_failure_after_readiness_requests_orderly_teardown() -> Result<()> {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "webots",
+            ParticipantKind::SiteTool,
+            ParticipantState::Starting,
+        ));
+        board.upsert(ParticipantStatus::new(
+            "simulator-webots-controller-robot",
+            ParticipantKind::OfficialArtifact,
+            ParticipantState::Ready,
+        ));
+
+        let mut webots = sleep_spec("webots");
+        webots.kind = ParticipantKind::SiteTool;
+        webots.args = vec![
+            "-c".to_string(),
+            "trap 'exit 0' TERM; while :; do sleep 1; done".to_string(),
+        ];
+        webots.process_group = true;
+        webots.bus_participant = false;
+
+        let expected = vec!["simulator-webots-controller-robot".to_string()];
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let monitor_board = board.clone();
+        let monitor = tokio::spawn(async move {
+            let failed =
+                await_terminal_graph_failure(&monitor_board, &expected, Duration::from_millis(10))
+                    .await;
+            let _ = cancel_tx.send(format!(
+                "graph ended unhealthy; failed participants: {}",
+                failed.join(", ")
+            ));
+        });
+        let supervise = tokio::spawn(supervise_until_shutdown(
+            vec![webots],
+            board.clone(),
+            SupervisorOptions {
+                requested_stop: Some(RequestedStop::new("webots", Duration::from_secs(1))),
+                render_board: false,
+                cancel_rx: Some(cancel_rx),
+                ..SupervisorOptions::default()
+            },
+        ));
+
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        assert!(
+            !supervise.is_finished(),
+            "a healthy graph must remain up until an operator or failure stops it"
+        );
+        board.set_state(
+            "simulator-webots-controller-robot",
+            ParticipantState::Failed,
+            Some("controller reported terminal failure".to_string()),
+        );
+
+        let outcome = tokio::time::timeout(Duration::from_secs(3), supervise)
+            .await
+            .expect("terminal graph failure must tear down promptly")
+            .expect("supervisor task panicked")?;
+        monitor.await.expect("terminal failure monitor panicked");
+        assert!(!outcome.clean_shutdown);
+        assert!(!outcome.graph_healthy());
+        assert_eq!(
+            outcome.failed_participants,
+            vec!["simulator-webots-controller-robot"]
+        );
+        assert_eq!(
+            board.snapshot().participants["webots"].state,
+            ParticipantState::Stopped
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_monitor_does_not_fire_for_a_healthy_graph() {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "mission",
+            ParticipantKind::UserService,
+            ParticipantState::Ready,
+        ));
+        let expected = vec!["mission".to_string()];
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(75),
+            await_terminal_graph_failure(&board, &expected, Duration::from_millis(10)),
+        )
+        .await;
+        assert!(result.is_err(), "a healthy graph must not self-teardown");
+    }
+
+    #[tokio::test]
     async fn local_log_capture_works_without_bus() -> Result<()> {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
@@ -2405,6 +2581,41 @@ mod tests {
         assert_eq!(
             outcome.failed_participants,
             vec!["simulator-webots-controller-robot"]
+        );
+    }
+
+    #[tokio::test]
+    async fn barrier_fails_immediately_on_explicit_terminal_readiness_failure() {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "simulator-webots-controller-robot",
+            ParticipantKind::OfficialArtifact,
+            ParticipantState::Starting,
+        ));
+        board.record_heartbeat(
+            "simulator-webots-controller-robot",
+            api::presence::Readiness::Failed,
+        );
+        let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation::default());
+        let expected = vec!["simulator-webots-controller-robot".to_string()];
+
+        let error = tokio::time::timeout(
+            Duration::from_millis(200),
+            await_readiness_barrier(
+                &board,
+                &expected,
+                &mut clock_rx,
+                Duration::from_secs(60),
+                Duration::from_millis(10),
+            ),
+        )
+        .await
+        .expect("explicit Failed readiness must bypass the startup timeout")
+        .expect_err("explicit Failed readiness must fail the barrier");
+
+        assert_eq!(
+            error.to_string(),
+            "graph ended unhealthy; failed participants: simulator-webots-controller-robot"
         );
     }
 

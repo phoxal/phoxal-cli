@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
-use phoxal::bus::{Codec, MessagePack, QueryFailure};
+use phoxal::bus::{Codec, ContractBody, MessagePack, QueryFailure};
 use phoxal::check as graph_check;
 use phoxal::raw::{Bus, BusConfig};
-use serde::{Deserialize, Serialize};
+use phoxal_api::y2026_8::simulation::{RobotSpawn, SpawnRequest, SpawnSet};
+use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -33,9 +34,10 @@ use crate::simulate_staging::{
 use crate::supervisor::{
     BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
     RequestedStop, RouterOwnership, SupervisorLock, SupervisorOptions, await_readiness_barrier,
-    default_connect_endpoint, local_router_reachable, router_ownership, start_bus_log_subscriber,
-    start_clock_barrier_feed, start_presence_heartbeat_subscriber, supervise_until_shutdown,
-    supervisor_actions_path, supervisor_state_path,
+    await_terminal_graph_failure, default_connect_endpoint, local_router_reachable,
+    router_ownership, start_bus_log_subscriber, start_clock_barrier_feed,
+    start_presence_heartbeat_subscriber, supervise_until_shutdown, supervisor_actions_path,
+    supervisor_state_path,
 };
 use crate::webots_stage_root;
 use crate::world;
@@ -57,11 +59,6 @@ const SIMULATOR_SUPERVISOR_ARTIFACT_NAME: &str = "webots-supervisor";
 /// `artifact.id`.
 const SIMULATOR_CONTROLLER_ARTIFACT_NAME: &str = "webots-controller";
 
-/// Wire key of the additive `y2026_8::simulation::SpawnRequest => SpawnSet`
-/// contract. The CLI uses the raw bus server surface because it is privileged
-/// orchestration tooling rather than a checked framework participant.
-const SIMULATION_SPAWN_QUERY_TOPIC: &str = "y2026_8/simulation/spawn";
-
 /// Bound on the simulate readiness barrier's startup window (see
 /// `await_readiness_barrier`): the supervisor, every expected controller,
 /// every CLI-managed bus participant, and a first-plus-advancing
@@ -71,17 +68,6 @@ const SIMULATION_SPAWN_QUERY_TOPIC: &str = "y2026_8/simulation/spawn";
 /// participant clearing its own `#[setup]` on a loaded host; a healthy
 /// session reaches barrier success in a few seconds in practice.
 const SIMULATE_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-#[derive(Debug, Deserialize)]
-struct SpawnRequestWire {
-    known_revision: Option<u64>,
-}
-
-#[derive(Debug, Serialize)]
-struct SpawnSetWire {
-    revision: u64,
-    robots: Vec<crate::simulate_staging::SpawnDescriptor>,
-}
 
 /// The robot-scoped participant id for the Webots controller artifact
 /// (`phoxal-simulator-webots-controller`) that substitutes `robot_id`'s
@@ -336,10 +322,11 @@ pub async fn run(
             // The readiness barrier and the process supervisor must run
             // concurrently, not sequentially: participants only start
             // publishing heartbeats once `supervise_until_shutdown` has
-            // actually spawned them. `cancel_tx` is the barrier's escape hatch
-            // if it times out - it asks the supervisor task to tear the whole
-            // session down in an orderly way (SIGTERM Webots, stop everything
-            // else) instead of leaving an unhealthy session running forever.
+            // actually spawned them. `cancel_tx` is the coordinated teardown
+            // path for both a barrier error and a terminal graph failure after
+            // readiness: it asks the supervisor task to SIGTERM Webots and
+            // stop every other child instead of leaving an unhealthy session
+            // running forever.
             let (cancel_tx, cancel_rx) = oneshot::channel();
             let supervise_task = tokio::spawn(supervise_until_shutdown(
                 specs,
@@ -363,16 +350,35 @@ pub async fn run(
             )
             .await;
             clock_task.abort();
-            if let Err(error) = &barrier_result {
-                // Dropping `cancel_tx` unsent (the `Ok` path) is equally
-                // valid - `supervisor::recv_cancel` treats a dropped sender
-                // as "no cancel" and settles to pending forever.
-                let _ = cancel_tx.send(error.to_string());
-            }
+            let terminal_failure_task = match &barrier_result {
+                Err(error) => {
+                    let _ = cancel_tx.send(error.to_string());
+                    None
+                }
+                Ok(()) => {
+                    let board = board.clone();
+                    let expected_bus_ids = expected_bus_ids.clone();
+                    Some(tokio::spawn(async move {
+                        let failed = await_terminal_graph_failure(
+                            &board,
+                            &expected_bus_ids,
+                            std::time::Duration::from_millis(200),
+                        )
+                        .await;
+                        let _ = cancel_tx.send(format!(
+                            "graph ended unhealthy; failed participants: {}",
+                            failed.join(", ")
+                        ));
+                    }))
+                }
+            };
 
             let outcome = supervise_task
                 .await
                 .context("simulation supervisor task panicked")?;
+            if let Some(handle) = terminal_failure_task {
+                handle.abort();
+            }
             if let Some(handle) = watch_handle {
                 handle.abort();
             }
@@ -1126,10 +1132,7 @@ pub(crate) const WEBOTS_SITE_ID: &str = "webots";
 fn stage_and_prepare_webots_spec(
     app: &AppContext,
     sim: &SimPlan,
-) -> Result<(
-    ParticipantSpec,
-    Vec<crate::simulate_staging::SpawnDescriptor>,
-)> {
+) -> Result<(ParticipantSpec, Vec<RobotSpawn>)> {
     let world = webots_world(&sim.plan.mode);
     let staged =
         stage_simulation_for_robot(&sim.ctx.project_root, world, &sim.ctx.resolved, &sim.plan)?;
@@ -1173,7 +1176,7 @@ fn stage_and_prepare_webots_spec(
 /// bounded query. The task and its bus session live until simulation ends.
 async fn start_spawn_responder(
     launch_plan: &LaunchPlan,
-    robots: Vec<crate::simulate_staging::SpawnDescriptor>,
+    robots: Vec<RobotSpawn>,
     router_ownership: RouterOwnership,
 ) -> Result<JoinHandle<()>> {
     let robot = launch_plan
@@ -1187,7 +1190,7 @@ async fn start_spawn_responder(
         incarnation: 0,
         connect_endpoints: vec![default_connect_endpoint()],
     };
-    let response = MessagePack::encode(&SpawnSetWire {
+    let response = MessagePack::encode(&SpawnSet {
         revision: 1,
         robots,
     })
@@ -1205,7 +1208,10 @@ async fn start_spawn_responder(
                     continue;
                 }
             };
-            let queryable = match bus.declare_server(SIMULATION_SPAWN_QUERY_TOPIC).await {
+            let queryable = match bus
+                .declare_server(<SpawnRequest as ContractBody>::TOPIC)
+                .await
+            {
                 Ok(queryable) => queryable,
                 Err(error) => {
                     tracing::debug!(%error, "simulation spawn responder declaration failed");
@@ -1248,7 +1254,7 @@ async fn serve_spawn_queries(
             .request_metadata()
             .and_then(|_| incoming.request_bytes())
             .and_then(|bytes| {
-                MessagePack::decode::<SpawnRequestWire>(&bytes)
+                MessagePack::decode::<SpawnRequest>(&bytes)
                     .map_err(|error| phoxal::bus::BusError::Transport(error.to_string()))
             });
         match request {
@@ -1768,10 +1774,16 @@ mod tests {
 
     #[test]
     fn spawn_responder_wire_shape_matches_additive_simulation_contract() {
-        assert_eq!(SIMULATION_SPAWN_QUERY_TOPIC, "y2026_8/simulation/spawn");
-        let value = serde_json::to_value(SpawnSetWire {
+        assert_eq!(
+            <SpawnRequest as ContractBody>::TOPIC,
+            format!(
+                "{}/simulation/spawn",
+                <SpawnRequest as ContractBody>::GENERATION
+            )
+        );
+        let value = serde_json::to_value(SpawnSet {
             revision: 1,
-            robots: vec![crate::simulate_staging::SpawnDescriptor {
+            robots: vec![RobotSpawn {
                 robot_id: "robot-a".to_string(),
                 node_string: "Robot { name \"robot-a\" }".to_string(),
             }],
