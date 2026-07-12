@@ -1025,12 +1025,34 @@ fn stage_and_prepare_webots_spec(app: &AppContext, sim: &SimPlan) -> Result<Part
         id: WEBOTS_SITE_ID.to_string(),
         kind: ParticipantKind::SiteTool,
         executable: webots_path,
-        args: vec![staged.staged_world_path.display().to_string()],
+        args: webots_launch_args(&staged.staged_world_path),
         cwd: None,
         env: Vec::new(),
         shutdown_grace: std::time::Duration::from_secs(10),
         note: None,
     })
+}
+
+/// Build Webots' argv for a live simulate launch.
+///
+/// `--mode=realtime` is load-bearing, not cosmetic: Webots opens a world in the
+/// PAUSED state by default, so without an explicit run mode the supervisor's
+/// `#[step]` is never called, `simulation/clock` never advances, and every
+/// clock-driven participant sits idle waiting for a first tick that never comes
+/// (the live gate's "the sim is frozen" symptom - only wall-clock traffic like
+/// `presence/heartbeat` flows). `realtime` starts the simulation running,
+/// synced to wall time so the operator watches the robot move at a natural
+/// speed; the clock authority (the Webots supervisor) still owns logical time.
+///
+/// `--batch` suppresses Webots' blocking modal dialogs (notably the "save world
+/// changes?" prompt on quit), so the CLI's supervised shutdown terminates the
+/// Webots child cleanly without an operator having to dismiss a popup.
+fn webots_launch_args(staged_world_path: &Path) -> Vec<String> {
+    vec![
+        "--mode=realtime".to_string(),
+        "--batch".to_string(),
+        staged_world_path.display().to_string(),
+    ]
 }
 
 /// Stage the two Webots controller BINARIES (supervisor + per-robot
@@ -1493,6 +1515,14 @@ mod tests {
         LaunchMode::Webots {
             world: PathBuf::from("worlds/test.wbt"),
         }
+    }
+
+    #[test]
+    fn webots_launch_starts_realtime_batch_mode() {
+        assert_eq!(
+            webots_launch_args(Path::new("/tmp/staged.wbt")),
+            vec!["--mode=realtime", "--batch", "/tmp/staged.wbt"]
+        );
     }
 
     #[test]

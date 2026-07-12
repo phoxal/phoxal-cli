@@ -10,14 +10,15 @@ Production reproducibility comes from explicit `artifacts.pins` plus the deploye
 
 ```sh
 # Hand-author robot.yaml in a new project directory (see the framework repo's
-# examples/ and getting-started docs for a working starting point).
+# fixture/ robots for a working starting point).
 cd rover
 
-phoxal-cli check                  # validate target generation + topology via emit-apis
-phoxal-cli generations status     # inspect catalog readiness for the robot target
+phoxal-cli check                  # validate the graph's participants + config via phoxal::check
 phoxal-cli service catalog        # print official services from the configured artifact catalog
 phoxal-cli run --watch            # supervise the graph and hot-swap checked local edits
 phoxal-cli simulate default       # resolve and report the simulation launch plan
+phoxal-cli logs -f                # stream participant bus logs from a reachable robot
+phoxal-cli status                 # print the local supervisor board snapshot
 
 phoxal-cli update                 # verify downloads and atomically retarget active versions
 phoxal-cli deploy robot@host      # build, render, sync, restart, and report systemd health
@@ -26,17 +27,18 @@ phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build va
 
 | Command | What it does |
 |---|---|
-| `check` | Resolve `robot.yaml`, stage participants, extract their embedded metadata sections, and validate the graph. `--service <name>` scopes user-service selection. |
-| `generations status` | Report readiness for a catalog generation on the robot target, including changed contracts and per-target artifact status. Use `--generation <g>` to inspect a specific generation. |
+| `check` | Resolve `robot.yaml`, stage participants, extract their embedded metadata sections, and validate the graph against `phoxal::check`. `--service <name>` scopes user-service selection. `--strict` additionally fails on coherence warnings. |
+| `validate` | Lower-level `robot.yaml` structure and user-service phoxal-dependency checks that back `check`. |
 | `run` | Supervise the resolved host-native graph. `--watch` rebuilds changed local participants, re-runs the graph proof, and swaps the checked process in place. `--message-format json` prints exact participant launch command lines and env. |
 | `simulate <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` hot-swaps service edits and re-checks driver metadata/substitutions without launching drivers. |
-| `status [release|resume <participant>]` | Print the supervisor board, or explicitly release a managed child for manual/debugger execution and later resume it under supervision. |
-| `service catalog` | Print official services from the configured artifact catalog. `service run` is intentionally removed; use `run --watch` plus `status release/resume` for debugging. |
+| `logs [participant]` | Stream participant bus log events from a reachable robot. `-f`/`--follow` keeps streaming; omit `participant` for every participant. |
+| `status [release|resume <participant>]` | Print the local supervisor board, or explicitly release a managed child for manual/debugger execution and later resume it under supervision. |
+| `service catalog` | Print official services from the configured artifact catalog. |
 | `update` | Resolve stable/nightly heads, verify downloads, retarget `active`, and prune inactive versions. Supports `--dry-run` and JSON. |
 | `cache clean` | Remove selected project-local `binaries`, `build`, `git`, or `webots` state, with size reporting and `--dry-run`. |
 | `deploy <user@host>` | Probe the robot arch, resolve/check the graph, cross-build local source artifacts for musl, render native systemd units/env/release record, sync to `/opt/phoxal` and `/etc/systemd/system`, restart `phoxal.target`, and report systemd readiness. Prints the v0 pre-stable warning. `--dry-run --target <arch>` renders hostless for validation. |
-| `validate` | Lower-level `robot.yaml` structure and user-service phoxal-dependency checks that back `check`. |
-| `doctor` | Check host prerequisites (Docker, Webots) without changing anything. |
+| `doctor` | Check host prerequisites (Webots, Rust toolchain) without changing anything. |
+| `version` | Print the CLI version, wire codec, and participant metadata section names. |
 | `self upgrade` | Update the CLI binary itself. |
 
 Commands that emit machine-readable state accept `--message-format human|json`.
@@ -114,12 +116,12 @@ catalog from the framework checkout and pass it with `--catalog` or
 ```sh
 # from the phoxal-cli checkout; ROBOT_DIR defaults to ../robot-v1
 scripts/live-simulate-gate.sh            # smoke: live resolve + dry-run report (CI-safe)
-scripts/live-simulate-gate.sh --live     # full live run (needs Docker daemon + Webots)
+scripts/live-simulate-gate.sh --live     # full live run (needs Webots)
 ```
 
 The smoke phase runs `simulate default --dry-run` to resolve and report the
 planned local launch without writing `.phoxal/run` or a release directory. It
-needs no Docker daemon. The `--live` phase additionally requires Webots on
+needs no daemon of any kind. The `--live` phase additionally requires Webots on
 `PATH`; run `phoxal update` first, then it runs `simulate default` so you can confirm the router,
 Webots, host tools, and bus connectivity. Until native release assets publish,
 official-service launch failures should surface as catalog or native-pending
