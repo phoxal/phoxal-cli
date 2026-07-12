@@ -8,35 +8,46 @@ use tracing_subscriber::EnvFilter;
 
 use phoxal_cli::AppContext;
 use phoxal_cli::Ui;
-use phoxal_cli::commands::Cli;
+use phoxal_cli::commands::{Cli, MessageFormat};
 
 #[tokio::main()]
 async fn main() -> ExitCode {
-    match run().await {
+    let cli = Cli::parse();
+    let message_format = cli.message_format();
+    init_tracing(message_format);
+
+    match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            Ui::new().error(format!("{error:#}"));
+            if message_format == MessageFormat::Human {
+                Ui::new().error(format!("{error:#}"));
+            }
             ExitCode::from(1)
         }
     }
 }
 
-async fn run() -> Result<()> {
-    match dotenvy::dotenv() {
-        Ok(_) => {}
-        Err(DotenvError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).context("failed to load .env"),
-    }
-
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+fn init_tracing(message_format: MessageFormat) {
+    let env_filter = if message_format == MessageFormat::Json {
+        EnvFilter::new("off")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
+    };
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
         .without_time()
         .with_ansi(tracing_ansi_enabled())
         .init();
+}
 
-    let cli = Cli::parse();
+async fn run(cli: Cli) -> Result<()> {
+    match dotenvy::dotenv() {
+        Ok(_) => {}
+        Err(DotenvError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("failed to load .env"),
+    }
+
     let workspace_root = cli.project_path.clone().unwrap_or(std::env::current_dir()?);
     let workspace_root = workspace_root.canonicalize().with_context(|| {
         format!(

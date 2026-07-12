@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::AppContext;
 use crate::shell;
 
-const DRY_RUN_FALLBACK: &str = "phoxal-cli simulate <world> --dry-run";
+const DRY_RUN_FALLBACK: &str = "phoxal-cli simulation run <world> --dry-run";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeStatus {

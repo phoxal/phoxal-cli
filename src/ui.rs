@@ -18,9 +18,6 @@ impl Ui {
 
     /// `--message-format json` promises stdout carries only the JSON
     /// document and stderr carries nothing (see [`crate::output_mode`]).
-    /// `error` is deliberately excluded from this gate - a fatal failure is
-    /// not decoration, and main.rs's top-level handler relies on it being
-    /// the one diagnostic that always reaches the user, JSON mode or not.
     fn should_print_decoration(&self) -> bool {
         !crate::progress::current_mode().is_json()
     }
@@ -73,6 +70,9 @@ impl Ui {
     }
 
     pub fn error(&self, message: impl AsRef<str>) {
+        if !self.should_print_decoration() {
+            return;
+        }
         let theme = self.theme();
         eprintln!("{} {}", theme.bold(&theme.error("error")), message.as_ref());
     }

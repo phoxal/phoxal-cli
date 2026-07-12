@@ -3422,7 +3422,7 @@ releases_root="{RELEASES_ROOT}"
 
 valid_unit() {{
   case "$1" in
-    phoxal.target|phoxal-router.service|phoxal-participant-*.service) ;;
+    phoxal.target|phoxal-router.service|phoxal-tool-*.service|phoxal-participant-*.service) ;;
     *) return 1 ;;
   esac
   case "$1" in
@@ -3654,6 +3654,10 @@ fn stale_units(installed: &[String], desired: &[String]) -> Vec<String> {
 fn managed_unit_name(unit: &str) -> bool {
     unit == "phoxal.target"
         || unit == "phoxal-router.service"
+        || unit
+            .strip_prefix("phoxal-tool-")
+            .and_then(|rest| rest.strip_suffix(".service"))
+            .is_some_and(crate::resolver::is_launch_id)
         || unit
             .strip_prefix("phoxal-participant-")
             .and_then(|rest| rest.strip_suffix(".service"))
@@ -5346,6 +5350,23 @@ capabilities:
     }
 
     #[test]
+    fn helper_and_stale_cleanup_accept_generated_site_tool_units() {
+        let script = helper_script();
+        assert!(script.contains("phoxal-tool-*.service"), "{script}");
+        assert!(managed_unit_name("phoxal-tool-joypad.service"));
+        assert!(managed_unit_name("phoxal-tool-telemetry.service"));
+        assert!(!managed_unit_name("phoxal-tool-../escape.service"));
+
+        assert_eq!(
+            stale_units(
+                &["phoxal-tool-telemetry.service".to_string()],
+                &["phoxal.target".to_string()],
+            ),
+            vec!["phoxal-tool-telemetry.service".to_string()]
+        );
+    }
+
+    #[test]
     fn helper_script_is_valid_posix_shell() -> Result<()> {
         let mut child = Command::new("sh").arg("-n").stdin(Stdio::piped()).spawn()?;
         child
@@ -5361,7 +5382,7 @@ capabilities:
     fn helper_script_hash_is_stable() {
         assert_eq!(
             helper_script_sha256(),
-            "25bcda1025ee69432973de5310a61569312aeaa89e29e8e1e0f882185502530f"
+            "e29c0dc203a8e3bae7d8b93fdf36518a39fe5f85f293f31c15501f15c169c01e"
         );
     }
 

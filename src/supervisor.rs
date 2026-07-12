@@ -1205,6 +1205,7 @@ pub async fn supervise_until_shutdown(
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut clean_shutdown = false;
+    let mut stage_error = None;
     let mut action_rx = options.action_rx.take();
     let mut cancel_rx = options.cancel_rx.take();
     let mut display = options.display;
@@ -1307,10 +1308,12 @@ pub async fn supervise_until_shutdown(
                         }
                     }
                     Err(error) => {
+                        let reason = format!("stage '{label}' stalled: {error:#}");
                         board.append_log(
                             "supervisor",
-                            format!("supervisor: stage '{label}' stalled: {error:#}"),
+                            format!("supervisor: {reason}"),
                         );
+                        stage_error = Some(anyhow!(reason));
                         clean_shutdown = false;
                         break;
                     }
@@ -1345,6 +1348,9 @@ pub async fn supervise_until_shutdown(
     shutdown_all(&mut running, &board).await;
     if let Some(state_file) = &options.state_file {
         board.write_snapshot(state_file)?;
+    }
+    if let Some(error) = stage_error {
+        return Err(error);
     }
     Ok(SupervisorOutcome {
         clean_shutdown,
@@ -1431,10 +1437,14 @@ async fn request_participant_stop(
 async fn recv_action(
     action_rx: &mut Option<mpsc::Receiver<SupervisorAction>>,
 ) -> Option<SupervisorAction> {
-    match action_rx {
+    let action = match action_rx {
         Some(action_rx) => action_rx.recv().await,
-        None => std::future::pending().await,
+        None => return std::future::pending().await,
+    };
+    if action.is_none() {
+        action_rx.take();
     }
+    action
 }
 
 /// Resolve at most once (a oneshot can only fire once, unlike `action_rx`'s
@@ -3387,7 +3397,7 @@ mod tests {
             vec![sleep_spec("one")],
             Duration::from_millis(150),
         )];
-        let outcome = tokio::time::timeout(
+        let error = tokio::time::timeout(
             Duration::from_secs(5),
             supervise_until_shutdown(
                 stages,
@@ -3398,10 +3408,14 @@ mod tests {
             ),
         )
         .await
-        .expect("a stalled stage must fail within its own timeout, never hang")?;
+        .expect("a stalled stage must fail within its own timeout, never hang")
+        .expect_err("a stalled stage must fail the supervisor");
 
-        assert!(!outcome.graph_healthy());
-        assert_eq!(outcome.failed_participants, vec!["one"]);
+        assert!(
+            error.to_string().contains("stage 'stage-one' stalled"),
+            "the failure must preserve the stalled stage label: {error:#}"
+        );
+        assert_eq!(board.snapshot().failed_participants(), vec!["one"]);
         Ok(())
     }
 }

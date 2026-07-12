@@ -61,6 +61,30 @@ fn welcome_flag_does_not_defeat_json_mode_silence() {
 }
 
 #[test]
+fn json_mode_keeps_stderr_empty_on_a_top_level_failure() {
+    let missing = tempfile::tempdir().expect("tempdir").path().join("missing");
+    let output = bin()
+        .args([
+            "--project-path",
+            missing.to_str().unwrap(),
+            "version",
+            "--message-format",
+            "json",
+        ])
+        .env("RUST_LOG", "trace")
+        .output()
+        .expect("failing JSON invocation should run");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.is_empty(),
+        "JSON mode must suppress tracing and the top-level human diagnostic: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn welcome_flag_does_not_defeat_the_machine_verb_suppression() {
     // `version` is a machine verb: identity/welcome stay suppressed even
     // under `--welcome` and even in human mode.

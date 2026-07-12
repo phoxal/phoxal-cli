@@ -16,7 +16,7 @@ cd rover
 phoxal-cli check                  # validate the graph's participants + config via phoxal::check
 phoxal-cli service catalog        # print official services from the configured artifact catalog
 phoxal-cli run --watch            # supervise the graph and hot-swap checked local edits
-phoxal-cli simulate default       # resolve and report the simulation launch plan
+phoxal-cli simulation run default # resolve and report the simulation launch plan
 phoxal-cli logs -f                # stream participant bus logs from a reachable robot
 phoxal-cli status                 # print the local supervisor board snapshot
 
@@ -30,7 +30,8 @@ phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build va
 | `check` | Resolve `robot.yaml`, stage participants, extract their embedded metadata sections, and validate the graph against `phoxal::check`. `--service <name>` scopes user-service selection. `--strict` additionally fails on coherence warnings. |
 | `validate` | Lower-level `robot.yaml` structure and user-service phoxal-dependency checks that back `check`. |
 | `run` | Supervise the resolved host-native graph. `--watch` rebuilds changed local participants, re-runs the graph proof, and swaps the checked process in place. `--message-format json` prints exact participant launch command lines and env. |
-| `simulate <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` hot-swaps service edits and re-checks driver metadata/substitutions without launching drivers. |
+| `simulation run <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` hot-swaps service edits and re-checks driver metadata/substitutions without launching drivers. |
+| `simulation join` | Reserved entry point for joining a running multi-robot simulation; currently reports that the workflow is not available yet. |
 | `logs [participant]` | Stream participant bus log events from a reachable robot. `-f`/`--follow` keeps streaming; omit `participant` for every participant. |
 | `status [release|resume <participant>]` | Print the local supervisor board, or explicitly release a managed child for manual/debugger execution and later resume it under supervision. |
 | `service catalog` | Print official services from the configured artifact catalog. |
@@ -94,7 +95,7 @@ cargo install --git https://github.com/phoxal/phoxal-cli
 ## Simulate
 
 ```sh
-phoxal-cli simulate <world>
+phoxal-cli simulation run <world>
 ```
 
 `<world>` resolves to a `.wbt` file in this order:
@@ -102,7 +103,7 @@ phoxal-cli simulate <world>
 1. `<project>/worlds/<world>.wbt`
 2. `<project>/<world>` (path-as-given, e.g. `worlds/foo.wbt`)
 
-Example: `phoxal-cli simulate default` finds `worlds/default.wbt` in the project.
+Example: `phoxal-cli simulation run default` finds `worlds/default.wbt` in the project.
 
 ## Live Split-Recovery Gate
 
@@ -119,10 +120,10 @@ scripts/live-simulate-gate.sh            # smoke: live resolve + dry-run report 
 scripts/live-simulate-gate.sh --live     # full live run (needs Webots)
 ```
 
-The smoke phase runs `simulate default --dry-run` to resolve and report the
+The smoke phase runs `simulation run default --dry-run` to resolve and report the
 planned local launch without writing `.phoxal/run` or a release directory. It
 needs no daemon of any kind. The `--live` phase additionally requires Webots on
-`PATH`; run `phoxal update` first, then it runs `simulate default` so you can confirm the router,
+`PATH`; run `phoxal update` first, then it runs `simulation run default` so you can confirm the router,
 Webots, host tools, and bus connectivity. Until native release assets publish,
 official-service launch failures should surface as catalog or native-pending
 diagnostics rather than as missing static catalog entries.

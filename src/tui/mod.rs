@@ -163,7 +163,13 @@ impl TuiDisplay {
     /// `select!` branch without losing an already-buffered event.
     pub async fn next_input(&mut self) -> Option<Event> {
         let activated = self.activated.as_mut()?;
-        activated.input_rx.recv().await
+        match activated.input_rx.recv().await {
+            Some(event) => Some(event),
+            // A terminal read error ends the bridge thread and closes this
+            // channel. Stay pending instead of returning `None` on every
+            // supervisor select pass and spinning a CPU core.
+            None => std::future::pending().await,
+        }
     }
 
     pub fn handle_input(

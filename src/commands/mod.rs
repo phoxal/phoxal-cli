@@ -353,6 +353,15 @@ impl RootCommand {
     }
 }
 
+impl Cli {
+    /// The invocation-wide output contract, exposed so the binary can silence
+    /// tracing and its top-level error reporter before dispatch starts.
+    #[must_use]
+    pub fn message_format(&self) -> MessageFormat {
+        self.command.message_format()
+    }
+}
+
 pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
     let interactive = std::io::stderr().is_terminal();
     let message_format = cli.command.message_format();

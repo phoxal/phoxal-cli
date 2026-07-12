@@ -13,7 +13,7 @@
 //!   executing it - [`participant_metadata`]) and validate it with the shared
 //!   [`phoxal::check`] graph core; git component commits resolve live unless
 //!   pinned to a commit SHA in `robot.yaml`.
-//! - `simulate <world>` - resolve and print or run the host-native simulation plan.
+//! - `simulation run <world>` - resolve and print or run the host-native simulation plan.
 //! - `deploy <user@host>` - render the checked launch plan into a native systemd
 //!   payload, sync it to the robot, restart `phoxal.target`, and report health.
 //!   Prints the v0 pre-stable warning.
