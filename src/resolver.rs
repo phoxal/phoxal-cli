@@ -393,24 +393,76 @@ fn ensure_no_base_path_pins(yaml: &serde_yaml::Value, path: &Path) -> Result<()>
         return Ok(());
     };
 
-    let path_pins = pins
+    // A path pin whose target stays INSIDE the project (a robot-local component
+    // checked into the robot repo, e.g. `./components/passive_caster`) is
+    // permanent, reproducible robot content and is allowed in the base manifest.
+    // Only a path that ESCAPES the project (absolute, lexically climbing out
+    // with `..`, or resolving outside through a symlink) is a dev override and
+    // must live in a `robot.<env>.yaml` overlay so production manifests stay
+    // catalog/release based.
+    let project_root = path.parent().unwrap_or_else(|| Path::new("."));
+    let escaping_pins = pins
         .iter()
         .filter_map(|(key, value)| {
             let path_key = serde_yaml::Value::String("path".to_string());
-            let has_path = value
+            let pin_path = value
                 .as_mapping()
-                .is_some_and(|mapping| mapping.contains_key(&path_key));
-            has_path.then(|| key.as_str().unwrap_or("<non-string>").to_string())
+                .and_then(|mapping| mapping.get(&path_key))
+                .and_then(serde_yaml::Value::as_str)?;
+            path_pin_escapes_project(Path::new(pin_path), project_root)
+                .then(|| key.as_str().unwrap_or("<non-string>").to_string())
         })
         .collect::<Vec<_>>();
-    if path_pins.is_empty() {
+    if escaping_pins.is_empty() {
         return Ok(());
     }
     bail!(
-        "{path}: artifacts.pins path overrides are dev-overlay only; move {} to robot.<env>.yaml and load it with --env <env>",
-        path_pins.join(", "),
+        "{path}: artifacts.pins path overrides that point outside the project are dev-overlay only; move {} to robot.<env>.yaml and load it with --env <env> (in-project component paths are allowed in the base manifest)",
+        escaping_pins.join(", "),
         path = path.display()
     )
+}
+
+/// Whether a pin `path` resolves outside the project root. Reject obvious lexical
+/// escapes first, then compare canonical paths when the target already exists so
+/// symlinks cannot carry a base-manifest pin outside the project. A missing target
+/// falls back to the lexical result so an in-project path may be created later.
+fn path_pin_escapes_project(pin_path: &Path, project_root: &Path) -> bool {
+    if path_pin_lexically_escapes_project(pin_path) {
+        return true;
+    }
+
+    let Ok(canonical_root) = project_root.canonicalize() else {
+        return false;
+    };
+    let resolved = resolve_project_path(project_root, pin_path);
+    let Ok(canonical_target) = resolved.canonicalize() else {
+        return false;
+    };
+    !canonical_target.starts_with(canonical_root)
+}
+
+fn path_pin_lexically_escapes_project(pin_path: &Path) -> bool {
+    use std::path::Component;
+    if pin_path.is_absolute() {
+        return true;
+    }
+    let mut depth: i32 = 0;
+    for component in pin_path.components() {
+        match component {
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            // A rooted/prefix component means absolute-like; treat as escaping.
+            Component::RootDir | Component::Prefix(_) => return true,
+        }
+    }
+    false
 }
 
 fn parse_robot_value_with_extras(yaml: &mut serde_yaml::Value, path: &Path) -> Result<LoadedRobot> {
@@ -2208,5 +2260,79 @@ services:
         };
 
         assert_eq!(runtime.artifact_ref(), "service-asset:y2026_1-stable");
+    }
+
+    #[test]
+    fn in_project_path_pins_allowed_in_base_but_escaping_ones_rejected() {
+        let base = |pin: &str| {
+            serde_yaml::from_str::<serde_yaml::Value>(&format!(
+                "artifacts:\n  pins:\n    phoxal/component-local:\n      path: {pin}\n"
+            ))
+            .unwrap()
+        };
+        let manifest = Path::new("/proj/robot.yaml");
+
+        // In-project component paths are permanent robot content: allowed in base.
+        for ok in ["./components/passive_caster", "components/x", "a/b/../c"] {
+            assert!(
+                ensure_no_base_path_pins(&base(ok), manifest).is_ok(),
+                "in-project pin {ok} should be allowed in the base manifest"
+            );
+        }
+        // Escaping / absolute paths are dev overrides: overlay only.
+        for bad in ["../framework/service/drive", "/abs/path", "../../x"] {
+            assert!(
+                ensure_no_base_path_pins(&base(bad), manifest).is_err(),
+                "escaping pin {bad} must be rejected in the base manifest"
+            );
+        }
+    }
+
+    #[test]
+    fn path_pin_escape_detection_is_lexical() {
+        let project_root = Path::new("/proj");
+        assert!(!path_pin_escapes_project(
+            Path::new("./components/x"),
+            project_root
+        ));
+        assert!(!path_pin_escapes_project(
+            Path::new("a/b/../c"),
+            project_root
+        ));
+        assert!(path_pin_escapes_project(Path::new("../x"), project_root));
+        assert!(path_pin_escapes_project(
+            Path::new("a/../../x"),
+            project_root
+        ));
+        assert!(path_pin_escapes_project(Path::new("/abs"), project_root));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn base_path_pin_rejects_symlink_escape_and_allows_real_project_dir() -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("robot");
+        let components = project_root.join("components");
+        let local = components.join("local");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&local)?;
+        fs::create_dir_all(&outside)?;
+        symlink(&outside, components.join("escaped"))?;
+        let manifest = project_root.join("robot.yaml");
+
+        let base = |pin: &str| {
+            serde_yaml::from_str::<serde_yaml::Value>(&format!(
+                "artifacts:\n  pins:\n    phoxal/component-local:\n      path: {pin}\n"
+            ))
+            .expect("test manifest should parse")
+        };
+
+        assert!(ensure_no_base_path_pins(&base("components/local"), &manifest).is_ok());
+        let error = ensure_no_base_path_pins(&base("components/escaped"), &manifest)
+            .expect_err("symlink outside the project must be rejected");
+        assert!(error.to_string().contains("dev-overlay only"), "{error:#}");
+        Ok(())
     }
 }

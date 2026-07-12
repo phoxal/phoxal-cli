@@ -4791,9 +4791,9 @@ dependencies = [
 
 [[package]]
 name = "webots-proto"
-version = "0.1.3"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8f797bcbe52fd0a3db807730fac7dd1af8a63f18a02e253aaba61f5db728930"
+checksum = "f586c5abc9124f9f4ad3f500fc4d3e8080e736df22704c60fea5d067642af0d6"
 dependencies = [
  "thiserror 2.0.18",
  "webots-proto-ast",
@@ -4804,9 +4804,9 @@ dependencies = [
 
 [[package]]
 name = "webots-proto-ast"
-version = "0.1.3"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "777da459662047819587b0c789b61ed42299a212ed34e93630748bfd4231a241"
+checksum = "0aefb42b60ee47b54aac9773039ae0b9094a8c5febf21a85293964b561f892cd"
 dependencies = [
  "derive-new",
  "derive_setters",
@@ -4816,9 +4816,9 @@ dependencies = [
 
 [[package]]
 name = "webots-proto-resolver"
-version = "0.1.3"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08135f538facd3cbfee1eba78ca037b451d9b8c3c74456b3d2de1b7595f78cb3"
+checksum = "783b6a8033ce3917c92a35b01d84cebfb5e22d990f7b74fd31e56ea204973819"
 dependencies = [
  "thiserror 2.0.18",
  "webots-proto-ast",
@@ -4827,9 +4827,9 @@ dependencies = [
 
 [[package]]
 name = "webots-proto-schema"
-version = "0.1.3"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8477e23733f164e36cb78ddce0b19a8a29cf067ecad07658816b4e4bda83a922"
+checksum = "f4bbc1358a427da664ed2325e70ade9a691660fb6e986993ddfd9314006b94d2"
 dependencies = [
  "derive-new",
  "derive_setters",
@@ -4841,9 +4841,9 @@ dependencies = [
 
 [[package]]
 name = "webots-proto-template"
-version = "0.1.3"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6aaa88f2a574fa55c5c6f9fae6f8c4f25010e5d004bdfe5df0e3394c271834d"
+checksum = "2e1e0ae7847e2185695d32c35c698746efb2d2ecf3fcca03649565a104bae45b"
 dependencies = [
  "boa_engine",
  "boa_gc",

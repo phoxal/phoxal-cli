@@ -29,7 +29,7 @@ use crate::simulate_staging::{
 };
 use crate::supervisor::{
     BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
-    RouterOwnership, SupervisorLock, SupervisorOptions, default_connect_endpoint,
+    RequestedStop, RouterOwnership, SupervisorLock, SupervisorOptions, default_connect_endpoint,
     local_router_reachable, router_ownership, start_bus_log_subscriber, supervise_until_shutdown,
     supervisor_actions_path, supervisor_state_path,
 };
@@ -214,6 +214,7 @@ pub async fn run(
             prepare_substitution_notes(&sim.plan, &board);
 
             let webots_spec = stage_and_prepare_webots_spec(app, &sim)?;
+            let requested_stop = RequestedStop::new(WEBOTS_SITE_ID, webots_spec.shutdown_grace);
             specs.push(webots_spec);
 
             app.ui.info(format!(
@@ -269,6 +270,7 @@ pub async fn run(
                     state_file: Some(state_file),
                     action_file: Some(action_file),
                     action_rx,
+                    requested_stop: Some(requested_stop),
                     ..SupervisorOptions::default()
                 },
             )
@@ -1028,7 +1030,8 @@ fn stage_and_prepare_webots_spec(app: &AppContext, sim: &SimPlan) -> Result<Part
         args: webots_launch_args(&staged.staged_world_path),
         cwd: None,
         env: Vec::new(),
-        shutdown_grace: std::time::Duration::from_secs(10),
+        shutdown_grace: std::time::Duration::from_secs(20),
+        process_group: true,
         note: None,
     })
 }
@@ -1045,8 +1048,8 @@ fn stage_and_prepare_webots_spec(app: &AppContext, sim: &SimPlan) -> Result<Part
 /// speed; the clock authority (the Webots supervisor) still owns logical time.
 ///
 /// `--batch` suppresses Webots' blocking modal dialogs (notably the "save world
-/// changes?" prompt on quit), so the CLI's supervised shutdown terminates the
-/// Webots child cleanly without an operator having to dismiss a popup.
+/// changes?" prompt on quit), so the CLI's requested SIGTERM stop can complete
+/// without an operator having to dismiss a popup.
 fn webots_launch_args(staged_world_path: &Path) -> Vec<String> {
     vec![
         "--mode=realtime".to_string(),

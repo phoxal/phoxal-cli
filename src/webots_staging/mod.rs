@@ -100,8 +100,13 @@ pub fn stage_world(
     extern_protos: &[ExternProto],
     root_nodes: &[AstNode],
 ) -> Result<String> {
-    let staged = match stage_world_source_with_protos(source_world, extern_protos, root_nodes) {
-        Ok(staged) => staged,
+    // The robot PROTOs in `extern_protos` are marked `IMPORTABLE` at construction
+    // (see `externproto_for_generated_proto`), which the webots-proto 0.2 writer
+    // emits as `IMPORTABLE EXTERNPROTO`. Webots requires that for a PROTO the
+    // supervisor instantiates at runtime via `importMFNodeFromString`; the base
+    // world's own EXTERNPROTOs stay non-importable.
+    match stage_world_source_with_protos(source_world, extern_protos, root_nodes) {
+        Ok(staged) => Ok(staged),
         Err(parse_error) => stage_world_source_with_text_fallback(
             source_world,
             extern_protos,
@@ -111,62 +116,8 @@ pub fn stage_world(
             anyhow!(
                 "failed to stage world after webots-proto parse fallback: {parse_error:#}: {fallback_error:#}"
             )
-        })?,
-    };
-    // The robot PROTOs we add here are instantiated at runtime by the Webots
-    // supervisor via `importMFNodeFromString` (the robots are spawned, never
-    // placed statically in the world). Webots refuses to import a PROTO that is
-    // not declared `IMPORTABLE EXTERNPROTO` in the world, failing with "In order
-    // to import the PROTO '<Name>', first it must be declared in the IMPORTABLE
-    // EXTERNPROTO list." The webots-proto AST writer only emits a bare
-    // `EXTERNPROTO`, so mark exactly the declarations we injected (identified by
-    // their url) as IMPORTABLE in the serialized text. The base world's own
-    // EXTERNPROTOs (arena, background, appearances) are static scene nodes and
-    // must stay non-importable.
-    Ok(mark_added_externprotos_importable(&staged, extern_protos))
-}
-
-/// Rewrite each `EXTERNPROTO "<url>"` declaration whose url matches one of
-/// `extern_protos` into `IMPORTABLE EXTERNPROTO "<url>"`. Idempotent: a line
-/// that is already `IMPORTABLE EXTERNPROTO` is left untouched.
-fn mark_added_externprotos_importable(staged: &str, extern_protos: &[ExternProto]) -> String {
-    if extern_protos.is_empty() {
-        return staged.to_string();
+        }),
     }
-    let importable_urls: BTreeSet<&str> = extern_protos
-        .iter()
-        .map(|extern_proto| extern_proto.url.as_str())
-        .collect();
-    staged
-        .split_inclusive('\n')
-        .map(|segment| {
-            let newline = segment.ends_with('\n');
-            let line = segment.trim_end_matches('\n');
-            let trimmed = line.trim_start();
-            let indent = &line[..line.len() - trimmed.len()];
-            if let Some(rest) = trimmed.strip_prefix("EXTERNPROTO ")
-                && externproto_url(rest).is_some_and(|url| importable_urls.contains(url))
-            {
-                let mut rewritten = format!("{indent}IMPORTABLE {trimmed}");
-                if newline {
-                    rewritten.push('\n');
-                }
-                rewritten
-            } else {
-                segment.to_string()
-            }
-        })
-        .collect()
-}
-
-/// Extract the quoted url from the remainder of an `EXTERNPROTO ` line
-/// (`"<url>"` optionally followed by trailing content). Returns `None` when the
-/// remainder is not a quoted string.
-fn externproto_url(rest: &str) -> Option<&str> {
-    let rest = rest.trim_start();
-    let inner = rest.strip_prefix('"')?;
-    let end = inner.find('"')?;
-    Some(&inner[..end])
 }
 
 pub fn validate_world_contact_materials(
@@ -196,7 +147,10 @@ pub fn externproto_for_generated_proto(
     world_path: &Path,
 ) -> Result<ExternProto> {
     let externproto_path = relative_path_for_world(generated_proto_path, world_path)?;
-    Ok(ExternProto::new(externproto_path, None, Span::default()))
+    // Marked IMPORTABLE: the supervisor instantiates this robot PROTO at runtime
+    // via `importMFNodeFromString`, which Webots only allows for an
+    // `IMPORTABLE EXTERNPROTO` declaration.
+    Ok(ExternProto::new(externproto_path, None, Span::default()).with_importable(true))
 }
 
 fn build_webots_scene(
@@ -243,9 +197,12 @@ WorldInfo {
     fn staged_robot_externprotos_are_importable_and_base_declarations_are_not() -> Result<()> {
         let first_url = "../protos/Alpha.proto";
         let second_url = "../protos/Beta.proto";
+        // Runtime-spawned robot PROTOs are constructed IMPORTABLE (as
+        // `externproto_for_generated_proto` does); the webots-proto writer emits
+        // the `IMPORTABLE` qualifier from that flag.
         let added = vec![
-            ExternProto::new(first_url.to_string(), None, Span::default()),
-            ExternProto::new(second_url.to_string(), None, Span::default()),
+            ExternProto::new(first_url.to_string(), None, Span::default()).with_importable(true),
+            ExternProto::new(second_url.to_string(), None, Span::default()).with_importable(true),
         ];
 
         let staged = stage_world(BASE_WORLD, &added, &[])?;
@@ -258,8 +215,6 @@ WorldInfo {
         assert!(!staged.contains(
             "IMPORTABLE EXTERNPROTO \"https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto\""
         ));
-
-        assert_eq!(mark_added_externprotos_importable(&staged, &added), staged);
         Ok(())
     }
 }
