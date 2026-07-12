@@ -19,6 +19,7 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
 
     assert_eq!(resolved.channel.to_string(), "stable");
+    assert_eq!(resolved.catalog_build_commit.as_deref(), Some("test"));
     assert_eq!(
         resolved
             .platform_runtimes

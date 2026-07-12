@@ -941,6 +941,7 @@ robot:
             channel: crate::catalog::SelectionChannel::Stable,
             target: host_target_triple(),
             catalog_snapshot: None,
+            catalog_build_commit: None,
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),

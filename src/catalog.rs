@@ -13,6 +13,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 
 pub use phoxal::catalog::{Artifact, Blob, BuildProvenance, Catalog, Heads};
 
+pub const FRAMEWORK_REPOSITORY_URL: &str = "https://github.com/phoxal/framework";
 pub const DEFAULT_CATALOG_URL: &str =
     "https://github.com/phoxal/framework/releases/latest/download/catalog.json";
 pub const CATALOG_SOURCE_ENV: &str = "PHOXAL_ARTIFACT_CATALOG";
@@ -150,7 +151,7 @@ pub fn snapshot_catalog_url(tag: &str) -> Result<String> {
         "catalog head contains an invalid release tag: {tag:?}"
     );
     Ok(format!(
-        "https://github.com/phoxal/framework/releases/download/{tag}/catalog.json"
+        "{FRAMEWORK_REPOSITORY_URL}/releases/download/{tag}/catalog.json"
     ))
 }
 

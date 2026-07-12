@@ -25,9 +25,7 @@ use crate::launch_plan::{
     CheckedRobotLaunchInput, DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, PlanContext,
     SITE_TOOL_JOYPAD, SubstitutedContract, SubstitutionRecord, build_launch_plan,
 };
-use crate::resolver::{
-    ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras, resolve,
-};
+use crate::resolver::{ResolveOptions, ResolvedRobot, RobotManifestExtras, resolve};
 use crate::simulate_staging::{
     ComponentTypeToStage, RobotToStage, StagedSimulationWorld, stage_simulation_world,
 };
@@ -1320,17 +1318,35 @@ fn webots_launch_args(staged_world_path: &Path) -> Vec<String> {
 /// drivers) already uses via `run.rs`. Cargo's own `target_directory` is
 /// always absolute, so this is already a legal symlink target.
 ///
-/// For a CATALOG simulator (no path override), the binary is obtained the
-/// same way every other official/native artifact is provisioned: resolve a
-/// `NativeArtifactDescriptor` from the runtime and look it up in the artifact
-/// cache via `native_artifacts::artifact_binary_path` - mirroring
-/// `commands::run::locate_official_binary`. The cache lives under the
-/// (already absolute) `host_paths::cache_dir()`. If the cache entry is
-/// missing, this is a hard error (`NativePending`-style), not a silent skip:
-/// a missing controller binary must never be allowed to fall through to
-/// Webots' `generic` controller unnoticed.
+/// For a CATALOG simulator (no path override), the binary is built from the
+/// framework checkout at the catalog's exact build commit. These binaries
+/// link against the host's Webots controller library and therefore cannot use
+/// the platform/Webots-version-specific binary published in the catalog.
 fn stage_simulator_controller_binaries(resolved: &ResolvedRobot, ui: &crate::Ui) -> Result<()> {
     let webots_home = detected_webots_home_for_build_env();
+    let has_catalog_simulator = resolved
+        .simulators
+        .iter()
+        .any(|runtime| runtime.source_path().is_none());
+    let catalog_source_build = has_catalog_simulator
+        .then(|| {
+            catalog_simulator_source_build_settings(
+                resolved,
+                std::env::var_os("WEBOTS_HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| webots_home.clone()),
+            )
+        })
+        .transpose()?;
+    if let Some((commit, home)) = &catalog_source_build {
+        let short_commit = commit.chars().take(12).collect::<String>();
+        ui.info(format!(
+            "building Webots controllers from framework {short_commit} against WEBOTS_HOME={}",
+            home.display()
+        ));
+    }
+
     for runtime in &resolved.simulators {
         let controller_name = webots_controller_name_for_simulator_artifact(&runtime.name)
             .ok_or_else(|| {
@@ -1356,7 +1372,30 @@ fn stage_simulator_controller_binaries(resolved: &ResolvedRobot, ui: &crate::Ui)
                 },
             )?
         } else {
-            provisioned_official_simulator_binary(runtime)?
+            let (commit, _) = catalog_source_build
+                .as_ref()
+                .context("catalog simulator source-build settings were not resolved")?;
+            let source = framework_simulator_source(&runtime.name, commit).ok_or_else(|| {
+                anyhow!(
+                    "unrecognized simulator artifact '{}'; expected '{}' or '{}'",
+                    runtime.name,
+                    SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
+                    SIMULATOR_CONTROLLER_ARTIFACT_NAME
+                )
+            })?;
+            let checkout =
+                crate::git_artifact::ensure_git_artifact(source.repository_url, source.commit)?;
+            let crate_dir = checkout.join(source.crate_subdir);
+            let _env_guard = webots_home
+                .as_ref()
+                .map(|home| WebotsHomeEnvGuard::set(home));
+            crate::commands::run::build_source_binary(&crate_dir, source.binary_name, ui)
+                .with_context(|| {
+                    format!(
+                        "failed to build catalog simulator '{}' from framework commit {}",
+                        runtime.name, source.commit
+                    )
+                })?
         };
         require_absolute_symlink_target("resolved simulator binary", &resolved_binary)?;
         let staged_dir = webots_stage_root::controller_dir(controller_name)?;
@@ -1382,6 +1421,58 @@ fn stage_simulator_controller_binaries(resolved: &ResolvedRobot, ui: &crate::Ui)
         ));
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FrameworkSimulatorSource<'a> {
+    repository_url: &'static str,
+    commit: &'a str,
+    crate_subdir: &'static str,
+    binary_name: &'static str,
+}
+
+fn framework_simulator_source<'a>(
+    artifact_name: &str,
+    commit: &'a str,
+) -> Option<FrameworkSimulatorSource<'a>> {
+    let (crate_subdir, binary_name) = match artifact_name {
+        SIMULATOR_SUPERVISOR_ARTIFACT_NAME => (
+            "simulator/webots-supervisor",
+            "phoxal-simulator-webots-supervisor",
+        ),
+        SIMULATOR_CONTROLLER_ARTIFACT_NAME => (
+            "simulator/webots-controller",
+            "phoxal-simulator-webots-controller",
+        ),
+        _ => return None,
+    };
+    Some(FrameworkSimulatorSource {
+        repository_url: crate::catalog::FRAMEWORK_REPOSITORY_URL,
+        commit,
+        crate_subdir,
+        binary_name,
+    })
+}
+
+fn require_webots_home_for_framework_build(webots_home: Option<PathBuf>) -> Result<PathBuf> {
+    webots_home.ok_or_else(|| {
+        anyhow!(
+            "Webots is required to build the native simulator controllers; install Webots or set WEBOTS_HOME to your Webots installation"
+        )
+    })
+}
+
+fn catalog_simulator_source_build_settings(
+    resolved: &ResolvedRobot,
+    webots_home: Option<PathBuf>,
+) -> Result<(&str, PathBuf)> {
+    let commit = resolved.catalog_build_commit.as_deref().ok_or_else(|| {
+        anyhow!(
+            "catalog-resolved Webots simulators require the catalog build commit, but the resolved catalog has no commit provenance"
+        )
+    })?;
+    let home = require_webots_home_for_framework_build(webots_home)?;
+    Ok((commit, home))
 }
 
 /// Symlink targets into the staged simulation must be absolute (Webots' cwd
@@ -1414,41 +1505,6 @@ fn webots_controller_name_for_simulator_artifact(artifact_name: &str) -> Option<
     } else {
         None
     }
-}
-
-/// Obtain the cached native-artifact binary path for a CATALOG (non
-/// path-overridden) simulator runtime, mirroring how
-/// `commands::run::locate_official_binary` resolves every other official
-/// artifact. Errors clearly rather than leaving the controller silently
-/// unstaged when the artifact was never vendored into the project store.
-fn provisioned_official_simulator_binary(runtime: &ResolvedPlatformRuntime) -> Result<PathBuf> {
-    let descriptor = crate::native_artifacts::NativeArtifactDescriptor::from_runtime(runtime)
-        .with_context(|| {
-            format!(
-                "failed to resolve native-artifact descriptor for simulator '{}'",
-                runtime.name
-            )
-        })?
-        .ok_or_else(|| {
-            anyhow!(
-                "simulator '{}' has no built native artifact for this target; run `phoxal update` or pin a path override",
-                runtime.name
-            )
-        })?;
-    let cached = crate::native_artifacts::artifact_binary_path(&descriptor).with_context(|| {
-        format!(
-            "failed to locate vendored simulator '{}' in the artifact store",
-            runtime.name
-        )
-    })?;
-    if !cached.is_file() {
-        bail!(
-            "NativePending: simulator '{}' binary is not vendored ({}); run `phoxal update` to fetch it",
-            runtime.name,
-            cached.display()
-        );
-    }
-    Ok(cached)
 }
 
 /// The Webots-linked simulator crates need `WEBOTS_HOME` to build (their
@@ -2833,6 +2889,7 @@ robot:
             channel: crate::catalog::SelectionChannel::Stable,
             target: host_target_triple(),
             catalog_snapshot: None,
+            catalog_build_commit: None,
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
@@ -3045,27 +3102,46 @@ robot:
         Ok(())
     }
 
-    /// A catalog (non path-overridden) simulator with no native-artifact
-    /// metadata and nothing in the artifact cache must fail loudly during
-    /// staging rather than silently leaving the controller unstaged - the
-    /// exact "generic controller" trap bug 1 exists to close.
     #[test]
-    fn catalog_simulator_missing_from_cache_is_a_hard_error() -> Result<()> {
-        let _phoxal_home = ScratchPhoxalHome::new()?;
-        let mut resolved = resolved_with_drive_components(&[], false)?;
-        resolved.simulators.clear();
-        resolved
-            .simulators
-            .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
-
-        let error = stage_simulator_controller_binaries(&resolved, &crate::Ui)
-            .expect_err("a catalog simulator with no cached binary must error, not silently skip");
-        let message = format!("{error:#}");
-        assert!(
-            message.contains("webots-supervisor"),
-            "error should name the simulator that failed to provision: {message}"
+    fn framework_simulator_source_maps_both_webots_artifacts() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let supervisor = framework_simulator_source(SIMULATOR_SUPERVISOR_ARTIFACT_NAME, commit)
+            .expect("supervisor must have a framework source mapping");
+        assert_eq!(
+            supervisor,
+            FrameworkSimulatorSource {
+                repository_url: crate::catalog::FRAMEWORK_REPOSITORY_URL,
+                commit,
+                crate_subdir: "simulator/webots-supervisor",
+                binary_name: "phoxal-simulator-webots-supervisor",
+            }
         );
 
+        let controller = framework_simulator_source(SIMULATOR_CONTROLLER_ARTIFACT_NAME, commit)
+            .expect("controller must have a framework source mapping");
+        assert_eq!(
+            controller,
+            FrameworkSimulatorSource {
+                repository_url: crate::catalog::FRAMEWORK_REPOSITORY_URL,
+                commit,
+                crate_subdir: "simulator/webots-controller",
+                binary_name: "phoxal-simulator-webots-controller",
+            }
+        );
+        assert!(framework_simulator_source("other", commit).is_none());
+    }
+
+    #[test]
+    fn catalog_source_build_requires_webots_home_before_checkout() -> Result<()> {
+        let mut resolved = resolved_with_drive_components(&[], false)?;
+        resolved.catalog_build_commit =
+            Some("0123456789abcdef0123456789abcdef01234567".to_string());
+        let error = catalog_simulator_source_build_settings(&resolved, None)
+            .expect_err("missing Webots must fail before cloning or building framework source");
+        let message = format!("{error:#}");
+        assert!(message.contains("Webots is required"), "{message}");
+        assert!(message.contains("install Webots"), "{message}");
+        assert!(message.contains("WEBOTS_HOME"), "{message}");
         Ok(())
     }
 
