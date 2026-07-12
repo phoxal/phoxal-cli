@@ -1376,6 +1376,18 @@ pub(crate) fn is_full_commit_sha(value: &str) -> bool {
 }
 
 pub fn resolve_git_ref(url: &str, git_ref: &str) -> Result<String> {
+    let progress = crate::progress::spinner(format!("resolving git ref {git_ref} from {url}"));
+    let result = resolve_git_ref_inner(url, git_ref);
+    match &result {
+        Ok(_) => progress.finish_and_clear(),
+        Err(error) => progress.abandon_with_message(format!(
+            "failed to resolve git ref {git_ref} from {url}: {error:#}"
+        )),
+    }
+    result
+}
+
+fn resolve_git_ref_inner(url: &str, git_ref: &str) -> Result<String> {
     let candidates = [
         format!("refs/tags/{git_ref}^{{}}"),
         format!("refs/tags/{git_ref}"),

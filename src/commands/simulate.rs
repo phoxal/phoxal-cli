@@ -341,6 +341,10 @@ pub async fn run(
                 },
             ));
 
+            let readiness_progress = crate::progress::spinner(format!(
+                "waiting for {} participant(s) to report ready",
+                expected_bus_ids.len()
+            ));
             let barrier_result = await_readiness_barrier(
                 &board,
                 &expected_bus_ids,
@@ -349,6 +353,11 @@ pub async fn run(
                 std::time::Duration::from_millis(200),
             )
             .await;
+            match &barrier_result {
+                Ok(()) => readiness_progress.finish_and_clear(),
+                Err(error) => readiness_progress
+                    .abandon_with_message(format!("readiness wait failed: {error:#}")),
+            }
             clock_task.abort();
             let terminal_failure_task = match &barrier_result {
                 Err(error) => {

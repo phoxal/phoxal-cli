@@ -851,22 +851,62 @@ pub fn existing_target_scopes(package: &str) -> Result<Vec<String>> {
 }
 
 fn download_blob(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
+    let label = format!(
+        "downloading {} {} [{}] ({} bytes)",
+        descriptor.package_id,
+        descriptor.version,
+        descriptor_scope_label(descriptor),
+        descriptor.size
+    );
+    // `descriptor.size` is the catalog-declared blob size (always known
+    // ahead of the request - it is what `verify_blob_bytes` checks the
+    // download against), so the byte bar is always determinate here.
+    let progress = crate::progress::bytes_bar(label, descriptor.size);
+    match download_blob_inner(descriptor, &progress) {
+        Ok(path) => {
+            progress.finish_and_clear();
+            Ok(path)
+        }
+        Err(error) => {
+            progress.abandon_with_message(format!(
+                "failed to download {} {}: {error:#}",
+                descriptor.package_id, descriptor.version
+            ));
+            Err(error)
+        }
+    }
+}
+
+fn download_blob_inner(
+    descriptor: &NativeArtifactDescriptor,
+    progress: &crate::progress::Handle,
+) -> Result<PathBuf> {
+    use std::io::Read;
+
     let url = &descriptor.url;
     let client = reqwest::blocking::Client::builder()
         .user_agent("phoxal-cli")
         .timeout(Duration::from_secs(120))
         .build()?;
-    let response = client
+    let mut response = client
         .get(url)
         .send()
         .with_context(|| format!("failed to download {url}"))?;
     if !response.status().is_success() {
         bail!("download from {url} returned {}", response.status());
     }
-    let bytes = response
-        .bytes()
-        .with_context(|| format!("failed to read {url} body"))?
-        .to_vec();
+    let mut bytes = Vec::with_capacity(descriptor.size as usize);
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        let read = response
+            .read(&mut chunk)
+            .with_context(|| format!("failed to read {url} body"))?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        progress.inc(read as u64);
+    }
     verify_blob_bytes(descriptor, &bytes)?;
     let path = artifact_tarball_path(descriptor)?;
     write_file_atomic(&path, &bytes)?;

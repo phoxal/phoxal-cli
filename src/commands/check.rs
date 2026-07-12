@@ -1526,7 +1526,16 @@ fn build_emit_apis_by_building(participant: &SourceParticipant) -> Result<RawEmi
 /// would miss it. Cargo's own artifact messages are workspace-aware
 /// regardless of layout.
 fn build_and_locate_binary(crate_dir: &Path, binary_name: &str) -> Result<PathBuf> {
-    let output = crate::shell::run_output(
+    // `run_output` fully captures the child's stdout/stderr (nothing is
+    // inherited), so an animated spinner here never collides with cargo's
+    // own live compiler output - unlike `run::build_source_binary`, whose
+    // `cargo build` inherits the terminal so its errors stream live and gets
+    // a static themed line instead (see that function's doc comment).
+    let progress = crate::progress::spinner(format!(
+        "building `{binary_name}` in {}",
+        crate_dir.display()
+    ));
+    let result = crate::shell::run_output(
         "cargo",
         [
             "build",
@@ -1537,7 +1546,17 @@ fn build_and_locate_binary(crate_dir: &Path, binary_name: &str) -> Result<PathBu
         ],
         Some(crate_dir),
     )
-    .with_context(|| format!("failed to spawn `cargo build --bin {binary_name}`"))?;
+    .with_context(|| format!("failed to spawn `cargo build --bin {binary_name}`"));
+    let output = match result {
+        Ok(output) => {
+            progress.finish_and_clear();
+            output
+        }
+        Err(error) => {
+            progress.abandon_with_message(format!("failed to build `{binary_name}`: {error:#}"));
+            return Err(error);
+        }
+    };
     if !output.status.success() {
         bail!(
             "failed to build `{binary_name}` in {}\nstdout:\n{}\nstderr:\n{}",

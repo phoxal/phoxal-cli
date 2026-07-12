@@ -227,6 +227,20 @@ fn validate_blob(blob: &Blob) -> Result<()> {
 }
 
 fn fetch_https(url: &str) -> Result<Catalog> {
+    let progress = crate::progress::spinner(format!("fetching artifact catalog from {url}"));
+    match fetch_https_inner(url) {
+        Ok(catalog) => {
+            progress.finish_and_clear();
+            Ok(catalog)
+        }
+        Err(error) => {
+            progress.abandon_with_message(format!("failed to fetch artifact catalog: {error:#}"));
+            Err(error)
+        }
+    }
+}
+
+fn fetch_https_inner(url: &str) -> Result<Catalog> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("phoxal-cli")
         .connect_timeout(REQUEST_TIMEOUT)

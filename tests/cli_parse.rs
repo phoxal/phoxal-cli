@@ -223,6 +223,18 @@ fn parses_update_and_rejects_removed_commands() {
 }
 
 #[test]
+fn parses_plain_and_welcome_as_global_flags() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "--plain", "--welcome", "check"])
+        .expect("global --plain/--welcome should parse before a verb");
+    assert!(cli.plain);
+    assert!(cli.welcome);
+
+    let cli = Cli::try_parse_from(["phoxal-cli", "check", "--plain"])
+        .expect("--plain also parses after the verb (global = true)");
+    assert!(cli.plain);
+}
+
+#[test]
 fn parses_cache_clean_and_dry_run() {
     let cli = Cli::try_parse_from(["phoxal-cli", "cache", "clean"]).expect("cache clean parses");
     let RootCommand::Cache(cache) = cli.command else {

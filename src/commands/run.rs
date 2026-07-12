@@ -861,6 +861,14 @@ fn native_pending_official_note(
     )
 }
 
+/// Build one user participant's crate. `cargo build` here inherits this
+/// process's stdout/stderr (`ui.command_status`, below) so build errors
+/// stream live to the developer's terminal - so, unlike
+/// `check::build_and_locate_binary`'s fully-captured build, this reports
+/// progress with a single themed (and `--message-format json`-silenced,
+/// via `Ui::info`) line rather than an animated spinner: an indicatif
+/// redraw sharing a stream with cargo's own inherited output would corrupt
+/// both.
 pub(crate) fn build_source_binary(
     crate_dir: &Path,
     preferred_name: &str,
