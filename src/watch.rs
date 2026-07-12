@@ -702,6 +702,7 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             shutdown_grace: Duration::from_millis(10),
+            process_group: false,
             note: None,
         };
 

@@ -501,6 +501,7 @@ pub(crate) fn prepare_site_tools(
                 cwd: None,
                 env: site_env(site, namespace, robot_id)?,
                 shutdown_grace: Duration::from_secs(5),
+                process_group: false,
                 note: None,
             }),
             None => board.set_state(
@@ -568,6 +569,7 @@ pub(crate) fn prepare_robot_participants(
                             shutdown_grace: Duration::from_millis(
                                 participant.launch.shutdown_grace_ms,
                             ),
+                            process_group: false,
                             note: None,
                         }),
                         None => board.set_state(
@@ -590,6 +592,7 @@ pub(crate) fn prepare_robot_participants(
                         cwd: Some(crate_dir.clone()),
                         env: encode_participant_env(&participant.launch)?.spawn_env(),
                         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
+                        process_group: false,
                         note: None,
                     });
                 }
@@ -603,6 +606,7 @@ pub(crate) fn prepare_robot_participants(
                         cwd: Some(crate_dir.clone()),
                         env: encode_participant_env(&participant.launch)?.spawn_env(),
                         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
+                        process_group: false,
                         note: None,
                     });
                 }
@@ -635,6 +639,7 @@ pub(crate) fn prepare_robot_participants(
                         cwd: Some(crate_dir.clone()),
                         env: encode_participant_env(&participant.launch)?.spawn_env(),
                         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
+                        process_group: false,
                         note: None,
                     });
                 }
@@ -677,6 +682,7 @@ pub(crate) fn source_spec_from_launch_record(
         cwd: Some(crate_dir.clone()),
         env: encode_participant_env(&participant.launch)?.spawn_env(),
         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
+        process_group: false,
         note: None,
     }))
 }

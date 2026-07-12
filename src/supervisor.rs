@@ -57,6 +57,7 @@ pub enum ParticipantState {
     Failed,
     Restarting,
     Released,
+    Stopped,
 }
 
 impl ParticipantState {
@@ -69,6 +70,7 @@ impl ParticipantState {
             Self::Failed => "failed",
             Self::Restarting => "restarting",
             Self::Released => "released",
+            Self::Stopped => "stopped",
         }
     }
 }
@@ -273,6 +275,7 @@ pub struct ParticipantSpec {
     pub cwd: Option<PathBuf>,
     pub env: Vec<(String, String)>,
     pub shutdown_grace: Duration,
+    pub process_group: bool,
     pub note: Option<String>,
 }
 
@@ -342,6 +345,7 @@ pub struct SupervisorOptions {
     pub state_file: Option<PathBuf>,
     pub action_file: Option<PathBuf>,
     pub action_rx: Option<mpsc::Receiver<SupervisorAction>>,
+    pub requested_stop: Option<RequestedStop>,
     pub render_board: bool,
 }
 
@@ -352,7 +356,23 @@ impl Default for SupervisorOptions {
             state_file: None,
             action_file: None,
             action_rx: None,
+            requested_stop: None,
             render_board: true,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RequestedStop {
+    participant_id: String,
+    grace: Duration,
+}
+
+impl RequestedStop {
+    pub fn new(participant_id: impl Into<String>, grace: Duration) -> Self {
+        Self {
+            participant_id: participant_id.into(),
+            grace,
         }
     }
 }
@@ -429,6 +449,10 @@ impl RunningParticipant {
         );
         let mut command = Command::new(&self.spec.executable);
         command.args(&self.spec.args);
+        #[cfg(unix)]
+        if self.spec.process_group {
+            command.process_group(0);
+        }
         if let Some(cwd) = &self.spec.cwd {
             command.current_dir(cwd);
         }
@@ -463,6 +487,59 @@ impl RunningParticipant {
             &self.spec.id,
             ParticipantState::Ready,
             self.spec.note.clone(),
+        );
+        Ok(())
+    }
+
+    async fn wait_for_requested_stop(
+        &mut self,
+        board: &BoardBackend,
+        budget: Duration,
+    ) -> Result<bool> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(false);
+        };
+        let status = match timeout(budget, child.wait()).await {
+            Ok(status) => status.context("failed to wait for requested child stop")?,
+            Err(_) => return Ok(false),
+        };
+        self.child = None;
+        join_reader(self.stdout_task.take()).await;
+        join_reader(self.stderr_task.take()).await;
+        self.failed = true;
+        board.set_state(
+            &self.spec.id,
+            ParticipantState::Stopped,
+            Some(format!("stopped after requested SIGTERM ({status})")),
+        );
+        Ok(true)
+    }
+
+    async fn kill_process_group_after_timeout(&mut self, board: &BoardBackend) -> Result<()> {
+        if !self.spec.process_group {
+            bail!(
+                "requested-stop fallback requires an isolated process group for {}",
+                self.spec.id
+            );
+        }
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+        board.append_log(
+            &self.spec.id,
+            "supervisor: SIGTERM grace expired; killing process group",
+        );
+        if let Err(error) = kill_child_process_group(&mut child).await {
+            self.child = Some(child);
+            return Err(error);
+        }
+        join_reader(self.stdout_task.take()).await;
+        join_reader(self.stderr_task.take()).await;
+        self.failed = true;
+        board.set_state(
+            &self.spec.id,
+            ParticipantState::Failed,
+            Some("SIGTERM grace expired; SIGKILL fallback used".to_string()),
         );
         Ok(())
     }
@@ -691,6 +768,9 @@ pub async fn supervise_until_shutdown(
         }
     }
 
+    if let Some(requested_stop) = options.requested_stop.take() {
+        request_participant_stop(&mut running, &board, requested_stop).await;
+    }
     shutdown_all(&mut running, &board).await;
     if let Some(state_file) = &options.state_file {
         board.write_snapshot(state_file)?;
@@ -699,6 +779,68 @@ pub async fn supervise_until_shutdown(
         clean_shutdown,
         failed_participants: board.snapshot().failed_participants(),
     })
+}
+
+async fn request_participant_stop(
+    running: &mut [RunningParticipant],
+    board: &BoardBackend,
+    requested_stop: RequestedStop,
+) {
+    let Some(participant) = running
+        .iter_mut()
+        .find(|participant| participant.spec.id == requested_stop.participant_id)
+    else {
+        return;
+    };
+    if participant.child.is_none() {
+        return;
+    }
+
+    board.append_log(
+        &participant.spec.id,
+        "supervisor: sending SIGTERM for requested stop",
+    );
+    let Some(pid) = participant.child.as_ref().and_then(Child::id) else {
+        board.set_state(
+            &participant.spec.id,
+            ParticipantState::Failed,
+            Some("requested-stop child has no pid".to_string()),
+        );
+        return;
+    };
+    match send_terminate(pid).await {
+        Ok(()) => board.append_log(
+            &participant.spec.id,
+            "supervisor: SIGTERM sent; waiting for child exit",
+        ),
+        Err(error) => board.append_log(
+            &participant.spec.id,
+            format!("supervisor: failed to send SIGTERM; waiting before fallback: {error:#}"),
+        ),
+    }
+
+    match participant
+        .wait_for_requested_stop(board, requested_stop.grace)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            if let Err(error) = participant.kill_process_group_after_timeout(board).await {
+                board.set_state(
+                    &participant.spec.id,
+                    ParticipantState::Failed,
+                    Some(format!("process-group SIGKILL failed: {error:#}")),
+                );
+            }
+        }
+        Err(error) => {
+            board.set_state(
+                &participant.spec.id,
+                ParticipantState::Failed,
+                Some(format!("requested-stop wait failed: {error:#}")),
+            );
+        }
+    }
 }
 
 async fn recv_action(
@@ -807,7 +949,7 @@ async fn shutdown_all(running: &mut [RunningParticipant], board: &BoardBackend) 
 
 pub async fn stop_child(child: &mut Child, budget: Duration) -> Result<()> {
     if let Some(pid) = child.id() {
-        send_terminate(pid).await;
+        let _ = send_terminate(pid).await;
     }
     match timeout(budget, child.wait()).await {
         Ok(status) => {
@@ -822,18 +964,79 @@ pub async fn stop_child(child: &mut Child, budget: Duration) -> Result<()> {
     }
 }
 
-async fn send_terminate(pid: u32) {
+async fn kill_child_process_group(child: &mut Child) -> Result<()> {
     #[cfg(unix)]
     {
-        let _ = Command::new("kill")
+        let pid = child.id().context("process group leader has no pid")?;
+        send_process_group_signal(pid, libc::SIGKILL)?;
+        child
+            .wait()
+            .await
+            .context("failed to wait for process group leader after SIGKILL")?;
+        let kill_deadline = Instant::now() + Duration::from_secs(1);
+        while process_group_alive(pid)? {
+            if Instant::now() >= kill_deadline {
+                bail!("child process group remained alive after SIGKILL");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        child.start_kill().context("failed to kill child")?;
+        child.wait().await.context("failed to wait after kill")?;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn send_process_group_signal(pid: u32, signal: libc::c_int) -> Result<()> {
+    let process_group =
+        i32::try_from(pid).context("child pid does not fit in a process-group id")?;
+    if unsafe { libc::kill(-process_group, signal) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error).context("failed to signal child process group")
+}
+
+#[cfg(unix)]
+fn process_group_alive(pid: u32) -> Result<bool> {
+    let process_group =
+        i32::try_from(pid).context("child pid does not fit in a process-group id")?;
+    if unsafe { libc::kill(-process_group, 0) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error).context("failed to inspect child process group"),
+    }
+}
+
+async fn send_terminate(pid: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
             .arg("-TERM")
             .arg(pid.to_string())
             .status()
-            .await;
+            .await
+            .context("failed to invoke kill -TERM")?;
+        if !status.success() {
+            bail!("kill -TERM exited with {status}");
+        }
+        Ok(())
     }
     #[cfg(not(unix))]
     {
         let _ = pid;
+        Ok(())
     }
 }
 
@@ -1053,6 +1256,7 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             shutdown_grace: Duration::from_millis(10),
+            process_group: false,
             note: None,
         }
     }
@@ -1066,6 +1270,7 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             shutdown_grace: Duration::from_millis(50),
+            process_group: false,
             note: None,
         }
     }
@@ -1153,6 +1358,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn requested_webots_sigterm_exit_is_stopped_not_failed() -> Result<()> {
+        let mut webots = sleep_spec("webots");
+        webots.args = vec![
+            "-c".to_string(),
+            "trap 'exit 0' TERM; while :; do sleep 1; done".to_string(),
+        ];
+        webots.process_group = true;
+
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "webots",
+            ParticipantKind::SiteTool,
+            ParticipantState::Starting,
+        ));
+        let participant = RunningParticipant::spawn(webots, &board).await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut running = vec![participant];
+
+        request_participant_stop(
+            &mut running,
+            &board,
+            RequestedStop::new("webots", Duration::from_secs(1)),
+        )
+        .await;
+
+        let snapshot = board.snapshot();
+        let status = snapshot.participants.get("webots").expect("webots");
+        assert_eq!(status.state, ParticipantState::Stopped);
+        assert!(snapshot.failed_participants().is_empty());
+        assert!(!running[0].is_active());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn requested_webots_stop_uses_sigkill_only_after_term_grace() -> Result<()> {
+        let mut webots = sleep_spec("webots");
+        webots.args = vec!["-c".to_string(), "trap '' TERM; sleep 30".to_string()];
+        webots.process_group = true;
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "webots",
+            ParticipantKind::SiteTool,
+            ParticipantState::Starting,
+        ));
+        let participant = RunningParticipant::spawn(webots, &board).await?;
+        let pid = participant
+            .child
+            .as_ref()
+            .and_then(Child::id)
+            .context("test child has no pid")?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut running = vec![participant];
+
+        request_participant_stop(
+            &mut running,
+            &board,
+            RequestedStop::new("webots", Duration::from_millis(20)),
+        )
+        .await;
+
+        assert!(!process_group_alive(pid)?);
+        let snapshot = board.snapshot();
+        let status = snapshot.participants.get("webots").expect("webots");
+        assert_eq!(status.state, ParticipantState::Failed);
+        assert!(
+            status
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("SIGKILL fallback"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn watch_swap_does_not_consume_restart_budget() -> Result<()> {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
@@ -1201,6 +1481,7 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             shutdown_grace: Duration::from_millis(10),
+            process_group: false,
             note: None,
         }];
         let outcome = supervise_until_shutdown(
@@ -1215,6 +1496,7 @@ mod tests {
                 state_file: None,
                 action_file: None,
                 action_rx: None,
+                requested_stop: None,
                 render_board: false,
             },
         )
@@ -1250,6 +1532,7 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             shutdown_grace: Duration::from_millis(10),
+            process_group: false,
             note: None,
         }];
         let _ = supervise_until_shutdown(
@@ -1264,6 +1547,7 @@ mod tests {
                 state_file: None,
                 action_file: None,
                 action_rx: None,
+                requested_stop: None,
                 render_board: false,
             },
         )
