@@ -11,15 +11,14 @@
 //!   supervisor-spawned at runtime, never pre-baked (see the module doc on
 //!   `commands::simulate`).
 //! - Adds exactly one static root node: the Webots supervisor `Robot` node
-//!   (`supervisor TRUE`, `controller "phoxal-simulator-webots-supervisor"`),
-//!   whose `--config` carries the spawn descriptors the supervisor imports at
-//!   startup.
+//!   (`supervisor TRUE`, `controller "phoxal-simulator-webots-supervisor"`).
+//!   Its `--config` contains only non-spawn settings. Robot nodes are served
+//!   separately over the bus by the live `simulate` launch path.
 //!
 //! Each spawn descriptor's `node_string` is a robot *instance* reference (PROTO
 //! name + transform + `controller "phoxal-simulator-webots-controller"` +
 //! `controllerArgs`), not the PROTO body - the body lives in the staged
-//! `.proto` file the `EXTERNPROTO` declares - so the supervisor's `--config`
-//! stays small even for many robots.
+//! `.proto` file the `EXTERNPROTO` declares.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -72,20 +71,17 @@ pub struct RobotToStage<'a> {
 }
 
 /// The supervisor's spawn descriptor for one robot: the shape the framework
-/// supervisor half consumes exactly (see the `commands::simulate` module doc
-/// for the fixed JSON contract).
+/// supervisor half consumes exactly through the simulation spawn bus contract.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SpawnDescriptor {
-    pub name: String,
+    pub robot_id: String,
     pub node_string: String,
 }
 
-/// The full supervisor `--config` payload: whether native artifacts are
-/// required, plus the spawn list it imports at startup.
+/// The supervisor `--config` payload. Spawn data is deliberately absent.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct SupervisorSpawnConfig {
+pub struct SupervisorConfig {
     pub require_native: bool,
-    pub spawn: Vec<SpawnDescriptor>,
 }
 
 /// Everything the caller needs to launch the staged world and register its
@@ -100,8 +96,9 @@ pub struct StagedSimulationWorld {
 /// Stage a simulation world for the given robots: generate each robot's
 /// PROTO (plus one PROTO per distinct component type it mounts), render its
 /// supervisor-owned instance node (never a static root node), build the
-/// supervisor's static `Robot` node with the resulting spawn list as its
-/// `--config`, and stage the augmented world text.
+/// supervisor's static `Robot` node with non-spawn `--config`, and stage the
+/// augmented world text. The returned descriptors are served over the bus by
+/// the live launch path.
 ///
 /// `staged_protos_dir` is where each generated robot `.proto` file is
 /// written; component PROTOs go under its `components/` subdirectory (the
@@ -224,19 +221,17 @@ pub fn stage_simulation_world(
         let node_string = render_node_to_string(&instance_node)?;
 
         spawn_descriptors.push(SpawnDescriptor {
-            name: robot.robot_id.clone(),
+            robot_id: robot.robot_id.clone(),
             node_string,
         });
         controller_launches.push((robot.robot_id.clone(), robot.controller_launch.clone()));
     }
 
-    let spawn_config = SupervisorSpawnConfig {
-        require_native,
-        spawn: spawn_descriptors.clone(),
-    };
+    let supervisor_config = SupervisorConfig { require_native };
     let mut supervisor_launch = supervisor_launch_base;
     supervisor_launch.config = Some(
-        serde_json::to_value(&spawn_config).context("failed to encode supervisor spawn config")?,
+        serde_json::to_value(&supervisor_config)
+            .context("failed to encode supervisor non-spawn config")?,
     );
     let supervisor_args =
         to_controller_args(&supervisor_launch).context("failed to render supervisor argv")?;
@@ -522,10 +517,9 @@ robot:
         );
 
         // (c) no static robot instance node - only the supervisor `Robot`
-        // node is a root node. The controller's controller name only appears
-        // escaped inside the supervisor's `--config` JSON blob (the spawn
-        // descriptor's node_string), never as an actual top-level Webots
-        // `controller "..."` field of a root node.
+        // node is a root node. The controller's controller name is carried
+        // only in the separately returned bus spawn descriptor, never in the
+        // staged world or supervisor `--config`.
         assert_eq!(
             staged_text
                 .matches(&format!("controller \"{CONTROLLER_CONTROLLER_NAME}\""))
@@ -533,21 +527,18 @@ robot:
             0,
             "staged world root nodes must not carry an unescaped controller field for the robot controller:\n{staged_text}"
         );
-        assert!(
-            staged_text.contains(CONTROLLER_CONTROLLER_NAME),
-            "the robot controller name should still appear (escaped) inside the supervisor's spawn config:\n{staged_text}"
-        );
+        assert!(!staged_text.contains(CONTROLLER_CONTROLLER_NAME));
         assert_eq!(
             staged_text.matches("Robot {").count(),
             1,
             "the staged world should contain exactly one root Robot node (the supervisor):\n{staged_text}"
         );
 
-        // The returned supervisor config's spawn descriptor carries the
-        // controller controller name + a controllerArgs list.
+        // The separately returned spawn descriptor carries the controller
+        // controller name + a controllerArgs list for the bus responder.
         assert_eq!(staged.spawn_descriptors.len(), 1);
         let descriptor = &staged.spawn_descriptors[0];
-        assert_eq!(descriptor.name, "testbot");
+        assert_eq!(descriptor.robot_id, "testbot");
         assert!(
             descriptor.node_string.contains(CONTROLLER_CONTROLLER_NAME),
             "{}",
@@ -564,19 +555,15 @@ robot:
             descriptor.node_string
         );
 
-        // The supervisor launch's config is exactly {require_native, spawn}.
+        // The supervisor launch's config contains no spawn data.
         let config = staged
             .supervisor_launch
             .config
             .as_ref()
             .expect("supervisor launch should carry a config");
         assert_eq!(config["require_native"], serde_json::json!(true));
-        assert_eq!(config["spawn"].as_array().map(Vec::len), Some(1));
-        assert_eq!(config["spawn"][0]["name"], serde_json::json!("testbot"));
-        assert_eq!(
-            config["spawn"][0]["node_string"],
-            serde_json::json!(descriptor.node_string)
-        );
+        assert!(config.get("spawn").is_none());
+        assert!(config.get("node_string").is_none());
         let mut config_keys = config
             .as_object()
             .expect("supervisor config should be a JSON object")
@@ -584,31 +571,20 @@ robot:
             .map(String::as_str)
             .collect::<Vec<_>>();
         config_keys.sort_unstable();
-        assert_eq!(config_keys, vec!["require_native", "spawn"]);
+        assert_eq!(config_keys, vec!["require_native"]);
 
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct SupervisorConfigForTest {
             require_native: bool,
-            spawn: Vec<SpawnDescriptorForTest>,
-        }
-
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct SpawnDescriptorForTest {
-            name: String,
-            node_string: String,
         }
 
         let config_argv = serde_json::to_string(config)?;
         let decoded: SupervisorConfigForTest = serde_json::from_str(&config_argv)?;
         assert!(decoded.require_native);
-        assert_eq!(decoded.spawn.len(), 1);
-        assert_eq!(decoded.spawn[0].name, "testbot");
-        assert_eq!(decoded.spawn[0].node_string, descriptor.node_string);
-        assert!(decoded.spawn[0].node_string.contains("--config"));
-        assert!(decoded.spawn[0].node_string.contains("quoted"));
-        let parsed_descriptor: webots_proto::Proto = decoded.spawn[0].node_string.parse()?;
+        assert!(descriptor.node_string.contains("--config"));
+        assert!(descriptor.node_string.contains("quoted"));
+        let parsed_descriptor: webots_proto::Proto = descriptor.node_string.parse()?;
         assert_eq!(parsed_descriptor.root_nodes.len(), 1);
 
         assert_eq!(staged.controller_launches.len(), 1);

@@ -3,9 +3,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
+use phoxal::bus::{Codec, MessagePack, QueryFailure};
 use phoxal::check as graph_check;
-use serde::Serialize;
+use phoxal::raw::{Bus, BusConfig};
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::AppContext;
 use crate::catalog::Catalog;
@@ -52,6 +55,22 @@ const SIMULATOR_SUPERVISOR_ARTIFACT_NAME: &str = "webots-supervisor";
 /// artifact, as reported by `resolved.simulators[].name` / `emit-apis`
 /// `artifact.id`.
 const SIMULATOR_CONTROLLER_ARTIFACT_NAME: &str = "webots-controller";
+
+/// Wire key of the additive `y2026_8::simulation::SpawnRequest => SpawnSet`
+/// contract. The CLI uses the raw bus server surface because it is privileged
+/// orchestration tooling rather than a checked framework participant.
+const SIMULATION_SPAWN_QUERY_TOPIC: &str = "y2026_8/simulation/spawn";
+
+#[derive(Debug, Deserialize)]
+struct SpawnRequestWire {
+    known_revision: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct SpawnSetWire {
+    revision: u64,
+    robots: Vec<crate::simulate_staging::SpawnDescriptor>,
+}
 
 /// The robot-scoped participant id for the Webots controller artifact
 /// (`phoxal-simulator-webots-controller`) that substitutes `robot_id`'s
@@ -213,7 +232,9 @@ pub async fn run(
             )?;
             prepare_substitution_notes(&sim.plan, &board);
 
-            let webots_spec = stage_and_prepare_webots_spec(app, &sim)?;
+            let (webots_spec, spawn_descriptors) = stage_and_prepare_webots_spec(app, &sim)?;
+            let spawn_responder =
+                start_spawn_responder(&sim.plan, spawn_descriptors, router_ownership).await?;
             let requested_stop = RequestedStop::new(WEBOTS_SITE_ID, webots_spec.shutdown_grace);
             specs.push(webots_spec);
 
@@ -278,6 +299,7 @@ pub async fn run(
             if let Some(handle) = watch_handle {
                 handle.abort();
             }
+            spawn_responder.abort();
             let outcome = outcome?;
 
             if !outcome.graph_healthy() {
@@ -1006,7 +1028,13 @@ pub(crate) const WEBOTS_SITE_ID: &str = "webots";
 /// only simulator-side child. The supervisor and controller participants are
 /// registered separately by `prepare_robot_participants` (SIMULATION-MANAGED,
 /// no spec of their own); this function only produces Webots's own spec.
-fn stage_and_prepare_webots_spec(app: &AppContext, sim: &SimPlan) -> Result<ParticipantSpec> {
+fn stage_and_prepare_webots_spec(
+    app: &AppContext,
+    sim: &SimPlan,
+) -> Result<(
+    ParticipantSpec,
+    Vec<crate::simulate_staging::SpawnDescriptor>,
+)> {
     let world = webots_world(&sim.plan.mode);
     let staged =
         stage_simulation_for_robot(&sim.ctx.project_root, world, &sim.ctx.resolved, &sim.plan)?;
@@ -1023,7 +1051,7 @@ fn stage_and_prepare_webots_spec(app: &AppContext, sim: &SimPlan) -> Result<Part
         "staged simulation world at {}",
         staged.staged_world_path.display()
     ));
-    Ok(ParticipantSpec {
+    let spec = ParticipantSpec {
         id: WEBOTS_SITE_ID.to_string(),
         kind: ParticipantKind::SiteTool,
         executable: webots_path,
@@ -1033,7 +1061,111 @@ fn stage_and_prepare_webots_spec(app: &AppContext, sim: &SimPlan) -> Result<Part
         shutdown_grace: std::time::Duration::from_secs(20),
         process_group: true,
         note: None,
+    };
+    Ok((spec, staged.spawn_descriptors))
+}
+
+/// Declare and keep alive the query responder that owns the simulation spawn
+/// set. With an external router, declaration completes before the caller gives
+/// Webots to the process supervisor. With a CLI-managed router, this task
+/// retries until that router starts, while the Webots supervisor retries its
+/// bounded query. The task and its bus session live until simulation ends.
+async fn start_spawn_responder(
+    launch_plan: &LaunchPlan,
+    robots: Vec<crate::simulate_staging::SpawnDescriptor>,
+    router_ownership: RouterOwnership,
+) -> Result<JoinHandle<()>> {
+    let robot = launch_plan
+        .robots
+        .first()
+        .context("sim launch plan has no robot for the spawn responder bus root")?;
+    let bus_config = BusConfig {
+        namespace: robot.namespace.clone(),
+        robot_id: robot.id.clone(),
+        participant: "phoxal-cli-simulation-spawn".to_string(),
+        incarnation: 0,
+        connect_endpoints: vec![default_connect_endpoint()],
+    };
+    let response = MessagePack::encode(&SpawnSetWire {
+        revision: 1,
+        robots,
     })
+    .context("failed to encode simulation spawn set")?;
+
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let mut ready_tx = Some(ready_tx);
+        loop {
+            let bus = match Bus::open(bus_config.clone()).await {
+                Ok(bus) => bus,
+                Err(error) => {
+                    tracing::debug!(%error, "simulation spawn responder waiting for router");
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    continue;
+                }
+            };
+            let queryable = match bus.declare_server(SIMULATION_SPAWN_QUERY_TOPIC).await {
+                Ok(queryable) => queryable,
+                Err(error) => {
+                    tracing::debug!(%error, "simulation spawn responder declaration failed");
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    continue;
+                }
+            };
+            if let Some(ready_tx) = ready_tx.take() {
+                let _ = ready_tx.send(());
+            }
+
+            if let Err(error) = serve_spawn_queries(&bus, &queryable, &response).await {
+                tracing::warn!(%error, "simulation spawn responder disconnected; retrying");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    });
+
+    // With an external router, declaration must finish before Webots is added
+    // to supervision. With a CLI-managed router, the router is itself launched
+    // by that supervision call, so the responder retries in parallel and the
+    // supervisor's bounded query retry bridges the bootstrap dependency.
+    if router_ownership == RouterOwnership::External {
+        ready_rx
+            .await
+            .context("simulation spawn responder exited before declaring its queryable")?;
+    }
+
+    Ok(handle)
+}
+
+async fn serve_spawn_queries(
+    bus: &Bus,
+    queryable: &phoxal::raw::ServerQueryable,
+    response: &[u8],
+) -> Result<()> {
+    loop {
+        let incoming = queryable.recv().await?;
+        let request = incoming
+            .request_metadata()
+            .and_then(|_| incoming.request_bytes())
+            .and_then(|bytes| {
+                MessagePack::decode::<SpawnRequestWire>(&bytes)
+                    .map_err(|error| phoxal::bus::BusError::Transport(error.to_string()))
+            });
+        match request {
+            Ok(request) => {
+                tracing::debug!(
+                    known_revision = request.known_revision,
+                    "serving simulation spawn set"
+                );
+                incoming.reply(bus, response.to_vec()).await?;
+            }
+            Err(error) => {
+                let failure = QueryFailure::invalid_argument(format!(
+                    "invalid simulation spawn request: {error}"
+                ));
+                incoming.reply_err(&failure).await?;
+            }
+        }
+    }
 }
 
 /// Build Webots' argv for a live simulate launch.
@@ -1531,6 +1663,28 @@ mod tests {
             webots_launch_args(Path::new("/tmp/staged.wbt")),
             vec!["--mode=realtime", "--batch", "/tmp/staged.wbt"]
         );
+    }
+
+    #[test]
+    fn spawn_responder_wire_shape_matches_additive_simulation_contract() {
+        assert_eq!(SIMULATION_SPAWN_QUERY_TOPIC, "y2026_8/simulation/spawn");
+        let value = serde_json::to_value(SpawnSetWire {
+            revision: 1,
+            robots: vec![crate::simulate_staging::SpawnDescriptor {
+                robot_id: "robot-a".to_string(),
+                node_string: "Robot { name \"robot-a\" }".to_string(),
+            }],
+        })
+        .unwrap();
+
+        assert_eq!(value["revision"], 1);
+        assert_eq!(value["robots"][0]["robot_id"], "robot-a");
+        assert_eq!(
+            value["robots"][0]["node_string"],
+            "Robot { name \"robot-a\" }"
+        );
+        assert!(value.get("spawn").is_none());
+        assert!(value["robots"][0].get("name").is_none());
     }
 
     #[test]
@@ -2033,7 +2187,7 @@ mod tests {
             "the staged world should contain exactly one root Robot node (the supervisor)"
         );
         assert_eq!(staged.spawn_descriptors.len(), 1);
-        assert_eq!(staged.spawn_descriptors[0].name, "robot_v1");
+        assert_eq!(staged.spawn_descriptors[0].robot_id, "robot_v1");
         assert!(
             staged.spawn_descriptors[0]
                 .node_string
