@@ -34,8 +34,9 @@ use crate::resolver::{
 use crate::supervisor::{
     BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
     RouterOwnership, SupervisorLock, SupervisorOptions, default_connect_endpoint,
-    local_router_reachable, router_ownership, start_bus_log_subscriber, supervise_until_shutdown,
-    supervisor_actions_path, supervisor_state_path,
+    local_router_reachable, router_ownership, start_bus_log_subscriber,
+    start_presence_heartbeat_subscriber, supervise_until_shutdown, supervisor_actions_path,
+    supervisor_state_path,
 };
 use crate::utils::cargo_binary_name;
 
@@ -139,6 +140,21 @@ impl Run {
             .iter()
             .map(|(namespace, robot_id)| {
                 start_bus_log_subscriber(
+                    namespace.clone(),
+                    robot_id.clone(),
+                    default_connect_endpoint(),
+                    prepared.board.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        // OBSERVED readiness: drive board state from each participant's own
+        // presence/heartbeat, mirroring the log subscriber above - see
+        // `supervisor::start_presence_heartbeat_subscriber`.
+        let _presence_tasks = prepared
+            .robot_log_targets
+            .iter()
+            .map(|(namespace, robot_id)| {
+                start_presence_heartbeat_subscriber(
                     namespace.clone(),
                     robot_id.clone(),
                     default_connect_endpoint(),
@@ -479,12 +495,23 @@ pub(crate) fn prepare_site_tools(
     for site in &plan.site {
         let should_launch =
             site.id != SITE_TOOL_ROUTER || router_ownership == RouterOwnership::Managed;
-        let state = if should_launch {
+        // A site tool (the router transport, or the joypad peripheral) is not
+        // a contract-graph participant - it is not gated by OBSERVED
+        // readiness. The router's own framework runner bus is in-process (no
+        // `PHOXAL_CONNECT`), so its heartbeat is structurally unobservable by
+        // the CLI's presence subscriber; its liveness is transitively proven
+        // instead by every downstream participant that talks through it
+        // reaching `Ready` on the barrier. So readiness here is process /
+        // transport liveness, not a heartbeat: `Ready` immediately once
+        // spawned (managed) or immediately here (external, since
+        // `RouterOwnership::External` already means `local_router_reachable`
+        // proved the transport is up).
+        let initial_state = if should_launch {
             ParticipantState::Starting
         } else {
             ParticipantState::Ready
         };
-        let mut status = ParticipantStatus::new(&site.id, ParticipantKind::SiteTool, state);
+        let mut status = ParticipantStatus::new(&site.id, ParticipantKind::SiteTool, initial_state);
         if !should_launch {
             status.note = Some("external router reused".to_string());
         }
@@ -503,6 +530,11 @@ pub(crate) fn prepare_site_tools(
                 shutdown_grace: Duration::from_secs(5),
                 process_group: false,
                 note: None,
+                // Not a contract-graph participant (transport/peripheral, see
+                // the comment above): excluded from `expected_bus_ids` and
+                // marked `Ready` on successful spawn in
+                // `supervisor::spawn_child`, exactly like the Webots app.
+                bus_participant: false,
             }),
             None => board.set_state(
                 &site.id,
@@ -534,13 +566,22 @@ pub(crate) fn prepare_robot_participants(
             let kind = participant_kind(&participant.execution);
             if participant.launch_ownership == LaunchOwnership::SimulationManaged {
                 // Webots (via the supervisor) owns this participant's
-                // lifecycle - the CLI never spawns or restarts it. It still
-                // satisfies the graph proof and appears on the board; presence
-                // and health come from its own bus heartbeats (D23), same as
-                // any participant. `commands::simulate` renders its
-                // controllerArgs into the staged world instead of a
-                // `ParticipantSpec` (Part 5).
-                let mut status = ParticipantStatus::new(&id, kind, ParticipantState::Ready);
+                // lifecycle - the CLI never spawns or restarts it, and has no
+                // process to poll for readiness. It still satisfies the graph
+                // proof and appears on the board, starting `Starting`, not
+                // `Ready`: OBSERVED readiness comes from its own bus
+                // heartbeats (D23), same as any participant, driven by
+                // `BoardBackend::record_heartbeat` once the presence
+                // heartbeat subscriber is running. A controller/supervisor
+                // Webots never actually launches (or that silently crashes
+                // before its own `#[setup]` completes) therefore never
+                // reaches `Ready` here, and the simulate readiness barrier
+                // (`await_readiness_barrier`) - or, failing that, the
+                // heartbeat staleness sweep - is what turns that into a
+                // detected failure instead of a permanently green board.
+                // `commands::simulate` renders its controllerArgs into the
+                // staged world instead of a `ParticipantSpec` (Part 5).
+                let mut status = ParticipantStatus::new(&id, kind, ParticipantState::Starting);
                 status.note = Some(
                     "SimulationManaged: launched by Webots via the supervisor, not the CLI supervisor"
                         .to_string(),
@@ -571,6 +612,7 @@ pub(crate) fn prepare_robot_participants(
                             ),
                             process_group: false,
                             note: None,
+                            bus_participant: true,
                         }),
                         None => board.set_state(
                             &participant.launch.participant_id,
@@ -594,6 +636,7 @@ pub(crate) fn prepare_robot_participants(
                         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
                         process_group: false,
                         note: None,
+                        bus_participant: true,
                     });
                 }
                 ParticipantExecution::SourceArtifact { crate_dir, .. } => {
@@ -608,6 +651,7 @@ pub(crate) fn prepare_robot_participants(
                         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
                         process_group: false,
                         note: None,
+                        bus_participant: true,
                     });
                 }
                 ParticipantExecution::ComponentDriver { crate_dir } => {
@@ -641,6 +685,7 @@ pub(crate) fn prepare_robot_participants(
                         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
                         process_group: false,
                         note: None,
+                        bus_participant: true,
                     });
                 }
             }
@@ -684,6 +729,7 @@ pub(crate) fn source_spec_from_launch_record(
         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
         process_group: false,
         note: None,
+        bus_participant: true,
     }))
 }
 
@@ -1058,5 +1104,202 @@ mod tests {
             baud: 115200,
         });
         assert_eq!(missing.as_deref(), Some("/definitely/not/a/phoxal/device"));
+    }
+
+    /// Scoped `PHOXAL_ARTIFACT_<ID>_PATH` override so `locate_tool_binary` /
+    /// `locate_official_binary` resolve without a real `cargo build` or
+    /// native-artifact cache. Points at the test binary itself (always a
+    /// real file). SAFETY: env mutation only races with another thread also
+    /// touching process env; this guard uses a key unique to this test
+    /// (`env_key` of a test-only id) and restores the prior (absent) value on
+    /// drop, mirroring the existing `WebotsHomeEnvGuard` precedent in
+    /// `commands::simulate`.
+    struct ArtifactPathEnvGuard {
+        key: String,
+    }
+
+    impl ArtifactPathEnvGuard {
+        fn set(id: &str) -> Self {
+            let key = format!("PHOXAL_ARTIFACT_{}_PATH", env_key(id));
+            let path = std::env::current_exe().expect("test binary path");
+            // SAFETY: scoped to this test via a unique env key, restored on
+            // drop before the next test can observe it.
+            unsafe {
+                std::env::set_var(&key, path);
+            }
+            Self { key }
+        }
+    }
+
+    impl Drop for ArtifactPathEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: only ever clears the key this guard set.
+            unsafe {
+                std::env::remove_var(&self.key);
+            }
+        }
+    }
+
+    fn resolved_robot_with_router() -> Result<ResolvedRobot> {
+        let yaml = r#"schema: robot/v0
+robot:
+  id: robot_v1
+  namespace: dev
+  structure: structure.urdf
+  kinematic:
+    kind: omnidirectional
+    actuators: []
+    encoders: []
+  components: {}
+"#;
+        let robot = phoxal::model::robot::v0::Robot::parse_from_string(yaml)?;
+        Ok(ResolvedRobot {
+            robot,
+            channel: crate::catalog::SelectionChannel::Stable,
+            target: host_target_triple(),
+            catalog_snapshot: None,
+            platform_runtimes: Vec::new(),
+            simulators: Vec::new(),
+            user_runtimes: Vec::new(),
+            components: Vec::new(),
+            tools: vec![crate::resolver::ResolvedTool {
+                name: SITE_TOOL_ROUTER.to_string(),
+                package: format!("phoxal/{SITE_TOOL_ROUTER}"),
+                requested: "0.1.0".to_string(),
+                resolved: "0.1.0".to_string(),
+                repo: "phoxal/framework".to_string(),
+                asset: format!("{SITE_TOOL_ROUTER}-0.1.0-{}.tar.gz", host_target_triple()),
+                binary_name: SITE_TOOL_ROUTER.to_string(),
+                sha256: "0".repeat(64),
+                url: None,
+                size: None,
+                published: false,
+                path_override: None,
+                channel: crate::catalog::SelectionChannel::Stable,
+                target: host_target_triple(),
+            }],
+            path_overrides: Vec::new(),
+        })
+    }
+
+    /// The router is the bus transport, not a contract-graph participant: it
+    /// must come out of `prepare_site_tools` with `bus_participant: false`
+    /// (excluded from the readiness barrier's `expected_bus_ids`, marked
+    /// `Ready` on spawn), while an ordinary robot participant produced by
+    /// `prepare_robot_participants` stays `bus_participant: true`
+    /// (heartbeat-gated by the OBSERVED-readiness barrier). This is the fix
+    /// for the regression where a managed `tool-router` hung at `Starting`
+    /// forever because its heartbeat is structurally unobservable (its
+    /// framework runner bus is in-process, disconnected from the zenoh
+    /// network it itself serves).
+    #[test]
+    fn site_tool_is_not_bus_participant_but_robot_participant_is() -> Result<()> {
+        let _router_guard = ArtifactPathEnvGuard::set(SITE_TOOL_ROUTER);
+        let official_id = "site_tool_test_official_svc";
+        let _official_guard = ArtifactPathEnvGuard::set(official_id);
+
+        let resolved = resolved_robot_with_router()?;
+        let plan = LaunchPlan {
+            mode: LaunchMode::Run,
+            site: vec![SiteLaunch {
+                id: SITE_TOOL_ROUTER.to_string(),
+                artifact_ref: "phoxal/tool-router@0.1.0".to_string(),
+                phoxal_config: Value::Null,
+            }],
+            robots: vec![crate::launch_plan::RobotLaunch {
+                id: "robot".to_string(),
+                namespace: "dev".to_string(),
+                participants: vec![participant(
+                    official_id,
+                    ParticipantExecution::OfficialArtifact {
+                        artifact_ref: "phoxal/service-drive@0.1.0".to_string(),
+                    },
+                )],
+                substitutions: Vec::new(),
+            }],
+        };
+        let board = BoardBackend::new();
+        let mut specs = Vec::new();
+
+        prepare_site_tools(
+            &plan,
+            &resolved,
+            &board,
+            &mut specs,
+            RouterOwnership::Managed,
+        )?;
+        prepare_robot_participants(
+            &plan,
+            &resolved,
+            Path::new("/tmp/project"),
+            &DriverPolicy::drivers_off_for_sim(),
+            &board,
+            &mut specs,
+            &crate::Ui::new(),
+        )?;
+
+        let router_spec = specs
+            .iter()
+            .find(|spec| spec.id == SITE_TOOL_ROUTER)
+            .expect("router spec present");
+        assert!(
+            !router_spec.bus_participant,
+            "router (bus transport) must not be heartbeat-gated"
+        );
+
+        let robot_spec = specs
+            .iter()
+            .find(|spec| spec.id == official_id)
+            .expect("robot participant spec present");
+        assert!(
+            robot_spec.bus_participant,
+            "a real contract-graph participant must stay heartbeat-gated"
+        );
+
+        Ok(())
+    }
+
+    /// A reused external router (`RouterOwnership::External`) never gets a
+    /// `ParticipantSpec` at all - `local_router_reachable` already proved the
+    /// transport is up, so it must be marked `Ready` on the board directly,
+    /// not left at `Starting` forever (nothing will ever move it out of that
+    /// state: it has no spawned process and, being a site tool, is excluded
+    /// from the heartbeat-driven barrier too).
+    #[test]
+    fn external_router_reused_is_marked_ready_not_starting() -> Result<()> {
+        let resolved = resolved_robot_with_router()?;
+        let plan = LaunchPlan {
+            mode: LaunchMode::Run,
+            site: vec![SiteLaunch {
+                id: SITE_TOOL_ROUTER.to_string(),
+                artifact_ref: "phoxal/tool-router@0.1.0".to_string(),
+                phoxal_config: Value::Null,
+            }],
+            robots: Vec::new(),
+        };
+        let board = BoardBackend::new();
+        let mut specs = Vec::new();
+
+        prepare_site_tools(
+            &plan,
+            &resolved,
+            &board,
+            &mut specs,
+            RouterOwnership::External,
+        )?;
+
+        assert!(
+            specs.is_empty(),
+            "an external router must not get a ParticipantSpec"
+        );
+        let snapshot = board.snapshot();
+        let status = snapshot
+            .participants
+            .get(SITE_TOOL_ROUTER)
+            .expect("router status present on board");
+        assert_eq!(status.state, ParticipantState::Ready);
+        assert_eq!(status.note.as_deref(), Some("external router reused"));
+
+        Ok(())
     }
 }

@@ -7,7 +7,7 @@ use phoxal::bus::{Codec, MessagePack, QueryFailure};
 use phoxal::check as graph_check;
 use phoxal::raw::{Bus, BusConfig};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::AppContext;
@@ -32,8 +32,9 @@ use crate::simulate_staging::{
 };
 use crate::supervisor::{
     BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
-    RequestedStop, RouterOwnership, SupervisorLock, SupervisorOptions, default_connect_endpoint,
-    local_router_reachable, router_ownership, start_bus_log_subscriber, supervise_until_shutdown,
+    RequestedStop, RouterOwnership, SupervisorLock, SupervisorOptions, await_readiness_barrier,
+    default_connect_endpoint, local_router_reachable, router_ownership, start_bus_log_subscriber,
+    start_clock_barrier_feed, start_presence_heartbeat_subscriber, supervise_until_shutdown,
     supervisor_actions_path, supervisor_state_path,
 };
 use crate::webots_stage_root;
@@ -60,6 +61,16 @@ const SIMULATOR_CONTROLLER_ARTIFACT_NAME: &str = "webots-controller";
 /// contract. The CLI uses the raw bus server surface because it is privileged
 /// orchestration tooling rather than a checked framework participant.
 const SIMULATION_SPAWN_QUERY_TOPIC: &str = "y2026_8/simulation/spawn";
+
+/// Bound on the simulate readiness barrier's startup window (see
+/// `await_readiness_barrier`): the supervisor, every expected controller,
+/// every CLI-managed bus participant, and a first-plus-advancing
+/// `simulation/clock` sample must all be observed within this window, or
+/// `simulate` fails loudly instead of hanging or reporting a false success.
+/// Generous enough to cover a first-run Webots GUI launch plus every
+/// participant clearing its own `#[setup]` on a loaded host; a healthy
+/// session reaches barrier success in a few seconds in practice.
+const SIMULATE_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Debug, Deserialize)]
 struct SpawnRequestWire {
@@ -236,6 +247,18 @@ pub async fn run(
             let spawn_responder =
                 start_spawn_responder(&sim.plan, spawn_descriptors, router_ownership).await?;
             let requested_stop = RequestedStop::new(WEBOTS_SITE_ID, webots_spec.shutdown_grace);
+            // The readiness barrier's expected set, captured before `specs` is
+            // moved into the supervisor task: every CLI-managed bus participant
+            // (everything except the Webots app itself, which has
+            // `bus_participant: false`) plus every SIMULATION-MANAGED
+            // participant (the supervisor and each robot's controller), which
+            // have no `ParticipantSpec`/supervised process at all.
+            let expected_bus_ids = specs
+                .iter()
+                .filter(|spec| spec.bus_participant)
+                .map(|spec| spec.id.clone())
+                .chain(simulation_managed_participant_ids(&sim.plan))
+                .collect::<Vec<_>>();
             specs.push(webots_spec);
 
             app.ui.info(format!(
@@ -265,6 +288,32 @@ pub async fn run(
                     )
                 })
                 .collect::<Vec<_>>();
+            // OBSERVED readiness: drive board state from each participant's own
+            // presence/heartbeat, including SIMULATION-MANAGED ones (the
+            // supervisor and every controller), which have no supervised
+            // process of their own to poll.
+            let _presence_tasks = sim
+                .plan
+                .robots
+                .iter()
+                .map(|robot| {
+                    start_presence_heartbeat_subscriber(
+                        robot.namespace.clone(),
+                        robot.id.clone(),
+                        default_connect_endpoint(),
+                        board.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let barrier_robot =
+                sim.plan.robots.first().context(
+                    "sim launch plan has no robot for the readiness barrier's clock feed",
+                )?;
+            let (mut clock_rx, clock_task) = start_clock_barrier_feed(
+                barrier_robot.namespace.clone(),
+                barrier_robot.id.clone(),
+                default_connect_endpoint(),
+            );
 
             let (action_rx, watch_handle) = if options.watch {
                 let (action_tx, action_rx) = mpsc::channel(16);
@@ -284,7 +333,15 @@ pub async fn run(
                 (None, None)
             };
 
-            let outcome = supervise_until_shutdown(
+            // The readiness barrier and the process supervisor must run
+            // concurrently, not sequentially: participants only start
+            // publishing heartbeats once `supervise_until_shutdown` has
+            // actually spawned them. `cancel_tx` is the barrier's escape hatch
+            // if it times out - it asks the supervisor task to tear the whole
+            // session down in an orderly way (SIGTERM Webots, stop everything
+            // else) instead of leaving an unhealthy session running forever.
+            let (cancel_tx, cancel_rx) = oneshot::channel();
+            let supervise_task = tokio::spawn(supervise_until_shutdown(
                 specs,
                 board.clone(),
                 SupervisorOptions {
@@ -292,16 +349,39 @@ pub async fn run(
                     action_file: Some(action_file),
                     action_rx,
                     requested_stop: Some(requested_stop),
+                    cancel_rx: Some(cancel_rx),
                     ..SupervisorOptions::default()
                 },
+            ));
+
+            let barrier_result = await_readiness_barrier(
+                &board,
+                &expected_bus_ids,
+                &mut clock_rx,
+                SIMULATE_READINESS_TIMEOUT,
+                std::time::Duration::from_millis(200),
             )
             .await;
+            clock_task.abort();
+            if let Err(error) = &barrier_result {
+                // Dropping `cancel_tx` unsent (the `Ok` path) is equally
+                // valid - `supervisor::recv_cancel` treats a dropped sender
+                // as "no cancel" and settles to pending forever.
+                let _ = cancel_tx.send(error.to_string());
+            }
+
+            let outcome = supervise_task
+                .await
+                .context("simulation supervisor task panicked")?;
             if let Some(handle) = watch_handle {
                 handle.abort();
             }
             spawn_responder.abort();
             let outcome = outcome?;
 
+            if let Err(error) = barrier_result {
+                bail!("{error}");
+            }
             if !outcome.graph_healthy() {
                 bail!(
                     "supervisor graph ended unhealthy; failed participants: {}",
@@ -946,6 +1026,21 @@ fn simulation_managed_lines(plan: &LaunchPlan) -> Vec<String> {
         .collect()
 }
 
+/// The bare participant ids of every SIMULATION-MANAGED participant in the
+/// plan (the Webots supervisor plus one controller per robot) - the readiness
+/// barrier's counterpart to `simulation_managed_lines`, which formats the same
+/// filtered set for display instead of returning ids to wait on.
+fn simulation_managed_participant_ids(plan: &LaunchPlan) -> Vec<String> {
+    plan.robots
+        .iter()
+        .flat_map(|robot| &robot.participants)
+        .filter(|participant| {
+            participant.launch_ownership == crate::launch_plan::LaunchOwnership::SimulationManaged
+        })
+        .map(|participant| participant.launch.participant_id.clone())
+        .collect()
+}
+
 fn prepare_substitution_notes(plan: &LaunchPlan, board: &BoardBackend) {
     for robot in &plan.robots {
         for substitution in &robot.substitutions {
@@ -1061,6 +1156,12 @@ fn stage_and_prepare_webots_spec(
         shutdown_grace: std::time::Duration::from_secs(20),
         process_group: true,
         note: None,
+        // The Webots application itself has no bus identity of its own - it
+        // never publishes a presence/heartbeat (the supervisor and each
+        // controller Webots launches do, and those are tracked separately as
+        // SIMULATION-MANAGED participants). Its readiness is necessarily
+        // process-lifecycle-only, so it keeps the old spawn-is-ready behavior.
+        bus_participant: false,
     };
     Ok((spec, staged.spawn_descriptors))
 }
@@ -1691,7 +1792,11 @@ mod tests {
     fn live_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
         // With no lockfile, a path-only / official-only project resolves live
         // with no network for either mode: there is nothing to look up remotely
-        // (no git components), so resolution succeeds and writes no lock.
+        // (no git components), so resolution succeeds and writes no lock. A
+        // scratch home still isolates the process-global `PHOXAL_PROJECT_ROOT`
+        // so `resolve()`'s ambient `artifacts_dir()` check can't race a
+        // concurrent test's real store lock.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_robot_project(temp.path())?;
 
@@ -1714,6 +1819,7 @@ mod tests {
 
     #[test]
     fn dry_run_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_robot_project(temp.path())?;
 
@@ -2401,6 +2507,7 @@ mod tests {
         // the driver's component as "simulated by" the controller, because
         // that label is a CLI-side display fact computed from the plan, not
         // a checked one.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_robot_project_with_component(temp.path())?;
         let catalog_path = write_catalog_with_driver(temp.path())?;
@@ -2432,6 +2539,7 @@ mod tests {
 
     #[test]
     fn custom_driver_metadata_unavailable_is_named() -> Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
         let temp = tempfile::tempdir()?;
         write_robot_project_with_custom_component(temp.path())?;
         let catalog_path = write_catalog_with_driver(temp.path())?;

@@ -704,6 +704,7 @@ mod tests {
             shutdown_grace: Duration::from_millis(10),
             process_group: false,
             note: None,
+            bus_participant: true,
         };
 
         apply_watch_result(

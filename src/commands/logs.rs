@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use phoxal::bus::{Subscribe, Subscriber, Topic};
+use phoxal::bus::{ContractBody, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::y2026_1 as api;
 use tokio::time::timeout;
@@ -11,7 +11,7 @@ use tokio::time::timeout;
 use crate::AppContext;
 use crate::launch_plan::DEFAULT_ROUTER_CONNECT;
 use crate::resolver::{discover_robot_yaml, load_robot_with_extras};
-use crate::supervisor::render_log_event;
+use crate::supervisor::{logs_wildcard_topic_key, render_log_event};
 
 #[derive(Debug, Args)]
 pub struct Logs {
@@ -97,8 +97,10 @@ async fn stream_logs(
     })
     .await?;
     let topic_key = match participant {
-        Some(participant) => format!("logs/{participant}"),
-        None => "logs/*".to_string(),
+        Some(participant) => {
+            <api::logs::Event as ContractBody>::TOPIC.replace("{participant_id}", &participant)
+        }
+        None => logs_wildcard_topic_key(),
     };
     let topic = Topic::<Subscribe<api::logs::Event>>::new_owned(topic_key);
     let subscriber = Subscriber::<api::logs::Event>::new(&bus, &topic, 256).await?;
