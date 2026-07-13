@@ -165,7 +165,6 @@ impl StartupState {
                     self.reached_running_or_paused = true;
                 }
             }
-            SessionEvent::ParticipantChanged { .. } | SessionEvent::Telemetry { .. } => {}
             // The controller's own `apply_event` reduces both of these into
             // a `SessionChanged` (via `reduce_clock_observation`/
             // `reduce_staged_startup_complete`) and forwards THAT instead of

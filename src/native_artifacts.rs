@@ -640,6 +640,8 @@ pub fn prepare_and_activate_descriptors(
             );
         }
     }
+    let total = descriptors.len() as u64;
+    let mut completed = 0_u64;
     for batch in descriptors.chunks(CONCURRENCY) {
         std::thread::scope(|scope| -> Result<()> {
             let handles = batch
@@ -657,6 +659,16 @@ pub fn prepare_and_activate_descriptors(
             }
             Ok(())
         })?;
+        // Finding C2: real per-batch progress against the "download" phase
+        // `prepare_descriptors_with_preflight` brackets - the first genuine
+        // producer of `SessionEvent::PhaseProgress` (see
+        // `session::diagnostics::phase_progress`'s own docs).
+        completed += batch.len() as u64;
+        crate::session::diagnostics::phase_progress(
+            crate::session::event::PhaseId::new("download"),
+            completed,
+            total,
+        );
         if let Some(ui) = ui {
             for descriptor in batch {
                 ui.info(format!(
@@ -1317,6 +1329,103 @@ mod tests {
         assert!(
             saw_finished_failed,
             "a cold cache's failed download must still finish its phase"
+        );
+        Ok(())
+    }
+
+    /// A minimal local HTTP/1.1 server that serves `body` for exactly one
+    /// request, then exits - just enough for a real `reqwest::blocking`
+    /// download to succeed without reaching any external network. The
+    /// returned `JoinHandle` is intentionally left unjoined: the server
+    /// thread exits on its own once it has served its one request.
+    fn spawn_minimal_http_server(body: Vec<u8>) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local http server");
+        let addr = listener.local_addr().expect("local server address");
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&body);
+            let _ = stream.flush();
+        });
+        addr
+    }
+
+    /// Build a real, minimal `.tar.gz` archive containing one flat file named
+    /// `entry_name` - enough for `unpack_asset`'s real `tar -xf` (via the
+    /// system `tar` binary) to succeed for real, unlike a fake byte blob.
+    fn minimal_tar_gz(entry_name: &str, contents: &[u8]) -> Result<Vec<u8>> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append_data(&mut header, entry_name, contents)?;
+            builder.finish()?;
+        }
+        let mut gz_bytes = Vec::new();
+        {
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut gz_bytes, flate2::Compression::fast());
+            std::io::Write::write_all(&mut encoder, &tar_bytes)?;
+            encoder.finish()?;
+        }
+        Ok(gz_bytes)
+    }
+
+    /// Finding C2: `PhaseProgress` used to be constructed only by a render
+    /// test, never by production code. This exercises the REAL download
+    /// pipeline end to end (a genuine HTTP download of a real tar.gz archive,
+    /// unpacked by the system `tar`) and asserts a real
+    /// `SessionEvent::PhaseProgress` for the "download" phase comes out the
+    /// other end, not just `PhaseStarted`/`PhaseFinished`.
+    #[tokio::test]
+    async fn prepare_descriptors_with_preflight_emits_real_download_progress_on_success()
+    -> Result<()> {
+        let _diagnostics_guard = crate::session::diagnostics::DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .await;
+        let _root = ScratchPhoxalHome::new()?;
+
+        let archive_bytes = minimal_tar_gz("phoxal-service-drive", b"#!/bin/sh\n")?;
+        let addr = spawn_minimal_http_server(archive_bytes.clone());
+        let mut fresh = descriptor("1.0.0", &archive_bytes);
+        fresh.url = format!("http://{addr}/drive.tar.gz");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        crate::session::diagnostics::install(tx);
+        let result = prepare_descriptors_with_preflight(std::slice::from_ref(&fresh), None);
+        crate::session::diagnostics::uninstall();
+        result?;
+
+        let mut saw_progress = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::session::event::SessionEvent::PhaseProgress {
+                id,
+                completed,
+                total,
+                ..
+            } = event
+            {
+                assert_eq!(id.as_str(), "download");
+                assert_eq!(completed, 1);
+                assert_eq!(total, 1);
+                saw_progress = true;
+            }
+        }
+        assert!(
+            saw_progress,
+            "a real successful download must emit real PhaseProgress, not just Started/Finished"
         );
         Ok(())
     }

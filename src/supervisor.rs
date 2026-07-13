@@ -585,6 +585,12 @@ impl Default for RestartPolicy {
     }
 }
 
+/// Finding A7/C2: this struct deliberately carries no UI/telemetry handle.
+/// Live telemetry (host/process/router/joypad feeds) is owned by the caller
+/// and passed directly to
+/// `session::controller::SessionController::drive_supervision`, and this
+/// loop never reads it - so an earlier `telemetry: TelemetryBackend` field
+/// here was dead weight, not a real dependency.
 #[derive(Debug)]
 pub struct SupervisorOptions {
     pub restart_policy: RestartPolicy,
@@ -612,18 +618,6 @@ pub struct SupervisorOptions {
     /// followed by orderly `request_participant_stop` + `shutdown_all`, then a
     /// normal `SupervisorOutcome` reflecting the board's failed participants.
     pub cancel_rx: Option<oneshot::Receiver<String>>,
-    /// The live-telemetry handle for this session's renderer (CLI-UX Phase
-    /// 3/4): the `SessionController`'s own redraw ticker reads this directly
-    /// (not through this loop) for the TUI's sim-clock top bar, host/process
-    /// resource meters, router Traffic table, and joypad Devices panel, and
-    /// `SessionController::apply_display_action` writes into it for
-    /// `DisplayAction::JoypadConnect`/`JoypadRescan`. Defaults to an empty,
-    /// disconnected [`crate::telemetry::TelemetryBackend`] (every test in
-    /// this module, and a `--message-format json`/`--plain` session, which
-    /// never reads it) - a caller that wants live telemetry constructs one
-    /// with `crate::telemetry::start_host_feed` etc. and passes the SAME
-    /// handle to the controller.
-    pub telemetry: crate::telemetry::TelemetryBackend,
     /// Whether this session's `SessionState::Running` has no authority other
     /// than staged startup finishing (finding B3: `run` has no simulation
     /// clock, so nothing else will ever tell it "running"). When `true`, once
@@ -648,7 +642,6 @@ impl Default for SupervisorOptions {
             token: tokio_util::sync::CancellationToken::new(),
             events: None,
             cancel_rx: None,
-            telemetry: crate::telemetry::TelemetryBackend::default(),
             emits_running_on_startup_complete: false,
         }
     }
@@ -2027,18 +2020,24 @@ pub struct ClockSample {
 
 /// Observed state of the simulation clock feed. Serves two consumers off the
 /// SAME subscription: the readiness barrier (`await_readiness_barrier`) reads
-/// `first_sample_ns`/`advanced` - whether any sample has been seen at all,
-/// and whether `now_ns` has advanced past the very first observed sample (a
-/// sample alone is not enough - Webots opens a world PAUSED, so
-/// `simulation/clock` can be present-but-frozen; only a strictly increasing
-/// `now_ns` proves the simulation is actually running) - while the TUI's
-/// display layer (`crate::telemetry::TelemetryBackend`) reads `latest` every
-/// redraw, updated unconditionally on every sample regardless of the
-/// barrier's own advance-detection state.
+/// `first_sample_ns` - whether any sample has been seen at all - while the
+/// TUI's display layer (`crate::telemetry::TelemetryBackend`) reads `latest`
+/// every redraw, updated unconditionally on every sample.
+///
+/// Finding C3: this used to also carry an `advanced` bit (whether `now_ns`
+/// had strictly increased past the first observed sample), from an EARLIER
+/// design that required the clock to be seen actually running before
+/// clearing the barrier. Product decision 5 replaced that: Webots opens a
+/// world PAUSED by design, and a `simulation/clock` sample carrying
+/// `running: false` is a healthy, explicit `paused` state, never a barrier
+/// failure - the barrier now accepts the FIRST published sample regardless
+/// of whether it is paused or running (see `barrier_gap`'s own docs). Once
+/// nothing read `advanced` for that decision, tracking it was stale
+/// complexity left over from the requirement it used to serve - removed
+/// rather than kept as an unread field.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClockObservation {
     pub first_sample_ns: Option<u64>,
-    pub advanced: bool,
     pub latest: Option<ClockSample>,
 }
 
@@ -2094,10 +2093,8 @@ async fn clock_barrier_feed_loop(
     loop {
         let received = subscriber.recv().await?;
         tx.send_modify(|observation| {
-            match observation.first_sample_ns {
-                None => observation.first_sample_ns = Some(received.body.now_ns),
-                Some(first) if received.body.now_ns > first => observation.advanced = true,
-                _ => {}
+            if observation.first_sample_ns.is_none() {
+                observation.first_sample_ns = Some(received.body.now_ns);
             }
             observation.latest = Some(ClockSample {
                 now_ns: received.body.now_ns,
@@ -2110,10 +2107,10 @@ async fn clock_barrier_feed_loop(
 
 /// The result of a timed-out readiness barrier: which expected bus
 /// participants never reached `Ready`, and whether the clock feed never
-/// produced a first sample or a sample but never advanced. Kept structured (not
-/// just an error string) so both `await_readiness_barrier`'s own error message
-/// and its board-marking side effect can be built from the same data without
-/// re-deriving it.
+/// produced its first published sample (paused or running - see
+/// `barrier_gap`'s own docs). Kept structured (not just an error string) so
+/// both `await_readiness_barrier`'s own error message and its board-marking
+/// side effect can be built from the same data without re-deriving it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BarrierGap {
     missing_participants: Vec<String>,
@@ -2680,7 +2677,6 @@ mod tests {
                 token: tokio_util::sync::CancellationToken::new(),
                 events: None,
                 cancel_rx: None,
-                telemetry: crate::telemetry::TelemetryBackend::default(),
                 emits_running_on_startup_complete: false,
             },
         )
@@ -2837,7 +2833,6 @@ mod tests {
                 token: tokio_util::sync::CancellationToken::new(),
                 events: None,
                 cancel_rx: None,
-                telemetry: crate::telemetry::TelemetryBackend::default(),
                 emits_running_on_startup_complete: false,
             },
         )
@@ -3054,7 +3049,6 @@ mod tests {
         // ...but the controller never does (the bug this barrier exists to catch).
         let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation {
             first_sample_ns: Some(0),
-            advanced: true,
             ..ClockObservation::default()
         });
 
@@ -3155,11 +3149,11 @@ mod tests {
             ParticipantKind::Tool,
             ParticipantState::Ready,
         ));
-        // A sample was observed (Webots opened the world) but never
-        // advances - Webots opens a world paused by design.
+        // The first published sample alone clears the barrier (finding C3) -
+        // Webots opens a world paused by design, and that is a healthy state,
+        // not a gap.
         let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation {
             first_sample_ns: Some(0),
-            advanced: false,
             ..ClockObservation::default()
         });
 
@@ -3233,7 +3227,6 @@ mod tests {
         );
         let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation {
             first_sample_ns: Some(0),
-            advanced: true,
             ..ClockObservation::default()
         });
 

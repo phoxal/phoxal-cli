@@ -1,25 +1,23 @@
-//! Per-runtime routed log scrollback + diagnostic events - ONLY. This is the
-//! log-scrollback third of today's `tui::logs::RuntimeLogState`, split out
-//! on its own so a consumer that only wants log lines never has to pull in
-//! telemetry history or the router's latest traffic sample (see
+//! Per-runtime routed log scrollback - ONLY. This is the log-scrollback
+//! third of today's `tui::logs::RuntimeLogState`, split out on its own so a
+//! consumer that only wants log lines never has to pull in telemetry history
+//! or the router's latest traffic sample (see
 //! [`crate::stores::telemetry_store::TelemetryStore`] for those).
 //!
-//! Diagnostic events (tracing records, captured dependency/tool/supervisor
-//! output) are a separate channel from routed participant log lines: they
-//! are not attributed to a bus participant id the way a [`RoutedLogLine`]
-//! is, so they get their own bounded ring rather than being folded into a
-//! per-runtime scrollback.
-//!
-//! [`DiagnosticEvent`] reuses `crate::session::event`'s own `DiagnosticSource`/
-//! `DiagnosticLevel` (the session-wide typed event vocabulary
-//! `SessionController` drives both renderers from - see that module's docs)
-//! rather than a local stand-in, so a diagnostic recorded here and one
-//! rendered by the startup surface (`tui::startup::DiagnosticLine`) always
-//! agree on source/level shape.
+//! Finding C2: this module used to also carry a second, parallel diagnostics
+//! ring (`DiagnosticEvent`/`record_diagnostic`/`diagnostics()`) alongside the
+//! log scrollback. It was never wired to anything: the real TUI path renders
+//! diagnostics from `tui::startup::StartupState::diagnostics` instead, fed
+//! directly from `SessionEvent::Diagnostic` via
+//! `StartupState::apply_event`/`tui::render::draw_diagnostics_strip` - a
+//! diagnostic never actually reached this store's ring in production. Picking
+//! ONE diagnostics buffer (the one the controller/renderer actually uses)
+//! means this one goes; a diagnostic's *routing* source/level shape still
+//! agrees everywhere because both paths share
+//! `crate::session::event::{DiagnosticSource, DiagnosticLevel}`.
 
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::session::event::{DiagnosticLevel, DiagnosticSource};
 use crate::supervisor::{LogSource, RoutedLogLine};
 
 /// Bound on a single runtime's scrollback. Matches the existing
@@ -28,44 +26,12 @@ use crate::supervisor::{LogSource, RoutedLogLine};
 /// long session.
 pub const LOG_CAPACITY: usize = 2000;
 
-/// Bound on the diagnostics ring. Diagnostics are lower-volume than routed
-/// log lines (tracing records, not per-line participant stdout/stderr), so a
-/// smaller cap than [`LOG_CAPACITY`] is enough to cover a long interactive
-/// session's worth of warnings/errors without growing unboundedly.
-pub const DIAGNOSTIC_CAPACITY: usize = 500;
-
 /// One rendered log line plus which routing source produced it (design doc:
 /// "dedup by ROUTING, not text-compare").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayedLine {
     pub source: LogSource,
     pub text: String,
-}
-
-/// One diagnostic event: a tracing record or captured non-bus output,
-/// attributed to a [`DiagnosticSource`] rather than a bus participant id -
-/// the same source/level vocabulary `session::event::SessionEvent::Diagnostic`
-/// and the startup surface use, so every diagnostic renderer agrees on shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiagnosticEvent {
-    pub source: DiagnosticSource,
-    pub level: DiagnosticLevel,
-    pub message: String,
-}
-
-impl DiagnosticEvent {
-    #[must_use]
-    pub fn new(
-        source: DiagnosticSource,
-        level: DiagnosticLevel,
-        message: impl Into<String>,
-    ) -> Self {
-        Self {
-            source,
-            level,
-            message: message.into(),
-        }
-    }
 }
 
 /// One runtime's log-only state: its bounded scrollback, plus whether a
@@ -87,7 +53,6 @@ struct RuntimeLogState {
 #[derive(Debug, Clone, Default)]
 pub struct LogStore {
     runtimes: BTreeMap<String, RuntimeLogState>,
-    diagnostics: VecDeque<DiagnosticEvent>,
 }
 
 impl LogStore {
@@ -141,20 +106,6 @@ impl LogStore {
         self.runtimes
             .get_mut(id)
             .map_or(&[][..], |state| state.lines.make_contiguous())
-    }
-
-    /// Record one diagnostic event into the bounded ring.
-    pub fn record_diagnostic(&mut self, event: DiagnosticEvent) {
-        self.diagnostics.push_back(event);
-        if self.diagnostics.len() > DIAGNOSTIC_CAPACITY {
-            self.diagnostics.pop_front();
-        }
-    }
-
-    /// The full diagnostics ring, oldest first, as a contiguous slice.
-    #[must_use]
-    pub fn diagnostics(&mut self) -> &[DiagnosticEvent] {
-        self.diagnostics.make_contiguous()
     }
 }
 
@@ -233,50 +184,5 @@ mod tests {
                 .text
                 .contains(&(LOG_CAPACITY + 49).to_string())
         );
-    }
-
-    #[test]
-    fn diagnostics_ring_is_bounded_and_ordered() {
-        let mut store = LogStore::new();
-        for i in 0..(DIAGNOSTIC_CAPACITY + 10) {
-            store.record_diagnostic(DiagnosticEvent::new(
-                DiagnosticSource::Tool {
-                    name: "tool-router".to_string(),
-                },
-                DiagnosticLevel::Info,
-                format!("diagnostic {i}"),
-            ));
-        }
-        let diagnostics = store.diagnostics();
-        assert_eq!(diagnostics.len(), DIAGNOSTIC_CAPACITY);
-        // Oldest evicted, newest retained, and order preserved (oldest
-        // surviving entry first).
-        assert!(diagnostics[0].message.contains("diagnostic 10"));
-        assert!(
-            diagnostics
-                .last()
-                .unwrap()
-                .message
-                .contains(&(DIAGNOSTIC_CAPACITY + 9).to_string())
-        );
-    }
-
-    #[test]
-    fn diagnostics_are_kept_separate_per_level() {
-        let mut store = LogStore::new();
-        store.record_diagnostic(DiagnosticEvent::new(
-            DiagnosticSource::Tracing,
-            DiagnosticLevel::Warn,
-            "router queue backing up",
-        ));
-        store.record_diagnostic(DiagnosticEvent::new(
-            DiagnosticSource::Supervisor,
-            DiagnosticLevel::Error,
-            "participant crashed",
-        ));
-        let diagnostics = store.diagnostics();
-        assert_eq!(diagnostics.len(), 2);
-        assert_eq!(diagnostics[0].level, DiagnosticLevel::Warn);
-        assert_eq!(diagnostics[1].level, DiagnosticLevel::Error);
     }
 }

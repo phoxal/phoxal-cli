@@ -557,7 +557,6 @@ async fn live_simulate_setup(
             cancel_rx: Some(cancel_rx),
             token: token.clone(),
             events: Some(events.clone()),
-            telemetry: telemetry.clone(),
             ..SupervisorOptions::default()
         },
     ));

@@ -264,7 +264,6 @@ impl Run {
                 action_rx: Some(action_rx),
                 token: controller.token(),
                 events: Some(events),
-                telemetry: telemetry.clone(),
                 emits_running_on_startup_complete: true,
                 ..SupervisorOptions::default()
             },

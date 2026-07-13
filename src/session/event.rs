@@ -1,11 +1,22 @@
-//! The typed session lifecycle event: the single vocabulary a
-//! `SessionController` (added in a later slice) will use to drive both the
-//! TUI and the plain/line renderer from one bounded channel.
+//! The typed session lifecycle event: the single vocabulary
+//! [`super::controller::SessionController`] uses to drive both the TUI and
+//! the plain/line renderer from one bounded channel.
 //!
-//! Nothing here depends on `supervisor`, `tui`, or `telemetry` - a later
-//! slice maps the heavier session types into these. Keeping the dependency
-//! pointed one way lets this module (and its tests) build and run without
-//! pulling in the terminal/process/runtime machinery.
+//! Nothing here depends on `supervisor`, `tui`, or `telemetry`, keeping the
+//! dependency pointed one way so this module (and its tests) build and run
+//! without pulling in the terminal/process/runtime machinery.
+//!
+//! Finding A4/C2: this vocabulary used to also carry `ParticipantChanged` and
+//! `Telemetry` variants (plus their `ParticipantStatusLite`/
+//! `ParticipantLifecycle`/`TelemetrySampleLite` payload types) as forward-
+//! looking scaffolding for a "fully event-sourced" renderer. Neither was ever
+//! constructed by production code: participant rows are read straight off
+//! `supervisor::BoardSnapshot` (board polling, not events - see
+//! `session::controller::LineRenderer`'s own docs on why that stays the
+//! source of truth) and live telemetry flows through
+//! `telemetry::TelemetryBackend`/`stores::telemetry_store::TelemetryStore`
+//! instead. Removed rather than kept "for later" (YAGNI) - this event
+//! vocabulary should only ever carry what a real producer emits.
 
 use std::time::Duration;
 
@@ -106,67 +117,6 @@ pub enum DiagnosticLevel {
     Error,
 }
 
-/// The lifecycle stage of one participant, independent of
-/// `supervisor::ParticipantStatus`.
-///
-/// This is deliberately a small, separate type: this module must not depend
-/// on the heavier supervisor session code, so a later slice maps supervisor
-/// state into this rather than this module importing supervisor's richer
-/// type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParticipantLifecycle {
-    Starting,
-    Ready,
-    Running,
-    Degraded,
-    Failed,
-    Stopped,
-}
-
-/// A minimal snapshot of one participant's lifecycle, carried by
-/// [`SessionEvent::ParticipantChanged`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParticipantStatusLite {
-    pub lifecycle: ParticipantLifecycle,
-    /// A short human detail (last error, wait reason, ...), if any.
-    pub detail: Option<String>,
-}
-
-impl ParticipantStatusLite {
-    #[must_use]
-    pub fn new(lifecycle: ParticipantLifecycle) -> Self {
-        Self {
-            lifecycle,
-            detail: None,
-        }
-    }
-
-    #[must_use]
-    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
-        self.detail = Some(detail.into());
-        self
-    }
-}
-
-/// A lightweight telemetry sample carried by [`SessionEvent::Telemetry`].
-///
-/// NOTE: `TelemetryStore` is being built in a parallel slice; this is a
-/// deliberately minimal placeholder carrying only what a renderer needs to
-/// show a live value (a source, a monotonic receive marker for freshness/
-/// staleness and dedup-by-time, and named numeric metrics). A later slice
-/// adapts the real telemetry sample type into this rather than this module
-/// depending on the store.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TelemetrySampleLite {
-    /// Which participant/topic produced this sample.
-    pub source: String,
-    /// Monotonic receive time, used to dedupe by sample identity/time (not
-    /// by equal values) and to detect staleness.
-    pub received_at: std::time::Instant,
-    /// Named numeric readings (e.g. `("cpu_percent", 4.2)`).
-    pub metrics: Vec<(String, f64)>,
-}
-
 /// What a simulation clock watcher directly observed - carried by
 /// [`SessionEvent::ClockObserved`] (finding B4).
 ///
@@ -208,17 +158,10 @@ pub enum SessionEvent {
         outcome: PhaseOutcome,
         elapsed: Duration,
     },
-    ParticipantChanged {
-        id: String,
-        status: ParticipantStatusLite,
-    },
     Diagnostic {
         source: DiagnosticSource,
         level: DiagnosticLevel,
         message: String,
-    },
-    Telemetry {
-        sample: TelemetrySampleLite,
     },
     SessionChanged {
         state: super::state::SessionState,
@@ -261,14 +204,6 @@ mod tests {
         let id: PhaseId = "router".into();
         assert_eq!(id.as_str(), "router");
         assert_eq!(id.to_string(), "router");
-    }
-
-    #[test]
-    fn participant_status_lite_builder() {
-        let status =
-            ParticipantStatusLite::new(ParticipantLifecycle::Degraded).with_detail("clock absent");
-        assert_eq!(status.lifecycle, ParticipantLifecycle::Degraded);
-        assert_eq!(status.detail.as_deref(), Some("clock absent"));
     }
 
     #[test]

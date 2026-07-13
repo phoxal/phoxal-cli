@@ -731,12 +731,6 @@ impl LineRenderer {
                     .unwrap_or_else(|| id.to_string());
                 self.print_phase_finished(&label, outcome, *elapsed);
             }
-            SessionEvent::ParticipantChanged { .. } => {
-                // `redraw_board` (board polling) is the source of truth for
-                // participant lines, matching every other consumer of
-                // `BoardSnapshot` - this avoids printing a line twice for the
-                // same transition.
-            }
             SessionEvent::Diagnostic {
                 source,
                 level,
@@ -747,7 +741,6 @@ impl LineRenderer {
                     format_diagnostic(self.theme, source.label(), *level, message)
                 );
             }
-            SessionEvent::Telemetry { .. } => {}
             SessionEvent::SessionChanged { state } => {
                 eprintln!(
                     "{:<5} session [{}] {}",
