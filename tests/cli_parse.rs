@@ -248,15 +248,21 @@ fn parses_update_and_rejects_removed_commands() {
 }
 
 #[test]
-fn parses_plain_and_welcome_as_global_flags() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "--plain", "--welcome", "check"])
-        .expect("global --plain/--welcome should parse before a verb");
+fn parses_plain_as_a_global_flag() {
+    let cli = Cli::try_parse_from(["phoxal-cli", "--plain", "check"])
+        .expect("global --plain should parse before a verb");
     assert!(cli.plain);
-    assert!(cli.welcome);
 
     let cli = Cli::try_parse_from(["phoxal-cli", "check", "--plain"])
         .expect("--plain also parses after the verb (global = true)");
     assert!(cli.plain);
+}
+
+#[test]
+fn welcome_is_no_longer_a_flag() {
+    // Product decision 4: the welcome card is always the default human
+    // rendering now - there is no `--welcome` flag left to parse.
+    assert!(Cli::try_parse_from(["phoxal-cli", "--welcome", "check"]).is_err());
 }
 
 #[test]

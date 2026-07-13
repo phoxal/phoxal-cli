@@ -370,6 +370,7 @@ fn recheck_run_target(
         project_root,
         loaded.robot.artifacts.channel,
         &loaded.extras,
+        options.output_mode,
     )?;
     let resolved = resolve(
         &loaded.robot,
@@ -379,6 +380,7 @@ fn recheck_run_target(
             emit_update_notice: false,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
+            output_mode: options.output_mode,
             ..ResolveOptions::default()
         },
     )?;
@@ -463,13 +465,15 @@ fn recheck_sim_target(
     target: &WatchTarget,
 ) -> Result<WatchOutcome> {
     let resolved = resolve_project(project_root, options.clone(), SimulateMode::Live)?;
-    let plan = build_checked_sim_launch_plan(
+    // A watch recheck only needs the plan itself (to diff specs), not the
+    // contract surfaces `build_checked_sim_launch_plan` now also returns for
+    // `RuntimeStore` (finding A5) - this path never builds a fresh session.
+    let (plan, _contract_surfaces) = build_checked_sim_launch_plan(
         &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,
         &resolved.manifest_extras,
         resolved.catalog.as_ref(),
-        options.joypad,
         options.message_format,
     )?;
     if target.kind == WatchTargetKind::Driver {
@@ -484,7 +488,11 @@ fn specs_for_target(plan: &LaunchPlan, target: &WatchTarget) -> Result<Vec<Parti
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let ui = crate::Ui;
+    // `--watch` is an interactive dev-loop feature; there is no `AppContext`
+    // this deep in the hot-reload swap path, so the mode is recomputed fresh
+    // rather than threaded the long way through the watch loop for a rare
+    // pairing (`--watch` with `--message-format json`).
+    let ui = crate::Ui::from_env();
     let mut specs = Vec::new();
     for participant in plan
         .robots
@@ -678,7 +686,6 @@ mod tests {
         let spec = ParticipantSpec {
             id: "mission".to_string(),
             kind: crate::supervisor::ParticipantKind::Service,
-            local: true,
             executable: PathBuf::from("/bin/echo"),
             args: Vec::new(),
             cwd: None,

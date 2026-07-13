@@ -113,34 +113,6 @@ pub fn stage_tool(
     stage_descriptor(ui, &descriptor, mode).map(Some)
 }
 
-/// Stage a resolved component package's (assets or driver) catalog bundle.
-/// `None` when the package is not catalog-sourced (`Path`/`Git` - a local
-/// override with no bundle to fetch) or when the catalog entry has no built
-/// artifact for the needed scope yet. Reuses the identical
-/// [`NativeArtifactDescriptor`]/[`stage_descriptor`] machinery services and
-/// tools already stage through - a component's `catalog_runtime` projects onto
-/// the same [`ResolvedPlatformRuntime`] shape.
-pub fn stage_component_package(
-    ui: Option<&Ui>,
-    package: &crate::resolver::ResolvedComponentPackage,
-    mode: ProvisioningMode,
-) -> Result<Option<PathBuf>> {
-    let Some(runtime) = &package.catalog_runtime else {
-        return Ok(None);
-    };
-    stage_runtime(ui, runtime, mode)
-}
-
-pub fn stage_resolved_artifacts(
-    ui: Option<&Ui>,
-    resolved: &crate::resolver::ResolvedRobot,
-    _mode: ProvisioningMode,
-) -> Result<usize> {
-    let descriptors = descriptors_for(resolved, true, true)?;
-    prepare_descriptors_with_preflight(&descriptors, ui)?;
-    Ok(descriptors.len())
-}
-
 pub fn descriptors(
     resolved: &crate::resolver::ResolvedRobot,
 ) -> Result<Vec<NativeArtifactDescriptor>> {
@@ -240,7 +212,22 @@ pub fn prepare_descriptors_with_preflight(
         return Ok(());
     }
     let _lock = ArtifactStoreLock::exclusive("provision")?;
-    prepare_and_activate_descriptors(&actionable, ui)
+    if missing.is_empty() {
+        // Finding A3: every actionable descriptor is already staged (a warm
+        // cache) - only cheap activation/retargeting remains, which is not
+        // itself download work, so no "download" phase appears (Product
+        // decision 3).
+        return prepare_and_activate_descriptors(&actionable, ui);
+    }
+    let count = missing.len();
+    crate::session::diagnostics::run_phase(
+        crate::session::event::PhaseId::new("download"),
+        format!(
+            "Downloading {count} artifact package{}",
+            if count == 1 { "" } else { "s" }
+        ),
+        || prepare_and_activate_descriptors(&actionable, ui),
+    )
 }
 
 fn should_prepare_descriptor(descriptor: &NativeArtifactDescriptor) -> bool {
@@ -595,7 +582,8 @@ fn prepare_descriptor(
             descriptor.kind, descriptor.name, descriptor.url
         ));
     }
-    let tarball_path = download_blob(descriptor)?;
+    let mode = ui.map_or_else(crate::output_mode::OutputMode::from_env, |ui| ui.mode());
+    let tarball_path = download_blob(descriptor, mode)?;
     unpack_asset(&tarball_path, &version_dir)?;
     fs::remove_file(&tarball_path).ok();
     if binary.is_file() {
@@ -624,6 +612,8 @@ pub fn prepare_and_activate_descriptors(
             );
         }
     }
+    let total = descriptors.len() as u64;
+    let mut completed = 0_u64;
     for batch in descriptors.chunks(CONCURRENCY) {
         std::thread::scope(|scope| -> Result<()> {
             let handles = batch
@@ -641,6 +631,16 @@ pub fn prepare_and_activate_descriptors(
             }
             Ok(())
         })?;
+        // Finding C2: real per-batch progress against the "download" phase
+        // `prepare_descriptors_with_preflight` brackets - the first genuine
+        // producer of `SessionEvent::PhaseProgress` (see
+        // `session::diagnostics::phase_progress`'s own docs).
+        completed += batch.len() as u64;
+        crate::session::diagnostics::phase_progress(
+            crate::session::event::PhaseId::new("download"),
+            completed,
+            total,
+        );
         if let Some(ui) = ui {
             for descriptor in batch {
                 ui.info(format!(
@@ -733,103 +733,6 @@ fn active_version_unlocked(package: &str) -> Result<Option<String>> {
     }
 }
 
-pub fn count_versions() -> Result<usize> {
-    let _lock = ArtifactStoreLock::shared()?;
-    walk_artifact_versions(false, false, None).map(|(retained, _)| retained)
-}
-
-pub fn prune_inactive_versions(current: &[NativeArtifactDescriptor]) -> Result<(usize, usize)> {
-    let _lock = ArtifactStoreLock::exclusive("prune")?;
-    classify_inactive_versions(current, true)
-}
-
-pub fn preview_prune_inactive_versions(
-    current: &[NativeArtifactDescriptor],
-) -> Result<(usize, usize)> {
-    let _lock = ArtifactStoreLock::shared()?;
-    classify_inactive_versions(current, false)
-}
-
-fn classify_inactive_versions(
-    current: &[NativeArtifactDescriptor],
-    remove: bool,
-) -> Result<(usize, usize)> {
-    let packages = current
-        .iter()
-        .map(|descriptor| descriptor.package_id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    walk_artifact_versions(true, remove, Some(&packages))
-}
-
-fn walk_artifact_versions(
-    classify_inactive: bool,
-    remove: bool,
-    current_packages: Option<&std::collections::BTreeSet<String>>,
-) -> Result<(usize, usize)> {
-    let root = crate::host_paths::artifacts_dir()?;
-    if !root.is_dir() {
-        return Ok((0, 0));
-    }
-    let mut retained = 0;
-    let mut pruned = 0;
-    for provider in fs::read_dir(&root)? {
-        let provider = provider?;
-        if !provider.file_type()?.is_dir() {
-            continue;
-        }
-        for package in fs::read_dir(provider.path())? {
-            let package = package?;
-            if !package.file_type()?.is_dir() {
-                continue;
-            }
-            let package_id = format!(
-                "{}/{}",
-                provider.file_name().to_string_lossy(),
-                package.file_name().to_string_lossy()
-            );
-            let versions = package.path().join("versions");
-            if !versions.is_dir() {
-                continue;
-            }
-            let keep_package =
-                current_packages.is_none_or(|packages| packages.contains(&package_id));
-            if classify_inactive && !keep_package {
-                pruned += fs::read_dir(&versions)?
-                    .filter_map(Result::ok)
-                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-                    .count();
-                if remove {
-                    fs::remove_dir_all(package.path())?;
-                }
-                continue;
-            }
-            let active = fs::read_link(package.path().join("active"))
-                .ok()
-                .and_then(|path| path.file_name().map(|name| name.to_os_string()));
-            for version in fs::read_dir(&versions)? {
-                let version = version?;
-                if !version.file_type()?.is_dir() {
-                    continue;
-                }
-                if active
-                    .as_ref()
-                    .is_some_and(|active| active == &version.file_name())
-                {
-                    retained += 1;
-                } else if classify_inactive {
-                    if remove {
-                        fs::remove_dir_all(version.path())?;
-                    }
-                    pruned += 1;
-                } else {
-                    retained += 1;
-                }
-            }
-        }
-    }
-    Ok((retained, pruned))
-}
-
 pub fn existing_target_scopes(package: &str) -> Result<Vec<String>> {
     let targets_dir = artifact_package_dir(package)?
         .join("active")
@@ -850,7 +753,10 @@ pub fn existing_target_scopes(package: &str) -> Result<Vec<String>> {
     Ok(targets)
 }
 
-fn download_blob(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
+fn download_blob(
+    descriptor: &NativeArtifactDescriptor,
+    mode: crate::output_mode::OutputMode,
+) -> Result<PathBuf> {
     let label = format!(
         "downloading {} {} [{}] ({} bytes)",
         descriptor.package_id,
@@ -861,7 +767,7 @@ fn download_blob(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
     // `descriptor.size` is the catalog-declared blob size (always known
     // ahead of the request - it is what `verify_blob_bytes` checks the
     // download against), so the byte bar is always determinate here.
-    let progress = crate::progress::bytes_bar(label, descriptor.size);
+    let progress = crate::progress::bytes_bar(label, descriptor.size, mode);
     match download_blob_inner(descriptor, &progress) {
         Ok(path) => {
             progress.finish_and_clear();
@@ -1008,12 +914,13 @@ fn unpack_tar(asset_path: &Path, dest: &Path) -> Result<()> {
 }
 
 fn unpack_with_system_tar(asset_path: &Path, dest: &Path) -> Result<()> {
-    let status = Command::new("tar")
-        .arg("-xf")
-        .arg(asset_path)
-        .arg("-C")
-        .arg(dest)
-        .status()
+    let mut command = Command::new("tar");
+    command.arg("-xf").arg(asset_path).arg("-C").arg(dest);
+    // Keep the uncommon system-tar fallback inside the same captured-output
+    // and cancellation path as cargo builds. In particular, tar diagnostics
+    // must not draw underneath an active TUI or leak onto JSON stderr.
+    let status = Ui::from_env()
+        .command_status_captured(&mut command)
         .with_context(|| format!("failed to start tar for {}", asset_path.display()))?;
     if status.success() {
         Ok(())
@@ -1112,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn active_symlink_selects_one_version_and_pruning_keeps_it() -> Result<()> {
+    fn active_symlink_selects_the_retargeted_version() -> Result<()> {
         let _root = ScratchPhoxalHome::new()?;
         let old = descriptor("1.0.0", b"old");
         let new = descriptor("2.0.0", b"new");
@@ -1120,28 +1027,6 @@ mod tests {
         fs::create_dir_all(artifact_exec_dir(&new)?)?;
         retarget_active(&new)?;
         assert_eq!(active_version(&new)?.as_deref(), Some("2.0.0"));
-        let (retained, pruned) = prune_inactive_versions(std::slice::from_ref(&new))?;
-        assert_eq!((retained, pruned), (1, 1));
-        assert!(artifact_exec_dir(&new)?.is_dir());
-        assert!(!artifact_exec_dir(&old)?.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn prune_preview_reports_without_mutating() -> Result<()> {
-        let _root = ScratchPhoxalHome::new()?;
-        let old = descriptor("1.0.0", b"old");
-        let new = descriptor("2.0.0", b"new");
-        fs::create_dir_all(artifact_exec_dir(&old)?)?;
-        fs::create_dir_all(artifact_exec_dir(&new)?)?;
-        retarget_active(&new)?;
-
-        assert_eq!(
-            preview_prune_inactive_versions(std::slice::from_ref(&new))?,
-            (1, 1)
-        );
-        assert!(artifact_exec_dir(&old)?.is_dir());
-        assert!(artifact_exec_dir(&new)?.is_dir());
         Ok(())
     }
 
@@ -1211,6 +1096,191 @@ mod tests {
         drop(second);
 
         assert!(!lock_path.exists());
+        Ok(())
+    }
+
+    /// Finding A3: a warm cache (every actionable descriptor already staged)
+    /// must emit NO `download` phase - Product decision 3 forbids showing a
+    /// phase for work that never runs. Uses a descriptor whose exec dir is
+    /// pre-created so `prepare_descriptor` takes its `MissingOnly` early
+    /// return and never reaches the network, regardless of the (unreachable)
+    /// URL.
+    #[tokio::test]
+    async fn prepare_descriptors_with_preflight_emits_no_download_phase_on_a_warm_cache()
+    -> Result<()> {
+        let _diagnostics_guard = crate::session::diagnostics::DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .await;
+        let _root = ScratchPhoxalHome::new()?;
+        let mut staged = descriptor("1.0.0", b"already-staged");
+        staged.url = "http://127.0.0.1:1/drive.tar".to_string();
+        fs::create_dir_all(artifact_exec_dir(&staged)?)?;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        crate::session::diagnostics::install(tx);
+
+        prepare_descriptors_with_preflight(std::slice::from_ref(&staged), None)?;
+
+        crate::session::diagnostics::uninstall();
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(
+                    event,
+                    crate::session::event::SessionEvent::PhaseStarted { .. }
+                        | crate::session::event::SessionEvent::PhaseFinished { .. }
+                ),
+                "a warm cache must not emit a download phase, got {event:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The fresh-cache counterpart: a descriptor with no staged exec dir must
+    /// genuinely attempt a download, so a `download` phase must appear -
+    /// started AND finished, even though the download itself fails (an
+    /// unroutable localhost port stands in for "no network available",
+    /// keeping this test fast and deterministic without a real artifact
+    /// server).
+    #[tokio::test]
+    async fn prepare_descriptors_with_preflight_emits_a_download_phase_on_a_cold_cache()
+    -> Result<()> {
+        let _diagnostics_guard = crate::session::diagnostics::DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .await;
+        let _root = ScratchPhoxalHome::new()?;
+        let mut cold = descriptor("1.0.0", b"never-staged");
+        cold.url = "http://127.0.0.1:1/drive.tar".to_string();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        crate::session::diagnostics::install(tx);
+
+        let result = prepare_descriptors_with_preflight(std::slice::from_ref(&cold), None);
+        crate::session::diagnostics::uninstall();
+        assert!(result.is_err(), "an unroutable download must fail");
+
+        let mut saw_started = false;
+        let mut saw_finished_failed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::session::event::SessionEvent::PhaseStarted { id, .. }
+                    if id.as_str() == "download" =>
+                {
+                    saw_started = true;
+                }
+                crate::session::event::SessionEvent::PhaseFinished { id, outcome, .. }
+                    if id.as_str() == "download" =>
+                {
+                    assert!(
+                        matches!(outcome, crate::session::event::PhaseOutcome::Failed { .. }),
+                        "the download phase must report its real failure, got {outcome:?}"
+                    );
+                    saw_finished_failed = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_started, "a cold cache must start a download phase");
+        assert!(
+            saw_finished_failed,
+            "a cold cache's failed download must still finish its phase"
+        );
+        Ok(())
+    }
+
+    /// A minimal local HTTP/1.1 server that serves `body` for exactly one
+    /// request, then exits - just enough for a real `reqwest::blocking`
+    /// download to succeed without reaching any external network. The
+    /// returned `JoinHandle` is intentionally left unjoined: the server
+    /// thread exits on its own once it has served its one request.
+    fn spawn_minimal_http_server(body: Vec<u8>) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local http server");
+        let addr = listener.local_addr().expect("local server address");
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&body);
+            let _ = stream.flush();
+        });
+        addr
+    }
+
+    /// Build a real, minimal `.tar.gz` archive containing one flat file named
+    /// `entry_name` - enough for `unpack_asset`'s real `tar -xf` (via the
+    /// system `tar` binary) to succeed for real, unlike a fake byte blob.
+    fn minimal_tar_gz(entry_name: &str, contents: &[u8]) -> Result<Vec<u8>> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append_data(&mut header, entry_name, contents)?;
+            builder.finish()?;
+        }
+        let mut gz_bytes = Vec::new();
+        {
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut gz_bytes, flate2::Compression::fast());
+            std::io::Write::write_all(&mut encoder, &tar_bytes)?;
+            encoder.finish()?;
+        }
+        Ok(gz_bytes)
+    }
+
+    /// Finding C2: `PhaseProgress` used to be constructed only by a render
+    /// test, never by production code. This exercises the REAL download
+    /// pipeline end to end (a genuine HTTP download of a real tar.gz archive,
+    /// unpacked by the system `tar`) and asserts a real
+    /// `SessionEvent::PhaseProgress` for the "download" phase comes out the
+    /// other end, not just `PhaseStarted`/`PhaseFinished`.
+    #[tokio::test]
+    async fn prepare_descriptors_with_preflight_emits_real_download_progress_on_success()
+    -> Result<()> {
+        let _diagnostics_guard = crate::session::diagnostics::DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .await;
+        let _root = ScratchPhoxalHome::new()?;
+
+        let archive_bytes = minimal_tar_gz("phoxal-service-drive", b"#!/bin/sh\n")?;
+        let addr = spawn_minimal_http_server(archive_bytes.clone());
+        let mut fresh = descriptor("1.0.0", &archive_bytes);
+        fresh.url = format!("http://{addr}/drive.tar.gz");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        crate::session::diagnostics::install(tx);
+        let result = prepare_descriptors_with_preflight(std::slice::from_ref(&fresh), None);
+        crate::session::diagnostics::uninstall();
+        result?;
+
+        let mut saw_progress = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::session::event::SessionEvent::PhaseProgress {
+                id,
+                completed,
+                total,
+                ..
+            } = event
+            {
+                assert_eq!(id.as_str(), "download");
+                assert_eq!(completed, 1);
+                assert_eq!(total, 1);
+                saw_progress = true;
+            }
+        }
+        assert!(
+            saw_progress,
+            "a real successful download must emit real PhaseProgress, not just Started/Finished"
+        );
         Ok(())
     }
 }

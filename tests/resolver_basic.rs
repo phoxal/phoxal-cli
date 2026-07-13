@@ -472,7 +472,7 @@ fn tools_resolve_from_catalog_entries() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
 
-    for tool_name in ["tool-router", "tool-joypad"] {
+    for tool_name in ["tool-router", "tool-joypad", "tool-telemetry"] {
         let tool = resolved
             .tools
             .iter()

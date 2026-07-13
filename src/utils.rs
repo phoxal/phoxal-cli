@@ -10,36 +10,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use toml::Value as TomlValue;
 
-pub fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)
-        .with_context(|| format!("failed to create directory {}", destination.display()))?;
-
-    for entry in fs::read_dir(source)
-        .with_context(|| format!("failed to read directory {}", source.display()))?
-    {
-        let entry = entry.with_context(|| format!("failed to inspect {}", source.display()))?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let file_type = entry.file_type().with_context(|| {
-            format!("failed to inspect file type for {}", source_path.display())
-        })?;
-
-        if file_type.is_dir() {
-            copy_dir_recursive(&source_path, &destination_path)?;
-        } else if file_type.is_file() {
-            fs::copy(&source_path, &destination_path).with_context(|| {
-                format!(
-                    "failed to copy asset {} to {}",
-                    source_path.display(),
-                    destination_path.display()
-                )
-            })?;
-        }
-    }
-
-    Ok(())
-}
-
 pub fn make_executable(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {

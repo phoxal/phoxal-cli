@@ -47,6 +47,11 @@ pub fn stage_world_source_with_protos(
     Ok(staged)
 }
 
+/// P4/C2 triage: see `webots_staging::validate_world_contact_materials`'s own
+/// docs (the thin re-export this crate's callers would actually use) - real,
+/// tested logic awaiting a product decision on where to source
+/// `referenced_contact_materials` from, not speculative scaffolding.
+#[allow(dead_code)]
 pub fn validate_world_contact_materials(
     staged_world: &str,
     referenced_contact_materials: &BTreeSet<String>,

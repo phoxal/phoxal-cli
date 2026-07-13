@@ -47,65 +47,6 @@ use crate::utils::cargo_binary_name;
 /// jitter without masking a genuinely hung participant.
 const RUN_STAGE_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// `run`'s startup stepper phases (Part 4), in order. Indices 3-6 map
-/// 1:1 onto `stages_for_run`'s four `SupervisionStage`s; `spawn_run_stepper`
-/// drives those live from the board. Indices 0-2 (download/validate/build)
-/// happen synchronously inside `prepare_run`, which does not yet report
-/// intermediate progress back to the caller - they complete together right
-/// when `prepare_run` returns rather than live-updating mid-phase; this is a
-/// known, deliberate simplification (threading a live/skip signal out of
-/// `prepare_run`'s artifact-download and source-build internals is future
-/// work, not required for the stepper to exist and hand off correctly).
-const RUN_PHASES: [&str; 8] = [
-    "Downloading artifacts",
-    "Validating robot",
-    "Building artifacts",
-    "Starting router",
-    "Starting tools",
-    "Starting drivers",
-    "Starting services",
-    "Initialized",
-];
-
-/// Drive `RUN_PHASES`' participant-observing phases (indices 3-6, plus the
-/// final `Initialized`) by polling the board for each stage's expected ids
-/// in turn, mirroring the staged supervisor's own gating (`stages_for_run`)
-/// without needing an event channel out of `supervise_until_shutdown` - this
-/// task is read-only and purely cosmetic; it never affects the actual staged
-/// startup, only what the operator sees while it happens. Consumes `stepper`
-/// (already having rendered phases 0-2) and clears the whole sequence once
-/// `Initialized` completes, hand off to the existing board render.
-fn spawn_run_stepper(
-    stepper: crate::stepper::Stepper,
-    board: BoardBackend,
-    stage_phases: Vec<crate::stepper::StagePhase>,
-    display_activate_tx: tokio::sync::oneshot::Sender<()>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut stepper = stepper
-            .drive_participant_phases(&board, 3, stage_phases)
-            .await;
-        if stepper.has_failed() {
-            // A phase already failed and printed its own `✗` line - leave it
-            // visible instead of papering over it with `Initialized`. The
-            // display still hands off here (not returning early) so a
-            // startup failure is visible in the TUI/logger too, not just a
-            // frozen stepper line.
-            let _ = display_activate_tx.send(());
-            return;
-        }
-        let initialized = RUN_PHASES.len() - 1;
-        stepper.start(initialized);
-        stepper.complete(initialized);
-        stepper.clear();
-        // Hand off to whichever display `Display::for_mode` selected (Part
-        // 2) only now that every stepper line is done redrawing - entering
-        // the TUI's alternate screen any earlier would race its indicatif
-        // output.
-        let _ = display_activate_tx.send(());
-    })
-}
-
 #[derive(Debug, Args)]
 pub struct Run {
     #[arg(
@@ -150,6 +91,10 @@ pub struct RunOptions {
     pub overlays: Vec<String>,
     pub watch: bool,
     pub message_format: MessageFormat,
+    /// The session's output mode, threaded into a catalog fetch's spinner
+    /// (`watch::recheck_run_target` runs `--watch` rechecks with no
+    /// `AppContext` in scope) - no process-global mode cell.
+    pub output_mode: crate::output_mode::OutputMode,
 }
 
 #[derive(Debug)]
@@ -160,6 +105,23 @@ struct PreparedRun {
     specs: Vec<ParticipantSpec>,
     robot_log_targets: Vec<(String, String)>,
     router_ownership: RouterOwnership,
+    /// Finding A5: this session's launch-time participant metadata, resolved
+    /// once here from `plan` and the contract-check `outcome` - see
+    /// `crate::stores::runtime_store::RuntimeStore`'s own docs.
+    runtime_store: crate::stores::runtime_store::RuntimeStore,
+}
+
+/// Resources assembled after preparation but before the controller enters
+/// supervision. Keeping this whole phase behind `drive_setup` means raw-mode
+/// Ctrl-C remains polled until the supervisor loop takes ownership.
+struct LiveRunSetup {
+    board: BoardBackend,
+    telemetry: crate::telemetry::TelemetryBackend,
+    runtime_store: crate::stores::runtime_store::RuntimeStore,
+    supervise_task: tokio::task::JoinHandle<Result<crate::supervisor::SupervisorOutcome>>,
+    watch_handle: Option<tokio::task::JoinHandle<()>>,
+    feed_tasks: Vec<tokio::task::JoinHandle<()>>,
+    action_tx: mpsc::Sender<crate::supervisor::SupervisorAction>,
 }
 
 impl Run {
@@ -171,6 +133,7 @@ impl Run {
             overlays: self.env.clone(),
             watch: self.watch,
             message_format: self.message_format,
+            output_mode: app.output.mode,
         };
         if options.drivers == DriversMode::Off && !options.drivers_subset.is_empty() {
             bail!("--driver cannot be combined with --drivers off");
@@ -186,130 +149,50 @@ impl Run {
         let project_root = app.project.root().to_path_buf();
         let ui = app.ui;
 
-        let mut stepper = crate::stepper::Stepper::new(RUN_PHASES);
-        stepper.start(0);
-        let prepared =
-            tokio::task::spawn_blocking(move || prepare_run(&project_root, options, &ui))
-                .await
-                .context("run preparation worker failed")??;
-        // See `RUN_PHASES`' docs: download/validate/build happen together
-        // inside `prepare_run`, so all three complete here rather than live.
-        stepper.complete(0);
-        stepper.start(1);
-        stepper.complete(1);
-        stepper.start(2);
-        stepper.complete(2);
+        // One interactive surface for the whole session (Product decision
+        // 1): the controller starts its renderer (a TUI's alternate screen,
+        // or the append-only line renderer) right now, before preparation
+        // even begins - see `SessionController::new`'s docs.
+        let identity = crate::identity::IdentitySummary::discover(app.project.root());
+        let mut controller =
+            crate::session::controller::SessionController::new(app.output, "run", identity)?;
+        let events = controller.events();
 
-        app.ui.info(format!(
-            "launch plan resolved: {} robot(s), {} site tool(s)",
-            prepared.plan.robots.len(),
-            prepared.plan.site.len()
-        ));
-        match prepared.router_ownership {
-            RouterOwnership::External => app.ui.info("reusing reachable external tool-router"),
-            RouterOwnership::Managed => app.ui.info("tool-router will be managed by this session"),
-        }
-        report_launch_commands(&prepared.plan, &prepared.specs, message_format)?;
+        let prepared = controller
+            .drive_prepare_phase(move || prepare_run(&project_root, options, &ui))
+            .await?;
 
-        let _log_tasks = prepared
-            .robot_log_targets
-            .iter()
-            .map(|(namespace, robot_id)| {
-                start_bus_log_subscriber(
-                    namespace.clone(),
-                    robot_id.clone(),
-                    default_connect_endpoint(),
-                    prepared.board.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        // OBSERVED readiness: drive board state from each participant's own
-        // presence/heartbeat, mirroring the log subscriber above - see
-        // `supervisor::start_presence_heartbeat_subscriber`.
-        let _presence_tasks = prepared
-            .robot_log_targets
-            .iter()
-            .map(|(namespace, robot_id)| {
-                start_presence_heartbeat_subscriber(
-                    namespace.clone(),
-                    robot_id.clone(),
-                    default_connect_endpoint(),
-                    prepared.board.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
+        let setup = controller
+            .drive_setup(live_run_setup(
+                prepared,
+                app.ui,
+                message_format,
+                watch_enabled,
+                watch_options,
+                state_file,
+                action_file,
+                controller.output(),
+                controller.token(),
+                events,
+                controller.renders_tui(),
+            ))
+            .await?;
+        controller.set_restart_channel(setup.action_tx.clone());
 
-        let (action_rx, watch_handle) = if watch_enabled {
-            let (action_tx, action_rx) = mpsc::channel(16);
-            let live_ids = prepared
-                .specs
-                .iter()
-                .map(|spec| spec.id.clone())
-                .collect::<BTreeSet<_>>();
-            let handle = crate::watch::spawn_run_watch(crate::watch::RunWatchConfig {
-                ctx: prepared.ctx.clone(),
-                options: watch_options,
-                live_ids,
-                board: prepared.board.clone(),
-                action_tx,
-            });
-            (Some(action_rx), Some(handle))
-        } else {
-            (None, None)
-        };
-
-        let stages = stages_for_run(prepared.specs);
-        let stage_phases = stages
-            .iter()
-            .map(|stage| {
-                crate::stepper::StagePhase::new(!stage.specs.is_empty(), stage.ready_ids.clone())
-            })
-            .collect::<Vec<_>>();
-        let identity = crate::identity::IdentitySummary::discover(&prepared.ctx.project_root);
-        let display = crate::display::Display::for_mode("run", identity);
-        // Live telemetry (CLI-UX Phase 3): only worth subscribing when a real
-        // TUI is up to read it - `--message-format json`/non-interactive
-        // sessions never touch `telemetry`, so skip the extra bus
-        // connections entirely rather than feed a display that can't render
-        // them. `run` has no simulation clock (`telemetry::TelemetryBackend`
-        // is never given one here - see `commands::simulate` for the
-        // sim-clock feed), so the TUI's clock slot stays empty in this mode
-        // by design (`tui::render::simulation_clock_slot`).
-        let telemetry = crate::telemetry::TelemetryBackend::new();
-        let _telemetry_tasks = if matches!(display, crate::display::Display::Tui(_)) {
-            start_telemetry_feeds(&prepared.robot_log_targets, &telemetry)
-        } else {
-            Vec::new()
-        };
-        let (display_activate_tx, display_activate_rx) = tokio::sync::oneshot::channel();
-        let stepper_handle = spawn_run_stepper(
-            stepper,
-            prepared.board.clone(),
-            stage_phases,
-            display_activate_tx,
-        );
-
-        let outcome = supervise_until_shutdown(
-            stages,
-            prepared.board.clone(),
-            SupervisorOptions {
-                state_file: Some(state_file),
-                action_file: Some(action_file),
-                action_rx,
-                display,
-                display_activate_rx: Some(display_activate_rx),
-                telemetry,
-                ..SupervisorOptions::default()
-            },
-        )
-        .await;
-        if let Some(handle) = watch_handle {
+        let outcome = controller
+            .drive_supervision(
+                setup.board,
+                setup.telemetry,
+                setup.runtime_store,
+                setup.supervise_task,
+            )
+            .await;
+        if let Some(handle) = setup.watch_handle {
             handle.abort();
         }
-        // Purely cosmetic (see `spawn_run_stepper`'s docs) - abort it rather
-        // than await it so a stalled/failed startup does not hang the
-        // command waiting on a stepper phase that will never complete.
-        stepper_handle.abort();
+        for feed in setup.feed_tasks {
+            feed.abort();
+        }
         let outcome = outcome?;
 
         if !outcome.graph_healthy() {
@@ -322,6 +205,119 @@ impl Run {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn live_run_setup(
+    prepared: PreparedRun,
+    ui: crate::Ui,
+    message_format: MessageFormat,
+    watch_enabled: bool,
+    watch_options: RunOptions,
+    state_file: PathBuf,
+    action_file: PathBuf,
+    output: crate::session::output::OutputContext,
+    token: tokio_util::sync::CancellationToken,
+    events: mpsc::Sender<crate::session::event::SessionEvent>,
+    renders_tui: bool,
+) -> Result<LiveRunSetup> {
+    ui.info(format!(
+        "launch plan resolved: {} robot(s), {} site tool(s)",
+        prepared.plan.robots.len(),
+        prepared.plan.site.len()
+    ));
+    match prepared.router_ownership {
+        RouterOwnership::External => ui.info("reusing reachable external tool-router"),
+        RouterOwnership::Managed => ui.info("tool-router will be managed by this session"),
+    }
+    report_launch_commands(&prepared.plan, &prepared.specs, message_format)?;
+
+    let mut feed_tasks = prepared
+        .robot_log_targets
+        .iter()
+        .map(|(namespace, robot_id)| {
+            start_bus_log_subscriber(
+                namespace.clone(),
+                robot_id.clone(),
+                default_connect_endpoint(),
+                prepared.board.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    feed_tasks.extend(
+        prepared
+            .robot_log_targets
+            .iter()
+            .map(|(namespace, robot_id)| {
+                start_presence_heartbeat_subscriber(
+                    namespace.clone(),
+                    robot_id.clone(),
+                    default_connect_endpoint(),
+                    prepared.board.clone(),
+                )
+            }),
+    );
+
+    let (action_tx, action_rx) = mpsc::channel(16);
+    let watch_handle = if watch_enabled {
+        let live_ids = prepared
+            .specs
+            .iter()
+            .map(|spec| spec.id.clone())
+            .collect::<BTreeSet<_>>();
+        Some(crate::watch::spawn_run_watch(
+            crate::watch::RunWatchConfig {
+                ctx: prepared.ctx.clone(),
+                options: watch_options,
+                live_ids,
+                board: prepared.board.clone(),
+                action_tx: action_tx.clone(),
+            },
+        ))
+    } else {
+        None
+    };
+
+    let stages = stages_for_run(prepared.specs, output);
+    let starting = crate::session::state::SessionState::Preparing
+        .start()
+        .expect("the controller begins every session in Preparing");
+    let _ = events
+        .send(crate::session::event::SessionEvent::SessionChanged { state: starting })
+        .await;
+
+    let telemetry = crate::telemetry::TelemetryBackend::new();
+    if renders_tui {
+        feed_tasks.extend(start_telemetry_feeds(
+            &prepared.robot_log_targets,
+            &telemetry,
+        ));
+    }
+
+    let board = prepared.board.clone();
+    let supervise_task = tokio::spawn(supervise_until_shutdown(
+        stages,
+        prepared.board,
+        SupervisorOptions {
+            state_file: Some(state_file),
+            action_file: Some(action_file),
+            action_rx: Some(action_rx),
+            token,
+            events: Some(events),
+            emits_running_on_startup_complete: true,
+            ..SupervisorOptions::default()
+        },
+    ));
+
+    Ok(LiveRunSetup {
+        board,
+        telemetry,
+        runtime_store: prepared.runtime_store,
+        supervise_task,
+        watch_handle,
+        feed_tasks,
+        action_tx,
+    })
+}
+
 /// Partition an already-built `run` spec list into the staged startup order
 /// (Part 2): router < other tools (`tool-joypad`, `tool-telemetry`) < drivers
 /// < services. Each stage's members all spawn together,
@@ -329,7 +325,10 @@ impl Run {
 /// router - see its `bus_participant: false` - heartbeat for everything
 /// else) before the next stage spawns; see `supervisor::SupervisionStage`
 /// and `supervisor::await_participants_ready`.
-fn stages_for_run(specs: Vec<ParticipantSpec>) -> Vec<SupervisionStage> {
+fn stages_for_run(
+    specs: Vec<ParticipantSpec>,
+    output: crate::session::output::OutputContext,
+) -> Vec<SupervisionStage> {
     let mut router = Vec::new();
     let mut tools = Vec::new();
     let mut drivers = Vec::new();
@@ -345,11 +344,14 @@ fn stages_for_run(specs: Vec<ParticipantSpec>) -> Vec<SupervisionStage> {
             }
         }
     }
+    // Product decision 6: no unconditional 60s teardown for an interactive
+    // session - see `OutputContext::wait_budget`.
+    let timeout = output.wait_budget(RUN_STAGE_READY_TIMEOUT);
     vec![
-        SupervisionStage::new("starting router", router, RUN_STAGE_READY_TIMEOUT),
-        SupervisionStage::new("starting tools", tools, RUN_STAGE_READY_TIMEOUT),
-        SupervisionStage::new("starting drivers", drivers, RUN_STAGE_READY_TIMEOUT),
-        SupervisionStage::new("starting services", services, RUN_STAGE_READY_TIMEOUT),
+        SupervisionStage::new("starting router", router, timeout),
+        SupervisionStage::new("starting tools", tools, timeout),
+        SupervisionStage::new("starting drivers", drivers, timeout),
+        SupervisionStage::new("starting services", services, timeout),
     ]
 }
 
@@ -415,6 +417,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         project_root,
         loaded.robot.artifacts.channel,
         &loaded.extras,
+        ui.mode(),
     )?;
     let resolved = resolve(
         &loaded.robot,
@@ -515,11 +518,18 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         &coherence,
         options.message_format,
     )?;
-    let board = BoardBackend::new();
+    // Finding A5: resolved once here, from the same `plan`/`outcome` this
+    // function already built - see `RuntimeStore::from_launch_plan`'s docs.
     let router_ownership = router_ownership(local_router_reachable(&default_connect_endpoint()));
+    let mut runtime_store = crate::stores::runtime_store::RuntimeStore::from_launch_plan(
+        &plan,
+        &outcome.contract_surfaces,
+    );
+    runtime_store.set_router_ownership(SITE_TOOL_ROUTER, router_ownership);
+    let board = BoardBackend::new();
     let mut specs = Vec::new();
 
-    prepare_site_tools(&plan, &resolved, &board, &mut specs, router_ownership)?;
+    prepare_site_tools(&plan, &resolved, &board, &mut specs, router_ownership, ui)?;
     prepare_robot_participants(
         &plan,
         &resolved,
@@ -550,6 +560,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         board,
         specs,
         router_ownership,
+        runtime_store,
     })
 }
 
@@ -703,6 +714,7 @@ pub(crate) fn prepare_site_tools(
     board: &BoardBackend,
     specs: &mut Vec<ParticipantSpec>,
     router_ownership: RouterOwnership,
+    ui: &crate::Ui,
 ) -> Result<()> {
     let namespace = plan
         .robots
@@ -743,11 +755,10 @@ pub(crate) fn prepare_site_tools(
         if !should_launch {
             continue;
         }
-        match locate_tool_binary(resolved, &site.id)? {
+        match locate_tool_binary(resolved, &site.id, ui)? {
             Some(path) => specs.push(ParticipantSpec {
                 id: site.id.clone(),
                 kind: ParticipantKind::Tool,
-                local: site_tool_is_local(resolved, &site.id),
                 executable: path,
                 args: Vec::new(),
                 cwd: None,
@@ -835,7 +846,6 @@ pub(crate) fn prepare_robot_participants(
                         Some(path) => specs.push(ParticipantSpec {
                             id,
                             kind,
-                            local,
                             executable: path,
                             args: Vec::new(),
                             cwd: None,
@@ -862,7 +872,6 @@ pub(crate) fn prepare_robot_participants(
                     specs.push(ParticipantSpec {
                         id,
                         kind,
-                        local,
                         executable: binary,
                         args: Vec::new(),
                         cwd: Some(crate_dir.clone()),
@@ -878,7 +887,6 @@ pub(crate) fn prepare_robot_participants(
                     specs.push(ParticipantSpec {
                         id,
                         kind,
-                        local,
                         executable: binary,
                         args: Vec::new(),
                         cwd: Some(crate_dir.clone()),
@@ -913,7 +921,6 @@ pub(crate) fn prepare_robot_participants(
                     specs.push(ParticipantSpec {
                         id,
                         kind,
-                        local,
                         executable: binary,
                         args: Vec::new(),
                         cwd: Some(crate_dir.clone()),
@@ -963,7 +970,10 @@ pub(crate) fn source_spec_from_launch_record(
     ui: &crate::Ui,
 ) -> Result<Option<ParticipantSpec>> {
     let id = participant.launch.participant_id.clone();
-    let (kind, local) = participant_kind(&participant.execution);
+    // `_local`: this function only builds a `ParticipantSpec` (no
+    // `ParticipantStatus` to mark `.with_local` on) - see the other
+    // `participant_kind` call sites for where the bool is actually consumed.
+    let (kind, _local) = participant_kind(&participant.execution);
     let crate_dir = match &participant.execution {
         ParticipantExecution::UserService { crate_dir }
         | ParticipantExecution::SourceArtifact { crate_dir, .. }
@@ -974,7 +984,6 @@ pub(crate) fn source_spec_from_launch_record(
     Ok(Some(ParticipantSpec {
         id,
         kind,
-        local,
         executable: binary,
         args: Vec::new(),
         cwd: Some(crate_dir.clone()),
@@ -1027,14 +1036,18 @@ fn site_tool_is_local(resolved: &ResolvedRobot, name: &str) -> bool {
         .is_some_and(|tool| tool.path_override.is_some())
 }
 
-fn locate_tool_binary(resolved: &ResolvedRobot, name: &str) -> Result<Option<PathBuf>> {
+fn locate_tool_binary(
+    resolved: &ResolvedRobot,
+    name: &str,
+    ui: &crate::Ui,
+) -> Result<Option<PathBuf>> {
     let tool = resolved
         .tools
         .iter()
         .find(|tool| tool.name == name)
         .ok_or_else(|| anyhow!("resolved graph is missing site tool {name}"))?;
     if let Some(path) = &tool.path_override {
-        return Ok(Some(build_source_binary(path, name, &crate::Ui)?));
+        return Ok(Some(build_source_binary(path, name, ui)?));
     }
     if let Some(path) = env_path_override("PHOXAL_ARTIFACT", name) {
         return Ok(Some(path));
@@ -1137,14 +1150,18 @@ fn native_pending_official_note(
     )
 }
 
-/// Build one user participant's crate. `cargo build` here inherits this
-/// process's stdout/stderr (`ui.command_status`, below) so build errors
-/// stream live to the developer's terminal - so, unlike
-/// `check::build_and_locate_binary`'s fully-captured build, this reports
-/// progress with a single themed (and `--message-format json`-silenced,
-/// via `Ui::info`) line rather than an animated spinner: an indicatif
-/// redraw sharing a stream with cargo's own inherited output would corrupt
-/// both.
+/// Build one user participant's crate. Fixes findings A2/B2: `cargo build`'s
+/// stdout/stderr is CAPTURED and routed as `SessionEvent::Diagnostic`s
+/// (`ui.command_status_captured`, below) instead of inherited straight
+/// through to this process's own stdout/stderr - a raw child write racing an
+/// active TUI redraw could corrupt the alternate-screen frame, and under
+/// `--message-format json` it could leak onto a stderr the contract promises
+/// stays empty. This still reports progress with a single themed (and
+/// `--message-format json`-silenced, via `Ui::info`) line rather than an
+/// animated spinner - `crate::progress`'s own session-routing (see its
+/// module docs) already keeps a spinner from colliding with captured build
+/// output, but a single line is simpler here and matches
+/// `check::build_and_locate_binary`'s equivalent build.
 pub(crate) fn build_source_binary(
     crate_dir: &Path,
     preferred_name: &str,
@@ -1160,24 +1177,36 @@ pub(crate) fn build_source_binary(
     ui.info(format!(
         "building user participant {preferred_name} with cargo build --bin {binary_name}"
     ));
-    let mut command = Command::new("cargo");
-    command
-        .arg("build")
-        .arg("--bin")
-        .arg(&binary_name)
-        .current_dir(&crate_dir);
-    let status = ui.command_status(&mut command).with_context(|| {
-        format!(
-            "failed to start cargo build for participant {preferred_name} in {}",
-            crate_dir.display()
-        )
-    })?;
-    if !status.success() {
-        bail!(
-            "cargo build failed for participant {preferred_name} in {} with status {status}",
-            crate_dir.display()
-        );
-    }
+    // Finding A3: a source participant only ever gets here when it genuinely
+    // needs a fresh `cargo build` (path-overridden components/simulators, or
+    // any user service/driver built from local source) - so bracketing this
+    // exact call with a "build" phase reports truthful per-operation work
+    // rather than the old synthetic single "Preparing" phase.
+    crate::session::diagnostics::run_phase(
+        crate::session::event::PhaseId::new("build"),
+        format!("Building {preferred_name}"),
+        || {
+            let mut command = Command::new("cargo");
+            command
+                .arg("build")
+                .arg("--bin")
+                .arg(&binary_name)
+                .current_dir(&crate_dir);
+            let status = ui.command_status_captured(&mut command).with_context(|| {
+                format!(
+                    "failed to start cargo build for participant {preferred_name} in {}",
+                    crate_dir.display()
+                )
+            })?;
+            if !status.success() {
+                bail!(
+                    "cargo build failed for participant {preferred_name} in {} with status {status}",
+                    crate_dir.display()
+                );
+            }
+            Ok(())
+        },
+    )?;
     Ok(cargo_target_dir(&crate_dir)?
         .join("debug")
         .join(binary_name_with_suffix(&binary_name)))
@@ -1370,6 +1399,7 @@ mod tests {
                 overlays: Vec::new(),
                 watch: false,
                 message_format: MessageFormat::Human,
+                output_mode: crate::output_mode::OutputMode::from_env(),
             },
             &plan,
         )?;
@@ -1387,6 +1417,7 @@ mod tests {
                 overlays: Vec::new(),
                 watch: false,
                 message_format: MessageFormat::Human,
+                output_mode: crate::output_mode::OutputMode::from_env(),
             },
             &plan,
         )
@@ -1406,6 +1437,7 @@ mod tests {
                 overlays: Vec::new(),
                 watch: false,
                 message_format: MessageFormat::Human,
+                output_mode: crate::output_mode::OutputMode::from_env(),
             },
             &plan,
         )?;
@@ -1552,6 +1584,7 @@ robot:
             &board,
             &mut specs,
             RouterOwnership::Managed,
+            &crate::Ui::from_env(),
         )?;
         prepare_robot_participants(
             &plan,
@@ -1560,7 +1593,7 @@ robot:
             &DriverPolicy::drivers_off_for_sim(),
             &board,
             &mut specs,
-            &crate::Ui::new(),
+            &crate::Ui::from_env(),
         )?;
 
         let router_spec = specs
@@ -1611,6 +1644,7 @@ robot:
             &board,
             &mut specs,
             RouterOwnership::External,
+            &crate::Ui::from_env(),
         )?;
 
         assert!(

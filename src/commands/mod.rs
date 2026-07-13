@@ -68,6 +68,7 @@ pub(crate) fn load_catalog_for_robot(
         project_root,
         channel,
         manifest_extras,
+        app.output.mode,
     )
 }
 
@@ -76,6 +77,7 @@ pub(crate) fn load_catalog_for_robot_from_source(
     project_root: &std::path::Path,
     channel: phoxal::model::robot::v0::Channel,
     manifest_extras: &RobotManifestExtras,
+    mode: crate::output_mode::OutputMode,
 ) -> Result<Option<crate::catalog::Catalog>> {
     let robot_source = manifest_extras.catalog_source.as_ref().map(|source| {
         if source.is_absolute() {
@@ -84,28 +86,46 @@ pub(crate) fn load_catalog_for_robot_from_source(
             project_root.join(source)
         }
     });
-    catalog_or_vendored(crate::catalog::load_pinned_catalog(
-        crate::catalog::CatalogLoadOptions {
-            cli_source: catalog_source,
-            robot_source,
-            offline: false,
-        },
-        crate::catalog::selection_channel(channel),
-    ))
+    catalog_or_vendored(
+        crate::catalog::load_pinned_catalog(
+            crate::catalog::CatalogLoadOptions {
+                cli_source: catalog_source,
+                robot_source,
+                offline: false,
+            },
+            crate::catalog::selection_channel(channel),
+            mode,
+        ),
+        mode,
+    )
 }
 
 pub(crate) fn catalog_or_vendored(
     loaded: Result<Option<crate::catalog::Catalog>>,
+    mode: crate::output_mode::OutputMode,
 ) -> Result<Option<crate::catalog::Catalog>> {
     match loaded {
         Ok(catalog) => Ok(catalog),
         Err(error) if crate::host_paths::artifacts_dir().is_ok_and(|path| path.is_dir()) => {
-            if std::env::var_os("PHOXAL_QUIET").is_none()
-                && !crate::progress::current_mode().is_json()
-            {
-                eprintln!(
-                    "warning: catalog unreachable, continuing with project-vendored files: {error:#}"
+            if std::env::var_os("PHOXAL_QUIET").is_none() && !mode.is_json() {
+                let message = format!(
+                    "catalog unreachable, continuing with project-vendored files: {error:#}"
                 );
+                // Finding A2: routed through an active session's diagnostics
+                // instead of a raw stderr write whenever one is installed -
+                // a direct `eprintln!` here could corrupt an active TUI
+                // frame. Falls back to the original direct write only when
+                // no session is active (matches `Ui::warn`'s own fallback).
+                if matches!(
+                    crate::session::diagnostics::try_route(
+                        crate::session::event::DiagnosticSource::Cli,
+                        crate::session::event::DiagnosticLevel::Warn,
+                        &message,
+                    ),
+                    crate::session::diagnostics::RouteResult::NoSession
+                ) {
+                    eprintln!("warning: {message}");
+                }
             }
             Ok(None)
         }
@@ -226,15 +246,9 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
-        help = "Force append-only stderr output: no spinner/progress redraw, no identity/welcome decoration beyond the plain identity line."
+        help = "Force append-only stderr output: no spinner/progress redraw, no interactive TUI beyond the plain welcome card and log lines."
     )]
     pub plain: bool,
-    #[arg(
-        long,
-        global = true,
-        help = "Print the phoxal welcome card instead of the compact identity line (suppressed under the same conditions as the identity line - see `phoxal-cli --help`)."
-    )]
-    pub welcome: bool,
 
     #[command(subcommand)]
     pub command: RootCommand,
@@ -288,9 +302,9 @@ impl RootCommand {
     /// A "machine verb" answers a terse, scriptable question (the CLI's own
     /// version, a log stream, a status snapshot, the service catalog, or
     /// self-management) rather than driving the develop/simulate/deploy loop
-    /// against a robot project. The identity header and `--welcome` card are
-    /// suppressed for these (see [`crate::identity::IdentityPolicy`]) so they
-    /// never precede output a script might be parsing.
+    /// against a robot project. The welcome card is suppressed for these (see
+    /// [`crate::identity::IdentityPolicy`]) so it never precedes output a
+    /// script might be parsing.
     fn is_machine_verb(&self) -> bool {
         matches!(
             self,
@@ -300,6 +314,26 @@ impl RootCommand {
                 | Self::Service(_)
                 | Self::SelfCmd(_)
         )
+    }
+
+    /// Whether this invocation drives a [`crate::session::controller::SessionController`]-owned
+    /// interactive session (`run`, or `simulation run` without `--dry-run`).
+    /// Under a real TTY those two verbs render the welcome card INSIDE the
+    /// TUI's own startup frame (`crate::tui::render::draw_startup`) instead
+    /// of `dispatch`'s own [`crate::identity::print`] call - see
+    /// [`dispatch`]'s use of this method. `simulation join` (a stub, no
+    /// session) and `simulation run --dry-run` (report-only, no controller)
+    /// are excluded: nothing else would ever render their card, so they keep
+    /// going through `dispatch`.
+    fn enters_interactive_session(&self) -> bool {
+        match self {
+            Self::Run(_) => true,
+            Self::Simulation(command) => matches!(
+                &command.command,
+                simulate::SimulationSubcommand::Run(run) if !run.dry_run
+            ),
+            _ => false,
+        }
     }
 
     /// The `--message-format` every verb answers with, defaulting to
@@ -382,36 +416,51 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
         crate::update_notice::start_cli_check();
     }
 
-    // Output-mode matrix (see `crate::output_mode`): computed once here from
-    // the same inputs the notice policy above uses, and pushed into the
-    // process-wide progress state so every long-running operation below
-    // (catalog fetch, artifact download, git resolve, cargo builds, the
-    // simulate readiness wait) can ask for a spinner/bar without a handle
-    // threaded through its call chain.
-    let output_mode =
-        crate::output_mode::OutputMode::compute(interactive, cli.plain, cli.quiet, message_format);
-    crate::progress::set_mode(output_mode);
+    // The explicit `OutputContext` (Target design part 4): built once, here,
+    // from the same inputs the notice policy above uses, plus the theme
+    // detected off the same stream, and threaded explicitly into every
+    // long-running operation below (catalog fetch, artifact download, git
+    // resolve, cargo builds, the simulate readiness wait, `AppContext::ui`'s
+    // own JSON gate) via `AppContext::output`/`AppContext::ui` - no
+    // process-global mode cell.
+    let output = crate::session::output::OutputContext::compute(
+        interactive,
+        cli.plain,
+        cli.quiet,
+        message_format,
+    );
+    let app = &AppContext {
+        output,
+        ui: crate::Ui::new(output.mode),
+        ..app.clone()
+    };
 
-    // Identity header / `--welcome` card: gated independently of the output
-    // mode above (see `crate::identity::IdentityPolicy` - `--plain` is
-    // deliberately not part of this rule).
+    // The welcome card: gated independently of the output mode above (see
+    // `crate::identity::IdentityPolicy` - `--plain` is deliberately not part
+    // of this rule). A Rich-mode `run`/`simulation run` session renders the
+    // SAME card inside its own TUI startup frame instead (Product decision
+    // 4) - printing it here too would show it twice, once on the outgoing
+    // primary screen and once inside the alternate screen the session then
+    // opens.
     let identity_policy = crate::identity::IdentityPolicy {
         interactive,
         quiet: cli.quiet,
         message_format,
         machine_verb: cli.command.is_machine_verb(),
-        welcome: cli.welcome,
     };
-    crate::identity::print(
-        identity_policy,
-        app.project.root(),
-        crate::theme::Theme::detect_stderr(),
-        version_summary().cli_version,
-    );
+    let card_rendered_by_the_session_itself = cli.command.enters_interactive_session()
+        && output.mode == crate::output_mode::OutputMode::Rich;
+    if !card_rendered_by_the_session_itself {
+        crate::identity::print(
+            identity_policy,
+            app.project.root(),
+            crate::theme::Theme::detect_stderr(output.mode),
+            version_summary().cli_version,
+        );
+    }
 
     let result = cli.command.run(app).await;
     crate::update_notice::finish();
-    crate::progress::clear_mode();
     result
 }
 
@@ -494,6 +543,34 @@ mod tests {
 
         let version = Cli::try_parse_from(["phoxal-cli", "version"]).unwrap();
         assert_eq!(version.command.update_notice_format(), None);
+    }
+
+    /// `enters_interactive_session` decides whether `dispatch` skips its own
+    /// welcome-card print in favor of the TUI's own startup frame (see
+    /// `dispatch`'s use of it) - `run` and a live `simulation run` must gate
+    /// it, while a dry-run simulate or `simulation join` (neither ever builds
+    /// a `SessionController`) must not, or their card would never render
+    /// anywhere at all.
+    #[test]
+    fn enters_interactive_session_covers_run_and_live_simulate_only() {
+        let run = Cli::try_parse_from(["phoxal-cli", "run"]).unwrap();
+        assert!(run.command.enters_interactive_session());
+
+        let simulate_live = Cli::try_parse_from(["phoxal-cli", "simulation", "run", "default"])
+            .expect("simulation run should parse");
+        assert!(simulate_live.command.enters_interactive_session());
+
+        let simulate_dry_run =
+            Cli::try_parse_from(["phoxal-cli", "simulation", "run", "default", "--dry-run"])
+                .expect("simulation run --dry-run should parse");
+        assert!(!simulate_dry_run.command.enters_interactive_session());
+
+        let simulate_join = Cli::try_parse_from(["phoxal-cli", "simulation", "join"])
+            .expect("simulation join should parse");
+        assert!(!simulate_join.command.enters_interactive_session());
+
+        let check = Cli::try_parse_from(["phoxal-cli", "check"]).unwrap();
+        assert!(!check.command.enters_interactive_session());
     }
 
     #[test]

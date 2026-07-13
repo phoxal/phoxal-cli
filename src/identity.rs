@@ -1,14 +1,22 @@
-//! The identity header (one compact line) and the optional `--welcome` card.
+//! The welcome card: the CLI's identity banner, printed left-aligned once
+//! whenever the human UI is permitted (Product decision 4 - there is no
+//! `--welcome` flag; the card is simply the default human rendering, never
+//! opt-in).
 //!
-//! Both are pure presentation over data the CLI already computes elsewhere
+//! Pure presentation over data the CLI already computes elsewhere
 //! ([`crate::commands::version_summary`] for the CLI's own identity,
 //! [`crate::resolver::discover_robot_yaml`]/[`crate::resolver::load_robot`]
 //! for the robot's). Gating lives beside
 //! [`crate::update_notice::NoticePolicy`] in [`crate::commands::dispatch`]:
 //! [`IdentityPolicy::allowed`] is the single suppression rule, deliberately
-//! independent of `--plain` (a plain run still gets the one-line identity
-//! banner - `--plain` only turns off redraw/spinner-style decoration, see
-//! [`crate::output_mode`]).
+//! independent of `--plain` (a plain run still gets the card - `--plain` only
+//! turns off redraw/spinner-style decoration, see [`crate::output_mode`]).
+//! A `run`/`simulation run` session under a real TTY renders the SAME card
+//! inside its own TUI startup frame instead
+//! (`crate::tui::render::draw_startup`); `dispatch` skips this module's
+//! `print` for that case (see
+//! `crate::commands::RootCommand::enters_interactive_session`) so the card
+//! never appears twice.
 
 use std::path::Path;
 
@@ -44,10 +52,10 @@ impl IdentitySummary {
     }
 }
 
-/// The suppression rule for both the compact identity line and `--welcome`.
-/// Deliberately does **not** include `--plain`: identity is one line of
-/// context, not a redraw, so it survives `--plain` the same way a `Ui::info`
-/// line does. It is suppressed by:
+/// The suppression rule for the welcome card. Deliberately does **not**
+/// include `--plain`: the card is decoration shown once at command start, not
+/// a redraw, so it survives `--plain` the same way a `Ui::info` line does. It
+/// is suppressed by:
 /// - `--message-format json` (identity is not part of the JSON contract),
 /// - `--quiet`,
 /// - a non-TTY stderr (piped/redirected - nothing interactive is reading it),
@@ -59,7 +67,6 @@ pub struct IdentityPolicy {
     pub quiet: bool,
     pub message_format: MessageFormat,
     pub machine_verb: bool,
-    pub welcome: bool,
 }
 
 impl IdentityPolicy {
@@ -72,10 +79,9 @@ impl IdentityPolicy {
     }
 }
 
-/// Print the compact identity line, or the `--welcome` card, to stderr - or
-/// nothing, if [`IdentityPolicy::allowed`] is false or no robot manifest is
-/// discoverable. Never returns an error: decoration must never fail a
-/// command.
+/// Print the left-aligned welcome card to stderr - or nothing, if
+/// [`IdentityPolicy::allowed`] is false or no robot manifest is discoverable.
+/// Never returns an error: decoration must never fail a command.
 pub fn print(policy: IdentityPolicy, project_root: &Path, theme: Theme, cli_version: &str) {
     if !policy.allowed() {
         return;
@@ -83,57 +89,19 @@ pub fn print(policy: IdentityPolicy, project_root: &Path, theme: Theme, cli_vers
     let Some(summary) = IdentitySummary::discover(project_root) else {
         return;
     };
-    if policy.welcome {
-        let card = render_welcome_card(&summary, theme, cli_version);
-        // `IdentityPolicy::allowed` already requires an interactive stderr to
-        // reach this branch, so a real terminal width is available to center
-        // against; a colorless/legacy terminal just gets an unindented card.
-        eprintln!("{}", center_card(&card, console::Term::stderr().size().1));
-    } else {
-        eprintln!("{}", render_compact_line(&summary, theme));
-    }
+    eprintln!("{}", render_welcome_card(&summary, theme, cli_version));
 }
 
-/// Left-pad every line of `card` by half the slack between `terminal_width`
-/// and the card's own (ANSI-stripped) width, so it reads as centered rather
-/// than pinned to the left margin.
-fn center_card(card: &str, terminal_width: u16) -> String {
-    let box_width = card
-        .lines()
-        .next()
-        .map(|line| strip_ansi(line).chars().count())
-        .unwrap_or(0);
-    let margin = (terminal_width as usize)
-        .saturating_sub(box_width)
-        .checked_div(2)
-        .unwrap_or(0);
-    let indent = " ".repeat(margin);
-    card.lines()
-        .map(|line| format!("{indent}{line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn render_compact_line(summary: &IdentitySummary, theme: Theme) -> String {
-    format!(
-        "{} · {} · {} · {}",
-        theme.accent("phoxal"),
-        summary.robot,
-        summary.channel,
-        theme.muted(&summary.manifest),
-    )
-}
-
-/// A centered rounded card:
+/// A left-aligned rounded card:
 /// ```text
-///               ╭────────────────────────────────────────────╮
-///               │        ◇                                   │
-///               │       ◇ ◇     p h o x a l                  │
-///               │      ◇◇◇◇◇     phoxal-cli 0.9.0            │
-///               │    robot      rover-01                     │
-///               │    manifest   ./robot.yaml                 │
-///               │    channel    dev                          │
-///               ╰────────────────────────────────────────────╯
+/// ╭────────────────────────────────────────────╮
+/// │        ◇                                   │
+/// │       ◇ ◇     p h o x a l                  │
+/// │      ◇◇◇◇◇     phoxal-cli 0.9.0            │
+/// │    robot      rover-01                     │
+/// │    manifest   ./robot.yaml                 │
+/// │    channel    dev                          │
+/// ╰────────────────────────────────────────────╯
 /// ```
 fn render_welcome_card(summary: &IdentitySummary, theme: Theme, cli_version: &str) -> String {
     use crate::theme::box_style::{
@@ -234,37 +202,12 @@ fn strip_ansi(text: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn center_card_indents_every_line_by_the_same_margin() {
-        let card = "╭───╮\n│ x │\n╰───╯";
-        let centered = center_card(card, 13);
-        let lines: Vec<&str> = centered.lines().collect();
-        // box width 5, terminal 13 -> margin (13-5)/2 = 4
-        assert!(lines[0].starts_with("    ╭"));
-        assert_eq!(
-            lines
-                .iter()
-                .map(|line| line.len() - line.trim_start_matches(' ').len())
-                .collect::<Vec<_>>(),
-            vec![4, 4, 4]
-        );
-    }
-
-    #[test]
-    fn center_card_never_panics_when_the_terminal_is_narrower_than_the_card() {
-        let card = "╭──────────────────────╮\n│ too wide for terminal │\n╰──────────────────────╯";
-        // saturating_sub must keep this from underflowing/panicking.
-        let centered = center_card(card, 5);
-        assert!(centered.lines().next().unwrap().starts_with('╭'));
-    }
-
     fn policy(overrides: impl FnOnce(IdentityPolicy) -> IdentityPolicy) -> IdentityPolicy {
         overrides(IdentityPolicy {
             interactive: true,
             quiet: false,
             message_format: MessageFormat::Human,
             machine_verb: false,
-            welcome: false,
         })
     }
 

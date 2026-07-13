@@ -98,19 +98,6 @@ pub fn build_groups(board: &BoardSnapshot, filter: &str) -> Vec<GroupSection> {
         .collect()
 }
 
-/// Whether `id`'s participant is one of the three bespoke system tools with
-/// a dedicated third detail tab (design doc: "Bespoke system detail
-/// insertion point"). Hardcoded, matching `group_override` above.
-#[must_use]
-pub fn bespoke_tab_label(id: &str) -> Option<&'static str> {
-    match id {
-        SITE_TOOL_ROUTER => Some("Traffic"),
-        SITE_TOOL_JOYPAD => Some("Devices"),
-        SITE_TOOL_TELEMETRY => Some("Resources"),
-        _ => None,
-    }
-}
-
 /// The row the "Right pane opens on Overview" suggestion (design doc) should
 /// point at: the first failed/degraded participant if any exist, else the
 /// first still-starting one, else `None` (nothing needs attention).
@@ -271,13 +258,5 @@ mod tests {
     fn suggested_is_none_when_everything_is_healthy() {
         let board = board_with(&[("a", ParticipantKind::Service, ParticipantState::Ready)]);
         assert!(suggested_participant(&board).is_none());
-    }
-
-    #[test]
-    fn bespoke_tab_mapping_is_hardcoded_per_tool() {
-        assert_eq!(bespoke_tab_label(SITE_TOOL_ROUTER), Some("Traffic"));
-        assert_eq!(bespoke_tab_label(SITE_TOOL_JOYPAD), Some("Devices"));
-        assert_eq!(bespoke_tab_label(SITE_TOOL_TELEMETRY), Some("Resources"));
-        assert_eq!(bespoke_tab_label("drive"), None);
     }
 }

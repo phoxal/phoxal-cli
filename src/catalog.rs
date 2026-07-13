@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
+use crate::output_mode::OutputMode;
+
 pub use phoxal::catalog::{Artifact, Blob, BuildProvenance, Catalog, Heads};
 
 pub const DEFAULT_CATALOG_URL: &str =
@@ -81,17 +83,19 @@ impl CatalogLoadOptions {
 
 /// Load one catalog without following heads. Custom URLs and local paths are
 /// intentionally frozen single-catalog sources.
-pub fn load_catalog(options: CatalogLoadOptions) -> Result<Option<Catalog>> {
+pub fn load_catalog(options: CatalogLoadOptions, mode: OutputMode) -> Result<Option<Catalog>> {
     if options.offline || offline_from_env() {
         return Ok(None);
     }
     match options.explicit_source() {
-        Some(source) => read_source(&source).map(Some),
-        None => fetch_https(DEFAULT_CATALOG_URL).map(Some).map_err(|error| {
-            anyhow!(
-                "artifact catalog unavailable at {DEFAULT_CATALOG_URL}: {error:#}; no binaries can be resolved on a first run"
-            )
-        }),
+        Some(source) => read_source(&source, mode).map(Some),
+        None => fetch_https(DEFAULT_CATALOG_URL, mode)
+            .map(Some)
+            .map_err(|error| {
+                anyhow!(
+                    "artifact catalog unavailable at {DEFAULT_CATALOG_URL}: {error:#}; no binaries can be resolved on a first run"
+                )
+            }),
     }
 }
 
@@ -107,9 +111,10 @@ fn offline_from_env() -> bool {
 pub fn load_pinned_catalog(
     options: CatalogLoadOptions,
     channel: SelectionChannel,
+    mode: OutputMode,
 ) -> Result<Option<Catalog>> {
     let is_default = options.is_default_source();
-    let Some(latest) = load_catalog(options)? else {
+    let Some(latest) = load_catalog(options, mode)? else {
         return Ok(None);
     };
     if !is_default {
@@ -136,7 +141,7 @@ pub fn load_pinned_catalog(
         return Ok(Some(latest));
     }
     let url = snapshot_catalog_url(head)?;
-    fetch_https(&url)
+    fetch_https(&url, mode)
         .with_context(|| format!("failed to fetch frozen {channel} snapshot {head} from {url}"))
         .map(Some)
 }
@@ -154,9 +159,9 @@ pub fn snapshot_catalog_url(tag: &str) -> Result<String> {
     ))
 }
 
-fn read_source(source: &str) -> Result<Catalog> {
+fn read_source(source: &str, mode: OutputMode) -> Result<Catalog> {
     if source.starts_with("https://") {
-        fetch_https(source)
+        fetch_https(source, mode)
             .with_context(|| format!("failed to fetch artifact catalog from {source}"))
     } else if source.starts_with("http://") {
         bail!("artifact catalog source must use HTTPS or a local path: {source}");
@@ -226,8 +231,8 @@ fn validate_blob(blob: &Blob) -> Result<()> {
     Ok(())
 }
 
-fn fetch_https(url: &str) -> Result<Catalog> {
-    let progress = crate::progress::spinner(format!("fetching artifact catalog from {url}"));
+fn fetch_https(url: &str, mode: OutputMode) -> Result<Catalog> {
+    let progress = crate::progress::spinner(format!("fetching artifact catalog from {url}"), mode);
     match fetch_https_inner(url) {
         Ok(catalog) => {
             progress.finish_and_clear();
@@ -319,22 +324,16 @@ pub const OFFICIAL_SERVICES: &[(&str, &str)] = &[
     ("video", "phoxal/service-video"),
 ];
 
+/// Standard site tools: every one of these is a hard-required participant.
+/// `resolver::resolve` fails the whole robot if any is absent from the active
+/// catalog snapshot - a catalog that cannot resolve the current standard set
+/// is outdated, and the remediation is `phoxal update`, not a silent
+/// degrade (product decision 9).
 pub const OFFICIAL_TOOLS: &[(&str, &str)] = &[
     ("joypad", "phoxal/tool-joypad"),
     ("router", "phoxal/tool-router"),
+    ("telemetry", "phoxal/tool-telemetry"),
 ];
-
-/// Official native tools that degrade GRACEFULLY when the active catalog
-/// snapshot predates them, unlike [`OFFICIAL_TOOLS`] (router/joypad - hard
-/// required; `resolver::resolve` fails the whole robot if either is absent
-/// from the catalog). `tool-telemetry` was added to the framework alongside
-/// the `y2026_9` CLI-UX contracts, so an older pinned catalog snapshot
-/// legitimately has no entry for it yet; `resolver::resolve_optional_tools`
-/// simply omits a tool here from `ResolvedRobot::tools` instead of failing,
-/// and every downstream consumer (`launch_plan::build_site_launches`, the
-/// TUI's host meter) already treats "this optional tool is absent" as a
-/// normal, not a failure, state.
-pub const OFFICIAL_OPTIONAL_TOOLS: &[(&str, &str)] = &[("telemetry", "phoxal/tool-telemetry")];
 
 pub const OFFICIAL_SIMULATORS: &[(&str, &str)] = &[
     ("webots-controller", "phoxal/simulator-webots-controller"),
@@ -409,7 +408,14 @@ pub fn select_artifact<'a>(
             .into_iter()
             .max_by(|left, right| compare_versions(&left.version, &right.version))
             .ok_or_else(|| anyhow!(
-                "expected package {package} is absent from snapshot {} (channel head); phoxal-cli {} expects it. Upgrade with `phoxal-cli self upgrade` or switch channel",
+                // Finding A6: aligned with every other "the active catalog
+                // doesn't have what this CLI needs" remediation in the crate
+                // (`resolver`/`native_artifacts`/`launch_plan`/`deploy` all
+                // say `phoxal update`) instead of the old, inconsistent
+                // "upgrade the CLI binary or switch channel" wording - `phoxal
+                // update` is the direct action (re-resolve against the
+                // current channel head and re-vendor whatever it requires).
+                "expected package {package} is absent from snapshot {} (channel head); phoxal-cli {} expects it. Run `phoxal update`",
                 catalog.build.tag,
                 env!("CARGO_PKG_VERSION")
             ))?,
@@ -470,7 +476,6 @@ pub fn fixture_catalog_for_tests(entries: Vec<CatalogFixtureEntry>) -> Catalog {
     for (_, package) in OFFICIAL_SERVICES
         .iter()
         .chain(OFFICIAL_TOOLS)
-        .chain(OFFICIAL_OPTIONAL_TOOLS)
         .chain(OFFICIAL_SIMULATORS)
     {
         if existing.contains(*package) {

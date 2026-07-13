@@ -8,7 +8,7 @@ use phoxal::check as graph_check;
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::y2026_8::simulation::{RobotSpawn, SpawnRequest, SpawnSet};
 use serde::Serialize;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::AppContext;
@@ -23,19 +23,23 @@ use crate::commands::check::{
 use crate::component_driver::{component_assets_dir, component_driver_crate_dir};
 use crate::launch_plan::{
     CheckedRobotLaunchInput, DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, PlanContext,
-    SITE_TOOL_JOYPAD, SubstitutedContract, SubstitutionRecord, build_launch_plan,
+    SITE_TOOL_ROUTER, STANDARD_SITE_TOOLS, SubstitutedContract, SubstitutionRecord,
+    build_launch_plan,
 };
 use crate::resolver::{
     ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras, resolve,
 };
+use crate::session::event::ClockPresence;
+use crate::session::output::OutputContext;
 use crate::simulate_staging::{
     ComponentTypeToStage, RobotToStage, StagedSimulationWorld, stage_simulation_world,
 };
 use crate::supervisor::{
-    BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
-    RequestedStop, RouterOwnership, SupervisionStage, SupervisorLock, SupervisorOptions,
-    await_readiness_barrier, await_terminal_graph_failure, default_connect_endpoint,
-    local_router_reachable, router_ownership, start_bus_log_subscriber, start_clock_barrier_feed,
+    BoardBackend, ClockObservation, ParticipantKind, ParticipantSpec, ParticipantState,
+    ParticipantStatus, RequestedStop, RouterOwnership, SupervisionStage, SupervisorAction,
+    SupervisorLock, SupervisorOptions, SupervisorOutcome, await_readiness_barrier,
+    await_terminal_graph_failure, default_connect_endpoint, local_router_reachable,
+    router_ownership, start_bus_log_subscriber, start_clock_barrier_feed,
     start_presence_heartbeat_subscriber, supervise_until_shutdown, supervisor_actions_path,
     supervisor_state_path,
 };
@@ -136,8 +140,6 @@ pub struct SimulationRun {
         help = "Resolve and write run artifacts without starting simulation processes."
     )]
     pub dry_run: bool,
-    #[arg(long, hide = true)]
-    pub joypad: bool,
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
     pub message_format: MessageFormat,
     #[arg(
@@ -185,12 +187,17 @@ pub enum SimulateMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimulateOptions {
     pub world: String,
-    pub joypad: bool,
     pub catalog_source: Option<String>,
     pub message_format: MessageFormat,
     pub watch: bool,
     pub overlays: Vec<String>,
     pub target: Option<String>,
+    /// The session's [`OutputMode`](crate::output_mode::OutputMode), carried
+    /// alongside the other options so `resolve_project`/`prepare_with_mode`
+    /// (which run inside a `spawn_blocking` worker with no `AppContext` in
+    /// scope) can thread it into a catalog fetch's spinner without a
+    /// process-global mode cell.
+    pub output_mode: crate::output_mode::OutputMode,
 }
 
 /// Pairs the sim `LaunchPlan` with its `PlanContext` (Part 3/6): replaces the
@@ -204,6 +211,11 @@ pub struct SimulateOptions {
 pub struct SimPlan {
     pub plan: LaunchPlan,
     pub ctx: PlanContext,
+    /// Finding A5: this session's launch-time participant metadata, resolved
+    /// once in `prepare_with_mode` from `plan` and its (sim-filtered)
+    /// contract surfaces - see `crate::stores::runtime_store::RuntimeStore`'s
+    /// own docs.
+    pub runtime_store: crate::stores::runtime_store::RuntimeStore,
 }
 
 pub(crate) struct ResolvedSimulation {
@@ -219,12 +231,12 @@ impl SimulationRun {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let options = SimulateOptions {
             world: self.world.clone(),
-            joypad: self.joypad,
             catalog_source: app.catalog_source.clone(),
             message_format: self.message_format,
             watch: self.watch,
             overlays: self.env.clone(),
             target: self.target.clone(),
+            output_mode: app.output.mode,
         };
         let mode = if self.dry_run {
             SimulateMode::DryRun
@@ -234,28 +246,6 @@ impl SimulationRun {
         run(app, options, mode).await.map(|_| ())
     }
 }
-
-/// `simulation run`'s startup stepper phases (Part 4), in order. Indices
-/// 3-8 map 1:1 onto `stages_for_simulate`'s six `SupervisionStage`s, driven
-/// live from the board by `Stepper::drive_participant_phases`; index 9 wraps
-/// the existing clock-coupled `await_readiness_barrier` call unchanged (see
-/// its own docs for why it stays a separate, final gate rather than folding
-/// into the staged supervisor). Indices 0-2 share `run`'s documented
-/// simplification (`commands::run::RUN_PHASES`) - they complete together
-/// right when `prepare_with_mode` returns rather than live-updating mid-phase.
-const SIMULATION_PHASES: [&str; 11] = [
-    "Downloading artifacts",
-    "Validating robot",
-    "Building artifacts",
-    "Starting router",
-    "Starting tools",
-    "Starting Webots",
-    "Starting simulation supervisor",
-    "Starting services",
-    "Spawning robot in Webots",
-    "Waiting for simulation clock",
-    "Initialized",
-];
 
 pub async fn run(
     app: &AppContext,
@@ -273,297 +263,74 @@ pub async fn run(
             Ok(sim)
         }
         SimulateMode::Live => {
-            let mut stepper = crate::stepper::Stepper::new(SIMULATION_PHASES);
-            stepper.start(0);
+            // One interactive surface for the whole session (Product
+            // decision 1): the controller starts its renderer right now,
+            // before preparation even begins - see `SessionController::new`.
+            let identity = crate::identity::IdentitySummary::discover(app.project.root());
+            let mut controller = crate::session::controller::SessionController::new(
+                app.output,
+                "simulation",
+                identity,
+            )?;
+            let events = controller.events();
+
             let project_root = app.project.root().to_path_buf();
             let ui = app.ui;
             let prepared_options = options.clone();
-            let sim = tokio::task::spawn_blocking(move || {
-                prepare_with_mode(&project_root, prepared_options, SimulateMode::Live)
-            })
-            .await
-            .context("simulate preparation worker failed")??;
-            // See `SIMULATION_PHASES`' docs: download/validate/build happen
-            // together inside `prepare_with_mode`, so all three complete
-            // here rather than live.
-            stepper.complete(0);
-            stepper.start(1);
-            stepper.complete(1);
-            stepper.start(2);
-            stepper.complete(2);
-
-            crate::host_doctor::preflight()
-                .map_err(|error| anyhow!("{error}"))
-                .context("Webots preflight failed; live simulate cannot launch the simulator")?;
-
-            let run_dir = crate::host_paths::run_dir()?;
-            let _lock = SupervisorLock::acquire(&run_dir)?;
-            let _simulator_lock =
-                SupervisorLock::acquire_path(&crate::host_paths::simulator_lock_path()?)?;
-            let state_file = supervisor_state_path()?;
-            let action_file = supervisor_actions_path()?;
-            let board = BoardBackend::new();
-            let router_ownership =
-                router_ownership(local_router_reachable(&default_connect_endpoint()));
-            let mut specs = Vec::new();
-            crate::commands::run::prepare_site_tools(
-                &sim.plan,
-                &sim.ctx.resolved,
-                &board,
-                &mut specs,
-                router_ownership,
-            )?;
-            crate::commands::run::prepare_robot_participants(
-                &sim.plan,
-                &sim.ctx.resolved,
-                &sim.ctx.project_root,
-                &crate::commands::run::DriverPolicy::drivers_off_for_sim(),
-                &board,
-                &mut specs,
-                &ui,
-            )?;
-            prepare_substitution_notes(&sim.plan, &board);
-
-            let (webots_spec, spawn_descriptors) = stage_and_prepare_webots_spec(app, &sim)?;
-            let spawn_responder =
-                start_spawn_responder(&sim.plan, spawn_descriptors, router_ownership).await?;
-            let requested_stop = RequestedStop::new(WEBOTS_SITE_ID, webots_spec.shutdown_grace);
-            // The readiness barrier's expected set, captured before `specs` is
-            // moved into the supervisor task: every CLI-managed bus participant
-            // (everything except the Webots app itself, which has
-            // `bus_participant: false`) plus every SIMULATION-MANAGED
-            // participant (the supervisor and each robot's controller), which
-            // have no `ParticipantSpec`/supervised process at all.
-            let expected_bus_ids = specs
-                .iter()
-                .filter(|spec| spec.bus_participant)
-                .map(|spec| spec.id.clone())
-                .chain(simulation_managed_participant_ids(&sim.plan))
-                .collect::<Vec<_>>();
-            specs.push(webots_spec);
-
-            app.ui.info(format!(
-                "simulation launch plan resolved: {} robot(s), {} site tool(s)",
-                sim.plan.robots.len(),
-                sim.plan.site.len()
-            ));
-            match router_ownership {
-                RouterOwnership::External => app.ui.info("reusing reachable external tool-router"),
-                RouterOwnership::Managed => {
-                    app.ui
-                        .info("tool-router will be managed by this simulation session");
-                }
-            }
-            crate::commands::run::report_launch_commands(
-                &sim.plan,
-                &specs,
-                options.message_format,
-            )?;
-
-            let _log_tasks = sim
-                .plan
-                .robots
-                .iter()
-                .map(|robot| {
-                    start_bus_log_subscriber(
-                        robot.namespace.clone(),
-                        robot.id.clone(),
-                        default_connect_endpoint(),
-                        board.clone(),
-                    )
+            let sim = controller
+                .drive_prepare_phase(move || {
+                    prepare_with_mode(&project_root, prepared_options, SimulateMode::Live)
                 })
-                .collect::<Vec<_>>();
-            // OBSERVED readiness: drive board state from each participant's own
-            // presence/heartbeat, including SIMULATION-MANAGED ones (the
-            // supervisor and every controller), which have no supervised
-            // process of their own to poll.
-            let _presence_tasks = sim
-                .plan
-                .robots
-                .iter()
-                .map(|robot| {
-                    start_presence_heartbeat_subscriber(
-                        robot.namespace.clone(),
-                        robot.id.clone(),
-                        default_connect_endpoint(),
-                        board.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let barrier_robot =
-                sim.plan.robots.first().context(
-                    "sim launch plan has no robot for the readiness barrier's clock feed",
-                )?;
-            let (mut clock_rx, _clock_task) = start_clock_barrier_feed(
-                barrier_robot.namespace.clone(),
-                barrier_robot.id.clone(),
-                default_connect_endpoint(),
+                .await?;
+
+            // Fixes finding A1: preflight, lock acquisition, world/controller
+            // staging, and spawn-responder startup used to run as a
+            // synchronous gap AFTER preparation but BEFORE the controller's
+            // own Ctrl-C-aware loop resumed - in a raw-mode TUI, Ctrl-C is a
+            // KEY EVENT (crossterm disables ISIG), which was simply never
+            // polled during that whole window. `drive_setup` keeps ONE
+            // controller loop live (input, Ctrl-C, session events, redraws)
+            // through this setup phase too, exactly like
+            // `drive_prepare_phase` already does for preparation.
+            let token = controller.token();
+            let output = controller.output();
+            let renders_tui = controller.renders_tui();
+            let setup = live_simulate_setup(
+                ui,
+                sim.clone(),
+                options.clone(),
+                events,
+                token,
+                output,
+                renders_tui,
             );
-            // The SAME clock feed backs both the readiness barrier below
-            // (`&mut clock_rx`, first-sample/advanced detection) and the
-            // TUI's live top-bar step/running readout
-            // (`TelemetryBackend::set_clock_feed`, `latest` field) - cloning
-            // the `watch::Receiver` here is cheap and leaves the barrier's own
-            // mutable borrow untouched. Unlike the old behavior, the feed
-            // task is no longer aborted once the barrier completes: it keeps
-            // running (as `_clock_task`, unbound) for the rest of the
-            // session so the TUI keeps seeing fresh samples.
-            let telemetry = crate::telemetry::TelemetryBackend::new();
-            telemetry.set_clock_feed(clock_rx.clone());
+            let setup = controller.drive_setup(setup).await?;
 
-            let (action_rx, watch_handle) = if options.watch {
-                let (action_tx, action_rx) = mpsc::channel(16);
-                let live_ids = specs
-                    .iter()
-                    .map(|spec| spec.id.clone())
-                    .collect::<std::collections::BTreeSet<_>>();
-                let handle = crate::watch::spawn_sim_watch(crate::watch::SimWatchConfig {
-                    ctx: sim.ctx.clone(),
-                    options: options.clone(),
-                    live_ids,
-                    board: board.clone(),
-                    action_tx,
-                });
-                (Some(action_rx), Some(handle))
-            } else {
-                (None, None)
-            };
+            controller.set_restart_channel(setup.action_tx);
 
-            // The readiness barrier and the process supervisor must run
-            // concurrently, not sequentially: participants only start
-            // publishing heartbeats once `supervise_until_shutdown` has
-            // actually spawned them. `cancel_tx` is the coordinated teardown
-            // path for both a barrier error and a terminal graph failure after
-            // readiness: it asks the supervisor task to SIGTERM Webots and
-            // stop every other child instead of leaving an unhealthy session
-            // running forever.
-            let (cancel_tx, cancel_rx) = oneshot::channel();
-            let stages = stages_for_simulate(specs, &sim.plan);
-            let stage_phases = stages
-                .iter()
-                .map(|stage| {
-                    crate::stepper::StagePhase::new(
-                        !stage.specs.is_empty() || !stage.ready_ids.is_empty(),
-                        stage.ready_ids.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let identity = crate::identity::IdentitySummary::discover(&sim.ctx.project_root);
-            let display = crate::display::Display::for_mode("simulation", identity);
-            // Live telemetry (CLI-UX Phase 3/4): only worth subscribing when
-            // a real TUI is up to read it, same gate as `commands::run`. The
-            // sim clock feed (`telemetry.set_clock_feed` above) is wired
-            // unconditionally since it costs nothing extra - the SAME task
-            // already exists for the readiness barrier - but host/process/
-            // router/joypad each open their own bus connection, so those
-            // stay Tui-gated.
-            let site_targets: Vec<(String, String)> = sim
-                .plan
-                .robots
-                .iter()
-                .map(|robot| (robot.namespace.clone(), robot.id.clone()))
-                .collect();
-            let _telemetry_tasks = if matches!(display, crate::display::Display::Tui(_)) {
-                crate::commands::run::start_telemetry_feeds(&site_targets, &telemetry)
-            } else {
-                Vec::new()
-            };
-            let (display_activate_tx, display_activate_rx) = oneshot::channel();
-            let supervise_task = tokio::spawn(supervise_until_shutdown(
-                stages,
-                board.clone(),
-                SupervisorOptions {
-                    state_file: Some(state_file),
-                    action_file: Some(action_file),
-                    action_rx,
-                    requested_stop: Some(requested_stop),
-                    cancel_rx: Some(cancel_rx),
-                    display,
-                    display_activate_rx: Some(display_activate_rx),
-                    telemetry,
-                    ..SupervisorOptions::default()
-                },
-            ));
-
-            // Phases 3-8 (Router/Tools/Webots/Supervisor/Services/Robot)
-            // progress live off the same board the staged supervisor above
-            // is driving, purely cosmetic and read-only (see
-            // `Stepper::drive_participant_phases`'s docs); phase 9 is the
-            // existing clock-coupled barrier, unchanged. `tokio::join!` runs
-            // both concurrently so the stepper's stage-by-stage display and
-            // the barrier's all-at-once participant+clock check finish
-            // together rather than one blocking the other.
-            stepper.start(9);
-            let (stepper_after_stages, barrier_result) = tokio::join!(
-                stepper.drive_participant_phases(&board, 3, stage_phases),
-                await_readiness_barrier(
-                    &board,
-                    &expected_bus_ids,
-                    &mut clock_rx,
-                    SIMULATE_READINESS_TIMEOUT,
-                    std::time::Duration::from_millis(200),
+            let outcome = controller
+                .drive_supervision(
+                    setup.board,
+                    setup.telemetry,
+                    setup.runtime_store,
+                    setup.supervise_task,
                 )
-            );
-            let mut stepper = stepper_after_stages;
-            match &barrier_result {
-                Ok(()) if !stepper.has_failed() => {
-                    stepper.complete(9);
-                    stepper.start(10);
-                    stepper.complete(10);
-                    stepper.clear();
-                }
-                Ok(()) => {
-                    // A phase 3-8 stage already failed and printed its own
-                    // `✗` line even though the barrier itself reported
-                    // success - leave that failure visible rather than
-                    // papering over it with a false `Initialized`.
-                }
-                Err(error) => stepper.fail(9, format!("{error:#}")),
-            }
-            // Hand off to whichever display `Display::for_mode` selected
-            // (Part 2) only now that every stepper line is done redrawing,
-            // regardless of which arm above ran - a startup failure must
-            // still be visible in the TUI/logger, not just a frozen stepper
-            // line.
-            let _ = display_activate_tx.send(());
-            let terminal_failure_task = match &barrier_result {
-                Err(error) => {
-                    let _ = cancel_tx.send(error.to_string());
-                    None
-                }
-                Ok(()) => {
-                    let board = board.clone();
-                    let expected_bus_ids = expected_bus_ids.clone();
-                    Some(tokio::spawn(async move {
-                        let failed = await_terminal_graph_failure(
-                            &board,
-                            &expected_bus_ids,
-                            std::time::Duration::from_millis(200),
-                        )
-                        .await;
-                        let _ = cancel_tx.send(format!(
-                            "graph ended unhealthy; failed participants: {}",
-                            failed.join(", ")
-                        ));
-                    }))
-                }
-            };
-
-            let outcome = supervise_task
-                .await
-                .context("simulation supervisor task panicked")?;
-            if let Some(handle) = terminal_failure_task {
+                .await;
+            setup.barrier_watch.abort();
+            setup.clock_state_watcher.abort();
+            if let Some(handle) = setup.watch_handle {
                 handle.abort();
             }
-            if let Some(handle) = watch_handle {
-                handle.abort();
+            setup.spawn_responder.abort();
+            // Finding B6: every feed task (log/presence subscribers, the
+            // clock barrier feed, live telemetry) participates in teardown
+            // instead of being leaked under a `_`-prefixed binding for the
+            // rest of the process's life.
+            for feed in setup.feed_tasks {
+                feed.abort();
             }
-            spawn_responder.abort();
             let outcome = outcome?;
 
-            if let Err(error) = barrier_result {
-                bail!("{error}");
-            }
             if !outcome.graph_healthy() {
                 bail!(
                     "supervisor graph ended unhealthy; failed participants: {}",
@@ -573,6 +340,368 @@ pub async fn run(
             Ok(sim)
         }
     }
+}
+
+/// Everything [`live_simulate_setup`] hands back to the caller once it
+/// completes: the board/telemetry/supervisor task `drive_supervision` needs,
+/// plus every ancillary task that must be aborted once supervision ends.
+struct LiveSimSetup {
+    // Keep both session-wide locks alive for the entire supervision lifetime,
+    // not merely while this setup future is being assembled.
+    _locks: LiveSimulationLocks,
+    board: BoardBackend,
+    telemetry: crate::telemetry::TelemetryBackend,
+    runtime_store: crate::stores::runtime_store::RuntimeStore,
+    supervise_task: JoinHandle<Result<SupervisorOutcome>>,
+    barrier_watch: JoinHandle<()>,
+    clock_state_watcher: JoinHandle<()>,
+    watch_handle: Option<JoinHandle<()>>,
+    spawn_responder: JoinHandle<()>,
+    action_tx: mpsc::Sender<SupervisorAction>,
+    /// Every feed task that must stay alive for the whole session (log/
+    /// presence subscribers, the clock barrier feed, live telemetry) -
+    /// collected here instead of leaked under `_`-prefixed bindings (finding
+    /// B6), so the caller can abort every one of them once supervision ends.
+    feed_tasks: Vec<JoinHandle<()>>,
+}
+
+struct LiveSimulationLocks {
+    _run_lock: SupervisorLock,
+    _simulator_lock: SupervisorLock,
+}
+
+impl LiveSimulationLocks {
+    fn acquire(run_dir: &std::path::Path, simulator_lock_path: &std::path::Path) -> Result<Self> {
+        Ok(Self {
+            _run_lock: SupervisorLock::acquire(run_dir)?,
+            _simulator_lock: SupervisorLock::acquire_path(simulator_lock_path)?,
+        })
+    }
+}
+
+/// Everything between preparation finishing and supervision beginning for a
+/// live `simulation run`: Webots preflight, lock acquisition, world/
+/// controller staging, and spawn-responder startup (finding A1's
+/// "intermediate setup" gap), plus starting every feed/watcher task
+/// supervision needs. Driven through `SessionController::drive_setup` (see
+/// the call site) so Ctrl-C is observed the whole time this runs, not only
+/// once it returns.
+async fn live_simulate_setup(
+    ui: crate::Ui,
+    sim: SimPlan,
+    options: SimulateOptions,
+    events: mpsc::Sender<crate::session::event::SessionEvent>,
+    token: tokio_util::sync::CancellationToken,
+    output: OutputContext,
+    renders_tui: bool,
+) -> Result<LiveSimSetup> {
+    crate::host_doctor::preflight()
+        .map_err(|error| anyhow!("{error}"))
+        .context("Webots preflight failed; live simulate cannot launch the simulator")?;
+
+    let run_dir = crate::host_paths::run_dir()?;
+    let locks = LiveSimulationLocks::acquire(&run_dir, &crate::host_paths::simulator_lock_path()?)?;
+    let state_file = supervisor_state_path()?;
+    let action_file = supervisor_actions_path()?;
+    let board = BoardBackend::new();
+    let router_ownership = router_ownership(local_router_reachable(&default_connect_endpoint()));
+    let mut runtime_store = sim.runtime_store.clone();
+    runtime_store.set_router_ownership(SITE_TOOL_ROUTER, router_ownership);
+    let mut specs = Vec::new();
+    crate::commands::run::prepare_site_tools(
+        &sim.plan,
+        &sim.ctx.resolved,
+        &board,
+        &mut specs,
+        router_ownership,
+        &ui,
+    )?;
+    crate::commands::run::prepare_robot_participants(
+        &sim.plan,
+        &sim.ctx.resolved,
+        &sim.ctx.project_root,
+        &crate::commands::run::DriverPolicy::drivers_off_for_sim(),
+        &board,
+        &mut specs,
+        &ui,
+    )?;
+    prepare_substitution_notes(&sim.plan, &board);
+
+    let (webots_spec, spawn_descriptors) = stage_and_prepare_webots_spec(&ui, &sim)?;
+    let spawn_responder =
+        start_spawn_responder(&sim.plan, spawn_descriptors, router_ownership).await?;
+    let requested_stop = RequestedStop::new(WEBOTS_SITE_ID, webots_spec.shutdown_grace);
+    // The readiness barrier's expected set, captured before `specs` is
+    // moved into the supervisor task: every CLI-managed bus participant
+    // (everything except the Webots app itself, which has
+    // `bus_participant: false`) plus every SIMULATION-MANAGED
+    // participant (the supervisor and each robot's controller), which
+    // have no `ParticipantSpec`/supervised process at all.
+    let expected_bus_ids = specs
+        .iter()
+        .filter(|spec| spec.bus_participant)
+        .map(|spec| spec.id.clone())
+        .chain(simulation_managed_participant_ids(&sim.plan))
+        .collect::<Vec<_>>();
+    specs.push(webots_spec);
+
+    ui.info(format!(
+        "simulation launch plan resolved: {} robot(s), {} site tool(s)",
+        sim.plan.robots.len(),
+        sim.plan.site.len()
+    ));
+    match router_ownership {
+        RouterOwnership::External => ui.info("reusing reachable external tool-router"),
+        RouterOwnership::Managed => {
+            ui.info("tool-router will be managed by this simulation session");
+        }
+    }
+    crate::commands::run::report_launch_commands(&sim.plan, &specs, options.message_format)?;
+
+    let mut feed_tasks = sim
+        .plan
+        .robots
+        .iter()
+        .map(|robot| {
+            start_bus_log_subscriber(
+                robot.namespace.clone(),
+                robot.id.clone(),
+                default_connect_endpoint(),
+                board.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    // OBSERVED readiness: drive board state from each participant's own
+    // presence/heartbeat, including SIMULATION-MANAGED ones (the
+    // supervisor and every controller), which have no supervised
+    // process of their own to poll.
+    feed_tasks.extend(sim.plan.robots.iter().map(|robot| {
+        start_presence_heartbeat_subscriber(
+            robot.namespace.clone(),
+            robot.id.clone(),
+            default_connect_endpoint(),
+            board.clone(),
+        )
+    }));
+    let barrier_robot = sim
+        .plan
+        .robots
+        .first()
+        .context("sim launch plan has no robot for the readiness barrier's clock feed")?;
+    let (clock_rx, clock_task) = start_clock_barrier_feed(
+        barrier_robot.namespace.clone(),
+        barrier_robot.id.clone(),
+        default_connect_endpoint(),
+    );
+    feed_tasks.push(clock_task);
+    // The SAME clock feed backs the readiness barrier, the session's clock
+    // observation watcher (Product decision 5), and the TUI's live top-bar
+    // step/running readout - cloning the `watch::Receiver` is cheap.
+    let telemetry = crate::telemetry::TelemetryBackend::new();
+    telemetry.set_clock_feed(clock_rx.clone());
+
+    // The restart/hot-reload action channel always exists now (not just
+    // under `--watch`), matching `commands::run`.
+    let (action_tx, action_rx) = mpsc::channel(16);
+    let watch_handle = if options.watch {
+        let live_ids = specs
+            .iter()
+            .map(|spec| spec.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        Some(crate::watch::spawn_sim_watch(
+            crate::watch::SimWatchConfig {
+                ctx: sim.ctx.clone(),
+                options: options.clone(),
+                live_ids,
+                board: board.clone(),
+                action_tx: action_tx.clone(),
+            },
+        ))
+    } else {
+        None
+    };
+
+    // The readiness barrier and the process supervisor must run
+    // concurrently, not sequentially: participants only start
+    // publishing heartbeats once `supervise_until_shutdown` has
+    // actually spawned them. `cancel_tx` is the coordinated teardown
+    // path for both a barrier error and a terminal graph failure
+    // after readiness: it asks the supervisor task to SIGTERM Webots
+    // and stop every other child instead of leaving an unhealthy
+    // session running forever.
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let stages = stages_for_simulate(specs, &sim.plan, output);
+
+    // Live telemetry (CLI-UX Phase 3/4): only worth subscribing when
+    // a real TUI is up to read it, same gate as `commands::run`. The
+    // sim clock feed (`telemetry.set_clock_feed` above) is wired
+    // unconditionally since it costs nothing extra - the SAME task
+    // already exists for the readiness barrier - but host/process/
+    // router/joypad each open their own bus connection, so those
+    // stay Tui-gated.
+    let site_targets: Vec<(String, String)> = sim
+        .plan
+        .robots
+        .iter()
+        .map(|robot| (robot.namespace.clone(), robot.id.clone()))
+        .collect();
+    if renders_tui {
+        feed_tasks.extend(crate::commands::run::start_telemetry_feeds(
+            &site_targets,
+            &telemetry,
+        ));
+    }
+
+    let starting = crate::session::state::SessionState::Preparing
+        .start()
+        .expect("the controller begins every session in Preparing");
+    let _ = events
+        .send(crate::session::event::SessionEvent::SessionChanged { state: starting })
+        .await;
+    // Fixes live-acceptance #3: reflects the observed simulation clock
+    // (waiting/paused/running) continuously for the whole session, via the
+    // controller's own validated reduction (finding B4) - not just once at
+    // startup, and independent of the readiness barrier's pass/fail decision.
+    let clock_state_watcher =
+        spawn_clock_state_watcher(clock_rx.clone(), events.clone(), token.clone());
+
+    let board_for_supervise = board.clone();
+    let supervise_task = tokio::spawn(supervise_until_shutdown(
+        stages,
+        board_for_supervise,
+        SupervisorOptions {
+            state_file: Some(state_file),
+            action_file: Some(action_file),
+            action_rx: Some(action_rx),
+            requested_stop: Some(requested_stop),
+            cancel_rx: Some(cancel_rx),
+            token: token.clone(),
+            events: Some(events.clone()),
+            ..SupervisorOptions::default()
+        },
+    ));
+
+    // Fixes live-acceptance #4: the readiness barrier (and, once it
+    // succeeds, the ongoing terminal-graph-failure watch) run as a
+    // background task instead of an unguarded `tokio::join!` ahead of
+    // the controller's own Ctrl-C-aware loop.
+    let readiness_timeout = output.wait_budget(SIMULATE_READINESS_TIMEOUT);
+    let barrier_watch = tokio::spawn({
+        let board = board.clone();
+        let expected_bus_ids = expected_bus_ids.clone();
+        let mut clock_rx = clock_rx;
+        async move {
+            match await_readiness_barrier(
+                &board,
+                &expected_bus_ids,
+                &mut clock_rx,
+                readiness_timeout,
+                std::time::Duration::from_millis(200),
+            )
+            .await
+            {
+                Err(error) => {
+                    let _ = cancel_tx.send(error.to_string());
+                }
+                Ok(()) => {
+                    let failed = await_terminal_graph_failure(
+                        &board,
+                        &expected_bus_ids,
+                        std::time::Duration::from_millis(200),
+                    )
+                    .await;
+                    let _ = cancel_tx.send(format!(
+                        "graph ended unhealthy; failed participants: {}",
+                        failed.join(", ")
+                    ));
+                }
+            }
+        }
+    });
+
+    Ok(LiveSimSetup {
+        _locks: locks,
+        board,
+        telemetry,
+        runtime_store,
+        supervise_task,
+        barrier_watch,
+        clock_state_watcher,
+        watch_handle,
+        spawn_responder,
+        action_tx,
+        feed_tasks,
+    })
+}
+
+/// Continuously OBSERVE the simulation clock (Product decision 5) and report
+/// it as `SessionEvent::ClockObserved` - an observation, never a state
+/// replacement (finding B4). This watcher does not track `SessionState` at
+/// all: only `SessionController` reduces an observation into the session's
+/// actual state, via `SessionState`'s own validated transitions, which is
+/// what makes rejecting a stale observation once `Stopping` has begun the
+/// controller's job instead of a second, independent authority racing it.
+/// Runs until `token` is cancelled or the feed itself ends.
+fn spawn_clock_state_watcher(
+    mut clock_rx: watch::Receiver<ClockObservation>,
+    events: mpsc::Sender<crate::session::event::SessionEvent>,
+    token: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut last_sent: Option<ClockPresence> = None;
+        // Copied out into a plain local BEFORE the `.await` below (not
+        // inlined as an argument expression): `watch::Ref` is not `Send`,
+        // and Rust keeps a temporary alive until the end of its enclosing
+        // statement - across the `.await` if it were an argument expression -
+        // which would make this whole future `!Send` and reject `tokio::spawn`.
+        let observation = *clock_rx.borrow();
+        send_clock_observation_if_changed(&mut last_sent, observation, &events).await;
+        loop {
+            tokio::select! {
+                () = token.cancelled() => break,
+                changed = clock_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+            let observation = *clock_rx.borrow();
+            send_clock_observation_if_changed(&mut last_sent, observation, &events).await;
+        }
+    })
+}
+
+/// Map the supervisor's own richer clock sample down to the minimal
+/// [`ClockPresence`] the session-state reduction cares about.
+fn clock_presence(observation: ClockObservation) -> ClockPresence {
+    if observation.first_sample_ns.is_none() {
+        ClockPresence::Absent
+    } else if observation.latest.is_some_and(|sample| sample.running) {
+        ClockPresence::Running
+    } else {
+        ClockPresence::Paused
+    }
+}
+
+/// Send `SessionEvent::ClockObserved` only on an edge change (never on every
+/// tick of a fast-advancing simulation clock) - awaited, not `try_send`
+/// (finding B5): a real pause/resume transition must never be silently
+/// dropped under channel pressure the way a merely-repeated observation may
+/// be. `last` starts `None` so the very first observation (even
+/// `ClockPresence::Absent`) is always reported once.
+async fn send_clock_observation_if_changed(
+    last: &mut Option<ClockPresence>,
+    observation: ClockObservation,
+    events: &mpsc::Sender<crate::session::event::SessionEvent>,
+) {
+    let presence = clock_presence(observation);
+    if *last == Some(presence) {
+        return;
+    }
+    *last = Some(presence);
+    let _ = events
+        .send(crate::session::event::SessionEvent::ClockObserved(presence))
+        .await;
 }
 
 pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<SimPlan> {
@@ -595,15 +724,18 @@ fn prepare_with_mode(
         )
         .context("failed to stage component assets into the simulation robot root")?;
     }
-    let plan = build_checked_sim_launch_plan(
+    let (plan, contract_surfaces) = build_checked_sim_launch_plan(
         &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,
         &resolved.manifest_extras,
         resolved.catalog.as_ref(),
-        options.joypad,
         options.message_format,
     )?;
+    // Finding A5: resolved once here, from the same `plan`/`contract_surfaces`
+    // this function already has - see `RuntimeStore::from_launch_plan`'s docs.
+    let runtime_store =
+        crate::stores::runtime_store::RuntimeStore::from_launch_plan(&plan, &contract_surfaces);
     let source_participants = sim_source_participants(
         &resolved.project_root,
         &resolved.resolved,
@@ -617,6 +749,7 @@ fn prepare_with_mode(
             resolved: resolved.resolved,
             source_participants,
         },
+        runtime_store,
     })
 }
 
@@ -639,20 +772,24 @@ pub(crate) fn resolve_project(
     };
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
-    let catalog = crate::commands::catalog_or_vendored(crate::catalog::load_pinned_catalog(
-        crate::catalog::CatalogLoadOptions {
-            cli_source: options.catalog_source.clone(),
-            robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
-                if source.is_absolute() {
-                    source.clone()
-                } else {
-                    project_root.join(source)
-                }
-            }),
-            offline: false,
-        },
-        crate::catalog::selection_channel(robot.artifacts.channel),
-    ))?;
+    let catalog = crate::commands::catalog_or_vendored(
+        crate::catalog::load_pinned_catalog(
+            crate::catalog::CatalogLoadOptions {
+                cli_source: options.catalog_source.clone(),
+                robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
+                    if source.is_absolute() {
+                        source.clone()
+                    } else {
+                        project_root.join(source)
+                    }
+                }),
+                offline: false,
+            },
+            crate::catalog::selection_channel(robot.artifacts.channel),
+            options.output_mode,
+        ),
+        options.output_mode,
+    )?;
 
     // Always resolve live git component driver commits so driver metadata can
     // be staged. Component asset git refs are resolved only for live simulate,
@@ -693,23 +830,31 @@ pub(crate) fn resolve_project(
 /// disk cache to scope a rebuild around (docs: `check::build_emit_apis_from_source`
 /// never caches), so a `watch`-triggered recheck simply rebuilds the whole
 /// source graph rather than just the one crate that changed.
+/// Also returns the (already sim-filtered/remapped) contract surfaces
+/// alongside the plan (finding A5) - the caller needs both to build a
+/// `RuntimeStore`, and re-deriving them separately would duplicate the whole
+/// metadata/check pass this function already ran.
 pub(crate) fn build_checked_sim_launch_plan(
     project_root: &Path,
     world: &Path,
     resolved: &ResolvedRobot,
     manifest_extras: &RobotManifestExtras,
     catalog: Option<&Catalog>,
-    joypad: bool,
     message_format: MessageFormat,
-) -> Result<LaunchPlan> {
+) -> Result<(LaunchPlan, Vec<graph_check::ParticipantContractSurface>)> {
     let source_participants = sim_source_participants(project_root, resolved, catalog)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
+    // Finding A6: all three filters below admit exactly the standard site-
+    // tool set (`STANDARD_SITE_TOOLS` - router/joypad/telemetry), derived
+    // once in `launch_plan` and shared with `build_site_launches` there.
+    // This used to hardcode only router+joypad, silently excluding
+    // telemetry's declared graph contracts from validation even though
+    // telemetry is started and readiness-waited exactly like the other two.
     let metadata_source_participants = source_participants
         .iter()
         .filter(|participant| {
             participant.kind != SourceParticipantKind::Tool
-                || participant.name == crate::launch_plan::SITE_TOOL_ROUTER
-                || (joypad && participant.name == SITE_TOOL_JOYPAD)
+                || STANDARD_SITE_TOOLS.contains(&participant.name.as_str())
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -721,16 +866,12 @@ pub(crate) fn build_checked_sim_launch_plan(
         .into_iter()
         .filter(|artifact| {
             artifact.kind != crate::catalog::ArtifactKind::Tool
-                || artifact.name == crate::launch_plan::SITE_TOOL_ROUTER
-                || (joypad && artifact.name == SITE_TOOL_JOYPAD)
+                || STANDARD_SITE_TOOLS.contains(&artifact.name.as_str())
         })
         .collect::<Vec<_>>();
     let tool_participants = tool_participants_from_resolved(resolved)?
         .into_iter()
-        .filter(|tool| {
-            tool.name == crate::launch_plan::SITE_TOOL_ROUTER
-                || (joypad && tool.name == SITE_TOOL_JOYPAD)
-        })
+        .filter(|tool| STANDARD_SITE_TOOLS.contains(&tool.name.as_str()))
         .collect::<Vec<_>>();
     let mut official_by_ref = resolved
         .platform_runtimes
@@ -801,7 +942,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         )?;
     }
 
-    let mut plan = build_launch_plan(
+    let plan = build_launch_plan(
         LaunchMode::Webots {
             world: world.to_path_buf(),
         },
@@ -814,9 +955,6 @@ pub(crate) fn build_checked_sim_launch_plan(
             source_participants: &source_participants,
         }],
     )?;
-    if !joypad {
-        plan.site.retain(|site| site.id != SITE_TOOL_JOYPAD);
-    }
     let coherence_graph = crate::commands::check::robot_contract_surfaces(
         &resolved.robot.robot.id,
         &contract_surfaces,
@@ -827,7 +965,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         &coherence,
         message_format,
     )?;
-    Ok(plan)
+    Ok((plan, contract_surfaces))
 }
 
 fn official_simulator_participants(
@@ -1235,7 +1373,11 @@ fn simulation_managed_participant_ids(plan: &LaunchPlan) -> Vec<String> {
 /// observation) is unchanged, this only reorders WHEN the CLI hands specs to
 /// the supervisor and adds explicit wait-only stages for the participants
 /// Webots itself spawns.
-fn stages_for_simulate(specs: Vec<ParticipantSpec>, plan: &LaunchPlan) -> Vec<SupervisionStage> {
+fn stages_for_simulate(
+    specs: Vec<ParticipantSpec>,
+    plan: &LaunchPlan,
+    output: OutputContext,
+) -> Vec<SupervisionStage> {
     let mut router = Vec::new();
     let mut tools = Vec::new();
     let mut webots = Vec::new();
@@ -1255,23 +1397,18 @@ fn stages_for_simulate(specs: Vec<ParticipantSpec>, plan: &LaunchPlan) -> Vec<Su
         simulation_managed_participant_ids(plan)
             .into_iter()
             .partition(|id| id == SIMULATOR_SUPERVISOR_PROVIDER_ID);
+    // Product decision 6: no unconditional 60s teardown for an interactive
+    // session - see `OutputContext::wait_budget`.
+    let timeout = output.wait_budget(SIMULATE_READINESS_TIMEOUT);
     vec![
-        SupervisionStage::new("starting router", router, SIMULATE_READINESS_TIMEOUT),
-        SupervisionStage::new("starting tools", tools, SIMULATE_READINESS_TIMEOUT),
-        SupervisionStage::new("starting Webots", webots, SIMULATE_READINESS_TIMEOUT),
-        SupervisionStage::new(
-            "waiting for the simulation supervisor",
-            Vec::new(),
-            SIMULATE_READINESS_TIMEOUT,
-        )
-        .with_extra_ready_ids(supervisor_ids),
-        SupervisionStage::new("starting services", services, SIMULATE_READINESS_TIMEOUT),
-        SupervisionStage::new(
-            "waiting for robot controllers",
-            Vec::new(),
-            SIMULATE_READINESS_TIMEOUT,
-        )
-        .with_extra_ready_ids(controller_ids),
+        SupervisionStage::new("starting router", router, timeout),
+        SupervisionStage::new("starting tools", tools, timeout),
+        SupervisionStage::new("starting Webots", webots, timeout),
+        SupervisionStage::new("waiting for the simulation supervisor", Vec::new(), timeout)
+            .with_extra_ready_ids(supervisor_ids),
+        SupervisionStage::new("starting services", services, timeout),
+        SupervisionStage::new("waiting for robot controllers", Vec::new(), timeout)
+            .with_extra_ready_ids(controller_ids),
     ]
 }
 
@@ -1320,21 +1457,11 @@ fn substitution_topic_summary(substitution: &SubstitutionRecord) -> String {
     format!("component/{}/*", substitution.component_instance)
 }
 
-/// `tool-joypad` is peripheral teleop, not part of the sim contract graph, so
-/// it no longer launches by default: the framework `tool-joypad` deserializes
-/// its `PHOXAL_CONFIG` as a unit `()`, but this crate's shared site-tool
-/// launch path (`launch_plan::build_site_launches` / `commands::run::site_env`)
-/// unconditionally sends `PHOXAL_CONFIG={}` for every non-router site tool -
-/// which fails a genuinely config-less tool's deserialization with `invalid
-/// type: map, expected unit`, exactly the live-gate failure this fixes.
-/// Making that encoding conditional is the more "correct" fix, but it is
-/// shared with `run`/`deploy` (out of this fix's scope, and a behavior change
-/// neither asked for); simulate instead just stops auto-launching joypad,
-/// gated behind the pre-existing (till now unused) `--joypad`/`options.joypad`
-/// flag - see the matching filter in `prepare_with_mode`, which already drops
-/// `tool-joypad` from `LaunchPlan.site` when `--joypad` is absent. This
-/// function's labels are derived from that same plan, so they never need
-/// `options` themselves - it replaces the old `SimulatePlan::native_tools`
+/// Site tool labels are derived straight from the resolved `LaunchPlan` (Part
+/// 3/6): router, `tool-joypad`, and `tool-telemetry` are standard, hard-
+/// required site tools in every mode including Webots (product decision 9),
+/// so they always appear here alongside the Webots app itself. This function
+/// never needs `options` - it replaces the old `SimulatePlan::native_tools`
 /// stored field.
 fn native_tool_labels_from_plan(plan: &LaunchPlan) -> Vec<String> {
     let mut labels = plan
@@ -1358,29 +1485,28 @@ pub(crate) const WEBOTS_SITE_ID: &str = "webots";
 /// registered separately by `prepare_robot_participants` (SIMULATION-MANAGED,
 /// no spec of their own); this function only produces Webots's own spec.
 fn stage_and_prepare_webots_spec(
-    app: &AppContext,
+    ui: &crate::Ui,
     sim: &SimPlan,
 ) -> Result<(ParticipantSpec, Vec<RobotSpawn>)> {
     let world = webots_world(&sim.plan.mode);
     let staged =
         stage_simulation_for_robot(&sim.ctx.project_root, world, &sim.ctx.resolved, &sim.plan)?;
-    stage_simulator_controller_binaries(&sim.ctx.resolved, &app.ui)?;
+    stage_simulator_controller_binaries(&sim.ctx.resolved, ui)?;
     let webots_path = crate::host_doctor::webots_executable_path()
         .map_err(|error| anyhow!("{error}"))
         .context("failed to locate the Webots executable for live simulate")?;
     // Print the generated project-local staging root explicitly.
-    app.ui.info(format!(
+    ui.info(format!(
         "staged simulation to {}",
         webots_stage_root::root()?.display()
     ));
-    app.ui.info(format!(
+    ui.info(format!(
         "staged simulation world at {}",
         staged.staged_world_path.display()
     ));
     let spec = ParticipantSpec {
         id: WEBOTS_SITE_ID.to_string(),
         kind: ParticipantKind::Tool,
-        local: false,
         executable: webots_path,
         args: webots_launch_args(&staged.staged_world_path),
         cwd: None,
@@ -1978,7 +2104,7 @@ mod tests {
         fixture_contract_for_tests, fixture_tool_entry_for_tests,
     };
     use crate::host_paths::test_support::ScratchPhoxalHome;
-    use crate::launch_plan::SITE_TOOL_ROUTER;
+    use crate::launch_plan::{SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SITE_TOOL_TELEMETRY};
     use crate::resolver::{
         ResolvedComponent, ResolvedComponentSource, ResolvedPathOverride, ResolvedPathOverrideKind,
         ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, host_target_triple,
@@ -1999,6 +2125,27 @@ mod tests {
             webots_launch_args(Path::new("/tmp/staged.wbt")),
             vec!["--mode=realtime", "--batch", "/tmp/staged.wbt"]
         );
+    }
+
+    #[test]
+    fn live_simulation_locks_remain_held_until_the_setup_owner_drops() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let simulator_lock = temp.path().join("simulator.lock");
+        let locks = LiveSimulationLocks::acquire(temp.path(), &simulator_lock)?;
+
+        assert!(
+            SupervisorLock::acquire(temp.path()).is_err(),
+            "the run lock must remain held after setup returns"
+        );
+        assert!(
+            SupervisorLock::acquire_path(&simulator_lock).is_err(),
+            "the simulator lock must remain held after setup returns"
+        );
+
+        drop(locks);
+        SupervisorLock::acquire(temp.path())?;
+        SupervisorLock::acquire_path(&simulator_lock)?;
+        Ok(())
     }
 
     #[test]
@@ -2692,6 +2839,7 @@ mod tests {
                 resolved,
                 source_participants: Vec::new(),
             },
+            runtime_store: crate::stores::runtime_store::RuntimeStore::new(),
         };
 
         let output = build_dry_run_output(&plan);
@@ -3163,6 +3311,7 @@ robot:
     fn add_site_tools(resolved: &mut ResolvedRobot) {
         resolved.tools.push(tool(SITE_TOOL_ROUTER));
         resolved.tools.push(tool(SITE_TOOL_JOYPAD));
+        resolved.tools.push(tool(SITE_TOOL_TELEMETRY));
     }
 
     fn tool(name: &str) -> ResolvedTool {
@@ -3230,7 +3379,7 @@ robot:
         controller.path_override = Some(controller_dir.clone());
         resolved.simulators.extend([supervisor, controller]);
 
-        stage_simulator_controller_binaries(&resolved, &crate::Ui)?;
+        stage_simulator_controller_binaries(&resolved, &crate::Ui::from_env())?;
 
         let supervisor_binary =
             webots_stage_root::controller_dir("phoxal-simulator-webots-supervisor")?
@@ -3287,7 +3436,7 @@ robot:
             .simulators
             .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
 
-        let error = stage_simulator_controller_binaries(&resolved, &crate::Ui)
+        let error = stage_simulator_controller_binaries(&resolved, &crate::Ui::from_env())
             .expect_err("a catalog simulator with no cached binary must error, not silently skip");
         let message = format!("{error:#}");
         assert!(

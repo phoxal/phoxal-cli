@@ -941,6 +941,7 @@ fn prepare_deploy(
         project_root,
         loaded.robot.artifacts.channel,
         &loaded.extras,
+        ui.mode(),
     )?;
     let mut resolved = resolve(
         &loaded.robot,
@@ -953,6 +954,7 @@ fn prepare_deploy(
             resolve_component_asset_commits: false,
             official_target_triple: Some(target.official_triple.clone()),
             tool_target_triple: Some(target.official_triple.clone()),
+            output_mode: ui.mode(),
         },
     )?;
     if let Some(catalog) = catalog.as_ref() {
@@ -970,6 +972,7 @@ fn prepare_deploy(
                 resolve_component_asset_commits: false,
                 official_target_triple: Some(crate::resolver::host_target_triple()),
                 tool_target_triple: Some(crate::resolver::host_target_triple()),
+                output_mode: ui.mode(),
             },
         )?;
         let catalog = catalog
@@ -5099,7 +5102,7 @@ capabilities:
             target_for_arch("aarch64"),
             false,
             DRY_RUN_REMOTE_USER,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )?;
         assert!(
             payload
@@ -5177,7 +5180,7 @@ capabilities:
             target_for_arch("aarch64"),
             false,
             DRY_RUN_REMOTE_USER,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )?;
         let opt = payload_opt(payload.root.path());
         let metadata_files = payload_relative_files(payload.root.path())?
@@ -5235,7 +5238,7 @@ capabilities:
             target_for_arch("aarch64"),
             false,
             DRY_RUN_REMOTE_USER,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )?;
 
         assert!(!payload_opt(payload.root.path()).join("components").exists());
@@ -5258,7 +5261,7 @@ capabilities:
             target_for_arch("aarch64"),
             false,
             DRY_RUN_REMOTE_USER,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )?;
         let remote_tmp = remote_staging_dir(PAYLOAD_STAGING_PREFIX);
         let mut remote = FakePayloadRemote::new("robot@test");
@@ -5515,7 +5518,7 @@ capabilities:
             &live_options(),
             &mut transport,
             false,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )
         .expect_err("a hostile remote user must be rejected before bootstrapping anything");
         assert!(
@@ -5561,7 +5564,7 @@ capabilities:
             target_for_arch("aarch64"),
             false,
             DRY_RUN_REMOTE_USER,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )?;
         let left = payload
             .rendered_units
@@ -5751,7 +5754,7 @@ robot:
             target_for_arch("aarch64"),
             false,
             DRY_RUN_REMOTE_USER,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )?;
         assert!(
             payload
@@ -5800,7 +5803,7 @@ robot:
             target_for_arch("aarch64"),
             false,
             DRY_RUN_REMOTE_USER,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )
         .expect_err("native C deps should be rejected before raw linker spew");
         let message = error.to_string();
@@ -5887,7 +5890,7 @@ robot:
             &live_options(),
             &mut transport,
             false,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )?;
         assert_eq!(
             transport.stale_removed,
@@ -5927,7 +5930,7 @@ robot:
             &live_options(),
             &mut transport,
             false,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )?;
 
         assert!(transport.fallback_prepared);
@@ -5953,7 +5956,7 @@ robot:
             &live_options(),
             &mut transport,
             false,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )
         .expect_err("verification failure must abort before activation");
 
@@ -6120,7 +6123,7 @@ robot:
             &mut transport,
             true,
             &mut source,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )?;
 
         assert!(transport.bootstrapped);
@@ -6235,7 +6238,7 @@ robot:
             &live_options(),
             &mut transport,
             false,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )?;
         assert!(transport.bootstrapped);
         let fragment = transport
@@ -6275,7 +6278,7 @@ robot:
             &mut transport,
             true,
             &mut source,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )?;
         assert!(
             transport.bootstrapped,
@@ -6318,7 +6321,7 @@ robot:
             &mut transport,
             false,
             &mut source,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )?;
         assert!(
             transport.bootstrapped,
@@ -6350,7 +6353,7 @@ robot:
             &mut transport,
             true,
             &mut source,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )?;
         assert!(
             transport.bootstrapped,
@@ -6380,7 +6383,7 @@ robot:
             &live_options(),
             &mut transport,
             false,
-            &crate::Ui,
+            &crate::Ui::from_env(),
         )
         .expect_err("health failure should fail deploy");
         let message = error.to_string();
