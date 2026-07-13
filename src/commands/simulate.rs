@@ -210,6 +210,11 @@ pub struct SimulateOptions {
 pub struct SimPlan {
     pub plan: LaunchPlan,
     pub ctx: PlanContext,
+    /// Finding A5: this session's launch-time participant metadata, resolved
+    /// once in `prepare_with_mode` from `plan` and its (sim-filtered)
+    /// contract surfaces - see `crate::stores::runtime_store::RuntimeStore`'s
+    /// own docs.
+    pub runtime_store: crate::stores::runtime_store::RuntimeStore,
 }
 
 pub(crate) struct ResolvedSimulation {
@@ -303,7 +308,12 @@ pub async fn run(
             controller.set_restart_channel(setup.action_tx);
 
             let outcome = controller
-                .drive_supervision(setup.board, setup.telemetry, setup.supervise_task)
+                .drive_supervision(
+                    setup.board,
+                    setup.telemetry,
+                    sim.runtime_store.clone(),
+                    setup.supervise_task,
+                )
                 .await;
             setup.barrier_watch.abort();
             setup.clock_state_watcher.abort();
@@ -693,7 +703,7 @@ fn prepare_with_mode(
         )
         .context("failed to stage component assets into the simulation robot root")?;
     }
-    let plan = build_checked_sim_launch_plan(
+    let (plan, contract_surfaces) = build_checked_sim_launch_plan(
         &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,
@@ -701,6 +711,10 @@ fn prepare_with_mode(
         resolved.catalog.as_ref(),
         options.message_format,
     )?;
+    // Finding A5: resolved once here, from the same `plan`/`contract_surfaces`
+    // this function already has - see `RuntimeStore::from_launch_plan`'s docs.
+    let runtime_store =
+        crate::stores::runtime_store::RuntimeStore::from_launch_plan(&plan, &contract_surfaces);
     let source_participants = sim_source_participants(
         &resolved.project_root,
         &resolved.resolved,
@@ -714,6 +728,7 @@ fn prepare_with_mode(
             resolved: resolved.resolved,
             source_participants,
         },
+        runtime_store,
     })
 }
 
@@ -794,6 +809,10 @@ pub(crate) fn resolve_project(
 /// disk cache to scope a rebuild around (docs: `check::build_emit_apis_from_source`
 /// never caches), so a `watch`-triggered recheck simply rebuilds the whole
 /// source graph rather than just the one crate that changed.
+/// Also returns the (already sim-filtered/remapped) contract surfaces
+/// alongside the plan (finding A5) - the caller needs both to build a
+/// `RuntimeStore`, and re-deriving them separately would duplicate the whole
+/// metadata/check pass this function already ran.
 pub(crate) fn build_checked_sim_launch_plan(
     project_root: &Path,
     world: &Path,
@@ -801,7 +820,7 @@ pub(crate) fn build_checked_sim_launch_plan(
     manifest_extras: &RobotManifestExtras,
     catalog: Option<&Catalog>,
     message_format: MessageFormat,
-) -> Result<LaunchPlan> {
+) -> Result<(LaunchPlan, Vec<graph_check::ParticipantContractSurface>)> {
     let source_participants = sim_source_participants(project_root, resolved, catalog)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
     let metadata_source_participants = source_participants
@@ -923,7 +942,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         &coherence,
         message_format,
     )?;
-    Ok(plan)
+    Ok((plan, contract_surfaces))
 }
 
 fn official_simulator_participants(
@@ -2777,6 +2796,7 @@ mod tests {
                 resolved,
                 source_participants: Vec::new(),
             },
+            runtime_store: crate::stores::runtime_store::RuntimeStore::new(),
         };
 
         let output = build_dry_run_output(&plan);

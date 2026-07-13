@@ -5,16 +5,21 @@
 //! the router's latest traffic sample - and its telemetry dedup was by equal
 //! VALUE, which flattened a genuinely-unchanging-but-still-live series into a
 //! single stale point (see `TelemetryStore`'s docs for the fix). This module
-//! splits that into two focused stores:
+//! splits that into three focused stores:
 //!
 //! - [`log_store::LogStore`] - routed log scrollback + diagnostic events
 //!   only.
 //! - [`telemetry_store::TelemetryStore`] - timestamped latest samples with
 //!   freshness, plus bounded histories, deduped by sample identity/time
 //!   rather than by value.
-//!
-//! The third store the target design names, `RuntimeStore`, already exists
-//! as `supervisor::BoardBackend`/`BoardSnapshot` and is not rebuilt here.
+//! - [`runtime_store::RuntimeStore`] - session-only participant metadata
+//!   (artifact reference, declared contracts, launch ownership, time-to-
+//!   ready) resolved once from the launch plan and its contract-check
+//!   outcome. Finding A5: an earlier version of this doc claimed this store
+//!   "already exists as `supervisor::BoardBackend`/`BoardSnapshot`" - that
+//!   was wrong. The board is the persisted, JSON-stable lifecycle record;
+//!   none of the above belongs on it, so it stayed `unknown` in the Overview
+//!   panel until this sidecar was added. See that module's own docs.
 //!
 //! [`telemetry_store::TelemetryStore`] is now the live store behind
 //! `telemetry::TelemetryBackend` (Wave C2): every `record_*` call from a
@@ -26,4 +31,5 @@
 //! been deleted.
 
 pub mod log_store;
+pub mod runtime_store;
 pub mod telemetry_store;

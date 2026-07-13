@@ -465,7 +465,10 @@ fn recheck_sim_target(
     target: &WatchTarget,
 ) -> Result<WatchOutcome> {
     let resolved = resolve_project(project_root, options.clone(), SimulateMode::Live)?;
-    let plan = build_checked_sim_launch_plan(
+    // A watch recheck only needs the plan itself (to diff specs), not the
+    // contract surfaces `build_checked_sim_launch_plan` now also returns for
+    // `RuntimeStore` (finding A5) - this path never builds a fresh session.
+    let (plan, _contract_surfaces) = build_checked_sim_launch_plan(
         &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,

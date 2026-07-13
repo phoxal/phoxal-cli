@@ -105,6 +105,10 @@ struct PreparedRun {
     specs: Vec<ParticipantSpec>,
     robot_log_targets: Vec<(String, String)>,
     router_ownership: RouterOwnership,
+    /// Finding A5: this session's launch-time participant metadata, resolved
+    /// once here from `plan` and the contract-check `outcome` - see
+    /// `crate::stores::runtime_store::RuntimeStore`'s own docs.
+    runtime_store: crate::stores::runtime_store::RuntimeStore,
 }
 
 impl Run {
@@ -267,7 +271,7 @@ impl Run {
         ));
 
         let outcome = controller
-            .drive_supervision(board, telemetry, supervise)
+            .drive_supervision(board, telemetry, prepared.runtime_store, supervise)
             .await;
         if let Some(handle) = watch_handle {
             handle.abort();
@@ -487,6 +491,12 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         &coherence,
         options.message_format,
     )?;
+    // Finding A5: resolved once here, from the same `plan`/`outcome` this
+    // function already built - see `RuntimeStore::from_launch_plan`'s docs.
+    let runtime_store = crate::stores::runtime_store::RuntimeStore::from_launch_plan(
+        &plan,
+        &outcome.contract_surfaces,
+    );
     let board = BoardBackend::new();
     let router_ownership = router_ownership(local_router_reachable(&default_connect_endpoint()));
     let mut specs = Vec::new();
@@ -522,6 +532,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         board,
         specs,
         router_ownership,
+        runtime_store,
     })
 }
 

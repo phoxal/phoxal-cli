@@ -356,14 +356,24 @@ impl SessionController {
     /// `supervise` (the spawned `supervise_until_shutdown` task) to finish or
     /// Ctrl-C to cancel it. Consumes `self` so the renderer (and, for the
     /// TUI, the terminal) is torn down exactly once, on every return path.
+    ///
+    /// `runtime_store` carries this session's launch-time participant
+    /// metadata (finding A5 - artifact reference, declared contracts,
+    /// ownership) resolved once by the caller from its `LaunchPlan` and
+    /// contract-check outcome; installed into the TUI (if any) alongside the
+    /// board's log sink, right before this loop starts. The `Line`/`None`
+    /// renderers have no runtime-detail view to feed it to, so it is simply
+    /// dropped for them.
     pub async fn drive_supervision(
         mut self,
         board: BoardBackend,
         telemetry: TelemetryBackend,
+        runtime_store: crate::stores::runtime_store::RuntimeStore,
         mut supervise: JoinHandle<Result<SupervisorOutcome>>,
     ) -> Result<SupervisorOutcome> {
-        if let Renderer::Tui(tui) = &self.renderer {
+        if let Renderer::Tui(tui) = &mut self.renderer {
             board.set_log_sink(tui.log_sender());
+            tui.set_runtime_store(runtime_store);
         }
         let mut ticker = tokio::time::interval(Duration::from_millis(500));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);

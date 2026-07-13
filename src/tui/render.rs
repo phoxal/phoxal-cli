@@ -8,7 +8,7 @@
 //! stay deterministic in tests too.
 
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -20,8 +20,10 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::identity::IdentitySummary;
+use crate::launch_plan::LaunchOwnership;
 use crate::session::event::{DiagnosticLevel, PhaseOutcome};
 use crate::stores::log_store::LogStore;
+use crate::stores::runtime_store::{RuntimeParticipantMetadata, RuntimeStore};
 use crate::stores::telemetry_store::{DEFAULT_FRESHNESS_TTL, HostPoint, Timestamped};
 use crate::supervisor::{BoardSnapshot, ClockSample, ParticipantState, ParticipantStatus};
 use crate::telemetry::{
@@ -127,6 +129,7 @@ pub fn draw(
     logs: &mut LogStore,
     state: &AppState,
     telemetry: &TelemetrySnapshot,
+    runtime: &RuntimeStore,
     now: Instant,
     diagnostics: &VecDeque<DiagnosticLine>,
 ) {
@@ -145,7 +148,9 @@ pub fn draw(
     draw_title_bar(frame, theme, title, telemetry.clock, rows[0]);
     draw_status_line(frame, theme, board, telemetry.host.as_ref(), now, rows[1]);
     draw_diagnostics_strip(frame, theme, diagnostics, rows[2]);
-    draw_body(frame, theme, board, logs, state, telemetry, now, rows[3]);
+    draw_body(
+        frame, theme, board, logs, state, telemetry, runtime, now, rows[3],
+    );
     draw_footer(frame, theme, state, rows[4]);
 
     if state.show_help {
@@ -479,6 +484,7 @@ fn draw_body(
     logs: &mut LogStore,
     state: &AppState,
     telemetry: &TelemetrySnapshot,
+    runtime: &RuntimeStore,
     now: Instant,
     area: Rect,
 ) {
@@ -488,7 +494,9 @@ fn draw_body(
         .constraints([Constraint::Length(nav_width), Constraint::Min(0)])
         .split(area);
     draw_navigator(frame, theme, board, state, columns[0]);
-    draw_right_pane(frame, theme, board, logs, state, telemetry, now, columns[1]);
+    draw_right_pane(
+        frame, theme, board, logs, state, telemetry, runtime, now, columns[1],
+    );
 }
 
 fn draw_navigator(
@@ -601,13 +609,16 @@ fn draw_right_pane(
     logs: &mut LogStore,
     state: &AppState,
     telemetry: &TelemetrySnapshot,
+    runtime: &RuntimeStore,
     now: Instant,
     area: Rect,
 ) {
     match &state.view {
         View::Home => draw_overview_home(frame, theme, board, area),
         View::Runtime(id) => {
-            draw_runtime_detail(frame, theme, board, logs, state, telemetry, now, id, area);
+            draw_runtime_detail(
+                frame, theme, board, logs, state, telemetry, runtime, now, id, area,
+            );
         }
     }
 }
@@ -704,6 +715,7 @@ fn draw_runtime_detail(
     logs: &mut LogStore,
     state: &AppState,
     telemetry: &TelemetrySnapshot,
+    runtime: &RuntimeStore,
     now: Instant,
     id: &str,
     area: Rect,
@@ -742,13 +754,23 @@ fn draw_runtime_detail(
             theme,
             status,
             telemetry.process_by_participant.get(id),
+            runtime.metadata(id),
+            runtime.time_to_ready(id),
             now,
             state.overview.scroll,
             rows[1],
         ),
         Panel::Logs => draw_runtime_logs(frame, theme, logs, state, id, rows[1]),
         Panel::Traffic => {
-            draw_traffic_tab(frame, theme, state, telemetry.router.as_ref(), now, rows[1]);
+            draw_traffic_tab(
+                frame,
+                theme,
+                state,
+                telemetry.router.as_ref(),
+                runtime,
+                now,
+                rows[1],
+            );
         }
         Panel::Devices => {
             draw_joypad_tab(frame, theme, state, telemetry.joypad.as_ref(), now, rows[1]);
@@ -765,13 +787,27 @@ fn draw_runtime_detail(
     }
 }
 
-/// A field the Overview panel would show if its data were plumbed to the
-/// session board, but genuinely is not yet (design doc part 7: "show a clear
-/// unknown, do not fabricate"). `supervisor::ParticipantStatus`/
-/// `BoardSnapshot` carry no artifact reference, declared contract, ownership,
-/// or time-to-ready field today - see this slice's report for the file:line
-/// citations and the follow-up to plumb them.
-const UNKNOWN_FIELD: &str = "unknown (not wired to the board yet)";
+/// A field the Overview panel falls back to when [`RuntimeStore`] genuinely
+/// has no metadata for this participant (finding A5's own fallback for the
+/// case the sidecar itself documents as "should not happen for anything the
+/// launch plan named" - e.g. a stale board entry from a previous session).
+/// Never fabricate a value in its place.
+const UNKNOWN_FIELD: &str = "unknown (not in this session's launch plan)";
+
+fn format_contract_list(contracts: &[String]) -> String {
+    if contracts.is_empty() {
+        "(none)".to_string()
+    } else {
+        contracts.join(", ")
+    }
+}
+
+fn format_time_to_ready(time_to_ready: Option<Duration>) -> String {
+    time_to_ready.map_or_else(
+        || "waiting for first ready".to_string(),
+        |elapsed| format!("{:.1}s", elapsed.as_secs_f32()),
+    )
+}
 
 #[allow(clippy::too_many_arguments)]
 fn draw_runtime_overview(
@@ -779,6 +815,8 @@ fn draw_runtime_overview(
     theme: Theme,
     status: &ParticipantStatus,
     process: Option<&Timestamped<ProcessSample>>,
+    runtime_metadata: Option<&RuntimeParticipantMetadata>,
+    time_to_ready: Option<Duration>,
     now: Instant,
     scroll: usize,
     area: Rect,
@@ -798,6 +836,16 @@ fn draw_runtime_overview(
         || "-".to_string(),
         |sample| format!("{}M", sample.value.rss_bytes / (1024 * 1024)),
     );
+    let artifact_text = runtime_metadata.and_then(|meta| meta.artifact_ref.clone());
+    let ownership_text = runtime_metadata.map(|meta| match meta.ownership {
+        LaunchOwnership::CliManaged => "cli-managed".to_string(),
+        LaunchOwnership::SimulationManaged => "simulation-managed".to_string(),
+    });
+    let input_contracts_text =
+        runtime_metadata.map(|meta| format_contract_list(&meta.input_contracts));
+    let output_contracts_text =
+        runtime_metadata.map(|meta| format_contract_list(&meta.output_contracts));
+    let time_to_ready_text = runtime_metadata.map(|_| format_time_to_ready(time_to_ready));
     let mut lines = vec![
         Line::from(vec![
             Span::styled("state     ", color::muted(theme)),
@@ -825,19 +873,23 @@ fn draw_runtime_overview(
         ]),
         Line::from(vec![
             Span::styled("artifact  ", color::muted(theme)),
-            Span::styled(UNKNOWN_FIELD, color::muted(theme)),
+            Span::raw(artifact_text.unwrap_or_else(|| UNKNOWN_FIELD.to_string())),
         ]),
         Line::from(vec![
-            Span::styled("contracts ", color::muted(theme)),
-            Span::styled(UNKNOWN_FIELD, color::muted(theme)),
+            Span::styled("input     ", color::muted(theme)),
+            Span::raw(input_contracts_text.unwrap_or_else(|| UNKNOWN_FIELD.to_string())),
+        ]),
+        Line::from(vec![
+            Span::styled("output    ", color::muted(theme)),
+            Span::raw(output_contracts_text.unwrap_or_else(|| UNKNOWN_FIELD.to_string())),
         ]),
         Line::from(vec![
             Span::styled("ownership ", color::muted(theme)),
-            Span::styled(UNKNOWN_FIELD, color::muted(theme)),
+            Span::raw(ownership_text.unwrap_or_else(|| UNKNOWN_FIELD.to_string())),
         ]),
         Line::from(vec![
             Span::styled("time to ready ", color::muted(theme)),
-            Span::styled(UNKNOWN_FIELD, color::muted(theme)),
+            Span::raw(time_to_ready_text.unwrap_or_else(|| UNKNOWN_FIELD.to_string())),
         ]),
         Line::from(vec![
             Span::styled("last error ", color::muted(theme)),
@@ -931,21 +983,23 @@ fn sort_traffic_rows(topics: &mut [&TopicMetric], sort: TrafficSort) {
 
 /// The router Traffic tab: a sortable (`s`), filterable (`/`) table of every
 /// topic the router has measured ingress for - TOPIC, PRODUCER, RATE, COUNT,
-/// and a live/stale STATUS derived from the measured rate itself (design
-/// doc: "stale if a topic's rate dropped to ~0 over the window"). Header
-/// line carries the router's own aggregate `throughput_msg_s` plus the
-/// SAMPLE's own receive-time freshness (distinct from a topic's own
-/// rate-derived staleness below: this is "is the router still publishing
-/// `Metrics` at all", that is "is THIS topic's ingress still flowing").
-/// Per-topic "potential consumers" (who subscribes to a topic) is not shown:
-/// `router::TopicMetric` carries only `topic`/`from_participant`/rate/count,
-/// no consumer list, and nothing else in the session board carries declared
-/// input contracts today - see this slice's report.
+/// a live/stale STATUS derived from the measured rate itself (design doc:
+/// "stale if a topic's rate dropped to ~0 over the window"), and a
+/// locally-known CONSUMERS count (finding A5 - see
+/// `RuntimeStore::potential_consumers`'s own docs for the exact
+/// approximation: a count of participants whose declared input contract
+/// name appears in the topic's own composed wire key, not a live
+/// subscription registry). Header line carries the router's own aggregate
+/// `throughput_msg_s` plus the SAMPLE's own receive-time freshness (distinct
+/// from a topic's own rate-derived staleness below: this is "is the router
+/// still publishing `Metrics` at all", that is "is THIS topic's ingress
+/// still flowing").
 fn draw_traffic_tab(
     frame: &mut Frame,
     theme: Theme,
     state: &AppState,
     sample: Option<&Timestamped<RouterMetricsSample>>,
+    runtime: &RuntimeStore,
     now: Instant,
     area: Rect,
 ) {
@@ -994,11 +1048,14 @@ fn draw_traffic_tab(
         traffic_header_row(width),
         color::muted(theme).add_modifier(Modifier::BOLD),
     ))];
-    lines.extend(
-        topics
-            .iter()
-            .map(|topic| traffic_row_line(theme, topic, width)),
-    );
+    lines.extend(topics.iter().map(|topic| {
+        traffic_row_line(
+            theme,
+            topic,
+            runtime.potential_consumers(&topic.topic),
+            width,
+        )
+    }));
 
     let height = rows[1].height as usize;
     let scroll = state
@@ -1012,14 +1069,19 @@ fn draw_traffic_tab(
 fn traffic_header_row(width: usize) -> String {
     truncate_to_width(
         &format!(
-            "{:<28} {:<16} {:>8} {:>9} {:>6}",
-            "TOPIC", "PRODUCER", "RATE", "COUNT", "STATUS"
+            "{:<28} {:<16} {:>8} {:>9} {:>6} {:>9}",
+            "TOPIC", "PRODUCER", "RATE", "COUNT", "STATUS", "CONSUMERS"
         ),
         width,
     )
 }
 
-fn traffic_row_line(theme: Theme, topic: &TopicMetric, width: usize) -> Line<'static> {
+fn traffic_row_line(
+    theme: Theme,
+    topic: &TopicMetric,
+    consumers: usize,
+    width: usize,
+) -> Line<'static> {
     let stale = topic_is_stale(topic);
     let producer = if topic.from_participant.is_empty() {
         "-"
@@ -1027,12 +1089,13 @@ fn traffic_row_line(theme: Theme, topic: &TopicMetric, width: usize) -> Line<'st
         topic.from_participant.as_str()
     };
     let text = format!(
-        "{:<28} {:<16} {:>6.1}Hz {:>9} {:>6}",
+        "{:<28} {:<16} {:>6.1}Hz {:>9} {:>6} {:>9}",
         truncate_to_width(&topic.topic, 28),
         truncate_to_width(producer, 16),
         topic.ingress_rate_hz,
         topic.count,
         if stale { "stale" } else { "live" },
+        consumers,
     );
     let role = if stale { Role::Muted } else { Role::Success };
     Line::from(Span::styled(
@@ -1553,12 +1616,121 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let theme = Theme::new(crate::theme::ColorCapability::None);
         terminal
-            .draw(|frame| draw_traffic_tab(frame, theme, &state, Some(&sample), now, frame.area()))
+            .draw(|frame| {
+                draw_traffic_tab(
+                    frame,
+                    theme,
+                    &state,
+                    Some(&sample),
+                    &RuntimeStore::new(),
+                    now,
+                    frame.area(),
+                )
+            })
             .expect("draw must not fail");
         let content = buffer_text(terminal.backend().buffer());
         assert!(content.contains("battery"), "{content}");
         assert!(content.contains("stale"), "{content}");
         assert!(!content.contains("drive/target"), "{content}");
+    }
+
+    /// Finding A5's Traffic "potential consumers": once `RuntimeStore` knows
+    /// a participant declared the topic's contract as an input, the
+    /// CONSUMERS column must show a nonzero, locally-known count instead of
+    /// being silently absent.
+    #[test]
+    fn traffic_tab_shows_a_nonzero_consumers_count_from_the_runtime_store() {
+        use phoxal::check::ParticipantContractSurface;
+        use phoxal::participant::launch::{
+            BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
+        };
+        use phoxal::participant::metadata::ParticipantMetaContract;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        use crate::launch_plan::{
+            LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord, RobotLaunch,
+        };
+        use crate::stores::runtime_store::RuntimeStore;
+
+        let now = Instant::now();
+        let sample = Timestamped {
+            value: RouterMetricsSample {
+                topics: vec![topic("y2026_1::drive::Target", "mission", 12.0, 500)],
+                throughput_msg_s: 12.0,
+                window_ns: 1_000_000_000,
+            },
+            received_at: now,
+        };
+        let plan = LaunchPlan {
+            mode: LaunchMode::Run,
+            site: Vec::new(),
+            robots: vec![RobotLaunch {
+                id: "rover-01".to_string(),
+                namespace: "dev".to_string(),
+                participants: vec![ParticipantLaunchRecord {
+                    artifact_id: "drive".to_string(),
+                    execution: ParticipantExecution::OfficialArtifact {
+                        artifact_ref: "phoxal/service-drive@0.4.0".to_string(),
+                    },
+                    launch: ParticipantLaunch {
+                        participant_id: "drive".to_string(),
+                        namespace: "dev".to_string(),
+                        robot_id: "rover-01".to_string(),
+                        bus: BusProfile {
+                            connect_endpoints: vec!["tcp/localhost:7447".to_string()],
+                        },
+                        clock: ClockMode::Real,
+                        config: None,
+                        robot_root: None,
+                        component_instance: None,
+                        shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
+                    },
+                    launch_ownership: LaunchOwnership::CliManaged,
+                }],
+                substitutions: Vec::new(),
+            }],
+        };
+        let surfaces = vec![ParticipantContractSurface {
+            participant_id: "drive".to_string(),
+            contracts: vec![ParticipantMetaContract {
+                role: "subscribe".to_string(),
+                generation: "y2026_1".to_string(),
+                contract: "drive::Target".to_string(),
+                external: false,
+            }],
+        }];
+        let runtime = RuntimeStore::from_launch_plan(&plan, &surfaces);
+
+        let state = AppState::new();
+        // Wide enough that the added CONSUMERS column is not truncated away
+        // (TOPIC(28) + PRODUCER(16) + RATE(8) + COUNT(9) + STATUS(6) +
+        // CONSUMERS(9) + 5 separating spaces needs 81 columns).
+        let backend = TestBackend::new(100, 10);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::new(crate::theme::ColorCapability::None);
+        terminal
+            .draw(|frame| {
+                draw_traffic_tab(
+                    frame,
+                    theme,
+                    &state,
+                    Some(&sample),
+                    &runtime,
+                    now,
+                    frame.area(),
+                )
+            })
+            .expect("draw must not fail");
+        let content = buffer_text(terminal.backend().buffer());
+        let row = content
+            .lines()
+            .find(|line| line.contains("y2026_1::drive::Target"))
+            .expect("the topic row must render");
+        assert!(
+            row.trim_end().ends_with('1'),
+            "the CONSUMERS column must show 1 known consumer: {row:?}"
+        );
     }
 
     /// The joypad Devices tab marks the AUTHORITATIVE `selected` device from
@@ -1692,11 +1864,10 @@ mod tests {
         }
     }
 
-    /// Fields the Overview panel would show if the session board carried the
-    /// data - artifact reference, declared contracts, ownership, time to
-    /// ready - are genuinely NOT wired anywhere today (see this slice's
-    /// report): they must render the explicit unknown marker rather than a
-    /// fabricated value.
+    /// Fields the Overview panel shows when [`RuntimeStore`] has no metadata
+    /// for this participant - the fallback case, not the normal one now that
+    /// finding A5's sidecar exists. Must render the explicit unknown marker
+    /// rather than a fabricated value.
     #[test]
     fn overview_shows_unknown_for_fields_not_wired_to_the_board() {
         use ratatui::Terminal;
@@ -1712,16 +1883,29 @@ mod tests {
         let theme = Theme::new(crate::theme::ColorCapability::None);
         let now = Instant::now();
         terminal
-            .draw(|frame| draw_runtime_overview(frame, theme, &status, None, now, 0, frame.area()))
+            .draw(|frame| {
+                draw_runtime_overview(
+                    frame,
+                    theme,
+                    &status,
+                    None,
+                    None,
+                    None,
+                    now,
+                    0,
+                    frame.area(),
+                )
+            })
             .expect("draw must not fail");
         let content = buffer_text(terminal.backend().buffer());
         assert!(content.contains("artifact"), "{content}");
-        assert!(content.contains("contracts"), "{content}");
+        assert!(content.contains("input"), "{content}");
+        assert!(content.contains("output"), "{content}");
         assert!(content.contains("ownership"), "{content}");
         assert!(content.contains("time to ready"), "{content}");
         assert!(
-            content.matches("unknown").count() >= 4,
-            "every unwired field must show the unknown marker: {content}"
+            content.matches("unknown").count() >= 5,
+            "every field with no runtime metadata must show the unknown marker: {content}"
         );
         // Process telemetry absent -> a plain dash, not a fabricated number.
         let cpu_line = content
@@ -1729,6 +1913,57 @@ mod tests {
             .find(|line| line.trim_start().starts_with("cpu"))
             .expect("a cpu row must render");
         assert_eq!(cpu_line.trim_end(), "cpu       -", "{cpu_line:?}");
+    }
+
+    /// Finding A5's positive case: once `RuntimeStore` has this
+    /// participant's launch-time metadata, the Overview panel renders the
+    /// REAL artifact reference, split input/output contracts, ownership, and
+    /// time-to-ready - never the unknown marker.
+    #[test]
+    fn overview_shows_populated_runtime_metadata_fields() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let status = ParticipantStatus::new(
+            "drive",
+            crate::participant_kind::ParticipantKind::Service,
+            ParticipantState::Ready,
+        );
+        let metadata = RuntimeParticipantMetadata {
+            artifact_ref: Some("phoxal/service-drive@0.4.0".to_string()),
+            ownership: LaunchOwnership::CliManaged,
+            input_contracts: vec!["y2026_1::drive::Target".to_string()],
+            output_contracts: vec!["y2026_1::drive::State".to_string()],
+        };
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::new(crate::theme::ColorCapability::None);
+        let now = Instant::now();
+        terminal
+            .draw(|frame| {
+                draw_runtime_overview(
+                    frame,
+                    theme,
+                    &status,
+                    None,
+                    Some(&metadata),
+                    Some(Duration::from_millis(1500)),
+                    now,
+                    0,
+                    frame.area(),
+                )
+            })
+            .expect("draw must not fail");
+        let content = buffer_text(terminal.backend().buffer());
+        assert!(content.contains("phoxal/service-drive@0.4.0"), "{content}");
+        assert!(content.contains("y2026_1::drive::Target"), "{content}");
+        assert!(content.contains("y2026_1::drive::State"), "{content}");
+        assert!(content.contains("cli-managed"), "{content}");
+        assert!(content.contains("1.5s"), "{content}");
+        assert!(
+            !content.contains("unknown"),
+            "populated metadata must never fall back to the unknown marker: {content}"
+        );
     }
 
     /// The command AND its environment (`ParticipantLaunchCommand::env`) must
@@ -1756,7 +1991,19 @@ mod tests {
         let theme = Theme::new(crate::theme::ColorCapability::None);
         let now = Instant::now();
         terminal
-            .draw(|frame| draw_runtime_overview(frame, theme, &status, None, now, 0, frame.area()))
+            .draw(|frame| {
+                draw_runtime_overview(
+                    frame,
+                    theme,
+                    &status,
+                    None,
+                    None,
+                    None,
+                    now,
+                    0,
+                    frame.area(),
+                )
+            })
             .expect("draw must not fail");
         let content = buffer_text(terminal.backend().buffer());
         assert!(
@@ -1795,7 +2042,17 @@ mod tests {
         let theme = Theme::new(crate::theme::ColorCapability::None);
         terminal
             .draw(|frame| {
-                draw_runtime_overview(frame, theme, &status, Some(&process), now, 0, frame.area())
+                draw_runtime_overview(
+                    frame,
+                    theme,
+                    &status,
+                    Some(&process),
+                    None,
+                    None,
+                    now,
+                    0,
+                    frame.area(),
+                )
             })
             .expect("draw must not fail");
         let content = buffer_text(terminal.backend().buffer());
@@ -1878,6 +2135,7 @@ mod tests {
                     &mut logs,
                     &state,
                     &TelemetrySnapshot::default(),
+                    &RuntimeStore::new(),
                     Instant::now(),
                     &VecDeque::new(),
                 )
@@ -1922,6 +2180,7 @@ mod tests {
                         &mut logs,
                         &state,
                         &TelemetrySnapshot::default(),
+                        &RuntimeStore::new(),
                         Instant::now(),
                         &VecDeque::new(),
                     )
@@ -1957,6 +2216,7 @@ mod tests {
                     &mut logs,
                     &state,
                     &TelemetrySnapshot::default(),
+                    &RuntimeStore::new(),
                     Instant::now(),
                     &VecDeque::new(),
                 )
@@ -1977,6 +2237,7 @@ mod tests {
                     &mut logs,
                     &state,
                     &TelemetrySnapshot::default(),
+                    &RuntimeStore::new(),
                     Instant::now(),
                     &VecDeque::new(),
                 )
@@ -2018,6 +2279,7 @@ mod tests {
                         &mut logs,
                         &state,
                         &TelemetrySnapshot::default(),
+                        &RuntimeStore::new(),
                         Instant::now(),
                         &VecDeque::new(),
                     )

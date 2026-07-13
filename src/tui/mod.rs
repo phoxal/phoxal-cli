@@ -54,6 +54,7 @@ use crate::display::DisplayAction;
 use crate::identity::IdentitySummary;
 use crate::session::event::SessionEvent;
 use crate::stores::log_store::LogStore;
+use crate::stores::runtime_store::RuntimeStore;
 use crate::supervisor::{BoardSnapshot, RoutedLogLine};
 use crate::telemetry::TelemetryBackend;
 use crate::theme::Theme;
@@ -75,6 +76,11 @@ pub struct TuiDisplay {
     logs: LogStore,
     log_tx: mpsc::Sender<RoutedLogLine>,
     log_rx: mpsc::Receiver<RoutedLogLine>,
+    /// Session-only participant metadata (finding A5) - empty until the
+    /// caller's launch plan is known, via [`Self::set_runtime_store`]. An
+    /// empty store still renders correctly: every lookup is `None`/`0`, the
+    /// same "not wired yet" shape the Overview/Traffic panels already handle.
+    runtime: RuntimeStore,
     activated: Option<Activated>,
 }
 
@@ -112,8 +118,18 @@ impl TuiDisplay {
             logs: LogStore::new(),
             log_tx,
             log_rx,
+            runtime: RuntimeStore::new(),
             activated: None,
         }
+    }
+
+    /// Install this session's launch-time participant metadata (finding A5),
+    /// called once by `SessionController` right before supervision starts,
+    /// alongside `BoardBackend::set_log_sink`. Replaces any previous store
+    /// wholesale rather than merging, since a session builds exactly one
+    /// launch plan.
+    pub fn set_runtime_store(&mut self, runtime: RuntimeStore) {
+        self.runtime = runtime;
     }
 
     /// Fold one [`SessionEvent`] the controller applies into the startup
@@ -183,6 +199,7 @@ impl TuiDisplay {
             self.logs.record(line);
         }
         self.state.sync(board);
+        self.runtime.observe_board(board);
         let snapshot = telemetry.snapshot();
         let now = Instant::now();
         let Some(activated) = &mut self.activated else {
@@ -194,6 +211,7 @@ impl TuiDisplay {
         let startup = &self.startup;
         let state = &self.state;
         let logs = &mut self.logs;
+        let runtime = &self.runtime;
         activated.terminal.draw(|frame| {
             if startup.show_startup_surface() {
                 render::draw_startup(frame, theme, title, identity, startup);
@@ -206,6 +224,7 @@ impl TuiDisplay {
                     logs,
                     state,
                     &snapshot,
+                    runtime,
                     now,
                     &startup.diagnostics,
                 );
