@@ -238,6 +238,7 @@ impl ResourcesState {
 /// [`AppState::handle_key`].
 #[derive(Debug, Clone)]
 pub struct AppState {
+    simulation: bool,
     pub navigator: NavigatorState,
     pub view: View,
     pub panel: Panel,
@@ -254,6 +255,7 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
+            simulation: false,
             navigator: NavigatorState::default(),
             view: View::Home,
             panel: Panel::default(),
@@ -270,9 +272,18 @@ impl Default for AppState {
 }
 
 impl AppState {
+    #[cfg(test)]
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn for_mode(mode: &str) -> Self {
+        Self {
+            simulation: mode == "simulation",
+            ..Self::default()
+        }
     }
 
     /// Recompute the flattened navigator rows against the latest board, and -
@@ -282,7 +293,7 @@ impl AppState {
     /// still-starting entity").
     pub fn sync(&mut self, board: &BoardSnapshot) {
         let filter = self.navigator.filter.to_lowercase();
-        let sections = build_groups(board, &filter);
+        let sections = build_groups(board, &filter, self.simulation);
         self.navigator.rows = flatten(&sections);
         if self.navigator.cursor >= self.navigator.rows.len() {
             self.navigator.cursor = self.navigator.rows.len().saturating_sub(1);
@@ -418,7 +429,6 @@ impl AppState {
 
     fn handle_diagnostics_key(&mut self, key: KeyEvent) -> DisplayAction {
         match key.code {
-            KeyCode::Char('q') => return DisplayAction::Quit,
             KeyCode::Esc | KeyCode::Left => {
                 self.view = View::Home;
                 self.focus = Focus::Navigator;
@@ -476,7 +486,6 @@ impl AppState {
         let on_devices = self.panel == Panel::Devices;
         let on_resources = self.panel == Panel::Resources;
         match key.code {
-            KeyCode::Char('q') => return DisplayAction::Quit,
             KeyCode::Esc => {
                 self.view = View::Home;
                 self.focus = Focus::Navigator;
@@ -669,6 +678,33 @@ mod tests {
             ),
             DisplayAction::Quit
         ));
+    }
+
+    #[test]
+    fn q_is_local_text_outside_the_top_level_navigator() {
+        let mut state = AppState::new();
+        let board = board_with(&[("drive", ParticipantKind::Service, ParticipantState::Ready)]);
+        state.sync(&board);
+        state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
+        assert_eq!(state.focus, Focus::Detail);
+        assert_eq!(
+            state.handle_key(
+                key(KeyCode::Char('q')),
+                &board,
+                &TelemetrySnapshot::default()
+            ),
+            DisplayAction::None
+        );
+
+        state.open_diagnostics();
+        assert_eq!(
+            state.handle_key(
+                key(KeyCode::Char('q')),
+                &board,
+                &TelemetrySnapshot::default()
+            ),
+            DisplayAction::None
+        );
     }
 
     #[test]

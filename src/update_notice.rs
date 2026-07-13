@@ -40,12 +40,17 @@ pub(crate) struct NoticePolicy {
     pub(crate) message_format: MessageFormat,
     pub(crate) quiet: bool,
     pub(crate) interactive: bool,
+    /// A rich session owns the terminal through its TUI. Human notices are
+    /// routed into Diagnostics while it is active; stderr remains the
+    /// fallback only when no session ever accepted the notice.
+    pub(crate) tui: bool,
 }
 
 #[derive(Debug)]
 struct InvocationState {
     policy: NoticePolicy,
     notice: Option<UpdateNotice>,
+    routed_notice: Option<UpdateNotice>,
     pending_cli: Option<Receiver<Option<CliUpdate>>>,
 }
 
@@ -60,6 +65,7 @@ pub(crate) fn begin(policy: NoticePolicy) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(InvocationState {
         policy,
         notice: None,
+        routed_notice: None,
         pending_cli: None,
     });
 }
@@ -75,7 +81,47 @@ pub(crate) fn offer(notice: UpdateNotice) {
     let Some(state) = invocation.as_mut() else {
         return;
     };
+    let previous = state.notice.clone();
     offer_to_state(state, notice);
+    if state.notice != previous {
+        route_current_to_session(state);
+    }
+}
+
+/// Non-blockingly collect a pending CLI update and deliver the current notice
+/// to an installed rich session. Called when the controller installs
+/// Diagnostics and on redraws so both cached notices offered before controller
+/// construction and background checks that finish later reach the TUI.
+pub(crate) fn poll_session() {
+    let mut invocation = invocation()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(state) = invocation.as_mut() else {
+        return;
+    };
+    poll_pending_cli(state);
+    route_current_to_session(state);
+}
+
+fn route_current_to_session(state: &mut InvocationState) {
+    if !state.policy.tui || state.notice == state.routed_notice {
+        return;
+    }
+    let Some(notice) = state.notice.as_ref() else {
+        return;
+    };
+    let result = crate::session::diagnostics::try_route(
+        crate::session::event::DiagnosticSource::Cli,
+        crate::session::event::DiagnosticLevel::Warn,
+        &format_human(notice),
+    );
+    // A full/closed session channel still owns the terminal. Treat Dropped as
+    // delivered so backpressure never causes a fallback stderr write that
+    // corrupts the screen after teardown. NoSession is deliberately retained
+    // for a later poll or the normal stderr fallback in `finish`.
+    if !matches!(result, crate::session::diagnostics::RouteResult::NoSession) {
+        state.routed_notice = state.notice.clone();
+    }
 }
 
 fn offer_to_state(state: &mut InvocationState, notice: UpdateNotice) {
@@ -114,12 +160,20 @@ pub(crate) fn finish() {
     let Some(state) = state else {
         return;
     };
-    if let Some(message) = render_human(state.policy, state.notice.as_ref()) {
+    if let Some(message) = render_human(
+        state.policy,
+        state.notice.as_ref(),
+        state.routed_notice.as_ref(),
+    ) {
         eprintln!("{message}");
     }
 }
 
-fn render_human(policy: NoticePolicy, notice: Option<&UpdateNotice>) -> Option<String> {
+fn render_human(
+    policy: NoticePolicy,
+    notice: Option<&UpdateNotice>,
+    routed_notice: Option<&UpdateNotice>,
+) -> Option<String> {
     if !policy.artifact_consuming
         || policy.quiet
         || !policy.interactive
@@ -127,15 +181,20 @@ fn render_human(policy: NoticePolicy, notice: Option<&UpdateNotice>) -> Option<S
     {
         return None;
     }
-    match notice? {
-        UpdateNotice::Artifacts(newer) => Some(format!(
+    let notice = notice?;
+    (Some(notice) != routed_notice).then(|| format_human(notice))
+}
+
+fn format_human(notice: &UpdateNotice) -> String {
+    match notice {
+        UpdateNotice::Artifacts(newer) => format!(
             "warning: newer artifact versions available: {}; run `phoxal update`",
             newer.join(", ")
-        )),
-        UpdateNotice::Cli(update) => Some(format!(
+        ),
+        UpdateNotice::Cli(update) => format!(
             "Update available! {} -> {}, run `{}`, release notes: {}",
             update.current, update.latest, update.upgrade_command, update.release_notes_url
-        )),
+        ),
     }
 }
 
@@ -366,6 +425,7 @@ mod tests {
             message_format,
             quiet: false,
             interactive: true,
+            tui: false,
         }
     }
 
@@ -393,7 +453,7 @@ mod tests {
                 ..policy(MessageFormat::Human)
             },
         ] {
-            assert_eq!(render_human(suppressed, Some(&notice)), None);
+            assert_eq!(render_human(suppressed, Some(&notice), None), None);
         }
     }
 
@@ -418,8 +478,36 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(
-            render_human(policy(MessageFormat::Human), Some(&notice)).unwrap(),
+            render_human(policy(MessageFormat::Human), Some(&notice), None).unwrap(),
             "Update available! 1.0.0 -> 1.1.0, run `phoxal-cli self upgrade`, release notes: https://github.com/phoxal/phoxal-cli/releases/tag/v1.1.0"
+        );
+    }
+
+    #[test]
+    fn a_notice_is_suppressed_only_after_the_tui_received_it() {
+        let notice = UpdateNotice::Artifacts(vec!["update".to_string()]);
+        assert_eq!(
+            render_human(
+                NoticePolicy {
+                    tui: true,
+                    ..policy(MessageFormat::Human)
+                },
+                Some(&notice),
+                Some(&notice),
+            ),
+            None
+        );
+        assert!(
+            render_human(
+                NoticePolicy {
+                    tui: true,
+                    ..policy(MessageFormat::Human)
+                },
+                Some(&notice),
+                None,
+            )
+            .is_some(),
+            "an offer made before Diagnostics is installed must retain its stderr fallback"
         );
     }
 
@@ -540,6 +628,7 @@ mod tests {
         let mut state = InvocationState {
             policy: policy(MessageFormat::Human),
             notice: None,
+            routed_notice: None,
             pending_cli: None,
         };
         let cli = UpdateNotice::Cli(
@@ -569,6 +658,7 @@ mod tests {
         let mut state = InvocationState {
             policy: policy(MessageFormat::Human),
             notice: None,
+            routed_notice: None,
             pending_cli: Some(receiver),
         };
 
