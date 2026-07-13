@@ -20,8 +20,17 @@ fn bin() -> Command {
 /// Captured from this crate's `main` branch (pre-theme/progress/identity)
 /// with `cargo run -- version --message-format json`, piped stdout/stderr.
 /// `version` needs no robot project and no network, so it is the cleanest
-/// verb to pin byte-for-byte.
-const BASELINE_VERSION_JSON_STDOUT: &str = "{\n  \"cli_version\": \"0.8.1\",\n  \"participant_metadata_sections\": [\n    \".phoxal_api_meta\",\n    \"__phoxal_meta\"\n  ],\n  \"wire_codec\": \"phoxal/v0;codec=1\"\n}\n";
+/// verb to pin byte-for-byte. The `cli_version` field is derived from the
+/// crate version (`CARGO_PKG_VERSION`, same value the binary reports) rather
+/// than hard-coded, so a legitimate version bump - e.g. the release PR - does
+/// not break this test; every OTHER byte (key order, structure, indentation,
+/// and the absence of any identity/progress decoration) stays pinned.
+fn baseline_version_json_stdout() -> String {
+    format!(
+        "{{\n  \"cli_version\": \"{}\",\n  \"participant_metadata_sections\": [\n    \".phoxal_api_meta\",\n    \"__phoxal_meta\"\n  ],\n  \"wire_codec\": \"phoxal/v0;codec=1\"\n}}\n",
+        env!("CARGO_PKG_VERSION")
+    )
+}
 
 #[test]
 fn version_json_output_is_byte_identical_to_the_pre_foundation_baseline() {
@@ -33,7 +42,7 @@ fn version_json_output_is_byte_identical_to_the_pre_foundation_baseline() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        BASELINE_VERSION_JSON_STDOUT,
+        baseline_version_json_stdout(),
         "--message-format json stdout must stay byte-identical - no identity/progress bytes may be mixed in"
     );
     assert!(
@@ -55,7 +64,7 @@ fn welcome_flag_does_not_defeat_json_mode_silence() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        BASELINE_VERSION_JSON_STDOUT
+        baseline_version_json_stdout()
     );
     assert!(output.stderr.is_empty());
 }
