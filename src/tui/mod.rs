@@ -25,12 +25,18 @@
 //!   `TuiDisplay` exists (`BoardBackend::set_log_sink`), independent of
 //!   `activate` - so by the time the alternate screen actually opens, the
 //!   scrollback is not empty.
+//! - **The startup surface** ([`startup::StartupState`]) is fed every
+//!   [`crate::session::event::SessionEvent`] the controller applies
+//!   ([`TuiDisplay::apply_session_event`]) and renders in place of the
+//!   runtime navigator until the session first reaches `Running`/`Paused` -
+//!   see that module's docs for the pure model.
 
 mod color;
 mod groups;
 mod input;
 mod logs;
 mod render;
+mod startup;
 mod state;
 mod terminal;
 
@@ -44,6 +50,8 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use crate::display::DisplayAction;
+use crate::identity::IdentitySummary;
+use crate::session::event::SessionEvent;
 use crate::supervisor::{BoardSnapshot, RoutedLogLine};
 use crate::telemetry::TelemetryBackend;
 use crate::theme::Theme;
@@ -60,6 +68,8 @@ pub use state::AppState;
 pub struct TuiDisplay {
     theme: Theme,
     title: TitleInfo,
+    identity: Option<IdentitySummary>,
+    startup: startup::StartupState,
     state: AppState,
     logs: LogRouter,
     log_tx: mpsc::UnboundedSender<RoutedLogLine>,
@@ -84,17 +94,28 @@ impl std::fmt::Debug for TuiDisplay {
 
 impl TuiDisplay {
     #[must_use]
-    pub fn new(theme: Theme, title: TitleInfo) -> Self {
+    pub fn new(theme: Theme, title: TitleInfo, identity: Option<IdentitySummary>) -> Self {
         let (log_tx, log_rx) = mpsc::unbounded_channel();
         Self {
             theme,
             title,
+            identity,
+            startup: startup::StartupState::new(),
             state: AppState::new(),
             logs: LogRouter::new(),
             log_tx,
             log_rx,
             activated: None,
         }
+    }
+
+    /// Fold one [`SessionEvent`] the controller applies into the startup
+    /// model - see `startup::StartupState::apply_event`. Called from
+    /// `SessionController::forward_to_renderer` for every event the
+    /// controller itself applies (phase/diagnostic/session transitions), so
+    /// the NEXT [`Self::redraw`] reflects it.
+    pub fn apply_session_event(&mut self, event: &SessionEvent) {
+        self.startup.apply_event(event);
     }
 
     /// The sender end for [`crate::supervisor::BoardBackend::set_log_sink`] -
@@ -135,7 +156,13 @@ impl TuiDisplay {
     /// per-runtime history the reserved `RuntimeLogState` slots keep
     /// (`LogRouter::record_telemetry`) and passed straight through to
     /// `render::draw` for the non-historical readouts (sim clock, host meter,
-    /// per-participant CPU/RAM, joypad selection).
+    /// per-participant CPU/RAM, joypad selection). Renders the dedicated
+    /// startup surface (`render::draw_startup`) instead of the runtime
+    /// navigator while `self.startup.show_startup_surface()` is true - see
+    /// `tui::startup`'s module docs. `self.startup.diagnostics` also feeds
+    /// the navigator's own one-line diagnostics strip once collapsed, so a
+    /// mid-session warning stays visible there too (fixes live-acceptance #2
+    /// for both surfaces).
     pub fn redraw(&mut self, board: &BoardSnapshot, telemetry: &TelemetryBackend) {
         while let Ok(line) = self.log_rx.try_recv() {
             self.logs.record(line);
@@ -148,10 +175,25 @@ impl TuiDisplay {
         };
         let theme = self.theme;
         let title = &self.title;
+        let identity = self.identity.as_ref();
+        let startup = &self.startup;
         let state = &self.state;
         let logs = &mut self.logs;
         let _ = activated.terminal.draw(|frame| {
-            render::draw(frame, theme, title, board, logs, state, &snapshot);
+            if startup.show_startup_surface() {
+                render::draw_startup(frame, theme, title, identity, startup);
+            } else {
+                render::draw(
+                    frame,
+                    theme,
+                    title,
+                    board,
+                    logs,
+                    state,
+                    &snapshot,
+                    &startup.diagnostics,
+                );
+            }
         });
     }
 
@@ -207,7 +249,7 @@ mod tests {
 
     #[test]
     fn a_dormant_display_never_touches_the_terminal_but_still_syncs_state() {
-        let mut display = TuiDisplay::new(Theme::new(ColorCapability::None), title());
+        let mut display = TuiDisplay::new(Theme::new(ColorCapability::None), title(), None);
         let mut board = BoardSnapshot::default();
         board.participants.insert(
             "drive".to_string(),
@@ -224,7 +266,7 @@ mod tests {
 
     #[test]
     fn log_sender_is_stable_before_activation() {
-        let display = TuiDisplay::new(Theme::new(ColorCapability::None), title());
+        let display = TuiDisplay::new(Theme::new(ColorCapability::None), title(), None);
         let sender = display.log_sender();
         assert!(
             sender

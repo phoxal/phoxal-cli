@@ -53,23 +53,6 @@ fn version_json_output_is_byte_identical_to_the_pre_foundation_baseline() {
 }
 
 #[test]
-fn welcome_flag_does_not_defeat_json_mode_silence() {
-    // `--welcome` is a global flag parsed before the verb; json's
-    // "stderr carries nothing" rule must still win over it.
-    let output = bin()
-        .args(["--welcome", "version", "--message-format", "json"])
-        .output()
-        .expect("phoxal-cli --welcome version --message-format json should run");
-
-    assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        baseline_version_json_stdout()
-    );
-    assert!(output.stderr.is_empty());
-}
-
-#[test]
 fn json_mode_keeps_stderr_empty_on_a_top_level_failure() {
     let missing = tempfile::tempdir().expect("tempdir").path().join("missing");
     let output = bin()
@@ -111,13 +94,14 @@ fn human_mode_still_reports_a_top_level_failure() {
 }
 
 #[test]
-fn welcome_flag_does_not_defeat_the_machine_verb_suppression() {
-    // `version` is a machine verb: identity/welcome stay suppressed even
-    // under `--welcome` and even in human mode.
+fn machine_verb_suppression_holds_even_though_the_welcome_card_is_now_default() {
+    // `version` is a machine verb: the welcome card stays suppressed even
+    // though it is the default human rendering now (Product decision 4, no
+    // `--welcome` flag).
     let output = bin()
-        .args(["--welcome", "version"])
+        .args(["version"])
         .output()
-        .expect("phoxal-cli --welcome version should run");
+        .expect("phoxal-cli version should run");
 
     assert!(output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();

@@ -36,14 +36,14 @@
 //! - [`OutputMode::Rich`] on a real TTY selects the existing
 //!   [`crate::tui::TuiDisplay`], activated immediately (before preparation
 //!   even starts) rather than gated behind a stepper hand-off, so the
-//!   alternate screen is the ONE surface from command start to shutdown. A
-//!   dedicated ratatui startup-phase surface (the active-phase-row +
-//!   diagnostics list ahead of the existing runtime navigator) is deferred to
-//!   a later wave - see the crate's follow-up plan; this wave reuses the
-//!   existing navigator unconditionally; a board that does not exist yet
-//!   (during preparation) simply renders as an empty participant list rather
-//!   than a scrollback- or corruption-causing renderer hand-off, which is the
-//!   part this wave's fix targets.
+//!   alternate screen is the ONE surface from command start to shutdown.
+//!   Every [`SessionEvent`] this controller applies (phase/diagnostic/session
+//!   transitions) is forwarded into the TUI via
+//!   [`crate::tui::TuiDisplay::apply_session_event`], which drives a
+//!   dedicated startup surface (welcome card + one active phase row + a
+//!   bounded diagnostics ring) until the session first reaches
+//!   `Running`/`Paused`, then collapses to the existing runtime navigator -
+//!   see `crate::tui::startup`'s module docs for the pure model.
 
 use std::io;
 use std::time::Duration;
@@ -65,7 +65,7 @@ use crate::theme::Theme;
 use crate::tui::{TerminalGuard, TitleInfo, TuiDisplay};
 
 use super::diagnostics;
-use super::event::{DiagnosticLevel, DiagnosticSource, PhaseId, PhaseOutcome, SessionEvent};
+use super::event::{DiagnosticLevel, PhaseId, PhaseOutcome, SessionEvent};
 use super::output::OutputContext;
 use super::state::SessionState;
 
@@ -127,7 +127,7 @@ impl SessionController {
                         .map_or_else(|| "-".to_string(), |summary| summary.channel.clone()),
                     mode: mode_label,
                 };
-                let mut tui = Box::new(TuiDisplay::new(output.theme, title));
+                let mut tui = Box::new(TuiDisplay::new(output.theme, title, identity));
                 tui.activate()?;
                 Renderer::Tui(tui)
             }
@@ -349,24 +349,28 @@ impl SessionController {
     /// exists for producers OUTSIDE the controller (preparation, the
     /// supervisor), not for the controller's own transitions.
     fn emit_session_changed_locally(&mut self) {
-        if let Renderer::Line(line) = &mut self.renderer {
-            line.handle_event(&SessionEvent::SessionChanged {
-                state: self.state.clone(),
-            });
-        }
+        let event = SessionEvent::SessionChanged {
+            state: self.state.clone(),
+        };
+        self.forward_to_renderer(&event);
     }
 
     fn apply_event(&mut self, event: SessionEvent) {
         self.state = reduce_state(self.state.clone(), &event);
-        if let Renderer::Line(line) = &mut self.renderer {
-            line.handle_event(&event);
+        self.forward_to_renderer(&event);
+    }
+
+    /// Hand one event to whichever renderer owns the terminal - the `Line`
+    /// renderer prints it as an append-only line, the TUI folds it into its
+    /// startup model (`TuiDisplay::apply_session_event`) so the NEXT
+    /// `redraw` shows it. `Renderer::None` (JSON mode) drops it: JSON stdout
+    /// must stay byte-identical and stderr must stay empty.
+    fn forward_to_renderer(&mut self, event: &SessionEvent) {
+        match &mut self.renderer {
+            Renderer::Line(line) => line.handle_event(event),
+            Renderer::Tui(tui) => tui.apply_session_event(event),
+            Renderer::None => {}
         }
-        // The Tui renderer does not yet visualize phase/diagnostic events
-        // directly (the dedicated startup surface is deferred - see the
-        // module docs); it still benefits from this call because
-        // `diagnostics::install` already keeps a `Diagnostic` event's raw
-        // text from ever reaching stderr while the alternate screen owns it,
-        // which is the actual corruption this fixes (#2).
     }
 
     fn redraw(&mut self, board: &BoardSnapshot, telemetry: &TelemetryBackend) {
@@ -495,7 +499,7 @@ impl LineRenderer {
             } => {
                 eprintln!(
                     "{}",
-                    format_diagnostic(self.theme, source_kind(source), *level, message)
+                    format_diagnostic(self.theme, source.label(), *level, message)
                 );
             }
             SessionEvent::Telemetry { .. } => {}
@@ -528,18 +532,6 @@ impl LineRenderer {
     }
 }
 
-/// A short, stable label for a [`DiagnosticSource`] - split out from
-/// [`LineRenderer::handle_event`] so `format_diagnostic` stays unit-testable
-/// without constructing a whole event.
-fn source_kind(source: &DiagnosticSource) -> &str {
-    match source {
-        DiagnosticSource::Tracing | DiagnosticSource::Cli => "cli",
-        DiagnosticSource::Dependency => "dependency",
-        DiagnosticSource::Tool { name } => name.as_str(),
-        DiagnosticSource::Supervisor => "supervisor",
-    }
-}
-
 fn format_diagnostic(theme: Theme, source: &str, level: DiagnosticLevel, message: &str) -> String {
     let level_word = match level {
         DiagnosticLevel::Info => "info",
@@ -556,6 +548,7 @@ fn format_diagnostic(theme: Theme, source: &str, level: DiagnosticLevel, message
 
 #[cfg(test)]
 mod tests {
+    use super::super::event::DiagnosticSource;
     use super::*;
     use crate::session::state::{ClockObservation, FailReason, WaitReason};
     use crate::theme::ColorCapability;
@@ -671,19 +664,6 @@ mod tests {
         assert!(text.contains("warn"), "{text}");
         assert!(text.contains("cli"), "{text}");
         assert!(text.contains("connection retrying"), "{text}");
-    }
-
-    #[test]
-    fn source_kind_labels_every_diagnostic_source() {
-        assert_eq!(source_kind(&DiagnosticSource::Tracing), "cli");
-        assert_eq!(source_kind(&DiagnosticSource::Dependency), "dependency");
-        assert_eq!(source_kind(&DiagnosticSource::Supervisor), "supervisor");
-        assert_eq!(
-            source_kind(&DiagnosticSource::Tool {
-                name: "router".to_string()
-            }),
-            "router"
-        );
     }
 
     #[test]

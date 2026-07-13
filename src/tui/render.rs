@@ -3,14 +3,20 @@
 //! I/O - so every function here can be exercised against a
 //! [`ratatui::backend::TestBackend`] in tests without a real terminal.
 
+use std::collections::VecDeque;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap,
+};
 use unicode_width::UnicodeWidthStr;
 
+use crate::identity::IdentitySummary;
 use crate::launch_plan::{SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SITE_TOOL_TELEMETRY};
+use crate::session::event::{DiagnosticLevel, PhaseOutcome};
 use crate::supervisor::{BoardSnapshot, ClockSample, ParticipantState, ParticipantStatus};
 use crate::telemetry::{
     HostSample, JoypadDevicesSample, RouterMetricsSample, TelemetrySnapshot, TopicMetric,
@@ -19,6 +25,7 @@ use crate::theme::{Role, Theme, state_symbol};
 use crate::tui::color;
 use crate::tui::groups::bespoke_tab_label;
 use crate::tui::logs::{HostPoint, LogRouter};
+use crate::tui::startup::{DiagnosticLine, PhaseRow, StartupState};
 use crate::tui::state::{AppState, DetailTab, Focus, NavRow, TrafficSort, View, available_tabs};
 
 /// Static identity shown on the title bar - resolved once at TUI
@@ -93,6 +100,7 @@ fn format_gib(bytes: u64) -> String {
     format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     frame: &mut Frame,
     theme: Theme,
@@ -101,11 +109,13 @@ pub fn draw(
     logs: &mut LogRouter,
     state: &AppState,
     telemetry: &TelemetrySnapshot,
+    diagnostics: &VecDeque<DiagnosticLine>,
 ) {
     let area = frame.area();
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(3),
@@ -115,12 +125,249 @@ pub fn draw(
 
     draw_title_bar(frame, theme, title, telemetry.clock, rows[0]);
     draw_status_line(frame, theme, board, telemetry.host, rows[1]);
-    draw_body(frame, theme, board, logs, state, telemetry, rows[2]);
-    draw_footer(frame, theme, state, rows[3]);
+    draw_diagnostics_strip(frame, theme, diagnostics, rows[2]);
+    draw_body(frame, theme, board, logs, state, telemetry, rows[3]);
+    draw_footer(frame, theme, state, rows[4]);
 
     if state.show_help {
         draw_help_overlay(frame, theme, area);
     }
+}
+
+/// The runtime navigator's own diagnostics line (fixes live-acceptance #2
+/// for the collapsed/post-startup frame too, not just the startup surface):
+/// the single most recent `SessionEvent::Diagnostic`, so a warning that
+/// arrives mid-session (e.g. a Zenoh connection retry) is still visible
+/// somewhere in the frame instead of silently landing only in the bounded
+/// ring nothing displays. Blank when nothing has been captured yet.
+fn draw_diagnostics_strip(
+    frame: &mut Frame,
+    theme: Theme,
+    diagnostics: &VecDeque<DiagnosticLine>,
+    area: Rect,
+) {
+    let Some(latest) = diagnostics.back() else {
+        frame.render_widget(Paragraph::new(""), area);
+        return;
+    };
+    let role = match latest.level {
+        DiagnosticLevel::Info => Role::TextPrimary,
+        DiagnosticLevel::Warn => Role::Warn,
+        DiagnosticLevel::Error => Role::Error,
+    };
+    let text = truncate_to_width(
+        &format!("{}: {}", latest.source.label(), latest.message),
+        area.width as usize,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(text, color::fg(theme, role))),
+        area,
+    );
+}
+
+/// The dedicated startup surface (Product decisions 1-4): the welcome card,
+/// one current active-phase row, a bounded diagnostics area, and the session
+/// state label - rendered INSTEAD of the runtime navigator until
+/// `startup.show_startup_surface()` goes false (see `tui::startup`'s module
+/// docs for the one-way ratchet). A resize simply redraws this same frame -
+/// there is no separate stepper/handoff renderer to fall back to.
+pub fn draw_startup(
+    frame: &mut Frame,
+    theme: Theme,
+    title: &TitleInfo,
+    identity: Option<&IdentitySummary>,
+    startup: &StartupState,
+) {
+    let area = frame.area();
+    let card_height = if identity.is_some() { 9 } else { 1 };
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(card_height),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    draw_welcome_card(frame, theme, identity, rows[0]);
+    draw_active_phase_row(frame, theme, startup.phase.as_ref(), rows[2]);
+    draw_diagnostics_area(frame, theme, &startup.diagnostics, rows[3]);
+    draw_startup_status_line(frame, theme, title, startup, rows[4]);
+}
+
+/// The welcome card (Product decision 4): left-aligned, never centered - a
+/// rounded border via ratatui's own `BorderType::Rounded` (matching
+/// `identity::render_welcome_card`'s glyphs without reusing its ANSI-styled
+/// `String`, which ratatui's cell buffer cannot interpret as escape
+/// sequences - every span here carries its color as a ratatui `Style`
+/// instead). Collapses to a bare one-line version when no `robot.yaml` was
+/// discoverable (`identity` is `None`) - matching
+/// `IdentitySummary::discover`'s own best-effort absence handling.
+fn draw_welcome_card(
+    frame: &mut Frame,
+    theme: Theme,
+    identity: Option<&IdentitySummary>,
+    area: Rect,
+) {
+    let Some(identity) = identity else {
+        frame.render_widget(
+            Paragraph::new(format!("phoxal-cli {}", env!("CARGO_PKG_VERSION")))
+                .style(color::fg(theme, Role::Accent)),
+            area,
+        );
+        return;
+    };
+    let lines = vec![
+        Line::from(Span::styled(" \u{25c7}", color::fg(theme, Role::Accent))),
+        Line::from(vec![
+            Span::styled("\u{25c7} \u{25c7}   ", color::fg(theme, Role::Accent)),
+            Span::styled(
+                "p h o x a l",
+                color::fg(theme, Role::TextPrimary).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "\u{25c7}\u{25c7}\u{25c7}\u{25c7}\u{25c7}    ",
+                color::fg(theme, Role::Accent),
+            ),
+            Span::styled(
+                format!("phoxal-cli {}", env!("CARGO_PKG_VERSION")),
+                color::muted(theme),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("robot     ", color::muted(theme)),
+            Span::styled(identity.robot.clone(), color::fg(theme, Role::TextPrimary)),
+        ]),
+        Line::from(vec![
+            Span::styled("manifest  ", color::muted(theme)),
+            Span::styled(
+                identity.manifest.clone(),
+                color::fg(theme, Role::TextPrimary),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("channel   ", color::muted(theme)),
+            Span::styled(
+                identity.channel.clone(),
+                color::fg(theme, Role::TextPrimary),
+            ),
+        ]),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(color::fg(theme, Role::Border));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .alignment(Alignment::Left),
+        area,
+    );
+}
+
+/// The one current active-phase row (Product decision 3): running (with
+/// progress if carried), or a compact completion result once finished. Blank
+/// when no phase has started yet - never a placeholder for work that has not
+/// begun.
+fn draw_active_phase_row(frame: &mut Frame, theme: Theme, phase: Option<&PhaseRow>, area: Rect) {
+    let Some(phase) = phase else {
+        frame.render_widget(Paragraph::new(""), area);
+        return;
+    };
+    let line = match &phase.outcome {
+        Some((PhaseOutcome::Succeeded, elapsed)) => Line::from(vec![
+            Span::styled("\u{2713} ", color::fg(theme, Role::Success)),
+            Span::styled(
+                format!("{} ({:.1}s)", phase.label, elapsed.as_secs_f32()),
+                color::fg(theme, Role::TextPrimary),
+            ),
+        ]),
+        Some((PhaseOutcome::Skipped, _)) => Line::from(Span::styled(
+            format!("\u{b7} {}", phase.label),
+            color::muted(theme),
+        )),
+        Some((PhaseOutcome::Failed { error }, _)) => Line::from(Span::styled(
+            format!("\u{2717} {} - {error}", phase.label),
+            color::fg(theme, Role::Error),
+        )),
+        None => {
+            let progress_text = phase
+                .progress
+                .as_ref()
+                .map_or_else(String::new, |progress| {
+                    let counter = if progress.total > 0 {
+                        format!(" ({}/{})", progress.completed, progress.total)
+                    } else {
+                        String::new()
+                    };
+                    let detail = progress
+                        .detail
+                        .as_ref()
+                        .map_or_else(String::new, |detail| format!(" - {detail}"));
+                    format!("{counter}{detail}")
+                });
+            Line::from(vec![
+                Span::styled("\u{2026} ", color::fg(theme, Role::Accent)),
+                Span::styled(
+                    format!("{}{progress_text}", phase.label),
+                    color::fg(theme, Role::TextPrimary),
+                ),
+            ])
+        }
+    };
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// The bounded diagnostics area: the most recent lines that fit `area`'s
+/// height, oldest of the visible window first - a `Diagnostic` event never
+/// writes to stderr directly while this surface owns the terminal (fixes
+/// live-acceptance #2).
+fn draw_diagnostics_area(
+    frame: &mut Frame,
+    theme: Theme,
+    diagnostics: &VecDeque<DiagnosticLine>,
+    area: Rect,
+) {
+    let height = area.height as usize;
+    let mut visible: Vec<&DiagnosticLine> = diagnostics.iter().rev().take(height).collect();
+    visible.reverse();
+    let lines: Vec<Line> = visible
+        .into_iter()
+        .map(|entry| {
+            let role = match entry.level {
+                DiagnosticLevel::Info => Role::TextPrimary,
+                DiagnosticLevel::Warn => Role::Warn,
+                DiagnosticLevel::Error => Role::Error,
+            };
+            Line::from(Span::styled(
+                format!("{}: {}", entry.source.label(), entry.message),
+                color::fg(theme, role),
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+/// The startup surface's bottom line: the mode plus the session's own human
+/// label (`"preparing"`, `"waiting for simulation clock"`, ...) - the plain
+/// data `SessionState::label` already computes, not re-derived here.
+fn draw_startup_status_line(
+    frame: &mut Frame,
+    theme: Theme,
+    title: &TitleInfo,
+    startup: &StartupState,
+    area: Rect,
+) {
+    let text = format!("{} \u{b7} {}", title.mode, startup.session_state.label());
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(text, color::muted(theme)))),
+        area,
+    );
 }
 
 /// Build one line with `left` flush to the start and `right` flush to the
@@ -1290,6 +1537,54 @@ mod tests {
         }
     }
 
+    /// The runtime navigator's diagnostics strip must show the most recent
+    /// diagnostic (fixes live-acceptance #2 for the collapsed frame too, not
+    /// just the startup surface), and stay blank rather than panic when
+    /// nothing has been captured yet.
+    #[test]
+    fn diagnostics_strip_shows_only_the_most_recent_diagnostic() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::new(crate::theme::ColorCapability::None);
+
+        let mut diagnostics = VecDeque::new();
+        diagnostics.push_back(DiagnosticLine {
+            source: crate::session::event::DiagnosticSource::Cli,
+            level: DiagnosticLevel::Info,
+            message: "stale first line".to_string(),
+        });
+        diagnostics.push_back(DiagnosticLine {
+            source: crate::session::event::DiagnosticSource::Cli,
+            level: DiagnosticLevel::Warn,
+            message: "zenoh connection retrying".to_string(),
+        });
+
+        terminal
+            .draw(|frame| draw_diagnostics_strip(frame, theme, &diagnostics, frame.area()))
+            .expect("draw_diagnostics_strip must not fail");
+        let content = buffer_text(terminal.backend().buffer());
+        assert!(content.contains("zenoh connection retrying"), "{content}");
+        assert!(!content.contains("stale first line"), "{content}");
+    }
+
+    #[test]
+    fn diagnostics_strip_is_blank_before_any_diagnostic_arrives() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::new(crate::theme::ColorCapability::None);
+        let diagnostics: VecDeque<DiagnosticLine> = VecDeque::new();
+
+        terminal
+            .draw(|frame| draw_diagnostics_strip(frame, theme, &diagnostics, frame.area()))
+            .expect("draw_diagnostics_strip must not fail when empty");
+    }
+
     /// A full frame at a very ordinary size must render without panicking,
     /// and every top-level chrome element (title, group headings, footer)
     /// must actually land somewhere in the buffer.
@@ -1317,6 +1612,7 @@ mod tests {
                     &mut logs,
                     &state,
                     &TelemetrySnapshot::default(),
+                    &VecDeque::new(),
                 )
             })
             .expect("draw must not fail at 80x24");
@@ -1359,6 +1655,7 @@ mod tests {
                         &mut logs,
                         &state,
                         &TelemetrySnapshot::default(),
+                        &VecDeque::new(),
                     )
                 })
                 .unwrap_or_else(|error| panic!("draw must not fail at {width}x{height}: {error}"));
@@ -1392,6 +1689,7 @@ mod tests {
                     &mut logs,
                     &state,
                     &TelemetrySnapshot::default(),
+                    &VecDeque::new(),
                 )
             })
             .expect("first draw must succeed");
@@ -1410,6 +1708,7 @@ mod tests {
                     &mut logs,
                     &state,
                     &TelemetrySnapshot::default(),
+                    &VecDeque::new(),
                 )
             })
             .expect("draw after resize must succeed");
@@ -1449,6 +1748,7 @@ mod tests {
                         &mut logs,
                         &state,
                         &TelemetrySnapshot::default(),
+                        &VecDeque::new(),
                     )
                 })
                 .unwrap_or_else(|error| panic!("draw must not fail under {capability:?}: {error}"));
@@ -1464,5 +1764,161 @@ mod tests {
             text.push('\n');
         }
         text
+    }
+
+    fn sample_identity() -> IdentitySummary {
+        IdentitySummary {
+            robot: "rover-01".to_string(),
+            channel: "dev".to_string(),
+            manifest: "./robot.yaml".to_string(),
+        }
+    }
+
+    /// The startup surface must show the welcome card, the active phase, and
+    /// a recent diagnostic all in the same frame, at an ordinary 80x24 size.
+    #[test]
+    fn draws_the_startup_surface_with_card_phase_and_diagnostics() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::new(crate::theme::ColorCapability::None);
+        let title = sample_title();
+        let identity = sample_identity();
+
+        let mut startup = StartupState::new();
+        startup.apply_event(&crate::session::event::SessionEvent::PhaseStarted {
+            id: crate::session::event::PhaseId::new("download"),
+            label: "Downloading artifacts".to_string(),
+        });
+        startup.apply_event(&crate::session::event::SessionEvent::Diagnostic {
+            source: crate::session::event::DiagnosticSource::Cli,
+            level: crate::session::event::DiagnosticLevel::Warn,
+            message: "connection retrying".to_string(),
+        });
+
+        terminal
+            .draw(|frame| draw_startup(frame, theme, &title, Some(&identity), &startup))
+            .expect("draw_startup must not fail at 80x24");
+
+        let content = buffer_text(terminal.backend().buffer());
+        assert!(content.contains("phoxal-cli"), "{content}");
+        assert!(content.contains("rover-01"), "{content}");
+        assert!(content.contains("Downloading artifacts"), "{content}");
+        assert!(content.contains("connection retrying"), "{content}");
+        assert!(
+            content.contains("preparing"),
+            "state label missing: {content}"
+        );
+    }
+
+    /// A finished phase shows its compact completion result (a checkmark and
+    /// elapsed time), not the running form.
+    #[test]
+    fn draws_a_finished_phase_as_a_compact_completion_line() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::new(crate::theme::ColorCapability::None);
+        let title = sample_title();
+
+        let mut startup = StartupState::new();
+        startup.apply_event(&crate::session::event::SessionEvent::PhaseStarted {
+            id: crate::session::event::PhaseId::new("download"),
+            label: "Downloading artifacts".to_string(),
+        });
+        startup.apply_event(&crate::session::event::SessionEvent::PhaseFinished {
+            id: crate::session::event::PhaseId::new("download"),
+            outcome: crate::session::event::PhaseOutcome::Succeeded,
+            elapsed: std::time::Duration::from_millis(1500),
+        });
+
+        terminal
+            .draw(|frame| draw_startup(frame, theme, &title, None, &startup))
+            .expect("draw_startup must not fail");
+
+        let content = buffer_text(terminal.backend().buffer());
+        assert!(content.contains("Downloading artifacts"), "{content}");
+        assert!(content.contains("1.5s"), "{content}");
+    }
+
+    /// A running phase with progress must show the counter AND the detail
+    /// text carried by `PhaseProgress`, not just the bare label.
+    #[test]
+    fn draws_a_running_phase_with_progress_counter_and_detail() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::new(crate::theme::ColorCapability::None);
+        let title = sample_title();
+
+        let mut startup = StartupState::new();
+        startup.apply_event(&crate::session::event::SessionEvent::PhaseStarted {
+            id: crate::session::event::PhaseId::new("download"),
+            label: "Downloading artifacts".to_string(),
+        });
+        startup.apply_event(&crate::session::event::SessionEvent::PhaseProgress {
+            id: crate::session::event::PhaseId::new("download"),
+            completed: 2,
+            total: 5,
+            detail: Some("phoxal/service-drive".to_string()),
+        });
+
+        terminal
+            .draw(|frame| draw_startup(frame, theme, &title, None, &startup))
+            .expect("draw_startup must not fail");
+
+        let content = buffer_text(terminal.backend().buffer());
+        assert!(content.contains("(2/5)"), "{content}");
+        assert!(content.contains("phoxal/service-drive"), "{content}");
+    }
+
+    /// No `robot.yaml` discoverable (`identity: None`) must still render a
+    /// bare one-line card rather than an empty gap or a panic.
+    #[test]
+    fn draws_a_bare_version_line_when_no_identity_is_discoverable() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::new(crate::theme::ColorCapability::None);
+        let title = sample_title();
+        let startup = StartupState::new();
+
+        terminal
+            .draw(|frame| draw_startup(frame, theme, &title, None, &startup))
+            .expect("draw_startup must not fail without identity");
+
+        let content = buffer_text(terminal.backend().buffer());
+        assert!(content.contains(env!("CARGO_PKG_VERSION")), "{content}");
+    }
+
+    /// The startup surface must degrade without panicking at a pathologically
+    /// narrow size, mirroring the navigator's own narrow-width proof.
+    #[test]
+    fn draws_the_startup_surface_without_panicking_at_a_very_narrow_width() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let identity = sample_identity();
+        for (width, height) in [(20, 10), (8, 6), (1, 3)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            let theme = Theme::new(crate::theme::ColorCapability::None);
+            let title = sample_title();
+            let startup = StartupState::new();
+
+            terminal
+                .draw(|frame| draw_startup(frame, theme, &title, Some(&identity), &startup))
+                .unwrap_or_else(|error| {
+                    panic!("draw_startup must not fail at {width}x{height}: {error}")
+                });
+        }
     }
 }

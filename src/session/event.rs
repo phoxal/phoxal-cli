@@ -83,6 +83,21 @@ pub enum DiagnosticSource {
     Supervisor,
 }
 
+impl DiagnosticSource {
+    /// A short, stable label for this source - shared by the `LineRenderer`
+    /// (`session::controller`) and the TUI's startup diagnostics area
+    /// (`tui::render`), so both renderers name a source identically.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Tracing | Self::Cli => "cli",
+            Self::Dependency => "dependency",
+            Self::Tool { name } => name.as_str(),
+            Self::Supervisor => "supervisor",
+        }
+    }
+}
+
 /// Severity of a [`SessionEvent::Diagnostic`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DiagnosticLevel {
@@ -223,6 +238,21 @@ mod tests {
             ParticipantStatusLite::new(ParticipantLifecycle::Degraded).with_detail("clock absent");
         assert_eq!(status.lifecycle, ParticipantLifecycle::Degraded);
         assert_eq!(status.detail.as_deref(), Some("clock absent"));
+    }
+
+    #[test]
+    fn diagnostic_source_label_covers_every_variant() {
+        assert_eq!(DiagnosticSource::Tracing.label(), "cli");
+        assert_eq!(DiagnosticSource::Cli.label(), "cli");
+        assert_eq!(DiagnosticSource::Dependency.label(), "dependency");
+        assert_eq!(DiagnosticSource::Supervisor.label(), "supervisor");
+        assert_eq!(
+            DiagnosticSource::Tool {
+                name: "router".to_string()
+            }
+            .label(),
+            "router"
+        );
     }
 
     #[test]
