@@ -237,12 +237,13 @@ pub struct BoardBackend {
     /// `reset_participant_liveness` on every (re)spawn so a fresh incarnation
     /// must earn `Ready` again before the sweep applies to it.
     ready_once: Arc<Mutex<BTreeSet<String>>>,
-    /// Optional live sink for [`RoutedLogLine`]s - set by a TUI display
-    /// (`crate::display::Display::attach`) once it has entered the terminal,
-    /// so it can maintain its own bounded per-runtime scrollback (Part 3)
-    /// without polling the board's own 8-line history. `None` outside a TUI
-    /// session (Plain/Json output, or any test) - [`Self::route_log`] simply
-    /// skips the broadcast in that case.
+    /// Optional live sink for [`RoutedLogLine`]s - set by
+    /// `session::controller::SessionController::drive_supervision` once its
+    /// `TuiDisplay` renderer exists, so it can maintain its own bounded
+    /// per-runtime scrollback (Part 3) without polling the board's own
+    /// 8-line history. `None` outside a TUI session (Plain/Json output, or
+    /// any test) - [`Self::route_log`] simply skips the broadcast in that
+    /// case.
     log_sink: Arc<Mutex<Option<mpsc::UnboundedSender<RoutedLogLine>>>>,
 }
 
@@ -582,41 +583,37 @@ pub struct SupervisorOptions {
     pub action_file: Option<PathBuf>,
     pub action_rx: Option<mpsc::Receiver<SupervisorAction>>,
     pub requested_stop: Option<RequestedStop>,
-    /// The live display for this session (Part 2): a full-screen TUI, an
-    /// append-only line logger, or nothing (`--message-format json`) - see
-    /// `crate::display::Display`. Driven from inside this function's own
-    /// `select!` loop so redraws/input never starve poll/restart/cancel.
-    /// Defaults to [`crate::display::Display::None`] (silent) so a caller
-    /// that does not care about interactive display (every test in this
-    /// module) does not have to construct one.
-    pub display: crate::display::Display,
-    /// Gate on when `display` may start redrawing/reading input, fired once
-    /// by the caller's own startup stepper when it reaches `Initialized` (see
-    /// `commands::run::spawn_run_stepper` / `commands::simulate::run`). Kept
-    /// separate from `display` itself so a `display` that is a live TUI can
-    /// still be constructed (and start capturing routed log lines via
-    /// `BoardBackend::set_log_sink`, Part 3) well before it is safe to enter
-    /// the alternate screen - entering it while the stepper's own indicatif
-    /// lines are still redrawing would corrupt both. `None` means "active
-    /// immediately" (every test in this module, and any caller with nothing
-    /// to hand off from).
-    pub display_activate_rx: Option<oneshot::Receiver<()>>,
+    /// The session's root cancellation signal (`session::SessionController`
+    /// owns the sender half): a Ctrl-C observed by the controller cancels
+    /// this, and this loop selects on it directly instead of its own private
+    /// `tokio::signal::ctrl_c()` - the controller is the ONE place that
+    /// decides what Ctrl-C means (first = cancel + orderly teardown, second =
+    /// force exit), never this loop. Defaults to a fresh, never-cancelled
+    /// token so a caller that does not care about cancellation (every test in
+    /// this module) does not have to construct one.
+    pub token: tokio_util::sync::CancellationToken,
+    /// Where this loop emits `SessionEvent`s (stage started/finished) for a
+    /// live `SessionController` to render - see `crate::session::event`.
+    /// `None` for a caller with no renderer to feed (every test in this
+    /// module).
+    pub events: Option<mpsc::Sender<crate::session::event::SessionEvent>>,
     /// Fires when readiness or the running contract graph reaches a terminal
     /// failure and needs the whole session torn down instead of left running
     /// unhealthy forever. The sent `String` is a human-readable reason,
     /// followed by orderly `request_participant_stop` + `shutdown_all`, then a
     /// normal `SupervisorOutcome` reflecting the board's failed participants.
     pub cancel_rx: Option<oneshot::Receiver<String>>,
-    /// The live-telemetry handle for this session's display (CLI-UX Phase
-    /// 3/4): read every redraw (`display.redraw`) for the TUI's sim-clock top
-    /// bar, host/process resource meters, router Traffic table, and joypad
-    /// Devices panel, and written into by `handle_input`'s
+    /// The live-telemetry handle for this session's renderer (CLI-UX Phase
+    /// 3/4): the `SessionController`'s own redraw ticker reads this directly
+    /// (not through this loop) for the TUI's sim-clock top bar, host/process
+    /// resource meters, router Traffic table, and joypad Devices panel, and
+    /// `SessionController::apply_display_action` writes into it for
     /// `DisplayAction::JoypadConnect`/`JoypadRescan`. Defaults to an empty,
     /// disconnected [`crate::telemetry::TelemetryBackend`] (every test in
-    /// this module, and `Display::None`/`Display::Logger` sessions, which
-    /// never read it) - a caller that wants live telemetry constructs one
+    /// this module, and a `--message-format json`/`--plain` session, which
+    /// never reads it) - a caller that wants live telemetry constructs one
     /// with `crate::telemetry::start_host_feed` etc. and passes the SAME
-    /// handle here.
+    /// handle to the controller.
     pub telemetry: crate::telemetry::TelemetryBackend,
 }
 
@@ -628,8 +625,8 @@ impl Default for SupervisorOptions {
             action_file: None,
             action_rx: None,
             requested_stop: None,
-            display: crate::display::Display::None,
-            display_activate_rx: None,
+            token: tokio_util::sync::CancellationToken::new(),
+            events: None,
             cancel_rx: None,
             telemetry: crate::telemetry::TelemetryBackend::default(),
         }
@@ -1064,7 +1061,8 @@ async fn join_reader(task: Option<JoinHandle<()>>) {
 #[derive(Debug, Clone, Default)]
 pub struct SupervisionStage {
     /// Human-readable name for this stage, used in the stalled-stage error
-    /// message and the startup stepper.
+    /// message and as the `PhaseId`/label of the `SessionEvent::PhaseStarted`/
+    /// `PhaseFinished` pair this stage emits (see `spawn_stage_emitting`).
     pub label: String,
     pub specs: Vec<ParticipantSpec>,
     /// Board ids that must be observed `Ready` before the next stage spawns.
@@ -1116,6 +1114,81 @@ async fn spawn_stage(
             }
         }
     }
+}
+
+/// A stage currently being waited on: its expected ready ids, its deadline,
+/// and when it started (so the eventual `PhaseFinished` can report real
+/// elapsed time) - the loop's replacement for a raw
+/// `(String, Vec<String>, Instant)` tuple, which the finished-elapsed
+/// bookkeeping outgrew.
+struct PendingStage {
+    label: String,
+    ready_ids: Vec<String>,
+    deadline: Instant,
+    started: Instant,
+}
+
+/// Send `event` to `events`, if a `SessionController` is listening. Never
+/// blocks: a full or absent channel simply drops the event rather than
+/// stalling the supervisor loop over a slow/missing renderer.
+fn emit_event(
+    events: Option<&mpsc::Sender<crate::session::event::SessionEvent>>,
+    event: crate::session::event::SessionEvent,
+) {
+    if let Some(sender) = events {
+        let _ = sender.try_send(event);
+    }
+}
+
+/// Spawn one stage's participants (if it has any work at all - Product
+/// decision 3: never emit a phase for a stage with nothing to start) and, when
+/// `events` is wired, emit its `PhaseStarted` immediately and `PhaseFinished`
+/// too IF the stage has nothing further to wait for (`ready_ids` empty - spawn
+/// itself already completes it, e.g. the router's spawn-is-ready case). A
+/// stage that DOES have participants to wait for returns its own
+/// [`PendingStage`] instead; the caller's own loop emits its `PhaseFinished`
+/// once `await_participants_ready` resolves.
+async fn spawn_stage_emitting(
+    running: &mut Vec<RunningParticipant>,
+    board: &BoardBackend,
+    events: Option<&mpsc::Sender<crate::session::event::SessionEvent>>,
+    stage: SupervisionStage,
+) -> Option<PendingStage> {
+    let SupervisionStage {
+        label,
+        specs,
+        ready_ids,
+        timeout: stage_timeout,
+    } = stage;
+    if specs.is_empty() && ready_ids.is_empty() {
+        return None;
+    }
+    let started = Instant::now();
+    emit_event(
+        events,
+        crate::session::event::SessionEvent::PhaseStarted {
+            id: crate::session::event::PhaseId::new(label.clone()),
+            label: label.clone(),
+        },
+    );
+    spawn_stage(running, board, specs).await;
+    if ready_ids.is_empty() {
+        emit_event(
+            events,
+            crate::session::event::SessionEvent::PhaseFinished {
+                id: crate::session::event::PhaseId::new(label.clone()),
+                outcome: crate::session::event::PhaseOutcome::Succeeded,
+                elapsed: started.elapsed(),
+            },
+        );
+        return None;
+    }
+    Some(PendingStage {
+        label,
+        ready_ids,
+        deadline: Instant::now() + stage_timeout,
+        started,
+    })
 }
 
 /// Wait until every id in `stage_ids` has been OBSERVED `Ready` on the
@@ -1180,26 +1253,22 @@ pub async fn supervise_until_shutdown(
 ) -> Result<SupervisorOutcome> {
     let mut running = Vec::new();
     let mut stage_queue: VecDeque<SupervisionStage> = stages.into();
+    let token = options.token.clone();
+    let events_tx = options.events.take();
 
     // Spawn every leading stage that has nothing to wait for back-to-back
     // (uncommon in practice - every real stage waits on at least the router
     // or a heartbeat - but keeps a zero-wait stage from stalling a whole
     // startup on an empty `select!` branch), then park on the first stage
     // that actually gates the next one.
-    let mut pending_stage: Option<(String, Vec<String>, Instant)> = None;
+    let mut pending_stage: Option<PendingStage> = None;
     while let Some(stage) = stage_queue.pop_front() {
-        let SupervisionStage {
-            label,
-            specs,
-            ready_ids,
-            timeout: stage_timeout,
-        } = stage;
-        spawn_stage(&mut running, &board, specs).await;
-        if ready_ids.is_empty() {
-            continue;
+        if let Some(next) =
+            spawn_stage_emitting(&mut running, &board, events_tx.as_ref(), stage).await
+        {
+            pending_stage = Some(next);
+            break;
         }
-        pending_stage = Some((label, ready_ids, Instant::now() + stage_timeout));
-        break;
     }
 
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
@@ -1208,32 +1277,9 @@ pub async fn supervise_until_shutdown(
     let mut stage_error = None;
     let mut action_rx = options.action_rx.take();
     let mut cancel_rx = options.cancel_rx.take();
-    let mut display = options.display;
-    let mut display_activate_rx = options.display_activate_rx.take();
-    // A live TUI display starts capturing routed log lines (Part 3) the
-    // instant it exists, well before `display_active` below lets it actually
-    // draw anything - so its scrollback is not empty the moment it activates.
-    if let crate::display::Display::Tui(tui) = &display {
-        board.set_log_sink(tui.log_sender());
-    }
-    let mut display_active = display_activate_rx.is_none();
-    if display_active {
-        // No hand-off gate was given (every test in this module, and any
-        // future caller with nothing to wait on) - activate synchronously so
-        // the invariant "display_active implies the display has been
-        // activated" holds from the very first loop iteration onward, same
-        // as the gated path below establishes it mid-loop.
-        if let Err(error) = display.activate() {
-            board.append_log(
-                "supervisor",
-                format!("supervisor: display activation failed, falling back to silent: {error:#}"),
-            );
-            display = crate::display::Display::None;
-        }
-    }
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+            () = token.cancelled() => {
                 clean_shutdown = true;
                 break;
             }
@@ -1252,36 +1298,6 @@ pub async fn supervise_until_shutdown(
                     handle_action(&mut running, &board, action).await?;
                 }
             }
-            () = recv_activate(&mut display_activate_rx), if !display_active => {
-                display_active = true;
-                if let Err(error) = display.activate() {
-                    board.append_log(
-                        "supervisor",
-                        format!("supervisor: display activation failed, falling back to silent: {error:#}"),
-                    );
-                    display = crate::display::Display::None;
-                }
-            }
-            event = display.next_input(), if display_active => {
-                if let Some(event) = event {
-                    match display.handle_input(event, &board.snapshot(), &options.telemetry) {
-                        crate::display::DisplayAction::None => {}
-                        crate::display::DisplayAction::Quit => {
-                            clean_shutdown = true;
-                            break;
-                        }
-                        crate::display::DisplayAction::Restart(id) => {
-                            handle_action(&mut running, &board, SupervisorAction::Restart { id }).await?;
-                        }
-                        crate::display::DisplayAction::JoypadConnect(id) => {
-                            options.telemetry.send_joypad_command(crate::telemetry::JoypadCommand::Connect(id));
-                        }
-                        crate::display::DisplayAction::JoypadRescan => {
-                            options.telemetry.send_joypad_command(crate::telemetry::JoypadCommand::Rescan);
-                        }
-                    }
-                }
-            }
             // Recreated fresh every loop pass (same pattern as `recv_cancel`/
             // `recv_action` above): the ONLY state that must survive a
             // cancelled poll is the stage's own deadline, which lives in
@@ -1289,30 +1305,39 @@ pub async fn supervise_until_shutdown(
             // recreating the await is safe and never resets the timeout.
             result = await_participants_ready(
                 &board,
-                pending_stage.as_ref().map_or(&[][..], |(_, ids, _)| ids.as_slice()),
-                pending_stage.as_ref().map_or(Duration::ZERO, |(_, _, deadline)| deadline.saturating_duration_since(Instant::now())),
+                pending_stage.as_ref().map_or(&[][..], |stage| stage.ready_ids.as_slice()),
+                pending_stage.as_ref().map_or(Duration::ZERO, |stage| stage.deadline.saturating_duration_since(Instant::now())),
                 Duration::from_millis(200),
             ), if pending_stage.is_some() => {
-                let (label, _, _) = pending_stage.take().expect("guarded by is_some");
+                let stage = pending_stage.take().expect("guarded by is_some");
                 match result {
                     Ok(()) => {
-                        board.append_log("supervisor", format!("supervisor: stage '{label}' ready"));
-                        while let Some(stage) = stage_queue.pop_front() {
-                            let SupervisionStage { label, specs, ready_ids, timeout: stage_timeout } = stage;
-                            spawn_stage(&mut running, &board, specs).await;
-                            if ready_ids.is_empty() {
-                                continue;
+                        board.append_log("supervisor", format!("supervisor: stage '{}' ready", stage.label));
+                        emit_event(events_tx.as_ref(), crate::session::event::SessionEvent::PhaseFinished {
+                            id: crate::session::event::PhaseId::new(stage.label.clone()),
+                            outcome: crate::session::event::PhaseOutcome::Succeeded,
+                            elapsed: stage.started.elapsed(),
+                        });
+                        while let Some(next_stage) = stage_queue.pop_front() {
+                            if let Some(next) =
+                                spawn_stage_emitting(&mut running, &board, events_tx.as_ref(), next_stage).await
+                            {
+                                pending_stage = Some(next);
+                                break;
                             }
-                            pending_stage = Some((label, ready_ids, Instant::now() + stage_timeout));
-                            break;
                         }
                     }
                     Err(error) => {
-                        let reason = format!("stage '{label}' stalled: {error:#}");
+                        let reason = format!("stage '{}' stalled: {error:#}", stage.label);
                         board.append_log(
                             "supervisor",
                             format!("supervisor: {reason}"),
                         );
+                        emit_event(events_tx.as_ref(), crate::session::event::SessionEvent::PhaseFinished {
+                            id: crate::session::event::PhaseId::new(stage.label.clone()),
+                            outcome: crate::session::event::PhaseOutcome::Failed { error: format!("{error:#}") },
+                            elapsed: stage.started.elapsed(),
+                        });
                         stage_error = Some(anyhow!(reason));
                         clean_shutdown = false;
                         break;
@@ -1329,9 +1354,6 @@ pub async fn supervise_until_shutdown(
                     participant.poll(&board, &options.restart_policy).await?;
                 }
                 board.fail_stale_heartbeats(HEARTBEAT_STALE_TIMEOUT);
-                if display_active {
-                    display.redraw(&board.snapshot(), &options.telemetry);
-                }
                 if let Some(state_file) = &options.state_file {
                     board.write_snapshot(state_file)?;
                 }
@@ -1459,20 +1481,6 @@ async fn recv_cancel(cancel_rx: &mut Option<oneshot::Receiver<String>>) -> Optio
     };
     cancel_rx.take();
     result.ok()
-}
-
-/// Resolve at most once, mirroring [`recv_cancel`]: the caller's
-/// `select!` arm additionally guards this with `if !display_active`, so once
-/// it has fired the branch is never polled again structurally either, but
-/// taking the receiver here too keeps the two mechanisms consistent and
-/// makes a stray `None` sender-dropped case terminal rather than spinning.
-async fn recv_activate(display_activate_rx: &mut Option<oneshot::Receiver<()>>) {
-    let result = match display_activate_rx.as_mut() {
-        Some(receiver) => receiver.await,
-        None => return std::future::pending().await,
-    };
-    display_activate_rx.take();
-    let _ = result;
 }
 
 async fn handle_action(
@@ -2087,23 +2095,24 @@ fn missing_ready_participants(board: &BoardSnapshot, expected_bus_ids: &[String]
         .collect()
 }
 
+/// Whether `clock` clears the readiness barrier's clock gate (Product
+/// decision 5): the FIRST observed sample alone proves the simulation clock
+/// path exists and is enough. A clock sample carrying `running: false` is a
+/// healthy, explicit `paused` state - Webots opens a world paused by design -
+/// never a barrier failure; only "no sample was ever observed at all" blocks
+/// readiness. Whether the clock is currently running or paused is surfaced to
+/// the session as `SessionState::Paused`/`Running` by the caller
+/// (`commands::simulate`), not by this gate.
 fn barrier_gap(
     board: &BoardSnapshot,
     expected_bus_ids: &[String],
     clock: ClockObservation,
 ) -> BarrierGap {
     let missing_participants = missing_ready_participants(board, expected_bus_ids);
-    let clock_gap = match clock {
-        ClockObservation {
-            first_sample_ns: None,
-            ..
-        } => Some("no simulation/clock sample was ever observed"),
-        ClockObservation {
-            advanced: false, ..
-        } => Some(
-            "simulation/clock was observed but never advanced (simulation appears paused/frozen)",
-        ),
-        _ => None,
+    let clock_gap = if clock.first_sample_ns.is_none() {
+        Some("no simulation/clock sample was ever observed")
+    } else {
+        None
     };
     BarrierGap {
         missing_participants,
@@ -2595,8 +2604,8 @@ mod tests {
                 action_file: None,
                 action_rx: None,
                 requested_stop: None,
-                display: crate::display::Display::None,
-                display_activate_rx: None,
+                token: tokio_util::sync::CancellationToken::new(),
+                events: None,
                 cancel_rx: None,
                 telemetry: crate::telemetry::TelemetryBackend::default(),
             },
@@ -2751,8 +2760,8 @@ mod tests {
                 action_file: None,
                 action_rx: None,
                 requested_stop: None,
-                display: crate::display::Display::None,
-                display_activate_rx: None,
+                token: tokio_util::sync::CancellationToken::new(),
+                events: None,
                 cancel_rx: None,
                 telemetry: crate::telemetry::TelemetryBackend::default(),
             },
@@ -3058,21 +3067,59 @@ mod tests {
         );
     }
 
+    /// Product decision 5: a published PAUSED clock (observed, but never
+    /// advancing - exactly Webots opening a world paused) is a HEALTHY
+    /// observable state, not a barrier failure. This replaces the old
+    /// `barrier_times_out_on_a_clock_that_never_advances` test, which
+    /// asserted the pre-fix (incorrect) behavior.
     #[tokio::test]
-    async fn barrier_times_out_on_a_clock_that_never_advances() {
+    async fn barrier_succeeds_on_a_clock_that_is_observed_but_paused() {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "simulator-webots-supervisor",
             ParticipantKind::Tool,
             ParticipantState::Ready,
         ));
-        // A sample was observed (Webots opened the world), but it never
-        // advances - the "opened paused, nothing ever unpauses it" symptom.
+        // A sample was observed (Webots opened the world) but never
+        // advances - Webots opens a world paused by design.
         let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation {
             first_sample_ns: Some(0),
             advanced: false,
             ..ClockObservation::default()
         });
+
+        let expected = vec!["simulator-webots-supervisor".to_string()];
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            await_readiness_barrier(
+                &board,
+                &expected,
+                &mut clock_rx,
+                Duration::from_millis(200),
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("readiness barrier must return within its own timeout, never hang")
+        .expect("an observed-but-paused clock must clear the barrier, not fail it");
+    }
+
+    /// Only "no sample was EVER observed" blocks the barrier's clock gate -
+    /// the case where the simulation clock path genuinely never came up at
+    /// all (e.g. the world failed to load).
+    #[tokio::test]
+    async fn barrier_times_out_when_no_clock_sample_is_ever_observed() {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "simulator-webots-supervisor",
+            ParticipantKind::Tool,
+            ParticipantState::Ready,
+        ));
+        board.record_heartbeat(
+            "simulator-webots-supervisor",
+            api::presence::Readiness::Ready,
+        );
+        let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation::default());
 
         let expected = vec!["simulator-webots-supervisor".to_string()];
         let error = tokio::time::timeout(
@@ -3087,11 +3134,13 @@ mod tests {
         )
         .await
         .expect("readiness barrier must return within its own timeout, never hang")
-        .expect_err("a clock that never advances must fail the barrier");
+        .expect_err("a clock that never publishes even one sample must fail the barrier");
 
         assert!(
-            error.to_string().contains("never advanced"),
-            "error should describe the frozen clock: {error}"
+            error
+                .to_string()
+                .contains("no simulation/clock sample was ever observed"),
+            "error should describe the absent clock: {error}"
         );
     }
 

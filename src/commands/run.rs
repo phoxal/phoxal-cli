@@ -47,65 +47,6 @@ use crate::utils::cargo_binary_name;
 /// jitter without masking a genuinely hung participant.
 const RUN_STAGE_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// `run`'s startup stepper phases (Part 4), in order. Indices 3-6 map
-/// 1:1 onto `stages_for_run`'s four `SupervisionStage`s; `spawn_run_stepper`
-/// drives those live from the board. Indices 0-2 (download/validate/build)
-/// happen synchronously inside `prepare_run`, which does not yet report
-/// intermediate progress back to the caller - they complete together right
-/// when `prepare_run` returns rather than live-updating mid-phase; this is a
-/// known, deliberate simplification (threading a live/skip signal out of
-/// `prepare_run`'s artifact-download and source-build internals is future
-/// work, not required for the stepper to exist and hand off correctly).
-const RUN_PHASES: [&str; 8] = [
-    "Downloading artifacts",
-    "Validating robot",
-    "Building artifacts",
-    "Starting router",
-    "Starting tools",
-    "Starting drivers",
-    "Starting services",
-    "Initialized",
-];
-
-/// Drive `RUN_PHASES`' participant-observing phases (indices 3-6, plus the
-/// final `Initialized`) by polling the board for each stage's expected ids
-/// in turn, mirroring the staged supervisor's own gating (`stages_for_run`)
-/// without needing an event channel out of `supervise_until_shutdown` - this
-/// task is read-only and purely cosmetic; it never affects the actual staged
-/// startup, only what the operator sees while it happens. Consumes `stepper`
-/// (already having rendered phases 0-2) and clears the whole sequence once
-/// `Initialized` completes, hand off to the existing board render.
-fn spawn_run_stepper(
-    stepper: crate::stepper::Stepper,
-    board: BoardBackend,
-    stage_phases: Vec<crate::stepper::StagePhase>,
-    display_activate_tx: tokio::sync::oneshot::Sender<()>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut stepper = stepper
-            .drive_participant_phases(&board, 3, stage_phases)
-            .await;
-        if stepper.has_failed() {
-            // A phase already failed and printed its own `✗` line - leave it
-            // visible instead of papering over it with `Initialized`. The
-            // display still hands off here (not returning early) so a
-            // startup failure is visible in the TUI/logger too, not just a
-            // frozen stepper line.
-            let _ = display_activate_tx.send(());
-            return;
-        }
-        let initialized = RUN_PHASES.len() - 1;
-        stepper.start(initialized);
-        stepper.complete(initialized);
-        stepper.clear();
-        // Hand off to whichever display `Display::for_mode` selected (Part
-        // 2) only now that every stepper line is done redrawing - entering
-        // the TUI's alternate screen any earlier would race its indicatif
-        // output.
-        let _ = display_activate_tx.send(());
-    })
-}
-
 #[derive(Debug, Args)]
 pub struct Run {
     #[arg(
@@ -186,19 +127,18 @@ impl Run {
         let project_root = app.project.root().to_path_buf();
         let ui = app.ui;
 
-        let mut stepper = crate::stepper::Stepper::new(RUN_PHASES);
-        stepper.start(0);
-        let prepared =
-            tokio::task::spawn_blocking(move || prepare_run(&project_root, options, &ui))
-                .await
-                .context("run preparation worker failed")??;
-        // See `RUN_PHASES`' docs: download/validate/build happen together
-        // inside `prepare_run`, so all three complete here rather than live.
-        stepper.complete(0);
-        stepper.start(1);
-        stepper.complete(1);
-        stepper.start(2);
-        stepper.complete(2);
+        // One interactive surface for the whole session (Product decision
+        // 1): the controller starts its renderer (a TUI's alternate screen,
+        // or the append-only line renderer) right now, before preparation
+        // even begins - see `SessionController::new`'s docs.
+        let identity = crate::identity::IdentitySummary::discover(app.project.root());
+        let mut controller =
+            crate::session::controller::SessionController::new(app.output, "run", identity)?;
+        let events = controller.events();
+
+        let prepared = controller
+            .drive_prepare_phase(move || prepare_run(&project_root, options, &ui))
+            .await?;
 
         app.ui.info(format!(
             "launch plan resolved: {} robot(s), {} site tool(s)",
@@ -239,77 +179,85 @@ impl Run {
             })
             .collect::<Vec<_>>();
 
-        let (action_rx, watch_handle) = if watch_enabled {
-            let (action_tx, action_rx) = mpsc::channel(16);
+        // The restart/hot-reload action channel always exists now (not just
+        // under `--watch`), so the TUI's `r restart` reaches the supervisor
+        // through `SessionController::set_restart_channel` even when `--watch`
+        // is off.
+        let (action_tx, action_rx) = mpsc::channel(16);
+        controller.set_restart_channel(action_tx.clone());
+        let watch_handle = if watch_enabled {
             let live_ids = prepared
                 .specs
                 .iter()
                 .map(|spec| spec.id.clone())
                 .collect::<BTreeSet<_>>();
-            let handle = crate::watch::spawn_run_watch(crate::watch::RunWatchConfig {
-                ctx: prepared.ctx.clone(),
-                options: watch_options,
-                live_ids,
-                board: prepared.board.clone(),
-                action_tx,
-            });
-            (Some(action_rx), Some(handle))
+            Some(crate::watch::spawn_run_watch(
+                crate::watch::RunWatchConfig {
+                    ctx: prepared.ctx.clone(),
+                    options: watch_options,
+                    live_ids,
+                    board: prepared.board.clone(),
+                    action_tx,
+                },
+            ))
         } else {
-            (None, None)
+            None
         };
 
-        let stages = stages_for_run(prepared.specs);
-        let stage_phases = stages
-            .iter()
-            .map(|stage| {
-                crate::stepper::StagePhase::new(!stage.specs.is_empty(), stage.ready_ids.clone())
-            })
-            .collect::<Vec<_>>();
-        let identity = crate::identity::IdentitySummary::discover(&prepared.ctx.project_root);
-        let display = crate::display::Display::for_mode("run", identity);
+        let stages = stages_for_run(prepared.specs, app.output);
+        // `run` has no simulation clock (Product decision 5 is
+        // `simulation run`-specific), so its session never visits
+        // `Waiting`/`Paused` - it goes straight from `Starting` to `Running`
+        // once the supervisor is live and managing participants; per-stage
+        // progress is already visible via the `PhaseStarted`/`PhaseFinished`
+        // events `supervise_until_shutdown` itself emits.
+        let starting = crate::session::state::SessionState::Preparing
+            .start()
+            .expect("the controller begins every session in Preparing");
+        let _ = events.try_send(crate::session::event::SessionEvent::SessionChanged {
+            state: starting.clone(),
+        });
+        let running = starting
+            .to_running()
+            .expect("Starting -> Running is a legal transition");
+        let _ =
+            events.try_send(crate::session::event::SessionEvent::SessionChanged { state: running });
         // Live telemetry (CLI-UX Phase 3): only worth subscribing when a real
         // TUI is up to read it - `--message-format json`/non-interactive
         // sessions never touch `telemetry`, so skip the extra bus
-        // connections entirely rather than feed a display that can't render
+        // connections entirely rather than feed a renderer that can't show
         // them. `run` has no simulation clock (`telemetry::TelemetryBackend`
         // is never given one here - see `commands::simulate` for the
         // sim-clock feed), so the TUI's clock slot stays empty in this mode
         // by design (`tui::render::simulation_clock_slot`).
         let telemetry = crate::telemetry::TelemetryBackend::new();
-        let _telemetry_tasks = if matches!(display, crate::display::Display::Tui(_)) {
+        let _telemetry_tasks = if controller.renders_tui() {
             start_telemetry_feeds(&prepared.robot_log_targets, &telemetry)
         } else {
             Vec::new()
         };
-        let (display_activate_tx, display_activate_rx) = tokio::sync::oneshot::channel();
-        let stepper_handle = spawn_run_stepper(
-            stepper,
-            prepared.board.clone(),
-            stage_phases,
-            display_activate_tx,
-        );
 
-        let outcome = supervise_until_shutdown(
+        let board = prepared.board.clone();
+        let supervise = tokio::spawn(supervise_until_shutdown(
             stages,
-            prepared.board.clone(),
+            prepared.board,
             SupervisorOptions {
                 state_file: Some(state_file),
                 action_file: Some(action_file),
-                action_rx,
-                display,
-                display_activate_rx: Some(display_activate_rx),
-                telemetry,
+                action_rx: Some(action_rx),
+                token: controller.token(),
+                events: Some(events),
+                telemetry: telemetry.clone(),
                 ..SupervisorOptions::default()
             },
-        )
-        .await;
+        ));
+
+        let outcome = controller
+            .drive_supervision(board, telemetry, supervise)
+            .await;
         if let Some(handle) = watch_handle {
             handle.abort();
         }
-        // Purely cosmetic (see `spawn_run_stepper`'s docs) - abort it rather
-        // than await it so a stalled/failed startup does not hang the
-        // command waiting on a stepper phase that will never complete.
-        stepper_handle.abort();
         let outcome = outcome?;
 
         if !outcome.graph_healthy() {
@@ -329,7 +277,10 @@ impl Run {
 /// router - see its `bus_participant: false` - heartbeat for everything
 /// else) before the next stage spawns; see `supervisor::SupervisionStage`
 /// and `supervisor::await_participants_ready`.
-fn stages_for_run(specs: Vec<ParticipantSpec>) -> Vec<SupervisionStage> {
+fn stages_for_run(
+    specs: Vec<ParticipantSpec>,
+    output: crate::session::output::OutputContext,
+) -> Vec<SupervisionStage> {
     let mut router = Vec::new();
     let mut tools = Vec::new();
     let mut drivers = Vec::new();
@@ -345,11 +296,14 @@ fn stages_for_run(specs: Vec<ParticipantSpec>) -> Vec<SupervisionStage> {
             }
         }
     }
+    // Product decision 6: no unconditional 60s teardown for an interactive
+    // session - see `OutputContext::wait_budget`.
+    let timeout = output.wait_budget(RUN_STAGE_READY_TIMEOUT);
     vec![
-        SupervisionStage::new("starting router", router, RUN_STAGE_READY_TIMEOUT),
-        SupervisionStage::new("starting tools", tools, RUN_STAGE_READY_TIMEOUT),
-        SupervisionStage::new("starting drivers", drivers, RUN_STAGE_READY_TIMEOUT),
-        SupervisionStage::new("starting services", services, RUN_STAGE_READY_TIMEOUT),
+        SupervisionStage::new("starting router", router, timeout),
+        SupervisionStage::new("starting tools", tools, timeout),
+        SupervisionStage::new("starting drivers", drivers, timeout),
+        SupervisionStage::new("starting services", services, timeout),
     ]
 }
 

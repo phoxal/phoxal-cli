@@ -8,7 +8,7 @@ use phoxal::check as graph_check;
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::y2026_8::simulation::{RobotSpawn, SpawnRequest, SpawnSet};
 use serde::Serialize;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::AppContext;
@@ -28,16 +28,23 @@ use crate::launch_plan::{
 use crate::resolver::{
     ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras, resolve,
 };
+// `session::state::ClockObservation` (the `{running: bool}` evidence
+// `SessionState::to_paused` requires) collides by name with
+// `supervisor::ClockObservation` (the richer `{first_sample_ns, advanced,
+// latest}` watch-channel sample below) - aliased here to keep the two
+// unambiguous at every use site in this module.
+use crate::session::output::OutputContext;
+use crate::session::state::{ClockObservation as ClockEvidence, SessionState, WaitReason};
 use crate::simulate_staging::{
     ComponentTypeToStage, RobotToStage, StagedSimulationWorld, stage_simulation_world,
 };
 use crate::supervisor::{
-    BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
-    RequestedStop, RouterOwnership, SupervisionStage, SupervisorLock, SupervisorOptions,
-    await_readiness_barrier, await_terminal_graph_failure, default_connect_endpoint,
-    local_router_reachable, router_ownership, start_bus_log_subscriber, start_clock_barrier_feed,
-    start_presence_heartbeat_subscriber, supervise_until_shutdown, supervisor_actions_path,
-    supervisor_state_path,
+    BoardBackend, ClockObservation, ParticipantKind, ParticipantSpec, ParticipantState,
+    ParticipantStatus, RequestedStop, RouterOwnership, SupervisionStage, SupervisorLock,
+    SupervisorOptions, await_readiness_barrier, await_terminal_graph_failure,
+    default_connect_endpoint, local_router_reachable, router_ownership, start_bus_log_subscriber,
+    start_clock_barrier_feed, start_presence_heartbeat_subscriber, supervise_until_shutdown,
+    supervisor_actions_path, supervisor_state_path,
 };
 use crate::webots_stage_root;
 use crate::world;
@@ -235,28 +242,6 @@ impl SimulationRun {
     }
 }
 
-/// `simulation run`'s startup stepper phases (Part 4), in order. Indices
-/// 3-8 map 1:1 onto `stages_for_simulate`'s six `SupervisionStage`s, driven
-/// live from the board by `Stepper::drive_participant_phases`; index 9 wraps
-/// the existing clock-coupled `await_readiness_barrier` call unchanged (see
-/// its own docs for why it stays a separate, final gate rather than folding
-/// into the staged supervisor). Indices 0-2 share `run`'s documented
-/// simplification (`commands::run::RUN_PHASES`) - they complete together
-/// right when `prepare_with_mode` returns rather than live-updating mid-phase.
-const SIMULATION_PHASES: [&str; 11] = [
-    "Downloading artifacts",
-    "Validating robot",
-    "Building artifacts",
-    "Starting router",
-    "Starting tools",
-    "Starting Webots",
-    "Starting simulation supervisor",
-    "Starting services",
-    "Spawning robot in Webots",
-    "Waiting for simulation clock",
-    "Initialized",
-];
-
 pub async fn run(
     app: &AppContext,
     options: SimulateOptions,
@@ -273,24 +258,25 @@ pub async fn run(
             Ok(sim)
         }
         SimulateMode::Live => {
-            let mut stepper = crate::stepper::Stepper::new(SIMULATION_PHASES);
-            stepper.start(0);
+            // One interactive surface for the whole session (Product
+            // decision 1): the controller starts its renderer right now,
+            // before preparation even begins - see `SessionController::new`.
+            let identity = crate::identity::IdentitySummary::discover(app.project.root());
+            let mut controller = crate::session::controller::SessionController::new(
+                app.output,
+                "simulation",
+                identity,
+            )?;
+            let events = controller.events();
+
             let project_root = app.project.root().to_path_buf();
             let ui = app.ui;
             let prepared_options = options.clone();
-            let sim = tokio::task::spawn_blocking(move || {
-                prepare_with_mode(&project_root, prepared_options, SimulateMode::Live)
-            })
-            .await
-            .context("simulate preparation worker failed")??;
-            // See `SIMULATION_PHASES`' docs: download/validate/build happen
-            // together inside `prepare_with_mode`, so all three complete
-            // here rather than live.
-            stepper.complete(0);
-            stepper.start(1);
-            stepper.complete(1);
-            stepper.start(2);
-            stepper.complete(2);
+            let sim = controller
+                .drive_prepare_phase(move || {
+                    prepare_with_mode(&project_root, prepared_options, SimulateMode::Live)
+                })
+                .await?;
 
             crate::host_doctor::preflight()
                 .map_err(|error| anyhow!("{error}"))
@@ -394,62 +380,54 @@ pub async fn run(
                 sim.plan.robots.first().context(
                     "sim launch plan has no robot for the readiness barrier's clock feed",
                 )?;
-            let (mut clock_rx, _clock_task) = start_clock_barrier_feed(
+            let (clock_rx, _clock_task) = start_clock_barrier_feed(
                 barrier_robot.namespace.clone(),
                 barrier_robot.id.clone(),
                 default_connect_endpoint(),
             );
-            // The SAME clock feed backs both the readiness barrier below
-            // (`&mut clock_rx`, first-sample/advanced detection) and the
-            // TUI's live top-bar step/running readout
-            // (`TelemetryBackend::set_clock_feed`, `latest` field) - cloning
-            // the `watch::Receiver` here is cheap and leaves the barrier's own
-            // mutable borrow untouched. Unlike the old behavior, the feed
+            // The SAME clock feed backs the readiness barrier, the
+            // `SessionState` clock-state watcher (Product decision 5), and
+            // the TUI's live top-bar step/running readout - cloning the
+            // `watch::Receiver` is cheap. Unlike the old behavior, the feed
             // task is no longer aborted once the barrier completes: it keeps
             // running (as `_clock_task`, unbound) for the rest of the
             // session so the TUI keeps seeing fresh samples.
             let telemetry = crate::telemetry::TelemetryBackend::new();
             telemetry.set_clock_feed(clock_rx.clone());
 
-            let (action_rx, watch_handle) = if options.watch {
-                let (action_tx, action_rx) = mpsc::channel(16);
+            // The restart/hot-reload action channel always exists now (not
+            // just under `--watch`), matching `commands::run`.
+            let (action_tx, action_rx) = mpsc::channel(16);
+            controller.set_restart_channel(action_tx.clone());
+            let watch_handle = if options.watch {
                 let live_ids = specs
                     .iter()
                     .map(|spec| spec.id.clone())
                     .collect::<std::collections::BTreeSet<_>>();
-                let handle = crate::watch::spawn_sim_watch(crate::watch::SimWatchConfig {
-                    ctx: sim.ctx.clone(),
-                    options: options.clone(),
-                    live_ids,
-                    board: board.clone(),
-                    action_tx,
-                });
-                (Some(action_rx), Some(handle))
+                Some(crate::watch::spawn_sim_watch(
+                    crate::watch::SimWatchConfig {
+                        ctx: sim.ctx.clone(),
+                        options: options.clone(),
+                        live_ids,
+                        board: board.clone(),
+                        action_tx,
+                    },
+                ))
             } else {
-                (None, None)
+                None
             };
 
             // The readiness barrier and the process supervisor must run
             // concurrently, not sequentially: participants only start
             // publishing heartbeats once `supervise_until_shutdown` has
             // actually spawned them. `cancel_tx` is the coordinated teardown
-            // path for both a barrier error and a terminal graph failure after
-            // readiness: it asks the supervisor task to SIGTERM Webots and
-            // stop every other child instead of leaving an unhealthy session
-            // running forever.
+            // path for both a barrier error and a terminal graph failure
+            // after readiness: it asks the supervisor task to SIGTERM Webots
+            // and stop every other child instead of leaving an unhealthy
+            // session running forever.
             let (cancel_tx, cancel_rx) = oneshot::channel();
-            let stages = stages_for_simulate(specs, &sim.plan);
-            let stage_phases = stages
-                .iter()
-                .map(|stage| {
-                    crate::stepper::StagePhase::new(
-                        !stage.specs.is_empty() || !stage.ready_ids.is_empty(),
-                        stage.ready_ids.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let identity = crate::identity::IdentitySummary::discover(&sim.ctx.project_root);
-            let display = crate::display::Display::for_mode("simulation", identity);
+            let stages = stages_for_simulate(specs, &sim.plan, controller.output());
+
             // Live telemetry (CLI-UX Phase 3/4): only worth subscribing when
             // a real TUI is up to read it, same gate as `commands::run`. The
             // sim clock feed (`telemetry.set_clock_feed` above) is wired
@@ -463,107 +441,93 @@ pub async fn run(
                 .iter()
                 .map(|robot| (robot.namespace.clone(), robot.id.clone()))
                 .collect();
-            let _telemetry_tasks = if matches!(display, crate::display::Display::Tui(_)) {
+            let _telemetry_tasks = if controller.renders_tui() {
                 crate::commands::run::start_telemetry_feeds(&site_targets, &telemetry)
             } else {
                 Vec::new()
             };
-            let (display_activate_tx, display_activate_rx) = oneshot::channel();
+
+            let starting = crate::session::state::SessionState::Preparing
+                .start()
+                .expect("the controller begins every session in Preparing");
+            let _ = events
+                .try_send(crate::session::event::SessionEvent::SessionChanged { state: starting });
+            // Fixes live-acceptance #3: reflects the observed simulation
+            // clock (waiting/paused/running) as its own live `SessionState`,
+            // continuously for the whole session - not just once at startup -
+            // independent of the readiness barrier's pass/fail decision.
+            let clock_state_watcher =
+                spawn_clock_state_watcher(clock_rx.clone(), events.clone(), controller.token());
+
+            let board_for_supervise = board.clone();
             let supervise_task = tokio::spawn(supervise_until_shutdown(
                 stages,
-                board.clone(),
+                board_for_supervise,
                 SupervisorOptions {
                     state_file: Some(state_file),
                     action_file: Some(action_file),
-                    action_rx,
+                    action_rx: Some(action_rx),
                     requested_stop: Some(requested_stop),
                     cancel_rx: Some(cancel_rx),
-                    display,
-                    display_activate_rx: Some(display_activate_rx),
-                    telemetry,
+                    token: controller.token(),
+                    events: Some(events),
+                    telemetry: telemetry.clone(),
                     ..SupervisorOptions::default()
                 },
             ));
 
-            // Phases 3-8 (Router/Tools/Webots/Supervisor/Services/Robot)
-            // progress live off the same board the staged supervisor above
-            // is driving, purely cosmetic and read-only (see
-            // `Stepper::drive_participant_phases`'s docs); phase 9 is the
-            // existing clock-coupled barrier, unchanged. `tokio::join!` runs
-            // both concurrently so the stepper's stage-by-stage display and
-            // the barrier's all-at-once participant+clock check finish
-            // together rather than one blocking the other.
-            stepper.start(9);
-            let (stepper_after_stages, barrier_result) = tokio::join!(
-                stepper.drive_participant_phases(&board, 3, stage_phases),
-                await_readiness_barrier(
-                    &board,
-                    &expected_bus_ids,
-                    &mut clock_rx,
-                    SIMULATE_READINESS_TIMEOUT,
-                    std::time::Duration::from_millis(200),
-                )
-            );
-            let mut stepper = stepper_after_stages;
-            match &barrier_result {
-                Ok(()) if !stepper.has_failed() => {
-                    stepper.complete(9);
-                    stepper.start(10);
-                    stepper.complete(10);
-                    stepper.clear();
+            // Fixes live-acceptance #4: the readiness barrier (and, once it
+            // succeeds, the ongoing terminal-graph-failure watch) run as a
+            // background task instead of an unguarded `tokio::join!` ahead of
+            // the controller's own Ctrl-C-aware loop. `drive_supervision` is
+            // entered IMMEDIATELY below, so Ctrl-C is observed from the
+            // instant supervision begins - during the readiness wait, not
+            // only after it happens to resolve.
+            let readiness_timeout = controller.output().wait_budget(SIMULATE_READINESS_TIMEOUT);
+            let barrier_watch = tokio::spawn({
+                let board = board.clone();
+                let expected_bus_ids = expected_bus_ids.clone();
+                let mut clock_rx = clock_rx;
+                async move {
+                    match await_readiness_barrier(
+                        &board,
+                        &expected_bus_ids,
+                        &mut clock_rx,
+                        readiness_timeout,
+                        std::time::Duration::from_millis(200),
+                    )
+                    .await
+                    {
+                        Err(error) => {
+                            let _ = cancel_tx.send(error.to_string());
+                        }
+                        Ok(()) => {
+                            let failed = await_terminal_graph_failure(
+                                &board,
+                                &expected_bus_ids,
+                                std::time::Duration::from_millis(200),
+                            )
+                            .await;
+                            let _ = cancel_tx.send(format!(
+                                "graph ended unhealthy; failed participants: {}",
+                                failed.join(", ")
+                            ));
+                        }
+                    }
                 }
-                Ok(()) => {
-                    // A phase 3-8 stage already failed and printed its own
-                    // `✗` line even though the barrier itself reported
-                    // success - leave that failure visible rather than
-                    // papering over it with a false `Initialized`.
-                }
-                Err(error) => stepper.fail(9, format!("{error:#}")),
-            }
-            // Hand off to whichever display `Display::for_mode` selected
-            // (Part 2) only now that every stepper line is done redrawing,
-            // regardless of which arm above ran - a startup failure must
-            // still be visible in the TUI/logger, not just a frozen stepper
-            // line.
-            let _ = display_activate_tx.send(());
-            let terminal_failure_task = match &barrier_result {
-                Err(error) => {
-                    let _ = cancel_tx.send(error.to_string());
-                    None
-                }
-                Ok(()) => {
-                    let board = board.clone();
-                    let expected_bus_ids = expected_bus_ids.clone();
-                    Some(tokio::spawn(async move {
-                        let failed = await_terminal_graph_failure(
-                            &board,
-                            &expected_bus_ids,
-                            std::time::Duration::from_millis(200),
-                        )
-                        .await;
-                        let _ = cancel_tx.send(format!(
-                            "graph ended unhealthy; failed participants: {}",
-                            failed.join(", ")
-                        ));
-                    }))
-                }
-            };
+            });
 
-            let outcome = supervise_task
-                .await
-                .context("simulation supervisor task panicked")?;
-            if let Some(handle) = terminal_failure_task {
-                handle.abort();
-            }
+            let outcome = controller
+                .drive_supervision(board, telemetry, supervise_task)
+                .await;
+            barrier_watch.abort();
+            clock_state_watcher.abort();
             if let Some(handle) = watch_handle {
                 handle.abort();
             }
             spawn_responder.abort();
             let outcome = outcome?;
 
-            if let Err(error) = barrier_result {
-                bail!("{error}");
-            }
             if !outcome.graph_healthy() {
                 bail!(
                     "supervisor graph ended unhealthy; failed participants: {}",
@@ -572,6 +536,58 @@ pub async fn run(
             }
             Ok(sim)
         }
+    }
+}
+
+/// Continuously reflect the observed simulation clock (Product decision 5)
+/// as `SessionState` transitions: `Waiting(ClockAbsent)` until a first
+/// sample is observed, then `Paused`/`Running` from the sample's own
+/// `running` flag - flips live if Webots is paused/resumed mid-session, not
+/// only once at startup. Runs until `token` is cancelled or the feed itself
+/// ends.
+fn spawn_clock_state_watcher(
+    mut clock_rx: watch::Receiver<ClockObservation>,
+    events: mpsc::Sender<crate::session::event::SessionEvent>,
+    token: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Ok(mut current) = SessionState::Preparing.start() else {
+            return;
+        };
+        apply_clock_observation(&mut current, *clock_rx.borrow(), &events);
+        loop {
+            tokio::select! {
+                () = token.cancelled() => break,
+                changed = clock_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+            apply_clock_observation(&mut current, *clock_rx.borrow(), &events);
+        }
+    })
+}
+
+fn apply_clock_observation(
+    current: &mut SessionState,
+    observation: ClockObservation,
+    events: &mpsc::Sender<crate::session::event::SessionEvent>,
+) {
+    let next = if observation.first_sample_ns.is_none() {
+        current.clone().to_waiting(WaitReason::ClockAbsent)
+    } else if observation.latest.is_some_and(|sample| sample.running) {
+        current.clone().to_running()
+    } else {
+        current.clone().to_paused(ClockEvidence { running: false })
+    };
+    if let Ok(next) = next
+        && next != *current
+    {
+        let _ = events.try_send(crate::session::event::SessionEvent::SessionChanged {
+            state: next.clone(),
+        });
+        *current = next;
     }
 }
 
@@ -1235,7 +1251,11 @@ fn simulation_managed_participant_ids(plan: &LaunchPlan) -> Vec<String> {
 /// observation) is unchanged, this only reorders WHEN the CLI hands specs to
 /// the supervisor and adds explicit wait-only stages for the participants
 /// Webots itself spawns.
-fn stages_for_simulate(specs: Vec<ParticipantSpec>, plan: &LaunchPlan) -> Vec<SupervisionStage> {
+fn stages_for_simulate(
+    specs: Vec<ParticipantSpec>,
+    plan: &LaunchPlan,
+    output: OutputContext,
+) -> Vec<SupervisionStage> {
     let mut router = Vec::new();
     let mut tools = Vec::new();
     let mut webots = Vec::new();
@@ -1255,23 +1275,18 @@ fn stages_for_simulate(specs: Vec<ParticipantSpec>, plan: &LaunchPlan) -> Vec<Su
         simulation_managed_participant_ids(plan)
             .into_iter()
             .partition(|id| id == SIMULATOR_SUPERVISOR_PROVIDER_ID);
+    // Product decision 6: no unconditional 60s teardown for an interactive
+    // session - see `OutputContext::wait_budget`.
+    let timeout = output.wait_budget(SIMULATE_READINESS_TIMEOUT);
     vec![
-        SupervisionStage::new("starting router", router, SIMULATE_READINESS_TIMEOUT),
-        SupervisionStage::new("starting tools", tools, SIMULATE_READINESS_TIMEOUT),
-        SupervisionStage::new("starting Webots", webots, SIMULATE_READINESS_TIMEOUT),
-        SupervisionStage::new(
-            "waiting for the simulation supervisor",
-            Vec::new(),
-            SIMULATE_READINESS_TIMEOUT,
-        )
-        .with_extra_ready_ids(supervisor_ids),
-        SupervisionStage::new("starting services", services, SIMULATE_READINESS_TIMEOUT),
-        SupervisionStage::new(
-            "waiting for robot controllers",
-            Vec::new(),
-            SIMULATE_READINESS_TIMEOUT,
-        )
-        .with_extra_ready_ids(controller_ids),
+        SupervisionStage::new("starting router", router, timeout),
+        SupervisionStage::new("starting tools", tools, timeout),
+        SupervisionStage::new("starting Webots", webots, timeout),
+        SupervisionStage::new("waiting for the simulation supervisor", Vec::new(), timeout)
+            .with_extra_ready_ids(supervisor_ids),
+        SupervisionStage::new("starting services", services, timeout),
+        SupervisionStage::new("waiting for robot controllers", Vec::new(), timeout)
+            .with_extra_ready_ids(controller_ids),
     ]
 }
 

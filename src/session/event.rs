@@ -69,6 +69,10 @@ pub enum DiagnosticSource {
     /// A `tracing` log record captured instead of written directly to
     /// stderr.
     Tracing,
+    /// An operator-facing message from the CLI's own command code
+    /// (`crate::ui::Ui::info`/`warn`/`error`) captured instead of written
+    /// directly to stderr, so it cannot race a renderer's redraw.
+    Cli,
     /// Output captured from a dependency's own logging (e.g. a library that
     /// writes to stderr directly).
     Dependency,

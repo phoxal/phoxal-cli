@@ -84,10 +84,11 @@ pub struct TerminalGuard;
 
 impl TerminalGuard {
     /// Whether a full-screen TUI may take over this process's stderr:
-    /// `OutputMode::Rich` (already TTY-gated at the point [`crate::display::Display::for_mode`]
-    /// calls this) plus a direct `is_terminal` check, belt-and-suspenders per
-    /// the design note that a TUI must never take over a non-interactive
-    /// stream even if the cached output mode were somehow stale.
+    /// `OutputMode::Rich` (already TTY-gated at the point
+    /// `session::controller::SessionController::new` calls this) plus a
+    /// direct `is_terminal` check, belt-and-suspenders per the design note
+    /// that a TUI must never take over a non-interactive stream even if the
+    /// cached output mode were somehow stale.
     #[must_use]
     pub fn should_use_terminal(stderr: &Stderr) -> bool {
         stderr.is_terminal()

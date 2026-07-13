@@ -387,10 +387,27 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
     // process-wide progress state so every long-running operation below
     // (catalog fetch, artifact download, git resolve, cargo builds, the
     // simulate readiness wait) can ask for a spinner/bar without a handle
-    // threaded through its call chain.
+    // threaded through its call chain. `crate::progress::set_mode` stays -
+    // every non-session verb (`check`, `deploy`, `status`, ...) still asks it
+    // directly (Wave D removes it, not this one).
     let output_mode =
         crate::output_mode::OutputMode::compute(interactive, cli.plain, cli.quiet, message_format);
     crate::progress::set_mode(output_mode);
+
+    // The explicit `OutputContext` (Target design part 4): built once, here,
+    // from the SAME inputs as `output_mode` above plus the theme detected off
+    // the same stream, and threaded into `run`/`simulation run`'s
+    // `SessionController` via `AppContext::output` - see that field's docs.
+    let output = crate::session::output::OutputContext::compute(
+        interactive,
+        cli.plain,
+        cli.quiet,
+        message_format,
+    );
+    let app = &AppContext {
+        output,
+        ..app.clone()
+    };
 
     // Identity header / `--welcome` card: gated independently of the output
     // mode above (see `crate::identity::IdentityPolicy` - `--plain` is

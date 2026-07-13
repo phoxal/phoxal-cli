@@ -52,7 +52,6 @@ pub mod resolver;
 pub mod session;
 pub mod shell;
 pub mod simulate_staging;
-pub mod stepper;
 pub mod stores;
 pub mod supervisor;
 pub mod telemetry;
