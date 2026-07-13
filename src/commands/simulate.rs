@@ -23,7 +23,8 @@ use crate::commands::check::{
 use crate::component_driver::{component_assets_dir, component_driver_crate_dir};
 use crate::launch_plan::{
     CheckedRobotLaunchInput, DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, PlanContext,
-    STANDARD_SITE_TOOLS, SubstitutedContract, SubstitutionRecord, build_launch_plan,
+    SITE_TOOL_ROUTER, STANDARD_SITE_TOOLS, SubstitutedContract, SubstitutionRecord,
+    build_launch_plan,
 };
 use crate::resolver::{
     ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras, resolve,
@@ -311,7 +312,7 @@ pub async fn run(
                 .drive_supervision(
                     setup.board,
                     setup.telemetry,
-                    sim.runtime_store.clone(),
+                    setup.runtime_store,
                     setup.supervise_task,
                 )
                 .await;
@@ -345,8 +346,12 @@ pub async fn run(
 /// completes: the board/telemetry/supervisor task `drive_supervision` needs,
 /// plus every ancillary task that must be aborted once supervision ends.
 struct LiveSimSetup {
+    // Keep both session-wide locks alive for the entire supervision lifetime,
+    // not merely while this setup future is being assembled.
+    _locks: LiveSimulationLocks,
     board: BoardBackend,
     telemetry: crate::telemetry::TelemetryBackend,
+    runtime_store: crate::stores::runtime_store::RuntimeStore,
     supervise_task: JoinHandle<Result<SupervisorOutcome>>,
     barrier_watch: JoinHandle<()>,
     clock_state_watcher: JoinHandle<()>,
@@ -358,6 +363,20 @@ struct LiveSimSetup {
     /// collected here instead of leaked under `_`-prefixed bindings (finding
     /// B6), so the caller can abort every one of them once supervision ends.
     feed_tasks: Vec<JoinHandle<()>>,
+}
+
+struct LiveSimulationLocks {
+    _run_lock: SupervisorLock,
+    _simulator_lock: SupervisorLock,
+}
+
+impl LiveSimulationLocks {
+    fn acquire(run_dir: &std::path::Path, simulator_lock_path: &std::path::Path) -> Result<Self> {
+        Ok(Self {
+            _run_lock: SupervisorLock::acquire(run_dir)?,
+            _simulator_lock: SupervisorLock::acquire_path(simulator_lock_path)?,
+        })
+    }
 }
 
 /// Everything between preparation finishing and supervision beginning for a
@@ -381,12 +400,13 @@ async fn live_simulate_setup(
         .context("Webots preflight failed; live simulate cannot launch the simulator")?;
 
     let run_dir = crate::host_paths::run_dir()?;
-    let _lock = SupervisorLock::acquire(&run_dir)?;
-    let _simulator_lock = SupervisorLock::acquire_path(&crate::host_paths::simulator_lock_path()?)?;
+    let locks = LiveSimulationLocks::acquire(&run_dir, &crate::host_paths::simulator_lock_path()?)?;
     let state_file = supervisor_state_path()?;
     let action_file = supervisor_actions_path()?;
     let board = BoardBackend::new();
     let router_ownership = router_ownership(local_router_reachable(&default_connect_endpoint()));
+    let mut runtime_store = sim.runtime_store.clone();
+    runtime_store.set_router_ownership(SITE_TOOL_ROUTER, router_ownership);
     let mut specs = Vec::new();
     crate::commands::run::prepare_site_tools(
         &sim.plan,
@@ -600,8 +620,10 @@ async fn live_simulate_setup(
     });
 
     Ok(LiveSimSetup {
+        _locks: locks,
         board,
         telemetry,
+        runtime_store,
         supervise_task,
         barrier_watch,
         clock_state_watcher,
@@ -2103,6 +2125,27 @@ mod tests {
             webots_launch_args(Path::new("/tmp/staged.wbt")),
             vec!["--mode=realtime", "--batch", "/tmp/staged.wbt"]
         );
+    }
+
+    #[test]
+    fn live_simulation_locks_remain_held_until_the_setup_owner_drops() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let simulator_lock = temp.path().join("simulator.lock");
+        let locks = LiveSimulationLocks::acquire(temp.path(), &simulator_lock)?;
+
+        assert!(
+            SupervisorLock::acquire(temp.path()).is_err(),
+            "the run lock must remain held after setup returns"
+        );
+        assert!(
+            SupervisorLock::acquire_path(&simulator_lock).is_err(),
+            "the simulator lock must remain held after setup returns"
+        );
+
+        drop(locks);
+        SupervisorLock::acquire(temp.path())?;
+        SupervisorLock::acquire_path(&simulator_lock)?;
+        Ok(())
     }
 
     #[test]

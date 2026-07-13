@@ -29,7 +29,28 @@ use std::time::{Duration, Instant};
 use phoxal::check::ParticipantContractSurface;
 
 use crate::launch_plan::{LaunchOwnership, LaunchPlan, ParticipantExecution};
-use crate::supervisor::{BoardSnapshot, ParticipantState};
+use crate::supervisor::{BoardSnapshot, ParticipantState, RouterOwnership};
+
+/// The ownership wording the runtime UI needs. This deliberately remains a
+/// session-only type: an externally reused router is neither CLI-managed nor
+/// simulation-managed, but adding that case to persisted `LaunchOwnership`
+/// would widen the JSON-stable launch-plan contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuntimeOwnership {
+    #[default]
+    CliManaged,
+    SimulationManaged,
+    External,
+}
+
+impl From<LaunchOwnership> for RuntimeOwnership {
+    fn from(ownership: LaunchOwnership) -> Self {
+        match ownership {
+            LaunchOwnership::CliManaged => Self::CliManaged,
+            LaunchOwnership::SimulationManaged => Self::SimulationManaged,
+        }
+    }
+}
 
 /// One participant's launch-time metadata: everything [`RuntimeStore`] knows
 /// about it that is not part of the board's own lifecycle record.
@@ -41,7 +62,7 @@ pub struct RuntimeParticipantMetadata {
     /// participant this store was never told about (should not happen for
     /// anything [`RuntimeStore::from_launch_plan`] actually launched).
     pub artifact_ref: Option<String>,
-    pub ownership: LaunchOwnership,
+    pub ownership: RuntimeOwnership,
     /// Declared input contracts (`subscribe`/`ask` roles), each rendered as
     /// its generation-qualified `"<generation>::<contract>"` name, sorted and
     /// deduplicated.
@@ -53,9 +74,9 @@ pub struct RuntimeParticipantMetadata {
 
 impl RuntimeParticipantMetadata {
     #[must_use]
-    fn ownership(ownership: LaunchOwnership) -> Self {
+    fn ownership(ownership: impl Into<RuntimeOwnership>) -> Self {
         Self {
-            ownership,
+            ownership: ownership.into(),
             ..Self::default()
         }
     }
@@ -150,6 +171,19 @@ impl RuntimeStore {
     #[must_use]
     pub fn metadata(&self, id: &str) -> Option<&RuntimeParticipantMetadata> {
         self.metadata.get(id)
+    }
+
+    /// Apply the router ownership decision made from the live transport probe.
+    /// Site launches are otherwise CLI-managed by default, but a reachable
+    /// pre-existing router must render as external rather than misreported as
+    /// a child this session owns.
+    pub fn set_router_ownership(&mut self, id: &str, ownership: RouterOwnership) {
+        if let Some(metadata) = self.metadata.get_mut(id) {
+            metadata.ownership = match ownership {
+                RouterOwnership::External => RuntimeOwnership::External,
+                RouterOwnership::Managed => RuntimeOwnership::CliManaged,
+            };
+        }
     }
 
     /// Feed a fresh board snapshot: records the first time each participant
@@ -297,7 +331,7 @@ mod tests {
             router.artifact_ref.as_deref(),
             Some("phoxal/tool-router@0.1.8")
         );
-        assert_eq!(router.ownership, LaunchOwnership::CliManaged);
+        assert_eq!(router.ownership, RuntimeOwnership::CliManaged);
 
         let drive = store.metadata("drive").expect("drive must be registered");
         assert_eq!(
@@ -390,6 +424,18 @@ mod tests {
         assert_eq!(
             store.potential_consumers("dev/rover-01/y2026_1::battery::State"),
             0
+        );
+    }
+
+    #[test]
+    fn external_router_ownership_overrides_the_site_default() {
+        let mut store = RuntimeStore::from_launch_plan(&plan_with_one_of_each(), &[]);
+        store.set_router_ownership("tool-router", RouterOwnership::External);
+        assert_eq!(
+            store
+                .metadata("tool-router")
+                .map(|metadata| metadata.ownership),
+            Some(RuntimeOwnership::External)
         );
     }
 }

@@ -116,10 +116,13 @@ pub(crate) fn catalog_or_vendored(
                 // a direct `eprintln!` here could corrupt an active TUI
                 // frame. Falls back to the original direct write only when
                 // no session is active (matches `Ui::warn`'s own fallback).
-                if !crate::session::diagnostics::try_route(
-                    crate::session::event::DiagnosticSource::Cli,
-                    crate::session::event::DiagnosticLevel::Warn,
-                    &message,
+                if matches!(
+                    crate::session::diagnostics::try_route(
+                        crate::session::event::DiagnosticSource::Cli,
+                        crate::session::event::DiagnosticLevel::Warn,
+                        &message,
+                    ),
+                    crate::session::diagnostics::RouteResult::NoSession
                 ) {
                     eprintln!("warning: {message}");
                 }

@@ -111,6 +111,19 @@ struct PreparedRun {
     runtime_store: crate::stores::runtime_store::RuntimeStore,
 }
 
+/// Resources assembled after preparation but before the controller enters
+/// supervision. Keeping this whole phase behind `drive_setup` means raw-mode
+/// Ctrl-C remains polled until the supervisor loop takes ownership.
+struct LiveRunSetup {
+    board: BoardBackend,
+    telemetry: crate::telemetry::TelemetryBackend,
+    runtime_store: crate::stores::runtime_store::RuntimeStore,
+    supervise_task: tokio::task::JoinHandle<Result<crate::supervisor::SupervisorOutcome>>,
+    watch_handle: Option<tokio::task::JoinHandle<()>>,
+    feed_tasks: Vec<tokio::task::JoinHandle<()>>,
+    action_tx: mpsc::Sender<crate::supervisor::SupervisorAction>,
+}
+
 impl Run {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let options = RunOptions {
@@ -149,133 +162,35 @@ impl Run {
             .drive_prepare_phase(move || prepare_run(&project_root, options, &ui))
             .await?;
 
-        app.ui.info(format!(
-            "launch plan resolved: {} robot(s), {} site tool(s)",
-            prepared.plan.robots.len(),
-            prepared.plan.site.len()
-        ));
-        match prepared.router_ownership {
-            RouterOwnership::External => app.ui.info("reusing reachable external tool-router"),
-            RouterOwnership::Managed => app.ui.info("tool-router will be managed by this session"),
-        }
-        report_launch_commands(&prepared.plan, &prepared.specs, message_format)?;
-
-        // Finding B6: every feed task participates in teardown instead of
-        // being leaked under a `_`-prefixed binding for the rest of the
-        // process's life - collected here and aborted once supervision ends
-        // (see below), rather than detached.
-        let mut feed_tasks = prepared
-            .robot_log_targets
-            .iter()
-            .map(|(namespace, robot_id)| {
-                start_bus_log_subscriber(
-                    namespace.clone(),
-                    robot_id.clone(),
-                    default_connect_endpoint(),
-                    prepared.board.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        // OBSERVED readiness: drive board state from each participant's own
-        // presence/heartbeat, mirroring the log subscriber above - see
-        // `supervisor::start_presence_heartbeat_subscriber`.
-        feed_tasks.extend(
-            prepared
-                .robot_log_targets
-                .iter()
-                .map(|(namespace, robot_id)| {
-                    start_presence_heartbeat_subscriber(
-                        namespace.clone(),
-                        robot_id.clone(),
-                        default_connect_endpoint(),
-                        prepared.board.clone(),
-                    )
-                }),
-        );
-
-        // The restart/hot-reload action channel always exists now (not just
-        // under `--watch`), so the TUI's `r restart` reaches the supervisor
-        // through `SessionController::set_restart_channel` even when `--watch`
-        // is off.
-        let (action_tx, action_rx) = mpsc::channel(16);
-        controller.set_restart_channel(action_tx.clone());
-        let watch_handle = if watch_enabled {
-            let live_ids = prepared
-                .specs
-                .iter()
-                .map(|spec| spec.id.clone())
-                .collect::<BTreeSet<_>>();
-            Some(crate::watch::spawn_run_watch(
-                crate::watch::RunWatchConfig {
-                    ctx: prepared.ctx.clone(),
-                    options: watch_options,
-                    live_ids,
-                    board: prepared.board.clone(),
-                    action_tx,
-                },
+        let setup = controller
+            .drive_setup(live_run_setup(
+                prepared,
+                app.ui,
+                message_format,
+                watch_enabled,
+                watch_options,
+                state_file,
+                action_file,
+                controller.output(),
+                controller.token(),
+                events,
+                controller.renders_tui(),
             ))
-        } else {
-            None
-        };
-
-        let stages = stages_for_run(prepared.specs, app.output);
-        // `run` has no simulation clock (Product decision 5 is
-        // `simulation run`-specific), so its session never visits
-        // `Waiting`/`Paused`. Fixes finding B3: it used to claim `Running`
-        // immediately, before the supervisor task even existed - now it only
-        // announces `Starting` here; `Running` is instead emitted by
-        // `supervise_until_shutdown` itself (`emits_running_on_startup_complete`
-        // below), once every staged-startup stage has ACTUALLY spawned and
-        // been observed ready, via `SessionEvent::StagedStartupComplete`. Per-
-        // stage progress is already visible via the `PhaseStarted`/
-        // `PhaseFinished` events `supervise_until_shutdown` itself emits.
-        let starting = crate::session::state::SessionState::Preparing
-            .start()
-            .expect("the controller begins every session in Preparing");
-        // Lifecycle events are awaited, not `try_send` (finding B5): a
-        // session-state transition must never be silently dropped under
-        // channel pressure.
-        let _ = events
-            .send(crate::session::event::SessionEvent::SessionChanged { state: starting })
-            .await;
-        // Live telemetry (CLI-UX Phase 3): only worth subscribing when a real
-        // TUI is up to read it - `--message-format json`/non-interactive
-        // sessions never touch `telemetry`, so skip the extra bus
-        // connections entirely rather than feed a renderer that can't show
-        // them. `run` has no simulation clock (`telemetry::TelemetryBackend`
-        // is never given one here - see `commands::simulate` for the
-        // sim-clock feed), so the TUI's clock slot stays empty in this mode
-        // by design (`tui::render::simulation_clock_slot`).
-        let telemetry = crate::telemetry::TelemetryBackend::new();
-        if controller.renders_tui() {
-            feed_tasks.extend(start_telemetry_feeds(
-                &prepared.robot_log_targets,
-                &telemetry,
-            ));
-        }
-
-        let board = prepared.board.clone();
-        let supervise = tokio::spawn(supervise_until_shutdown(
-            stages,
-            prepared.board,
-            SupervisorOptions {
-                state_file: Some(state_file),
-                action_file: Some(action_file),
-                action_rx: Some(action_rx),
-                token: controller.token(),
-                events: Some(events),
-                emits_running_on_startup_complete: true,
-                ..SupervisorOptions::default()
-            },
-        ));
+            .await?;
+        controller.set_restart_channel(setup.action_tx.clone());
 
         let outcome = controller
-            .drive_supervision(board, telemetry, prepared.runtime_store, supervise)
+            .drive_supervision(
+                setup.board,
+                setup.telemetry,
+                setup.runtime_store,
+                setup.supervise_task,
+            )
             .await;
-        if let Some(handle) = watch_handle {
+        if let Some(handle) = setup.watch_handle {
             handle.abort();
         }
-        for feed in feed_tasks {
+        for feed in setup.feed_tasks {
             feed.abort();
         }
         let outcome = outcome?;
@@ -288,6 +203,119 @@ impl Run {
         }
         Ok(())
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn live_run_setup(
+    prepared: PreparedRun,
+    ui: crate::Ui,
+    message_format: MessageFormat,
+    watch_enabled: bool,
+    watch_options: RunOptions,
+    state_file: PathBuf,
+    action_file: PathBuf,
+    output: crate::session::output::OutputContext,
+    token: tokio_util::sync::CancellationToken,
+    events: mpsc::Sender<crate::session::event::SessionEvent>,
+    renders_tui: bool,
+) -> Result<LiveRunSetup> {
+    ui.info(format!(
+        "launch plan resolved: {} robot(s), {} site tool(s)",
+        prepared.plan.robots.len(),
+        prepared.plan.site.len()
+    ));
+    match prepared.router_ownership {
+        RouterOwnership::External => ui.info("reusing reachable external tool-router"),
+        RouterOwnership::Managed => ui.info("tool-router will be managed by this session"),
+    }
+    report_launch_commands(&prepared.plan, &prepared.specs, message_format)?;
+
+    let mut feed_tasks = prepared
+        .robot_log_targets
+        .iter()
+        .map(|(namespace, robot_id)| {
+            start_bus_log_subscriber(
+                namespace.clone(),
+                robot_id.clone(),
+                default_connect_endpoint(),
+                prepared.board.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    feed_tasks.extend(
+        prepared
+            .robot_log_targets
+            .iter()
+            .map(|(namespace, robot_id)| {
+                start_presence_heartbeat_subscriber(
+                    namespace.clone(),
+                    robot_id.clone(),
+                    default_connect_endpoint(),
+                    prepared.board.clone(),
+                )
+            }),
+    );
+
+    let (action_tx, action_rx) = mpsc::channel(16);
+    let watch_handle = if watch_enabled {
+        let live_ids = prepared
+            .specs
+            .iter()
+            .map(|spec| spec.id.clone())
+            .collect::<BTreeSet<_>>();
+        Some(crate::watch::spawn_run_watch(
+            crate::watch::RunWatchConfig {
+                ctx: prepared.ctx.clone(),
+                options: watch_options,
+                live_ids,
+                board: prepared.board.clone(),
+                action_tx: action_tx.clone(),
+            },
+        ))
+    } else {
+        None
+    };
+
+    let stages = stages_for_run(prepared.specs, output);
+    let starting = crate::session::state::SessionState::Preparing
+        .start()
+        .expect("the controller begins every session in Preparing");
+    let _ = events
+        .send(crate::session::event::SessionEvent::SessionChanged { state: starting })
+        .await;
+
+    let telemetry = crate::telemetry::TelemetryBackend::new();
+    if renders_tui {
+        feed_tasks.extend(start_telemetry_feeds(
+            &prepared.robot_log_targets,
+            &telemetry,
+        ));
+    }
+
+    let board = prepared.board.clone();
+    let supervise_task = tokio::spawn(supervise_until_shutdown(
+        stages,
+        prepared.board,
+        SupervisorOptions {
+            state_file: Some(state_file),
+            action_file: Some(action_file),
+            action_rx: Some(action_rx),
+            token,
+            events: Some(events),
+            emits_running_on_startup_complete: true,
+            ..SupervisorOptions::default()
+        },
+    ));
+
+    Ok(LiveRunSetup {
+        board,
+        telemetry,
+        runtime_store: prepared.runtime_store,
+        supervise_task,
+        watch_handle,
+        feed_tasks,
+        action_tx,
+    })
 }
 
 /// Partition an already-built `run` spec list into the staged startup order
@@ -492,12 +520,13 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     )?;
     // Finding A5: resolved once here, from the same `plan`/`outcome` this
     // function already built - see `RuntimeStore::from_launch_plan`'s docs.
-    let runtime_store = crate::stores::runtime_store::RuntimeStore::from_launch_plan(
+    let router_ownership = router_ownership(local_router_reachable(&default_connect_endpoint()));
+    let mut runtime_store = crate::stores::runtime_store::RuntimeStore::from_launch_plan(
         &plan,
         &outcome.contract_surfaces,
     );
+    runtime_store.set_router_ownership(SITE_TOOL_ROUTER, router_ownership);
     let board = BoardBackend::new();
-    let router_ownership = router_ownership(local_router_reachable(&default_connect_endpoint()));
     let mut specs = Vec::new();
 
     prepare_site_tools(&plan, &resolved, &board, &mut specs, router_ownership, ui)?;

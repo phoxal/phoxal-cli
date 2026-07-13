@@ -914,12 +914,13 @@ fn unpack_tar(asset_path: &Path, dest: &Path) -> Result<()> {
 }
 
 fn unpack_with_system_tar(asset_path: &Path, dest: &Path) -> Result<()> {
-    let status = Command::new("tar")
-        .arg("-xf")
-        .arg(asset_path)
-        .arg("-C")
-        .arg(dest)
-        .status()
+    let mut command = Command::new("tar");
+    command.arg("-xf").arg(asset_path).arg("-C").arg(dest);
+    // Keep the uncommon system-tar fallback inside the same captured-output
+    // and cancellation path as cargo builds. In particular, tar diagnostics
+    // must not draw underneath an active TUI or leak onto JSON stderr.
+    let status = Ui::from_env()
+        .command_status_captured(&mut command)
         .with_context(|| format!("failed to start tar for {}", asset_path.display()))?;
     if status.success() {
         Ok(())

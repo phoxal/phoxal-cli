@@ -1,10 +1,12 @@
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
 use crate::output_mode::OutputMode;
-use crate::session::diagnostics::try_route;
+use crate::session::diagnostics::{RouteResult, register_child, try_route, unregister_child};
 use crate::session::event::{DiagnosticLevel, DiagnosticSource};
 use crate::theme::Theme;
 
@@ -55,7 +57,10 @@ impl Ui {
     ) -> Result<T> {
         let title_ref = title.as_ref();
         if self.should_print_decoration()
-            && !try_route(DiagnosticSource::Cli, DiagnosticLevel::Info, title_ref)
+            && matches!(
+                try_route(DiagnosticSource::Cli, DiagnosticLevel::Info, title_ref),
+                RouteResult::NoSession
+            )
         {
             let theme = self.theme();
             eprintln!("{} {}", theme.accent(">"), theme.bold(title_ref));
@@ -78,7 +83,10 @@ impl Ui {
             return;
         }
         let message = message.as_ref();
-        if try_route(DiagnosticSource::Cli, DiagnosticLevel::Info, message) {
+        if !matches!(
+            try_route(DiagnosticSource::Cli, DiagnosticLevel::Info, message),
+            RouteResult::NoSession
+        ) {
             return;
         }
         let theme = self.theme();
@@ -90,7 +98,10 @@ impl Ui {
             return;
         }
         let message = message.as_ref();
-        if try_route(DiagnosticSource::Cli, DiagnosticLevel::Info, message) {
+        if !matches!(
+            try_route(DiagnosticSource::Cli, DiagnosticLevel::Info, message),
+            RouteResult::NoSession
+        ) {
             return;
         }
         let theme = self.theme();
@@ -102,7 +113,10 @@ impl Ui {
             return;
         }
         let message = message.as_ref();
-        if try_route(DiagnosticSource::Cli, DiagnosticLevel::Warn, message) {
+        if !matches!(
+            try_route(DiagnosticSource::Cli, DiagnosticLevel::Warn, message),
+            RouteResult::NoSession
+        ) {
             return;
         }
         let theme = self.theme();
@@ -114,7 +128,10 @@ impl Ui {
             return;
         }
         let message = message.as_ref();
-        if try_route(DiagnosticSource::Cli, DiagnosticLevel::Error, message) {
+        if !matches!(
+            try_route(DiagnosticSource::Cli, DiagnosticLevel::Error, message),
+            RouteResult::NoSession
+        ) {
             return;
         }
         let theme = self.theme();
@@ -145,32 +162,77 @@ impl Ui {
     /// its own severity per line.
     pub fn command_status_captured(&self, command: &mut Command) -> Result<ExitStatus> {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command.spawn().context("failed to spawn command")?;
-        let stdout = child.stdout.take().context("child stdout was not piped")?;
-        let stderr = child.stderr.take().context("child stderr was not piped")?;
+        let child = Arc::new(Mutex::new(
+            command.spawn().context("failed to spawn command")?,
+        ));
+        register_child(child.clone());
+        let stdout = {
+            child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stdout
+                .take()
+                .context("child stdout was not piped")
+        };
+        let stderr = {
+            child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stderr
+                .take()
+                .context("child stderr was not piped")
+        };
+        let (stdout, stderr) = match (stdout, stderr) {
+            (Ok(stdout), Ok(stderr)) => (stdout, stderr),
+            (Err(error), _) | (_, Err(error)) => {
+                unregister_child(&child);
+                return Err(error);
+            }
+        };
+        let mode = self.mode;
         let stdout_thread = std::thread::spawn(move || {
-            forward_captured_output(stdout, DiagnosticLevel::Info, false);
+            forward_captured_output(stdout, DiagnosticLevel::Info, false, mode);
         });
         let stderr_thread = std::thread::spawn(move || {
-            forward_captured_output(stderr, DiagnosticLevel::Warn, true);
+            forward_captured_output(stderr, DiagnosticLevel::Warn, true, mode);
         });
-        let status = child.wait().context("failed to wait for command")?;
+        let status = wait_for_captured_child(&child);
+        unregister_child(&child);
         // Best-effort: a panicked reader thread must not fail the build
         // itself - the command's own exit status is still authoritative.
         let _ = stdout_thread.join();
         let _ = stderr_thread.join();
-        Ok(status)
+        status
+    }
+}
+
+fn wait_for_captured_child(child: &Arc<Mutex<Child>>) -> Result<ExitStatus> {
+    loop {
+        if let Some(status) = child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .try_wait()
+            .context("failed to wait for command")?
+        {
+            return Ok(status);
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
 /// Forward every line from a captured child stream as a `Dependency`
 /// diagnostic, falling back to a direct write when no session is installed.
-fn forward_captured_output(reader: impl Read, level: DiagnosticLevel, is_stderr: bool) {
+fn forward_captured_output(
+    reader: impl Read,
+    level: DiagnosticLevel,
+    is_stderr: bool,
+    mode: OutputMode,
+) {
     for line in BufReader::new(reader).lines().map_while(Result::ok) {
         if line.is_empty() {
             continue;
         }
-        if try_route(DiagnosticSource::Dependency, level, &line) {
+        if !may_write_raw(try_route(DiagnosticSource::Dependency, level, &line), mode) {
             continue;
         }
         if is_stderr {
@@ -178,5 +240,25 @@ fn forward_captured_output(reader: impl Read, level: DiagnosticLevel, is_stderr:
         } else {
             println!("{line}");
         }
+    }
+}
+
+/// Raw output is only permitted when no session owns the terminal and the
+/// invocation is not JSON. `Dropped` is intentionally not a fallback case.
+fn may_write_raw(route: RouteResult, mode: OutputMode) -> bool {
+    matches!(route, RouteResult::NoSession) && !mode.is_json()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_but_full_session_never_falls_back_to_raw_output() {
+        assert!(!may_write_raw(RouteResult::Dropped, OutputMode::Rich));
+        assert!(!may_write_raw(RouteResult::Dropped, OutputMode::Plain));
+        assert!(!may_write_raw(RouteResult::Dropped, OutputMode::Json));
+        assert!(!may_write_raw(RouteResult::NoSession, OutputMode::Json));
+        assert!(may_write_raw(RouteResult::NoSession, OutputMode::Plain));
     }
 }

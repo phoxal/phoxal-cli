@@ -23,13 +23,12 @@
 //! through the controller at all - a raw-mode Ctrl-C during a fresh-cache
 //! build or Webots staging was simply never observed.
 //!
-//! During preparation/setup nothing is under supervision yet (no participant
-//! has been spawned), so the first Ctrl-C both restores the terminal and
-//! exits the process immediately - there is nothing else to tear down, and
-//! any `cargo build`/download child sharing this process's foreground
-//! process group already received the terminal's own SIGINT independent of
-//! this handler. During supervision the first Ctrl-C instead cancels the
-//! root token (letting the supervisor run its own orderly
+//! During preparation/setup the first Ctrl-C cancels the root token, stops
+//! every captured child, and waits for the owned worker before restoring the
+//! terminal and exiting. This is required because raw mode turns Ctrl-C into
+//! a key event rather than delivering SIGINT to the child's process group.
+//! During supervision the first Ctrl-C instead cancels the root token
+//! (letting the supervisor run its own orderly
 //! `request_participant_stop`/`shutdown_all`) and waits for that to finish; a
 //! second Ctrl-C forces an immediate exit if teardown is not prompt enough.
 //!
@@ -136,7 +135,6 @@ impl SessionController {
         identity: Option<IdentitySummary>,
     ) -> io::Result<Self> {
         let (events_tx, events_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
-        diagnostics::install(events_tx.clone());
 
         let renderer = match output.mode {
             OutputMode::Json => Renderer::None,
@@ -157,6 +155,10 @@ impl SessionController {
             _ => Renderer::Line(LineRenderer::new(mode_label, output.theme)),
         };
 
+        // Do this only after terminal activation succeeds. Otherwise a failed
+        // constructor would leave a process-global diagnostics sender pointing
+        // at a receiver that was immediately dropped.
+        diagnostics::install(events_tx.clone());
         Ok(Self {
             output,
             token: CancellationToken::new(),
@@ -282,11 +284,10 @@ impl SessionController {
     /// No board/telemetry exist yet at this point in the session, so redraws
     /// show an empty participant list; the renderer still shows every
     /// [`SessionEvent`] phase/diagnostic `task` emits. Returns `task`'s own
-    /// result, or a terminal-input `Err`, or never returns at all if Ctrl-C
-    /// fires (see the module docs on why that exits the process immediately
-    /// rather than waiting `task` out - neither a `spawn_blocking` closure
-    /// nor an arbitrary setup future is guaranteed to unwind promptly, and
-    /// nothing is under supervision yet to tear down in the meantime).
+    /// result, or a terminal-input `Err`. Ctrl-C first cancels and joins the
+    /// owned task (including registered child processes) before restoring the
+    /// terminal and exiting; it never exits while preparation/setup work is
+    /// detached.
     async fn drive_cancelable<T: Send + 'static>(
         &mut self,
         mut task: JoinHandle<Result<T>>,
@@ -297,12 +298,17 @@ impl SessionController {
         // event applied just before this call (e.g. `drive_prepare_phase`'s
         // "Preparing" row) would not actually appear until the first event/
         // tick, which could be a visible delay on a slow host.
-        self.redraw(&empty_board, &empty_telemetry)?;
+        if let Err(error) = self.redraw(&empty_board, &empty_telemetry) {
+            self.cancel_owned_task(&mut task).await;
+            return Err(error);
+        }
         loop {
             tokio::select! {
                 biased;
                 _ = tokio::signal::ctrl_c() => {
-                    self.cancel_and_exit();
+                    self.cancel_owned_task(&mut task).await;
+                    self.teardown();
+                    std::process::exit(130);
                 }
                 Some(input) = poll_next_input(&mut self.renderer) => {
                     match input {
@@ -315,17 +321,23 @@ impl SessionController {
                             // so it is simply ignored during this phase.
                             let action = handle_input(&mut self.renderer, event, &empty_board, &empty_telemetry);
                             if matches!(action, DisplayAction::Quit) {
-                                self.cancel_and_exit();
+                                self.cancel_owned_task(&mut task).await;
+                                self.teardown();
+                                std::process::exit(130);
                             }
                         }
                         Err(error) => {
+                            self.cancel_owned_task(&mut task).await;
                             return Err(anyhow!(error).context("terminal input reader failed"));
                         }
                     }
                 }
                 Some(event) = self.events_rx.recv() => {
                     self.apply_event(event);
-                    self.redraw(&empty_board, &empty_telemetry)?;
+                    if let Err(error) = self.redraw(&empty_board, &empty_telemetry) {
+                        self.cancel_owned_task(&mut task).await;
+                        return Err(error);
+                    }
                 }
                 result = &mut task => {
                     return match result {
@@ -337,17 +349,20 @@ impl SessionController {
         }
     }
 
-    /// Cancel the root token, transition to `Stopping`, restore the terminal,
-    /// and exit the process immediately - the shared tail for every Ctrl-C
-    /// observed before supervision exists (see the module docs: nothing is
-    /// under supervision yet, so there is no orderly child teardown to await
-    /// first, and a `spawn_blocking`/arbitrary setup task is not guaranteed
-    /// to unwind promptly on its own).
-    fn cancel_and_exit(&mut self) -> ! {
+    /// Cancel and join pre-supervision work before terminal teardown. A
+    /// preparation worker may own a captured cargo/tar child, so killing every
+    /// registered child first is essential: raw-mode Ctrl-C is a key event,
+    /// not a process-group SIGINT. Joining the task prevents an error path
+    /// from silently detaching setup work in the background.
+    async fn cancel_owned_task<T>(&mut self, task: &mut JoinHandle<Result<T>>) {
+        // A setup task can itself be awaiting a lifecycle send. Once this
+        // controller is leaving pre-supervision, no one will drain events, so
+        // close the receiver before joining to make that send fail promptly.
+        self.events_rx.close();
         self.token.cancel();
         self.transition_to_stopping();
-        self.teardown();
-        std::process::exit(130);
+        diagnostics::kill_active_children();
+        let _ = task.await;
     }
 
     /// Drive the controller for the rest of the session once board/telemetry
@@ -433,7 +448,7 @@ impl SessionController {
                 result
             }
             SupervisionEnd::Failed(error) => {
-                finish_after_failure(&self.token, supervise, error).await
+                finish_after_failure(&mut self.events_rx, &self.token, supervise, error).await
             }
         }
     }
@@ -591,7 +606,7 @@ impl SessionController {
 
     /// Restore the terminal (if a TUI is active) and stop routing tracing
     /// through this session's event channel, SYNCHRONOUSLY. Only needed on
-    /// the `std::process::exit` path (`cancel_and_exit`): `exit` skips every
+    /// the post-cancellation `std::process::exit` path: `exit` skips every
     /// `Drop` impl, so it must call this explicitly first. Every OTHER exit
     /// path (normal return, `?`, an early `return`) relies on `Drop` instead
     /// (see below) - idempotent either way, since `Drop` runs on an
@@ -638,10 +653,15 @@ enum SupervisionEnd {
 /// `error` is still what gets returned - it is the actual cause, not
 /// whatever the supervisor itself eventually returns once cancelled.
 async fn finish_after_failure(
+    events_rx: &mut mpsc::Receiver<SessionEvent>,
     token: &CancellationToken,
     supervise: JoinHandle<Result<SupervisorOutcome>>,
     error: anyhow::Error,
 ) -> Result<SupervisorOutcome> {
+    // Closing wakes an awaited lifecycle send with an immediate error. Without
+    // this, a full channel could deadlock failure teardown after the
+    // controller stopped draining it.
+    events_rx.close();
     token.cancel();
     let _ = supervise.await;
     Err(error)
@@ -1065,6 +1085,7 @@ mod tests {
     #[tokio::test]
     async fn finish_after_failure_cancels_the_token_and_awaits_the_supervisor_task() {
         let token = CancellationToken::new();
+        let (_events_tx, mut events_rx) = mpsc::channel(1);
         let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let completed_in_task = completed.clone();
         let supervise = tokio::spawn(async move {
@@ -1080,7 +1101,13 @@ mod tests {
             })
         });
 
-        let result = finish_after_failure(&token, supervise, anyhow!("terminal draw failed")).await;
+        let result = finish_after_failure(
+            &mut events_rx,
+            &token,
+            supervise,
+            anyhow!("terminal draw failed"),
+        )
+        .await;
 
         assert!(
             token.is_cancelled(),
@@ -1091,6 +1118,46 @@ mod tests {
             "the supervisor task must be awaited to completion, never left detached"
         );
         assert_eq!(result.unwrap_err().to_string(), "terminal draw failed");
+    }
+
+    #[tokio::test]
+    async fn failure_teardown_closes_a_full_event_channel_before_awaiting_supervisor() {
+        let token = CancellationToken::new();
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        events_tx
+            .try_send(SessionEvent::Diagnostic {
+                source: DiagnosticSource::Cli,
+                level: DiagnosticLevel::Info,
+                message: "fill the channel".to_string(),
+            })
+            .expect("the first event fills the channel");
+        let blocked_sender = events_tx.clone();
+        let supervise = tokio::spawn(async move {
+            // This is the exact supervisor shape: an awaited lifecycle send
+            // while the bounded receiver is full.
+            let _ = blocked_sender
+                .send(SessionEvent::StagedStartupComplete)
+                .await;
+            Ok(SupervisorOutcome {
+                clean_shutdown: true,
+                failed_participants: Vec::new(),
+            })
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            finish_after_failure(
+                &mut events_rx,
+                &token,
+                supervise,
+                anyhow!("terminal failed"),
+            ),
+        )
+        .await
+        .expect("closing the receiver must unblock the lifecycle sender");
+
+        assert!(token.is_cancelled());
+        assert_eq!(result.unwrap_err().to_string(), "terminal failed");
     }
 
     /// Finding A1: `drive_setup` and `drive_prepare_phase` share one

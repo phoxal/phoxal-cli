@@ -34,7 +34,7 @@ use std::time::Duration;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::output_mode::OutputMode;
-use crate::session::diagnostics::try_route;
+use crate::session::diagnostics::{RouteResult, try_route};
 use crate::session::event::{DiagnosticLevel, DiagnosticSource};
 use crate::theme::{Role, Theme};
 
@@ -52,7 +52,7 @@ pub enum Handle {
 
 /// Route `message` through the active session's diagnostics channel, if one
 /// is installed. Shared by [`spinner`] and [`bytes_bar`].
-fn try_route_progress(message: &str) -> bool {
+fn try_route_progress(message: &str) -> RouteResult {
     try_route(DiagnosticSource::Dependency, DiagnosticLevel::Info, message)
 }
 
@@ -64,7 +64,7 @@ fn try_route_progress(message: &str) -> bool {
 #[must_use]
 pub fn spinner(message: impl Into<String>, mode: OutputMode) -> Handle {
     let message = message.into();
-    if try_route_progress(&message) {
+    if !matches!(try_route_progress(&message), RouteResult::NoSession) {
         return Handle::Routed;
     }
     match mode {
@@ -92,7 +92,7 @@ pub fn spinner(message: impl Into<String>, mode: OutputMode) -> Handle {
 #[must_use]
 pub fn bytes_bar(message: impl Into<String>, total: u64, mode: OutputMode) -> Handle {
     let message = message.into();
-    if try_route_progress(&message) {
+    if !matches!(try_route_progress(&message), RouteResult::NoSession) {
         return Handle::Routed;
     }
     match mode {
@@ -139,14 +139,15 @@ impl Handle {
         match self {
             Self::Rich(bar) => bar.abandon_with_message(message),
             Self::Plain => eprintln!("{message}"),
+            // A routed handle was created while a session owned output. Keep
+            // that ownership even if teardown races this final diagnostic:
+            // raw fallback here could corrupt a live TUI or leak JSON stderr.
             Self::Routed => {
-                if !try_route(
+                let _ = try_route(
                     DiagnosticSource::Dependency,
                     DiagnosticLevel::Warn,
                     &message,
-                ) {
-                    eprintln!("{message}");
-                }
+                );
             }
             Self::Silent => {}
         }

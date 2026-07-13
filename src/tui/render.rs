@@ -20,6 +20,7 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::identity::IdentitySummary;
+#[cfg(test)]
 use crate::launch_plan::LaunchOwnership;
 use crate::session::event::{DiagnosticLevel, PhaseOutcome};
 use crate::stores::log_store::LogStore;
@@ -838,8 +839,11 @@ fn draw_runtime_overview(
     );
     let artifact_text = runtime_metadata.and_then(|meta| meta.artifact_ref.clone());
     let ownership_text = runtime_metadata.map(|meta| match meta.ownership {
-        LaunchOwnership::CliManaged => "cli-managed".to_string(),
-        LaunchOwnership::SimulationManaged => "simulation-managed".to_string(),
+        crate::stores::runtime_store::RuntimeOwnership::CliManaged => "cli-managed".to_string(),
+        crate::stores::runtime_store::RuntimeOwnership::SimulationManaged => {
+            "simulation-managed".to_string()
+        }
+        crate::stores::runtime_store::RuntimeOwnership::External => "external".to_string(),
     });
     let input_contracts_text =
         runtime_metadata.map(|meta| format_contract_list(&meta.input_contracts));
@@ -1931,7 +1935,7 @@ mod tests {
         );
         let metadata = RuntimeParticipantMetadata {
             artifact_ref: Some("phoxal/service-drive@0.4.0".to_string()),
-            ownership: LaunchOwnership::CliManaged,
+            ownership: crate::stores::runtime_store::RuntimeOwnership::CliManaged,
             input_contracts: vec!["y2026_1::drive::Target".to_string()],
             output_contracts: vec!["y2026_1::drive::State".to_string()],
         };

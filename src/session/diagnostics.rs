@@ -26,7 +26,8 @@
 //! reaches this writer already IS `WARN` or `ERROR`.
 
 use std::io::{self, Write};
-use std::sync::{Mutex, OnceLock};
+use std::process::Child;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
@@ -34,8 +35,13 @@ use tracing_subscriber::fmt::MakeWriter;
 
 use super::event::{DiagnosticLevel, DiagnosticSource, PhaseId, PhaseOutcome, SessionEvent};
 
-fn sender_cell() -> &'static Mutex<Option<mpsc::Sender<SessionEvent>>> {
-    static CELL: OnceLock<Mutex<Option<mpsc::Sender<SessionEvent>>>> = OnceLock::new();
+struct ActiveSession {
+    sender: mpsc::Sender<SessionEvent>,
+    children: Vec<Arc<Mutex<Child>>>,
+}
+
+fn sender_cell() -> &'static Mutex<Option<ActiveSession>> {
+    static CELL: OnceLock<Mutex<Option<ActiveSession>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(None))
 }
 
@@ -44,7 +50,10 @@ fn sender_cell() -> &'static Mutex<Option<mpsc::Sender<SessionEvent>>> {
 pub fn install(events: mpsc::Sender<SessionEvent>) {
     *sender_cell()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(events);
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ActiveSession {
+        sender: events,
+        children: Vec::new(),
+    });
 }
 
 /// Stop routing to a session channel; every subsequent tracing line writes
@@ -60,29 +69,82 @@ fn current_sender() -> Option<mpsc::Sender<SessionEvent>> {
     sender_cell()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+        .as_ref()
+        .map(|session| session.sender.clone())
+}
+
+/// Result of attempting to route a line through the current session. A full
+/// or closed session still owns the terminal, so callers must not fall back
+/// to a raw stdout/stderr write in that case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouteResult {
+    NoSession,
+    Routed,
+    Dropped,
 }
 
 /// Try to route one operator-facing message (`crate::ui::Ui::info`/`warn`/
 /// `error`) through the active session's event channel instead of letting the
-/// caller write it directly to stderr. Returns `true` only if the message was
-/// actually enqueued (the caller must NOT also write to stderr - that would
-/// print it twice, and the whole point is that stderr belongs to the renderer
-/// during a session); `false` if no session is active OR the send itself
-/// failed (channel full/closed - finding B1: a session that cannot accept the
-/// message is not meaningfully "listening", so the caller must fall back to
-/// its own direct write rather than silently losing the line).
-pub(crate) fn try_route(source: DiagnosticSource, level: DiagnosticLevel, message: &str) -> bool {
+/// caller write it directly to stderr. Diagnostics may be dropped under
+/// backpressure, but a live session's terminal/JSON ownership is never lost.
+pub(crate) fn try_route(
+    source: DiagnosticSource,
+    level: DiagnosticLevel,
+    message: &str,
+) -> RouteResult {
     let Some(sender) = current_sender() else {
-        return false;
+        return RouteResult::NoSession;
     };
-    sender
-        .try_send(SessionEvent::Diagnostic {
-            source,
-            level,
-            message: message.to_string(),
-        })
-        .is_ok()
+    match sender.try_send(SessionEvent::Diagnostic {
+        source,
+        level,
+        message: message.to_string(),
+    }) {
+        Ok(()) => RouteResult::Routed,
+        Err(_) => RouteResult::Dropped,
+    }
+}
+
+/// Register a captured child owned by the active session. The controller
+/// stops these before waiting on cancelled preparation/setup work.
+pub(crate) fn register_child(child: Arc<Mutex<Child>>) {
+    if let Some(session) = sender_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        session.children.push(child);
+    }
+}
+
+/// Stop tracking a child once its owner has reaped it.
+pub(crate) fn unregister_child(child: &Arc<Mutex<Child>>) {
+    if let Some(session) = sender_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        session
+            .children
+            .retain(|tracked| !Arc::ptr_eq(tracked, child));
+    }
+}
+
+/// Best-effort immediate stop for every captured child owned by the active
+/// session. A child may already have completed, so kill errors are harmless.
+pub(crate) fn kill_active_children() {
+    let children = sender_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|session| session.children.clone())
+        .unwrap_or_default();
+    for child in children {
+        let _ = child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .kill();
+    }
 }
 
 /// Emit `SessionEvent::PhaseStarted` for one real per-operation phase
@@ -283,6 +345,29 @@ mod tests {
             other => panic!("expected a Diagnostic event, got {other:?}"),
         }
 
+        uninstall();
+    }
+
+    #[test]
+    fn full_active_session_drops_instead_of_claiming_no_session() {
+        let _guard = DIAGNOSTICS_TEST_LOCK.blocking_lock();
+        let (tx, _rx) = mpsc::channel(1);
+        install(tx.clone());
+        tx.try_send(SessionEvent::Diagnostic {
+            source: DiagnosticSource::Cli,
+            level: DiagnosticLevel::Info,
+            message: "fill the channel".to_string(),
+        })
+        .expect("the first event fills the channel");
+
+        assert_eq!(
+            try_route(
+                DiagnosticSource::Cli,
+                DiagnosticLevel::Warn,
+                "must not print raw"
+            ),
+            RouteResult::Dropped
+        );
         uninstall();
     }
 
