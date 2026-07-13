@@ -1,4 +1,5 @@
-use std::process::{Child, Command, ExitStatus};
+use std::io::{BufRead, BufReader, Read};
+use std::process::{Child, Command, ExitStatus, Stdio};
 
 use anyhow::{Context, Result};
 
@@ -126,5 +127,56 @@ impl Ui {
 
     pub fn command_spawn(&self, command: &mut Command) -> Result<Child> {
         command.spawn().context("failed to spawn command")
+    }
+
+    /// Run `command` with its stdout/stderr CAPTURED and routed line-by-line
+    /// as `SessionEvent::Diagnostic`s, instead of inherited straight through
+    /// to this process's own stdout/stderr (findings A2/B2). A raw child
+    /// write racing an active TUI redraw can corrupt the alternate-screen
+    /// frame; under `--message-format json` it would also leak onto a stderr
+    /// the contract promises stays empty. Falls back to a direct
+    /// `eprintln!`/`println!` for a line that arrives when no session is
+    /// installed (`try_route` returns `false`) - identical to `Ui::info`/
+    /// `warn`'s own fallback, so a caller with no active session (a bare
+    /// `cargo build` outside any `run`/`simulation run` session) sees
+    /// unchanged behavior. Stdout is routed at `Info`, stderr at `Warn` - the
+    /// same approximation `session::diagnostics::SessionWriter` already
+    /// documents for captured `tracing` output, since neither stream states
+    /// its own severity per line.
+    pub fn command_status_captured(&self, command: &mut Command) -> Result<ExitStatus> {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn().context("failed to spawn command")?;
+        let stdout = child.stdout.take().context("child stdout was not piped")?;
+        let stderr = child.stderr.take().context("child stderr was not piped")?;
+        let stdout_thread = std::thread::spawn(move || {
+            forward_captured_output(stdout, DiagnosticLevel::Info, false);
+        });
+        let stderr_thread = std::thread::spawn(move || {
+            forward_captured_output(stderr, DiagnosticLevel::Warn, true);
+        });
+        let status = child.wait().context("failed to wait for command")?;
+        // Best-effort: a panicked reader thread must not fail the build
+        // itself - the command's own exit status is still authoritative.
+        let _ = stdout_thread.join();
+        let _ = stderr_thread.join();
+        Ok(status)
+    }
+}
+
+/// Forward every line from a captured child stream as a `Dependency`
+/// diagnostic, falling back to a direct write when no session is installed.
+fn forward_captured_output(reader: impl Read, level: DiagnosticLevel, is_stderr: bool) {
+    for line in BufReader::new(reader).lines().map_while(Result::ok) {
+        if line.is_empty() {
+            continue;
+        }
+        if try_route(DiagnosticSource::Dependency, level, &line) {
+            continue;
+        }
+        if is_stderr {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
     }
 }

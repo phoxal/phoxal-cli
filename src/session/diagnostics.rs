@@ -64,21 +64,24 @@ fn current_sender() -> Option<mpsc::Sender<SessionEvent>> {
 
 /// Try to route one operator-facing message (`crate::ui::Ui::info`/`warn`/
 /// `error`) through the active session's event channel instead of letting the
-/// caller write it directly to stderr. Returns `true` if a session was
-/// listening (the caller must NOT also write to stderr - that would print it
-/// twice, and the whole point is that stderr belongs to the renderer during a
-/// session); `false` if no session is active, in which case the caller keeps
-/// its own direct write exactly as before.
+/// caller write it directly to stderr. Returns `true` only if the message was
+/// actually enqueued (the caller must NOT also write to stderr - that would
+/// print it twice, and the whole point is that stderr belongs to the renderer
+/// during a session); `false` if no session is active OR the send itself
+/// failed (channel full/closed - finding B1: a session that cannot accept the
+/// message is not meaningfully "listening", so the caller must fall back to
+/// its own direct write rather than silently losing the line).
 pub(crate) fn try_route(source: DiagnosticSource, level: DiagnosticLevel, message: &str) -> bool {
     let Some(sender) = current_sender() else {
         return false;
     };
-    let _ = sender.try_send(SessionEvent::Diagnostic {
-        source,
-        level,
-        message: message.to_string(),
-    });
-    true
+    sender
+        .try_send(SessionEvent::Diagnostic {
+            source,
+            level,
+            message: message.to_string(),
+        })
+        .is_ok()
 }
 
 /// The [`MakeWriter`] installed on the process-wide `tracing_subscriber::fmt`
@@ -125,20 +128,35 @@ impl Write for SessionWriter {
     }
 }
 
+/// The `sender_cell()` this module installs into is process-global, and it
+/// is now read from OTHER modules' tests too (`session::controller`, which
+/// constructs a real `SessionController` and so calls [`install`] from
+/// `#[tokio::test]` `async fn`s; `progress`, whose `spinner`/`bytes_bar` call
+/// [`try_route`] and must see NO session installed to exercise their own
+/// `Silent`/`Plain`/`Rich` fallback from plain, synchronous `#[test]` `fn`s).
+/// Every test anywhere in the crate that installs, uninstalls, or depends on
+/// nothing being installed MUST acquire this lock first, or two such tests
+/// running concurrently (the default `cargo test` behavior) can flip each
+/// other's expected state and fail intermittently.
+///
+/// A `tokio::sync::Mutex`, not `std::sync::Mutex`: a guard needs to stay held
+/// across an `.await` in `session::controller`'s async tests (the whole point
+/// is serializing for the FULL test, including an awaited `drive_setup`/
+/// `drive_prepare_phase` call, not just the synchronous `install()` moment) -
+/// `clippy::await_holding_lock` correctly forbids that for a `std::sync`
+/// guard. A synchronous `#[test]` fn (this module's own tests, `progress`'s)
+/// uses [`tokio::sync::Mutex::blocking_lock`] instead, which is exactly the
+/// sync-context escape hatch this type provides.
+#[cfg(test)]
+pub(crate) static DIAGNOSTICS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
-
-    // The sender cell is process-global; serialize the tests that touch it,
-    // matching `progress`'s own `TEST_LOCK` precedent.
-    static TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
     #[test]
     fn install_routes_writes_as_diagnostic_events_instead_of_stderr() {
-        let _guard = TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = DIAGNOSTICS_TEST_LOCK.blocking_lock();
         let (tx, mut rx) = mpsc::channel(8);
         install(tx);
 
@@ -166,9 +184,7 @@ mod tests {
 
     #[test]
     fn uninstall_falls_back_to_direct_stderr_writes() {
-        let _guard = TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = DIAGNOSTICS_TEST_LOCK.blocking_lock();
         uninstall();
         let mut writer = SessionWriter;
         // Must not panic and must report every byte written, exactly like a

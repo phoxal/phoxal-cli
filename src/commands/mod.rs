@@ -108,9 +108,21 @@ pub(crate) fn catalog_or_vendored(
         Ok(catalog) => Ok(catalog),
         Err(error) if crate::host_paths::artifacts_dir().is_ok_and(|path| path.is_dir()) => {
             if std::env::var_os("PHOXAL_QUIET").is_none() && !mode.is_json() {
-                eprintln!(
-                    "warning: catalog unreachable, continuing with project-vendored files: {error:#}"
+                let message = format!(
+                    "catalog unreachable, continuing with project-vendored files: {error:#}"
                 );
+                // Finding A2: routed through an active session's diagnostics
+                // instead of a raw stderr write whenever one is installed -
+                // a direct `eprintln!` here could corrupt an active TUI
+                // frame. Falls back to the original direct write only when
+                // no session is active (matches `Ui::warn`'s own fallback).
+                if !crate::session::diagnostics::try_route(
+                    crate::session::event::DiagnosticSource::Cli,
+                    crate::session::event::DiagnosticLevel::Warn,
+                    &message,
+                ) {
+                    eprintln!("warning: {message}");
+                }
             }
             Ok(None)
         }
