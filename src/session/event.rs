@@ -38,7 +38,13 @@ impl PhaseId {
         Self(id.into())
     }
 
+    /// Test-only in practice (P4/C2 triage): production code compares/
+    /// displays a `PhaseId` through its `PartialEq`/`Display` impls instead,
+    /// but tests asserting on a real production-emitted id (e.g.
+    /// `native_artifacts`'s download-phase tests) want a borrowed `&str`
+    /// without allocating a `String` just to compare it - kept for that.
     #[must_use]
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -66,11 +72,22 @@ impl std::fmt::Display for PhaseId {
 /// genuinely began (emitted [`PhaseStarted`](SessionEvent::PhaseStarted))
 /// and then found no work to do, e.g. a validation phase with nothing to
 /// validate.
+///
+/// P4/C2 triage: none of the three phases wired so far (download/build/
+/// validate - finding A3) ever produces `Skipped`, since each is gated to
+/// only start when it has confirmed real work; both renderers
+/// (`session::controller::LineRenderer`, `tui::render`) already handle it
+/// correctly, tested directly. Kept rather than removed: a future phase that
+/// starts and then finds nothing to do (e.g. a cache-hit build) is a real,
+/// anticipated producer, not speculative scaffolding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PhaseOutcome {
     Succeeded,
+    #[allow(dead_code)]
     Skipped,
-    Failed { error: String },
+    Failed {
+        error: String,
+    },
 }
 
 /// Where a [`SessionEvent::Diagnostic`] originated, so the renderer can
@@ -89,8 +106,20 @@ pub enum DiagnosticSource {
     Dependency,
     /// Output attributed to one named standard tool (router, joypad,
     /// Webots, ...).
+    ///
+    /// P4/C2 triage: no current producer exists - `Ui::command_status_captured`
+    /// attributes every captured child's output to the generic `Dependency`
+    /// bucket regardless of which participant produced it. Per-participant
+    /// attribution here would need that capture path to carry participant
+    /// identity through, which is a real, separate feature (flagged as a
+    /// follow-up), not something this refactor's scope covers. Kept rather
+    /// than removed: this is documented, tested (`label()`) design intent
+    /// for that follow-up, not speculative parallel scaffolding.
+    #[allow(dead_code)]
     Tool { name: String },
-    /// Output attributed to the supervisor itself.
+    /// Output attributed to the supervisor itself. Same status as `Tool`
+    /// above.
+    #[allow(dead_code)]
     Supervisor,
 }
 

@@ -113,34 +113,6 @@ pub fn stage_tool(
     stage_descriptor(ui, &descriptor, mode).map(Some)
 }
 
-/// Stage a resolved component package's (assets or driver) catalog bundle.
-/// `None` when the package is not catalog-sourced (`Path`/`Git` - a local
-/// override with no bundle to fetch) or when the catalog entry has no built
-/// artifact for the needed scope yet. Reuses the identical
-/// [`NativeArtifactDescriptor`]/[`stage_descriptor`] machinery services and
-/// tools already stage through - a component's `catalog_runtime` projects onto
-/// the same [`ResolvedPlatformRuntime`] shape.
-pub fn stage_component_package(
-    ui: Option<&Ui>,
-    package: &crate::resolver::ResolvedComponentPackage,
-    mode: ProvisioningMode,
-) -> Result<Option<PathBuf>> {
-    let Some(runtime) = &package.catalog_runtime else {
-        return Ok(None);
-    };
-    stage_runtime(ui, runtime, mode)
-}
-
-pub fn stage_resolved_artifacts(
-    ui: Option<&Ui>,
-    resolved: &crate::resolver::ResolvedRobot,
-    _mode: ProvisioningMode,
-) -> Result<usize> {
-    let descriptors = descriptors_for(resolved, true, true)?;
-    prepare_descriptors_with_preflight(&descriptors, ui)?;
-    Ok(descriptors.len())
-}
-
 pub fn descriptors(
     resolved: &crate::resolver::ResolvedRobot,
 ) -> Result<Vec<NativeArtifactDescriptor>> {
@@ -761,103 +733,6 @@ fn active_version_unlocked(package: &str) -> Result<Option<String>> {
     }
 }
 
-pub fn count_versions() -> Result<usize> {
-    let _lock = ArtifactStoreLock::shared()?;
-    walk_artifact_versions(false, false, None).map(|(retained, _)| retained)
-}
-
-pub fn prune_inactive_versions(current: &[NativeArtifactDescriptor]) -> Result<(usize, usize)> {
-    let _lock = ArtifactStoreLock::exclusive("prune")?;
-    classify_inactive_versions(current, true)
-}
-
-pub fn preview_prune_inactive_versions(
-    current: &[NativeArtifactDescriptor],
-) -> Result<(usize, usize)> {
-    let _lock = ArtifactStoreLock::shared()?;
-    classify_inactive_versions(current, false)
-}
-
-fn classify_inactive_versions(
-    current: &[NativeArtifactDescriptor],
-    remove: bool,
-) -> Result<(usize, usize)> {
-    let packages = current
-        .iter()
-        .map(|descriptor| descriptor.package_id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    walk_artifact_versions(true, remove, Some(&packages))
-}
-
-fn walk_artifact_versions(
-    classify_inactive: bool,
-    remove: bool,
-    current_packages: Option<&std::collections::BTreeSet<String>>,
-) -> Result<(usize, usize)> {
-    let root = crate::host_paths::artifacts_dir()?;
-    if !root.is_dir() {
-        return Ok((0, 0));
-    }
-    let mut retained = 0;
-    let mut pruned = 0;
-    for provider in fs::read_dir(&root)? {
-        let provider = provider?;
-        if !provider.file_type()?.is_dir() {
-            continue;
-        }
-        for package in fs::read_dir(provider.path())? {
-            let package = package?;
-            if !package.file_type()?.is_dir() {
-                continue;
-            }
-            let package_id = format!(
-                "{}/{}",
-                provider.file_name().to_string_lossy(),
-                package.file_name().to_string_lossy()
-            );
-            let versions = package.path().join("versions");
-            if !versions.is_dir() {
-                continue;
-            }
-            let keep_package =
-                current_packages.is_none_or(|packages| packages.contains(&package_id));
-            if classify_inactive && !keep_package {
-                pruned += fs::read_dir(&versions)?
-                    .filter_map(Result::ok)
-                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-                    .count();
-                if remove {
-                    fs::remove_dir_all(package.path())?;
-                }
-                continue;
-            }
-            let active = fs::read_link(package.path().join("active"))
-                .ok()
-                .and_then(|path| path.file_name().map(|name| name.to_os_string()));
-            for version in fs::read_dir(&versions)? {
-                let version = version?;
-                if !version.file_type()?.is_dir() {
-                    continue;
-                }
-                if active
-                    .as_ref()
-                    .is_some_and(|active| active == &version.file_name())
-                {
-                    retained += 1;
-                } else if classify_inactive {
-                    if remove {
-                        fs::remove_dir_all(version.path())?;
-                    }
-                    pruned += 1;
-                } else {
-                    retained += 1;
-                }
-            }
-        }
-    }
-    Ok((retained, pruned))
-}
-
 pub fn existing_target_scopes(package: &str) -> Result<Vec<String>> {
     let targets_dir = artifact_package_dir(package)?
         .join("active")
@@ -1143,7 +1018,7 @@ mod tests {
     }
 
     #[test]
-    fn active_symlink_selects_one_version_and_pruning_keeps_it() -> Result<()> {
+    fn active_symlink_selects_the_retargeted_version() -> Result<()> {
         let _root = ScratchPhoxalHome::new()?;
         let old = descriptor("1.0.0", b"old");
         let new = descriptor("2.0.0", b"new");
@@ -1151,28 +1026,6 @@ mod tests {
         fs::create_dir_all(artifact_exec_dir(&new)?)?;
         retarget_active(&new)?;
         assert_eq!(active_version(&new)?.as_deref(), Some("2.0.0"));
-        let (retained, pruned) = prune_inactive_versions(std::slice::from_ref(&new))?;
-        assert_eq!((retained, pruned), (1, 1));
-        assert!(artifact_exec_dir(&new)?.is_dir());
-        assert!(!artifact_exec_dir(&old)?.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn prune_preview_reports_without_mutating() -> Result<()> {
-        let _root = ScratchPhoxalHome::new()?;
-        let old = descriptor("1.0.0", b"old");
-        let new = descriptor("2.0.0", b"new");
-        fs::create_dir_all(artifact_exec_dir(&old)?)?;
-        fs::create_dir_all(artifact_exec_dir(&new)?)?;
-        retarget_active(&new)?;
-
-        assert_eq!(
-            preview_prune_inactive_versions(std::slice::from_ref(&new))?,
-            (1, 1)
-        );
-        assert!(artifact_exec_dir(&old)?.is_dir());
-        assert!(artifact_exec_dir(&new)?.is_dir());
         Ok(())
     }
 

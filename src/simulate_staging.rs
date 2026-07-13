@@ -79,9 +79,21 @@ pub struct SupervisorConfig {
 
 /// Everything the caller needs to launch the staged world and register its
 /// simulation-managed participants (Part 5).
+///
+/// P4/C2 triage: `supervisor_launch`/`controller_launches` are real,
+/// correctly-populated values (their EFFECT already lives in the staged
+/// world's baked-in `controllerArgs`), but the real caller
+/// (`commands::simulate::stage_and_prepare_webots_spec`) only needs
+/// `staged_world_path`/`spawn_descriptors` afterward - these two exist for
+/// test introspection of what was actually rendered
+/// (`staged.supervisor_launch`/`staged.controller_launches` in this module's
+/// and `commands::simulate`'s own tests), not because they are unused
+/// byproducts.
 pub struct StagedSimulationWorld {
     pub staged_world_path: PathBuf,
+    #[allow(dead_code)]
     pub supervisor_launch: ParticipantLaunch,
+    #[allow(dead_code)]
     pub controller_launches: Vec<(String, ParticipantLaunch)>,
     pub spawn_descriptors: Vec<RobotSpawn>,
 }

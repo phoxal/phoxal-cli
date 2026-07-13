@@ -1,5 +1,6 @@
-//! The pure session state machine a later `SessionController` slice will
-//! drive from the supervisor and preparation lifecycle.
+//! The pure session state machine
+//! [`super::controller::SessionController`] drives from the supervisor and
+//! preparation lifecycle.
 //!
 //! Every transition is a method that consumes `self` and returns the next
 //! state or a documented [`InvalidTransition`] error - illegal edges are
@@ -21,22 +22,41 @@
 use std::fmt;
 
 /// A structured reason the session is waiting rather than running.
+///
+/// P4/C2 triage: only `ClockAbsent` has a real producer today
+/// (`commands::simulate`'s clock-presence handling). `Participant`/
+/// `ToolConnection` are documented, tested (`legal_edges_succeed`) design
+/// intent for a producer that would need the supervisor's own readiness
+/// barrier to report WHICH specific participant/tool it is still waiting on
+/// (deeper plumbing than this refactor's scope) - kept rather than removed
+/// for that reason, not because they are speculative.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitReason {
     /// Waiting on a named participant to become ready.
+    #[allow(dead_code)]
     Participant(String),
     /// The simulation clock has not published a first sample yet.
     ClockAbsent,
     /// Waiting on a named standard tool's connection (router, joypad, ...).
+    #[allow(dead_code)]
     ToolConnection(String),
 }
 
 /// Why the session ended in `Failed`.
+///
+/// P4/C2 triage: `Terminal` is the real producer
+/// (`session::controller::SessionController::reflect_final_outcome`).
+/// `Participant`/`Timeout` are documented, tested design intent for a more
+/// specific failure attribution than `reflect_final_outcome` currently
+/// builds - kept rather than removed for the same reason as `WaitReason`
+/// above.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FailReason {
     /// A named participant failed in a way the session cannot recover from.
+    #[allow(dead_code)]
     Participant(String),
     /// A bounded wait exceeded its explicit, non-interactive policy.
+    #[allow(dead_code)]
     Timeout,
     /// Any other terminal failure, carrying a short human message.
     Terminal(String),
@@ -95,6 +115,18 @@ impl fmt::Display for InvalidTransition {
 
 impl std::error::Error for InvalidTransition {}
 
+// clippy's `wrong_self_convention` wants a `to_*` method to borrow `self`
+// (like `to_string`), but every `to_*` method below is an intentionally
+// CONSUMING state transition (`Preparing -> Starting`, ...): the whole point
+// is that the caller's old `SessionState` is moved into the next one, never
+// read back afterward, matching a typestate/state-machine idiom rather than
+// the "cheap owned-to-owned conversion of a Copy type" case the lint
+// targets. Renaming the whole transition-method surface to `into_*` would
+// match the lint literally but read strangely for a state MACHINE (`Preparing
+// -> Starting` reads far more naturally as `preparing.to_stopping()` than
+// `preparing.into_stopping()`), so this is a deliberate, crate-local
+// exception rather than a rename.
+#[allow(clippy::wrong_self_convention)]
 impl SessionState {
     fn label_str(&self) -> &'static str {
         match self {
@@ -129,14 +161,24 @@ impl SessionState {
     }
 
     /// `true` once the session has reached a state no transition leaves.
+    ///
+    /// P4/C2 triage: no current caller needs this as a standalone predicate -
+    /// `reduce_state`/`reflect_final_outcome` reach `Stopped`/`Failed` through
+    /// the `to_*` transition methods' own `Result`, never by querying
+    /// terminality first. Kept (tested directly by
+    /// `terminal_states_reject_every_transition`) as the obvious, cheap
+    /// predicate any state-machine consumer would expect to exist.
     #[must_use]
+    #[allow(dead_code)]
     pub const fn is_terminal(&self) -> bool {
         matches!(self, Self::Stopped | Self::Failed(_))
     }
 
     /// `true` while the session's lifecycle is still progressing, i.e. the
-    /// complement of [`Self::is_terminal`].
+    /// complement of [`Self::is_terminal`]. Same status as `is_terminal`
+    /// above.
     #[must_use]
+    #[allow(dead_code)]
     pub const fn is_active(&self) -> bool {
         !self.is_terminal()
     }

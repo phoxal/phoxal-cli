@@ -24,11 +24,6 @@ impl EncodedParticipantEnv {
     }
 
     #[must_use]
-    pub fn into_variables(self) -> BTreeMap<String, String> {
-        self.variables
-    }
-
-    #[must_use]
     pub fn spawn_env(&self) -> Vec<(String, String)> {
         self.variables
             .iter()

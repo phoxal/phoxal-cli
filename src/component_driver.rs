@@ -64,8 +64,8 @@ fn resolved_component_package_dir(
 
 /// Fetch and unpack a catalog-resolved component package's release asset via
 /// the identical native-staging path services/tools already use
-/// ([`native_artifacts::stage_component_package`]/`stage_descriptor`), and
-/// return its local exec directory: the unpacked assets bundle root
+/// (`native_artifacts::stage_runtime`/`stage_descriptor`), and return its
+/// local exec directory: the unpacked assets bundle root
 /// (`component.yaml`, `structure.urdf`, `simulation.yaml`, `meshes/`) for a
 /// `component_assets` package, or the directory containing the staged driver
 /// binary for a `component_driver` package.

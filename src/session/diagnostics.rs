@@ -195,7 +195,21 @@ pub struct SessionWriter;
 impl Write for SessionWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if let Some(sender) = current_sender() {
-            let message = String::from_utf8_lossy(buf).trim_end().to_string();
+            // `main::init_tracing` enables ANSI whenever stderr is a real
+            // terminal - true for an active TUI session too (raw mode/the
+            // alternate screen do not change the underlying fd's
+            // terminal-ness), so a captured line can carry real escape
+            // codes here. The renderer applies its OWN theme color by
+            // `DiagnosticLevel`/`DiagnosticSource` (`tui::render::
+            // format_diagnostic`) and shows the message as plain text in a
+            // `ratatui::text::Span`, which does not interpret escape
+            // sequences - stripped here so a routed diagnostic reads as
+            // text, not garbled control bytes, while the non-session
+            // fallback below stays byte-for-byte unchanged (plain stderr
+            // still gets real color).
+            let message = console::strip_ansi_codes(&String::from_utf8_lossy(buf))
+                .trim_end()
+                .to_string();
             if !message.is_empty() {
                 // Never block the tracing call site on a full channel - a
                 // dropped diagnostic under backpressure is preferable to a

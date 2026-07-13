@@ -121,36 +121,12 @@ impl Handle {
         }
     }
 
-    pub fn set_message(&self, message: impl Into<String>) {
-        if let Self::Rich(bar) = self {
-            bar.set_message(message.into());
-        }
-    }
-
     /// Finish successfully and erase the line (Rich), or print nothing more
     /// (Plain already printed its one line at start; Json/Routed never
     /// printed and have nothing further to say).
     pub fn finish_and_clear(self) {
         if let Self::Rich(bar) = self {
             bar.finish_and_clear();
-        }
-    }
-
-    /// Finish successfully, leaving `message` as the final line (Rich), or
-    /// print it as the plain completion line (Plain), or route it the same
-    /// way the start message was routed (Routed) - falling back to a direct
-    /// write only if the session vanished mid-flight.
-    pub fn finish_with_message(self, message: impl Into<String>) {
-        let message = message.into();
-        match self {
-            Self::Rich(bar) => bar.finish_with_message(message),
-            Self::Plain => eprintln!("{message}"),
-            Self::Routed => {
-                if !try_route_progress(&message) {
-                    eprintln!("{message}");
-                }
-            }
-            Self::Silent => {}
         }
     }
 
@@ -267,7 +243,11 @@ mod tests {
             matches!(handle, Handle::Routed),
             "an installed session must absorb the message, never draw a raw ProgressBar"
         );
-        handle.finish_with_message("built");
+        // `abandon_with_message` is the real production caller of a Routed
+        // handle's post-start message (a failed download) - reused here to
+        // prove the Routed variant also intercepts a FINISH-time message, not
+        // only its start message.
+        handle.abandon_with_message("build failed");
 
         crate::session::diagnostics::uninstall();
 
@@ -277,7 +257,10 @@ mod tests {
                 messages.push(message);
             }
         }
-        assert_eq!(messages, vec!["building".to_string(), "built".to_string()]);
+        assert_eq!(
+            messages,
+            vec!["building".to_string(), "build failed".to_string()]
+        );
     }
 
     #[test]

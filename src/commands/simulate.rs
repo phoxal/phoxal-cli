@@ -1485,7 +1485,6 @@ fn stage_and_prepare_webots_spec(
     let spec = ParticipantSpec {
         id: WEBOTS_SITE_ID.to_string(),
         kind: ParticipantKind::Tool,
-        local: false,
         executable: webots_path,
         args: webots_launch_args(&staged.staged_world_path),
         cwd: None,

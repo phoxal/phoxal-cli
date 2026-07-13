@@ -686,7 +686,6 @@ mod tests {
         let spec = ParticipantSpec {
             id: "mission".to_string(),
             kind: crate::supervisor::ParticipantKind::Service,
-            local: true,
             executable: PathBuf::from("/bin/echo"),
             args: Vec::new(),
             cwd: None,

@@ -501,11 +501,6 @@ impl BoardBackend {
 pub struct ParticipantSpec {
     pub id: String,
     pub kind: ParticipantKind,
-    /// Whether this participant runs from a locally resolved directory
-    /// (user-authored source, or a local path-pin override) rather than a
-    /// fetched catalog artifact. Orthogonal to `kind` - see
-    /// `crate::participant_kind` module docs.
-    pub local: bool,
     pub executable: PathBuf,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
@@ -1847,11 +1842,6 @@ pub fn router_ownership(endpoint_reachable: bool) -> RouterOwnership {
     }
 }
 
-#[must_use]
-pub fn teardown_order(specs: &[ParticipantSpec]) -> Vec<String> {
-    specs.iter().rev().map(|spec| spec.id.clone()).collect()
-}
-
 pub fn supervisor_state_path() -> Result<PathBuf> {
     Ok(crate::host_paths::run_dir()?.join(SUPERVISOR_STATE_FILE))
 }
@@ -2295,7 +2285,6 @@ mod tests {
         ParticipantSpec {
             id: id.to_string(),
             kind: ParticipantKind::Service,
-            local: false,
             executable: PathBuf::from("/bin/echo"),
             args: Vec::new(),
             cwd: None,
@@ -2311,7 +2300,6 @@ mod tests {
         ParticipantSpec {
             id: id.to_string(),
             kind: ParticipantKind::Service,
-            local: false,
             executable: PathBuf::from("/bin/sh"),
             args: vec!["-c".to_string(), "sleep 30".to_string()],
             cwd: None,
@@ -2345,15 +2333,6 @@ mod tests {
     fn router_ownership_distinguishes_external_from_managed() {
         assert_eq!(router_ownership(true), RouterOwnership::External);
         assert_eq!(router_ownership(false), RouterOwnership::Managed);
-    }
-
-    #[test]
-    fn teardown_order_is_reverse_spawn_order_so_router_is_last() {
-        let specs = vec![spec("tool-router"), spec("tool-joypad"), spec("mission")];
-        assert_eq!(
-            teardown_order(&specs),
-            vec!["mission", "tool-joypad", "tool-router"]
-        );
     }
 
     #[test]
@@ -2647,7 +2626,6 @@ mod tests {
         let specs = vec![ParticipantSpec {
             id: "flap".to_string(),
             kind: ParticipantKind::Service,
-            local: false,
             executable: PathBuf::from("/bin/sh"),
             args: vec!["-c".to_string(), "echo fail; exit 7".to_string()],
             cwd: None,
@@ -2803,7 +2781,6 @@ mod tests {
         let specs = vec![ParticipantSpec {
             id: "logger".to_string(),
             kind: ParticipantKind::Service,
-            local: false,
             executable: PathBuf::from("/bin/sh"),
             args: vec!["-c".to_string(), "echo local-line; exit 2".to_string()],
             cwd: None,
@@ -3405,7 +3382,6 @@ mod tests {
         let flappy = ParticipantSpec {
             id: "flap".to_string(),
             kind: ParticipantKind::Service,
-            local: false,
             executable: PathBuf::from("/bin/sh"),
             args: vec!["-c".to_string(), "exit 7".to_string()],
             cwd: None,

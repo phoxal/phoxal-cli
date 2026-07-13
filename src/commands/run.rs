@@ -730,7 +730,6 @@ pub(crate) fn prepare_site_tools(
             Some(path) => specs.push(ParticipantSpec {
                 id: site.id.clone(),
                 kind: ParticipantKind::Tool,
-                local: site_tool_is_local(resolved, &site.id),
                 executable: path,
                 args: Vec::new(),
                 cwd: None,
@@ -818,7 +817,6 @@ pub(crate) fn prepare_robot_participants(
                         Some(path) => specs.push(ParticipantSpec {
                             id,
                             kind,
-                            local,
                             executable: path,
                             args: Vec::new(),
                             cwd: None,
@@ -845,7 +843,6 @@ pub(crate) fn prepare_robot_participants(
                     specs.push(ParticipantSpec {
                         id,
                         kind,
-                        local,
                         executable: binary,
                         args: Vec::new(),
                         cwd: Some(crate_dir.clone()),
@@ -861,7 +858,6 @@ pub(crate) fn prepare_robot_participants(
                     specs.push(ParticipantSpec {
                         id,
                         kind,
-                        local,
                         executable: binary,
                         args: Vec::new(),
                         cwd: Some(crate_dir.clone()),
@@ -896,7 +892,6 @@ pub(crate) fn prepare_robot_participants(
                     specs.push(ParticipantSpec {
                         id,
                         kind,
-                        local,
                         executable: binary,
                         args: Vec::new(),
                         cwd: Some(crate_dir.clone()),
@@ -946,7 +941,10 @@ pub(crate) fn source_spec_from_launch_record(
     ui: &crate::Ui,
 ) -> Result<Option<ParticipantSpec>> {
     let id = participant.launch.participant_id.clone();
-    let (kind, local) = participant_kind(&participant.execution);
+    // `_local`: this function only builds a `ParticipantSpec` (no
+    // `ParticipantStatus` to mark `.with_local` on) - see the other
+    // `participant_kind` call sites for where the bool is actually consumed.
+    let (kind, _local) = participant_kind(&participant.execution);
     let crate_dir = match &participant.execution {
         ParticipantExecution::UserService { crate_dir }
         | ParticipantExecution::SourceArtifact { crate_dir, .. }
@@ -957,7 +955,6 @@ pub(crate) fn source_spec_from_launch_record(
     Ok(Some(ParticipantSpec {
         id,
         kind,
-        local,
         executable: binary,
         args: Vec::new(),
         cwd: Some(crate_dir.clone()),

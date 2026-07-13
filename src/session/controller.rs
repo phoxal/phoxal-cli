@@ -90,7 +90,7 @@ use crate::tui::{TerminalGuard, TitleInfo, TuiDisplay};
 use super::diagnostics;
 use super::event::{ClockPresence, DiagnosticLevel, PhaseId, PhaseOutcome, SessionEvent};
 use super::output::OutputContext;
-use super::state::{ClockObservation, SessionState, WaitReason};
+use super::state::{ClockObservation, FailReason, SessionState, WaitReason};
 
 /// Bound on the [`SessionEvent`] channel: the only source of startup and
 /// runtime transitions the renderer sees (Target design part 2). Generous
@@ -428,10 +428,54 @@ impl SessionController {
         // the module docs - so there is no explicit `teardown()` call on this
         // path any more.
         match end {
-            SupervisionEnd::Finished(result) => result,
+            SupervisionEnd::Finished(result) => {
+                self.reflect_final_outcome(&board, &telemetry, &result);
+                result
+            }
             SupervisionEnd::Failed(error) => {
                 finish_after_failure(&self.token, supervise, error).await
             }
+        }
+    }
+
+    /// Finding C2: `SessionState::Stopped`/`Failed` used to be entirely
+    /// dead - `self` (and its renderer) is CONSUMED the instant this
+    /// function returns, so by the time the caller's own `bail!` on
+    /// `!outcome.graph_healthy()` runs (`run`/`simulation run`), nothing is
+    /// left listening; the session's actual last rendered frame kept
+    /// showing whatever state it was in when the supervisor loop happened to
+    /// end (typically `Stopping`, never advancing to its own natural
+    /// `Stopped`/`Failed` conclusion). Transitions and redraws ONE more
+    /// frame here, before that happens, mirroring `drive_prepare_phase`'s
+    /// own "show the final outcome for at least one frame" best-effort
+    /// redraw. A no-op for an `Err` result (nothing to add to a genuine
+    /// error) or a state that cannot legally reach the target (`to_stopped`/
+    /// `to_failed` reject an illegal source state themselves - e.g. a graph
+    /// that finishes healthily without ever having been cancelled is not in
+    /// `Stopping`, so it simply keeps its current state rather than forcing
+    /// an invalid edge).
+    fn reflect_final_outcome(
+        &mut self,
+        board: &BoardBackend,
+        telemetry: &TelemetryBackend,
+        result: &Result<SupervisorOutcome>,
+    ) {
+        let Ok(outcome) = result else {
+            return;
+        };
+        let next = if outcome.graph_healthy() {
+            self.state.clone().to_stopped()
+        } else {
+            let reason = FailReason::Terminal(format!(
+                "failed participant(s): {}",
+                outcome.failed_participants.join(", ")
+            ));
+            self.state.clone().to_failed(reason)
+        };
+        if let Ok(next) = next {
+            self.state = next;
+            self.emit_session_changed_locally();
+            let _ = self.redraw(&board.snapshot(), telemetry);
         }
     }
 

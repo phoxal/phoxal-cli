@@ -14,8 +14,8 @@
 //! 2. **Freshness from receive timestamp, not implicit trust in the cached
 //!    latest value.** Every stored latest sample is wrapped in a
 //!    [`Timestamped`] carrying the [`Instant`] it was received, so a caller
-//!    can ask [`Timestamped::is_stale`]/[`Timestamped::freshness`] instead of
-//!    rendering a long-cached sample as if it were still live.
+//!    can ask [`Timestamped::is_stale`] instead of rendering a long-cached
+//!    sample as if it were still live.
 //!
 //! Time is always passed in explicitly (`now: Instant` on every `record_*`
 //! and freshness check) rather than captured internally via `Instant::now()`,
@@ -59,13 +59,6 @@ pub struct HostPoint {
     pub ram_total_bytes: u64,
 }
 
-/// Whether a [`Timestamped`] sample is still within its freshness window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Freshness {
-    Fresh,
-    Stale,
-}
-
 /// A latest-value sample plus the monotonic instant it was received.
 #[derive(Debug, Clone, Copy)]
 pub struct Timestamped<T> {
@@ -86,16 +79,6 @@ impl<T> Timestamped<T> {
     pub fn is_stale(&self, now: Instant, ttl: Duration) -> bool {
         now.duration_since(self.received_at) > ttl
     }
-
-    /// [`Freshness::Stale`] iff [`Self::is_stale`].
-    #[must_use]
-    pub fn freshness(&self, now: Instant, ttl: Duration) -> Freshness {
-        if self.is_stale(now, ttl) {
-            Freshness::Stale
-        } else {
-            Freshness::Fresh
-        }
-    }
 }
 
 /// Timestamped latest telemetry samples plus bounded histories, deduped by
@@ -110,11 +93,6 @@ pub struct TelemetryStore {
 }
 
 impl TelemetryStore {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Record a `telemetry::Host` sample received at `now`: overwrites the
     /// latest value AND unconditionally appends a [`HostPoint`] to the
     /// rolling history - never gated on whether the payload differs from
@@ -174,13 +152,6 @@ impl TelemetryStore {
         self.host_history.make_contiguous()
     }
 
-    /// The latest `Process` sample for `participant` plus its receive time,
-    /// or `None` if this participant has never published one.
-    #[must_use]
-    pub fn process(&self, participant: &str) -> Option<&Timestamped<ProcessSample>> {
-        self.process_by_participant.get(participant)
-    }
-
     /// Every participant's latest `Process` sample plus its receive time -
     /// the full map, for a caller (`telemetry::TelemetryBackend::snapshot`)
     /// that needs to hand the whole set to a renderer rather than look up
@@ -228,7 +199,7 @@ mod tests {
 
     #[test]
     fn history_advances_on_identical_consecutive_values() {
-        let mut store = TelemetryStore::new();
+        let mut store = TelemetryStore::default();
         let t0 = Instant::now();
         let sample = host_sample();
 
@@ -246,7 +217,7 @@ mod tests {
 
     #[test]
     fn history_keeps_advancing_across_many_identical_samples() {
-        let mut store = TelemetryStore::new();
+        let mut store = TelemetryStore::default();
         let t0 = Instant::now();
         let sample = host_sample();
         for i in 0..10u32 {
@@ -257,7 +228,7 @@ mod tests {
 
     #[test]
     fn latest_host_value_is_the_most_recently_recorded_one() {
-        let mut store = TelemetryStore::new();
+        let mut store = TelemetryStore::default();
         let t0 = Instant::now();
         store.record_host(t0, host_sample());
         let mut second = host_sample();
@@ -268,30 +239,25 @@ mod tests {
 
     #[test]
     fn freshness_is_fresh_within_ttl_and_stale_beyond_it() {
-        let mut store = TelemetryStore::new();
+        let mut store = TelemetryStore::default();
         let t0 = Instant::now();
         let ttl = Duration::from_secs(2);
         store.record_host(t0, host_sample());
 
         let sample = store.host().expect("host sample recorded");
-        assert_eq!(
-            sample.freshness(t0 + ttl / 2, ttl),
-            Freshness::Fresh,
+        assert!(
+            !sample.is_stale(t0 + ttl / 2, ttl),
             "well within the TTL window"
         );
-        assert!(!sample.is_stale(t0 + ttl / 2, ttl));
-
-        assert_eq!(
-            sample.freshness(t0 + ttl * 2, ttl),
-            Freshness::Stale,
+        assert!(
+            sample.is_stale(t0 + ttl * 2, ttl),
             "well past the TTL window"
         );
-        assert!(sample.is_stale(t0 + ttl * 2, ttl));
     }
 
     #[test]
     fn host_history_is_bounded_to_capacity() {
-        let mut store = TelemetryStore::new();
+        let mut store = TelemetryStore::default();
         let t0 = Instant::now();
         let sample = host_sample();
         for i in 0..(HOST_HISTORY_CAPACITY + 25) {
@@ -309,7 +275,7 @@ mod tests {
 
     #[test]
     fn process_samples_are_demuxed_by_participant() {
-        let mut store = TelemetryStore::new();
+        let mut store = TelemetryStore::default();
         let t0 = Instant::now();
         store.record_process(
             t0,
@@ -329,14 +295,17 @@ mod tests {
                 window_ns: 1,
             },
         );
-        assert_eq!(store.process("drive").unwrap().value.cpu_pct, 1.0);
-        assert_eq!(store.process("mission").unwrap().value.cpu_pct, 2.0);
-        assert!(store.process("unknown").is_none());
+        assert_eq!(store.process_all().get("drive").unwrap().value.cpu_pct, 1.0);
+        assert_eq!(
+            store.process_all().get("mission").unwrap().value.cpu_pct,
+            2.0
+        );
+        assert!(store.process_all().get("unknown").is_none());
     }
 
     #[test]
     fn router_and_joypad_are_latest_only_and_graceful_before_first_sample() {
-        let mut store = TelemetryStore::new();
+        let mut store = TelemetryStore::default();
         assert!(store.router().is_none());
         assert!(store.joypad().is_none());
 
@@ -349,9 +318,9 @@ mod tests {
 
     #[test]
     fn empty_store_reports_no_samples_and_empty_history() {
-        let mut store = TelemetryStore::new();
+        let mut store = TelemetryStore::default();
         assert!(store.host().is_none());
         assert!(store.host_history().is_empty());
-        assert!(store.process("anything").is_none());
+        assert!(store.process_all().get("anything").is_none());
     }
 }
