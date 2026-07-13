@@ -2977,7 +2977,7 @@ dependencies = [
 
 [[package]]
 name = "phoxal-cli"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "clap",
