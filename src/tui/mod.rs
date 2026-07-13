@@ -21,10 +21,10 @@
 //!   channel by a small dedicated OS thread ([`input::InputThread`]),
 //!   spawned lazily in [`TuiDisplay::activate`]; the controller's `select!`
 //!   arm just does a cancel-safe `.recv()` on that channel.
-//! - **Log routing** ([`logs::LogRouter`]) is wired the instant a
-//!   `TuiDisplay` exists (`BoardBackend::set_log_sink`), independent of
-//!   `activate` - so by the time the alternate screen actually opens, the
-//!   scrollback is not empty.
+//! - **Log routing** ([`crate::stores::log_store::LogStore`]) is wired the
+//!   instant a `TuiDisplay` exists (`BoardBackend::set_log_sink`),
+//!   independent of `activate` - so by the time the alternate screen
+//!   actually opens, the scrollback is not empty.
 //! - **The startup surface** ([`startup::StartupState`]) is fed every
 //!   [`crate::session::event::SessionEvent`] the controller applies
 //!   ([`TuiDisplay::apply_session_event`]) and renders in place of the

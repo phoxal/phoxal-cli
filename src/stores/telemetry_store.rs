@@ -1,6 +1,7 @@
 //! Timestamped latest telemetry samples + freshness + bounded histories.
 //!
-//! This fixes two bugs in today's `tui::logs::LogRouter::record_telemetry`:
+//! This fixes two bugs in the old (now deleted) `tui::logs::LogRouter::record_telemetry`,
+//! and is now the live store behind `telemetry::TelemetryBackend` (Wave C2):
 //!
 //! 1. **Dedup by identity/time, not by equal value.** The old code compared
 //!    the new `HostPoint` against the last pushed one with `PartialEq` and
@@ -20,10 +21,10 @@
 //! and freshness check) rather than captured internally via `Instant::now()`,
 //! so tests stay deterministic without real sleeps.
 //!
-//! This store is a plain data structure: independent of ratatui and of
-//! `telemetry::TelemetryBackend` (today's live-feed-holding type). Wiring the
-//! live bus feeds into this store instead of `TelemetryBackend` is a later
-//! slice's job.
+//! This store is a plain data structure, independent of ratatui - and now the
+//! internal storage `telemetry::TelemetryBackend` delegates every `record_*`/
+//! `snapshot` call to, so the receive-time stamping happens at the actual
+//! bus-feed callsite rather than being re-derived on a later redraw.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};

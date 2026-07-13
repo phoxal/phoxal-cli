@@ -102,8 +102,8 @@ impl LogStore {
     /// duplicate (the participant's own stderr mirrors what it now also
     /// publishes on the bus) and is dropped: the whole "dedup by ROUTING,
     /// not text-compare" rule - no string comparison happens at all. This is
-    /// the correct, unchanged behavior carried over from
-    /// `tui::logs::LogRouter::record`.
+    /// the correct, unchanged behavior carried over from the old (now
+    /// deleted) `tui::logs::LogRouter::record`.
     pub fn record(&mut self, line: RoutedLogLine) {
         let state = self.runtimes.entry(line.participant).or_default();
         match line.source {

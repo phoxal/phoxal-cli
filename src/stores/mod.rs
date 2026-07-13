@@ -1,9 +1,9 @@
 //! Bounded, single-responsibility TUI state stores (Target design part 5).
 //!
-//! Today's `tui::logs::LogRouter` conflates three concerns in one struct: the
-//! per-runtime log scrollback, the telemetry rolling history, and the
-//! router's latest traffic sample - and its telemetry dedup is by equal
-//! VALUE, which flattens a genuinely-unchanging-but-still-live series into a
+//! The old `tui::logs::LogRouter` (deleted) conflated three concerns in one
+//! struct: the per-runtime log scrollback, the telemetry rolling history, and
+//! the router's latest traffic sample - and its telemetry dedup was by equal
+//! VALUE, which flattened a genuinely-unchanging-but-still-live series into a
 //! single stale point (see `TelemetryStore`'s docs for the fix). This module
 //! splits that into two focused stores:
 //!

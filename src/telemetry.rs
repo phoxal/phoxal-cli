@@ -127,7 +127,7 @@ impl From<api::joypad::Device> for JoypadDevice {
 
 /// The joypad tool's latest published device state - `selected` is the
 /// AUTHORITATIVE selection (the tool's own ack), never a local UI guess; see
-/// `tui::state::AppState::joypad_cursor` for the separate, purely local list
+/// `tui::state::DevicesState::cursor` for the separate, purely local list
 /// cursor.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JoypadDevicesSample {
