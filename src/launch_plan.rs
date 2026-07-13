@@ -15,12 +15,12 @@ use crate::resolver::{ResolvedRobot, ResolvedTool, RobotManifestExtras};
 pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
 pub const SITE_TOOL_ROUTER: &str = "tool-router";
 pub const SITE_TOOL_JOYPAD: &str = "tool-joypad";
-/// The host-resource-meter tool (CLI-UX Phase 3/4): a standard, OBSERVABLE
+/// The host-resource-meter tool (CLI-UX Phase 3/4): a standard, hard-required
 /// bus participant exactly like `tool-joypad`, published in every mode (Run,
 /// Deploy, Webots) - a host meter is useful everywhere, including a deployed
-/// robot, unlike the joypad peripheral. Degrades GRACEFULLY when the active
-/// catalog snapshot predates it: see `resolver::OFFICIAL_OPTIONAL_TOOLS` and
-/// `build_site_launches`.
+/// robot, unlike the joypad peripheral. A catalog snapshot that cannot
+/// resolve it is outdated and fails resolution (product decision 9); there
+/// is no graceful-degrade path.
 pub const SITE_TOOL_TELEMETRY: &str = "tool-telemetry";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -179,22 +179,16 @@ fn build_site_launches(
         // unit`); an absent var uses the runner's null/unit fallback.
         phoxal_config: Value::Null,
     });
-    // `tool-telemetry` is a standard OBSERVABLE site tool too, but degrades
-    // GRACEFULLY rather than failing the whole launch plan: unlike router and
-    // joypad (`merge_site_tool_artifact`, hard-required), a catalog snapshot
-    // that predates telemetry's addition to the framework simply has no
-    // resolved entry for it (`resolver::OFFICIAL_OPTIONAL_TOOLS`), so it is
-    // omitted from the site set here instead of erroring. Every downstream
-    // consumer (`commands::run::prepare_site_tools`, the TUI host meter)
-    // already treats "this optional tool is absent" as a normal state.
-    if let Some(telemetry) = merge_optional_site_tool_artifact(SITE_TOOL_TELEMETRY, robots) {
-        site.push(SiteLaunch {
-            id: SITE_TOOL_TELEMETRY.to_string(),
-            artifact_ref: telemetry,
-            // Configless (`type Config = ()`): omit `PHOXAL_CONFIG` - see joypad above.
-            phoxal_config: Value::Null,
-        });
-    }
+    // `tool-telemetry` is a standard site tool too, hard-required exactly
+    // like router and joypad: a catalog that cannot resolve it is outdated
+    // (product decision 9).
+    let telemetry = merge_site_tool_artifact(SITE_TOOL_TELEMETRY, robots)?;
+    site.push(SiteLaunch {
+        id: SITE_TOOL_TELEMETRY.to_string(),
+        artifact_ref: telemetry,
+        // Configless (`type Config = ()`): omit `PHOXAL_CONFIG` - see joypad above.
+        phoxal_config: Value::Null,
+    });
     Ok(site)
 }
 
@@ -219,49 +213,13 @@ fn merge_site_tool_artifact(
     artifact_ref.ok_or_else(|| anyhow!("site tool {tool_name} was not resolved"))
 }
 
-/// The optional-tool counterpart to [`merge_site_tool_artifact`]: `None` if
-/// ANY robot's resolved graph lacks `tool_name` (the catalog-absent case -
-/// tolerated, not an error) rather than bailing. A conflicting artifact ref
-/// across robots that DO have it resolved is still a genuine inconsistency
-/// and bails, same as the required path.
-fn merge_optional_site_tool_artifact(
-    tool_name: &str,
-    robots: &[CheckedRobotLaunchInput<'_>],
-) -> Option<String> {
-    let mut artifact_ref: Option<String> = None;
-    for robot in robots {
-        let tool = robot
-            .resolved
-            .tools
-            .iter()
-            .find(|tool| tool.name == tool_name)?;
-        let current = tool_artifact_ref(tool);
-        match &artifact_ref {
-            Some(existing) if existing != &current => {
-                tracing::warn!(
-                    tool = tool_name,
-                    "optional site tool resolves to conflicting artifacts across robots; omitting it from the site set"
-                );
-                return None;
-            }
-            Some(_) => {}
-            None => artifact_ref = Some(current),
-        }
-    }
-    artifact_ref
-}
-
 fn resolved_tool<'a>(resolved: &'a ResolvedRobot, tool_name: &str) -> Result<&'a ResolvedTool> {
-    resolved
-        .tools
-        .iter()
-        .find(|tool| tool.name == tool_name)
-        .ok_or_else(|| {
-            anyhow!(
-                "resolved robot {} is missing required site tool {tool_name}",
-                resolved.robot.robot.id
-            )
-        })
+    resolved.tools.iter().find(|tool| tool.name == tool_name).ok_or_else(|| {
+        anyhow!(
+            "resolved robot {} is missing standard site tool {tool_name}; the active catalog snapshot is outdated for this standard set - run `phoxal update`",
+            resolved.robot.robot.id
+        )
+    })
 }
 
 fn tool_artifact_ref(tool: &ResolvedTool) -> String {
@@ -761,6 +719,7 @@ mod tests {
             serde_json::json!({"listen": ["serial//dev/ttyUSB0?baudrate=115200"]})
         );
         assert_eq!(plan.site[1].id, SITE_TOOL_JOYPAD);
+        assert_eq!(plan.site[2].id, SITE_TOOL_TELEMETRY);
         let robot = &plan.robots[0];
         assert_eq!(robot.id, "robot_v1");
         assert_eq!(robot.substitutions, Vec::<SubstitutionRecord>::new());
@@ -938,6 +897,36 @@ mod tests {
         Ok(())
     }
 
+    /// Product decision 9: router, joypad, and telemetry are STANDARD site
+    /// tools, so a resolved robot missing any of them means the active
+    /// catalog snapshot is outdated for the current standard set - this
+    /// fails the whole launch plan with a direct remediation message rather
+    /// than silently degrading (the old optional-tool behavior telemetry
+    /// used to have).
+    #[test]
+    fn a_catalog_missing_a_standard_site_tool_fails_with_a_remediation_message()
+    -> anyhow::Result<()> {
+        let mut resolved = empty_resolved_robot("robot_v1")?;
+        resolved.tools.push(tool(SITE_TOOL_ROUTER));
+        resolved.tools.push(tool(SITE_TOOL_JOYPAD));
+        // Telemetry deliberately left unresolved, as if the pinned catalog
+        // snapshot predates it.
+        let extras = RobotManifestExtras::default();
+        let error = build_launch_plan(
+            LaunchMode::Run,
+            &[empty_checked_input(
+                Path::new("/tmp/robot"),
+                &resolved,
+                &extras,
+            )],
+        )
+        .expect_err("a missing standard site tool must fail the launch plan");
+        let message = error.to_string();
+        assert!(message.contains(SITE_TOOL_TELEMETRY), "{message}");
+        assert!(message.contains("phoxal update"), "{message}");
+        Ok(())
+    }
+
     fn participant(
         participant_id: &str,
         artifact_id: &str,
@@ -1014,6 +1003,7 @@ robot:
     fn add_site_tools(resolved: &mut ResolvedRobot) {
         resolved.tools.push(tool(SITE_TOOL_ROUTER));
         resolved.tools.push(tool(SITE_TOOL_JOYPAD));
+        resolved.tools.push(tool(SITE_TOOL_TELEMETRY));
     }
 
     fn tool(name: &str) -> ResolvedTool {

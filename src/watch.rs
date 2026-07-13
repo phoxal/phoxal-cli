@@ -469,7 +469,6 @@ fn recheck_sim_target(
         &resolved.resolved,
         &resolved.manifest_extras,
         resolved.catalog.as_ref(),
-        options.joypad,
         options.message_format,
     )?;
     if target.kind == WatchTargetKind::Driver {

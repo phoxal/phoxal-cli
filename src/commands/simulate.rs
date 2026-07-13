@@ -143,8 +143,6 @@ pub struct SimulationRun {
         help = "Resolve and write run artifacts without starting simulation processes."
     )]
     pub dry_run: bool,
-    #[arg(long, hide = true)]
-    pub joypad: bool,
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
     pub message_format: MessageFormat,
     #[arg(
@@ -192,7 +190,6 @@ pub enum SimulateMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimulateOptions {
     pub world: String,
-    pub joypad: bool,
     pub catalog_source: Option<String>,
     pub message_format: MessageFormat,
     pub watch: bool,
@@ -226,7 +223,6 @@ impl SimulationRun {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let options = SimulateOptions {
             world: self.world.clone(),
-            joypad: self.joypad,
             catalog_source: app.catalog_source.clone(),
             message_format: self.message_format,
             watch: self.watch,
@@ -617,7 +613,6 @@ fn prepare_with_mode(
         &resolved.resolved,
         &resolved.manifest_extras,
         resolved.catalog.as_ref(),
-        options.joypad,
         options.message_format,
     )?;
     let source_participants = sim_source_participants(
@@ -715,7 +710,6 @@ pub(crate) fn build_checked_sim_launch_plan(
     resolved: &ResolvedRobot,
     manifest_extras: &RobotManifestExtras,
     catalog: Option<&Catalog>,
-    joypad: bool,
     message_format: MessageFormat,
 ) -> Result<LaunchPlan> {
     let source_participants = sim_source_participants(project_root, resolved, catalog)
@@ -725,7 +719,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         .filter(|participant| {
             participant.kind != SourceParticipantKind::Tool
                 || participant.name == crate::launch_plan::SITE_TOOL_ROUTER
-                || (joypad && participant.name == SITE_TOOL_JOYPAD)
+                || participant.name == SITE_TOOL_JOYPAD
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -738,14 +732,13 @@ pub(crate) fn build_checked_sim_launch_plan(
         .filter(|artifact| {
             artifact.kind != crate::catalog::ArtifactKind::Tool
                 || artifact.name == crate::launch_plan::SITE_TOOL_ROUTER
-                || (joypad && artifact.name == SITE_TOOL_JOYPAD)
+                || artifact.name == SITE_TOOL_JOYPAD
         })
         .collect::<Vec<_>>();
     let tool_participants = tool_participants_from_resolved(resolved)?
         .into_iter()
         .filter(|tool| {
-            tool.name == crate::launch_plan::SITE_TOOL_ROUTER
-                || (joypad && tool.name == SITE_TOOL_JOYPAD)
+            tool.name == crate::launch_plan::SITE_TOOL_ROUTER || tool.name == SITE_TOOL_JOYPAD
         })
         .collect::<Vec<_>>();
     let mut official_by_ref = resolved
@@ -817,7 +810,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         )?;
     }
 
-    let mut plan = build_launch_plan(
+    let plan = build_launch_plan(
         LaunchMode::Webots {
             world: world.to_path_buf(),
         },
@@ -830,9 +823,6 @@ pub(crate) fn build_checked_sim_launch_plan(
             source_participants: &source_participants,
         }],
     )?;
-    if !joypad {
-        plan.site.retain(|site| site.id != SITE_TOOL_JOYPAD);
-    }
     let coherence_graph = crate::commands::check::robot_contract_surfaces(
         &resolved.robot.robot.id,
         &contract_surfaces,
@@ -1335,21 +1325,11 @@ fn substitution_topic_summary(substitution: &SubstitutionRecord) -> String {
     format!("component/{}/*", substitution.component_instance)
 }
 
-/// `tool-joypad` is peripheral teleop, not part of the sim contract graph, so
-/// it no longer launches by default: the framework `tool-joypad` deserializes
-/// its `PHOXAL_CONFIG` as a unit `()`, but this crate's shared site-tool
-/// launch path (`launch_plan::build_site_launches` / `commands::run::site_env`)
-/// unconditionally sends `PHOXAL_CONFIG={}` for every non-router site tool -
-/// which fails a genuinely config-less tool's deserialization with `invalid
-/// type: map, expected unit`, exactly the live-gate failure this fixes.
-/// Making that encoding conditional is the more "correct" fix, but it is
-/// shared with `run`/`deploy` (out of this fix's scope, and a behavior change
-/// neither asked for); simulate instead just stops auto-launching joypad,
-/// gated behind the pre-existing (till now unused) `--joypad`/`options.joypad`
-/// flag - see the matching filter in `prepare_with_mode`, which already drops
-/// `tool-joypad` from `LaunchPlan.site` when `--joypad` is absent. This
-/// function's labels are derived from that same plan, so they never need
-/// `options` themselves - it replaces the old `SimulatePlan::native_tools`
+/// Site tool labels are derived straight from the resolved `LaunchPlan` (Part
+/// 3/6): router, `tool-joypad`, and `tool-telemetry` are standard, hard-
+/// required site tools in every mode including Webots (product decision 9),
+/// so they always appear here alongside the Webots app itself. This function
+/// never needs `options` - it replaces the old `SimulatePlan::native_tools`
 /// stored field.
 fn native_tool_labels_from_plan(plan: &LaunchPlan) -> Vec<String> {
     let mut labels = plan
@@ -1993,7 +1973,7 @@ mod tests {
         fixture_contract_for_tests, fixture_tool_entry_for_tests,
     };
     use crate::host_paths::test_support::ScratchPhoxalHome;
-    use crate::launch_plan::SITE_TOOL_ROUTER;
+    use crate::launch_plan::{SITE_TOOL_ROUTER, SITE_TOOL_TELEMETRY};
     use crate::resolver::{
         ResolvedComponent, ResolvedComponentSource, ResolvedPathOverride, ResolvedPathOverrideKind,
         ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, host_target_triple,
@@ -3178,6 +3158,7 @@ robot:
     fn add_site_tools(resolved: &mut ResolvedRobot) {
         resolved.tools.push(tool(SITE_TOOL_ROUTER));
         resolved.tools.push(tool(SITE_TOOL_JOYPAD));
+        resolved.tools.push(tool(SITE_TOOL_TELEMETRY));
     }
 
     fn tool(name: &str) -> ResolvedTool {

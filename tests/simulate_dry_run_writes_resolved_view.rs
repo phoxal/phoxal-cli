@@ -34,12 +34,12 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
         }
         other => panic!("expected LaunchMode::Webots, got {other:?}"),
     }
-    // `tool-joypad` is peripheral teleop and no longer launches by default
-    // for `simulate` (opt in via `--joypad`); see `commands::simulate::prepare_with_mode`.
-    // `tool-telemetry` (CLI-UX Phase 3/4) IS a standard observable site tool
-    // in every mode including `simulate` (no opt-in flag, unlike joypad) -
-    // it resolves here because `fixture_catalog_for_tests` auto-fills every
-    // `resolver::OFFICIAL_OPTIONAL_TOOLS` entry alongside the required ones.
+    // Router, joypad, and telemetry are all standard, hard-required site
+    // tools in every mode including `simulate` (product decision 9) - no
+    // opt-in flag, no graceful-degrade path. `fixture_catalog_for_tests`
+    // auto-fills every `catalog::OFFICIAL_TOOLS` entry not explicitly listed
+    // in `write_catalog` above, which is why joypad and telemetry resolve
+    // here despite not being in that fixture list.
     let site_ids = plan
         .plan
         .site
@@ -50,6 +50,7 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
         site_ids,
         vec![
             phoxal_cli::launch_plan::SITE_TOOL_ROUTER,
+            phoxal_cli::launch_plan::SITE_TOOL_JOYPAD,
             phoxal_cli::launch_plan::SITE_TOOL_TELEMETRY,
         ]
     );

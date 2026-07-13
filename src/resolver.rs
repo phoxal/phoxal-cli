@@ -10,8 +10,8 @@ use phoxal::model::robot::{
 use serde_json::Value;
 
 use crate::catalog::{
-    ArtifactKind, Catalog, OFFICIAL_OPTIONAL_TOOLS, OFFICIAL_SERVICES, OFFICIAL_SIMULATORS,
-    OFFICIAL_TOOLS, SelectionChannel, select_artifact, selection_channel,
+    ArtifactKind, Catalog, OFFICIAL_SERVICES, OFFICIAL_SIMULATORS, OFFICIAL_TOOLS,
+    SelectionChannel, select_artifact, selection_channel,
 };
 use crate::shell;
 use crate::utils::{hash_tree, resolve_project_path};
@@ -772,13 +772,6 @@ pub fn resolve(
         &tool_target,
         prefer_vendored,
     )?;
-    tools.extend(resolve_optional_tools(
-        robot,
-        catalog,
-        catalog_channel,
-        &tool_target,
-        prefer_vendored,
-    ));
     let path_overrides = apply_path_pins(
         robot,
         project_root,
@@ -1774,143 +1767,6 @@ fn resolve_tools(
                 channel,
                 target: target.to_string(),
             })
-        })
-        .collect()
-}
-
-/// Resolve [`OFFICIAL_OPTIONAL_TOOLS`] the same way [`resolve_tools`] resolves
-/// [`OFFICIAL_TOOLS`], except a tool this function cannot find (no vendored
-/// active version, and absent from the catalog snapshot) is skipped rather
-/// than propagated as an error - see [`OFFICIAL_OPTIONAL_TOOLS`]'s docs for
-/// why. Logs once per skipped tool per call (i.e. once per `resolve()`
-/// invocation) via `tracing::warn!` so the gap is visible without failing the
-/// run/deploy/simulate it was called from.
-fn resolve_optional_tools(
-    robot: &Robot,
-    catalog: Option<&Catalog>,
-    channel: SelectionChannel,
-    target: &str,
-    prefer_vendored: bool,
-) -> Vec<ResolvedTool> {
-    let Some(catalog) = catalog else {
-        return OFFICIAL_OPTIONAL_TOOLS
-            .iter()
-            .filter_map(|(name, package)| {
-                match vendored_runtime(name, package, ArtifactKind::Tool, channel, Some(target)) {
-                    Ok(runtime) => Some(ResolvedTool {
-                        name: format!("tool-{name}"),
-                        package: (*package).to_string(),
-                        requested: runtime.version.clone(),
-                        resolved: runtime.version,
-                        repo: "vendored".to_string(),
-                        asset: runtime.artifact_ref,
-                        binary_name: official_binary_name(ArtifactKind::Tool, name),
-                        sha256: String::new(),
-                        url: None,
-                        size: None,
-                        published: true,
-                        path_override: None,
-                        channel,
-                        target: target.to_string(),
-                    }),
-                    Err(error) => {
-                        tracing::warn!(
-                            tool = name,
-                            error = format!("{error:#}"),
-                            "optional site tool has no vendored active version; continuing without it"
-                        );
-                        None
-                    }
-                }
-            })
-            .collect();
-    };
-    OFFICIAL_OPTIONAL_TOOLS
-        .iter()
-        .filter_map(|(artifact_name, package)| {
-            if matches!(
-                robot.artifacts.pins.get(*package),
-                Some(ArtifactPin::Path(_) | ArtifactPin::Git(_))
-            ) {
-                return Some(ResolvedTool {
-                    name: format!("tool-{artifact_name}"),
-                    package: (*package).to_string(),
-                    requested: "source".to_string(),
-                    resolved: "source".to_string(),
-                    repo: "source".to_string(),
-                    asset: format!("source:{package}"),
-                    binary_name: official_binary_name(ArtifactKind::Tool, artifact_name),
-                    sha256: String::new(),
-                    url: None,
-                    size: None,
-                    published: true,
-                    path_override: None,
-                    channel,
-                    target: target.to_string(),
-                });
-            }
-            if prefer_vendored
-                && !robot.artifacts.pins.contains_key(*package)
-                && let Ok(runtime) = vendored_runtime(
-                    artifact_name,
-                    package,
-                    ArtifactKind::Tool,
-                    channel,
-                    Some(target),
-                )
-            {
-                return Some(ResolvedTool {
-                    name: format!("tool-{artifact_name}"),
-                    package: (*package).to_string(),
-                    requested: runtime.version.clone(),
-                    resolved: runtime.version,
-                    repo: "vendored".to_string(),
-                    asset: runtime.artifact_ref,
-                    binary_name: official_binary_name(ArtifactKind::Tool, artifact_name),
-                    sha256: String::new(),
-                    url: None,
-                    size: None,
-                    published: true,
-                    path_override: None,
-                    channel,
-                    target: target.to_string(),
-                });
-            }
-            match select_artifact(catalog, package, robot.artifacts.pins.get(*package), target) {
-                Ok(entry) => {
-                    let built = entry.targets.get(target);
-                    let asset = built.map_or_else(
-                        || format!("{}:{}-{target}", entry.package, entry.version),
-                        |blob| blob.url.clone(),
-                    );
-                    Some(ResolvedTool {
-                        name: format!("tool-{artifact_name}"),
-                        package: entry.package.clone(),
-                        requested: entry.version.clone(),
-                        resolved: entry.version.clone(),
-                        repo: "phoxal/framework".to_string(),
-                        asset,
-                        binary_name: official_binary_name(ArtifactKind::Tool, artifact_name),
-                        sha256: built
-                            .map(|blob| blob.sha256.clone())
-                            .unwrap_or_else(|| "0".repeat(64)),
-                        url: built.map(|blob| blob.url.clone()),
-                        size: built.map(|blob| blob.size),
-                        published: built.is_some(),
-                        path_override: None,
-                        channel,
-                        target: target.to_string(),
-                    })
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        tool = artifact_name,
-                        error = format!("{error:#}"),
-                        "optional site tool is absent from the active catalog snapshot; continuing without it"
-                    );
-                    None
-                }
-            }
         })
         .collect()
 }
