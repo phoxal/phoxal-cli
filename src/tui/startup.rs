@@ -1,6 +1,6 @@
 //! The pure startup-surface model: which phase (if any) is currently active,
-//! a bounded ring of recent diagnostics, and whether the dedicated startup
-//! surface (welcome card + active phase + diagnostics) should render at all
+//! and whether the dedicated startup surface (welcome card + active phase)
+//! should render at all
 //! INSTEAD of the runtime navigator.
 //!
 //! Deliberately free of ratatui/crossterm: [`TuiDisplay`](super::TuiDisplay)
@@ -19,34 +19,16 @@
 //! # A one-way ratchet to the runtime navigator
 //!
 //! [`StartupState::show_startup_surface`] is `true` until the session has
-//! EVER reached [`SessionState::Running`] or [`SessionState::Paused`], then
-//! stays `false` for the rest of the session - even if a later event moves
-//! the session back to [`SessionState::Waiting`] (e.g. the simulation clock
-//! going silent mid-session). Without the ratchet, that transition would
-//! yank the operator back to the welcome card/phase row mid-session, which
-//! is a worse regression than the "waiting" reason simply not being visible
-//! in the navigator (a documented follow-up, not this slice's scope).
+//! reached [`SessionState::Running`], then stays `false` for the rest of the
+//! session. Later stopping or failure events do not yank the operator back to
+//! the welcome card/phase row and make the console feel like it is restarting.
+//! The ratchet is TUI-only presentation state; it is not a second lifecycle
+//! authority.
 
-use std::collections::VecDeque;
 use std::time::Duration;
 
-use crate::session::event::{
-    DiagnosticLevel, DiagnosticSource, PhaseId, PhaseOutcome, SessionEvent,
-};
+use crate::session::event::{PhaseId, PhaseOutcome, SessionEvent};
 use crate::session::state::SessionState;
-
-/// Bound on the diagnostics ring: generous enough to show a burst of
-/// warnings across every startup stage without ever growing unboundedly.
-const DIAGNOSTICS_CAPACITY: usize = 50;
-
-/// One captured diagnostic line, ready for the startup surface's
-/// diagnostics area.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct DiagnosticLine {
-    pub source: DiagnosticSource,
-    pub level: DiagnosticLevel,
-    pub message: String,
-}
 
 /// Progress carried by a [`SessionEvent::PhaseProgress`] for the current
 /// phase.
@@ -73,8 +55,7 @@ pub(crate) struct PhaseRow {
 pub(crate) struct StartupState {
     pub session_state: SessionState,
     pub phase: Option<PhaseRow>,
-    pub diagnostics: VecDeque<DiagnosticLine>,
-    reached_running_or_paused: bool,
+    reached_running: bool,
 }
 
 impl StartupState {
@@ -82,8 +63,7 @@ impl StartupState {
         Self {
             session_state: SessionState::Preparing,
             phase: None,
-            diagnostics: VecDeque::new(),
-            reached_running_or_paused: false,
+            reached_running: false,
         }
     }
 
@@ -91,7 +71,7 @@ impl StartupState {
     /// the runtime navigator - see the module docs for the one-way ratchet.
     #[must_use]
     pub(crate) fn show_startup_surface(&self) -> bool {
-        !self.reached_running_or_paused
+        !self.reached_running
     }
 
     /// Fold one [`SessionEvent`] into the model. Free of I/O so it can be
@@ -145,33 +125,19 @@ impl StartupState {
                     });
                 }
             },
-            SessionEvent::Diagnostic {
-                source,
-                level,
-                message,
-            } => {
-                if self.diagnostics.len() >= DIAGNOSTICS_CAPACITY {
-                    self.diagnostics.pop_front();
-                }
-                self.diagnostics.push_back(DiagnosticLine {
-                    source: source.clone(),
-                    level: *level,
-                    message: message.clone(),
-                });
-            }
+            SessionEvent::Diagnostic { .. } => {}
             SessionEvent::SessionChanged { state } => {
                 self.session_state = state.clone();
-                if matches!(state, SessionState::Running | SessionState::Paused) {
-                    self.reached_running_or_paused = true;
+                if matches!(state, SessionState::Running) {
+                    self.reached_running = true;
                 }
             }
-            // The controller's own `apply_event` reduces both of these into
-            // a `SessionChanged` (via `reduce_clock_observation`/
-            // `reduce_staged_startup_complete`) and forwards THAT instead of
-            // the raw event - see `session::controller`'s docs. These arms
-            // exist only for exhaustiveness; the `SessionChanged` arm above
-            // is what this model actually observes.
-            SessionEvent::ClockObserved(_) | SessionEvent::StagedStartupComplete => {}
+            // The controller's own `apply_event` reduces this into a
+            // `SessionChanged` via `reduce_staged_startup_complete` and
+            // forwards that instead of the raw event. This arm exists only
+            // for exhaustiveness; the `SessionChanged` arm above is what this
+            // model actually observes.
+            SessionEvent::StagedStartupComplete => {}
         }
     }
 }
@@ -213,7 +179,6 @@ mod tests {
         let state = StartupState::new();
         assert!(state.show_startup_surface());
         assert!(state.phase.is_none());
-        assert!(state.diagnostics.is_empty());
     }
 
     /// The exact lifecycle the brief calls out: start -> progress -> finish
@@ -278,52 +243,22 @@ mod tests {
         assert!(state.phase.as_ref().unwrap().progress.is_none());
     }
 
+    /// State -> surface selection: `Preparing`/`Starting` show the startup
+    /// surface; `Running` collapses it - and the collapse is a one-way ratchet,
+    /// so a later lifecycle update must not bring the startup surface back.
     #[test]
-    fn diagnostics_ring_is_bounded_and_drops_the_oldest_first() {
-        let mut state = StartupState::new();
-        for index in 0..(DIAGNOSTICS_CAPACITY + 10) {
-            state.apply_event(&SessionEvent::Diagnostic {
-                source: DiagnosticSource::Cli,
-                level: DiagnosticLevel::Info,
-                message: format!("line {index}"),
-            });
-        }
-        assert_eq!(state.diagnostics.len(), DIAGNOSTICS_CAPACITY);
-        assert_eq!(state.diagnostics.front().unwrap().message, "line 10");
-        assert_eq!(
-            state.diagnostics.back().unwrap().message,
-            format!("line {}", DIAGNOSTICS_CAPACITY + 9)
-        );
-    }
-
-    /// State -> surface selection: `Preparing`/`Starting`/`Waiting` show the
-    /// startup surface; `Running`/`Paused` collapse it - and the collapse is
-    /// a one-way ratchet, so a later regression back to `Waiting` (e.g. the
-    /// simulation clock going silent) must NOT bring the startup surface
-    /// back.
-    #[test]
-    fn show_startup_surface_ratchets_off_at_running_or_paused_and_never_back_on() {
+    fn show_startup_surface_ratchets_off_at_running_and_never_back_on() {
         let mut state = StartupState::new();
         assert!(state.show_startup_surface());
 
         state.apply_event(&changed(SessionState::Starting));
         assert!(state.show_startup_surface());
 
-        state.apply_event(&changed(SessionState::Waiting(
-            crate::session::state::WaitReason::ClockAbsent,
-        )));
-        assert!(state.show_startup_surface());
-
-        state.apply_event(&changed(SessionState::Paused));
-        assert!(!state.show_startup_surface());
-
-        // Regression back to Waiting must not un-ratchet.
-        state.apply_event(&changed(SessionState::Waiting(
-            crate::session::state::WaitReason::ClockAbsent,
-        )));
-        assert!(!state.show_startup_surface());
-
         state.apply_event(&changed(SessionState::Running));
+        assert!(!state.show_startup_surface());
+
+        // Later lifecycle updates must not un-ratchet.
+        state.apply_event(&changed(SessionState::Stopping));
         assert!(!state.show_startup_surface());
     }
 

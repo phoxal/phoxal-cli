@@ -156,10 +156,11 @@ impl Ui {
     /// installed (`try_route` returns `false`) - identical to `Ui::info`/
     /// `warn`'s own fallback, so a caller with no active session (a bare
     /// `cargo build` outside any `run`/`simulation run` session) sees
-    /// unchanged behavior. Stdout is routed at `Info`, stderr at `Warn` - the
-    /// same approximation `session::diagnostics::SessionWriter` already
-    /// documents for captured `tracing` output, since neither stream states
-    /// its own severity per line.
+    /// unchanged behavior. While a command is running, both streams are
+    /// routine dependency progress and route at `Info`, which keeps successful
+    /// Cargo compiler chatter out of a TUI. Stderr is retained and replayed at
+    /// `Error` only if the command exits unsuccessfully, so the useful failure
+    /// diagnosis remains visible.
     pub fn command_status_captured(&self, command: &mut Command) -> Result<ExitStatus> {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let child = Arc::new(Mutex::new(
@@ -191,17 +192,22 @@ impl Ui {
         };
         let mode = self.mode;
         let stdout_thread = std::thread::spawn(move || {
-            forward_captured_output(stdout, DiagnosticLevel::Info, false, mode);
+            forward_captured_output(stdout, DiagnosticLevel::Info, false, mode)
         });
         let stderr_thread = std::thread::spawn(move || {
-            forward_captured_output(stderr, DiagnosticLevel::Warn, true, mode);
+            forward_captured_output(stderr, DiagnosticLevel::Info, true, mode)
         });
         let status = wait_for_captured_child(&child);
         unregister_child(&child);
         // Best-effort: a panicked reader thread must not fail the build
         // itself - the command's own exit status is still authoritative.
         let _ = stdout_thread.join();
-        let _ = stderr_thread.join();
+        let stderr_lines = stderr_thread.join().unwrap_or_default();
+        if status.as_ref().is_ok_and(|status| !status.success()) {
+            for line in stderr_lines {
+                let _ = try_route(DiagnosticSource::Dependency, DiagnosticLevel::Error, &line);
+            }
+        }
         status
     }
 }
@@ -227,20 +233,22 @@ fn forward_captured_output(
     level: DiagnosticLevel,
     is_stderr: bool,
     mode: OutputMode,
-) {
+) -> Vec<String> {
+    let mut captured = Vec::new();
     for line in BufReader::new(reader).lines().map_while(Result::ok) {
         if line.is_empty() {
             continue;
         }
-        if !may_write_raw(try_route(DiagnosticSource::Dependency, level, &line), mode) {
-            continue;
+        if may_write_raw(try_route(DiagnosticSource::Dependency, level, &line), mode) {
+            if is_stderr {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
         }
-        if is_stderr {
-            eprintln!("{line}");
-        } else {
-            println!("{line}");
-        }
+        captured.push(line);
     }
+    captured
 }
 
 /// Raw output is only permitted when no session owns the terminal and the

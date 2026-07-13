@@ -28,10 +28,11 @@
 //! - **The startup surface** ([`startup::StartupState`]) is fed every
 //!   [`crate::session::event::SessionEvent`] the controller applies
 //!   ([`TuiDisplay::apply_session_event`]) and renders in place of the
-//!   runtime navigator until the session first reaches `Running`/`Paused` -
+//!   runtime navigator until the session reaches `Running` -
 //!   see that module's docs for the pure model.
 
 mod color;
+mod diagnostics;
 mod groups;
 mod input;
 mod panel;
@@ -52,7 +53,7 @@ use tokio::sync::mpsc;
 
 use crate::display::DisplayAction;
 use crate::identity::IdentitySummary;
-use crate::session::event::SessionEvent;
+use crate::session::event::{DiagnosticLevel, SessionEvent};
 use crate::stores::log_store::LogStore;
 use crate::stores::runtime_store::RuntimeStore;
 use crate::supervisor::{BoardSnapshot, RoutedLogLine};
@@ -72,6 +73,8 @@ pub struct TuiDisplay {
     title: TitleInfo,
     identity: Option<IdentitySummary>,
     startup: startup::StartupState,
+    diagnostics: diagnostics::DiagnosticsStore,
+    started_at: Instant,
     state: AppState,
     logs: LogStore,
     log_tx: mpsc::Sender<RoutedLogLine>,
@@ -114,6 +117,8 @@ impl TuiDisplay {
             title,
             identity,
             startup: startup::StartupState::new(),
+            diagnostics: diagnostics::DiagnosticsStore::default(),
+            started_at: Instant::now(),
             state: AppState::new(),
             logs: LogStore::new(),
             log_tx,
@@ -138,6 +143,23 @@ impl TuiDisplay {
     /// controller itself applies (phase/diagnostic/session transitions), so
     /// the NEXT [`Self::redraw`] reflects it.
     pub fn apply_session_event(&mut self, event: &SessionEvent) {
+        let during_startup = self.startup.show_startup_surface();
+        if let SessionEvent::Diagnostic {
+            source,
+            level,
+            message,
+        } = event
+        {
+            self.diagnostics.record(
+                self.started_at.elapsed(),
+                source.clone(),
+                *level,
+                message.clone(),
+            );
+            if during_startup && *level == DiagnosticLevel::Error {
+                self.state.open_diagnostics();
+            }
+        }
         self.startup.apply_event(event);
     }
 
@@ -183,9 +205,8 @@ impl TuiDisplay {
     /// sample. Renders the dedicated startup surface (`render::draw_startup`)
     /// instead of the runtime navigator while
     /// `self.startup.show_startup_surface()` is true - see `tui::startup`'s
-    /// module docs. `self.startup.diagnostics` also feeds the navigator's own
-    /// one-line diagnostics strip once collapsed, so a mid-session warning
-    /// stays visible there too (fixes live-acceptance #2 for both surfaces).
+    /// module docs. Warnings and errors are retained separately in the
+    /// session-wide Diagnostics tab, never printed over either surface.
     /// Draw one frame if activated. An `Err` here is a genuine terminal I/O
     /// failure (e.g. the tty went away underneath the session) - the caller
     /// (`SessionController`) treats it as a session failure rather than
@@ -209,11 +230,12 @@ impl TuiDisplay {
         let title = &self.title;
         let identity = self.identity.as_ref();
         let startup = &self.startup;
+        let diagnostics = &self.diagnostics;
         let state = &self.state;
         let logs = &mut self.logs;
         let runtime = &self.runtime;
         activated.terminal.draw(|frame| {
-            if startup.show_startup_surface() {
+            if startup.show_startup_surface() && state.view != state::View::Diagnostics {
                 render::draw_startup(frame, theme, title, identity, startup);
             } else {
                 render::draw(
@@ -226,7 +248,7 @@ impl TuiDisplay {
                     &snapshot,
                     runtime,
                     now,
-                    &startup.diagnostics,
+                    diagnostics,
                 );
             }
         })?;
@@ -322,5 +344,38 @@ mod tests {
                 })
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn warning_is_retained_without_interrupting_startup() {
+        let mut display = TuiDisplay::new(Theme::new(ColorCapability::None), title(), None);
+        display.apply_session_event(&SessionEvent::Diagnostic {
+            source: crate::session::event::DiagnosticSource::Cli,
+            level: DiagnosticLevel::Warn,
+            message: "connection retrying".to_string(),
+        });
+
+        assert_eq!(display.diagnostics.len(), 1);
+        assert_eq!(display.state.view, state::View::Home);
+        assert!(display.startup.show_startup_surface());
+    }
+
+    #[test]
+    fn startup_error_opens_diagnostics_while_info_is_ignored() {
+        let mut display = TuiDisplay::new(Theme::new(ColorCapability::None), title(), None);
+        display.apply_session_event(&SessionEvent::Diagnostic {
+            source: crate::session::event::DiagnosticSource::Dependency,
+            level: DiagnosticLevel::Info,
+            message: "staged simulation".to_string(),
+        });
+        assert!(display.diagnostics.is_empty());
+
+        display.apply_session_event(&SessionEvent::Diagnostic {
+            source: crate::session::event::DiagnosticSource::Dependency,
+            level: DiagnosticLevel::Error,
+            message: "build failed".to_string(),
+        });
+        assert_eq!(display.diagnostics.error_count(), 1);
+        assert_eq!(display.state.view, state::View::Diagnostics);
     }
 }

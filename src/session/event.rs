@@ -146,25 +146,6 @@ pub enum DiagnosticLevel {
     Error,
 }
 
-/// What a simulation clock watcher directly observed - carried by
-/// [`SessionEvent::ClockObserved`] (finding B4).
-///
-/// A separate, minimal type rather than reusing `supervisor::ClockObservation`
-/// (the richer `{first_sample_ns, latest, ...}` watch-channel sample): this
-/// module must not depend on the heavier supervisor code (see the module
-/// docs), so the watcher maps its own observation down to exactly the three
-/// states a `SessionState` transition cares about. The watcher only OBSERVES;
-/// only [`super::controller::SessionController`] reduces this into
-/// [`super::state::SessionState`] via that type's own validated transitions -
-/// see the controller's `reduce_clock_observation`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClockPresence {
-    /// No clock sample has been published yet.
-    Absent,
-    Paused,
-    Running,
-}
-
 /// The one typed lifecycle event stream a `SessionController` will use to
 /// drive both the TUI and the plain/line renderer.
 ///
@@ -195,17 +176,10 @@ pub enum SessionEvent {
     SessionChanged {
         state: super::state::SessionState,
     },
-    /// A simulation clock watcher's raw observation (finding B4) - an
-    /// OBSERVATION, not a state replacement. Only the controller reduces this
-    /// into `SessionState`, via that type's own validated transitions, and
-    /// rejects it once `Stopping` has begun (see
-    /// `controller::reduce_clock_observation`).
-    ClockObserved(ClockPresence),
     /// Every staged-startup stage has spawned and been observed ready with
-    /// nothing left pending (finding B3) - emitted only by a session (like
-    /// `run`) whose `Running` state has no other authority; `simulation run`'s
-    /// `Running` instead comes from [`Self::ClockObserved`] and never emits
-    /// this. See `supervisor::SupervisorOptions::emits_running_on_startup_complete`.
+    /// nothing left pending. This is the sole transition to `Running` for
+    /// both host and simulation sessions; clock telemetry is observational
+    /// and never gates the session lifecycle.
     StagedStartupComplete,
 }
 

@@ -11,12 +11,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use phoxal::bus::{Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::y2026_1 as api;
-// The simulation clock is re-minted in `y2026_9` (adds the authoritative
-// `step`/`running` fields the TUI top bar reads directly - see
-// `ClockSample`/`start_clock_barrier_feed`); every other `y2026_1` contract
+// The simulation clock is re-minted in `y2026_10` (adds the authoritative
+// `step` field the TUI top bar reads directly - see
+// `ClockSample`/`start_clock_feed`); every other `y2026_1` contract
 // this module subscribes to (`presence::Heartbeat`, `logs::Event`) is
 // unaffected and stays on its original generation.
-use phoxal_api::y2026_9 as api9;
+use phoxal_api::y2026_10 as api10;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -233,8 +233,8 @@ pub struct BoardBackend {
     /// `Ready` is still within a legitimate `#[setup]` (the runner publishes
     /// only one `Initializing` heartbeat before `#[setup]` runs, then nothing
     /// until the post-setup `Ready` beacon, so a slow setup is heartbeat-silent
-    /// by design) and is bounded by the readiness barrier's own timeout
-    /// instead, not this sweep. Cleared alongside `heartbeats` by
+    /// by design) and is bounded by its startup stage's timeout instead, not
+    /// this sweep. Cleared alongside `heartbeats` by
     /// `reset_participant_liveness` on every (re)spawn so a fresh incarnation
     /// must earn `Ready` again before the sweep applies to it.
     ready_once: Arc<Mutex<BTreeSet<String>>>,
@@ -329,7 +329,7 @@ impl BoardBackend {
     /// Deliberately excludes a participant that has never been observed
     /// `Ready` (only ever `Starting`, e.g. mid a legitimately slow
     /// `#[setup]`) - see the `ready_once` field docs. That case is bounded by
-    /// the readiness barrier's own timeout, not this sweep.
+    /// its startup stage's timeout, not this sweep.
     pub fn fail_stale_heartbeats(&self, stale_after: Duration) {
         let now = Instant::now();
         let stale_ids: Vec<String> = {
@@ -613,16 +613,13 @@ pub struct SupervisorOptions {
     /// followed by orderly `request_participant_stop` + `shutdown_all`, then a
     /// normal `SupervisorOutcome` reflecting the board's failed participants.
     pub cancel_rx: Option<oneshot::Receiver<String>>,
-    /// Whether this session's `SessionState::Running` has no authority other
-    /// than staged startup finishing (finding B3: `run` has no simulation
-    /// clock, so nothing else will ever tell it "running"). When `true`, once
+    /// Whether staged startup completion should transition the session to
+    /// `SessionState::Running`. When `true`, once
     /// every stage has spawned and been observed ready with nothing left
     /// pending, this loop emits `SessionEvent::StagedStartupComplete` itself
     /// instead of the caller claiming `Running` before the supervisor even
-    /// exists. `simulation run` leaves this `false`: its `Running` comes
-    /// exclusively from the simulation clock watcher
-    /// (`commands::simulate::spawn_clock_state_watcher`) observing a running
-    /// sample, which must not be preempted by "stages merely finished".
+    /// exists. Both host and simulation sessions enable this; simulation
+    /// clock telemetry is not a lifecycle authority.
     pub emits_running_on_startup_complete: bool,
 }
 
@@ -1063,10 +1060,7 @@ async fn join_reader(task: Option<JoinHandle<()>>) {
 /// members are spawned. `run`'s stages are `router < other tools < drivers <
 /// services`; `simulation run`'s are `router < other tools < Webots app <
 /// simulation supervisor (wait-only) < services < robot/controllers
-/// (wait-only)`. The final "clock advancing" gate is NOT a stage here - it
-/// stays the existing clock-coupled [`await_readiness_barrier`], called by
-/// the caller once every stage below has completed (see the
-/// `commands::simulate` module docs for why).
+/// (wait-only)`. There is deliberately no clock stage.
 #[derive(Debug, Clone, Default)]
 pub struct SupervisionStage {
     /// Human-readable name for this stage, used in the stalled-stage error
@@ -1216,9 +1210,8 @@ async fn spawn_stage_emitting(
 }
 
 /// Wait until every id in `stage_ids` has been OBSERVED `Ready` on the
-/// board, or `timeout` elapses. The clock-independent half of
-/// [`await_readiness_barrier`] (factored out so `run`'s staged startup can
-/// reuse it without simulation's clock coupling): returns `Ok(())` on
+/// board, or `timeout` elapses. Shared by host and simulation staged startup;
+/// returns `Ok(())` on
 /// success with no side effects; on an explicit terminal `Failed` readiness
 /// it returns `Err` immediately (never waits out the timeout for a graph
 /// that already ended unhealthy); on timeout it marks every still-missing id
@@ -1279,9 +1272,7 @@ pub async fn await_participants_ready(
 /// after a stage-draining loop means the loop only stopped because the queue
 /// was genuinely empty, not because it parked on a stage awaiting readiness
 /// (a park always sets `pending_stage`). Only fires for a session that opted
-/// in via `emits_running_on_startup_complete` (`run`; `simulation run` leaves
-/// it `false` since its `Running` comes from the clock watcher instead - see
-/// the field's own docs).
+/// in via `emits_running_on_startup_complete`.
 async fn maybe_emit_staged_startup_complete(
     options: &SupervisorOptions,
     events: Option<&mpsc::Sender<crate::session::event::SessionEvent>>,
@@ -1828,6 +1819,17 @@ pub fn endpoint_reachable(endpoint: &str, timeout: Duration) -> bool {
     TcpStream::connect_timeout(&address, timeout).is_ok()
 }
 
+/// Wait for a TCP router endpoint before asking Zenoh to open a session.
+/// Managed sessions intentionally start their observer feeds before the
+/// router process so they cannot miss early readiness. A cheap TCP preflight
+/// keeps those expected retries from producing Zenoh connection warnings on
+/// top of the alternate-screen TUI.
+pub(crate) async fn wait_for_endpoint(endpoint: &str) {
+    while !endpoint_reachable(endpoint, Duration::from_millis(50)) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouterOwnership {
     External,
@@ -1881,6 +1883,7 @@ pub fn start_bus_log_subscriber(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
+            wait_for_endpoint(&connect).await;
             match bus_log_subscriber_loop(
                 namespace.clone(),
                 robot_id.clone(),
@@ -1951,6 +1954,7 @@ pub fn start_presence_heartbeat_subscriber(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
+            wait_for_endpoint(&connect).await;
             match presence_heartbeat_subscriber_loop(
                 namespace.clone(),
                 robot_id.clone(),
@@ -1998,48 +2002,26 @@ async fn presence_heartbeat_subscriber_loop(
     }
 }
 
-/// One `y2026_9::simulation::Clock` sample, as surfaced to the TUI top bar
-/// (`tui::render::simulation_clock_slot`) - `step`/`running` are read
-/// DIRECTLY from here, not inferred from `now_ns` silence.
+/// One `y2026_10::simulation::Clock` sample, as surfaced to the TUI top bar.
+/// A new sample means the world advanced; silence means it did not.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClockSample {
     pub now_ns: u64,
     pub step: u64,
-    pub running: bool,
 }
 
-/// Observed state of the simulation clock feed. Serves two consumers off the
-/// SAME subscription: the readiness barrier (`await_readiness_barrier`) reads
-/// `first_sample_ns` - whether any sample has been seen at all - while the
-/// TUI's display layer (`crate::telemetry::TelemetryBackend`) reads `latest`
-/// every redraw, updated unconditionally on every sample.
-///
-/// Finding C3: this used to also carry an `advanced` bit (whether `now_ns`
-/// had strictly increased past the first observed sample), from an EARLIER
-/// design that required the clock to be seen actually running before
-/// clearing the barrier. Product decision 5 replaced that: Webots opens a
-/// world PAUSED by design, and a `simulation/clock` sample carrying
-/// `running: false` is a healthy, explicit `paused` state, never a barrier
-/// failure - the barrier now accepts the FIRST published sample regardless
-/// of whether it is paused or running (see `barrier_gap`'s own docs). Once
-/// nothing read `advanced` for that decision, tracking it was stale
-/// complexity left over from the requirement it used to serve - removed
-/// rather than kept as an unread field.
+/// Latest observed clock sample for the TUI. Clock telemetry is deliberately
+/// not part of CLI readiness: the session becomes usable when its
+/// participants are ready, regardless of whether a world step has occurred.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClockObservation {
-    pub first_sample_ns: Option<u64>,
     pub latest: Option<ClockSample>,
 }
 
-/// Start a background feed of `y2026_9::simulation::Clock` samples. Returns a
-/// `watch::Receiver` both the readiness barrier and the TUI's telemetry layer
-/// poll cheaply (no async subscription plumbing in either caller's own loop)
-/// plus the feed task's handle. The barrier only needs the feed for its own
-/// startup window; a caller that also wants the TUI top bar's live
-/// step/running readout (`commands::simulate`) keeps the task running for the
-/// rest of the session instead of aborting it once the barrier completes -
-/// see `TelemetryBackend::set_clock_feed`.
-pub fn start_clock_barrier_feed(
+/// Start a background feed of `y2026_10::simulation::Clock` samples. Returns a
+/// `watch::Receiver` the TUI's telemetry layer polls cheaply, plus the feed
+/// task's handle.
+pub fn start_clock_feed(
     namespace: String,
     robot_id: String,
     connect: String,
@@ -2047,12 +2029,11 @@ pub fn start_clock_barrier_feed(
     let (tx, rx) = watch::channel(ClockObservation::default());
     let handle = tokio::spawn(async move {
         loop {
-            match clock_barrier_feed_loop(namespace.clone(), robot_id.clone(), connect.clone(), &tx)
-                .await
-            {
+            wait_for_endpoint(&connect).await;
+            match clock_feed_loop(namespace.clone(), robot_id.clone(), connect.clone(), &tx).await {
                 Ok(()) => break,
                 Err(error) => {
-                    tracing::debug!("clock barrier feed waiting for router: {error:#}");
+                    tracing::debug!("clock telemetry feed waiting for router: {error:#}");
                     tokio::time::sleep(Duration::from_millis(250)).await;
                 }
             }
@@ -2061,7 +2042,7 @@ pub fn start_clock_barrier_feed(
     (rx, handle)
 }
 
-async fn clock_barrier_feed_loop(
+async fn clock_feed_loop(
     namespace: String,
     robot_id: String,
     connect: String,
@@ -2070,72 +2051,28 @@ async fn clock_barrier_feed_loop(
     let bus = Bus::open(BusConfig {
         namespace,
         robot_id,
-        participant: "phoxal-cli-readiness-barrier".to_string(),
+        participant: "phoxal-cli-clock-observer".to_string(),
         incarnation: 0,
         connect_endpoints: vec![connect],
     })
     .await
     .map_err(|error| anyhow!("failed to open bus clock subscription: {error}"))?;
-    let topic = Topic::<Subscribe<api9::simulation::Clock>>::new_static(
-        <api9::simulation::Clock as phoxal::bus::ContractBody>::TOPIC,
+    let topic = Topic::<Subscribe<api10::simulation::Clock>>::new_static(
+        <api10::simulation::Clock as phoxal::bus::ContractBody>::TOPIC,
     );
-    let subscriber = Subscriber::<api9::simulation::Clock>::new(&bus, &topic, 32).await?;
+    let subscriber = Subscriber::<api10::simulation::Clock>::new(&bus, &topic, 32).await?;
     loop {
         let received = subscriber.recv().await?;
         tx.send_modify(|observation| {
-            if observation.first_sample_ns.is_none() {
-                observation.first_sample_ns = Some(received.body.now_ns);
-            }
             observation.latest = Some(ClockSample {
                 now_ns: received.body.now_ns,
                 step: received.body.step,
-                running: received.body.running,
             });
         });
     }
 }
 
-/// The result of a timed-out readiness barrier: which expected bus
-/// participants never reached `Ready`, and whether the clock feed never
-/// produced its first published sample (paused or running - see
-/// `barrier_gap`'s own docs). Kept structured (not just an error string) so
-/// both `await_readiness_barrier`'s own error message and its board-marking
-/// side effect can be built from the same data without re-deriving it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BarrierGap {
-    missing_participants: Vec<String>,
-    clock_gap: Option<&'static str>,
-}
-
-impl BarrierGap {
-    fn is_empty(&self) -> bool {
-        self.missing_participants.is_empty() && self.clock_gap.is_none()
-    }
-
-    fn describe(&self, waited: Duration) -> String {
-        let mut parts = Vec::new();
-        if !self.missing_participants.is_empty() {
-            parts.push(format!(
-                "participant(s) never observed ready: {}",
-                self.missing_participants.join(", ")
-            ));
-        }
-        if let Some(clock_gap) = self.clock_gap {
-            parts.push(clock_gap.to_string());
-        }
-        format!(
-            "simulation readiness barrier timed out after {}s: {}",
-            waited.as_secs(),
-            parts.join("; ")
-        )
-    }
-}
-
-/// Ids in `expected_bus_ids` not yet OBSERVED `Ready` on the board. Shared by
-/// [`barrier_gap`] (the clock-coupled simulation readiness barrier) and
-/// [`await_participants_ready`] (the clock-independent staged-startup
-/// primitive) - both wait on the identical "has this participant reached
-/// Ready" condition, differing only in whether a clock feed gates them too.
+/// Ids in `expected_bus_ids` not yet observed `Ready` on the board.
 fn missing_ready_participants(board: &BoardSnapshot, expected_bus_ids: &[String]) -> Vec<String> {
     expected_bus_ids
         .iter()
@@ -2147,31 +2084,6 @@ fn missing_ready_participants(board: &BoardSnapshot, expected_bus_ids: &[String]
         })
         .cloned()
         .collect()
-}
-
-/// Whether `clock` clears the readiness barrier's clock gate (Product
-/// decision 5): the FIRST observed sample alone proves the simulation clock
-/// path exists and is enough. A clock sample carrying `running: false` is a
-/// healthy, explicit `paused` state - Webots opens a world paused by design -
-/// never a barrier failure; only "no sample was ever observed at all" blocks
-/// readiness. Whether the clock is currently running or paused is surfaced to
-/// the session as `SessionState::Paused`/`Running` by the caller
-/// (`commands::simulate`), not by this gate.
-fn barrier_gap(
-    board: &BoardSnapshot,
-    expected_bus_ids: &[String],
-    clock: ClockObservation,
-) -> BarrierGap {
-    let missing_participants = missing_ready_participants(board, expected_bus_ids);
-    let clock_gap = if clock.first_sample_ns.is_none() {
-        Some("no simulation/clock sample was ever observed")
-    } else {
-        None
-    };
-    BarrierGap {
-        missing_participants,
-        clock_gap,
-    }
 }
 
 fn failed_expected_participants(board: &BoardSnapshot, expected_bus_ids: &[String]) -> Vec<String> {
@@ -2203,62 +2115,6 @@ pub async fn await_terminal_graph_failure(
         let failed = failed_expected_participants(&board.snapshot(), expected_bus_ids);
         if !failed.is_empty() {
             return failed;
-        }
-    }
-}
-
-/// Wait for the simulate readiness barrier: every id in `expected_bus_ids`
-/// (the Webots supervisor, every expected controller, and every CLI-managed
-/// bus participant) observed `Ready`, plus the clock feed's first sample and
-/// at least one advance - all within `timeout`. On success, returns `Ok(())`
-/// with no side effects. On timeout, marks every still-missing participant
-/// `Failed` on the board (so `BoardSnapshot::failed_participants`/
-/// `SupervisorOutcome::graph_healthy` count it even though a SIMULATION-MANAGED
-/// participant has no supervised process of its own) and returns a `Err`
-/// naming exactly what never showed up. Never hangs past `timeout` and never
-/// falsely reports success.
-pub async fn await_readiness_barrier(
-    board: &BoardBackend,
-    expected_bus_ids: &[String],
-    clock: &mut watch::Receiver<ClockObservation>,
-    budget: WaitBudget,
-    poll_interval: Duration,
-) -> Result<()> {
-    let started = Instant::now();
-    let deadline = budget.deadline_from(started);
-    let mut interval = tokio::time::interval(poll_interval);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    loop {
-        interval.tick().await;
-        let snapshot = board.snapshot();
-        let failed = failed_expected_participants(&snapshot, expected_bus_ids);
-        if !failed.is_empty() {
-            bail!(
-                "graph ended unhealthy; failed participants: {}",
-                failed.join(", ")
-            );
-        }
-        let gap = barrier_gap(&snapshot, expected_bus_ids, *clock.borrow());
-        if gap.is_empty() {
-            return Ok(());
-        }
-        // `deadline` is `None` for an unbounded wait (Product decision 6) -
-        // an interactive session simply keeps waiting, with the gap surfaced
-        // as a named `waiting`/`degraded` console state, for as long as the
-        // operator leaves the session open.
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            let waited = started.elapsed();
-            for id in &gap.missing_participants {
-                board.set_state(
-                    id,
-                    ParticipantState::Failed,
-                    Some(format!(
-                        "readiness barrier timed out after {}s: heartbeat never observed",
-                        waited.as_secs()
-                    )),
-                );
-            }
-            bail!("{}", gap.describe(waited));
         }
     }
 }
@@ -2860,7 +2716,7 @@ mod tests {
         // `#[setup]` runs, then nothing until the post-setup `Ready` beacon.
         // A participant whose `#[setup]` legitimately runs long is therefore
         // heartbeat-silent, and must NOT be false-`Failed` by the 5s sweep -
-        // that case belongs to the readiness barrier's own (longer) timeout.
+        // that case belongs to the startup stage's own (longer) timeout.
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "slow-setup",
@@ -3001,12 +2857,12 @@ mod tests {
 
     /// A simulation-managed participant (the Webots supervisor/controller: no
     /// `ParticipantSpec`, no supervised process, launched by Webots itself) that
-    /// never heartbeats must both (a) make the readiness barrier fail with a
+    /// never heartbeats must both (a) make participant readiness fail with a
     /// clear, bounded-time error instead of hanging, and (b) be counted as
     /// failed afterward so `SupervisorOutcome::graph_healthy` reflects it even
     /// though no process crash was ever observed.
     #[tokio::test]
-    async fn barrier_times_out_on_a_simulation_managed_participant_that_never_appears() {
+    async fn participant_wait_times_out_on_a_simulation_managed_participant_that_never_appears() {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "simulator-webots-supervisor",
@@ -3023,11 +2879,7 @@ mod tests {
             "simulator-webots-supervisor",
             api::presence::Readiness::Ready,
         );
-        // ...but the controller never does (the bug this barrier exists to catch).
-        let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation {
-            first_sample_ns: Some(0),
-            ..ClockObservation::default()
-        });
+        // ...but the controller never does.
 
         let expected = vec![
             "simulator-webots-supervisor".to_string(),
@@ -3035,16 +2887,15 @@ mod tests {
         ];
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            await_readiness_barrier(
+            await_participants_ready(
                 &board,
                 &expected,
-                &mut clock_rx,
                 WaitBudget::Bounded(Duration::from_millis(300)),
                 Duration::from_millis(20),
             ),
         )
         .await
-        .expect("readiness barrier must return within its own timeout, never hang");
+        .expect("participant wait must return within its own timeout, never hang");
 
         let error = result.expect_err("a controller that never appears must fail the barrier");
         assert!(
@@ -3054,7 +2905,7 @@ mod tests {
             "error should name the missing participant: {error}"
         );
 
-        // Failure propagation (item 4): the barrier's own board-marking side
+        // Failure propagation: the wait's own board-marking side
         // effect is what makes the graph unhealthy, even though this
         // participant never had a supervised process to crash.
         let snapshot = board.snapshot();
@@ -3079,7 +2930,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn barrier_fails_immediately_on_explicit_terminal_readiness_failure() {
+    async fn participant_wait_fails_immediately_on_explicit_terminal_readiness_failure() {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "simulator-webots-controller-robot",
@@ -3090,15 +2941,13 @@ mod tests {
             "simulator-webots-controller-robot",
             api::presence::Readiness::Failed,
         );
-        let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation::default());
         let expected = vec!["simulator-webots-controller-robot".to_string()];
 
         let error = tokio::time::timeout(
             Duration::from_millis(200),
-            await_readiness_barrier(
+            await_participants_ready(
                 &board,
                 &expected,
-                &mut clock_rx,
                 WaitBudget::Bounded(Duration::from_secs(60)),
                 Duration::from_millis(10),
             ),
@@ -3109,114 +2958,8 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "graph ended unhealthy; failed participants: simulator-webots-controller-robot"
+            "stage ended unhealthy; failed participants: simulator-webots-controller-robot"
         );
-    }
-
-    /// Product decision 5: a published PAUSED clock (observed, but never
-    /// advancing - exactly Webots opening a world paused) is a HEALTHY
-    /// observable state, not a barrier failure. This replaces the old
-    /// `barrier_times_out_on_a_clock_that_never_advances` test, which
-    /// asserted the pre-fix (incorrect) behavior.
-    #[tokio::test]
-    async fn barrier_succeeds_on_a_clock_that_is_observed_but_paused() {
-        let board = BoardBackend::new();
-        board.upsert(ParticipantStatus::new(
-            "simulator-webots-supervisor",
-            ParticipantKind::Tool,
-            ParticipantState::Ready,
-        ));
-        // The first published sample alone clears the barrier (finding C3) -
-        // Webots opens a world paused by design, and that is a healthy state,
-        // not a gap.
-        let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation {
-            first_sample_ns: Some(0),
-            ..ClockObservation::default()
-        });
-
-        let expected = vec!["simulator-webots-supervisor".to_string()];
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            await_readiness_barrier(
-                &board,
-                &expected,
-                &mut clock_rx,
-                WaitBudget::Bounded(Duration::from_millis(200)),
-                Duration::from_millis(20),
-            ),
-        )
-        .await
-        .expect("readiness barrier must return within its own timeout, never hang")
-        .expect("an observed-but-paused clock must clear the barrier, not fail it");
-    }
-
-    /// Only "no sample was EVER observed" blocks the barrier's clock gate -
-    /// the case where the simulation clock path genuinely never came up at
-    /// all (e.g. the world failed to load).
-    #[tokio::test]
-    async fn barrier_times_out_when_no_clock_sample_is_ever_observed() {
-        let board = BoardBackend::new();
-        board.upsert(ParticipantStatus::new(
-            "simulator-webots-supervisor",
-            ParticipantKind::Tool,
-            ParticipantState::Ready,
-        ));
-        board.record_heartbeat(
-            "simulator-webots-supervisor",
-            api::presence::Readiness::Ready,
-        );
-        let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation::default());
-
-        let expected = vec!["simulator-webots-supervisor".to_string()];
-        let error = tokio::time::timeout(
-            Duration::from_secs(5),
-            await_readiness_barrier(
-                &board,
-                &expected,
-                &mut clock_rx,
-                WaitBudget::Bounded(Duration::from_millis(200)),
-                Duration::from_millis(20),
-            ),
-        )
-        .await
-        .expect("readiness barrier must return within its own timeout, never hang")
-        .expect_err("a clock that never publishes even one sample must fail the barrier");
-
-        assert!(
-            error
-                .to_string()
-                .contains("no simulation/clock sample was ever observed"),
-            "error should describe the absent clock: {error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn barrier_succeeds_once_everything_is_observed() {
-        let board = BoardBackend::new();
-        board.upsert(ParticipantStatus::new(
-            "simulator-webots-supervisor",
-            ParticipantKind::Tool,
-            ParticipantState::Starting,
-        ));
-        board.record_heartbeat(
-            "simulator-webots-supervisor",
-            api::presence::Readiness::Ready,
-        );
-        let (_clock_tx, mut clock_rx) = watch::channel(ClockObservation {
-            first_sample_ns: Some(0),
-            ..ClockObservation::default()
-        });
-
-        let expected = vec!["simulator-webots-supervisor".to_string()];
-        await_readiness_barrier(
-            &board,
-            &expected,
-            &mut clock_rx,
-            WaitBudget::Bounded(Duration::from_secs(5)),
-            Duration::from_millis(20),
-        )
-        .await
-        .expect("everything is ready; the barrier must not error");
     }
 
     #[tokio::test]
@@ -3500,9 +3243,7 @@ mod tests {
     }
 
     /// A stage that never reaches readiness fails the whole run, naming the
-    /// stalled participant(s) as failed on the board and in the outcome -
-    /// the staged-startup counterpart of the simulate readiness barrier's own
-    /// timeout behavior.
+    /// stalled participant(s) as failed on the board and in the outcome.
     #[tokio::test]
     async fn stalled_stage_times_out_and_marks_missing_participants_failed() -> Result<()> {
         let board = BoardBackend::new();

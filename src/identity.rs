@@ -24,6 +24,31 @@ use crate::commands::MessageFormat;
 use crate::resolver::{discover_robot_yaml, load_robot};
 use crate::theme::Theme;
 
+/// User-facing shape of this invocation, shown in the welcome card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalMode {
+    /// Full-screen interactive session.
+    Full,
+    /// Live session using append-only output.
+    Plain,
+    /// Read-only preview such as `simulation run --dry-run`.
+    PlanOnly,
+    /// A finite command that does not own a live session.
+    OneShot,
+}
+
+impl TerminalMode {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Plain => "plain",
+            Self::PlanOnly => "plan only",
+            Self::OneShot => "one shot",
+        }
+    }
+}
+
 /// Robot-side identity facts shown in the compact line and the welcome card.
 /// Best-effort: a project with no discoverable/parseable `robot.yaml` (e.g.
 /// `doctor` run outside a robot project) simply yields `None` from
@@ -33,11 +58,12 @@ pub struct IdentitySummary {
     pub robot: String,
     pub channel: String,
     pub manifest: String,
+    pub terminal: TerminalMode,
 }
 
 impl IdentitySummary {
     #[must_use]
-    pub fn discover(project_root: &Path) -> Option<Self> {
+    pub fn discover(project_root: &Path, terminal: TerminalMode) -> Option<Self> {
         let manifest_path = discover_robot_yaml(project_root).ok()?;
         let robot = load_robot(&manifest_path).ok()?;
         let manifest = pathdiff::diff_paths(&manifest_path, project_root)
@@ -48,6 +74,7 @@ impl IdentitySummary {
             robot: robot.robot.id,
             channel: robot.artifacts.channel.as_str().to_string(),
             manifest: format!("./{manifest}"),
+            terminal,
         })
     }
 }
@@ -82,11 +109,17 @@ impl IdentityPolicy {
 /// Print the left-aligned welcome card to stderr - or nothing, if
 /// [`IdentityPolicy::allowed`] is false or no robot manifest is discoverable.
 /// Never returns an error: decoration must never fail a command.
-pub fn print(policy: IdentityPolicy, project_root: &Path, theme: Theme, cli_version: &str) {
+pub fn print(
+    policy: IdentityPolicy,
+    project_root: &Path,
+    terminal: TerminalMode,
+    theme: Theme,
+    cli_version: &str,
+) {
     if !policy.allowed() {
         return;
     }
-    let Some(summary) = IdentitySummary::discover(project_root) else {
+    let Some(summary) = IdentitySummary::discover(project_root, terminal) else {
         return;
     };
     eprintln!("{}", render_welcome_card(&summary, theme, cli_version));
@@ -130,6 +163,10 @@ fn render_welcome_card(summary: &IdentitySummary, theme: Theme, cli_version: &st
         (
             "channel".to_string(),
             Some(theme.text_primary(&summary.channel)),
+        ),
+        (
+            "terminal".to_string(),
+            Some(theme.text_primary(summary.terminal.label())),
         ),
     ];
 
@@ -269,12 +306,14 @@ mod tests {
             robot: "rover-01".to_string(),
             channel: "stable".to_string(),
             manifest: "./robot.yaml".to_string(),
+            terminal: TerminalMode::Full,
         };
         let theme = Theme::new(crate::theme::ColorCapability::None);
         let card = render_welcome_card(&summary, theme, "0.9.0");
         assert!(card.contains("rover-01"));
         assert!(card.contains("./robot.yaml"));
         assert!(card.contains("stable"));
+        assert!(card.contains("full"));
         assert!(card.contains("phoxal-cli 0.9.0"));
         assert!(card.starts_with('╭'));
         assert!(card.trim_end().ends_with('╯'));

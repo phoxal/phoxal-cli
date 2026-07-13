@@ -814,6 +814,48 @@ mod tests {
     }
 
     #[test]
+    fn webots_simulators_use_real_clock_while_services_use_simulation_clock() -> anyhow::Result<()>
+    {
+        let resolved = empty_resolved_robot("robot_v1")?;
+        let extras = RobotManifestExtras::default();
+        let input = CheckedRobotLaunchInput {
+            project_root: Path::new("/tmp/robot"),
+            resolved: &resolved,
+            manifest_extras: &extras,
+            checked_participants: &[],
+            substitutions: &[],
+            source_participants: &[],
+        };
+        let mode = LaunchMode::Webots {
+            world: PathBuf::from("worlds/default.wbt"),
+        };
+        let service = participant("mission", "mission", graph_check::ParticipantScope::Graph);
+
+        for (participant_id, artifact_id) in [
+            ("simulator-webots-supervisor", "webots-supervisor"),
+            ("simulator-webots-controller-robot_v1", "webots-controller"),
+        ] {
+            let mut simulator = participant(
+                participant_id,
+                artifact_id,
+                graph_check::ParticipantScope::Graph,
+            );
+            simulator.participant_kind = graph_check::ParticipantKind::Simulator;
+            assert_eq!(
+                participant_launch(&mode, &input, &simulator).clock,
+                ClockMode::Real,
+                "{participant_id} must never wait on the simulation clock"
+            );
+        }
+        assert_eq!(
+            participant_launch(&mode, &input, &service).clock,
+            ClockMode::Simulation,
+            "services in simulation must advance from published world steps"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn multi_robot_listen_endpoints_collapse_and_conflicts_error() -> anyhow::Result<()> {
         let mut left = empty_resolved_robot("left")?;
         add_site_tools(&mut left);

@@ -62,8 +62,8 @@
 //!   transitions) is forwarded into the TUI via
 //!   [`crate::tui::TuiDisplay::apply_session_event`], which drives a
 //!   dedicated startup surface (welcome card + one active phase row + a
-//!   bounded diagnostics ring) until the session first reaches
-//!   `Running`/`Paused`, then collapses to the existing runtime navigator -
+//!   bounded diagnostics ring) until the session reaches `Running`, then
+//!   collapses to the existing runtime navigator -
 //!   see `crate::tui::startup`'s module docs for the pure model.
 
 use std::future::Future;
@@ -87,9 +87,9 @@ use crate::theme::Theme;
 use crate::tui::{TerminalGuard, TitleInfo, TuiDisplay};
 
 use super::diagnostics;
-use super::event::{ClockPresence, DiagnosticLevel, PhaseId, PhaseOutcome, SessionEvent};
+use super::event::{DiagnosticLevel, PhaseId, PhaseOutcome, SessionEvent};
 use super::output::OutputContext;
-use super::state::{ClockObservation, FailReason, SessionState, WaitReason};
+use super::state::{FailReason, SessionState};
 
 /// Bound on the [`SessionEvent`] channel: the only source of startup and
 /// runtime transitions the renderer sees (Target design part 2). Generous
@@ -171,7 +171,7 @@ impl SessionController {
     }
 
     /// The root cancellation signal: pass a clone into `SupervisorOptions`
-    /// and every other cancel-safe wait (readiness barriers, stage waits) so
+    /// and every other cancel-safe wait (including stage waits) so
     /// one Ctrl-C reaches all of them.
     #[must_use]
     pub fn token(&self) -> CancellationToken {
@@ -536,22 +536,12 @@ impl SessionController {
         self.forward_to_renderer(&event);
     }
 
-    /// Apply one incoming event. Most variants are reduced by
-    /// [`reduce_state`] (only `SessionChanged` affects `self.state`; it is
-    /// PRE-validated by whoever constructed it - see that function's docs)
-    /// and forwarded to the renderer as-is. `ClockObserved` and
-    /// `StagedStartupComplete` are different: they carry an OBSERVATION, not
-    /// a state replacement (finding B4), so the controller itself reduces
-    /// them through `SessionState`'s own validated transition methods
-    /// (rejecting the update entirely once the session has started
-    /// `Stopping`/reached a terminal state) and, only if that produces an
-    /// actual change, synthesizes a `SessionChanged` for the renderer -
-    /// exactly like `transition_to_stopping`'s own internal transitions do.
+    /// Apply one incoming event. `SessionChanged` is pre-validated by its
+    /// producer. `StagedStartupComplete` is the one observation the
+    /// controller reduces itself, through the state machine's transition to
+    /// `Running`.
     fn apply_event(&mut self, event: SessionEvent) {
         match event {
-            SessionEvent::ClockObserved(presence) => {
-                self.apply_reduced_state(reduce_clock_observation(self.state.clone(), presence));
-            }
             SessionEvent::StagedStartupComplete => {
                 self.apply_reduced_state(reduce_staged_startup_complete(self.state.clone()));
             }
@@ -564,9 +554,8 @@ impl SessionController {
 
     /// Adopt `next` and forward a synthesized `SessionChanged` to the
     /// renderer only if it actually differs from the current state - an
-    /// observation reduction rejected by `SessionState` (e.g. a clock sample
-    /// arriving after `Stopping` has begun) returns the state unchanged, and
-    /// must not spam the renderer with a no-op transition.
+    /// observation reduction rejected by `SessionState` returns the state
+    /// unchanged and must not spam the renderer with a no-op transition.
     fn apply_reduced_state(&mut self, next: SessionState) {
         if next != self.state {
             self.state = next.clone();
@@ -704,8 +693,8 @@ fn handle_input(
 /// incoming event. Free of any I/O so a test can drive it directly over a
 /// fake event stream (see this module's tests) - the actual transition
 /// legality is enforced by whoever CONSTRUCTS the `SessionChanged` event
-/// (preparation/the supervisor calling `SessionState`'s own `start`/
-/// `to_waiting`/... methods), not re-validated here.
+/// (preparation/the supervisor calling `SessionState`'s own transition
+/// methods), not re-validated here.
 #[must_use]
 fn reduce_state(current: SessionState, event: &SessionEvent) -> SessionState {
     match event {
@@ -714,32 +703,10 @@ fn reduce_state(current: SessionState, event: &SessionEvent) -> SessionState {
     }
 }
 
-/// Reduce a raw clock OBSERVATION into the next `SessionState` (finding B4):
-/// unlike `reduce_state`'s `SessionChanged` (already pre-validated by its
-/// sender), this goes through `SessionState`'s own validated transition
-/// methods itself, so a stale observation - notably one arriving after
-/// `Stopping` has begun - is REJECTED (returns `current` unchanged) rather
-/// than silently overwriting a state the clock watcher knows nothing about.
-/// This is what makes the controller the sole authority reducing
-/// observations into state, per the plan's target design.
-#[must_use]
-fn reduce_clock_observation(current: SessionState, presence: ClockPresence) -> SessionState {
-    let next = match presence {
-        ClockPresence::Absent => current.clone().to_waiting(WaitReason::ClockAbsent),
-        ClockPresence::Paused => current
-            .clone()
-            .to_paused(ClockObservation { running: false }),
-        ClockPresence::Running => current.clone().to_running(),
-    };
-    next.unwrap_or(current)
-}
-
 /// Reduce `SessionEvent::StagedStartupComplete` into the next `SessionState`
-/// (finding B3): `run` has no other authority over `Running` (no simulation
-/// clock), so once every staged-startup stage has finished, this is the only
-/// signal that gets it there - through the same validated `to_running`
-/// transition, so it is a no-op (returns `current` unchanged) for a session
-/// that is not in a state `to_running` accepts (e.g. already `Stopping`).
+/// once every staged-startup stage has finished. It is a no-op for a session
+/// that is not in a state `to_running` accepts (for example, already
+/// `Stopping`).
 #[must_use]
 fn reduce_staged_startup_complete(current: SessionState) -> SessionState {
     current.clone().to_running().unwrap_or(current)
@@ -813,13 +780,9 @@ impl LineRenderer {
                     state.label()
                 );
             }
-            // The controller's own `apply_event` intercepts both of these
-            // before they ever reach a renderer: it reduces them into a
-            // `SessionChanged` (via `reduce_clock_observation`/
-            // `reduce_staged_startup_complete`) and forwards THAT instead -
-            // see `SessionController::apply_reduced_state`. These arms exist
-            // only for exhaustiveness.
-            SessionEvent::ClockObserved(_) | SessionEvent::StagedStartupComplete => {}
+            // The controller intercepts this before it reaches a renderer,
+            // reduces it into `SessionChanged`, and forwards that instead.
+            SessionEvent::StagedStartupComplete => {}
         }
     }
 
@@ -859,7 +822,6 @@ fn format_diagnostic(theme: Theme, source: &str, level: DiagnosticLevel, message
 mod tests {
     use super::super::event::DiagnosticSource;
     use super::*;
-    use crate::session::state::{ClockObservation, FailReason, WaitReason};
     use crate::theme::ColorCapability;
 
     fn changed(state: SessionState) -> SessionEvent {
@@ -868,57 +830,24 @@ mod tests {
 
     /// The controller's own reducer over a fake event stream must follow the
     /// exact chain a real session drives:
-    /// `Preparing -> Starting -> Waiting(ClockAbsent) -> Paused -> Running ->
-    /// Stopping -> Stopped`. Each state is built through `SessionState`'s own
+    /// `Preparing -> Starting -> Running -> Stopping -> Stopped`.
+    /// Each state is built through `SessionState`'s own
     /// transition methods (never constructed directly), so this doubles as
     /// proof the chain is legal per the state machine's own rules.
     #[test]
     fn reduce_state_follows_the_full_lifecycle_over_a_fake_event_stream() {
         let preparing = SessionState::Preparing;
         let starting = preparing.clone().start().expect("start");
-        let waiting = starting
-            .clone()
-            .to_waiting(WaitReason::ClockAbsent)
-            .expect("waiting");
-        let paused = waiting
-            .clone()
-            .to_paused(ClockObservation { running: false })
-            .expect("paused");
-        let running = paused.clone().to_running().expect("running");
+        let running = starting.clone().to_running().expect("running");
         let stopping = running.clone().to_stopping().expect("stopping");
         let stopped = stopping.clone().to_stopped().expect("stopped");
 
         let mut state = SessionState::Preparing;
-        for next in [
-            starting,
-            waiting,
-            paused,
-            running,
-            stopping,
-            stopped.clone(),
-        ] {
+        for next in [starting, running, stopping, stopped.clone()] {
             state = reduce_state(state, &changed(next));
         }
         assert_eq!(state, stopped);
         assert!(state.is_terminal());
-    }
-
-    /// A paused clock is healthy (Product decision 5): the reducer must
-    /// adopt `Paused`, never silently reinterpret it as `Failed`.
-    #[test]
-    fn reduce_state_adopts_paused_not_failed() {
-        let state = SessionState::Preparing
-            .start()
-            .unwrap()
-            .to_waiting(WaitReason::ClockAbsent)
-            .unwrap();
-        let paused = state
-            .clone()
-            .to_paused(ClockObservation { running: false })
-            .expect("an observed paused clock sample must be accepted");
-        let reduced = reduce_state(state, &changed(paused.clone()));
-        assert_eq!(reduced, paused);
-        assert_ne!(reduced, SessionState::Failed(FailReason::Timeout));
     }
 
     /// Events other than `SessionChanged` must never mutate the tracked
@@ -998,60 +927,8 @@ mod tests {
         });
     }
 
-    /// Finding B4: an OBSERVED clock presence must follow the SAME validated
-    /// chain `reduce_state`'s tests already exercise for `SessionChanged` -
-    /// `Starting -> Waiting(ClockAbsent) -> Paused -> Running` - proving the
-    /// controller reduces observations itself rather than trusting them
-    /// blindly.
-    #[test]
-    fn reduce_clock_observation_follows_the_validated_chain() {
-        let starting = SessionState::Preparing.start().unwrap();
-        let waiting = reduce_clock_observation(starting, ClockPresence::Absent);
-        assert_eq!(waiting, SessionState::Waiting(WaitReason::ClockAbsent));
-
-        let paused = reduce_clock_observation(waiting, ClockPresence::Paused);
-        assert_eq!(paused, SessionState::Paused);
-
-        let running = reduce_clock_observation(paused, ClockPresence::Running);
-        assert_eq!(running, SessionState::Running);
-    }
-
-    /// The exact regression finding B4 flags: a clock observation arriving
-    /// after the session has started `Stopping` must be REJECTED, not
-    /// silently overwrite it with `Running`/`Paused`. This is what makes the
-    /// controller (not the clock watcher) the sole state authority.
-    #[test]
-    fn reduce_clock_observation_rejects_updates_once_stopping_has_begun() {
-        let stopping = SessionState::Preparing
-            .start()
-            .unwrap()
-            .to_running()
-            .unwrap()
-            .to_stopping()
-            .unwrap();
-
-        let after_running = reduce_clock_observation(stopping.clone(), ClockPresence::Running);
-        assert_eq!(
-            after_running, stopping,
-            "a queued Running observation must not overwrite Stopping"
-        );
-
-        let after_paused = reduce_clock_observation(stopping.clone(), ClockPresence::Paused);
-        assert_eq!(
-            after_paused, stopping,
-            "a queued Paused observation must not overwrite Stopping"
-        );
-
-        let after_absent = reduce_clock_observation(stopping.clone(), ClockPresence::Absent);
-        assert_eq!(
-            after_absent, stopping,
-            "a queued Absent observation must not overwrite Stopping"
-        );
-    }
-
-    /// Finding B3: `StagedStartupComplete` is `run`'s only path to `Running`
-    /// (no simulation clock ever tells it) - it must reach `Running` from
-    /// `Starting`, and it must NOT resurrect a session that has already moved
+    /// `StagedStartupComplete` is the only path to `Running`; it must reach
+    /// `Running` from `Starting`, and must not resurrect a session already
     /// on to `Stopping`.
     #[test]
     fn reduce_staged_startup_complete_reaches_running_but_never_past_stopping() {
