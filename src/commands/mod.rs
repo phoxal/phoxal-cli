@@ -434,6 +434,12 @@ impl Cli {
 pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
     let interactive = std::io::stderr().is_terminal();
     let message_format = cli.command.message_format();
+    let output = crate::session::output::OutputContext::compute(
+        interactive,
+        cli.plain,
+        cli.quiet,
+        message_format,
+    );
 
     let policy = crate::update_notice::NoticePolicy {
         artifact_consuming: cli.command.update_notice_format().is_some(),
@@ -443,6 +449,8 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
             .unwrap_or(MessageFormat::Human),
         quiet: cli.quiet,
         interactive,
+        tui: cli.command.enters_interactive_session()
+            && output.mode == crate::output_mode::OutputMode::Rich,
     };
     crate::update_notice::begin(policy);
     if policy.artifact_consuming && !policy.quiet && policy.interactive {
@@ -456,12 +464,6 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
     // resolve, cargo builds, the simulate readiness wait, `AppContext::ui`'s
     // own JSON gate) via `AppContext::output`/`AppContext::ui` - no
     // process-global mode cell.
-    let output = crate::session::output::OutputContext::compute(
-        interactive,
-        cli.plain,
-        cli.quiet,
-        message_format,
-    );
     let app = &AppContext {
         output,
         ui: crate::Ui::new(output.mode),
@@ -656,6 +658,7 @@ mod tests {
             message_format: MessageFormat::Json,
             quiet: false,
             interactive: true,
+            tui: false,
         });
         crate::update_notice::offer(crate::update_notice::UpdateNotice::Artifacts(vec![
             "phoxal/service-drive 1.0.0 -> 1.1.0".to_string(),

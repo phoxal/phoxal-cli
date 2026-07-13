@@ -6,11 +6,11 @@ use crate::launch_plan::{SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SITE_TOOL_TELEMETRY
 use crate::participant_kind::ParticipantKind;
 use crate::supervisor::{BoardSnapshot, ParticipantStatus};
 
-/// The synthetic Webots application row's id, shared with
-/// `commands::simulate::WEBOTS_SITE_ID` (kept as a local literal rather than
-/// importing across the `commands` boundary, since this module has no other
-/// reason to depend on `commands::simulate`).
+/// The synthetic Webots application row's id. It is supervision machinery,
+/// not an operator-facing tool, and is therefore filtered from the navigator.
 pub const WEBOTS_SITE_ID: &str = "webots";
+const WEBOTS_SUPERVISOR_ID: &str = "simulator-webots-supervisor";
+const WEBOTS_CONTROLLER_ID_PREFIX: &str = "simulator-webots-controller";
 
 /// The stable navigator group order (design doc, "Left pane").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -18,7 +18,6 @@ pub enum Group {
     System,
     Services,
     Drivers,
-    Simulation,
 }
 
 impl Group {
@@ -28,7 +27,6 @@ impl Group {
             Self::System => "System",
             Self::Services => "Services",
             Self::Drivers => "Drivers",
-            Self::Simulation => "Simulation",
         }
     }
 }
@@ -43,13 +41,11 @@ pub struct GroupSection {
 
 /// A hardcoded id -> group override for ids whose board `kind` alone does
 /// not place them correctly: the site tools (router/joypad/telemetry, board
-/// `kind: Tool`) and the synthetic Webots application row belong in System
-/// rather than falling through to their raw `kind`.
+/// `kind: Tool`) belong in System rather than falling through to their raw
+/// kind.
 fn group_override(id: &str) -> Option<Group> {
     match id {
-        SITE_TOOL_ROUTER | SITE_TOOL_JOYPAD | SITE_TOOL_TELEMETRY | WEBOTS_SITE_ID => {
-            Some(Group::System)
-        }
+        SITE_TOOL_ROUTER | SITE_TOOL_JOYPAD | SITE_TOOL_TELEMETRY => Some(Group::System),
         _ => None,
     }
 }
@@ -63,8 +59,24 @@ pub fn group_for(id: &str, kind: ParticipantKind) -> Group {
         ParticipantKind::Tool => Group::System,
         ParticipantKind::Service => Group::Services,
         ParticipantKind::Driver => Group::Drivers,
-        ParticipantKind::Simulator => Group::Simulation,
+        // Simulator participants are filtered by `visible_in_navigator`.
+        ParticipantKind::Simulator => Group::System,
     }
+}
+
+fn visible_in_navigator(status: &ParticipantStatus, simulation: bool) -> bool {
+    // Webots-owned rows can arrive from the live board as `Service` even
+    // though they are simulation machinery. Identify those rows by their
+    // stable launch ids as well as by kind so implementation details never
+    // leak into the operator-facing service list.
+    if status.id == WEBOTS_SITE_ID
+        || status.id == WEBOTS_SUPERVISOR_ID
+        || status.id.starts_with(WEBOTS_CONTROLLER_ID_PREFIX)
+        || status.kind == ParticipantKind::Simulator
+    {
+        return false;
+    }
+    !(simulation && status.kind == ParticipantKind::Driver)
 }
 
 /// Partition `board`'s participants into the stable group order, dropping
@@ -72,14 +84,16 @@ pub fn group_for(id: &str, kind: ParticipantKind) -> Group {
 /// an already-lowercased substring match against the id (see `state::AppState`'s
 /// `/` filter); pass `""` for no filtering.
 #[must_use]
-pub fn build_groups(board: &BoardSnapshot, filter: &str) -> Vec<GroupSection> {
-    let mut buckets: [(Group, Vec<String>); 4] = [
+pub fn build_groups(board: &BoardSnapshot, filter: &str, simulation: bool) -> Vec<GroupSection> {
+    let mut buckets: [(Group, Vec<String>); 3] = [
         (Group::System, Vec::new()),
         (Group::Services, Vec::new()),
         (Group::Drivers, Vec::new()),
-        (Group::Simulation, Vec::new()),
     ];
     for status in board.participants.values() {
+        if !visible_in_navigator(status, simulation) {
+            continue;
+        }
         if !filter.is_empty() && !status.id.to_lowercase().contains(filter) {
             continue;
         }
@@ -147,14 +161,11 @@ mod tests {
             group_for(SITE_TOOL_JOYPAD, ParticipantKind::Tool),
             Group::System
         );
-        assert_eq!(
-            group_for(WEBOTS_SITE_ID, ParticipantKind::Tool),
-            Group::System
-        );
+        assert_eq!(group_for("telemetry", ParticipantKind::Tool), Group::System);
     }
 
     #[test]
-    fn ordinary_kinds_map_to_their_matching_group() {
+    fn ordinary_operator_facing_kinds_map_to_their_matching_group() {
         assert_eq!(
             group_for("drive", ParticipantKind::Service),
             Group::Services
@@ -163,16 +174,12 @@ mod tests {
             group_for("left_wheel", ParticipantKind::Driver),
             Group::Drivers
         );
-        assert_eq!(
-            group_for("simulator-webots-supervisor", ParticipantKind::Simulator),
-            Group::Simulation
-        );
     }
 
     #[test]
     fn empty_groups_never_appear() {
         let board = board_with(&[("drive", ParticipantKind::Service, ParticipantState::Ready)]);
-        let groups = build_groups(&board, "");
+        let groups = build_groups(&board, "", false);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].group, Group::Services);
     }
@@ -193,21 +200,51 @@ mod tests {
             ("drive", ParticipantKind::Service, ParticipantState::Ready),
             (
                 "simulator-webots-supervisor",
-                ParticipantKind::Simulator,
+                ParticipantKind::Service,
+                ParticipantState::Ready,
+            ),
+            (
+                "simulator-webots-controller-robot-v1",
+                ParticipantKind::Service,
                 ParticipantState::Ready,
             ),
         ]);
-        let groups = build_groups(&board, "");
+        let groups = build_groups(&board, "", false);
         let order: Vec<Group> = groups.iter().map(|section| section.group).collect();
-        assert_eq!(
-            order,
-            vec![
-                Group::System,
-                Group::Services,
-                Group::Drivers,
-                Group::Simulation
-            ]
-        );
+        assert_eq!(order, vec![Group::System, Group::Services, Group::Drivers]);
+    }
+
+    #[test]
+    fn simulation_hides_component_drivers_and_webots_internals() {
+        let board = board_with(&[
+            ("drive", ParticipantKind::Service, ParticipantState::Ready),
+            (
+                "left_wheel",
+                ParticipantKind::Driver,
+                ParticipantState::Ready,
+            ),
+            (
+                WEBOTS_SITE_ID,
+                ParticipantKind::Tool,
+                ParticipantState::Ready,
+            ),
+            (
+                "simulator-webots-supervisor",
+                ParticipantKind::Service,
+                ParticipantState::Ready,
+            ),
+            (
+                "simulator-webots-controller-robot-v1",
+                ParticipantKind::Service,
+                ParticipantState::Ready,
+            ),
+        ]);
+        let groups = build_groups(&board, "", true);
+        let ids = groups
+            .iter()
+            .flat_map(|section| section.ids.iter().map(String::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["drive"]);
     }
 
     #[test]
@@ -224,7 +261,7 @@ mod tests {
                 ParticipantState::Ready,
             ),
         ]);
-        let groups = build_groups(&board, "left");
+        let groups = build_groups(&board, "left", false);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].ids, vec!["left_wheel".to_string()]);
     }

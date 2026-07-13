@@ -84,6 +84,7 @@ pub struct TuiDisplay {
     /// empty store still renders correctly: every lookup is `None`/`0`, the
     /// same "not wired yet" shape the Overview/Traffic panels already handle.
     runtime: RuntimeStore,
+    telemetry: crate::telemetry::TelemetrySnapshot,
     activated: Option<Activated>,
 }
 
@@ -112,6 +113,7 @@ impl TuiDisplay {
     #[must_use]
     pub fn new(theme: Theme, title: TitleInfo, identity: Option<IdentitySummary>) -> Self {
         let (log_tx, log_rx) = mpsc::channel(LOG_CHANNEL_CAPACITY);
+        let state = AppState::for_mode(title.mode);
         Self {
             theme,
             title,
@@ -119,11 +121,12 @@ impl TuiDisplay {
             startup: startup::StartupState::new(),
             diagnostics: diagnostics::DiagnosticsStore::default(),
             started_at: Instant::now(),
-            state: AppState::new(),
+            state,
             logs: LogStore::new(),
             log_tx,
             log_rx,
             runtime: RuntimeStore::new(),
+            telemetry: crate::telemetry::TelemetrySnapshot::default(),
             activated: None,
         }
     }
@@ -221,7 +224,7 @@ impl TuiDisplay {
         }
         self.state.sync(board);
         self.runtime.observe_board(board);
-        let snapshot = telemetry.snapshot();
+        self.telemetry = telemetry.snapshot();
         let now = Instant::now();
         let Some(activated) = &mut self.activated else {
             return Ok(());
@@ -245,7 +248,7 @@ impl TuiDisplay {
                     board,
                     logs,
                     state,
-                    &snapshot,
+                    &self.telemetry,
                     runtime,
                     now,
                     diagnostics,
@@ -282,7 +285,7 @@ impl TuiDisplay {
         &mut self,
         event: Event,
         board: &BoardSnapshot,
-        telemetry: &TelemetryBackend,
+        _telemetry: &TelemetryBackend,
     ) -> DisplayAction {
         let Event::Key(key) = event else {
             if let Event::Resize(_, _) = event {
@@ -297,7 +300,7 @@ impl TuiDisplay {
         if key.kind != KeyEventKind::Press {
             return DisplayAction::None;
         }
-        self.state.handle_key(key, board, &telemetry.snapshot())
+        self.state.handle_key(key, board, &self.telemetry)
     }
 }
 

@@ -159,6 +159,7 @@ impl SessionController {
         // constructor would leave a process-global diagnostics sender pointing
         // at a receiver that was immediately dropped.
         diagnostics::install(events_tx.clone());
+        crate::update_notice::poll_session();
         Ok(Self {
             output,
             token: CancellationToken::new(),
@@ -390,7 +391,7 @@ impl SessionController {
             board.set_log_sink(tui.log_sender());
             tui.set_runtime_store(runtime_store);
         }
-        let mut ticker = tokio::time::interval(Duration::from_millis(500));
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut cancel_requested = false;
 
@@ -411,12 +412,19 @@ impl SessionController {
                 }
                 Some(event) = self.events_rx.recv() => {
                     self.apply_event(event);
+                    if let Err(error) = self.redraw(&board.snapshot(), &telemetry) {
+                        break SupervisionEnd::Failed(error);
+                    }
                 }
                 Some(input) = poll_next_input(&mut self.renderer) => {
                     match input {
                         Ok(event) => {
-                            let action = handle_input(&mut self.renderer, event, &board.snapshot(), &telemetry);
+                            let board_snapshot = board.snapshot();
+                            let action = handle_input(&mut self.renderer, event, &board_snapshot, &telemetry);
                             self.apply_display_action(action, &telemetry);
+                            if let Err(error) = self.redraw(&board_snapshot, &telemetry) {
+                                break SupervisionEnd::Failed(error);
+                            }
                         }
                         Err(error) => {
                             break SupervisionEnd::Failed(anyhow!(error).context("terminal input reader failed"));
@@ -581,6 +589,7 @@ impl SessionController {
     /// silently leaving a stale screen up forever; `Line`/`None` never draw
     /// to a terminal and so never fail here.
     fn redraw(&mut self, board: &BoardSnapshot, telemetry: &TelemetryBackend) -> Result<()> {
+        crate::update_notice::poll_session();
         match &mut self.renderer {
             Renderer::Tui(tui) => tui
                 .redraw(board, telemetry)

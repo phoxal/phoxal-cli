@@ -127,6 +127,10 @@ pub fn draw(
     diagnostics: &DiagnosticsStore,
 ) {
     let area = frame.area();
+    // Repaint every cell before composing the next view. In particular this
+    // prevents a long log/overview line from surviving underneath a shorter
+    // panel after a tab switch or terminal resize.
+    frame.render_widget(Clear, area);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -482,9 +486,14 @@ fn draw_navigator(
     state: &AppState,
     area: Rect,
 ) {
+    let active = state.focus == Focus::Navigator;
     let block = Block::default()
         .borders(Borders::RIGHT)
-        .border_style(color::muted(theme));
+        .border_style(if active {
+            color::fg(theme, Role::Accent)
+        } else {
+            color::muted(theme)
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -493,13 +502,19 @@ fn draw_navigator(
         .navigator
         .rows
         .iter()
-        .map(|row| navigator_row_item(theme, board, row, width))
+        .map(|row| navigator_row_item(theme, board, row, width, active))
         .collect();
     let mut list_state = ListState::default();
     list_state.select(Some(state.navigator.cursor));
-    let list = List::new(items)
-        .highlight_style(color::selected(theme, Role::Text))
-        .highlight_symbol("▍");
+    let list = if active {
+        List::new(items)
+            .highlight_style(color::selected(theme, Role::Text))
+            .highlight_symbol("▍")
+    } else {
+        List::new(items)
+            .highlight_style(color::fg(theme, Role::MutedStrong))
+            .highlight_symbol(" ")
+    };
     frame.render_stateful_widget(list, inner, &mut list_state);
 }
 
@@ -508,6 +523,7 @@ fn navigator_row_item<'a>(
     board: &BoardSnapshot,
     row: &NavRow,
     width: usize,
+    active: bool,
 ) -> ListItem<'a> {
     match row {
         NavRow::Header(group) => ListItem::new(Line::from(Span::styled(
@@ -515,12 +531,16 @@ fn navigator_row_item<'a>(
             color::muted(theme).add_modifier(Modifier::BOLD),
         ))),
         NavRow::Participant(id) => {
-            let role = board
-                .participants
-                .get(id)
-                .map_or(Role::TextPrimary, |status| {
-                    crate::theme::state_role(status.state)
-                });
+            let role = if active {
+                board
+                    .participants
+                    .get(id)
+                    .map_or(Role::TextPrimary, |status| {
+                        crate::theme::state_role(status.state)
+                    })
+            } else {
+                Role::MutedStrong
+            };
             let text = board
                 .participants
                 .get(id)
@@ -590,6 +610,7 @@ fn draw_right_pane(
     now: Instant,
     area: Rect,
 ) {
+    frame.render_widget(Clear, area);
     match &state.view {
         View::Home | View::Diagnostics => {
             let rows = Layout::default()
@@ -601,13 +622,18 @@ fn draw_right_pane(
                 Line::from(format!("Diagnostics ({})", diagnostics.len())),
             ];
             let selected = usize::from(state.view == View::Diagnostics);
-            frame.render_widget(
-                Tabs::new(titles)
-                    .select(selected)
-                    .highlight_style(color::fg(theme, Role::Accent).add_modifier(Modifier::BOLD))
-                    .style(color::muted(theme)),
-                rows[0],
-            );
+            let tabs = Tabs::new(titles)
+                .select(selected)
+                .style(color::muted(theme));
+            let tabs = if state.focus == Focus::Detail {
+                tabs.highlight_style(
+                    color::fg(theme, Role::Accent)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                )
+            } else {
+                tabs.highlight_style(color::fg(theme, Role::MutedStrong))
+            };
+            frame.render_widget(tabs, rows[0]);
             if state.view == View::Diagnostics {
                 draw_diagnostics_tab(frame, theme, diagnostics, state, rows[1]);
             } else {
@@ -836,7 +862,9 @@ fn draw_runtime_detail(
         .unwrap_or(0);
     let tabs_widget = Tabs::new(titles)
         .select(selected)
-        .highlight_style(color::fg(theme, Role::Accent).add_modifier(Modifier::BOLD))
+        .highlight_style(
+            color::fg(theme, Role::Accent).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )
         .style(color::muted(theme));
     frame.render_widget(tabs_widget, rows[0]);
 
@@ -922,19 +950,24 @@ fn draw_runtime_overview(
     area: Rect,
 ) {
     let cpu_text = process.map_or_else(
-        || "-".to_string(),
+        || "n/a".to_string(),
         |sample| {
             let stale = if sample.is_stale(now, DEFAULT_FRESHNESS_TTL) {
                 " (stale)"
             } else {
                 ""
             };
-            format!("{:.0}%{stale}", sample.value.cpu_pct)
+            format!("{:.1}%{stale}", sample.value.cpu_pct)
         },
     );
     let ram_text = process.map_or_else(
-        || "-".to_string(),
-        |sample| format!("{}M", sample.value.rss_bytes / (1024 * 1024)),
+        || "n/a".to_string(),
+        |sample| {
+            format!(
+                "{:.1} MiB",
+                sample.value.rss_bytes as f64 / (1024.0 * 1024.0)
+            )
+        },
     );
     let artifact_text = runtime_metadata.and_then(|meta| meta.artifact_ref.clone());
     let ownership_text = runtime_metadata.map(|meta| match meta.ownership {
@@ -949,7 +982,7 @@ fn draw_runtime_overview(
     let output_contracts_text =
         runtime_metadata.map(|meta| format_contract_list(&meta.output_contracts));
     let time_to_ready_text = runtime_metadata.map(|_| format_time_to_ready(time_to_ready));
-    let mut lines = vec![
+    let lines = vec![
         Line::from(vec![
             Span::styled("state     ", color::muted(theme)),
             Span::raw(theme.participant_state(status.state)),
@@ -999,20 +1032,6 @@ fn draw_runtime_overview(
             Span::raw(status.note.clone().unwrap_or_else(|| "-".to_string())),
         ]),
     ];
-    if let Some(command) = &status.launch_command {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("command", color::muted(theme))));
-        lines.push(Line::from(command.command_line.clone()));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("environment", color::muted(theme))));
-        if command.env.is_empty() {
-            lines.push(Line::from(Span::styled("(none)", color::muted(theme))));
-        } else {
-            for (key, value) in &command.env {
-                lines.push(Line::from(format!("{key}={value}")));
-            }
-        }
-    }
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((scroll as u16, 0));
@@ -1113,8 +1132,7 @@ fn draw_traffic_tab(
 
     let Some(sample) = sample else {
         frame.render_widget(
-            Paragraph::new("no router metrics observed yet - cpu n/a until tool-router publishes")
-                .style(color::muted(theme)),
+            Paragraph::new("loading router traffic…").style(color::muted(theme)),
             area,
         );
         return;
@@ -1223,7 +1241,7 @@ fn draw_joypad_tab(
 ) {
     let Some(sample) = sample else {
         frame.render_widget(
-            Paragraph::new("no joypad devices observed yet").style(color::muted(theme)),
+            Paragraph::new("loading joypad devices…").style(color::muted(theme)),
             area,
         );
         return;
@@ -1231,7 +1249,10 @@ fn draw_joypad_tab(
     let stale = sample.is_stale(now, DEFAULT_FRESHNESS_TTL);
     let sample = &sample.value;
 
-    let mut lines = Vec::new();
+    let mut lines = vec![Line::from(Span::styled(
+        "✓ selected automatically · L1/R1 forward · L2/R2 reverse",
+        color::muted(theme),
+    ))];
     if stale {
         lines.push(Line::from(Span::styled(
             "stale - tool-joypad has not published recently",
@@ -1318,8 +1339,7 @@ fn draw_resources_tab(
     let stale = host.is_some_and(|sample| sample.is_stale(now, DEFAULT_FRESHNESS_TTL));
     let Some(host) = state.resources.display_host(live_host.as_ref()).copied() else {
         frame.render_widget(
-            Paragraph::new("cpu n/a - tool-telemetry has not published a sample yet")
-                .style(color::muted(theme)),
+            Paragraph::new("loading host resources…").style(color::muted(theme)),
             area,
         );
         return;
@@ -1410,16 +1430,17 @@ fn footer_segments(state: &AppState) -> Vec<&'static str> {
     if state.view == View::Diagnostics {
         return vec![
             "↑↓ scroll",
+            "|",
             "s severity",
             "/ filter",
             "d/Esc back",
             "? help",
-            "q quit",
         ];
     }
     match state.focus {
         Focus::Navigator => vec![
             "↑↓ select",
+            "|",
             "↵ inspect",
             "r restart",
             "/ filter",
@@ -1430,51 +1451,51 @@ fn footer_segments(state: &AppState) -> Vec<&'static str> {
         Focus::Detail if state.panel == Panel::Logs => {
             vec![
                 "↑↓ scroll",
+                "|",
                 "f follow",
                 "/ filter",
                 "←→ tab",
                 "d diagnostics",
                 "Esc back",
                 "? help",
-                "q quit",
             ]
         }
         Focus::Detail if state.panel == Panel::Traffic => vec![
             "↑↓ scroll",
+            "|",
             "s sort",
             "/ filter",
             "←→ tab",
             "d diagnostics",
             "Esc back",
             "? help",
-            "q quit",
         ],
         Focus::Detail if state.panel == Panel::Devices => vec![
             "↑↓ select",
+            "|",
             "↵ connect",
             "r rescan",
             "←→ tab",
             "d diagnostics",
             "Esc back",
             "? help",
-            "q quit",
         ],
         Focus::Detail if state.panel == Panel::Resources => vec![
             "p pause",
+            "|",
             "w window",
             "←→ tab",
             "d diagnostics",
             "Esc back",
             "? help",
-            "q quit",
         ],
         Focus::Detail => vec![
-            "←→ tab",
             "↑↓ scroll",
+            "|",
+            "←→ tab",
             "d diagnostics",
             "Esc back",
             "? help",
-            "q quit",
         ],
     }
 }
@@ -1497,7 +1518,8 @@ fn draw_help_overlay(frame: &mut Frame, theme: Theme, area: Rect) {
         Line::from("/         filter"),
         Line::from("f         toggle log follow"),
         Line::from("Esc       back"),
-        Line::from("q, Ctrl-C quit"),
+        Line::from("q         quit from the service list"),
+        Line::from("Ctrl-C    quit from anywhere"),
         Line::from("?         toggle this help"),
     ];
     let block = Block::default()
@@ -2018,12 +2040,12 @@ mod tests {
             content.matches("unknown").count() >= 5,
             "every field with no runtime metadata must show the unknown marker: {content}"
         );
-        // Process telemetry absent -> a plain dash, not a fabricated number.
+        // Process telemetry absence is explicit rather than a fabricated zero.
         let cpu_line = content
             .lines()
             .find(|line| line.trim_start().starts_with("cpu"))
             .expect("a cpu row must render");
-        assert_eq!(cpu_line.trim_end(), "cpu       -", "{cpu_line:?}");
+        assert_eq!(cpu_line.trim_end(), "cpu       n/a", "{cpu_line:?}");
     }
 
     /// Finding A5's positive case: once `RuntimeStore` has this
@@ -2077,12 +2099,9 @@ mod tests {
         );
     }
 
-    /// The command AND its environment (`ParticipantLaunchCommand::env`) must
-    /// both render once a launch command exists - the brief calls out
-    /// "launch command AND environment" as a field that IS plumbed today but
-    /// was only half-shown (command only, no env).
+    /// Launch mechanics are intentionally absent from the operator Overview.
     #[test]
-    fn overview_shows_the_launch_command_and_its_environment() {
+    fn overview_hides_the_launch_command_and_its_environment() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -2117,12 +2136,9 @@ mod tests {
             })
             .expect("draw must not fail");
         let content = buffer_text(terminal.backend().buffer());
-        assert!(
-            content.contains("service-drive --config /etc/drive.yaml"),
-            "{content}"
-        );
-        assert!(content.contains("environment"), "{content}");
-        assert!(content.contains("PHOXAL_ROBOT_ID=rover-01"), "{content}");
+        assert!(!content.contains("service-drive"), "{content}");
+        assert!(!content.contains("environment"), "{content}");
+        assert!(!content.contains("PHOXAL_ROBOT_ID"), "{content}");
     }
 
     /// A live `Process` sample renders its value; a stale one (past
@@ -2167,7 +2183,7 @@ mod tests {
             })
             .expect("draw must not fail");
         let content = buffer_text(terminal.backend().buffer());
-        assert!(content.contains("7%"), "{content}");
+        assert!(content.contains("7.0%"), "{content}");
         assert!(content.contains("(stale)"), "{content}");
     }
 
@@ -2353,6 +2369,67 @@ mod tests {
                 )
             })
             .expect("draw after resize must succeed");
+    }
+
+    #[test]
+    fn switching_to_a_shorter_tab_clears_the_previous_tab_contents() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::new(crate::theme::ColorCapability::None);
+        let title = sample_title();
+        let mut board = BoardSnapshot::default();
+        board.participants.insert(
+            "drive".to_string(),
+            ParticipantStatus::new(
+                "drive",
+                crate::participant_kind::ParticipantKind::Service,
+                ParticipantState::Ready,
+            ),
+        );
+        let mut logs = LogStore::new();
+        logs.record(crate::supervisor::RoutedLogLine {
+            participant: "drive".to_string(),
+            source: crate::supervisor::LogSource::Raw,
+            text: "OLD_LONG_LOG_CONTENT_THAT_MUST_DISAPPEAR".to_string(),
+        });
+        let mut state = AppState::new();
+        state.sync(&board);
+        state.view = View::Runtime("drive".to_string());
+        state.focus = Focus::Detail;
+        state.panel = Panel::Logs;
+
+        let mut draw_frame = |terminal: &mut Terminal<TestBackend>, state: &AppState| {
+            terminal
+                .draw(|frame| {
+                    draw(
+                        frame,
+                        theme,
+                        &title,
+                        &board,
+                        &mut logs,
+                        state,
+                        &TelemetrySnapshot::default(),
+                        &RuntimeStore::new(),
+                        Instant::now(),
+                        &DiagnosticsStore::default(),
+                    )
+                })
+                .expect("draw must succeed");
+        };
+
+        draw_frame(&mut terminal, &state);
+        assert!(
+            buffer_text(terminal.backend().buffer()).contains("OLD_LONG_LOG_CONTENT"),
+            "the first frame must contain the log marker"
+        );
+
+        state.panel = Panel::Overview;
+        draw_frame(&mut terminal, &state);
+        let content = buffer_text(terminal.backend().buffer());
+        assert!(!content.contains("OLD_LONG_LOG_CONTENT"), "{content}");
     }
 
     /// Every `ColorCapability` tier (including the two non-truecolor
