@@ -195,8 +195,14 @@ pub enum JoypadCommand {
 pub struct TelemetryBackend {
     inner: Arc<Mutex<TelemetryStore>>,
     clock_rx: Arc<Mutex<Option<watch::Receiver<ClockObservation>>>>,
-    joypad_command_tx: Arc<Mutex<Option<mpsc::UnboundedSender<JoypadCommand>>>>,
+    joypad_command_tx: Arc<Mutex<Option<mpsc::Sender<JoypadCommand>>>>,
 }
+
+/// A generous bound for a user-driven command channel (one send per
+/// keypress in the Devices tab, never a hot loop): [`JoypadCommand`]s queue
+/// here between redraws, so this only needs to absorb a rapid burst of
+/// key presses, not hold unbounded history.
+const JOYPAD_COMMAND_CHANNEL_CAPACITY: usize = 16;
 
 impl TelemetryBackend {
     #[must_use]
@@ -214,7 +220,7 @@ impl TelemetryBackend {
         *self.clock_rx.lock().expect("clock_rx mutex poisoned") = Some(rx);
     }
 
-    fn set_joypad_command_sender(&self, tx: mpsc::UnboundedSender<JoypadCommand>) {
+    fn set_joypad_command_sender(&self, tx: mpsc::Sender<JoypadCommand>) {
         *self
             .joypad_command_tx
             .lock()
@@ -223,16 +229,19 @@ impl TelemetryBackend {
 
     /// Publish a joypad `Connect`/`Rescan` command, requested from the TUI's
     /// Devices tab. A silent no-op if no joypad feed is running (the tool is
-    /// absent from the catalog, or the session predates the feed starting) -
-    /// there is nothing actionable to report to the user beyond what the
-    /// Devices tab already shows (no device list at all).
+    /// absent from the catalog, or the session predates the feed starting),
+    /// or if the command channel is full (newest-wins: an overloaded queue
+    /// means the feed loop is stalled, so a fresh command is not worth
+    /// blocking the TUI's input-handling path over) - there is nothing
+    /// actionable to report to the user beyond what the Devices tab already
+    /// shows (no device list at all).
     pub fn send_joypad_command(&self, command: JoypadCommand) {
         if let Some(sender) = &*self
             .joypad_command_tx
             .lock()
             .expect("joypad_command_tx mutex poisoned")
         {
-            let _ = sender.send(command);
+            let _ = sender.try_send(command);
         }
     }
 
@@ -472,7 +481,7 @@ pub fn start_joypad_devices_feed(
     connect: String,
     telemetry: TelemetryBackend,
 ) -> JoinHandle<()> {
-    let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+    let (command_tx, mut command_rx) = mpsc::channel(JOYPAD_COMMAND_CHANNEL_CAPACITY);
     telemetry.set_joypad_command_sender(command_tx);
     tokio::spawn(async move {
         loop {
@@ -500,7 +509,7 @@ async fn joypad_devices_feed_loop(
     robot_id: String,
     connect: String,
     telemetry: &TelemetryBackend,
-    command_rx: &mut mpsc::UnboundedReceiver<JoypadCommand>,
+    command_rx: &mut mpsc::Receiver<JoypadCommand>,
 ) -> Result<()> {
     let bus = Bus::open(BusConfig {
         namespace,

@@ -243,8 +243,12 @@ pub struct BoardBackend {
     /// per-runtime scrollback (Part 3) without polling the board's own
     /// 8-line history. `None` outside a TUI session (Plain/Json output, or
     /// any test) - [`Self::route_log`] simply skips the broadcast in that
-    /// case.
-    log_sink: Arc<Mutex<Option<mpsc::UnboundedSender<RoutedLogLine>>>>,
+    /// case. Bounded: the consuming `TuiDisplay::redraw` already keeps its
+    /// own bounded ring per runtime (`stores::log_store::LogStore`), so a
+    /// full channel here just means a redraw is overdue - `route_log` drops
+    /// the newest line rather than blocking the log-subscriber task that
+    /// calls it.
+    log_sink: Arc<Mutex<Option<mpsc::Sender<RoutedLogLine>>>>,
 }
 
 impl BoardBackend {
@@ -417,7 +421,7 @@ impl BoardBackend {
     /// Register the live [`RoutedLogLine`] sink for this session's display
     /// (a TUI). Replaces any previous sink - only one live display exists per
     /// session.
-    pub fn set_log_sink(&self, sender: mpsc::UnboundedSender<RoutedLogLine>) {
+    pub fn set_log_sink(&self, sender: mpsc::Sender<RoutedLogLine>) {
         *self.log_sink.lock().expect("log sink mutex poisoned") = Some(sender);
     }
 
@@ -434,7 +438,11 @@ impl BoardBackend {
         self.append_log(id, text.clone());
         let sink = self.log_sink.lock().expect("log sink mutex poisoned");
         if let Some(sender) = sink.as_ref() {
-            let _ = sender.send(RoutedLogLine {
+            // Non-blocking: a full channel (redraw overdue) or a closed one
+            // (no live TUI) both just mean this line never reaches the
+            // scrollback - never worth blocking the caller (a bus-log
+            // subscriber or output-reader task) over.
+            let _ = sender.try_send(RoutedLogLine {
                 participant: id.to_string(),
                 source,
                 text,

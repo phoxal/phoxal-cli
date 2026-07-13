@@ -73,16 +73,22 @@ pub struct TuiDisplay {
     startup: startup::StartupState,
     state: AppState,
     logs: LogStore,
-    log_tx: mpsc::UnboundedSender<RoutedLogLine>,
-    log_rx: mpsc::UnboundedReceiver<RoutedLogLine>,
+    log_tx: mpsc::Sender<RoutedLogLine>,
+    log_rx: mpsc::Receiver<RoutedLogLine>,
     activated: Option<Activated>,
 }
+
+/// Overflow policy for the routed-log channel: drop-newest. The bounded
+/// `LogStore` ring is the real backstop against unbounded memory growth; this
+/// capacity only needs to absorb a burst between redraws, not hold a whole
+/// session's history.
+const LOG_CHANNEL_CAPACITY: usize = 512;
 
 struct Activated {
     _guard: terminal::TerminalGuard,
     terminal: Terminal<CrosstermBackend<Stderr>>,
     _input_thread: input::InputThread,
-    input_rx: mpsc::UnboundedReceiver<Event>,
+    input_rx: mpsc::Receiver<Event>,
 }
 
 impl std::fmt::Debug for TuiDisplay {
@@ -96,7 +102,7 @@ impl std::fmt::Debug for TuiDisplay {
 impl TuiDisplay {
     #[must_use]
     pub fn new(theme: Theme, title: TitleInfo, identity: Option<IdentitySummary>) -> Self {
-        let (log_tx, log_rx) = mpsc::unbounded_channel();
+        let (log_tx, log_rx) = mpsc::channel(LOG_CHANNEL_CAPACITY);
         Self {
             theme,
             title,
@@ -124,7 +130,7 @@ impl TuiDisplay {
     /// [`Self::activate`], so log routing starts the instant this display
     /// exists.
     #[must_use]
-    pub fn log_sender(&self) -> mpsc::UnboundedSender<RoutedLogLine> {
+    pub fn log_sender(&self) -> mpsc::Sender<RoutedLogLine> {
         self.log_tx.clone()
     }
 
@@ -199,7 +205,7 @@ impl TuiDisplay {
         });
     }
 
-    /// Cancel-safe: `.recv()` on an `mpsc::UnboundedReceiver` is documented
+    /// Cancel-safe: `.recv()` on an `mpsc::Receiver` is documented
     /// cancel-safe, so this may be dropped mid-await by a competing
     /// `select!` branch without losing an already-buffered event.
     pub async fn next_input(&mut self) -> Option<Event> {
@@ -272,7 +278,7 @@ mod tests {
         let sender = display.log_sender();
         assert!(
             sender
-                .send(RoutedLogLine {
+                .try_send(RoutedLogLine {
                     participant: "drive".to_string(),
                     source: crate::supervisor::LogSource::Bus,
                     text: "hello".to_string(),
