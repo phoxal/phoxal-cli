@@ -4,6 +4,13 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.10.0) - 2026-07-13
+
+
+### Added
+
+- *(cli-ux)* Event-driven session core (follow-up refactor) (#128)
+
 ## [0.9.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.9.0) - 2026-07-13
 
 
