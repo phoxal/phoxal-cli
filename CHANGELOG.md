@@ -4,6 +4,13 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.11.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.11.1) - 2026-07-13
+
+
+### Fixed
+
+- *(tui)* Polish simulation interaction (#134)
+
 ## [0.11.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.11.0) - 2026-07-13
 
 
