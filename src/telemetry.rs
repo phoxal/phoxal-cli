@@ -1,6 +1,6 @@
 //! Live telemetry feed for the TUI (CLI-UX Phase 3/4): background bus
 //! subscribers for the framework's `y2026_9` router/telemetry/joypad
-//! contracts, plus the simulation clock's live `step`/`running` readout,
+//! contracts, plus the simulation clock's live step/time readout,
 //! mirroring `supervisor::start_bus_log_subscriber`/
 //! `start_presence_heartbeat_subscriber`'s "subscribe, update a shared
 //! snapshot" pattern.
@@ -24,7 +24,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::stores::telemetry_store::{HostPoint, TelemetryStore, Timestamped};
-use crate::supervisor::ClockObservation;
+use crate::supervisor::{ClockObservation, wait_for_endpoint};
 
 /// One `telemetry::Host` sample (the host resource meter).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -211,11 +211,8 @@ impl TelemetryBackend {
     }
 
     /// Wire in the simulation clock feed
-    /// (`supervisor::start_clock_barrier_feed`), reused as-is rather than a
-    /// separate subscription, since the barrier already keeps exactly this
-    /// sample fresh; the caller (`commands::simulate`) simply stops aborting
-    /// the feed task once the barrier completes and hands the same receiver
-    /// here instead.
+    /// (`supervisor::start_clock_feed`). The caller keeps the feed alive for
+    /// the session and hands the receiver here for cheap redraw snapshots.
     pub fn set_clock_feed(&self, rx: watch::Receiver<ClockObservation>) {
         *self.clock_rx.lock().expect("clock_rx mutex poisoned") = Some(rx);
     }
@@ -314,6 +311,7 @@ pub fn start_host_feed(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
+            wait_for_endpoint(&connect).await;
             match host_feed_loop(
                 namespace.clone(),
                 robot_id.clone(),
@@ -370,6 +368,7 @@ pub fn start_process_feed(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
+            wait_for_endpoint(&connect).await;
             match process_feed_loop(
                 namespace.clone(),
                 robot_id.clone(),
@@ -423,6 +422,7 @@ pub fn start_router_metrics_feed(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
+            wait_for_endpoint(&connect).await;
             match router_metrics_feed_loop(
                 namespace.clone(),
                 robot_id.clone(),
@@ -485,6 +485,7 @@ pub fn start_joypad_devices_feed(
     telemetry.set_joypad_command_sender(command_tx);
     tokio::spawn(async move {
         loop {
+            wait_for_endpoint(&connect).await;
             match joypad_devices_feed_loop(
                 namespace.clone(),
                 robot_id.clone(),
@@ -662,15 +663,10 @@ mod tests {
         telemetry.set_clock_feed(rx);
         assert!(telemetry.snapshot().clock.is_none());
         tx.send_modify(|observation| {
-            observation.latest = Some(crate::supervisor::ClockSample {
-                now_ns: 5,
-                step: 3,
-                running: true,
-            });
+            observation.latest = Some(crate::supervisor::ClockSample { now_ns: 5, step: 3 });
         });
         let sample = telemetry.snapshot().clock.expect("clock sample");
         assert_eq!(sample.step, 3);
-        assert!(sample.running);
     }
 
     #[test]

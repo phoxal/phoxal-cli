@@ -153,7 +153,10 @@ impl Run {
         // 1): the controller starts its renderer (a TUI's alternate screen,
         // or the append-only line renderer) right now, before preparation
         // even begins - see `SessionController::new`'s docs.
-        let identity = crate::identity::IdentitySummary::discover(app.project.root());
+        let identity = crate::identity::IdentitySummary::discover(
+            app.project.root(),
+            crate::identity::TerminalMode::Full,
+        );
         let mut controller =
             crate::session::controller::SessionController::new(app.output, "run", identity)?;
         let events = controller.events();
@@ -819,9 +822,8 @@ pub(crate) fn prepare_robot_participants(
                 // heartbeat subscriber is running. A controller/supervisor
                 // Webots never actually launches (or that silently crashes
                 // before its own `#[setup]` completes) therefore never
-                // reaches `Ready` here, and the simulate readiness barrier
-                // (`await_readiness_barrier`) - or, failing that, the
-                // heartbeat staleness sweep - is what turns that into a
+                // reaches `Ready` here, and its staged participant wait (or,
+                // failing that, the heartbeat staleness sweep) turns that into a
                 // detected failure instead of a permanently green board.
                 // `commands::simulate` renders its controllerArgs into the
                 // staged world instead of a `ParticipantSpec` (Part 5).
@@ -1322,6 +1324,11 @@ mod tests {
             env.iter().any(|(k, _)| k == env::CONNECT),
             "observable bus tool must get PHOXAL_CONNECT: {env:?}"
         );
+        assert!(
+            env.iter()
+                .any(|(key, value)| key == env::CLOCK && value == "real"),
+            "site tools must always use the real scheduler: {env:?}"
+        );
     }
 
     #[test]
@@ -1541,10 +1548,10 @@ robot:
 
     /// The router is the bus transport, not a contract-graph participant: it
     /// must come out of `prepare_site_tools` with `bus_participant: false`
-    /// (excluded from the readiness barrier's `expected_bus_ids`, marked
+    /// (excluded from startup-stage heartbeat waits, marked
     /// `Ready` on spawn), while an ordinary robot participant produced by
     /// `prepare_robot_participants` stays `bus_participant: true`
-    /// (heartbeat-gated by the OBSERVED-readiness barrier). This is the fix
+    /// (heartbeat-gated by observed readiness). This is the fix
     /// for the regression where a managed `tool-router` hung at `Starting`
     /// forever because its heartbeat is structurally unobservable (its
     /// framework runner bus is in-process, disconnected from the zenoh

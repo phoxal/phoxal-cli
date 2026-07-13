@@ -336,6 +336,39 @@ impl RootCommand {
         }
     }
 
+    /// Label the welcome card with the invocation's terminal shape. A dry
+    /// run is always `plan only`; a live session is `full` when the TUI owns
+    /// the terminal and `plain` otherwise; finite commands are `one shot`.
+    fn welcome_terminal_mode(
+        &self,
+        output_mode: crate::output_mode::OutputMode,
+    ) -> crate::identity::TerminalMode {
+        let plan_only = match self {
+            Self::Simulation(command) => matches!(
+                &command.command,
+                simulate::SimulationSubcommand::Run(run) if run.dry_run
+            ),
+            Self::Deploy(command) => command.dry_run,
+            Self::Update(command) => command.dry_run,
+            Self::Cache(command) => {
+                let cache::CacheSubcommand::Clean(clean) = &command.command;
+                clean.dry_run
+            }
+            _ => false,
+        };
+        if plan_only {
+            crate::identity::TerminalMode::PlanOnly
+        } else if self.enters_interactive_session() {
+            if output_mode == crate::output_mode::OutputMode::Rich {
+                crate::identity::TerminalMode::Full
+            } else {
+                crate::identity::TerminalMode::Plain
+            }
+        } else {
+            crate::identity::TerminalMode::OneShot
+        }
+    }
+
     /// The `--message-format` every verb answers with, defaulting to
     /// [`MessageFormat::Human`] for the handful of verbs (`validate`,
     /// `logs`, `doctor`) that have no format flag of their own. Broader than
@@ -454,6 +487,7 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
         crate::identity::print(
             identity_policy,
             app.project.root(),
+            cli.command.welcome_terminal_mode(output.mode),
             crate::theme::Theme::detect_stderr(output.mode),
             version_summary().cli_version,
         );
@@ -571,6 +605,38 @@ mod tests {
 
         let check = Cli::try_parse_from(["phoxal-cli", "check"]).unwrap();
         assert!(!check.command.enters_interactive_session());
+    }
+
+    #[test]
+    fn welcome_terminal_mode_distinguishes_full_plain_plan_and_one_shot() {
+        let live = Cli::try_parse_from(["phoxal-cli", "simulation", "run", "default"])
+            .expect("live simulation should parse");
+        assert_eq!(
+            live.command
+                .welcome_terminal_mode(crate::output_mode::OutputMode::Rich),
+            crate::identity::TerminalMode::Full
+        );
+        assert_eq!(
+            live.command
+                .welcome_terminal_mode(crate::output_mode::OutputMode::Plain),
+            crate::identity::TerminalMode::Plain
+        );
+
+        let plan = Cli::try_parse_from(["phoxal-cli", "simulation", "run", "default", "--dry-run"])
+            .expect("simulation plan should parse");
+        assert_eq!(
+            plan.command
+                .welcome_terminal_mode(crate::output_mode::OutputMode::Rich),
+            crate::identity::TerminalMode::PlanOnly
+        );
+
+        let check = Cli::try_parse_from(["phoxal-cli", "check"]).expect("check should parse");
+        assert_eq!(
+            check
+                .command
+                .welcome_terminal_mode(crate::output_mode::OutputMode::Rich),
+            crate::identity::TerminalMode::OneShot
+        );
     }
 
     #[test]

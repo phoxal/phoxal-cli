@@ -8,7 +8,7 @@ use phoxal::check as graph_check;
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::y2026_8::simulation::{RobotSpawn, SpawnRequest, SpawnSet};
 use serde::Serialize;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::AppContext;
@@ -29,19 +29,17 @@ use crate::launch_plan::{
 use crate::resolver::{
     ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras, resolve,
 };
-use crate::session::event::ClockPresence;
 use crate::session::output::OutputContext;
 use crate::simulate_staging::{
     ComponentTypeToStage, RobotToStage, StagedSimulationWorld, stage_simulation_world,
 };
 use crate::supervisor::{
-    BoardBackend, ClockObservation, ParticipantKind, ParticipantSpec, ParticipantState,
-    ParticipantStatus, RequestedStop, RouterOwnership, SupervisionStage, SupervisorAction,
-    SupervisorLock, SupervisorOptions, SupervisorOutcome, await_readiness_barrier,
-    await_terminal_graph_failure, default_connect_endpoint, local_router_reachable,
-    router_ownership, start_bus_log_subscriber, start_clock_barrier_feed,
+    BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
+    RequestedStop, RouterOwnership, SupervisionStage, SupervisorAction, SupervisorLock,
+    SupervisorOptions, SupervisorOutcome, await_terminal_graph_failure, default_connect_endpoint,
+    local_router_reachable, router_ownership, start_bus_log_subscriber, start_clock_feed,
     start_presence_heartbeat_subscriber, supervise_until_shutdown, supervisor_actions_path,
-    supervisor_state_path,
+    supervisor_state_path, wait_for_endpoint,
 };
 use crate::webots_stage_root;
 use crate::world;
@@ -63,11 +61,8 @@ const SIMULATOR_SUPERVISOR_ARTIFACT_NAME: &str = "webots-supervisor";
 /// `artifact.id`.
 const SIMULATOR_CONTROLLER_ARTIFACT_NAME: &str = "webots-controller";
 
-/// Bound on the simulate readiness barrier's startup window (see
-/// `await_readiness_barrier`): the supervisor, every expected controller,
-/// every CLI-managed bus participant, and a first-plus-advancing
-/// `simulation/clock` sample must all be observed within this window, or
-/// `simulate` fails loudly instead of hanging or reporting a false success.
+/// Bound on each non-interactive simulate participant-readiness stage. The
+/// simulation clock is telemetry and never participates in this budget.
 /// Generous enough to cover a first-run Webots GUI launch plus every
 /// participant clearing its own `#[setup]` on a loaded host; a healthy
 /// session reaches barrier success in a few seconds in practice.
@@ -266,7 +261,10 @@ pub async fn run(
             // One interactive surface for the whole session (Product
             // decision 1): the controller starts its renderer right now,
             // before preparation even begins - see `SessionController::new`.
-            let identity = crate::identity::IdentitySummary::discover(app.project.root());
+            let identity = crate::identity::IdentitySummary::discover(
+                app.project.root(),
+                crate::identity::TerminalMode::Full,
+            );
             let mut controller = crate::session::controller::SessionController::new(
                 app.output,
                 "simulation",
@@ -316,14 +314,13 @@ pub async fn run(
                     setup.supervise_task,
                 )
                 .await;
-            setup.barrier_watch.abort();
-            setup.clock_state_watcher.abort();
+            setup.graph_watch.abort();
             if let Some(handle) = setup.watch_handle {
                 handle.abort();
             }
             setup.spawn_responder.abort();
-            // Finding B6: every feed task (log/presence subscribers, the
-            // clock barrier feed, live telemetry) participates in teardown
+            // Finding B6: every feed task (log/presence subscribers, clock
+            // telemetry, live telemetry) participates in teardown
             // instead of being leaked under a `_`-prefixed binding for the
             // rest of the process's life.
             for feed in setup.feed_tasks {
@@ -353,13 +350,12 @@ struct LiveSimSetup {
     telemetry: crate::telemetry::TelemetryBackend,
     runtime_store: crate::stores::runtime_store::RuntimeStore,
     supervise_task: JoinHandle<Result<SupervisorOutcome>>,
-    barrier_watch: JoinHandle<()>,
-    clock_state_watcher: JoinHandle<()>,
+    graph_watch: JoinHandle<()>,
     watch_handle: Option<JoinHandle<()>>,
     spawn_responder: JoinHandle<()>,
     action_tx: mpsc::Sender<SupervisorAction>,
     /// Every feed task that must stay alive for the whole session (log/
-    /// presence subscribers, the clock barrier feed, live telemetry) -
+    /// presence subscribers, clock telemetry, live telemetry) -
     /// collected here instead of leaked under `_`-prefixed bindings (finding
     /// B6), so the caller can abort every one of them once supervision ends.
     feed_tasks: Vec<JoinHandle<()>>,
@@ -431,8 +427,8 @@ async fn live_simulate_setup(
     let spawn_responder =
         start_spawn_responder(&sim.plan, spawn_descriptors, router_ownership).await?;
     let requested_stop = RequestedStop::new(WEBOTS_SITE_ID, webots_spec.shutdown_grace);
-    // The readiness barrier's expected set, captured before `specs` is
-    // moved into the supervisor task: every CLI-managed bus participant
+    // The expected graph set, captured before `specs` is moved into the
+    // supervisor task: every CLI-managed bus participant
     // (everything except the Webots app itself, which has
     // `bus_participant: false`) plus every SIMULATION-MANAGED
     // participant (the supervisor and each robot's controller), which
@@ -483,20 +479,20 @@ async fn live_simulate_setup(
             board.clone(),
         )
     }));
-    let barrier_robot = sim
+    let clock_robot = sim
         .plan
         .robots
         .first()
-        .context("sim launch plan has no robot for the readiness barrier's clock feed")?;
-    let (clock_rx, clock_task) = start_clock_barrier_feed(
-        barrier_robot.namespace.clone(),
-        barrier_robot.id.clone(),
+        .context("sim launch plan has no robot for the clock telemetry feed")?;
+    let (clock_rx, clock_task) = start_clock_feed(
+        clock_robot.namespace.clone(),
+        clock_robot.id.clone(),
         default_connect_endpoint(),
     );
     feed_tasks.push(clock_task);
-    // The SAME clock feed backs the readiness barrier, the session's clock
-    // observation watcher (Product decision 5), and the TUI's live top-bar
-    // step/running readout - cloning the `watch::Receiver` is cheap.
+    // Clock observation is telemetry only. Startup and session state do not
+    // wait for a sample; services consume it independently through their
+    // `--clock simulation` runner.
     let telemetry = crate::telemetry::TelemetryBackend::new();
     telemetry.set_clock_feed(clock_rx.clone());
 
@@ -521,14 +517,9 @@ async fn live_simulate_setup(
         None
     };
 
-    // The readiness barrier and the process supervisor must run
-    // concurrently, not sequentially: participants only start
-    // publishing heartbeats once `supervise_until_shutdown` has
-    // actually spawned them. `cancel_tx` is the coordinated teardown
-    // path for both a barrier error and a terminal graph failure
-    // after readiness: it asks the supervisor task to SIGTERM Webots
-    // and stop every other child instead of leaving an unhealthy
-    // session running forever.
+    // A graph-failure monitor and the process supervisor run concurrently.
+    // Stage readiness is already owned by `supervise_until_shutdown`; the
+    // monitor coordinates teardown if any expected participant later fails.
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let stages = stages_for_simulate(specs, &sim.plan, output);
 
@@ -536,7 +527,7 @@ async fn live_simulate_setup(
     // a real TUI is up to read it, same gate as `commands::run`. The
     // sim clock feed (`telemetry.set_clock_feed` above) is wired
     // unconditionally since it costs nothing extra - the SAME task
-    // already exists for the readiness barrier - but host/process/
+    // already exists for the title telemetry - but host/process/
     // router/joypad each open their own bus connection, so those
     // stay Tui-gated.
     let site_targets: Vec<(String, String)> = sim
@@ -558,13 +549,6 @@ async fn live_simulate_setup(
     let _ = events
         .send(crate::session::event::SessionEvent::SessionChanged { state: starting })
         .await;
-    // Fixes live-acceptance #3: reflects the observed simulation clock
-    // (waiting/paused/running) continuously for the whole session, via the
-    // controller's own validated reduction (finding B4) - not just once at
-    // startup, and independent of the readiness barrier's pass/fail decision.
-    let clock_state_watcher =
-        spawn_clock_state_watcher(clock_rx.clone(), events.clone(), token.clone());
-
     let board_for_supervise = board.clone();
     let supervise_task = tokio::spawn(supervise_until_shutdown(
         stages,
@@ -577,45 +561,25 @@ async fn live_simulate_setup(
             cancel_rx: Some(cancel_rx),
             token: token.clone(),
             events: Some(events.clone()),
+            emits_running_on_startup_complete: true,
             ..SupervisorOptions::default()
         },
     ));
 
-    // Fixes live-acceptance #4: the readiness barrier (and, once it
-    // succeeds, the ongoing terminal-graph-failure watch) run as a
-    // background task instead of an unguarded `tokio::join!` ahead of
-    // the controller's own Ctrl-C-aware loop.
-    let readiness_timeout = output.wait_budget(SIMULATE_READINESS_TIMEOUT);
-    let barrier_watch = tokio::spawn({
+    let graph_watch = tokio::spawn({
         let board = board.clone();
         let expected_bus_ids = expected_bus_ids.clone();
-        let mut clock_rx = clock_rx;
         async move {
-            match await_readiness_barrier(
+            let failed = await_terminal_graph_failure(
                 &board,
                 &expected_bus_ids,
-                &mut clock_rx,
-                readiness_timeout,
                 std::time::Duration::from_millis(200),
             )
-            .await
-            {
-                Err(error) => {
-                    let _ = cancel_tx.send(error.to_string());
-                }
-                Ok(()) => {
-                    let failed = await_terminal_graph_failure(
-                        &board,
-                        &expected_bus_ids,
-                        std::time::Duration::from_millis(200),
-                    )
-                    .await;
-                    let _ = cancel_tx.send(format!(
-                        "graph ended unhealthy; failed participants: {}",
-                        failed.join(", ")
-                    ));
-                }
-            }
+            .await;
+            let _ = cancel_tx.send(format!(
+                "graph ended unhealthy; failed participants: {}",
+                failed.join(", ")
+            ));
         }
     });
 
@@ -625,83 +589,12 @@ async fn live_simulate_setup(
         telemetry,
         runtime_store,
         supervise_task,
-        barrier_watch,
-        clock_state_watcher,
+        graph_watch,
         watch_handle,
         spawn_responder,
         action_tx,
         feed_tasks,
     })
-}
-
-/// Continuously OBSERVE the simulation clock (Product decision 5) and report
-/// it as `SessionEvent::ClockObserved` - an observation, never a state
-/// replacement (finding B4). This watcher does not track `SessionState` at
-/// all: only `SessionController` reduces an observation into the session's
-/// actual state, via `SessionState`'s own validated transitions, which is
-/// what makes rejecting a stale observation once `Stopping` has begun the
-/// controller's job instead of a second, independent authority racing it.
-/// Runs until `token` is cancelled or the feed itself ends.
-fn spawn_clock_state_watcher(
-    mut clock_rx: watch::Receiver<ClockObservation>,
-    events: mpsc::Sender<crate::session::event::SessionEvent>,
-    token: tokio_util::sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut last_sent: Option<ClockPresence> = None;
-        // Copied out into a plain local BEFORE the `.await` below (not
-        // inlined as an argument expression): `watch::Ref` is not `Send`,
-        // and Rust keeps a temporary alive until the end of its enclosing
-        // statement - across the `.await` if it were an argument expression -
-        // which would make this whole future `!Send` and reject `tokio::spawn`.
-        let observation = *clock_rx.borrow();
-        send_clock_observation_if_changed(&mut last_sent, observation, &events).await;
-        loop {
-            tokio::select! {
-                () = token.cancelled() => break,
-                changed = clock_rx.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                }
-            }
-            let observation = *clock_rx.borrow();
-            send_clock_observation_if_changed(&mut last_sent, observation, &events).await;
-        }
-    })
-}
-
-/// Map the supervisor's own richer clock sample down to the minimal
-/// [`ClockPresence`] the session-state reduction cares about.
-fn clock_presence(observation: ClockObservation) -> ClockPresence {
-    if observation.first_sample_ns.is_none() {
-        ClockPresence::Absent
-    } else if observation.latest.is_some_and(|sample| sample.running) {
-        ClockPresence::Running
-    } else {
-        ClockPresence::Paused
-    }
-}
-
-/// Send `SessionEvent::ClockObserved` only on an edge change (never on every
-/// tick of a fast-advancing simulation clock) - awaited, not `try_send`
-/// (finding B5): a real pause/resume transition must never be silently
-/// dropped under channel pressure the way a merely-repeated observation may
-/// be. `last` starts `None` so the very first observation (even
-/// `ClockPresence::Absent`) is always reported once.
-async fn send_clock_observation_if_changed(
-    last: &mut Option<ClockPresence>,
-    observation: ClockObservation,
-    events: &mpsc::Sender<crate::session::event::SessionEvent>,
-) {
-    let presence = clock_presence(observation);
-    if *last == Some(presence) {
-        return;
-    }
-    *last = Some(presence);
-    let _ = events
-        .send(crate::session::event::SessionEvent::ClockObserved(presence))
-        .await;
 }
 
 pub fn prepare(project_start: &Path, options: SimulateOptions) -> Result<SimPlan> {
@@ -1366,13 +1259,13 @@ fn simulation_managed_participant_ids(plan: &LaunchPlan) -> Vec<String> {
 /// plan's SIMULATION-MANAGED (wait-only, spec-less) ids into the staged
 /// startup order (Part 2): router < other tools < Webots app < simulation
 /// supervisor (wait-only) < services < robot/controllers (wait-only). The
-/// final "clock advancing" gate is NOT a stage here - it stays the existing
-/// clock-coupled `await_readiness_barrier`, called by `run` (above) once
-/// every stage below has completed; the deferred-spawn machinery (the
+/// deferred-spawn machinery (the
 /// `SpawnSet` bus responder, importable PROTOs, controller-readiness
 /// observation) is unchanged, this only reorders WHEN the CLI hands specs to
 /// the supervisor and adds explicit wait-only stages for the participants
-/// Webots itself spawns.
+/// Webots itself spawns. Once the controller stage is ready the simulation
+/// session is initialized; clock samples are independent telemetry and do
+/// not form another stage.
 fn stages_for_simulate(
     specs: Vec<ParticipantSpec>,
     plan: &LaunchPlan,
@@ -1555,6 +1448,7 @@ async fn start_spawn_responder(
     let handle = tokio::spawn(async move {
         let mut ready_tx = Some(ready_tx);
         loop {
+            wait_for_endpoint(&bus_config.connect_endpoints[0]).await;
             let bus = match Bus::open(bus_config.clone()).await {
                 Ok(bus) => bus,
                 Err(error) => {
@@ -1634,9 +1528,8 @@ async fn serve_spawn_queries(
 ///
 /// `--mode=realtime` is load-bearing, not cosmetic: Webots opens a world in the
 /// PAUSED state by default, so without an explicit run mode the supervisor's
-/// `#[step]` is never called, `simulation/clock` never advances, and every
-/// clock-driven participant sits idle waiting for a first tick that never comes
-/// (the live gate's "the sim is frozen" symptom - only wall-clock traffic like
+/// `#[step]` is never called, `simulation/clock` never advances, and services
+/// that use simulation time remain idle (only wall-clock traffic like
 /// `presence/heartbeat` flows). `realtime` starts the simulation running,
 /// synced to wall time so the operator watches the robot move at a natural
 /// speed; the clock authority (the Webots supervisor) still owns logical time.

@@ -7,7 +7,6 @@
 //! freshness/staleness checks against `stores::telemetry_store::Timestamped`
 //! stay deterministic in tests too.
 
-use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -33,8 +32,9 @@ use crate::telemetry::{
 };
 use crate::theme::{Role, Theme, state_symbol};
 use crate::tui::color;
+use crate::tui::diagnostics::{DiagnosticEntry, DiagnosticsStore};
 use crate::tui::panel::{Panel, panels_for};
-use crate::tui::startup::{DiagnosticLine, PhaseRow, StartupState};
+use crate::tui::startup::{PhaseRow, StartupState};
 use crate::tui::state::{AppState, Focus, NavRow, TrafficSort, View};
 
 /// Static identity shown on the title bar - resolved once at TUI
@@ -46,12 +46,8 @@ pub struct TitleInfo {
     pub mode: &'static str,
 }
 
-/// Right-aligned insertion point on the title line for the simulation
-/// step/time readout: `step <n> · <sim>s` while the clock is running, dimmed
-/// `step <n> … paused` while it is observed but not advancing (`running ==
-/// false` is an OBSERVED state from the clock sample itself, never inferred
-/// from feed silence). Empty in `run` mode (no sim clock ever exists there)
-/// or before the first sample arrives.
+/// Right-aligned insertion point on the title line for the latest simulation
+/// step/time sample. Empty in `run` mode or before the first sample arrives.
 #[must_use]
 pub fn simulation_clock_slot(mode: &str, clock: Option<ClockSample>) -> String {
     if mode != "simulation" {
@@ -60,12 +56,8 @@ pub fn simulation_clock_slot(mode: &str, clock: Option<ClockSample>) -> String {
     let Some(sample) = clock else {
         return String::new();
     };
-    if sample.running {
-        let seconds = sample.now_ns as f64 / 1_000_000_000.0;
-        format!("step {} · {seconds:.1}s", sample.step)
-    } else {
-        format!("step {} … paused", sample.step)
-    }
+    let seconds = sample.now_ns as f64 / 1_000_000_000.0;
+    format!("step {} · {seconds:.1}s", sample.step)
 }
 
 /// Right-aligned insertion point on the status line for the host CPU/RAM
@@ -132,13 +124,12 @@ pub fn draw(
     telemetry: &TelemetrySnapshot,
     runtime: &RuntimeStore,
     now: Instant,
-    diagnostics: &VecDeque<DiagnosticLine>,
+    diagnostics: &DiagnosticsStore,
 ) {
     let area = frame.area();
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(3),
@@ -147,52 +138,37 @@ pub fn draw(
         .split(area);
 
     draw_title_bar(frame, theme, title, telemetry.clock, rows[0]);
-    draw_status_line(frame, theme, board, telemetry.host.as_ref(), now, rows[1]);
-    draw_diagnostics_strip(frame, theme, diagnostics, rows[2]);
-    draw_body(
-        frame, theme, board, logs, state, telemetry, runtime, now, rows[3],
+    draw_status_line(
+        frame,
+        theme,
+        board,
+        telemetry.host.as_ref(),
+        diagnostics,
+        now,
+        rows[1],
     );
-    draw_footer(frame, theme, state, rows[4]);
+    draw_body(
+        frame,
+        theme,
+        board,
+        logs,
+        state,
+        telemetry,
+        runtime,
+        diagnostics,
+        now,
+        rows[2],
+    );
+    draw_footer(frame, theme, state, rows[3]);
 
     if state.show_help {
         draw_help_overlay(frame, theme, area);
     }
 }
 
-/// The runtime navigator's own diagnostics line (fixes live-acceptance #2
-/// for the collapsed/post-startup frame too, not just the startup surface):
-/// the single most recent `SessionEvent::Diagnostic`, so a warning that
-/// arrives mid-session (e.g. a Zenoh connection retry) is still visible
-/// somewhere in the frame instead of silently landing only in the bounded
-/// ring nothing displays. Blank when nothing has been captured yet.
-fn draw_diagnostics_strip(
-    frame: &mut Frame,
-    theme: Theme,
-    diagnostics: &VecDeque<DiagnosticLine>,
-    area: Rect,
-) {
-    let Some(latest) = diagnostics.back() else {
-        frame.render_widget(Paragraph::new(""), area);
-        return;
-    };
-    let role = match latest.level {
-        DiagnosticLevel::Info => Role::TextPrimary,
-        DiagnosticLevel::Warn => Role::Warn,
-        DiagnosticLevel::Error => Role::Error,
-    };
-    let text = truncate_to_width(
-        &format!("{}: {}", latest.source.label(), latest.message),
-        area.width as usize,
-    );
-    frame.render_widget(
-        Paragraph::new(Span::styled(text, color::fg(theme, role))),
-        area,
-    );
-}
-
 /// The dedicated startup surface (Product decisions 1-4): the welcome card,
-/// one current active-phase row, a bounded diagnostics area, and the session
-/// state label - rendered INSTEAD of the runtime navigator until
+/// one current active-phase row and the session state label - rendered
+/// INSTEAD of the runtime navigator until
 /// `startup.show_startup_surface()` goes false (see `tui::startup`'s module
 /// docs for the one-way ratchet). A resize simply redraws this same frame -
 /// there is no separate stepper/handoff renderer to fall back to.
@@ -204,7 +180,7 @@ pub fn draw_startup(
     startup: &StartupState,
 ) {
     let area = frame.area();
-    let card_height = if identity.is_some() { 9 } else { 1 };
+    let card_height = if identity.is_some() { 10 } else { 1 };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -218,7 +194,6 @@ pub fn draw_startup(
 
     draw_welcome_card(frame, theme, identity, rows[0]);
     draw_active_phase_row(frame, theme, startup.phase.as_ref(), rows[2]);
-    draw_diagnostics_area(frame, theme, &startup.diagnostics, rows[3]);
     draw_startup_status_line(frame, theme, title, startup, rows[4]);
 }
 
@@ -279,6 +254,13 @@ fn draw_welcome_card(
             Span::styled("channel   ", color::muted(theme)),
             Span::styled(
                 identity.channel.clone(),
+                color::fg(theme, Role::TextPrimary),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("terminal  ", color::muted(theme)),
+            Span::styled(
+                identity.terminal.label(),
                 color::fg(theme, Role::TextPrimary),
             ),
         ]),
@@ -348,38 +330,8 @@ fn draw_active_phase_row(frame: &mut Frame, theme: Theme, phase: Option<&PhaseRo
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// The bounded diagnostics area: the most recent lines that fit `area`'s
-/// height, oldest of the visible window first - a `Diagnostic` event never
-/// writes to stderr directly while this surface owns the terminal (fixes
-/// live-acceptance #2).
-fn draw_diagnostics_area(
-    frame: &mut Frame,
-    theme: Theme,
-    diagnostics: &VecDeque<DiagnosticLine>,
-    area: Rect,
-) {
-    let height = area.height as usize;
-    let mut visible: Vec<&DiagnosticLine> = diagnostics.iter().rev().take(height).collect();
-    visible.reverse();
-    let lines: Vec<Line> = visible
-        .into_iter()
-        .map(|entry| {
-            let role = match entry.level {
-                DiagnosticLevel::Info => Role::TextPrimary,
-                DiagnosticLevel::Warn => Role::Warn,
-                DiagnosticLevel::Error => Role::Error,
-            };
-            Line::from(Span::styled(
-                format!("{}: {}", entry.source.label(), entry.message),
-                color::fg(theme, role),
-            ))
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-}
-
 /// The startup surface's bottom line: the mode plus the session's own human
-/// label (`"preparing"`, `"waiting for simulation clock"`, ...) - the plain
+/// label (`"preparing"`, `"starting"`, `"running"`, ...) - the plain
 /// data `SessionState::label` already computes, not re-derived here.
 fn draw_startup_status_line(
     frame: &mut Frame,
@@ -446,6 +398,7 @@ fn draw_status_line(
     theme: Theme,
     board: &BoardSnapshot,
     host: Option<&Timestamped<HostSample>>,
+    diagnostics: &DiagnosticsStore,
     now: Instant,
     area: Rect,
 ) {
@@ -465,10 +418,22 @@ fn draw_status_line(
             )
         })
         .count();
-    let left = vec![Span::styled(
+    let mut left = vec![Span::styled(
         format!("{connected}/{total} connected · {degraded} degraded"),
         color::fg(theme, Role::TextPrimary),
     )];
+    if !diagnostics.is_empty() {
+        let role = if diagnostics.error_count() > 0 {
+            Role::Error
+        } else {
+            Role::Warn
+        };
+        left.push(Span::raw(" · "));
+        left.push(Span::styled(
+            format!("diagnostics {}", diagnostics.len()),
+            color::fg(theme, role).add_modifier(Modifier::BOLD),
+        ));
+    }
     let right = vec![Span::styled(
         host_resource_slot(host, now),
         color::fg(theme, host_resource_role(host, now)),
@@ -486,6 +451,7 @@ fn draw_body(
     state: &AppState,
     telemetry: &TelemetrySnapshot,
     runtime: &RuntimeStore,
+    diagnostics: &DiagnosticsStore,
     now: Instant,
     area: Rect,
 ) {
@@ -496,7 +462,16 @@ fn draw_body(
         .split(area);
     draw_navigator(frame, theme, board, state, columns[0]);
     draw_right_pane(
-        frame, theme, board, logs, state, telemetry, runtime, now, columns[1],
+        frame,
+        theme,
+        board,
+        logs,
+        state,
+        telemetry,
+        runtime,
+        diagnostics,
+        now,
+        columns[1],
     );
 }
 
@@ -611,11 +586,34 @@ fn draw_right_pane(
     state: &AppState,
     telemetry: &TelemetrySnapshot,
     runtime: &RuntimeStore,
+    diagnostics: &DiagnosticsStore,
     now: Instant,
     area: Rect,
 ) {
     match &state.view {
-        View::Home => draw_overview_home(frame, theme, board, area),
+        View::Home | View::Diagnostics => {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(area);
+            let titles = vec![
+                Line::from("Overview"),
+                Line::from(format!("Diagnostics ({})", diagnostics.len())),
+            ];
+            let selected = usize::from(state.view == View::Diagnostics);
+            frame.render_widget(
+                Tabs::new(titles)
+                    .select(selected)
+                    .highlight_style(color::fg(theme, Role::Accent).add_modifier(Modifier::BOLD))
+                    .style(color::muted(theme)),
+                rows[0],
+            );
+            if state.view == View::Diagnostics {
+                draw_diagnostics_tab(frame, theme, diagnostics, state, rows[1]);
+            } else {
+                draw_overview_home(frame, theme, board, rows[1]);
+            }
+        }
         View::Runtime(id) => {
             draw_runtime_detail(
                 frame, theme, board, logs, state, telemetry, runtime, now, id, area,
@@ -698,6 +696,107 @@ fn draw_overview_home(frame: &mut Frame, theme: Theme, board: &BoardSnapshot, ar
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn draw_diagnostics_tab(
+    frame: &mut Frame,
+    theme: Theme,
+    diagnostics: &DiagnosticsStore,
+    state: &AppState,
+    area: Rect,
+) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(area);
+
+    let mut summary = format!(
+        "{} · {} warning{} · {} error{}",
+        state.diagnostics.severity.label(),
+        diagnostics.warning_count(),
+        if diagnostics.warning_count() == 1 {
+            ""
+        } else {
+            "s"
+        },
+        diagnostics.error_count(),
+        if diagnostics.error_count() == 1 {
+            ""
+        } else {
+            "s"
+        },
+    );
+    if !state.diagnostics.filter.is_empty() {
+        summary.push_str(&format!(" · filter: {}", state.diagnostics.filter));
+    }
+    if diagnostics.dropped_count() > 0 {
+        summary.push_str(&format!(" · {} older dropped", diagnostics.dropped_count()));
+    }
+    frame.render_widget(
+        Paragraph::new(truncate_to_width(&summary, rows[0].width as usize))
+            .style(color::muted(theme)),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new("TIME      LEVEL  SOURCE        MESSAGE")
+            .style(color::muted(theme).add_modifier(Modifier::BOLD)),
+        rows[1],
+    );
+
+    let query = state.diagnostics.filter.to_lowercase();
+    let matching: Vec<&DiagnosticEntry> = diagnostics
+        .entries()
+        .iter()
+        .filter(|entry| state.diagnostics.severity.matches(entry.level))
+        .filter(|entry| {
+            query.is_empty()
+                || entry.source.label().to_lowercase().contains(&query)
+                || entry.message.to_lowercase().contains(&query)
+        })
+        .collect();
+
+    if matching.is_empty() {
+        let message = if diagnostics.is_empty() {
+            "No warnings or errors."
+        } else {
+            "No diagnostics match the current filters."
+        };
+        frame.render_widget(Paragraph::new(message).style(color::muted(theme)), rows[2]);
+        return;
+    }
+
+    let height = rows[2].height as usize;
+    let max_start = matching.len().saturating_sub(height);
+    let start = max_start.saturating_sub(state.diagnostics.scroll.min(max_start));
+    let end = (start + height).min(matching.len());
+    let lines = matching[start..end]
+        .iter()
+        .map(|entry| diagnostic_line(theme, entry, rows[2].width as usize))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), rows[2]);
+}
+
+fn diagnostic_line(theme: Theme, entry: &DiagnosticEntry, width: usize) -> Line<'static> {
+    let seconds = entry.elapsed.as_secs_f32();
+    let (level, role) = match entry.level {
+        DiagnosticLevel::Warn => ("WARN ", Role::Warn),
+        DiagnosticLevel::Error => ("ERROR", Role::Error),
+        DiagnosticLevel::Info => ("INFO ", Role::TextPrimary),
+    };
+    let source = truncate_to_width(entry.source.label(), 12);
+    let prefix = format!("+{seconds:>7.1}s  {level}  {source:<12}  ");
+    let message_width = width.saturating_sub(prefix.width());
+    Line::from(vec![
+        Span::styled(prefix, color::fg(theme, role)),
+        Span::styled(
+            truncate_to_width(&entry.message, message_width),
+            color::fg(theme, Role::TextPrimary),
+        ),
+    ])
 }
 
 fn join_or_none(ids: &[&str]) -> String {
@@ -1308,12 +1407,23 @@ fn footer_segments(state: &AppState) -> Vec<&'static str> {
     if state.is_filtering() {
         return vec!["type to filter", "↵/Esc done"];
     }
+    if state.view == View::Diagnostics {
+        return vec![
+            "↑↓ scroll",
+            "s severity",
+            "/ filter",
+            "d/Esc back",
+            "? help",
+            "q quit",
+        ];
+    }
     match state.focus {
         Focus::Navigator => vec![
             "↑↓ select",
             "↵ inspect",
             "r restart",
             "/ filter",
+            "d diagnostics",
             "? help",
             "q quit",
         ],
@@ -1323,6 +1433,7 @@ fn footer_segments(state: &AppState) -> Vec<&'static str> {
                 "f follow",
                 "/ filter",
                 "←→ tab",
+                "d diagnostics",
                 "Esc back",
                 "? help",
                 "q quit",
@@ -1333,6 +1444,7 @@ fn footer_segments(state: &AppState) -> Vec<&'static str> {
             "s sort",
             "/ filter",
             "←→ tab",
+            "d diagnostics",
             "Esc back",
             "? help",
             "q quit",
@@ -1342,6 +1454,7 @@ fn footer_segments(state: &AppState) -> Vec<&'static str> {
             "↵ connect",
             "r rescan",
             "←→ tab",
+            "d diagnostics",
             "Esc back",
             "? help",
             "q quit",
@@ -1350,17 +1463,25 @@ fn footer_segments(state: &AppState) -> Vec<&'static str> {
             "p pause",
             "w window",
             "←→ tab",
+            "d diagnostics",
             "Esc back",
             "? help",
             "q quit",
         ],
-        Focus::Detail => vec!["←→ tab", "↑↓ scroll", "Esc back", "? help", "q quit"],
+        Focus::Detail => vec![
+            "←→ tab",
+            "↑↓ scroll",
+            "d diagnostics",
+            "Esc back",
+            "? help",
+            "q quit",
+        ],
     }
 }
 
 fn draw_help_overlay(frame: &mut Frame, theme: Theme, area: Rect) {
     let width = (area.width.saturating_sub(4)).min(60);
-    let height = 12.min(area.height.saturating_sub(2));
+    let height = 13.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let popup = Rect::new(x, y, width, height);
@@ -1372,6 +1493,7 @@ fn draw_help_overlay(frame: &mut Frame, theme: Theme, area: Rect) {
         Line::from("↵         inspect selected runtime"),
         Line::from("←→        switch tab"),
         Line::from("r         restart selected runtime"),
+        Line::from("d         diagnostics tab"),
         Line::from("/         filter"),
         Line::from("f         toggle log follow"),
         Line::from("Esc       back"),
@@ -1454,7 +1576,6 @@ mod tests {
         let sample = ClockSample {
             now_ns: 5_000_000_000,
             step: 42,
-            running: true,
         };
         assert_eq!(simulation_clock_slot("run", Some(sample)), "");
     }
@@ -1465,28 +1586,14 @@ mod tests {
     }
 
     #[test]
-    fn simulation_clock_slot_shows_step_and_seconds_while_running() {
+    fn simulation_clock_slot_shows_the_latest_step_and_seconds() {
         let sample = ClockSample {
             now_ns: 5_500_000_000,
             step: 42,
-            running: true,
         };
         let text = simulation_clock_slot("simulation", Some(sample));
         assert!(text.contains("step 42"), "{text}");
         assert!(text.contains("5.5s"), "{text}");
-        assert!(!text.contains("paused"), "{text}");
-    }
-
-    #[test]
-    fn simulation_clock_slot_shows_paused_when_the_observed_clock_is_not_running() {
-        let sample = ClockSample {
-            now_ns: 5_000_000_000,
-            step: 7,
-            running: false,
-        };
-        let text = simulation_clock_slot("simulation", Some(sample));
-        assert!(text.contains("step 7"), "{text}");
-        assert!(text.contains("paused"), "{text}");
     }
 
     #[test]
@@ -2064,54 +2171,6 @@ mod tests {
         assert!(content.contains("(stale)"), "{content}");
     }
 
-    /// The runtime navigator's diagnostics strip must show the most recent
-    /// diagnostic (fixes live-acceptance #2 for the collapsed frame too, not
-    /// just the startup surface), and stay blank rather than panic when
-    /// nothing has been captured yet.
-    #[test]
-    fn diagnostics_strip_shows_only_the_most_recent_diagnostic() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let backend = TestBackend::new(80, 3);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
-        let theme = Theme::new(crate::theme::ColorCapability::None);
-
-        let mut diagnostics = VecDeque::new();
-        diagnostics.push_back(DiagnosticLine {
-            source: crate::session::event::DiagnosticSource::Cli,
-            level: DiagnosticLevel::Info,
-            message: "stale first line".to_string(),
-        });
-        diagnostics.push_back(DiagnosticLine {
-            source: crate::session::event::DiagnosticSource::Cli,
-            level: DiagnosticLevel::Warn,
-            message: "zenoh connection retrying".to_string(),
-        });
-
-        terminal
-            .draw(|frame| draw_diagnostics_strip(frame, theme, &diagnostics, frame.area()))
-            .expect("draw_diagnostics_strip must not fail");
-        let content = buffer_text(terminal.backend().buffer());
-        assert!(content.contains("zenoh connection retrying"), "{content}");
-        assert!(!content.contains("stale first line"), "{content}");
-    }
-
-    #[test]
-    fn diagnostics_strip_is_blank_before_any_diagnostic_arrives() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let backend = TestBackend::new(80, 3);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
-        let theme = Theme::new(crate::theme::ColorCapability::None);
-        let diagnostics: VecDeque<DiagnosticLine> = VecDeque::new();
-
-        terminal
-            .draw(|frame| draw_diagnostics_strip(frame, theme, &diagnostics, frame.area()))
-            .expect("draw_diagnostics_strip must not fail when empty");
-    }
-
     /// A full frame at a very ordinary size must render without panicking,
     /// and every top-level chrome element (title, group headings, footer)
     /// must actually land somewhere in the buffer.
@@ -2141,7 +2200,7 @@ mod tests {
                     &TelemetrySnapshot::default(),
                     &RuntimeStore::new(),
                     Instant::now(),
-                    &VecDeque::new(),
+                    &DiagnosticsStore::default(),
                 )
             })
             .expect("draw must not fail at 80x24");
@@ -2153,6 +2212,53 @@ mod tests {
             "System group heading missing: {content}"
         );
         assert!(content.contains("quit"), "footer hint missing: {content}");
+    }
+
+    #[test]
+    fn diagnostics_tab_renders_structured_rows_and_header_badge() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::new(crate::theme::ColorCapability::None);
+        let title = sample_title();
+        let board = sample_board();
+        let mut logs = LogStore::new();
+        let mut state = AppState::new();
+        state.sync(&board);
+        state.open_diagnostics();
+        let mut diagnostics = DiagnosticsStore::default();
+        diagnostics.record(
+            Duration::from_millis(1250),
+            crate::session::event::DiagnosticSource::Dependency,
+            DiagnosticLevel::Warn,
+            "connection retrying".to_string(),
+        );
+
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    theme,
+                    &title,
+                    &board,
+                    &mut logs,
+                    &state,
+                    &TelemetrySnapshot::default(),
+                    &RuntimeStore::new(),
+                    Instant::now(),
+                    &diagnostics,
+                )
+            })
+            .expect("draw must not fail");
+
+        let content = buffer_text(terminal.backend().buffer());
+        assert!(content.contains("diagnostics 1"), "{content}");
+        assert!(content.contains("Diagnostics (1)"), "{content}");
+        assert!(content.contains("WARN"), "{content}");
+        assert!(content.contains("dependency"), "{content}");
+        assert!(content.contains("connection retrying"), "{content}");
     }
 
     /// A pathologically narrow terminal (design doc: "a very narrow width")
@@ -2186,7 +2292,7 @@ mod tests {
                         &TelemetrySnapshot::default(),
                         &RuntimeStore::new(),
                         Instant::now(),
-                        &VecDeque::new(),
+                        &DiagnosticsStore::default(),
                     )
                 })
                 .unwrap_or_else(|error| panic!("draw must not fail at {width}x{height}: {error}"));
@@ -2222,7 +2328,7 @@ mod tests {
                     &TelemetrySnapshot::default(),
                     &RuntimeStore::new(),
                     Instant::now(),
-                    &VecDeque::new(),
+                    &DiagnosticsStore::default(),
                 )
             })
             .expect("first draw must succeed");
@@ -2243,7 +2349,7 @@ mod tests {
                     &TelemetrySnapshot::default(),
                     &RuntimeStore::new(),
                     Instant::now(),
-                    &VecDeque::new(),
+                    &DiagnosticsStore::default(),
                 )
             })
             .expect("draw after resize must succeed");
@@ -2285,7 +2391,7 @@ mod tests {
                         &TelemetrySnapshot::default(),
                         &RuntimeStore::new(),
                         Instant::now(),
-                        &VecDeque::new(),
+                        &DiagnosticsStore::default(),
                     )
                 })
                 .unwrap_or_else(|error| panic!("draw must not fail under {capability:?}: {error}"));
@@ -2308,13 +2414,14 @@ mod tests {
             robot: "rover-01".to_string(),
             channel: "dev".to_string(),
             manifest: "./robot.yaml".to_string(),
+            terminal: crate::identity::TerminalMode::Full,
         }
     }
 
-    /// The startup surface must show the welcome card, the active phase, and
-    /// a recent diagnostic all in the same frame, at an ordinary 80x24 size.
+    /// The startup surface shows identity and the active phase without
+    /// printing diagnostics into the terminal frame.
     #[test]
-    fn draws_the_startup_surface_with_card_phase_and_diagnostics() {
+    fn draws_the_startup_surface_with_card_and_phase() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -2329,12 +2436,6 @@ mod tests {
             id: crate::session::event::PhaseId::new("download"),
             label: "Downloading artifacts".to_string(),
         });
-        startup.apply_event(&crate::session::event::SessionEvent::Diagnostic {
-            source: crate::session::event::DiagnosticSource::Cli,
-            level: crate::session::event::DiagnosticLevel::Warn,
-            message: "connection retrying".to_string(),
-        });
-
         terminal
             .draw(|frame| draw_startup(frame, theme, &title, Some(&identity), &startup))
             .expect("draw_startup must not fail at 80x24");
@@ -2343,7 +2444,6 @@ mod tests {
         assert!(content.contains("phoxal-cli"), "{content}");
         assert!(content.contains("rover-01"), "{content}");
         assert!(content.contains("Downloading artifacts"), "{content}");
-        assert!(content.contains("connection retrying"), "{content}");
         assert!(
             content.contains("preparing"),
             "state label missing: {content}"

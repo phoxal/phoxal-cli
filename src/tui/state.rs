@@ -20,6 +20,7 @@ use crate::display::DisplayAction;
 use crate::stores::telemetry_store::HostPoint;
 use crate::supervisor::BoardSnapshot;
 use crate::telemetry::{HostSample, TelemetrySnapshot};
+use crate::tui::diagnostics::DiagnosticsFilter;
 use crate::tui::groups::{Group, GroupSection, build_groups, suggested_participant};
 use crate::tui::panel::{Panel, panels_for};
 
@@ -110,6 +111,7 @@ pub enum NavRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum View {
     Home,
+    Diagnostics,
     Runtime(String),
 }
 
@@ -138,6 +140,16 @@ pub struct NavigatorState {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OverviewState {
     pub scroll: usize,
+}
+
+/// The global Diagnostics tab's local query, severity, and scroll state.
+#[derive(Debug, Clone, Default)]
+pub struct DiagnosticsState {
+    pub(crate) filter: String,
+    pub(crate) filtering: bool,
+    pub(crate) severity: DiagnosticsFilter,
+    /// Rows scrolled back from the newest matching diagnostic.
+    pub(crate) scroll: usize,
 }
 
 /// The Logs panel's own state.
@@ -232,6 +244,7 @@ pub struct AppState {
     pub focus: Focus,
     pub show_help: bool,
     pub overview: OverviewState,
+    pub diagnostics: DiagnosticsState,
     pub logs: LogsState,
     pub traffic: TrafficState,
     pub devices: DevicesState,
@@ -247,6 +260,7 @@ impl Default for AppState {
             focus: Focus::Navigator,
             show_help: false,
             overview: OverviewState::default(),
+            diagnostics: DiagnosticsState::default(),
             logs: LogsState::default(),
             traffic: TrafficState::default(),
             devices: DevicesState::default(),
@@ -327,6 +341,18 @@ impl AppState {
             self.show_help = false;
             return DisplayAction::None;
         }
+        if key.code == KeyCode::Char('d') {
+            if self.view == View::Diagnostics {
+                self.view = View::Home;
+                self.focus = Focus::Navigator;
+            } else {
+                self.open_diagnostics();
+            }
+            return DisplayAction::None;
+        }
+        if self.view == View::Diagnostics {
+            return self.handle_diagnostics_key(key);
+        }
         match self.focus {
             Focus::Navigator => self.handle_navigator_key(key, board),
             Focus::Detail => self.handle_detail_key(key, telemetry),
@@ -341,11 +367,15 @@ impl AppState {
     /// clears all three together.
     #[must_use]
     pub fn is_filtering(&self) -> bool {
-        self.navigator.filtering || self.logs.filtering || self.traffic.filtering
+        self.navigator.filtering
+            || self.diagnostics.filtering
+            || self.logs.filtering
+            || self.traffic.filtering
     }
 
     fn stop_filtering(&mut self) {
         self.navigator.filtering = false;
+        self.diagnostics.filtering = false;
         self.logs.filtering = false;
         self.traffic.filtering = false;
     }
@@ -355,7 +385,9 @@ impl AppState {
     /// each of which gets its own buffer so switching panels never clobbers
     /// another panel's filter (matches the pre-split behavior exactly).
     fn active_filter_buffer_mut(&mut self) -> &mut String {
-        if self.focus == Focus::Detail && self.panel == Panel::Logs {
+        if self.view == View::Diagnostics {
+            &mut self.diagnostics.filter
+        } else if self.focus == Focus::Detail && self.panel == Panel::Logs {
             &mut self.logs.filter
         } else if self.focus == Focus::Detail && self.panel == Panel::Traffic {
             &mut self.traffic.filter
@@ -371,6 +403,37 @@ impl AppState {
                 self.active_filter_buffer_mut().pop();
             }
             KeyCode::Char(character) => self.active_filter_buffer_mut().push(character),
+            _ => {}
+        }
+        DisplayAction::None
+    }
+
+    /// Open the session-wide Diagnostics tab. Used both by the `d` shortcut
+    /// and by the display when a fatal diagnostic arrives during startup.
+    pub(crate) fn open_diagnostics(&mut self) {
+        self.view = View::Diagnostics;
+        self.focus = Focus::Detail;
+        self.diagnostics.scroll = 0;
+    }
+
+    fn handle_diagnostics_key(&mut self, key: KeyEvent) -> DisplayAction {
+        match key.code {
+            KeyCode::Char('q') => return DisplayAction::Quit,
+            KeyCode::Esc | KeyCode::Left => {
+                self.view = View::Home;
+                self.focus = Focus::Navigator;
+            }
+            KeyCode::Up => {
+                self.diagnostics.scroll = self.diagnostics.scroll.saturating_add(1);
+            }
+            KeyCode::Down => {
+                self.diagnostics.scroll = self.diagnostics.scroll.saturating_sub(1);
+            }
+            KeyCode::Char('s') => {
+                self.diagnostics.severity = self.diagnostics.severity.cycle();
+                self.diagnostics.scroll = 0;
+            }
+            KeyCode::Char('/') => self.diagnostics.filtering = true,
             _ => {}
         }
         DisplayAction::None
@@ -606,6 +669,54 @@ mod tests {
             ),
             DisplayAction::Quit
         ));
+    }
+
+    #[test]
+    fn diagnostics_is_global_and_d_toggles_back_to_home() {
+        let mut state = AppState::new();
+        let board = BoardSnapshot::default();
+        state.handle_key(
+            key(KeyCode::Char('d')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
+        assert_eq!(state.view, View::Diagnostics);
+        assert_eq!(state.focus, Focus::Detail);
+
+        state.handle_key(
+            key(KeyCode::Char('d')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
+        assert_eq!(state.view, View::Home);
+        assert_eq!(state.focus, Focus::Navigator);
+    }
+
+    #[test]
+    fn diagnostics_has_independent_severity_filter_and_scroll_controls() {
+        let mut state = AppState::new();
+        let board = BoardSnapshot::default();
+        state.open_diagnostics();
+        state.handle_key(
+            key(KeyCode::Char('s')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
+        assert_eq!(state.diagnostics.severity, DiagnosticsFilter::Warnings);
+        state.handle_key(key(KeyCode::Up), &board, &TelemetrySnapshot::default());
+        assert_eq!(state.diagnostics.scroll, 1);
+        state.handle_key(
+            key(KeyCode::Char('/')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
+        state.handle_key(
+            key(KeyCode::Char('w')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
+        assert_eq!(state.diagnostics.filter, "w");
+        assert!(state.navigator.filter.is_empty());
     }
 
     #[test]
