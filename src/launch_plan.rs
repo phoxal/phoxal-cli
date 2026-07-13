@@ -23,6 +23,23 @@ pub const SITE_TOOL_JOYPAD: &str = "tool-joypad";
 /// is no graceful-degrade path.
 pub const SITE_TOOL_TELEMETRY: &str = "tool-telemetry";
 
+/// The full standard, hard-required site-tool id set (product decision 9) -
+/// derived ONCE here and used consistently everywhere a caller needs to ask
+/// "is this a standard site tool": [`build_site_launches`] (launch), and
+/// `commands::simulate::build_checked_sim_launch_plan`'s graph-proof
+/// filtering (resolution/validation). Resolution itself
+/// (`catalog::OFFICIAL_TOOLS`) and readiness (`supervisor`'s per-`Tool`-kind
+/// handling) already treat every standard tool uniformly by kind rather than
+/// naming router/joypad/telemetry individually, so this is the one list the
+/// id-based call sites needed to share (finding A6).
+///
+/// Finding A6's regression: `simulate`'s metadata/contract filter used to
+/// hardcode only `SITE_TOOL_ROUTER`/`SITE_TOOL_JOYPAD` at three separate call
+/// sites, silently excluding telemetry's declared graph contracts from
+/// validation even though telemetry is started and readiness-waited exactly
+/// like the other two standard tools.
+pub const STANDARD_SITE_TOOLS: &[&str] = &[SITE_TOOL_ROUTER, SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY];
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LaunchMode {
@@ -154,41 +171,35 @@ pub fn build_launch_plan(
     Ok(LaunchPlan { mode, site, robots })
 }
 
+/// Builds one [`SiteLaunch`] per [`STANDARD_SITE_TOOLS`] entry, in that
+/// constant's order (router first, matching every caller/test that reads
+/// `plan.site[0]` as the router). Every standard tool is hard-required in
+/// every mode, including Deploy (CLI-UX Phase 4): a deployed robot ships the
+/// full standard set the same way it ships every other official site tool,
+/// ordered by `commands::deploy::render_units` into per-tool systemd units.
+/// Only the router carries real config (`router_config`); every other
+/// standard tool is configless (`type Config = ()`) - `Value::Null` marks
+/// "no config" so the env builders OMIT `PHOXAL_CONFIG` entirely (passing
+/// `{}` would make a unit-config tool fail to deserialize: "invalid type:
+/// map, expected unit").
 fn build_site_launches(
     mode: &LaunchMode,
     robots: &[CheckedRobotLaunchInput<'_>],
 ) -> Result<Vec<SiteLaunch>> {
-    let router = merge_site_tool_artifact(SITE_TOOL_ROUTER, robots)?;
-    let router_config = router_config(mode, robots)?;
-    let mut site = vec![SiteLaunch {
-        id: SITE_TOOL_ROUTER.to_string(),
-        artifact_ref: router,
-        phoxal_config: router_config,
-    }];
-    // `tool-joypad` is a standard site tool in every mode, including Deploy
-    // (CLI-UX Phase 4): a deployed robot ships the peripheral tool the same
-    // way it ships every other official site tool, ordered after the router
-    // in its own systemd unit (`commands::deploy::render_units`).
-    let joypad = merge_site_tool_artifact(SITE_TOOL_JOYPAD, robots)?;
-    site.push(SiteLaunch {
-        id: SITE_TOOL_JOYPAD.to_string(),
-        artifact_ref: joypad,
-        // Configless tool (`type Config = ()`): `Value::Null` marks "no config"
-        // so the env builders OMIT `PHOXAL_CONFIG` entirely. Passing `{}` makes
-        // a unit-config tool fail to deserialize (`invalid type: map, expected
-        // unit`); an absent var uses the runner's null/unit fallback.
-        phoxal_config: Value::Null,
-    });
-    // `tool-telemetry` is a standard site tool too, hard-required exactly
-    // like router and joypad: a catalog that cannot resolve it is outdated
-    // (product decision 9).
-    let telemetry = merge_site_tool_artifact(SITE_TOOL_TELEMETRY, robots)?;
-    site.push(SiteLaunch {
-        id: SITE_TOOL_TELEMETRY.to_string(),
-        artifact_ref: telemetry,
-        // Configless (`type Config = ()`): omit `PHOXAL_CONFIG` - see joypad above.
-        phoxal_config: Value::Null,
-    });
+    let mut site = Vec::with_capacity(STANDARD_SITE_TOOLS.len());
+    for &tool_name in STANDARD_SITE_TOOLS {
+        let artifact_ref = merge_site_tool_artifact(tool_name, robots)?;
+        let phoxal_config = if tool_name == SITE_TOOL_ROUTER {
+            router_config(mode, robots)?
+        } else {
+            Value::Null
+        };
+        site.push(SiteLaunch {
+            id: tool_name.to_string(),
+            artifact_ref,
+            phoxal_config,
+        });
+    }
     Ok(site)
 }
 

@@ -408,7 +408,14 @@ pub fn select_artifact<'a>(
             .into_iter()
             .max_by(|left, right| compare_versions(&left.version, &right.version))
             .ok_or_else(|| anyhow!(
-                "expected package {package} is absent from snapshot {} (channel head); phoxal-cli {} expects it. Upgrade with `phoxal-cli self upgrade` or switch channel",
+                // Finding A6: aligned with every other "the active catalog
+                // doesn't have what this CLI needs" remediation in the crate
+                // (`resolver`/`native_artifacts`/`launch_plan`/`deploy` all
+                // say `phoxal update`) instead of the old, inconsistent
+                // "upgrade the CLI binary or switch channel" wording - `phoxal
+                // update` is the direct action (re-resolve against the
+                // current channel head and re-vendor whatever it requires).
+                "expected package {package} is absent from snapshot {} (channel head); phoxal-cli {} expects it. Run `phoxal update`",
                 catalog.build.tag,
                 env!("CARGO_PKG_VERSION")
             ))?,

@@ -23,7 +23,7 @@ use crate::commands::check::{
 use crate::component_driver::{component_assets_dir, component_driver_crate_dir};
 use crate::launch_plan::{
     CheckedRobotLaunchInput, DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, PlanContext,
-    SITE_TOOL_JOYPAD, SubstitutedContract, SubstitutionRecord, build_launch_plan,
+    STANDARD_SITE_TOOLS, SubstitutedContract, SubstitutionRecord, build_launch_plan,
 };
 use crate::resolver::{
     ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras, resolve,
@@ -823,12 +823,17 @@ pub(crate) fn build_checked_sim_launch_plan(
 ) -> Result<(LaunchPlan, Vec<graph_check::ParticipantContractSurface>)> {
     let source_participants = sim_source_participants(project_root, resolved, catalog)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
+    // Finding A6: all three filters below admit exactly the standard site-
+    // tool set (`STANDARD_SITE_TOOLS` - router/joypad/telemetry), derived
+    // once in `launch_plan` and shared with `build_site_launches` there.
+    // This used to hardcode only router+joypad, silently excluding
+    // telemetry's declared graph contracts from validation even though
+    // telemetry is started and readiness-waited exactly like the other two.
     let metadata_source_participants = source_participants
         .iter()
         .filter(|participant| {
             participant.kind != SourceParticipantKind::Tool
-                || participant.name == crate::launch_plan::SITE_TOOL_ROUTER
-                || participant.name == SITE_TOOL_JOYPAD
+                || STANDARD_SITE_TOOLS.contains(&participant.name.as_str())
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -840,15 +845,12 @@ pub(crate) fn build_checked_sim_launch_plan(
         .into_iter()
         .filter(|artifact| {
             artifact.kind != crate::catalog::ArtifactKind::Tool
-                || artifact.name == crate::launch_plan::SITE_TOOL_ROUTER
-                || artifact.name == SITE_TOOL_JOYPAD
+                || STANDARD_SITE_TOOLS.contains(&artifact.name.as_str())
         })
         .collect::<Vec<_>>();
     let tool_participants = tool_participants_from_resolved(resolved)?
         .into_iter()
-        .filter(|tool| {
-            tool.name == crate::launch_plan::SITE_TOOL_ROUTER || tool.name == SITE_TOOL_JOYPAD
-        })
+        .filter(|tool| STANDARD_SITE_TOOLS.contains(&tool.name.as_str()))
         .collect::<Vec<_>>();
     let mut official_by_ref = resolved
         .platform_runtimes
@@ -2082,7 +2084,7 @@ mod tests {
         fixture_contract_for_tests, fixture_tool_entry_for_tests,
     };
     use crate::host_paths::test_support::ScratchPhoxalHome;
-    use crate::launch_plan::{SITE_TOOL_ROUTER, SITE_TOOL_TELEMETRY};
+    use crate::launch_plan::{SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SITE_TOOL_TELEMETRY};
     use crate::resolver::{
         ResolvedComponent, ResolvedComponentSource, ResolvedPathOverride, ResolvedPathOverrideKind,
         ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, host_target_triple,
