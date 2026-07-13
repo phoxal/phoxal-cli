@@ -24,8 +24,7 @@ use crate::component_driver::component_driver_crate_dir;
 use crate::launch_env::encode_participant_env;
 use crate::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution,
-    ParticipantLaunchRecord, PlanContext, SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SiteLaunch,
-    build_launch_plan,
+    ParticipantLaunchRecord, PlanContext, SITE_TOOL_ROUTER, SiteLaunch, build_launch_plan,
 };
 use crate::resolver::{
     ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, discover_robot_yaml,
@@ -992,14 +991,25 @@ fn site_env(site: &SiteLaunch, namespace: &str, robot_id: &str) -> Result<Vec<(S
         (env::PARTICIPANT_ID.to_string(), site.id.clone()),
         (env::NAMESPACE.to_string(), namespace.to_string()),
         (env::ROBOT_ID.to_string(), robot_id.to_string()),
-        (
+        (env::CLOCK.to_string(), "real".to_string()),
+    ];
+    // A configless tool (`phoxal_config == Value::Null`, e.g. joypad/telemetry)
+    // must run with `PHOXAL_CONFIG` ABSENT: a unit config (`type Config = ()`)
+    // fails to deserialize `{}` ("invalid type: map, expected unit"), and an
+    // absent var uses the runner's null/unit fallback. Only a tool that carries
+    // real config (the router) gets `PHOXAL_CONFIG`.
+    if !site.phoxal_config.is_null() {
+        envs.push((
             env::CONFIG.to_string(),
             serde_json::to_string(&site.phoxal_config)
                 .with_context(|| format!("failed to encode PHOXAL_CONFIG for {}", site.id))?,
-        ),
-        (env::CLOCK.to_string(), "real".to_string()),
-    ];
-    if site.id == SITE_TOOL_JOYPAD {
+        ));
+    }
+    // Every site tool OTHER than the router is a real bus client (joypad and
+    // telemetry are observable bus participants), so it needs the connect
+    // endpoint to reach the router's bus and publish its heartbeat/telemetry.
+    // The router itself is the transport and takes no `PHOXAL_CONNECT`.
+    if site.id != SITE_TOOL_ROUTER {
         envs.push((env::CONNECT.to_string(), default_connect_endpoint()));
     }
     Ok(envs)
@@ -1259,10 +1269,51 @@ fn usb_missing(vendor_id: Option<u16>, product_id: Option<u16>) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launch_plan::{LaunchOwnership, ParticipantLaunchRecord};
+    use crate::launch_plan::{LaunchOwnership, ParticipantLaunchRecord, SITE_TOOL_TELEMETRY};
     use phoxal::participant::launch::{
         BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
     };
+
+    #[test]
+    fn configless_site_tool_omits_config_and_gets_connect() {
+        // A configless tool (phoxal_config == Value::Null, e.g. joypad/telemetry)
+        // must NOT receive PHOXAL_CONFIG - a unit config rejects `{}` - and, being
+        // a real bus client, MUST receive PHOXAL_CONNECT to reach the router bus.
+        let tool = SiteLaunch {
+            id: SITE_TOOL_TELEMETRY.to_string(),
+            artifact_ref: "phoxal/tool-telemetry@0.1.0".to_string(),
+            phoxal_config: serde_json::Value::Null,
+        };
+        let env = site_env(&tool, "dev", "rover-01").expect("site_env");
+        assert!(
+            !env.iter().any(|(k, _)| k == env::CONFIG),
+            "configless tool must not get PHOXAL_CONFIG: {env:?}"
+        );
+        assert!(
+            env.iter().any(|(k, _)| k == env::CONNECT),
+            "observable bus tool must get PHOXAL_CONNECT: {env:?}"
+        );
+    }
+
+    #[test]
+    fn router_site_tool_gets_config_and_no_connect() {
+        // The router carries real config and IS the transport, so it gets
+        // PHOXAL_CONFIG but no PHOXAL_CONNECT (it does not connect to itself).
+        let router = SiteLaunch {
+            id: SITE_TOOL_ROUTER.to_string(),
+            artifact_ref: "phoxal/tool-router@0.1.8".to_string(),
+            phoxal_config: serde_json::json!({ "uplink": null }),
+        };
+        let env = site_env(&router, "dev", "rover-01").expect("site_env");
+        assert!(
+            env.iter().any(|(k, _)| k == env::CONFIG),
+            "router must get PHOXAL_CONFIG: {env:?}"
+        );
+        assert!(
+            !env.iter().any(|(k, _)| k == env::CONNECT),
+            "router must not get PHOXAL_CONNECT: {env:?}"
+        );
+    }
 
     fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRecord {
         ParticipantLaunchRecord {

@@ -173,7 +173,11 @@ fn build_site_launches(
     site.push(SiteLaunch {
         id: SITE_TOOL_JOYPAD.to_string(),
         artifact_ref: joypad,
-        phoxal_config: serde_json::json!({}),
+        // Configless tool (`type Config = ()`): `Value::Null` marks "no config"
+        // so the env builders OMIT `PHOXAL_CONFIG` entirely. Passing `{}` makes
+        // a unit-config tool fail to deserialize (`invalid type: map, expected
+        // unit`); an absent var uses the runner's null/unit fallback.
+        phoxal_config: Value::Null,
     });
     // `tool-telemetry` is a standard OBSERVABLE site tool too, but degrades
     // GRACEFULLY rather than failing the whole launch plan: unlike router and
@@ -187,7 +191,8 @@ fn build_site_launches(
         site.push(SiteLaunch {
             id: SITE_TOOL_TELEMETRY.to_string(),
             artifact_ref: telemetry,
-            phoxal_config: serde_json::json!({}),
+            // Configless (`type Config = ()`): omit `PHOXAL_CONFIG` - see joypad above.
+            phoxal_config: Value::Null,
         });
     }
     Ok(site)

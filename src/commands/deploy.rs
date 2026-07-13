@@ -2641,11 +2641,16 @@ fn site_tool_env(
     variables.insert(env::NAMESPACE.to_string(), namespace.to_string());
     variables.insert(env::ROBOT_ID.to_string(), robot_id.to_string());
     variables.insert(env::ROBOT_ROOT.to_string(), ACTIVE_ROOT.to_string());
-    variables.insert(
-        env::CONFIG.to_string(),
-        serde_json::to_string(&site.phoxal_config)
-            .with_context(|| format!("failed to encode PHOXAL_CONFIG for {}", site.id))?,
-    );
+    // Configless tools (`phoxal_config == Value::Null`, e.g. joypad/telemetry)
+    // must run with `PHOXAL_CONFIG` ABSENT - a unit config (`type Config = ()`)
+    // rejects `{}`. Only a tool carrying real config emits the variable.
+    if !site.phoxal_config.is_null() {
+        variables.insert(
+            env::CONFIG.to_string(),
+            serde_json::to_string(&site.phoxal_config)
+                .with_context(|| format!("failed to encode PHOXAL_CONFIG for {}", site.id))?,
+        );
+    }
     variables.insert(env::CLOCK.to_string(), "real".to_string());
     variables.insert(env::CONNECT.to_string(), DEFAULT_ROUTER_CONNECT.to_string());
     Ok(EncodedParticipantEnv::from_variables(variables))
