@@ -42,22 +42,25 @@ impl OutputContext {
     }
 
     /// The wait budget for an interactive-session readiness/stage wait
-    /// (Product decision 6). [`OutputMode::Rich`]/[`OutputMode::Plain`] (a
-    /// human at a terminal, or a human-oriented non-TTY stream) get
-    /// [`NO_TIMEOUT`] - a missing clock/participant becomes a named
-    /// `waiting`/`degraded` console state, never an automatic teardown.
-    /// [`OutputMode::Json`] (a machine/batch invocation with no human
-    /// watching a "waiting" console) keeps `bounded` so a script still gets a
-    /// deterministic failure instead of hanging forever. Any future headless
+    /// (Product decision 6). Only [`OutputMode::Rich`] - a true interactive
+    /// TTY console that actually renders a live "waiting" state - gets
+    /// [`NO_TIMEOUT`]: a missing clock/participant becomes a named
+    /// `waiting`/`degraded` console state, never an automatic teardown,
+    /// because an operator is watching it. [`OutputMode::Plain`] (a non-TTY
+    /// or `--plain` stream - piped, redirected, or a CI log) and
+    /// [`OutputMode::Json`] (a machine/batch invocation) both have no
+    /// interactive console to show that state in, so both keep `bounded`: an
+    /// append-only or machine caller must get a deterministic failure instead
+    /// of hanging forever on a missing clock. Any future headless
     /// bounded-wait policy should be an explicit, separate opt-in - never
     /// implicitly shared with the interactive session the way the old fixed
     /// 60s constant was.
     #[must_use]
     pub const fn wait_budget(self, bounded: Duration) -> Duration {
-        if self.mode.is_json() {
-            bounded
-        } else {
+        if self.mode.allows_progress_drawing() {
             NO_TIMEOUT
+        } else {
+            bounded
         }
     }
 
@@ -99,18 +102,20 @@ mod tests {
         assert!(ctx.quiet);
     }
 
-    /// Product decision 6: only `Json` keeps a bounded wait; `Rich`/`Plain`
-    /// (an interactive or human-oriented session) must not be given the same
-    /// finite budget that would tear an operator's console down after 60s.
+    /// Product decision 6: only `Rich` - the true interactive TTY console -
+    /// gets the unbounded wait. `Plain` (piped/non-TTY/CI) and `Json`
+    /// (machine callers) have no interactive console to show a "waiting"
+    /// state in, so both must keep a bounded, deterministic failure instead
+    /// of hanging forever on a missing clock.
     #[test]
-    fn wait_budget_is_bounded_only_for_json() {
+    fn wait_budget_is_bounded_unless_rich() {
         let bounded = Duration::from_secs(60);
         let rich = OutputContext::new(OutputMode::Rich, Theme::new(ColorCapability::None), false);
         let plain = OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false);
         let json = OutputContext::new(OutputMode::Json, Theme::new(ColorCapability::None), false);
 
-        assert_eq!(json.wait_budget(bounded), bounded);
         assert!(rich.wait_budget(bounded) > bounded);
-        assert!(plain.wait_budget(bounded) > bounded);
+        assert_eq!(plain.wait_budget(bounded), bounded);
+        assert_eq!(json.wait_budget(bounded), bounded);
     }
 }
