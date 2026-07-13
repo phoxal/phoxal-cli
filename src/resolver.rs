@@ -693,9 +693,19 @@ pub fn resolve(
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    robot
-        .validate_with(&platform_names)
-        .map_err(|errors| anyhow!("Robot errors:\n{}", join_errors(errors)))?;
+    // Finding A3: robot.yaml structural/schema validation always genuinely
+    // runs (never conditionally skipped like download/build), so it always
+    // gets its own truthful "validate" phase rather than the old synthetic
+    // single "Preparing" phase.
+    crate::session::diagnostics::run_phase(
+        crate::session::event::PhaseId::new("validate"),
+        "Validating robot.yaml".to_string(),
+        || {
+            robot
+                .validate_with(&platform_names)
+                .map_err(|errors| anyhow!("Robot errors:\n{}", join_errors(errors)))
+        },
+    )?;
     let tool_target = options
         .tool_target_triple
         .unwrap_or_else(host_target_triple);

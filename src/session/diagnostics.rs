@@ -27,11 +27,12 @@
 
 use std::io::{self, Write};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tracing_subscriber::fmt::MakeWriter;
 
-use super::event::{DiagnosticLevel, DiagnosticSource, SessionEvent};
+use super::event::{DiagnosticLevel, DiagnosticSource, PhaseId, PhaseOutcome, SessionEvent};
 
 fn sender_cell() -> &'static Mutex<Option<mpsc::Sender<SessionEvent>>> {
     static CELL: OnceLock<Mutex<Option<mpsc::Sender<SessionEvent>>>> = OnceLock::new();
@@ -82,6 +83,76 @@ pub(crate) fn try_route(source: DiagnosticSource, level: DiagnosticLevel, messag
             message: message.to_string(),
         })
         .is_ok()
+}
+
+/// Emit `SessionEvent::PhaseStarted` for one real per-operation phase
+/// (`"download"`/`"build"`/`"validate"`/...) through the active session, if
+/// any (finding A3) - a no-op when no session is installed, exactly like
+/// [`try_route`]. Prefer [`run_phase`] at the call site; this and
+/// [`phase_finished`] exist for the rare caller that cannot express its work
+/// as one `FnOnce`.
+pub(crate) fn phase_started(id: impl Into<PhaseId>, label: impl Into<String>) {
+    if let Some(sender) = current_sender() {
+        let _ = sender.try_send(SessionEvent::PhaseStarted {
+            id: id.into(),
+            label: label.into(),
+        });
+    }
+}
+
+/// Emit `SessionEvent::PhaseFinished` for a phase previously started with
+/// [`phase_started`]. See [`run_phase`] for the paired, harder-to-misuse
+/// helper most callers should reach for instead.
+pub(crate) fn phase_finished(id: impl Into<PhaseId>, outcome: PhaseOutcome, elapsed: Duration) {
+    if let Some(sender) = current_sender() {
+        let _ = sender.try_send(SessionEvent::PhaseFinished {
+            id: id.into(),
+            outcome,
+            elapsed,
+        });
+    }
+}
+
+/// Bracket `work` with a `PhaseStarted`/`PhaseFinished` pair through the
+/// active session's event channel, if any (finding A3) - the renderer then
+/// shows real per-operation progress (download/build/validate) instead of
+/// one opaque synthetic "Preparing" phase around the whole callback. A no-op
+/// wrapper (falls straight through to `work`'s own result) when no session is
+/// installed, exactly like [`try_route`].
+///
+/// Call this only once real work for `id` is confirmed to exist - e.g. a
+/// non-empty download/build set. This helper does NOT itself decide whether
+/// the operation should run at all (Product decision 3: a phase with no real
+/// work behind it must never appear), so gate the call site on that decision
+/// first.
+///
+/// Uses `try_send` (via [`phase_started`]/[`phase_finished`]), not an
+/// awaited/blocking send: the controller's own select loop
+/// (`drive_prepare_phase`/`drive_setup`) is ALWAYS draining `events_rx` for
+/// the entire window a phase can run in - that is what makes the phase
+/// visible at all - so this channel practically never fills. An awaited
+/// `blocking_send` would also risk a genuine panic: this function runs from
+/// synchronous code that is not always on a dedicated `spawn_blocking`
+/// thread (`commands::simulate::live_simulate_setup` calls synchronous
+/// build code directly from a plain `tokio::spawn`ed async task), and
+/// `blocking_send` panics if called from a runtime's own worker thread.
+pub(crate) fn run_phase<T>(
+    id: impl Into<PhaseId>,
+    label: impl Into<String>,
+    work: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let id = id.into();
+    phase_started(id.clone(), label);
+    let started = Instant::now();
+    let result = work();
+    let outcome = match &result {
+        Ok(_) => PhaseOutcome::Succeeded,
+        Err(error) => PhaseOutcome::Failed {
+            error: format!("{error:#}"),
+        },
+    };
+    phase_finished(id, outcome, started.elapsed());
+    result
 }
 
 /// The [`MakeWriter`] installed on the process-wide `tracing_subscriber::fmt`
@@ -193,5 +264,76 @@ mod tests {
             .write(b"hello\n")
             .expect("fallback write must succeed");
         assert_eq!(written, 6);
+    }
+
+    /// Finding A3: `run_phase` must emit a real `PhaseStarted`/`PhaseFinished`
+    /// pair around genuine work, not the old synthetic single "Preparing"
+    /// phase - and must return `work`'s own value untouched.
+    #[test]
+    fn run_phase_emits_a_started_and_finished_pair_and_returns_work_s_value() {
+        let _guard = DIAGNOSTICS_TEST_LOCK.blocking_lock();
+        let (tx, mut rx) = mpsc::channel(8);
+        install(tx);
+
+        let result = run_phase(PhaseId::new("download"), "Downloading artifacts", || {
+            Ok::<_, anyhow::Error>(42)
+        });
+        assert_eq!(result.unwrap(), 42);
+
+        match rx.try_recv().expect("PhaseStarted must be queued") {
+            SessionEvent::PhaseStarted { id, label } => {
+                assert_eq!(id, PhaseId::new("download"));
+                assert_eq!(label, "Downloading artifacts");
+            }
+            other => panic!("expected PhaseStarted, got {other:?}"),
+        }
+        match rx.try_recv().expect("PhaseFinished must be queued") {
+            SessionEvent::PhaseFinished { id, outcome, .. } => {
+                assert_eq!(id, PhaseId::new("download"));
+                assert_eq!(outcome, PhaseOutcome::Succeeded);
+            }
+            other => panic!("expected PhaseFinished, got {other:?}"),
+        }
+
+        uninstall();
+    }
+
+    /// A phase whose work fails must still emit `PhaseFinished` (with a
+    /// `Failed` outcome carrying the error), not leave the renderer showing a
+    /// phase that started but never concluded.
+    #[test]
+    fn run_phase_reports_a_failed_outcome_and_still_propagates_the_error() {
+        let _guard = DIAGNOSTICS_TEST_LOCK.blocking_lock();
+        let (tx, mut rx) = mpsc::channel(8);
+        install(tx);
+
+        let result = run_phase(PhaseId::new("build"), "Building thing", || {
+            Err::<(), _>(anyhow::anyhow!("cargo build failed"))
+        });
+        assert_eq!(result.unwrap_err().to_string(), "cargo build failed");
+
+        let _started = rx.try_recv().expect("PhaseStarted must be queued");
+        match rx.try_recv().expect("PhaseFinished must be queued") {
+            SessionEvent::PhaseFinished { outcome, .. } => match outcome {
+                PhaseOutcome::Failed { error } => assert_eq!(error, "cargo build failed"),
+                other => panic!("expected a Failed outcome, got {other:?}"),
+            },
+            other => panic!("expected PhaseFinished, got {other:?}"),
+        }
+
+        uninstall();
+    }
+
+    /// No session installed: `run_phase` must fall straight through to
+    /// `work`'s own result without panicking (mirrors `try_route`'s own
+    /// no-session fallback).
+    #[test]
+    fn run_phase_is_a_transparent_passthrough_with_no_session_installed() {
+        let _guard = DIAGNOSTICS_TEST_LOCK.blocking_lock();
+        uninstall();
+        let result = run_phase(PhaseId::new("validate"), "Validating", || {
+            Ok::<_, anyhow::Error>("ok")
+        });
+        assert_eq!(result.unwrap(), "ok");
     }
 }

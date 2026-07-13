@@ -240,7 +240,22 @@ pub fn prepare_descriptors_with_preflight(
         return Ok(());
     }
     let _lock = ArtifactStoreLock::exclusive("provision")?;
-    prepare_and_activate_descriptors(&actionable, ui)
+    if missing.is_empty() {
+        // Finding A3: every actionable descriptor is already staged (a warm
+        // cache) - only cheap activation/retargeting remains, which is not
+        // itself download work, so no "download" phase appears (Product
+        // decision 3).
+        return prepare_and_activate_descriptors(&actionable, ui);
+    }
+    let count = missing.len();
+    crate::session::diagnostics::run_phase(
+        crate::session::event::PhaseId::new("download"),
+        format!(
+            "Downloading {count} artifact package{}",
+            if count == 1 { "" } else { "s" }
+        ),
+        || prepare_and_activate_descriptors(&actionable, ui),
+    )
 }
 
 fn should_prepare_descriptor(descriptor: &NativeArtifactDescriptor) -> bool {
@@ -1215,6 +1230,94 @@ mod tests {
         drop(second);
 
         assert!(!lock_path.exists());
+        Ok(())
+    }
+
+    /// Finding A3: a warm cache (every actionable descriptor already staged)
+    /// must emit NO `download` phase - Product decision 3 forbids showing a
+    /// phase for work that never runs. Uses a descriptor whose exec dir is
+    /// pre-created so `prepare_descriptor` takes its `MissingOnly` early
+    /// return and never reaches the network, regardless of the (unreachable)
+    /// URL.
+    #[tokio::test]
+    async fn prepare_descriptors_with_preflight_emits_no_download_phase_on_a_warm_cache()
+    -> Result<()> {
+        let _diagnostics_guard = crate::session::diagnostics::DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .await;
+        let _root = ScratchPhoxalHome::new()?;
+        let mut staged = descriptor("1.0.0", b"already-staged");
+        staged.url = "http://127.0.0.1:1/drive.tar".to_string();
+        fs::create_dir_all(artifact_exec_dir(&staged)?)?;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        crate::session::diagnostics::install(tx);
+
+        prepare_descriptors_with_preflight(std::slice::from_ref(&staged), None)?;
+
+        crate::session::diagnostics::uninstall();
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(
+                    event,
+                    crate::session::event::SessionEvent::PhaseStarted { .. }
+                        | crate::session::event::SessionEvent::PhaseFinished { .. }
+                ),
+                "a warm cache must not emit a download phase, got {event:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The fresh-cache counterpart: a descriptor with no staged exec dir must
+    /// genuinely attempt a download, so a `download` phase must appear -
+    /// started AND finished, even though the download itself fails (an
+    /// unroutable localhost port stands in for "no network available",
+    /// keeping this test fast and deterministic without a real artifact
+    /// server).
+    #[tokio::test]
+    async fn prepare_descriptors_with_preflight_emits_a_download_phase_on_a_cold_cache()
+    -> Result<()> {
+        let _diagnostics_guard = crate::session::diagnostics::DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .await;
+        let _root = ScratchPhoxalHome::new()?;
+        let mut cold = descriptor("1.0.0", b"never-staged");
+        cold.url = "http://127.0.0.1:1/drive.tar".to_string();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        crate::session::diagnostics::install(tx);
+
+        let result = prepare_descriptors_with_preflight(std::slice::from_ref(&cold), None);
+        crate::session::diagnostics::uninstall();
+        assert!(result.is_err(), "an unroutable download must fail");
+
+        let mut saw_started = false;
+        let mut saw_finished_failed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::session::event::SessionEvent::PhaseStarted { id, .. }
+                    if id.as_str() == "download" =>
+                {
+                    saw_started = true;
+                }
+                crate::session::event::SessionEvent::PhaseFinished { id, outcome, .. }
+                    if id.as_str() == "download" =>
+                {
+                    assert!(
+                        matches!(outcome, crate::session::event::PhaseOutcome::Failed { .. }),
+                        "the download phase must report its real failure, got {outcome:?}"
+                    );
+                    saw_finished_failed = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_started, "a cold cache must start a download phase");
+        assert!(
+            saw_finished_failed,
+            "a cold cache's failed download must still finish its phase"
+        );
         Ok(())
     }
 }

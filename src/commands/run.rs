@@ -1141,24 +1141,36 @@ pub(crate) fn build_source_binary(
     ui.info(format!(
         "building user participant {preferred_name} with cargo build --bin {binary_name}"
     ));
-    let mut command = Command::new("cargo");
-    command
-        .arg("build")
-        .arg("--bin")
-        .arg(&binary_name)
-        .current_dir(&crate_dir);
-    let status = ui.command_status_captured(&mut command).with_context(|| {
-        format!(
-            "failed to start cargo build for participant {preferred_name} in {}",
-            crate_dir.display()
-        )
-    })?;
-    if !status.success() {
-        bail!(
-            "cargo build failed for participant {preferred_name} in {} with status {status}",
-            crate_dir.display()
-        );
-    }
+    // Finding A3: a source participant only ever gets here when it genuinely
+    // needs a fresh `cargo build` (path-overridden components/simulators, or
+    // any user service/driver built from local source) - so bracketing this
+    // exact call with a "build" phase reports truthful per-operation work
+    // rather than the old synthetic single "Preparing" phase.
+    crate::session::diagnostics::run_phase(
+        crate::session::event::PhaseId::new("build"),
+        format!("Building {preferred_name}"),
+        || {
+            let mut command = Command::new("cargo");
+            command
+                .arg("build")
+                .arg("--bin")
+                .arg(&binary_name)
+                .current_dir(&crate_dir);
+            let status = ui.command_status_captured(&mut command).with_context(|| {
+                format!(
+                    "failed to start cargo build for participant {preferred_name} in {}",
+                    crate_dir.display()
+                )
+            })?;
+            if !status.success() {
+                bail!(
+                    "cargo build failed for participant {preferred_name} in {} with status {status}",
+                    crate_dir.display()
+                );
+            }
+            Ok(())
+        },
+    )?;
     Ok(cargo_target_dir(&crate_dir)?
         .join("debug")
         .join(binary_name_with_suffix(&binary_name)))
