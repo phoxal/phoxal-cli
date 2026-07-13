@@ -166,6 +166,13 @@ impl StartupState {
                 }
             }
             SessionEvent::ParticipantChanged { .. } | SessionEvent::Telemetry { .. } => {}
+            // The controller's own `apply_event` reduces both of these into
+            // a `SessionChanged` (via `reduce_clock_observation`/
+            // `reduce_staged_startup_complete`) and forwards THAT instead of
+            // the raw event - see `session::controller`'s docs. These arms
+            // exist only for exhaustiveness; the `SessionChanged` arm above
+            // is what this model actually observes.
+            SessionEvent::ClockObserved(_) | SessionEvent::StagedStartupComplete => {}
         }
     }
 }

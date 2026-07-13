@@ -156,7 +156,11 @@ impl Run {
         }
         report_launch_commands(&prepared.plan, &prepared.specs, message_format)?;
 
-        let _log_tasks = prepared
+        // Finding B6: every feed task participates in teardown instead of
+        // being leaked under a `_`-prefixed binding for the rest of the
+        // process's life - collected here and aborted once supervision ends
+        // (see below), rather than detached.
+        let mut feed_tasks = prepared
             .robot_log_targets
             .iter()
             .map(|(namespace, robot_id)| {
@@ -171,18 +175,19 @@ impl Run {
         // OBSERVED readiness: drive board state from each participant's own
         // presence/heartbeat, mirroring the log subscriber above - see
         // `supervisor::start_presence_heartbeat_subscriber`.
-        let _presence_tasks = prepared
-            .robot_log_targets
-            .iter()
-            .map(|(namespace, robot_id)| {
-                start_presence_heartbeat_subscriber(
-                    namespace.clone(),
-                    robot_id.clone(),
-                    default_connect_endpoint(),
-                    prepared.board.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
+        feed_tasks.extend(
+            prepared
+                .robot_log_targets
+                .iter()
+                .map(|(namespace, robot_id)| {
+                    start_presence_heartbeat_subscriber(
+                        namespace.clone(),
+                        robot_id.clone(),
+                        default_connect_endpoint(),
+                        prepared.board.clone(),
+                    )
+                }),
+        );
 
         // The restart/hot-reload action channel always exists now (not just
         // under `--watch`), so the TUI's `r restart` reaches the supervisor
@@ -212,21 +217,23 @@ impl Run {
         let stages = stages_for_run(prepared.specs, app.output);
         // `run` has no simulation clock (Product decision 5 is
         // `simulation run`-specific), so its session never visits
-        // `Waiting`/`Paused` - it goes straight from `Starting` to `Running`
-        // once the supervisor is live and managing participants; per-stage
-        // progress is already visible via the `PhaseStarted`/`PhaseFinished`
-        // events `supervise_until_shutdown` itself emits.
+        // `Waiting`/`Paused`. Fixes finding B3: it used to claim `Running`
+        // immediately, before the supervisor task even existed - now it only
+        // announces `Starting` here; `Running` is instead emitted by
+        // `supervise_until_shutdown` itself (`emits_running_on_startup_complete`
+        // below), once every staged-startup stage has ACTUALLY spawned and
+        // been observed ready, via `SessionEvent::StagedStartupComplete`. Per-
+        // stage progress is already visible via the `PhaseStarted`/
+        // `PhaseFinished` events `supervise_until_shutdown` itself emits.
         let starting = crate::session::state::SessionState::Preparing
             .start()
             .expect("the controller begins every session in Preparing");
-        let _ = events.try_send(crate::session::event::SessionEvent::SessionChanged {
-            state: starting.clone(),
-        });
-        let running = starting
-            .to_running()
-            .expect("Starting -> Running is a legal transition");
-        let _ =
-            events.try_send(crate::session::event::SessionEvent::SessionChanged { state: running });
+        // Lifecycle events are awaited, not `try_send` (finding B5): a
+        // session-state transition must never be silently dropped under
+        // channel pressure.
+        let _ = events
+            .send(crate::session::event::SessionEvent::SessionChanged { state: starting })
+            .await;
         // Live telemetry (CLI-UX Phase 3): only worth subscribing when a real
         // TUI is up to read it - `--message-format json`/non-interactive
         // sessions never touch `telemetry`, so skip the extra bus
@@ -236,11 +243,12 @@ impl Run {
         // sim-clock feed), so the TUI's clock slot stays empty in this mode
         // by design (`tui::render::simulation_clock_slot`).
         let telemetry = crate::telemetry::TelemetryBackend::new();
-        let _telemetry_tasks = if controller.renders_tui() {
-            start_telemetry_feeds(&prepared.robot_log_targets, &telemetry)
-        } else {
-            Vec::new()
-        };
+        if controller.renders_tui() {
+            feed_tasks.extend(start_telemetry_feeds(
+                &prepared.robot_log_targets,
+                &telemetry,
+            ));
+        }
 
         let board = prepared.board.clone();
         let supervise = tokio::spawn(supervise_until_shutdown(
@@ -253,6 +261,7 @@ impl Run {
                 token: controller.token(),
                 events: Some(events),
                 telemetry: telemetry.clone(),
+                emits_running_on_startup_complete: true,
                 ..SupervisorOptions::default()
             },
         ));
@@ -262,6 +271,9 @@ impl Run {
             .await;
         if let Some(handle) = watch_handle {
             handle.abort();
+        }
+        for feed in feed_tasks {
+            feed.abort();
         }
         let outcome = outcome?;
 
@@ -1102,14 +1114,18 @@ fn native_pending_official_note(
     )
 }
 
-/// Build one user participant's crate. `cargo build` here inherits this
-/// process's stdout/stderr (`ui.command_status`, below) so build errors
-/// stream live to the developer's terminal - so, unlike
-/// `check::build_and_locate_binary`'s fully-captured build, this reports
-/// progress with a single themed (and `--message-format json`-silenced,
-/// via `Ui::info`) line rather than an animated spinner: an indicatif
-/// redraw sharing a stream with cargo's own inherited output would corrupt
-/// both.
+/// Build one user participant's crate. Fixes findings A2/B2: `cargo build`'s
+/// stdout/stderr is CAPTURED and routed as `SessionEvent::Diagnostic`s
+/// (`ui.command_status_captured`, below) instead of inherited straight
+/// through to this process's own stdout/stderr - a raw child write racing an
+/// active TUI redraw could corrupt the alternate-screen frame, and under
+/// `--message-format json` it could leak onto a stderr the contract promises
+/// stays empty. This still reports progress with a single themed (and
+/// `--message-format json`-silenced, via `Ui::info`) line rather than an
+/// animated spinner - `crate::progress`'s own session-routing (see its
+/// module docs) already keeps a spinner from colliding with captured build
+/// output, but a single line is simpler here and matches
+/// `check::build_and_locate_binary`'s equivalent build.
 pub(crate) fn build_source_binary(
     crate_dir: &Path,
     preferred_name: &str,
@@ -1131,7 +1147,7 @@ pub(crate) fn build_source_binary(
         .arg("--bin")
         .arg(&binary_name)
         .current_dir(&crate_dir);
-    let status = ui.command_status(&mut command).with_context(|| {
+    let status = ui.command_status_captured(&mut command).with_context(|| {
         format!(
             "failed to start cargo build for participant {preferred_name} in {}",
             crate_dir.display()

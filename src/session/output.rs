@@ -9,21 +9,53 @@
 //! ref resolution) from there - there is no process-global mode cell
 //! anywhere in the crate.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::commands::MessageFormat;
 use crate::output_mode::OutputMode;
 use crate::theme::Theme;
 
-/// An effectively-unbounded readiness/stage-wait budget for an interactive
-/// session (Product decision 6: "no unconditional 60-second teardown in an
-/// interactive session"). Not literally `Duration::MAX` - `Instant + Duration`
-/// panics on overflow, and every caller of
-/// [`OutputContext::wait_budget`] adds this to `Instant::now()` to compute a
-/// deadline - but long enough that no real session ever reaches it; a
-/// missing clock/participant is a named `waiting`/`degraded` console state
-/// for as long as the operator leaves the session open, not a kill.
-const NO_TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+/// A readiness/stage-wait budget for an interactive session (Product decision
+/// 6: "no unconditional 60-second teardown in an interactive session").
+///
+/// Replaces a one-year `Duration` sentinel for "no timeout" (finding D2): a
+/// magic duration still technically times out (`Instant + Duration` would
+/// eventually panic on overflow, and every caller had to remember never to
+/// print it as a real deadline) and obscures the intended semantics. This
+/// type makes "no deadline at all" a distinct, explicit state a caller must
+/// handle, rather than a very large number it might format or compare
+/// incorrectly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitBudget {
+    /// No deadline at all: a missing clock/participant is a named
+    /// `waiting`/`degraded` console state for as long as the operator leaves
+    /// the session open, not a kill.
+    Unbounded,
+    Bounded(Duration),
+}
+
+impl Default for WaitBudget {
+    /// `Bounded(Duration::default())` (an already-elapsed deadline) rather
+    /// than `Unbounded` - a derived `Default` (e.g. `SupervisionStage`'s) must
+    /// never silently produce a wait with no deadline at all; every real
+    /// caller sets this explicitly via `OutputContext::wait_budget`.
+    fn default() -> Self {
+        Self::Bounded(Duration::default())
+    }
+}
+
+impl WaitBudget {
+    /// The deadline this budget implies starting from `now`, or `None` if
+    /// [`Self::Unbounded`] - there is no `Instant` a caller should ever
+    /// compare against.
+    #[must_use]
+    pub fn deadline_from(self, now: Instant) -> Option<Instant> {
+        match self {
+            Self::Unbounded => None,
+            Self::Bounded(duration) => Some(now + duration),
+        }
+    }
+}
 
 /// The immutable output contract for one `run`/`simulation run` invocation.
 #[derive(Debug, Clone, Copy)]
@@ -42,23 +74,23 @@ impl OutputContext {
     /// The wait budget for an interactive-session readiness/stage wait
     /// (Product decision 6). Only [`OutputMode::Rich`] - a true interactive
     /// TTY console that actually renders a live "waiting" state - gets
-    /// [`NO_TIMEOUT`]: a missing clock/participant becomes a named
+    /// [`WaitBudget::Unbounded`]: a missing clock/participant becomes a named
     /// `waiting`/`degraded` console state, never an automatic teardown,
     /// because an operator is watching it. [`OutputMode::Plain`] (a non-TTY
     /// or `--plain` stream - piped, redirected, or a CI log) and
     /// [`OutputMode::Json`] (a machine/batch invocation) both have no
-    /// interactive console to show that state in, so both keep `bounded`: an
+    /// interactive console to show that state in, so both keep `Bounded`: an
     /// append-only or machine caller must get a deterministic failure instead
     /// of hanging forever on a missing clock. Any future headless
     /// bounded-wait policy should be an explicit, separate opt-in - never
     /// implicitly shared with the interactive session the way the old fixed
     /// 60s constant was.
     #[must_use]
-    pub const fn wait_budget(self, bounded: Duration) -> Duration {
+    pub const fn wait_budget(self, bounded: Duration) -> WaitBudget {
         if self.mode.allows_progress_drawing() {
-            NO_TIMEOUT
+            WaitBudget::Unbounded
         } else {
-            bounded
+            WaitBudget::Bounded(bounded)
         }
     }
 
@@ -112,8 +144,21 @@ mod tests {
         let plain = OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false);
         let json = OutputContext::new(OutputMode::Json, Theme::new(ColorCapability::None), false);
 
-        assert!(rich.wait_budget(bounded) > bounded);
-        assert_eq!(plain.wait_budget(bounded), bounded);
-        assert_eq!(json.wait_budget(bounded), bounded);
+        assert_eq!(rich.wait_budget(bounded), WaitBudget::Unbounded);
+        assert_eq!(plain.wait_budget(bounded), WaitBudget::Bounded(bounded));
+        assert_eq!(json.wait_budget(bounded), WaitBudget::Bounded(bounded));
+    }
+
+    /// D2: `Unbounded` has no deadline at all - a caller must handle that
+    /// explicitly rather than comparing against a very large `Instant`.
+    #[test]
+    fn unbounded_has_no_deadline_bounded_has_one() {
+        let now = Instant::now();
+        assert_eq!(WaitBudget::Unbounded.deadline_from(now), None);
+        let bounded = WaitBudget::Bounded(Duration::from_secs(5));
+        assert_eq!(
+            bounded.deadline_from(now),
+            Some(now + Duration::from_secs(5))
+        );
     }
 }

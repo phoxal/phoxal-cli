@@ -5,25 +5,47 @@
 //! [`OutputContext`] - replacing the old `Stepper` + display-activation
 //! handoff + supervisor-owned `Display` design.
 //!
-//! # Cancellation (fixes live-acceptance #4)
+//! # Cancellation (fixes live-acceptance #4, finding A1)
 //!
 //! The controller starts the renderer FIRST, then the caller (`run`/
-//! `simulation run`) drives preparation ([`SessionController::drive_preparation`])
-//! and then supervision ([`SessionController::drive_supervision`]) through it.
-//! Both methods race every wait against Ctrl-C in their own `select!`, so a
-//! Ctrl-C during ANY phase - download, validate, build, a staged-startup
-//! wait, the readiness barrier, or steady state - is observed immediately
-//! rather than only once an outer `join!`/barrier happens to return.
+//! `simulation run`) drives preparation ([`SessionController::drive_prepare_phase`]),
+//! any intermediate setup ([`SessionController::drive_setup`] - `simulation
+//! run`'s Webots preflight/locking/staging/spawn-responder startup), and
+//! finally supervision ([`SessionController::drive_supervision`]) through it.
+//! All three share ONE underlying select loop
+//! ([`SessionController::drive_cancelable`] for the first two) that polls TUI
+//! input, `tokio::signal::ctrl_c()`, session events, and redraws THROUGHOUT -
+//! not just once supervision begins. This matters because raw mode (a real
+//! TUI session) disables the terminal's own `ISIG`, so Ctrl-C never becomes a
+//! `SIGINT` at all; it arrives only as a crossterm key event. Before this
+//! fix, `drive_preparation` polled only the (useless, under raw mode)
+//! `ctrl_c()` signal and simulate's own intermediate setup was not driven
+//! through the controller at all - a raw-mode Ctrl-C during a fresh-cache
+//! build or Webots staging was simply never observed.
 //!
-//! During preparation nothing is under supervision yet (no participant has
-//! been spawned), so the first Ctrl-C both restores the terminal and exits
-//! the process immediately - there is nothing else to tear down, and any
-//! `cargo build`/download child sharing this process's foreground process
-//! group already received the terminal's own SIGINT independent of this
-//! handler. During supervision the first Ctrl-C instead cancels the root
-//! token (letting the supervisor run its own orderly
+//! During preparation/setup nothing is under supervision yet (no participant
+//! has been spawned), so the first Ctrl-C both restores the terminal and
+//! exits the process immediately - there is nothing else to tear down, and
+//! any `cargo build`/download child sharing this process's foreground
+//! process group already received the terminal's own SIGINT independent of
+//! this handler. During supervision the first Ctrl-C instead cancels the
+//! root token (letting the supervisor run its own orderly
 //! `request_participant_stop`/`shutdown_all`) and waits for that to finish; a
 //! second Ctrl-C forces an immediate exit if teardown is not prompt enough.
+//!
+//! # Cleanup (finding B1/D3)
+//!
+//! [`SessionController`] restores the terminal and uninstalls diagnostics
+//! routing on EVERY exit path, not just an explicit call some branches used
+//! to skip: [`Drop`] uninstalls diagnostics routing unconditionally, and
+//! dropping the `Renderer` field (either via `Drop` or the explicit
+//! process-exit path's [`SessionController::teardown`]) restores the terminal
+//! through the `Tui` renderer's own `TerminalGuard` chain. A terminal
+//! draw/input failure inside [`SessionController::drive_supervision`] no
+//! longer just tears down the renderer and returns: it cancels the root
+//! token and AWAITS the supervisor's `JoinHandle` first (see
+//! `finish_after_failure`), so a dropped `JoinHandle` never silently detaches
+//! the supervisor (and every child it owns) in the background.
 //!
 //! # Renderer (Target design parts 4 and 6; this wave keeps part 6 minimal)
 //!
@@ -45,6 +67,7 @@
 //!   `Running`/`Paused`, then collapses to the existing runtime navigator -
 //!   see `crate::tui::startup`'s module docs for the pure model.
 
+use std::future::Future;
 use std::io;
 use std::time::Duration;
 
@@ -65,9 +88,9 @@ use crate::theme::Theme;
 use crate::tui::{TerminalGuard, TitleInfo, TuiDisplay};
 
 use super::diagnostics;
-use super::event::{DiagnosticLevel, PhaseId, PhaseOutcome, SessionEvent};
+use super::event::{ClockPresence, DiagnosticLevel, PhaseId, PhaseOutcome, SessionEvent};
 use super::output::OutputContext;
-use super::state::SessionState;
+use super::state::{ClockObservation, SessionState, WaitReason};
 
 /// Bound on the [`SessionEvent`] channel: the only source of startup and
 /// runtime transitions the renderer sees (Target design part 2). Generous
@@ -203,12 +226,18 @@ impl SessionController {
         F: FnOnce() -> Result<T> + Send + 'static,
     {
         let started = std::time::Instant::now();
-        let _ = self.events_tx.try_send(SessionEvent::PhaseStarted {
+        // Applied directly rather than round-tripped through `events_tx` -
+        // the controller is the only reader of that channel and has not
+        // started its own select loop yet, so an awaited send here (the norm
+        // for a lifecycle event - finding B5) would deadlock against nothing
+        // draining it; a direct `apply_event` has the exact same effect
+        // (state reduction + renderer forwarding) without that risk.
+        self.apply_event(SessionEvent::PhaseStarted {
             id: PhaseId::new("prepare"),
             label: "Preparing".to_string(),
         });
         let result = self
-            .drive_preparation(tokio::task::spawn_blocking(prepare))
+            .drive_cancelable(tokio::task::spawn_blocking(prepare))
             .await;
         let outcome = match &result {
             Ok(_) => PhaseOutcome::Succeeded,
@@ -216,40 +245,89 @@ impl SessionController {
                 error: format!("{error:#}"),
             },
         };
-        let _ = self.events_tx.try_send(SessionEvent::PhaseFinished {
+        self.apply_event(SessionEvent::PhaseFinished {
             id: PhaseId::new("prepare"),
             outcome,
             elapsed: started.elapsed(),
         });
+        // Best-effort: show the phase's final outcome for at least one frame
+        // before the caller's `?` can propagate an error and drop this
+        // controller. Errors are ignored here (not the `Err` this method
+        // returns) - a genuine terminal failure at this exact instant is
+        // vanishingly rare and would only affect this one cosmetic frame.
+        let _ = self.redraw(&BoardSnapshot::default(), &TelemetryBackend::default());
         result
     }
 
-    /// Drive the controller while `prepare` (a `spawn_blocking` task) runs -
-    /// no board/telemetry exist yet, so redraws show an empty participant
-    /// list; the renderer still shows every [`SessionEvent`] phase/diagnostic
-    /// preparation emits. Returns `prepare`'s own result, or an `Err` if
-    /// Ctrl-C cancelled the session first (see the module docs on why that
-    /// exits the process immediately rather than waiting preparation out).
-    pub async fn drive_preparation<T: Send + 'static>(
+    /// Drive `setup` (an async unit of work that runs BETWEEN preparation and
+    /// supervision - `simulation run`'s Webots preflight, lock acquisition,
+    /// world/controller staging, and spawn-responder startup) through the
+    /// SAME cancelable loop as preparation (finding A1's "intermediate setup"
+    /// gap). Unlike [`Self::drive_prepare_phase`]'s `spawn_blocking` (not
+    /// itself interruptible mid-closure), `setup` runs as a normal
+    /// `tokio::spawn`ed task, so it stays cooperatively cancellable at its
+    /// own `.await` points even before a Ctrl-C forces the whole process to
+    /// exit.
+    pub async fn drive_setup<T, Fut>(&mut self, setup: Fut) -> Result<T>
+    where
+        T: Send + 'static,
+        Fut: Future<Output = Result<T>> + Send + 'static,
+    {
+        self.drive_cancelable(tokio::spawn(setup)).await
+    }
+
+    /// The shared loop behind [`Self::drive_prepare_phase`] and
+    /// [`Self::drive_setup`] (finding A1): polls TUI input, `ctrl_c()`,
+    /// session events, and redraws in one `select!` until `task` completes.
+    /// No board/telemetry exist yet at this point in the session, so redraws
+    /// show an empty participant list; the renderer still shows every
+    /// [`SessionEvent`] phase/diagnostic `task` emits. Returns `task`'s own
+    /// result, or a terminal-input `Err`, or never returns at all if Ctrl-C
+    /// fires (see the module docs on why that exits the process immediately
+    /// rather than waiting `task` out - neither a `spawn_blocking` closure
+    /// nor an arbitrary setup future is guaranteed to unwind promptly, and
+    /// nothing is under supervision yet to tear down in the meantime).
+    async fn drive_cancelable<T: Send + 'static>(
         &mut self,
-        mut prepare: JoinHandle<Result<T>>,
+        mut task: JoinHandle<Result<T>>,
     ) -> Result<T> {
         let empty_board = BoardSnapshot::default();
         let empty_telemetry = TelemetryBackend::default();
+        // Draw immediately, before waiting on anything - otherwise a phase
+        // event applied just before this call (e.g. `drive_prepare_phase`'s
+        // "Preparing" row) would not actually appear until the first event/
+        // tick, which could be a visible delay on a slow host.
+        self.redraw(&empty_board, &empty_telemetry)?;
         loop {
             tokio::select! {
                 biased;
                 _ = tokio::signal::ctrl_c() => {
-                    self.token.cancel();
-                    self.transition_to_stopping();
-                    self.teardown();
-                    std::process::exit(130);
+                    self.cancel_and_exit();
+                }
+                Some(input) = poll_next_input(&mut self.renderer) => {
+                    match input {
+                        Ok(event) => {
+                            // The only input action that matters before
+                            // supervision exists is Ctrl-C's raw-mode KEY
+                            // form (`handle_input` already maps it to
+                            // `DisplayAction::Quit`, same as the `q` key) -
+                            // a restart/joypad key has nothing to act on yet,
+                            // so it is simply ignored during this phase.
+                            let action = handle_input(&mut self.renderer, event, &empty_board, &empty_telemetry);
+                            if matches!(action, DisplayAction::Quit) {
+                                self.cancel_and_exit();
+                            }
+                        }
+                        Err(error) => {
+                            return Err(anyhow!(error).context("terminal input reader failed"));
+                        }
+                    }
                 }
                 Some(event) = self.events_rx.recv() => {
                     self.apply_event(event);
                     self.redraw(&empty_board, &empty_telemetry)?;
                 }
-                result = &mut prepare => {
+                result = &mut task => {
                     return match result {
                         Ok(inner) => inner,
                         Err(join_error) => Err(anyhow!(join_error)),
@@ -257,6 +335,19 @@ impl SessionController {
                 }
             }
         }
+    }
+
+    /// Cancel the root token, transition to `Stopping`, restore the terminal,
+    /// and exit the process immediately - the shared tail for every Ctrl-C
+    /// observed before supervision exists (see the module docs: nothing is
+    /// under supervision yet, so there is no orderly child teardown to await
+    /// first, and a `spawn_blocking`/arbitrary setup task is not guaranteed
+    /// to unwind promptly on its own).
+    fn cancel_and_exit(&mut self) -> ! {
+        self.token.cancel();
+        self.transition_to_stopping();
+        self.teardown();
+        std::process::exit(130);
     }
 
     /// Drive the controller for the rest of the session once board/telemetry
@@ -278,7 +369,7 @@ impl SessionController {
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut cancel_requested = false;
 
-        let outcome = loop {
+        let end = loop {
             tokio::select! {
                 biased;
                 _ = tokio::signal::ctrl_c() => {
@@ -290,7 +381,7 @@ impl SessionController {
                     self.token.cancel();
                     self.transition_to_stopping();
                     if let Err(error) = self.redraw(&board.snapshot(), &telemetry) {
-                        break Err(error);
+                        break SupervisionEnd::Failed(error);
                     }
                 }
                 Some(event) = self.events_rx.recv() => {
@@ -303,25 +394,35 @@ impl SessionController {
                             self.apply_display_action(action, &telemetry);
                         }
                         Err(error) => {
-                            break Err(anyhow!(error).context("terminal input reader failed"));
+                            break SupervisionEnd::Failed(anyhow!(error).context("terminal input reader failed"));
                         }
                     }
                 }
                 _ = ticker.tick() => {
                     if let Err(error) = self.redraw(&board.snapshot(), &telemetry) {
-                        break Err(error);
+                        break SupervisionEnd::Failed(error);
                     }
                 }
                 result = &mut supervise => {
-                    break match result {
+                    break SupervisionEnd::Finished(match result {
                         Ok(inner) => inner,
                         Err(join_error) => Err(anyhow!(join_error)),
-                    };
+                    });
                 }
             }
         };
-        self.teardown();
-        outcome
+        // Finding B1: a terminal draw/input failure must not just tear down
+        // the renderer and leave the supervisor (and every child it owns)
+        // detached in the background. `self` (and its `Renderer`/diagnostics
+        // routing) is restored via `Drop` once this function returns - see
+        // the module docs - so there is no explicit `teardown()` call on this
+        // path any more.
+        match end {
+            SupervisionEnd::Finished(result) => result,
+            SupervisionEnd::Failed(error) => {
+                finish_after_failure(&self.token, supervise, error).await
+            }
+        }
     }
 
     fn apply_display_action(&mut self, action: DisplayAction, telemetry: &TelemetryBackend) {
@@ -366,9 +467,42 @@ impl SessionController {
         self.forward_to_renderer(&event);
     }
 
+    /// Apply one incoming event. Most variants are reduced by
+    /// [`reduce_state`] (only `SessionChanged` affects `self.state`; it is
+    /// PRE-validated by whoever constructed it - see that function's docs)
+    /// and forwarded to the renderer as-is. `ClockObserved` and
+    /// `StagedStartupComplete` are different: they carry an OBSERVATION, not
+    /// a state replacement (finding B4), so the controller itself reduces
+    /// them through `SessionState`'s own validated transition methods
+    /// (rejecting the update entirely once the session has started
+    /// `Stopping`/reached a terminal state) and, only if that produces an
+    /// actual change, synthesizes a `SessionChanged` for the renderer -
+    /// exactly like `transition_to_stopping`'s own internal transitions do.
     fn apply_event(&mut self, event: SessionEvent) {
-        self.state = reduce_state(self.state.clone(), &event);
-        self.forward_to_renderer(&event);
+        match event {
+            SessionEvent::ClockObserved(presence) => {
+                self.apply_reduced_state(reduce_clock_observation(self.state.clone(), presence));
+            }
+            SessionEvent::StagedStartupComplete => {
+                self.apply_reduced_state(reduce_staged_startup_complete(self.state.clone()));
+            }
+            other => {
+                self.state = reduce_state(self.state.clone(), &other);
+                self.forward_to_renderer(&other);
+            }
+        }
+    }
+
+    /// Adopt `next` and forward a synthesized `SessionChanged` to the
+    /// renderer only if it actually differs from the current state - an
+    /// observation reduction rejected by `SessionState` (e.g. a clock sample
+    /// arriving after `Stopping` has begun) returns the state unchanged, and
+    /// must not spam the renderer with a no-op transition.
+    fn apply_reduced_state(&mut self, next: SessionState) {
+        if next != self.state {
+            self.state = next.clone();
+            self.forward_to_renderer(&SessionEvent::SessionChanged { state: next });
+        }
     }
 
     /// Hand one event to whichever renderer owns the terminal - the `Line`
@@ -402,10 +536,12 @@ impl SessionController {
     }
 
     /// Restore the terminal (if a TUI is active) and stop routing tracing
-    /// through this session's event channel. Idempotent - safe to call more
-    /// than once (a `std::process::exit` path calls this explicitly before
-    /// exiting, since `exit` skips `Drop`; the normal return path then drops
-    /// an already-`None` renderer harmlessly).
+    /// through this session's event channel, SYNCHRONOUSLY. Only needed on
+    /// the `std::process::exit` path (`cancel_and_exit`): `exit` skips every
+    /// `Drop` impl, so it must call this explicitly first. Every OTHER exit
+    /// path (normal return, `?`, an early `return`) relies on `Drop` instead
+    /// (see below) - idempotent either way, since `Drop` runs on an
+    /// already-`None` renderer harmlessly.
     fn teardown(&mut self) {
         diagnostics::uninstall();
         // Dropping the old `Renderer` value here (rather than waiting for
@@ -414,6 +550,47 @@ impl SessionController {
         // immediately afterward - `exit` never runs `Drop` impls.
         self.renderer = Renderer::None;
     }
+}
+
+/// Finding B1/D3: every OTHER exit path (a normal return, an early `?`, a
+/// panic unwind) restores the terminal and uninstalls diagnostics routing
+/// through this `Drop` impl instead of a call to `teardown()` a future code
+/// path could forget. Uninstalling diagnostics here is what closes the gap:
+/// dropping `self.renderer` (a struct field, dropped automatically after this
+/// method body runs) already restored the terminal on its own for the `Tui`
+/// variant (`TerminalGuard`'s own `Drop`), but nothing previously guaranteed
+/// diagnostics routing was ALSO torn down on every path.
+impl Drop for SessionController {
+    fn drop(&mut self) {
+        diagnostics::uninstall();
+    }
+}
+
+/// How [`SessionController::drive_supervision`]'s select loop ended: either
+/// the supervisor task itself resolved (`Finished`, already carrying its own
+/// result), or a terminal draw/input failure broke the loop before the
+/// supervisor did (`Failed`, still holding the ORIGINAL `supervise` handle
+/// unresolved).
+enum SupervisionEnd {
+    Finished(Result<SupervisorOutcome>),
+    Failed(anyhow::Error),
+}
+
+/// Shared tail for a `Failed` [`SupervisionEnd`] (finding B1): cancels the
+/// root token (idempotent - a harmless no-op if Ctrl-C already cancelled it)
+/// and AWAITS `supervise` before returning, so the supervisor's own orderly
+/// teardown (`request_participant_stop`/`shutdown_all`) always completes and
+/// nothing is left running detached in the background. The terminal failure
+/// `error` is still what gets returned - it is the actual cause, not
+/// whatever the supervisor itself eventually returns once cancelled.
+async fn finish_after_failure(
+    token: &CancellationToken,
+    supervise: JoinHandle<Result<SupervisorOutcome>>,
+    error: anyhow::Error,
+) -> Result<SupervisorOutcome> {
+    token.cancel();
+    let _ = supervise.await;
+    Err(error)
 }
 
 /// Poll the active renderer for its next input event, if any. A free
@@ -461,6 +638,37 @@ fn reduce_state(current: SessionState, event: &SessionEvent) -> SessionState {
         SessionEvent::SessionChanged { state } => state.clone(),
         _ => current,
     }
+}
+
+/// Reduce a raw clock OBSERVATION into the next `SessionState` (finding B4):
+/// unlike `reduce_state`'s `SessionChanged` (already pre-validated by its
+/// sender), this goes through `SessionState`'s own validated transition
+/// methods itself, so a stale observation - notably one arriving after
+/// `Stopping` has begun - is REJECTED (returns `current` unchanged) rather
+/// than silently overwriting a state the clock watcher knows nothing about.
+/// This is what makes the controller the sole authority reducing
+/// observations into state, per the plan's target design.
+#[must_use]
+fn reduce_clock_observation(current: SessionState, presence: ClockPresence) -> SessionState {
+    let next = match presence {
+        ClockPresence::Absent => current.clone().to_waiting(WaitReason::ClockAbsent),
+        ClockPresence::Paused => current
+            .clone()
+            .to_paused(ClockObservation { running: false }),
+        ClockPresence::Running => current.clone().to_running(),
+    };
+    next.unwrap_or(current)
+}
+
+/// Reduce `SessionEvent::StagedStartupComplete` into the next `SessionState`
+/// (finding B3): `run` has no other authority over `Running` (no simulation
+/// clock), so once every staged-startup stage has finished, this is the only
+/// signal that gets it there - through the same validated `to_running`
+/// transition, so it is a no-op (returns `current` unchanged) for a session
+/// that is not in a state `to_running` accepts (e.g. already `Stopping`).
+#[must_use]
+fn reduce_staged_startup_complete(current: SessionState) -> SessionState {
+    current.clone().to_running().unwrap_or(current)
 }
 
 /// The append-only renderer for `OutputMode::Plain` (or `Rich` without a real
@@ -538,6 +746,13 @@ impl LineRenderer {
                     state.label()
                 );
             }
+            // The controller's own `apply_event` intercepts both of these
+            // before they ever reach a renderer: it reduces them into a
+            // `SessionChanged` (via `reduce_clock_observation`/
+            // `reduce_staged_startup_complete`) and forwards THAT instead -
+            // see `SessionController::apply_reduced_state`. These arms exist
+            // only for exhaustiveness.
+            SessionEvent::ClockObserved(_) | SessionEvent::StagedStartupComplete => {}
         }
     }
 
@@ -714,5 +929,164 @@ mod tests {
             outcome: PhaseOutcome::Succeeded,
             elapsed: Duration::from_millis(5),
         });
+    }
+
+    /// Finding B4: an OBSERVED clock presence must follow the SAME validated
+    /// chain `reduce_state`'s tests already exercise for `SessionChanged` -
+    /// `Starting -> Waiting(ClockAbsent) -> Paused -> Running` - proving the
+    /// controller reduces observations itself rather than trusting them
+    /// blindly.
+    #[test]
+    fn reduce_clock_observation_follows_the_validated_chain() {
+        let starting = SessionState::Preparing.start().unwrap();
+        let waiting = reduce_clock_observation(starting, ClockPresence::Absent);
+        assert_eq!(waiting, SessionState::Waiting(WaitReason::ClockAbsent));
+
+        let paused = reduce_clock_observation(waiting, ClockPresence::Paused);
+        assert_eq!(paused, SessionState::Paused);
+
+        let running = reduce_clock_observation(paused, ClockPresence::Running);
+        assert_eq!(running, SessionState::Running);
+    }
+
+    /// The exact regression finding B4 flags: a clock observation arriving
+    /// after the session has started `Stopping` must be REJECTED, not
+    /// silently overwrite it with `Running`/`Paused`. This is what makes the
+    /// controller (not the clock watcher) the sole state authority.
+    #[test]
+    fn reduce_clock_observation_rejects_updates_once_stopping_has_begun() {
+        let stopping = SessionState::Preparing
+            .start()
+            .unwrap()
+            .to_running()
+            .unwrap()
+            .to_stopping()
+            .unwrap();
+
+        let after_running = reduce_clock_observation(stopping.clone(), ClockPresence::Running);
+        assert_eq!(
+            after_running, stopping,
+            "a queued Running observation must not overwrite Stopping"
+        );
+
+        let after_paused = reduce_clock_observation(stopping.clone(), ClockPresence::Paused);
+        assert_eq!(
+            after_paused, stopping,
+            "a queued Paused observation must not overwrite Stopping"
+        );
+
+        let after_absent = reduce_clock_observation(stopping.clone(), ClockPresence::Absent);
+        assert_eq!(
+            after_absent, stopping,
+            "a queued Absent observation must not overwrite Stopping"
+        );
+    }
+
+    /// Finding B3: `StagedStartupComplete` is `run`'s only path to `Running`
+    /// (no simulation clock ever tells it) - it must reach `Running` from
+    /// `Starting`, and it must NOT resurrect a session that has already moved
+    /// on to `Stopping`.
+    #[test]
+    fn reduce_staged_startup_complete_reaches_running_but_never_past_stopping() {
+        let starting = SessionState::Preparing.start().unwrap();
+        assert_eq!(
+            reduce_staged_startup_complete(starting),
+            SessionState::Running
+        );
+
+        let stopping = SessionState::Preparing
+            .start()
+            .unwrap()
+            .to_stopping()
+            .unwrap();
+        assert_eq!(
+            reduce_staged_startup_complete(stopping.clone()),
+            stopping,
+            "staged-startup completing after Ctrl-C must not resurrect Running"
+        );
+    }
+
+    /// Finding B1: the CRITICAL regression - a controller failure (a
+    /// terminal draw/input error) must never just drop the supervisor's
+    /// `JoinHandle` and leave it (and every child it owns) detached in the
+    /// background. `finish_after_failure` is `drive_supervision`'s shared
+    /// tail for exactly that case; this proves it actually awaits the
+    /// supervisor to completion (via a flag the spawned task itself flips
+    /// only once it finishes) rather than merely dropping the handle, AND
+    /// that the root token is cancelled so the supervisor's own orderly
+    /// teardown runs in the first place.
+    #[tokio::test]
+    async fn finish_after_failure_cancels_the_token_and_awaits_the_supervisor_task() {
+        let token = CancellationToken::new();
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed_in_task = completed.clone();
+        let supervise = tokio::spawn(async move {
+            // A short delay so a caller that merely dropped the handle
+            // (instead of awaiting it) would very likely observe `completed`
+            // still `false` - making a regression back to "drop and return"
+            // an easy, reliable test failure rather than a rare flake.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            completed_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(SupervisorOutcome {
+                clean_shutdown: true,
+                failed_participants: Vec::new(),
+            })
+        });
+
+        let result = finish_after_failure(&token, supervise, anyhow!("terminal draw failed")).await;
+
+        assert!(
+            token.is_cancelled(),
+            "the root token must be cancelled so the supervisor's own orderly teardown runs"
+        );
+        assert!(
+            completed.load(std::sync::atomic::Ordering::SeqCst),
+            "the supervisor task must be awaited to completion, never left detached"
+        );
+        assert_eq!(result.unwrap_err().to_string(), "terminal draw failed");
+    }
+
+    /// Finding A1: `drive_setup` and `drive_prepare_phase` share one
+    /// cancelable loop; this proves the plumbing for the new `drive_setup`
+    /// method (simulate's "intermediate setup" gap) actually runs an
+    /// arbitrary future to completion and returns its value. `OutputMode::Plain`
+    /// never touches a real terminal, so this needs no TUI/terminal fixture.
+    /// `SessionController::new` installs a diagnostics sender into the same
+    /// process-global cell `session::diagnostics`'s own tests (and
+    /// `progress`'s) touch - serialize through their shared lock.
+    #[tokio::test]
+    async fn drive_setup_returns_the_future_s_own_result() {
+        let _guard = super::super::diagnostics::DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .await;
+        let mut controller = SessionController::new(
+            OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false),
+            "test",
+            None,
+        )
+        .expect("Plain mode never touches a real terminal");
+        let result = controller
+            .drive_setup(async { Ok::<_, anyhow::Error>(42) })
+            .await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    /// The same plumbing must also propagate the setup future's own error,
+    /// not swallow or replace it.
+    #[tokio::test]
+    async fn drive_setup_propagates_the_future_s_error() {
+        let _guard = super::super::diagnostics::DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .await;
+        let mut controller = SessionController::new(
+            OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false),
+            "test",
+            None,
+        )
+        .expect("Plain mode never touches a real terminal");
+        let result: Result<()> = controller
+            .drive_setup(async { Err(anyhow!("setup failed")) })
+            .await;
+        assert_eq!(result.unwrap_err().to_string(), "setup failed");
     }
 }

@@ -26,6 +26,7 @@ use tokio::time::{MissedTickBehavior, timeout};
 
 use crate::launch_plan::DEFAULT_ROUTER_CONNECT;
 pub use crate::participant_kind::ParticipantKind;
+use crate::session::output::WaitBudget;
 
 pub const SUPERVISOR_LOCK_FILE: &str = "supervisor.lock";
 pub const SUPERVISOR_STATE_FILE: &str = "supervisor-state.json";
@@ -623,6 +624,17 @@ pub struct SupervisorOptions {
     /// with `crate::telemetry::start_host_feed` etc. and passes the SAME
     /// handle to the controller.
     pub telemetry: crate::telemetry::TelemetryBackend,
+    /// Whether this session's `SessionState::Running` has no authority other
+    /// than staged startup finishing (finding B3: `run` has no simulation
+    /// clock, so nothing else will ever tell it "running"). When `true`, once
+    /// every stage has spawned and been observed ready with nothing left
+    /// pending, this loop emits `SessionEvent::StagedStartupComplete` itself
+    /// instead of the caller claiming `Running` before the supervisor even
+    /// exists. `simulation run` leaves this `false`: its `Running` comes
+    /// exclusively from the simulation clock watcher
+    /// (`commands::simulate::spawn_clock_state_watcher`) observing a running
+    /// sample, which must not be preempted by "stages merely finished".
+    pub emits_running_on_startup_complete: bool,
 }
 
 impl Default for SupervisorOptions {
@@ -637,6 +649,7 @@ impl Default for SupervisorOptions {
             events: None,
             cancel_rx: None,
             telemetry: crate::telemetry::TelemetryBackend::default(),
+            emits_running_on_startup_complete: false,
         }
     }
 }
@@ -1078,12 +1091,16 @@ pub struct SupervisionStage {
     /// (see [`Self::new`]); extend with [`Self::with_extra_ready_ids`] for a
     /// wait-only id that has no `ParticipantSpec` of its own.
     pub ready_ids: Vec<String>,
-    pub timeout: Duration,
+    pub timeout: crate::session::output::WaitBudget,
 }
 
 impl SupervisionStage {
     #[must_use]
-    pub fn new(label: impl Into<String>, specs: Vec<ParticipantSpec>, timeout: Duration) -> Self {
+    pub fn new(
+        label: impl Into<String>,
+        specs: Vec<ParticipantSpec>,
+        timeout: crate::session::output::WaitBudget,
+    ) -> Self {
         let ready_ids = specs
             .iter()
             .filter(|spec| spec.bus_participant)
@@ -1132,19 +1149,28 @@ async fn spawn_stage(
 struct PendingStage {
     label: String,
     ready_ids: Vec<String>,
-    deadline: Instant,
+    /// `None` for an unbounded wait (Product decision 6/finding D2) - there is
+    /// no `Instant` to ever compare against.
+    deadline: Option<Instant>,
     started: Instant,
 }
 
-/// Send `event` to `events`, if a `SessionController` is listening. Never
-/// blocks: a full or absent channel simply drops the event rather than
-/// stalling the supervisor loop over a slow/missing renderer.
-fn emit_event(
+/// Send `event` to `events`, if a `SessionController` is listening. Awaits
+/// the send so a lifecycle/control transition (a phase or session-state
+/// change) can never be silently dropped under channel backpressure (finding
+/// B5) - only [`crate::session::diagnostics`]'s much higher-volume, lower-
+/// severity telemetry/log routing keeps a non-blocking `try_send`. The
+/// channel is generously bounded (`EVENT_CHANNEL_CAPACITY`) and the
+/// controller's own select loop drains it continuously, so this resolves
+/// promptly under normal operation; a truly gone/closed receiver (the
+/// controller already tore down) makes the send fail immediately rather than
+/// hang, which is why the result is still discarded here.
+async fn emit_event(
     events: Option<&mpsc::Sender<crate::session::event::SessionEvent>>,
     event: crate::session::event::SessionEvent,
 ) {
     if let Some(sender) = events {
-        let _ = sender.try_send(event);
+        let _ = sender.send(event).await;
     }
 }
 
@@ -1178,7 +1204,8 @@ async fn spawn_stage_emitting(
             id: crate::session::event::PhaseId::new(label.clone()),
             label: label.clone(),
         },
-    );
+    )
+    .await;
     spawn_stage(running, board, specs).await;
     if ready_ids.is_empty() {
         emit_event(
@@ -1188,13 +1215,14 @@ async fn spawn_stage_emitting(
                 outcome: crate::session::event::PhaseOutcome::Succeeded,
                 elapsed: started.elapsed(),
             },
-        );
+        )
+        .await;
         return None;
     }
     Some(PendingStage {
         label,
         ready_ids,
-        deadline: Instant::now() + stage_timeout,
+        deadline: stage_timeout.deadline_from(Instant::now()),
         started,
     })
 }
@@ -1211,13 +1239,14 @@ async fn spawn_stage_emitting(
 pub async fn await_participants_ready(
     board: &BoardBackend,
     stage_ids: &[String],
-    timeout: Duration,
+    budget: crate::session::output::WaitBudget,
     poll_interval: Duration,
 ) -> Result<()> {
     if stage_ids.is_empty() {
         return Ok(());
     }
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
+    let deadline = budget.deadline_from(started);
     let mut interval = tokio::time::interval(poll_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -1234,23 +1263,48 @@ pub async fn await_participants_ready(
         if missing.is_empty() {
             return Ok(());
         }
-        if Instant::now() >= deadline {
+        // `deadline` is `None` for an unbounded wait (Product decision 6) -
+        // there is nothing to ever compare `Instant::now()` against, so a
+        // missing participant simply keeps waiting for as long as the
+        // operator leaves the session open.
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            let waited = started.elapsed().as_secs();
             for id in &missing {
                 board.set_state(
                     id,
                     ParticipantState::Failed,
                     Some(format!(
-                        "stage readiness timed out after {}s: never observed ready",
-                        timeout.as_secs()
+                        "stage readiness timed out after {waited}s: never observed ready"
                     )),
                 );
             }
             bail!(
-                "stage readiness timed out after {}s: participant(s) never observed ready: {}",
-                timeout.as_secs(),
+                "stage readiness timed out after {waited}s: participant(s) never observed ready: {}",
                 missing.join(", ")
             );
         }
+    }
+}
+
+/// Emit `SessionEvent::StagedStartupComplete` exactly when there is truly
+/// nothing left to spawn or wait for (finding B3) - `pending_stage.is_none()`
+/// after a stage-draining loop means the loop only stopped because the queue
+/// was genuinely empty, not because it parked on a stage awaiting readiness
+/// (a park always sets `pending_stage`). Only fires for a session that opted
+/// in via `emits_running_on_startup_complete` (`run`; `simulation run` leaves
+/// it `false` since its `Running` comes from the clock watcher instead - see
+/// the field's own docs).
+async fn maybe_emit_staged_startup_complete(
+    options: &SupervisorOptions,
+    events: Option<&mpsc::Sender<crate::session::event::SessionEvent>>,
+    pending_stage: &Option<PendingStage>,
+) {
+    if options.emits_running_on_startup_complete && pending_stage.is_none() {
+        emit_event(
+            events,
+            crate::session::event::SessionEvent::StagedStartupComplete,
+        )
+        .await;
     }
 }
 
@@ -1278,6 +1332,7 @@ pub async fn supervise_until_shutdown(
             break;
         }
     }
+    maybe_emit_staged_startup_complete(&options, events_tx.as_ref(), &pending_stage).await;
 
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -1314,7 +1369,10 @@ pub async fn supervise_until_shutdown(
             result = await_participants_ready(
                 &board,
                 pending_stage.as_ref().map_or(&[][..], |stage| stage.ready_ids.as_slice()),
-                pending_stage.as_ref().map_or(Duration::ZERO, |stage| stage.deadline.saturating_duration_since(Instant::now())),
+                pending_stage.as_ref().map_or(WaitBudget::Unbounded, |stage| match stage.deadline {
+                    Some(deadline) => WaitBudget::Bounded(deadline.saturating_duration_since(Instant::now())),
+                    None => WaitBudget::Unbounded,
+                }),
                 Duration::from_millis(200),
             ), if pending_stage.is_some() => {
                 let stage = pending_stage.take().expect("guarded by is_some");
@@ -1325,7 +1383,7 @@ pub async fn supervise_until_shutdown(
                             id: crate::session::event::PhaseId::new(stage.label.clone()),
                             outcome: crate::session::event::PhaseOutcome::Succeeded,
                             elapsed: stage.started.elapsed(),
-                        });
+                        }).await;
                         while let Some(next_stage) = stage_queue.pop_front() {
                             if let Some(next) =
                                 spawn_stage_emitting(&mut running, &board, events_tx.as_ref(), next_stage).await
@@ -1334,6 +1392,7 @@ pub async fn supervise_until_shutdown(
                                 break;
                             }
                         }
+                        maybe_emit_staged_startup_complete(&options, events_tx.as_ref(), &pending_stage).await;
                     }
                     Err(error) => {
                         let reason = format!("stage '{}' stalled: {error:#}", stage.label);
@@ -1345,7 +1404,7 @@ pub async fn supervise_until_shutdown(
                             id: crate::session::event::PhaseId::new(stage.label.clone()),
                             outcome: crate::session::event::PhaseOutcome::Failed { error: format!("{error:#}") },
                             elapsed: stage.started.elapsed(),
-                        });
+                        }).await;
                         stage_error = Some(anyhow!(reason));
                         clean_shutdown = false;
                         break;
@@ -2066,7 +2125,7 @@ impl BarrierGap {
         self.missing_participants.is_empty() && self.clock_gap.is_none()
     }
 
-    fn describe(&self, startup_timeout: Duration) -> String {
+    fn describe(&self, waited: Duration) -> String {
         let mut parts = Vec::new();
         if !self.missing_participants.is_empty() {
             parts.push(format!(
@@ -2079,7 +2138,7 @@ impl BarrierGap {
         }
         format!(
             "simulation readiness barrier timed out after {}s: {}",
-            startup_timeout.as_secs(),
+            waited.as_secs(),
             parts.join("; ")
         )
     }
@@ -2175,10 +2234,11 @@ pub async fn await_readiness_barrier(
     board: &BoardBackend,
     expected_bus_ids: &[String],
     clock: &mut watch::Receiver<ClockObservation>,
-    startup_timeout: Duration,
+    budget: WaitBudget,
     poll_interval: Duration,
 ) -> Result<()> {
-    let deadline = Instant::now() + startup_timeout;
+    let started = Instant::now();
+    let deadline = budget.deadline_from(started);
     let mut interval = tokio::time::interval(poll_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -2195,18 +2255,23 @@ pub async fn await_readiness_barrier(
         if gap.is_empty() {
             return Ok(());
         }
-        if Instant::now() >= deadline {
+        // `deadline` is `None` for an unbounded wait (Product decision 6) -
+        // an interactive session simply keeps waiting, with the gap surfaced
+        // as a named `waiting`/`degraded` console state, for as long as the
+        // operator leaves the session open.
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            let waited = started.elapsed();
             for id in &gap.missing_participants {
                 board.set_state(
                     id,
                     ParticipantState::Failed,
                     Some(format!(
                         "readiness barrier timed out after {}s: heartbeat never observed",
-                        startup_timeout.as_secs()
+                        waited.as_secs()
                     )),
                 );
             }
-            bail!("{}", gap.describe(startup_timeout));
+            bail!("{}", gap.describe(waited));
         }
     }
 }
@@ -2599,7 +2664,7 @@ mod tests {
             vec![SupervisionStage::new(
                 "stage",
                 specs,
-                Duration::from_secs(5),
+                WaitBudget::Bounded(Duration::from_secs(5)),
             )],
             board.clone(),
             SupervisorOptions {
@@ -2616,6 +2681,7 @@ mod tests {
                 events: None,
                 cancel_rx: None,
                 telemetry: crate::telemetry::TelemetryBackend::default(),
+                emits_running_on_startup_complete: false,
             },
         )
         .await?;
@@ -2673,7 +2739,7 @@ mod tests {
             vec![SupervisionStage::new(
                 "stage",
                 vec![webots],
-                Duration::from_secs(5),
+                WaitBudget::Bounded(Duration::from_secs(5)),
             )],
             board.clone(),
             SupervisorOptions {
@@ -2755,7 +2821,7 @@ mod tests {
             vec![SupervisionStage::new(
                 "stage",
                 specs,
-                Duration::from_secs(5),
+                WaitBudget::Bounded(Duration::from_secs(5)),
             )],
             board.clone(),
             SupervisorOptions {
@@ -2772,6 +2838,7 @@ mod tests {
                 events: None,
                 cancel_rx: None,
                 telemetry: crate::telemetry::TelemetryBackend::default(),
+                emits_running_on_startup_complete: false,
             },
         )
         .await?;
@@ -3001,7 +3068,7 @@ mod tests {
                 &board,
                 &expected,
                 &mut clock_rx,
-                Duration::from_millis(300),
+                WaitBudget::Bounded(Duration::from_millis(300)),
                 Duration::from_millis(20),
             ),
         )
@@ -3061,7 +3128,7 @@ mod tests {
                 &board,
                 &expected,
                 &mut clock_rx,
-                Duration::from_secs(60),
+                WaitBudget::Bounded(Duration::from_secs(60)),
                 Duration::from_millis(10),
             ),
         )
@@ -3103,7 +3170,7 @@ mod tests {
                 &board,
                 &expected,
                 &mut clock_rx,
-                Duration::from_millis(200),
+                WaitBudget::Bounded(Duration::from_millis(200)),
                 Duration::from_millis(20),
             ),
         )
@@ -3136,7 +3203,7 @@ mod tests {
                 &board,
                 &expected,
                 &mut clock_rx,
-                Duration::from_millis(200),
+                WaitBudget::Bounded(Duration::from_millis(200)),
                 Duration::from_millis(20),
             ),
         )
@@ -3175,7 +3242,7 @@ mod tests {
             &board,
             &expected,
             &mut clock_rx,
-            Duration::from_secs(5),
+            WaitBudget::Bounded(Duration::from_secs(5)),
             Duration::from_millis(20),
         )
         .await
@@ -3195,7 +3262,7 @@ mod tests {
         await_participants_ready(
             &board,
             &["mission".to_string()],
-            Duration::from_secs(5),
+            WaitBudget::Bounded(Duration::from_secs(5)),
             Duration::from_millis(10),
         )
         .await
@@ -3216,7 +3283,7 @@ mod tests {
             await_participants_ready(
                 &board,
                 &["mission".to_string()],
-                Duration::from_millis(150),
+                WaitBudget::Bounded(Duration::from_millis(150)),
                 Duration::from_millis(10),
             ),
         )
@@ -3249,7 +3316,7 @@ mod tests {
             await_participants_ready(
                 &board,
                 &["mission".to_string()],
-                Duration::from_secs(60),
+                WaitBudget::Bounded(Duration::from_secs(60)),
                 Duration::from_millis(10),
             ),
         )
@@ -3285,8 +3352,16 @@ mod tests {
             ParticipantState::Starting,
         ));
         let stages = vec![
-            SupervisionStage::new("stage-one", vec![sleep_spec("one")], Duration::from_secs(5)),
-            SupervisionStage::new("stage-two", vec![sleep_spec("two")], Duration::from_secs(5)),
+            SupervisionStage::new(
+                "stage-one",
+                vec![sleep_spec("one")],
+                WaitBudget::Bounded(Duration::from_secs(5)),
+            ),
+            SupervisionStage::new(
+                "stage-two",
+                vec![sleep_spec("two")],
+                WaitBudget::Bounded(Duration::from_secs(5)),
+            ),
         ];
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let supervise = tokio::spawn(supervise_until_shutdown(
@@ -3353,7 +3428,7 @@ mod tests {
         let stages = vec![SupervisionStage::new(
             "stage-one",
             vec![flappy],
-            Duration::from_secs(30),
+            WaitBudget::Bounded(Duration::from_secs(30)),
         )];
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let supervise = tokio::spawn(supervise_until_shutdown(
@@ -3420,7 +3495,7 @@ mod tests {
         let stages = vec![SupervisionStage::new(
             "stage-one",
             vec![sleep_spec("one")],
-            Duration::from_secs(30),
+            WaitBudget::Bounded(Duration::from_secs(30)),
         )];
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let supervise = tokio::spawn(supervise_until_shutdown(
@@ -3470,7 +3545,7 @@ mod tests {
         let stages = vec![SupervisionStage::new(
             "stage-one",
             vec![sleep_spec("one")],
-            Duration::from_millis(150),
+            WaitBudget::Bounded(Duration::from_millis(150)),
         )];
         let error = tokio::time::timeout(
             Duration::from_secs(5),
