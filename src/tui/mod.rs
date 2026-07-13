@@ -87,7 +87,7 @@ const LOG_CHANNEL_CAPACITY: usize = 512;
 struct Activated {
     _guard: terminal::TerminalGuard,
     terminal: Terminal<CrosstermBackend<Stderr>>,
-    _input_thread: input::InputThread,
+    input_thread: input::InputThread,
     input_rx: mpsc::Receiver<Event>,
 }
 
@@ -150,7 +150,7 @@ impl TuiDisplay {
         self.activated = Some(Activated {
             _guard: guard,
             terminal,
-            _input_thread: input_thread,
+            input_thread,
             input_rx,
         });
         Ok(())
@@ -170,7 +170,15 @@ impl TuiDisplay {
     /// module docs. `self.startup.diagnostics` also feeds the navigator's own
     /// one-line diagnostics strip once collapsed, so a mid-session warning
     /// stays visible there too (fixes live-acceptance #2 for both surfaces).
-    pub fn redraw(&mut self, board: &BoardSnapshot, telemetry: &TelemetryBackend) {
+    /// Draw one frame if activated. An `Err` here is a genuine terminal I/O
+    /// failure (e.g. the tty went away underneath the session) - the caller
+    /// (`SessionController`) treats it as a session failure rather than
+    /// silently leaving the screen stale forever.
+    pub fn redraw(
+        &mut self,
+        board: &BoardSnapshot,
+        telemetry: &TelemetryBackend,
+    ) -> io::Result<()> {
         while let Ok(line) = self.log_rx.try_recv() {
             self.logs.record(line);
         }
@@ -178,7 +186,7 @@ impl TuiDisplay {
         let snapshot = telemetry.snapshot();
         let now = Instant::now();
         let Some(activated) = &mut self.activated else {
-            return;
+            return Ok(());
         };
         let theme = self.theme;
         let title = &self.title;
@@ -186,7 +194,7 @@ impl TuiDisplay {
         let startup = &self.startup;
         let state = &self.state;
         let logs = &mut self.logs;
-        let _ = activated.terminal.draw(|frame| {
+        activated.terminal.draw(|frame| {
             if startup.show_startup_surface() {
                 render::draw_startup(frame, theme, title, identity, startup);
             } else {
@@ -202,20 +210,30 @@ impl TuiDisplay {
                     &startup.diagnostics,
                 );
             }
-        });
+        })?;
+        Ok(())
     }
 
     /// Cancel-safe: `.recv()` on an `mpsc::Receiver` is documented
     /// cancel-safe, so this may be dropped mid-await by a competing
     /// `select!` branch without losing an already-buffered event.
-    pub async fn next_input(&mut self) -> Option<Event> {
-        let activated = self.activated.as_mut()?;
+    ///
+    /// `Ok(None)` means no more input will ever arrive but nothing is
+    /// wrong (the reader thread stopped cleanly - e.g. mid-teardown); the
+    /// caller should stay pending rather than spin. `Err` means the reader
+    /// thread ended because `event::poll`/`event::read` itself failed (the
+    /// tty went away underneath the session) - a real failure the caller
+    /// should surface, not swallow.
+    pub async fn next_input(&mut self) -> io::Result<Option<Event>> {
+        let Some(activated) = self.activated.as_mut() else {
+            return Ok(None);
+        };
         match activated.input_rx.recv().await {
-            Some(event) => Some(event),
-            // A terminal read error ends the bridge thread and closes this
-            // channel. Stay pending instead of returning `None` on every
-            // supervisor select pass and spinning a CPU core.
-            None => std::future::pending().await,
+            Some(event) => Ok(Some(event)),
+            None => match activated.input_thread.take_error() {
+                Some(error) => Err(error),
+                None => std::future::pending().await,
+            },
         }
     }
 
@@ -268,7 +286,7 @@ mod tests {
             ),
         );
         // Must not panic even though `activate` was never called.
-        display.redraw(&board, &TelemetryBackend::default());
+        assert!(display.redraw(&board, &TelemetryBackend::default()).is_ok());
         assert!(display.activated.is_none());
     }
 

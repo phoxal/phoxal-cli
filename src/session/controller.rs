@@ -48,7 +48,7 @@
 use std::io;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use crossterm::event::Event;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -247,7 +247,7 @@ impl SessionController {
                 }
                 Some(event) = self.events_rx.recv() => {
                     self.apply_event(event);
-                    self.redraw(&empty_board, &empty_telemetry);
+                    self.redraw(&empty_board, &empty_telemetry)?;
                 }
                 result = &mut prepare => {
                     return match result {
@@ -289,17 +289,28 @@ impl SessionController {
                     cancel_requested = true;
                     self.token.cancel();
                     self.transition_to_stopping();
-                    self.redraw(&board.snapshot(), &telemetry);
+                    if let Err(error) = self.redraw(&board.snapshot(), &telemetry) {
+                        break Err(error);
+                    }
                 }
                 Some(event) = self.events_rx.recv() => {
                     self.apply_event(event);
                 }
                 Some(input) = poll_next_input(&mut self.renderer) => {
-                    let action = handle_input(&mut self.renderer, input, &board.snapshot(), &telemetry);
-                    self.apply_display_action(action, &telemetry);
+                    match input {
+                        Ok(event) => {
+                            let action = handle_input(&mut self.renderer, event, &board.snapshot(), &telemetry);
+                            self.apply_display_action(action, &telemetry);
+                        }
+                        Err(error) => {
+                            break Err(anyhow!(error).context("terminal input reader failed"));
+                        }
+                    }
                 }
                 _ = ticker.tick() => {
-                    self.redraw(&board.snapshot(), &telemetry);
+                    if let Err(error) = self.redraw(&board.snapshot(), &telemetry) {
+                        break Err(error);
+                    }
                 }
                 result = &mut supervise => {
                     break match result {
@@ -373,11 +384,20 @@ impl SessionController {
         }
     }
 
-    fn redraw(&mut self, board: &BoardSnapshot, telemetry: &TelemetryBackend) {
+    /// Draw one frame. An `Err` is a genuine terminal I/O failure (the TUI's
+    /// underlying tty went away) - the caller fails the session rather than
+    /// silently leaving a stale screen up forever; `Line`/`None` never draw
+    /// to a terminal and so never fail here.
+    fn redraw(&mut self, board: &BoardSnapshot, telemetry: &TelemetryBackend) -> Result<()> {
         match &mut self.renderer {
-            Renderer::Tui(tui) => tui.redraw(board, telemetry),
-            Renderer::Line(line) => line.redraw_board(board),
-            Renderer::None => {}
+            Renderer::Tui(tui) => tui
+                .redraw(board, telemetry)
+                .context("failed to draw the interactive session frame"),
+            Renderer::Line(line) => {
+                line.redraw_board(board);
+                Ok(())
+            }
+            Renderer::None => Ok(()),
         }
     }
 
@@ -403,9 +423,16 @@ impl SessionController {
 /// disjoint from the `events_rx` field another branch borrows in the same
 /// `select!` invocation. `Line`/`None` never produce input, so this future
 /// simply never resolves for them - safe to poll repeatedly every loop pass.
-async fn poll_next_input(renderer: &mut Renderer) -> Option<Event> {
+/// `Some(Err(_))` is a genuine terminal read failure (see
+/// `TuiDisplay::next_input`'s docs) - the caller fails the session rather
+/// than silently going input-deaf.
+async fn poll_next_input(renderer: &mut Renderer) -> Option<io::Result<Event>> {
     match renderer {
-        Renderer::Tui(tui) => tui.next_input().await,
+        Renderer::Tui(tui) => match tui.next_input().await {
+            Ok(Some(event)) => Some(Ok(event)),
+            Ok(None) => std::future::pending().await,
+            Err(error) => Some(Err(error)),
+        },
         Renderer::Line(_) | Renderer::None => std::future::pending().await,
     }
 }
