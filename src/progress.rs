@@ -3,70 +3,20 @@
 //! [`OutputMode`] so it never emits cursor control on a non-interactive
 //! stream and never leaks a byte into `--message-format json`.
 //!
-//! [`set_mode`]/[`clear_mode`] follow the same once-per-invocation global-cell
-//! pattern as [`crate::update_notice`]: [`crate::commands::dispatch`] sets the
-//! mode once from the same inputs that build the output-mode matrix, and every
-//! long-running operation below it ([`crate::catalog::fetch_https`],
+//! [`spinner`]/[`bytes_bar`] take their [`OutputMode`] explicitly from the
+//! caller - no process-global mode cell. Every long-running operation that
+//! draws one ([`crate::catalog::fetch_https`],
 //! [`crate::native_artifacts::download_blob`],
-//! [`crate::resolver::resolve_git_ref`], the cargo build helpers, the
-//! simulate readiness wait) asks for a [`spinner`]/[`bytes_bar`] without
-//! needing a handle threaded through every call site. Code that never runs
-//! through `dispatch` (unit tests, library callers) falls back to computing
-//! the mode fresh from the real environment, which is always the safe
-//! (non-drawing) choice under a test harness's piped stderr.
+//! [`crate::resolver::resolve_git_ref`], the cargo build helpers) either has
+//! an `AppContext`/`OutputContext` in scope already or threads the mode down
+//! from the caller that does.
 
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
-use crate::commands::MessageFormat;
 use crate::output_mode::OutputMode;
 use crate::theme::{Role, Theme};
-
-fn mode_cell() -> &'static Mutex<Option<OutputMode>> {
-    static CELL: OnceLock<Mutex<Option<OutputMode>>> = OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(None))
-}
-
-/// Set the process-wide output mode for the remainder of this invocation.
-/// Called once from [`crate::commands::dispatch`], beside the
-/// `update_notice`/identity policy setup.
-pub fn set_mode(mode: OutputMode) {
-    *mode_cell()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mode);
-}
-
-/// Reset the global mode. Tests that exercise [`set_mode`] call this in
-/// teardown so they do not leak state into the next test on the same thread
-/// pool; `dispatch` does not need to call it since the process exits after.
-pub fn clear_mode() {
-    *mode_cell()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-}
-
-/// The process-wide output mode set by [`set_mode`] (falling back to a fresh
-/// environment read outside `dispatch`). [`crate::ui::Ui`] reads this to
-/// suppress every line under [`OutputMode::Json`] - the output-mode matrix
-/// promises stderr carries nothing at all in that mode, not just no
-/// progress bars.
-#[must_use]
-pub fn current_mode() -> OutputMode {
-    let cached = *mode_cell()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cached.unwrap_or_else(|| {
-        use std::io::IsTerminal;
-        OutputMode::compute(
-            std::io::stderr().is_terminal(),
-            false,
-            false,
-            MessageFormat::Human,
-        )
-    })
-}
 
 /// A live spinner or bar handle. Draws when the mode allows it, prints a
 /// single append-only line under [`OutputMode::Plain`], and is entirely
@@ -81,16 +31,16 @@ pub enum Handle {
 /// plain line under [`OutputMode::Plain`]; nothing at all under
 /// [`OutputMode::Json`].
 #[must_use]
-pub fn spinner(message: impl Into<String>) -> Handle {
+pub fn spinner(message: impl Into<String>, mode: OutputMode) -> Handle {
     let message = message.into();
-    match current_mode() {
+    match mode {
         OutputMode::Json => Handle::Silent,
         OutputMode::Plain => {
             eprintln!("{message}");
             Handle::Plain
         }
         OutputMode::Rich => {
-            let theme = Theme::detect_stderr();
+            let theme = Theme::detect_stderr(mode);
             let bar = ProgressBar::new_spinner();
             bar.set_draw_target(ProgressDrawTarget::stderr());
             bar.set_style(spinner_style(theme));
@@ -104,16 +54,16 @@ pub fn spinner(message: impl Into<String>) -> Handle {
 /// Start a determinate byte/count bar with `message` and a known `total`.
 /// Callers with an unknown total should use [`spinner`] instead.
 #[must_use]
-pub fn bytes_bar(message: impl Into<String>, total: u64) -> Handle {
+pub fn bytes_bar(message: impl Into<String>, total: u64, mode: OutputMode) -> Handle {
     let message = message.into();
-    match current_mode() {
+    match mode {
         OutputMode::Json => Handle::Silent,
         OutputMode::Plain => {
             eprintln!("{message}");
             Handle::Plain
         }
         OutputMode::Rich => {
-            let theme = Theme::detect_stderr();
+            let theme = Theme::detect_stderr(mode);
             let bar = ProgressBar::new(total);
             bar.set_draw_target(ProgressDrawTarget::stderr());
             bar.set_style(bytes_style(theme));
@@ -194,43 +144,41 @@ fn bytes_style(theme: Theme) -> ProgressStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
-
-    // `set_mode`/`clear_mode` touch process-global state; serialize the tests
-    // that exercise it so they cannot interleave with each other.
-    static TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
     #[test]
     fn json_mode_yields_a_silent_handle_for_spinner_and_bytes_bar() {
-        let _guard = TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        set_mode(OutputMode::Json);
-        assert!(matches!(spinner("fetching"), Handle::Silent));
-        assert!(matches!(bytes_bar("downloading", 100), Handle::Silent));
-        clear_mode();
+        assert!(matches!(
+            spinner("fetching", OutputMode::Json),
+            Handle::Silent
+        ));
+        assert!(matches!(
+            bytes_bar("downloading", 100, OutputMode::Json),
+            Handle::Silent
+        ));
     }
 
     #[test]
     fn plain_mode_yields_a_plain_handle_not_a_rich_bar() {
-        let _guard = TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        set_mode(OutputMode::Plain);
-        assert!(matches!(spinner("fetching"), Handle::Plain));
-        assert!(matches!(bytes_bar("downloading", 100), Handle::Plain));
-        clear_mode();
+        assert!(matches!(
+            spinner("fetching", OutputMode::Plain),
+            Handle::Plain
+        ));
+        assert!(matches!(
+            bytes_bar("downloading", 100, OutputMode::Plain),
+            Handle::Plain
+        ));
     }
 
     #[test]
     fn rich_mode_yields_a_rich_handle() {
-        let _guard = TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        set_mode(OutputMode::Rich);
-        assert!(matches!(spinner("fetching"), Handle::Rich(_)));
-        assert!(matches!(bytes_bar("downloading", 100), Handle::Rich(_)));
-        clear_mode();
+        assert!(matches!(
+            spinner("fetching", OutputMode::Rich),
+            Handle::Rich(_)
+        ));
+        assert!(matches!(
+            bytes_bar("downloading", 100, OutputMode::Rich),
+            Handle::Rich(_)
+        ));
     }
 
     #[test]

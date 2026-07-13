@@ -472,20 +472,24 @@ fn run(
     };
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
-    let catalog = crate::commands::catalog_or_vendored(crate::catalog::load_pinned_catalog(
-        crate::catalog::CatalogLoadOptions {
-            cli_source: options.catalog_source.clone(),
-            robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
-                if source.is_absolute() {
-                    source.clone()
-                } else {
-                    project_root.join(source)
-                }
-            }),
-            offline: false,
-        },
-        crate::catalog::selection_channel(robot.artifacts.channel),
-    ))?;
+    let catalog = crate::commands::catalog_or_vendored(
+        crate::catalog::load_pinned_catalog(
+            crate::catalog::CatalogLoadOptions {
+                cli_source: options.catalog_source.clone(),
+                robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
+                    if source.is_absolute() {
+                        source.clone()
+                    } else {
+                        project_root.join(source)
+                    }
+                }),
+                offline: false,
+            },
+            crate::catalog::selection_channel(robot.artifacts.channel),
+            ui.mode(),
+        ),
+        ui.mode(),
+    )?;
     // `check` resolves live git component refs so component drivers can be
     // located and staged. A path-only / official-only graph needs no component
     // network; a git component pinned to a commit SHA resolves offline; a
@@ -507,6 +511,7 @@ fn run(
             resolve_component_asset_commits: false,
             official_target_triple: target_triple.clone(),
             tool_target_triple: target_triple,
+            output_mode: ui.mode(),
         },
     )?;
     let descriptors = crate::native_artifacts::descriptors_for(&resolved, false, false)?;
@@ -1559,10 +1564,19 @@ fn build_and_locate_binary(crate_dir: &Path, binary_name: &str) -> Result<PathBu
     // own live compiler output - unlike `run::build_source_binary`, whose
     // `cargo build` inherits the terminal so its errors stream live and gets
     // a static themed line instead (see that function's doc comment).
-    let progress = crate::progress::spinner(format!(
-        "building `{binary_name}` in {}",
-        crate_dir.display()
-    ));
+    //
+    // This sits behind `build_emit_apis_by_building`, which is itself passed
+    // around as a bare fn pointer matching a shared closure signature (the
+    // `build_by_building` parameter of `build_emit_apis_from_source_with_diagnostics`,
+    // and the `run_check_with_context` callback used identically by
+    // `run`/`deploy`/`simulate`/`watch`) - adding a `mode` parameter here
+    // would have to ripple through that whole shared contract. Recomputing
+    // fresh from the environment is the explicit, non-global fallback
+    // (`OutputMode::from_env`'s docs) for exactly this case.
+    let progress = crate::progress::spinner(
+        format!("building `{binary_name}` in {}", crate_dir.display()),
+        crate::output_mode::OutputMode::from_env(),
+    );
     let result = crate::shell::run_output(
         "cargo",
         [

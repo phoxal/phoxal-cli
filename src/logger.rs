@@ -19,10 +19,10 @@ pub struct LineLogger {
 
 impl LineLogger {
     #[must_use]
-    pub fn new(mode_label: &'static str) -> Self {
+    pub fn new(mode_label: &'static str, theme: Theme) -> Self {
         Self {
             mode_label,
-            theme: Theme::detect_stderr(),
+            theme,
             last_state: BTreeMap::new(),
         }
     }
@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn redraw_tracks_state_transitions_without_panicking() {
-        let mut logger = LineLogger::new("run");
+        let mut logger = LineLogger::new("run", Theme::new(crate::theme::ColorCapability::None));
         let starting = board_with("drive", ParticipantState::Starting);
         logger.redraw(&starting);
         assert_eq!(

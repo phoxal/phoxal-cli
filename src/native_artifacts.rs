@@ -595,7 +595,8 @@ fn prepare_descriptor(
             descriptor.kind, descriptor.name, descriptor.url
         ));
     }
-    let tarball_path = download_blob(descriptor)?;
+    let mode = ui.map_or_else(crate::output_mode::OutputMode::from_env, |ui| ui.mode());
+    let tarball_path = download_blob(descriptor, mode)?;
     unpack_asset(&tarball_path, &version_dir)?;
     fs::remove_file(&tarball_path).ok();
     if binary.is_file() {
@@ -850,7 +851,10 @@ pub fn existing_target_scopes(package: &str) -> Result<Vec<String>> {
     Ok(targets)
 }
 
-fn download_blob(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
+fn download_blob(
+    descriptor: &NativeArtifactDescriptor,
+    mode: crate::output_mode::OutputMode,
+) -> Result<PathBuf> {
     let label = format!(
         "downloading {} {} [{}] ({} bytes)",
         descriptor.package_id,
@@ -861,7 +865,7 @@ fn download_blob(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
     // `descriptor.size` is the catalog-declared blob size (always known
     // ahead of the request - it is what `verify_blob_bytes` checks the
     // download against), so the byte bar is always determinate here.
-    let progress = crate::progress::bytes_bar(label, descriptor.size);
+    let progress = crate::progress::bytes_bar(label, descriptor.size, mode);
     match download_blob_inner(descriptor, &progress) {
         Ok(path) => {
             progress.finish_and_clear();

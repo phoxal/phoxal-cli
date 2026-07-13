@@ -18,13 +18,17 @@
 
 use crate::commands::MessageFormat;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputMode {
     /// Interactive stderr: the progress primitive may draw a spinner/bar and
     /// redraw in place.
     Rich,
     /// stderr is append-only: one line per event, no redraw, no cursor
-    /// control. Selected by a non-TTY stderr, `--plain`, or `--quiet`.
+    /// control. Selected by a non-TTY stderr, `--plain`, or `--quiet`. The
+    /// default for a config struct built outside `dispatch` (e.g. a test
+    /// fixture) - the same safe, non-drawing choice [`OutputMode::from_env`]
+    /// falls back to when a non-TTY stream can't be assumed.
+    #[default]
     Plain,
     /// `--message-format json`: stdout carries only the JSON document and
     /// stderr carries nothing - no identity, no welcome, no progress, no log
@@ -42,6 +46,28 @@ impl OutputMode {
             return Self::Plain;
         }
         Self::Rich
+    }
+
+    /// Recompute fresh from the live environment, ignoring `--plain`/
+    /// `--quiet`/`--message-format` (those are only known once `clap` has
+    /// parsed the invocation). For the narrow set of call sites with no
+    /// `AppContext`/`OutputContext` in scope to read the real mode from: a
+    /// deeply-nested helper behind a shared closure signature that cannot
+    /// take an extra parameter without rippling through every other
+    /// implementation of that signature, or a pre-`dispatch` error path.
+    /// Never draws incorrectly (worst case: a decorated line that should
+    /// have been suppressed under `--message-format json`, not a hang or a
+    /// panic), and is always non-global - recomputed at the call site, not
+    /// cached process-wide.
+    #[must_use]
+    pub fn from_env() -> Self {
+        use std::io::IsTerminal;
+        Self::compute(
+            std::io::stderr().is_terminal(),
+            false,
+            false,
+            MessageFormat::Human,
+        )
     }
 
     /// Whether the progress primitive may draw/redraw (a spinner tick, a

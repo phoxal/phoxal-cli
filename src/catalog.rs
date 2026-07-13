@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
+use crate::output_mode::OutputMode;
+
 pub use phoxal::catalog::{Artifact, Blob, BuildProvenance, Catalog, Heads};
 
 pub const DEFAULT_CATALOG_URL: &str =
@@ -81,17 +83,19 @@ impl CatalogLoadOptions {
 
 /// Load one catalog without following heads. Custom URLs and local paths are
 /// intentionally frozen single-catalog sources.
-pub fn load_catalog(options: CatalogLoadOptions) -> Result<Option<Catalog>> {
+pub fn load_catalog(options: CatalogLoadOptions, mode: OutputMode) -> Result<Option<Catalog>> {
     if options.offline || offline_from_env() {
         return Ok(None);
     }
     match options.explicit_source() {
-        Some(source) => read_source(&source).map(Some),
-        None => fetch_https(DEFAULT_CATALOG_URL).map(Some).map_err(|error| {
-            anyhow!(
-                "artifact catalog unavailable at {DEFAULT_CATALOG_URL}: {error:#}; no binaries can be resolved on a first run"
-            )
-        }),
+        Some(source) => read_source(&source, mode).map(Some),
+        None => fetch_https(DEFAULT_CATALOG_URL, mode)
+            .map(Some)
+            .map_err(|error| {
+                anyhow!(
+                    "artifact catalog unavailable at {DEFAULT_CATALOG_URL}: {error:#}; no binaries can be resolved on a first run"
+                )
+            }),
     }
 }
 
@@ -107,9 +111,10 @@ fn offline_from_env() -> bool {
 pub fn load_pinned_catalog(
     options: CatalogLoadOptions,
     channel: SelectionChannel,
+    mode: OutputMode,
 ) -> Result<Option<Catalog>> {
     let is_default = options.is_default_source();
-    let Some(latest) = load_catalog(options)? else {
+    let Some(latest) = load_catalog(options, mode)? else {
         return Ok(None);
     };
     if !is_default {
@@ -136,7 +141,7 @@ pub fn load_pinned_catalog(
         return Ok(Some(latest));
     }
     let url = snapshot_catalog_url(head)?;
-    fetch_https(&url)
+    fetch_https(&url, mode)
         .with_context(|| format!("failed to fetch frozen {channel} snapshot {head} from {url}"))
         .map(Some)
 }
@@ -154,9 +159,9 @@ pub fn snapshot_catalog_url(tag: &str) -> Result<String> {
     ))
 }
 
-fn read_source(source: &str) -> Result<Catalog> {
+fn read_source(source: &str, mode: OutputMode) -> Result<Catalog> {
     if source.starts_with("https://") {
-        fetch_https(source)
+        fetch_https(source, mode)
             .with_context(|| format!("failed to fetch artifact catalog from {source}"))
     } else if source.starts_with("http://") {
         bail!("artifact catalog source must use HTTPS or a local path: {source}");
@@ -226,8 +231,8 @@ fn validate_blob(blob: &Blob) -> Result<()> {
     Ok(())
 }
 
-fn fetch_https(url: &str) -> Result<Catalog> {
-    let progress = crate::progress::spinner(format!("fetching artifact catalog from {url}"));
+fn fetch_https(url: &str, mode: OutputMode) -> Result<Catalog> {
+    let progress = crate::progress::spinner(format!("fetching artifact catalog from {url}"), mode);
     match fetch_https_inner(url) {
         Ok(catalog) => {
             progress.finish_and_clear();

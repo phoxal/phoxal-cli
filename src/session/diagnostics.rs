@@ -6,8 +6,9 @@
 //! never a raw write racing an active redraw or corrupting the alternate
 //! screen.
 //!
-//! Follows the same process-global-cell pattern as [`crate::progress`]'s own
-//! output-mode cell: [`install`] is called once by
+//! Uses a process-global cell for the session's event sender (unlike
+//! `crate::progress`'s spinner/bar, which take their `OutputMode` as an
+//! explicit parameter): [`install`] is called once by
 //! [`super::controller::SessionController::new`] for the lifetime of one
 //! `run`/`simulation run` session; [`uninstall`] restores direct stderr
 //! writing on teardown. Every OTHER verb (and any code running before a

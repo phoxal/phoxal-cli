@@ -455,7 +455,7 @@ impl LineRenderer {
         Self {
             mode_label,
             theme,
-            board_logger: LineLogger::new(mode_label),
+            board_logger: LineLogger::new(mode_label, theme),
             phase_labels: std::collections::HashMap::new(),
         }
     }

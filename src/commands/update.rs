@@ -84,6 +84,7 @@ fn update(
             offline: false,
         },
         channel,
+        ui.mode(),
     )?
     .context("update requires a reachable artifact catalog; --offline cannot update")?;
     let resolved = resolve(

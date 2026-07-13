@@ -91,6 +91,10 @@ pub struct RunOptions {
     pub overlays: Vec<String>,
     pub watch: bool,
     pub message_format: MessageFormat,
+    /// The session's output mode, threaded into a catalog fetch's spinner
+    /// (`watch::recheck_run_target` runs `--watch` rechecks with no
+    /// `AppContext` in scope) - no process-global mode cell.
+    pub output_mode: crate::output_mode::OutputMode,
 }
 
 #[derive(Debug)]
@@ -112,6 +116,7 @@ impl Run {
             overlays: self.env.clone(),
             watch: self.watch,
             message_format: self.message_format,
+            output_mode: app.output.mode,
         };
         if options.drivers == DriversMode::Off && !options.drivers_subset.is_empty() {
             bail!("--driver cannot be combined with --drivers off");
@@ -369,6 +374,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         project_root,
         loaded.robot.artifacts.channel,
         &loaded.extras,
+        ui.mode(),
     )?;
     let resolved = resolve(
         &loaded.robot,
@@ -473,7 +479,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     let router_ownership = router_ownership(local_router_reachable(&default_connect_endpoint()));
     let mut specs = Vec::new();
 
-    prepare_site_tools(&plan, &resolved, &board, &mut specs, router_ownership)?;
+    prepare_site_tools(&plan, &resolved, &board, &mut specs, router_ownership, ui)?;
     prepare_robot_participants(
         &plan,
         &resolved,
@@ -657,6 +663,7 @@ pub(crate) fn prepare_site_tools(
     board: &BoardBackend,
     specs: &mut Vec<ParticipantSpec>,
     router_ownership: RouterOwnership,
+    ui: &crate::Ui,
 ) -> Result<()> {
     let namespace = plan
         .robots
@@ -697,7 +704,7 @@ pub(crate) fn prepare_site_tools(
         if !should_launch {
             continue;
         }
-        match locate_tool_binary(resolved, &site.id)? {
+        match locate_tool_binary(resolved, &site.id, ui)? {
             Some(path) => specs.push(ParticipantSpec {
                 id: site.id.clone(),
                 kind: ParticipantKind::Tool,
@@ -981,14 +988,18 @@ fn site_tool_is_local(resolved: &ResolvedRobot, name: &str) -> bool {
         .is_some_and(|tool| tool.path_override.is_some())
 }
 
-fn locate_tool_binary(resolved: &ResolvedRobot, name: &str) -> Result<Option<PathBuf>> {
+fn locate_tool_binary(
+    resolved: &ResolvedRobot,
+    name: &str,
+    ui: &crate::Ui,
+) -> Result<Option<PathBuf>> {
     let tool = resolved
         .tools
         .iter()
         .find(|tool| tool.name == name)
         .ok_or_else(|| anyhow!("resolved graph is missing site tool {name}"))?;
     if let Some(path) = &tool.path_override {
-        return Ok(Some(build_source_binary(path, name, &crate::Ui)?));
+        return Ok(Some(build_source_binary(path, name, ui)?));
     }
     if let Some(path) = env_path_override("PHOXAL_ARTIFACT", name) {
         return Ok(Some(path));
@@ -1324,6 +1335,7 @@ mod tests {
                 overlays: Vec::new(),
                 watch: false,
                 message_format: MessageFormat::Human,
+                output_mode: crate::output_mode::OutputMode::from_env(),
             },
             &plan,
         )?;
@@ -1341,6 +1353,7 @@ mod tests {
                 overlays: Vec::new(),
                 watch: false,
                 message_format: MessageFormat::Human,
+                output_mode: crate::output_mode::OutputMode::from_env(),
             },
             &plan,
         )
@@ -1360,6 +1373,7 @@ mod tests {
                 overlays: Vec::new(),
                 watch: false,
                 message_format: MessageFormat::Human,
+                output_mode: crate::output_mode::OutputMode::from_env(),
             },
             &plan,
         )?;
@@ -1506,6 +1520,7 @@ robot:
             &board,
             &mut specs,
             RouterOwnership::Managed,
+            &crate::Ui::from_env(),
         )?;
         prepare_robot_participants(
             &plan,
@@ -1514,7 +1529,7 @@ robot:
             &DriverPolicy::drivers_off_for_sim(),
             &board,
             &mut specs,
-            &crate::Ui::new(),
+            &crate::Ui::from_env(),
         )?;
 
         let router_spec = specs
@@ -1565,6 +1580,7 @@ robot:
             &board,
             &mut specs,
             RouterOwnership::External,
+            &crate::Ui::from_env(),
         )?;
 
         assert!(

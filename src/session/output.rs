@@ -2,14 +2,12 @@
 //! which renderer applies, the theme it draws with, and whether the
 //! invocation asked for `--quiet`.
 //!
-//! Replaces scattered `progress::current_mode()`/`Theme::detect_stderr()`
-//! calls at the session entry point with one immutable value, built ONCE in
-//! [`crate::commands::dispatch`] from the same inputs
-//! [`crate::output_mode::OutputMode::compute`] uses, and threaded into
-//! [`super::controller::SessionController`]. `crate::progress`'s own
-//! process-global mode cell is untouched by this - every non-session verb
-//! (`check`, `deploy`, `status`, ...) still asks it directly, and stays doing
-//! so until a later wave (see the crate's follow-up plan, Wave D).
+//! Built ONCE in [`crate::commands::dispatch`] from the same inputs
+//! [`crate::output_mode::OutputMode::compute`] uses, and threaded explicitly
+//! into [`super::controller::SessionController`], `AppContext::ui`, and every
+//! other mode-aware helper (`crate::progress`, catalog/artifact fetches, git
+//! ref resolution) from there - there is no process-global mode cell
+//! anywhere in the crate.
 
 use std::time::Duration;
 
@@ -73,7 +71,7 @@ impl OutputContext {
     #[must_use]
     pub fn compute(is_tty: bool, plain: bool, quiet: bool, message_format: MessageFormat) -> Self {
         let mode = OutputMode::compute(is_tty, plain, quiet, message_format);
-        Self::new(mode, Theme::detect_stderr(), quiet)
+        Self::new(mode, Theme::detect_stderr(mode), quiet)
     }
 }
 

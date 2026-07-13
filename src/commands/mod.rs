@@ -68,6 +68,7 @@ pub(crate) fn load_catalog_for_robot(
         project_root,
         channel,
         manifest_extras,
+        app.output.mode,
     )
 }
 
@@ -76,6 +77,7 @@ pub(crate) fn load_catalog_for_robot_from_source(
     project_root: &std::path::Path,
     channel: phoxal::model::robot::v0::Channel,
     manifest_extras: &RobotManifestExtras,
+    mode: crate::output_mode::OutputMode,
 ) -> Result<Option<crate::catalog::Catalog>> {
     let robot_source = manifest_extras.catalog_source.as_ref().map(|source| {
         if source.is_absolute() {
@@ -84,25 +86,28 @@ pub(crate) fn load_catalog_for_robot_from_source(
             project_root.join(source)
         }
     });
-    catalog_or_vendored(crate::catalog::load_pinned_catalog(
-        crate::catalog::CatalogLoadOptions {
-            cli_source: catalog_source,
-            robot_source,
-            offline: false,
-        },
-        crate::catalog::selection_channel(channel),
-    ))
+    catalog_or_vendored(
+        crate::catalog::load_pinned_catalog(
+            crate::catalog::CatalogLoadOptions {
+                cli_source: catalog_source,
+                robot_source,
+                offline: false,
+            },
+            crate::catalog::selection_channel(channel),
+            mode,
+        ),
+        mode,
+    )
 }
 
 pub(crate) fn catalog_or_vendored(
     loaded: Result<Option<crate::catalog::Catalog>>,
+    mode: crate::output_mode::OutputMode,
 ) -> Result<Option<crate::catalog::Catalog>> {
     match loaded {
         Ok(catalog) => Ok(catalog),
         Err(error) if crate::host_paths::artifacts_dir().is_ok_and(|path| path.is_dir()) => {
-            if std::env::var_os("PHOXAL_QUIET").is_none()
-                && !crate::progress::current_mode().is_json()
-            {
+            if std::env::var_os("PHOXAL_QUIET").is_none() && !mode.is_json() {
                 eprintln!(
                     "warning: catalog unreachable, continuing with project-vendored files: {error:#}"
                 );
@@ -396,22 +401,13 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
         crate::update_notice::start_cli_check();
     }
 
-    // Output-mode matrix (see `crate::output_mode`): computed once here from
-    // the same inputs the notice policy above uses, and pushed into the
-    // process-wide progress state so every long-running operation below
-    // (catalog fetch, artifact download, git resolve, cargo builds, the
-    // simulate readiness wait) can ask for a spinner/bar without a handle
-    // threaded through its call chain. `crate::progress::set_mode` stays -
-    // every non-session verb (`check`, `deploy`, `status`, ...) still asks it
-    // directly (Wave D removes it, not this one).
-    let output_mode =
-        crate::output_mode::OutputMode::compute(interactive, cli.plain, cli.quiet, message_format);
-    crate::progress::set_mode(output_mode);
-
     // The explicit `OutputContext` (Target design part 4): built once, here,
-    // from the SAME inputs as `output_mode` above plus the theme detected off
-    // the same stream, and threaded into `run`/`simulation run`'s
-    // `SessionController` via `AppContext::output` - see that field's docs.
+    // from the same inputs the notice policy above uses, plus the theme
+    // detected off the same stream, and threaded explicitly into every
+    // long-running operation below (catalog fetch, artifact download, git
+    // resolve, cargo builds, the simulate readiness wait, `AppContext::ui`'s
+    // own JSON gate) via `AppContext::output`/`AppContext::ui` - no
+    // process-global mode cell.
     let output = crate::session::output::OutputContext::compute(
         interactive,
         cli.plain,
@@ -420,6 +416,7 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
     );
     let app = &AppContext {
         output,
+        ui: crate::Ui::new(output.mode),
         ..app.clone()
     };
 
@@ -442,14 +439,13 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
         crate::identity::print(
             identity_policy,
             app.project.root(),
-            crate::theme::Theme::detect_stderr(),
+            crate::theme::Theme::detect_stderr(output.mode),
             version_summary().cli_version,
         );
     }
 
     let result = cli.command.run(app).await;
     crate::update_notice::finish();
-    crate::progress::clear_mode();
     result
 }
 

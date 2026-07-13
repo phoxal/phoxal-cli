@@ -2,26 +2,49 @@ use std::process::{Child, Command, ExitStatus};
 
 use anyhow::{Context, Result};
 
+use crate::output_mode::OutputMode;
 use crate::session::diagnostics::try_route;
 use crate::session::event::{DiagnosticLevel, DiagnosticSource};
 use crate::theme::Theme;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Ui;
+#[derive(Debug, Clone, Copy)]
+pub struct Ui {
+    mode: OutputMode,
+}
 
 impl Ui {
-    pub fn new() -> Self {
-        Self
+    /// Construct with an explicit, already-known output mode - the preferred
+    /// constructor everywhere an `AppContext`/`OutputContext` is in scope
+    /// (i.e. everywhere downstream of `commands::dispatch`).
+    pub fn new(mode: OutputMode) -> Self {
+        Self { mode }
+    }
+
+    /// Compute the mode fresh from the live environment. For the narrow set
+    /// of call sites with no `AppContext` in scope: `main`'s top-level
+    /// pre-dispatch error path, and tests/library callers that do not care
+    /// which mode they get.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::new(OutputMode::from_env())
+    }
+
+    /// This `Ui`'s output mode - for a caller that needs to pass the same
+    /// mode on to another mode-aware helper (a spinner, a catalog fetch)
+    /// without threading a second, separate parameter alongside `ui`.
+    #[must_use]
+    pub const fn mode(&self) -> OutputMode {
+        self.mode
     }
 
     fn theme(&self) -> Theme {
-        Theme::detect_stderr()
+        Theme::detect_stderr(self.mode)
     }
 
     /// `--message-format json` promises stdout carries only the JSON
     /// document and stderr carries nothing (see [`crate::output_mode`]).
     fn should_print_decoration(&self) -> bool {
-        !crate::progress::current_mode().is_json()
+        !self.mode.is_json()
     }
 
     pub fn step<T>(

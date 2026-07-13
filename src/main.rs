@@ -20,7 +20,7 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             if message_format == MessageFormat::Human {
-                Ui::new().error(format!("{error:#}"));
+                Ui::from_env().error(format!("{error:#}"));
             }
             ExitCode::from(1)
         }

@@ -475,7 +475,7 @@ mod tests {
             requested_version: Some(current_version()),
             force: false,
         };
-        let outcome = run_upgrade(options, Ui::new(), MessageFormat::Human)?;
+        let outcome = run_upgrade(options, Ui::from_env(), MessageFormat::Human)?;
 
         assert_eq!(outcome.version_from, current_version().to_string());
         assert_eq!(outcome.version_to, current_version().to_string());
@@ -492,7 +492,7 @@ mod tests {
                 requested_version: Some(current_version()),
                 force: false,
             },
-            Ui::new(),
+            Ui::from_env(),
             MessageFormat::Human,
         )?;
         let json_outcome = run_upgrade(
@@ -500,7 +500,7 @@ mod tests {
                 requested_version: Some(current_version()),
                 force: false,
             },
-            Ui::new(),
+            Ui::from_env(),
             MessageFormat::Json,
         )?;
 

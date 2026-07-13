@@ -16,11 +16,12 @@ pub struct AppContext {
     pub quiet: bool,
     /// The output contract for `run`/`simulation run`'s `SessionController`.
     /// [`AppContext::new`] fills this with a reasonable default computed from
-    /// the live environment (matching `crate::progress::current_mode`'s own
+    /// the live environment (matching [`crate::ui::Ui::from_env`]'s own
     /// fallback), since `--plain`/`--message-format` are not yet known at
-    /// construction time; [`crate::commands::dispatch`] overwrites it with
-    /// the precise value computed from the actual CLI invocation before any
-    /// command runs (see that function's docs).
+    /// construction time; [`crate::commands::dispatch`] overwrites it (and
+    /// `ui`'s mode alongside it) with the precise value computed from the
+    /// actual CLI invocation before any command runs (see that function's
+    /// docs).
     pub output: OutputContext,
 }
 
@@ -50,7 +51,7 @@ impl AppContext {
             MessageFormat::Human,
         );
         Ok(Self {
-            ui: Ui::new(),
+            ui: Ui::new(output.mode),
             project: Project::new(workspace_root)?,
             catalog_source,
             offline,

@@ -195,6 +195,12 @@ pub struct SimulateOptions {
     pub watch: bool,
     pub overlays: Vec<String>,
     pub target: Option<String>,
+    /// The session's [`OutputMode`](crate::output_mode::OutputMode), carried
+    /// alongside the other options so `resolve_project`/`prepare_with_mode`
+    /// (which run inside a `spawn_blocking` worker with no `AppContext` in
+    /// scope) can thread it into a catalog fetch's spinner without a
+    /// process-global mode cell.
+    pub output_mode: crate::output_mode::OutputMode,
 }
 
 /// Pairs the sim `LaunchPlan` with its `PlanContext` (Part 3/6): replaces the
@@ -228,6 +234,7 @@ impl SimulationRun {
             watch: self.watch,
             overlays: self.env.clone(),
             target: self.target.clone(),
+            output_mode: app.output.mode,
         };
         let mode = if self.dry_run {
             SimulateMode::DryRun
@@ -294,6 +301,7 @@ pub async fn run(
                 &board,
                 &mut specs,
                 router_ownership,
+                &ui,
             )?;
             crate::commands::run::prepare_robot_participants(
                 &sim.plan,
@@ -650,20 +658,24 @@ pub(crate) fn resolve_project(
     };
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
-    let catalog = crate::commands::catalog_or_vendored(crate::catalog::load_pinned_catalog(
-        crate::catalog::CatalogLoadOptions {
-            cli_source: options.catalog_source.clone(),
-            robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
-                if source.is_absolute() {
-                    source.clone()
-                } else {
-                    project_root.join(source)
-                }
-            }),
-            offline: false,
-        },
-        crate::catalog::selection_channel(robot.artifacts.channel),
-    ))?;
+    let catalog = crate::commands::catalog_or_vendored(
+        crate::catalog::load_pinned_catalog(
+            crate::catalog::CatalogLoadOptions {
+                cli_source: options.catalog_source.clone(),
+                robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
+                    if source.is_absolute() {
+                        source.clone()
+                    } else {
+                        project_root.join(source)
+                    }
+                }),
+                offline: false,
+            },
+            crate::catalog::selection_channel(robot.artifacts.channel),
+            options.output_mode,
+        ),
+        options.output_mode,
+    )?;
 
     // Always resolve live git component driver commits so driver metadata can
     // be staged. Component asset git refs are resolved only for live simulate,
@@ -3226,7 +3238,7 @@ robot:
         controller.path_override = Some(controller_dir.clone());
         resolved.simulators.extend([supervisor, controller]);
 
-        stage_simulator_controller_binaries(&resolved, &crate::Ui)?;
+        stage_simulator_controller_binaries(&resolved, &crate::Ui::from_env())?;
 
         let supervisor_binary =
             webots_stage_root::controller_dir("phoxal-simulator-webots-supervisor")?
@@ -3283,7 +3295,7 @@ robot:
             .simulators
             .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
 
-        let error = stage_simulator_controller_binaries(&resolved, &crate::Ui)
+        let error = stage_simulator_controller_binaries(&resolved, &crate::Ui::from_env())
             .expect_err("a catalog simulator with no cached binary must error, not silently skip");
         let message = format!("{error:#}");
         assert!(

@@ -49,6 +49,12 @@ pub struct ResolveOptions {
     /// Override native tool asset target triple. Host-native run/sim use the
     /// host triple; deploy ships robot-native tools.
     pub tool_target_triple: Option<String>,
+    /// The session's output mode, threaded into a git-ref resolution
+    /// spinner (`resolve_git_ref`) - no process-global mode cell. Defaults
+    /// to [`OutputMode::Plain`](crate::output_mode::OutputMode), the safe
+    /// non-drawing choice, for callers (mostly tests) with no real session
+    /// mode to report.
+    pub output_mode: crate::output_mode::OutputMode,
 }
 
 impl Default for ResolveOptions {
@@ -60,6 +66,7 @@ impl Default for ResolveOptions {
             resolve_component_asset_commits: true,
             official_target_triple: None,
             tool_target_triple: None,
+            output_mode: crate::output_mode::OutputMode::default(),
         }
     }
 }
@@ -756,15 +763,16 @@ pub fn resolve(
     // Metadata-only/update flows leave component commit resolution off.
     // Component assets have a separate gate because deploy/check/run do not
     // read non-local asset bundles during planning/staging; live simulate does.
-    let mut components = resolve_components(
+    let mut components = resolve_components(&ComponentResolveContext {
         robot,
         catalog,
-        catalog_channel,
-        &target,
-        options.resolve_source_commits,
-        options.resolve_component_asset_commits,
+        channel: catalog_channel,
+        target: &target,
+        resolve_source_commits: options.resolve_source_commits,
+        resolve_component_asset_commits: options.resolve_component_asset_commits,
         prefer_vendored,
-    )?;
+        output_mode: options.output_mode,
+    })?;
     let mut tools = resolve_tools(
         robot,
         catalog,
@@ -773,9 +781,12 @@ pub fn resolve(
         prefer_vendored,
     )?;
     let path_overrides = apply_path_pins(
-        robot,
-        project_root,
-        options.resolve_source_commits,
+        &PathPinContext {
+            robot,
+            project_root,
+            resolve_source_commits: options.resolve_source_commits,
+            output_mode: options.output_mode,
+        },
         &mut platform_runtimes,
         &mut simulators,
         &mut components,
@@ -808,24 +819,37 @@ pub fn resolve(
 /// gates the same way it does for components: off leaves the pin unapplied
 /// rather than touching the network, on resolves the ref to
 /// a commit and clones/reuses the shallow checkout.
-fn apply_path_pins(
-    robot: &Robot,
-    project_root: &Path,
+/// The fixed (non-slice) inputs [`apply_path_pins`] needs, bundled so adding
+/// the output mode did not push it over clippy's argument-count lint - same
+/// pattern as [`ComponentResolveContext`].
+struct PathPinContext<'a> {
+    robot: &'a Robot,
+    project_root: &'a Path,
     resolve_source_commits: bool,
+    output_mode: crate::output_mode::OutputMode,
+}
+
+fn apply_path_pins(
+    context: &PathPinContext<'_>,
     platform_runtimes: &mut [ResolvedPlatformRuntime],
     simulators: &mut [ResolvedPlatformRuntime],
     components: &mut [ResolvedComponent],
     tools: &mut [ResolvedTool],
 ) -> Result<Vec<ResolvedPathOverride>> {
     let mut overrides = Vec::new();
-    for (key, pin) in &robot.artifacts.pins {
+    for (key, pin) in &context.robot.artifacts.pins {
         let path = match pin {
-            ArtifactPin::Path(pin) => resolve_project_path(project_root, &pin.path),
+            ArtifactPin::Path(pin) => resolve_project_path(context.project_root, &pin.path),
             ArtifactPin::Git(pin) => {
                 if is_component_package_key(key, components) {
                     continue;
                 }
-                let Some(path) = resolve_git_artifact_pin_path(pin, resolve_source_commits)? else {
+                let Some(path) = resolve_git_artifact_pin_path(
+                    pin,
+                    context.resolve_source_commits,
+                    context.output_mode,
+                )?
+                else {
                     continue;
                 };
                 path
@@ -876,11 +900,12 @@ fn is_component_package_key(key: &str, components: &[ResolvedComponent]) -> bool
 fn resolve_git_artifact_pin_path(
     pin: &phoxal::model::robot::v0::ArtifactGitPin,
     resolve_source_commits: bool,
+    mode: crate::output_mode::OutputMode,
 ) -> Result<Option<PathBuf>> {
     if !resolve_source_commits {
         return Ok(None);
     }
-    let commit = resolve_component_commit(&pin.git, &pin.rev)?;
+    let commit = resolve_component_commit(&pin.git, &pin.rev, mode)?;
     let repo_dir = crate::git_artifact::ensure_git_artifact(&pin.git, &commit)?;
     Ok(Some(crate::git_artifact::subdir(
         repo_dir,
@@ -1358,11 +1383,15 @@ fn resolved_runtime_from_expected_package(
 /// is returned as-is with no network access. Any other ref (a tag or branch
 /// name) is resolved live via `git ls-remote`; if the network is unavailable the
 /// failure is reported with an actionable fix.
-fn resolve_component_commit(url: &str, git_ref: &str) -> Result<String> {
+fn resolve_component_commit(
+    url: &str,
+    git_ref: &str,
+    mode: crate::output_mode::OutputMode,
+) -> Result<String> {
     if is_full_commit_sha(git_ref) {
         return Ok(git_ref.to_string());
     }
-    resolve_git_ref(url, git_ref).with_context(|| {
+    resolve_git_ref(url, git_ref, mode).with_context(|| {
         format!(
             "could not resolve git ref '{git_ref}' from {url} without network access. \
              Pin artifacts.pins.<package>.rev to an explicit commit SHA in robot.yaml, \
@@ -1375,8 +1404,13 @@ pub(crate) fn is_full_commit_sha(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|byte| byte.is_ascii_hexdigit())
 }
 
-pub fn resolve_git_ref(url: &str, git_ref: &str) -> Result<String> {
-    let progress = crate::progress::spinner(format!("resolving git ref {git_ref} from {url}"));
+pub fn resolve_git_ref(
+    url: &str,
+    git_ref: &str,
+    mode: crate::output_mode::OutputMode,
+) -> Result<String> {
+    let progress =
+        crate::progress::spinner(format!("resolving git ref {git_ref} from {url}"), mode);
     let result = resolve_git_ref_inner(url, git_ref);
     match &result {
         Ok(_) => progress.finish_and_clear(),
@@ -1481,26 +1515,11 @@ struct ComponentResolveContext<'a> {
     resolve_source_commits: bool,
     resolve_component_asset_commits: bool,
     prefer_vendored: bool,
+    output_mode: crate::output_mode::OutputMode,
 }
 
-fn resolve_components(
-    robot: &Robot,
-    catalog: Option<&Catalog>,
-    channel: SelectionChannel,
-    target: &str,
-    resolve_source_commits: bool,
-    resolve_component_asset_commits: bool,
-    prefer_vendored: bool,
-) -> Result<Vec<ResolvedComponent>> {
-    let context = ComponentResolveContext {
-        robot,
-        catalog,
-        channel,
-        target,
-        resolve_source_commits,
-        resolve_component_asset_commits,
-        prefer_vendored,
-    };
+fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<ResolvedComponent>> {
+    let robot = context.robot;
     let mut components = Vec::new();
     for (instance_name, instance) in &robot.robot.components {
         let component_id = &instance.component;
@@ -1508,7 +1527,7 @@ fn resolve_components(
 
         let has_driver = instance.driver.is_some();
         let assets = match resolve_component_package(
-            &context,
+            context,
             &package,
             ArtifactKind::ComponentAssets,
             context.resolve_component_asset_commits,
@@ -1529,7 +1548,7 @@ fn resolve_components(
 
         let driver = if has_driver {
             match resolve_component_package(
-                &context,
+                context,
                 &package,
                 ArtifactKind::ComponentDriver,
                 context.resolve_source_commits,
@@ -1581,7 +1600,13 @@ fn resolve_component_package(
     if let Some(pin @ (ArtifactPin::Path(_) | ArtifactPin::Git(_))) =
         context.robot.artifacts.pins.get(package)
     {
-        return resolve_pinned_component_package(package, kind, pin, resolve_git_ref);
+        return resolve_pinned_component_package(
+            package,
+            kind,
+            pin,
+            resolve_git_ref,
+            context.output_mode,
+        );
     }
 
     let (target, assets) = if kind == ArtifactKind::ComponentAssets {
@@ -1623,6 +1648,7 @@ fn resolve_pinned_component_package(
     kind: ArtifactKind,
     pin: &ArtifactPin,
     resolve_git_ref: bool,
+    mode: crate::output_mode::OutputMode,
 ) -> Result<ResolvedComponentPackage> {
     let source = match pin {
         ArtifactPin::Path(pin) => ResolvedComponentSource::Path {
@@ -1634,7 +1660,7 @@ fn resolve_pinned_component_package(
             // `git ls-remote`. Flows that never read this package's local
             // files leave `resolve_git_ref` off and skip this entirely.
             let commit = if resolve_git_ref {
-                resolve_component_commit(&pin.git, &pin.rev)?
+                resolve_component_commit(&pin.git, &pin.rev, mode)?
             } else {
                 String::new()
             };
