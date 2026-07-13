@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use phoxal::bus::{ContractBody, LogicalTime, Publish, Publisher, Subscribe, Subscriber, Topic};
@@ -23,6 +23,7 @@ use phoxal_api::y2026_9 as api;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::stores::telemetry_store::{HostPoint, TelemetryStore, Timestamped};
 use crate::supervisor::ClockObservation;
 
 /// One `telemetry::Host` sample (the host resource meter).
@@ -146,7 +147,13 @@ impl From<api::joypad::Devices> for JoypadDevicesSample {
 }
 
 /// A snapshot of every live telemetry feed, cloned once per TUI redraw
-/// (mirrors `BoardBackend::snapshot`).
+/// (mirrors `BoardBackend::snapshot`). Every latest-value field is a
+/// [`Timestamped`] carrying the [`Instant`] the underlying sample was
+/// actually RECEIVED off the bus (recorded by `TelemetryBackend::record_*`
+/// at the moment a feed task observes it, never re-stamped on later
+/// redraws), so a renderer can ask `Timestamped::is_stale`/`freshness`
+/// instead of trusting a long-cached value as if it were still live - see
+/// `stores::telemetry_store`'s module docs for the two bugs this fixes.
 #[derive(Debug, Clone, Default)]
 pub struct TelemetrySnapshot {
     /// The simulation clock's latest observed sample - `None` in `run` mode
@@ -156,10 +163,15 @@ pub struct TelemetrySnapshot {
     /// `None` until `tool-telemetry`'s first `Host` sample arrives - this is
     /// the graceful-absence case (the tool may not be in the catalog yet),
     /// rendered as `cpu n/a` rather than a failure.
-    pub host: Option<HostSample>,
-    pub process_by_participant: BTreeMap<String, ProcessSample>,
-    pub router: Option<RouterMetricsSample>,
-    pub joypad: Option<JoypadDevicesSample>,
+    pub host: Option<Timestamped<HostSample>>,
+    /// The Resources tab's rolling host-sample history, oldest first -
+    /// advances on every received sample regardless of whether its payload
+    /// differs from the previous one (see `TelemetryStore::record_host`'s
+    /// docs on the value-dedup bug this replaces).
+    pub host_history: Vec<HostPoint>,
+    pub process_by_participant: BTreeMap<String, Timestamped<ProcessSample>>,
+    pub router: Option<Timestamped<RouterMetricsSample>>,
+    pub joypad: Option<Timestamped<JoypadDevicesSample>>,
 }
 
 /// A joypad action the TUI's Devices tab asked to publish.
@@ -173,9 +185,15 @@ pub enum JoypadCommand {
 /// (`start_host_feed` etc.) and the TUI's redraw path
 /// (`TuiDisplay::redraw`/`render::draw`). Cheap to clone (an `Arc` handle);
 /// every feed task and the TUI hold their own clone.
+///
+/// Backed by [`TelemetryStore`] (Wave C2): every `record_*` call below
+/// stamps the sample with `Instant::now()` AT THE MOMENT the feed task
+/// received it, not when a later redraw happens to observe it - that
+/// receive-time timestamp is what makes [`TelemetrySnapshot`]'s freshness
+/// checks meaningful.
 #[derive(Debug, Clone, Default)]
 pub struct TelemetryBackend {
-    inner: Arc<Mutex<TelemetrySnapshot>>,
+    inner: Arc<Mutex<TelemetryStore>>,
     clock_rx: Arc<Mutex<Option<watch::Receiver<ClockObservation>>>>,
     joypad_command_tx: Arc<Mutex<Option<mpsc::UnboundedSender<JoypadCommand>>>>,
 }
@@ -220,7 +238,16 @@ impl TelemetryBackend {
 
     #[must_use]
     pub fn snapshot(&self) -> TelemetrySnapshot {
-        let mut snapshot = self.inner.lock().expect("telemetry mutex poisoned").clone();
+        let mut store = self.inner.lock().expect("telemetry mutex poisoned");
+        let mut snapshot = TelemetrySnapshot {
+            clock: None,
+            host: store.host().cloned(),
+            host_history: store.host_history().to_vec(),
+            process_by_participant: store.process_all().clone(),
+            router: store.router().cloned(),
+            joypad: store.joypad().cloned(),
+        };
+        drop(store);
         if let Some(rx) = &*self.clock_rx.lock().expect("clock_rx mutex poisoned") {
             snapshot.clock = rx.borrow().latest;
         }
@@ -228,23 +255,31 @@ impl TelemetryBackend {
     }
 
     fn record_host(&self, sample: HostSample) {
-        self.inner.lock().expect("telemetry mutex poisoned").host = Some(sample);
+        self.inner
+            .lock()
+            .expect("telemetry mutex poisoned")
+            .record_host(Instant::now(), sample);
     }
 
     fn record_process(&self, participant: String, sample: ProcessSample) {
         self.inner
             .lock()
             .expect("telemetry mutex poisoned")
-            .process_by_participant
-            .insert(participant, sample);
+            .record_process(Instant::now(), participant, sample);
     }
 
     fn record_router(&self, sample: RouterMetricsSample) {
-        self.inner.lock().expect("telemetry mutex poisoned").router = Some(sample);
+        self.inner
+            .lock()
+            .expect("telemetry mutex poisoned")
+            .record_router(Instant::now(), sample);
     }
 
     fn record_joypad(&self, sample: JoypadDevicesSample) {
-        self.inner.lock().expect("telemetry mutex poisoned").joypad = Some(sample);
+        self.inner
+            .lock()
+            .expect("telemetry mutex poisoned")
+            .record_joypad(Instant::now(), sample);
     }
 }
 
@@ -546,7 +581,33 @@ mod tests {
             window_ns: 1_000_000_000,
         });
         let snapshot = telemetry.snapshot();
-        assert_eq!(snapshot.host.map(|host| host.cpu_pct), Some(42.0));
+        assert_eq!(snapshot.host.map(|host| host.value.cpu_pct), Some(42.0));
+        assert_eq!(snapshot.host_history.len(), 1);
+    }
+
+    /// The bug `TelemetryStore` fixes, exercised through the live
+    /// `TelemetryBackend` path rather than the store directly: two
+    /// consecutive, IDENTICAL `Host` samples must still advance the
+    /// Resources tab's history, since each is a genuinely new receive event
+    /// even though the payload happens not to have changed.
+    #[test]
+    fn record_host_advances_history_on_repeated_identical_samples() {
+        let telemetry = TelemetryBackend::new();
+        let sample = HostSample {
+            cpu_pct: 12.5,
+            ram_used_bytes: 100,
+            ram_total_bytes: 200,
+            load_1m: 0.3,
+            window_ns: 1_000_000_000,
+        };
+        telemetry.record_host(sample);
+        telemetry.record_host(sample);
+        telemetry.record_host(sample);
+        assert_eq!(
+            telemetry.snapshot().host_history.len(),
+            3,
+            "a flat/unchanging live sample must still advance the series"
+        );
     }
 
     #[test]
@@ -573,14 +634,14 @@ mod tests {
             snapshot
                 .process_by_participant
                 .get("drive")
-                .map(|p| p.cpu_pct),
+                .map(|p| p.value.cpu_pct),
             Some(1.0)
         );
         assert_eq!(
             snapshot
                 .process_by_participant
                 .get("mission")
-                .map(|p| p.cpu_pct),
+                .map(|p| p.value.cpu_pct),
             Some(2.0)
         );
     }

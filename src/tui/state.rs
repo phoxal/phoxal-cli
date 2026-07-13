@@ -3,16 +3,25 @@
 //! terminal. Only [`AppState::handle_key`]'s input type
 //! ([`crossterm::event::KeyEvent`]) ties this to crossterm; construct one
 //! directly in a test rather than driving a real terminal.
+//!
+//! # Per-panel state (Target design part 6)
+//!
+//! Each detail-surface panel owns its OWN cursor/filter/scroll state
+//! ([`NavigatorState`], [`OverviewState`], [`LogsState`], [`TrafficState`],
+//! [`DevicesState`], [`ResourcesState`]) rather than one flat struct with
+//! every field always present - the old shape let a joypad cursor coexist
+//! with a traffic sort even though only one panel is ever visible at a time.
+//! [`AppState`] composes these; [`AppState::panel`] (a [`Panel`], never a
+//! participant-id string check - see `tui::panel`) says which one is active.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::display::DisplayAction;
-use crate::launch_plan::{SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER};
+use crate::stores::telemetry_store::HostPoint;
 use crate::supervisor::BoardSnapshot;
-use crate::telemetry::TelemetrySnapshot;
-use crate::tui::groups::{
-    Group, GroupSection, bespoke_tab_label, build_groups, suggested_participant,
-};
+use crate::telemetry::{HostSample, TelemetrySnapshot};
+use crate::tui::groups::{Group, GroupSection, build_groups, suggested_participant};
+use crate::tui::panel::{Panel, panels_for};
 
 /// Sort key for the `tool-router` Traffic table (`s` cycles through these in
 /// order); default is the busiest-first view an operator opens the tab to
@@ -48,6 +57,46 @@ impl TrafficSort {
     }
 }
 
+/// The Resources tab's rolling-history display window (`w` cycles through
+/// these) - a trailing slice of `TelemetrySnapshot::host_history` by receive
+/// time, not a separate sample buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResourcesRange {
+    ThirtySeconds,
+    #[default]
+    OneMinute,
+    TwoMinutes,
+}
+
+impl ResourcesRange {
+    #[must_use]
+    const fn cycle(self) -> Self {
+        match self {
+            Self::ThirtySeconds => Self::OneMinute,
+            Self::OneMinute => Self::TwoMinutes,
+            Self::TwoMinutes => Self::ThirtySeconds,
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ThirtySeconds => "30s",
+            Self::OneMinute => "1m",
+            Self::TwoMinutes => "2m",
+        }
+    }
+
+    #[must_use]
+    pub const fn seconds(self) -> u64 {
+        match self {
+            Self::ThirtySeconds => 30,
+            Self::OneMinute => 60,
+            Self::TwoMinutes => 120,
+        }
+    }
+}
+
 /// One flattened navigator row: a group heading (not selectable) or a
 /// participant id (selectable).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,42 +119,14 @@ pub enum Focus {
     Detail,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DetailTab {
-    Overview,
-    Logs,
-    Bespoke,
-}
-
-/// The full interactive state of the TUI shell, rebuilt against the latest
-/// [`BoardSnapshot`] every redraw ([`AppState::sync`]) and mutated by
-/// [`AppState::handle_key`].
-#[derive(Debug, Clone)]
-pub struct AppState {
+/// The home navigator's own state: the flattened rows, cursor, and filter
+/// buffer - see the module docs on per-panel state.
+#[derive(Debug, Clone, Default)]
+pub struct NavigatorState {
     pub rows: Vec<NavRow>,
     pub cursor: usize,
-    pub view: View,
-    pub tab: DetailTab,
-    pub focus: Focus,
-    pub nav_filter: String,
-    pub log_filter: String,
+    pub filter: String,
     pub filtering: bool,
-    pub log_scroll: usize,
-    pub log_follow: bool,
-    pub overview_scroll: usize,
-    pub show_help: bool,
-    /// Cursor into `telemetry.joypad.available` for the `tool-joypad` Devices
-    /// tab's pure list navigation - purely local UI state, NOT the actual
-    /// selection (that comes from the tool's own `Devices` ack; see
-    /// `crate::telemetry::JoypadDevicesSample`'s docs).
-    pub joypad_cursor: usize,
-    /// Sort key for the `tool-router` Traffic table, cycled by `s`.
-    pub traffic_sort: TrafficSort,
-    /// Filter buffer for the Traffic table, separate from `nav_filter`/
-    /// `log_filter` so switching tabs never clobbers another tab's filter.
-    pub traffic_filter: String,
-    /// Scroll offset into the sorted/filtered Traffic table.
-    pub traffic_scroll: usize,
     /// Becomes `true` the first time the user moves the cursor themselves;
     /// until then, `sync` keeps steering the cursor at the suggested
     /// (failed/degraded, else starting) row so the navigator opens already
@@ -113,26 +134,123 @@ pub struct AppState {
     user_moved_cursor: bool,
 }
 
+/// The Overview panel's own state: just its scroll offset.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OverviewState {
+    pub scroll: usize,
+}
+
+/// The Logs panel's own state.
+#[derive(Debug, Clone)]
+pub struct LogsState {
+    pub filter: String,
+    pub filtering: bool,
+    pub scroll: usize,
+    pub follow: bool,
+}
+
+impl Default for LogsState {
+    fn default() -> Self {
+        Self {
+            filter: String::new(),
+            filtering: false,
+            scroll: 0,
+            follow: true,
+        }
+    }
+}
+
+/// The router Traffic panel's own state.
+#[derive(Debug, Clone, Default)]
+pub struct TrafficState {
+    pub sort: TrafficSort,
+    pub filter: String,
+    pub filtering: bool,
+    pub scroll: usize,
+}
+
+/// The joypad Devices panel's own state.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DevicesState {
+    /// Cursor into `telemetry.joypad.available` for the `tool-joypad`
+    /// Devices panel's pure list navigation - purely local UI state, NOT the
+    /// actual selection (that comes from the tool's own `Devices` ack; see
+    /// `crate::telemetry::JoypadDevicesSample`'s docs).
+    pub cursor: usize,
+}
+
+/// The `tool-telemetry` Resources panel's own state: the display window and
+/// whether the operator has paused the live feed (`p`), in which case the
+/// values captured at the moment of pausing are shown instead of the
+/// still-arriving live ones until resumed.
+#[derive(Debug, Clone, Default)]
+pub struct ResourcesState {
+    pub range: ResourcesRange,
+    pub paused: bool,
+    frozen_host: Option<HostSample>,
+    frozen_history: Vec<HostPoint>,
+}
+
+impl ResourcesState {
+    /// The host sample to render: the frozen one while paused, else `live`.
+    #[must_use]
+    pub fn display_host<'a>(&'a self, live: Option<&'a HostSample>) -> Option<&'a HostSample> {
+        if self.paused {
+            self.frozen_host.as_ref()
+        } else {
+            live
+        }
+    }
+
+    /// The history to render: the frozen one while paused, else `live`.
+    #[must_use]
+    pub fn display_history<'a>(&'a self, live: &'a [HostPoint]) -> &'a [HostPoint] {
+        if self.paused {
+            &self.frozen_history
+        } else {
+            live
+        }
+    }
+
+    fn toggle_pause(&mut self, host: Option<HostSample>, history: &[HostPoint]) {
+        self.paused = !self.paused;
+        if self.paused {
+            self.frozen_host = host;
+            self.frozen_history = history.to_vec();
+        }
+    }
+}
+
+/// The full interactive state of the TUI shell, rebuilt against the latest
+/// [`BoardSnapshot`] every redraw ([`AppState::sync`]) and mutated by
+/// [`AppState::handle_key`].
+#[derive(Debug, Clone)]
+pub struct AppState {
+    pub navigator: NavigatorState,
+    pub view: View,
+    pub panel: Panel,
+    pub focus: Focus,
+    pub show_help: bool,
+    pub overview: OverviewState,
+    pub logs: LogsState,
+    pub traffic: TrafficState,
+    pub devices: DevicesState,
+    pub resources: ResourcesState,
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            rows: Vec::new(),
-            cursor: 0,
+            navigator: NavigatorState::default(),
             view: View::Home,
-            tab: DetailTab::Overview,
+            panel: Panel::default(),
             focus: Focus::Navigator,
-            nav_filter: String::new(),
-            log_filter: String::new(),
-            filtering: false,
-            log_scroll: 0,
-            log_follow: true,
-            overview_scroll: 0,
             show_help: false,
-            joypad_cursor: 0,
-            traffic_sort: TrafficSort::default(),
-            traffic_filter: String::new(),
-            traffic_scroll: 0,
-            user_moved_cursor: false,
+            overview: OverviewState::default(),
+            logs: LogsState::default(),
+            traffic: TrafficState::default(),
+            devices: DevicesState::default(),
+            resources: ResourcesState::default(),
         }
     }
 }
@@ -149,29 +267,33 @@ impl AppState {
     /// highlight it as the suggested selection; else suggest the first
     /// still-starting entity").
     pub fn sync(&mut self, board: &BoardSnapshot) {
-        let filter = self.nav_filter.to_lowercase();
+        let filter = self.navigator.filter.to_lowercase();
         let sections = build_groups(board, &filter);
-        self.rows = flatten(&sections);
-        if self.cursor >= self.rows.len() {
-            self.cursor = self.rows.len().saturating_sub(1);
+        self.navigator.rows = flatten(&sections);
+        if self.navigator.cursor >= self.navigator.rows.len() {
+            self.navigator.cursor = self.navigator.rows.len().saturating_sub(1);
         }
-        if !matches!(self.rows.get(self.cursor), Some(NavRow::Participant(_))) {
-            self.cursor = first_selectable(&self.rows).unwrap_or(0);
+        if !matches!(
+            self.navigator.rows.get(self.navigator.cursor),
+            Some(NavRow::Participant(_))
+        ) {
+            self.navigator.cursor = first_selectable(&self.navigator.rows).unwrap_or(0);
         }
-        if !self.user_moved_cursor
+        if !self.navigator.user_moved_cursor
             && let Some(suggested) = suggested_participant(board)
             && let Some(index) = self
+                .navigator
                 .rows
                 .iter()
                 .position(|row| matches!(row, NavRow::Participant(id) if id == &suggested.id))
         {
-            self.cursor = index;
+            self.navigator.cursor = index;
         }
     }
 
     #[must_use]
     pub fn selected_id(&self) -> Option<&str> {
-        match self.rows.get(self.cursor) {
+        match self.navigator.rows.get(self.navigator.cursor) {
             Some(NavRow::Participant(id)) => Some(id.as_str()),
             _ => None,
         }
@@ -179,9 +301,10 @@ impl AppState {
 
     /// Handle one key event, returning what the supervisor loop must act on
     /// (`DisplayAction::None` for anything purely internal to the TUI).
-    /// `telemetry` is only consulted by the detail focus's bespoke tabs (the
-    /// joypad Devices list's cursor bound, and which device id `↵` resolves
-    /// to) - navigation, filtering, and every other key path ignore it.
+    /// `telemetry` is only consulted by the detail focus's bespoke panels
+    /// (the Devices list's cursor bound and which device id `↵` resolves to,
+    /// and the Resources pause snapshot) - navigation, filtering, and every
+    /// other key path ignore it.
     pub fn handle_key(
         &mut self,
         key: KeyEvent,
@@ -191,7 +314,7 @@ impl AppState {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return DisplayAction::Quit;
         }
-        if self.filtering {
+        if self.is_filtering() {
             return self.handle_filter_key(key);
         }
         if key.code == KeyCode::Char('?') {
@@ -210,36 +333,44 @@ impl AppState {
         }
     }
 
-    /// Whether the current view+tab is the router's Traffic bespoke tab -
-    /// shared by the filter-buffer routing and the sort/filter key bindings,
-    /// and by `render`'s footer-hint selection.
+    /// Whether ANY panel's filter buffer is currently accepting typed input -
+    /// public so `tui::render`'s footer can show the filter-mode hint without
+    /// re-deriving this from the three per-panel flags itself. Exactly one of
+    /// `navigator`/`logs`/`traffic`'s `filtering` flags is ever `true` at
+    /// once, since only one panel is visible at a time and `stop_filtering`
+    /// clears all three together.
     #[must_use]
-    pub fn on_router_traffic_tab(&self) -> bool {
-        self.tab == DetailTab::Bespoke
-            && matches!(&self.view, View::Runtime(id) if id == SITE_TOOL_ROUTER)
+    pub fn is_filtering(&self) -> bool {
+        self.navigator.filtering || self.logs.filtering || self.traffic.filtering
     }
 
-    /// Whether the current view+tab is the joypad Devices bespoke tab.
-    #[must_use]
-    pub fn on_joypad_devices_tab(&self) -> bool {
-        self.tab == DetailTab::Bespoke
-            && matches!(&self.view, View::Runtime(id) if id == SITE_TOOL_JOYPAD)
+    fn stop_filtering(&mut self) {
+        self.navigator.filtering = false;
+        self.logs.filtering = false;
+        self.traffic.filtering = false;
+    }
+
+    /// The filter buffer the currently active filter mode types into - the
+    /// navigator's own filter for every case except the Logs/Traffic panels,
+    /// each of which gets its own buffer so switching panels never clobbers
+    /// another panel's filter (matches the pre-split behavior exactly).
+    fn active_filter_buffer_mut(&mut self) -> &mut String {
+        if self.focus == Focus::Detail && self.panel == Panel::Logs {
+            &mut self.logs.filter
+        } else if self.focus == Focus::Detail && self.panel == Panel::Traffic {
+            &mut self.traffic.filter
+        } else {
+            &mut self.navigator.filter
+        }
     }
 
     fn handle_filter_key(&mut self, key: KeyEvent) -> DisplayAction {
-        let buffer = if self.focus == Focus::Detail && self.tab == DetailTab::Logs {
-            &mut self.log_filter
-        } else if self.focus == Focus::Detail && self.on_router_traffic_tab() {
-            &mut self.traffic_filter
-        } else {
-            &mut self.nav_filter
-        };
         match key.code {
-            KeyCode::Enter | KeyCode::Esc => self.filtering = false,
+            KeyCode::Enter | KeyCode::Esc => self.stop_filtering(),
             KeyCode::Backspace => {
-                buffer.pop();
+                self.active_filter_buffer_mut().pop();
             }
-            KeyCode::Char(character) => buffer.push(character),
+            KeyCode::Char(character) => self.active_filter_buffer_mut().push(character),
             _ => {}
         }
         DisplayAction::None
@@ -248,17 +379,17 @@ impl AppState {
     fn handle_navigator_key(&mut self, key: KeyEvent, _board: &BoardSnapshot) -> DisplayAction {
         match key.code {
             KeyCode::Char('q') => return DisplayAction::Quit,
-            KeyCode::Char('/') => self.filtering = true,
+            KeyCode::Char('/') => self.navigator.filtering = true,
             KeyCode::Up => self.move_cursor(-1),
             KeyCode::Down => self.move_cursor(1),
             KeyCode::Enter => {
                 if let Some(id) = self.selected_id() {
                     self.view = View::Runtime(id.to_string());
-                    self.tab = DetailTab::Overview;
-                    self.overview_scroll = 0;
-                    self.log_scroll = 0;
-                    self.joypad_cursor = 0;
-                    self.traffic_scroll = 0;
+                    self.panel = Panel::Overview;
+                    self.overview.scroll = 0;
+                    self.logs.scroll = 0;
+                    self.devices.cursor = 0;
+                    self.traffic.scroll = 0;
                     self.focus = Focus::Detail;
                 }
             }
@@ -277,45 +408,56 @@ impl AppState {
             self.focus = Focus::Navigator;
             return DisplayAction::None;
         };
-        let tabs = available_tabs(id);
-        let on_router_traffic_tab = self.on_router_traffic_tab();
-        let on_joypad_devices_tab = self.on_joypad_devices_tab();
+        let panels = panels_for(id);
+        let on_traffic = self.panel == Panel::Traffic;
+        let on_devices = self.panel == Panel::Devices;
+        let on_resources = self.panel == Panel::Resources;
         match key.code {
             KeyCode::Char('q') => return DisplayAction::Quit,
             KeyCode::Esc => {
                 self.view = View::Home;
                 self.focus = Focus::Navigator;
             }
-            KeyCode::Left => self.tab = cycle_tab(&tabs, self.tab, -1),
-            KeyCode::Right => self.tab = cycle_tab(&tabs, self.tab, 1),
-            KeyCode::Up if on_joypad_devices_tab => self.move_joypad_cursor(-1, telemetry),
-            KeyCode::Down if on_joypad_devices_tab => self.move_joypad_cursor(1, telemetry),
-            KeyCode::Up if on_router_traffic_tab => {
-                self.traffic_scroll = self.traffic_scroll.saturating_sub(1);
+            KeyCode::Left => self.panel = cycle_panel(&panels, self.panel, -1),
+            KeyCode::Right => self.panel = cycle_panel(&panels, self.panel, 1),
+            KeyCode::Up if on_devices => self.move_device_cursor(-1, telemetry),
+            KeyCode::Down if on_devices => self.move_device_cursor(1, telemetry),
+            KeyCode::Up if on_traffic => {
+                self.traffic.scroll = self.traffic.scroll.saturating_sub(1);
             }
-            KeyCode::Down if on_router_traffic_tab => {
-                self.traffic_scroll = self.traffic_scroll.saturating_add(1);
+            KeyCode::Down if on_traffic => {
+                self.traffic.scroll = self.traffic.scroll.saturating_add(1);
             }
             KeyCode::Up => self.scroll(-1),
             KeyCode::Down => self.scroll(1),
-            KeyCode::Enter if on_joypad_devices_tab => {
+            KeyCode::Enter if on_devices => {
                 if let Some(device) = telemetry
                     .joypad
                     .as_ref()
-                    .and_then(|devices| devices.available.get(self.joypad_cursor))
+                    .and_then(|devices| devices.value.available.get(self.devices.cursor))
                 {
                     return DisplayAction::JoypadConnect(device.id.clone());
                 }
             }
-            KeyCode::Char('r') if on_joypad_devices_tab => return DisplayAction::JoypadRescan,
-            KeyCode::Char('s') if on_router_traffic_tab => {
-                self.traffic_sort = self.traffic_sort.cycle();
+            KeyCode::Char('r') if on_devices => return DisplayAction::JoypadRescan,
+            KeyCode::Char('s') if on_traffic => {
+                self.traffic.sort = self.traffic.sort.cycle();
             }
-            KeyCode::Char('f') if self.tab == DetailTab::Logs => {
-                self.log_follow = !self.log_follow;
+            KeyCode::Char('p') if on_resources => {
+                let host = telemetry.host.as_ref().map(|sample| sample.value);
+                self.resources.toggle_pause(host, &telemetry.host_history);
             }
-            KeyCode::Char('/') if self.tab == DetailTab::Logs || on_router_traffic_tab => {
-                self.filtering = true;
+            KeyCode::Char('w') if on_resources => {
+                self.resources.range = self.resources.range.cycle();
+            }
+            KeyCode::Char('f') if self.panel == Panel::Logs => {
+                self.logs.follow = !self.logs.follow;
+            }
+            KeyCode::Char('/') if self.panel == Panel::Logs => {
+                self.logs.filtering = true;
+            }
+            KeyCode::Char('/') if on_traffic => {
+                self.traffic.filtering = true;
             }
             _ => {}
         }
@@ -325,39 +467,42 @@ impl AppState {
     /// Move the joypad Devices list cursor by `delta`, clamped to the
     /// current device count (0 if the list is empty or not yet observed -
     /// `Enter` then simply has nothing to resolve, see `handle_detail_key`).
-    fn move_joypad_cursor(&mut self, delta: isize, telemetry: &TelemetrySnapshot) {
+    fn move_device_cursor(&mut self, delta: isize, telemetry: &TelemetrySnapshot) {
         let len = telemetry
             .joypad
             .as_ref()
-            .map_or(0, |devices| devices.available.len());
+            .map_or(0, |devices| devices.value.available.len());
         if len == 0 {
-            self.joypad_cursor = 0;
+            self.devices.cursor = 0;
             return;
         }
-        let next = (self.joypad_cursor as isize + delta).rem_euclid(len as isize) as usize;
-        self.joypad_cursor = next;
+        let next = (self.devices.cursor as isize + delta).rem_euclid(len as isize) as usize;
+        self.devices.cursor = next;
     }
 
     fn move_cursor(&mut self, delta: isize) {
-        self.user_moved_cursor = true;
-        let selectable = selectable_indices(&self.rows);
+        self.navigator.user_moved_cursor = true;
+        let selectable = selectable_indices(&self.navigator.rows);
         if selectable.is_empty() {
             return;
         }
         let current_pos = selectable
             .iter()
-            .position(|&index| index == self.cursor)
+            .position(|&index| index == self.navigator.cursor)
             .unwrap_or(0);
         let len = selectable.len() as isize;
         let next = (current_pos as isize + delta).rem_euclid(len) as usize;
-        self.cursor = selectable[next];
+        self.navigator.cursor = selectable[next];
     }
 
+    /// Scroll the currently visible scrollable panel (Overview or Logs only;
+    /// Traffic/Devices have their own dedicated `Up`/`Down` handling above,
+    /// and Resources has no scroll, only `p`/`w`).
     fn scroll(&mut self, delta: isize) {
-        let target = if self.tab == DetailTab::Logs {
-            &mut self.log_scroll
-        } else {
-            &mut self.overview_scroll
+        let target = match self.panel {
+            Panel::Logs => &mut self.logs.scroll,
+            Panel::Overview => &mut self.overview.scroll,
+            Panel::Traffic | Panel::Devices | Panel::Resources => return,
         };
         if delta.is_negative() {
             *target = target.saturating_sub(delta.unsigned_abs());
@@ -389,32 +534,24 @@ fn first_selectable(rows: &[NavRow]) -> Option<usize> {
     selectable_indices(rows).into_iter().next()
 }
 
-/// The tabs available for `id`'s detail surface: Overview + Logs always, plus
-/// a bespoke third tab for the three hardcoded system tools (design doc).
-#[must_use]
-pub fn available_tabs(id: &str) -> Vec<DetailTab> {
-    let mut tabs = vec![DetailTab::Overview, DetailTab::Logs];
-    if bespoke_tab_label(id).is_some() {
-        tabs.push(DetailTab::Bespoke);
-    }
-    tabs
-}
-
-fn cycle_tab(tabs: &[DetailTab], current: DetailTab, delta: isize) -> DetailTab {
-    let Some(index) = tabs.iter().position(|tab| *tab == current) else {
-        return tabs.first().copied().unwrap_or(DetailTab::Overview);
+fn cycle_panel(panels: &[Panel], current: Panel, delta: isize) -> Panel {
+    let Some(index) = panels.iter().position(|panel| *panel == current) else {
+        return panels.first().copied().unwrap_or(Panel::Overview);
     };
-    let len = tabs.len() as isize;
+    let len = panels.len() as isize;
     let next = ((index as isize + delta).rem_euclid(len)) as usize;
-    tabs[next]
+    panels[next]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launch_plan::{SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER};
     use crate::participant_kind::ParticipantKind;
+    use crate::stores::telemetry_store::Timestamped;
     use crate::supervisor::{ParticipantState, ParticipantStatus};
     use crossterm::event::{KeyEventKind, KeyEventState};
+    use std::time::Instant;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {
@@ -513,7 +650,7 @@ mod tests {
         state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
         assert_eq!(state.view, View::Runtime("drive".to_string()));
         assert_eq!(state.focus, Focus::Detail);
-        assert_eq!(state.tab, DetailTab::Overview);
+        assert_eq!(state.panel, Panel::Overview);
     }
 
     #[test]
@@ -541,34 +678,31 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycling_includes_bespoke_tab_only_for_hardcoded_system_tools() {
+    fn panel_set_includes_the_bespoke_panel_only_for_hardcoded_system_tools() {
         assert_eq!(
-            available_tabs("tool-router"),
-            vec![DetailTab::Overview, DetailTab::Logs, DetailTab::Bespoke]
+            panels_for("tool-router"),
+            vec![Panel::Overview, Panel::Logs, Panel::Traffic]
         );
-        assert_eq!(
-            available_tabs("drive"),
-            vec![DetailTab::Overview, DetailTab::Logs]
-        );
+        assert_eq!(panels_for("drive"), vec![Panel::Overview, Panel::Logs]);
     }
 
     #[test]
-    fn left_right_cycles_tabs_and_wraps() {
+    fn left_right_cycles_panels_and_wraps() {
         let mut state = AppState::new();
         let board = board_with(&[(
-            "tool-router",
+            SITE_TOOL_ROUTER,
             ParticipantKind::Tool,
             ParticipantState::Ready,
         )]);
         state.sync(&board);
         state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
-        assert_eq!(state.tab, DetailTab::Overview);
+        assert_eq!(state.panel, Panel::Overview);
         state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
-        assert_eq!(state.tab, DetailTab::Logs);
+        assert_eq!(state.panel, Panel::Logs);
         state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
-        assert_eq!(state.tab, DetailTab::Bespoke);
+        assert_eq!(state.panel, Panel::Traffic);
         state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
-        assert_eq!(state.tab, DetailTab::Overview, "must wrap back around");
+        assert_eq!(state.panel, Panel::Overview, "must wrap back around");
     }
 
     #[test]
@@ -581,7 +715,7 @@ mod tests {
             &board,
             &TelemetrySnapshot::default(),
         );
-        assert!(state.filtering);
+        assert!(state.navigator.filtering);
         state.handle_key(
             key(KeyCode::Char('d')),
             &board,
@@ -592,9 +726,9 @@ mod tests {
             &board,
             &TelemetrySnapshot::default(),
         );
-        assert_eq!(state.nav_filter, "dr");
+        assert_eq!(state.navigator.filter, "dr");
         state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
-        assert!(!state.filtering);
+        assert!(!state.navigator.filtering);
     }
 
     #[test]
@@ -615,33 +749,35 @@ mod tests {
 
     fn joypad_telemetry() -> TelemetrySnapshot {
         let mut telemetry = TelemetrySnapshot::default();
-        telemetry.joypad = Some(crate::telemetry::JoypadDevicesSample {
-            available: vec![
-                crate::telemetry::JoypadDevice {
-                    id: "pad-a".to_string(),
-                    name: "Pad A".to_string(),
-                    connected: true,
-                },
-                crate::telemetry::JoypadDevice {
-                    id: "pad-b".to_string(),
-                    name: "Pad B".to_string(),
-                    connected: true,
-                },
-            ],
-            selected: None,
-            last_error: None,
+        telemetry.joypad = Some(Timestamped {
+            value: crate::telemetry::JoypadDevicesSample {
+                available: vec![
+                    crate::telemetry::JoypadDevice {
+                        id: "pad-a".to_string(),
+                        name: "Pad A".to_string(),
+                        connected: true,
+                    },
+                    crate::telemetry::JoypadDevice {
+                        id: "pad-b".to_string(),
+                        name: "Pad B".to_string(),
+                        connected: true,
+                    },
+                ],
+                selected: None,
+                last_error: None,
+            },
+            received_at: Instant::now(),
         });
         telemetry
     }
 
-    fn open_joypad_devices_tab(state: &mut AppState, board: &BoardSnapshot) {
+    fn open_joypad_devices_panel(state: &mut AppState, board: &BoardSnapshot) {
         state.sync(board);
         state.handle_key(key(KeyCode::Enter), board, &TelemetrySnapshot::default());
-        // Overview -> Logs -> Bespoke (Devices).
+        // Overview -> Logs -> Devices.
         state.handle_key(key(KeyCode::Right), board, &TelemetrySnapshot::default());
         state.handle_key(key(KeyCode::Right), board, &TelemetrySnapshot::default());
-        assert_eq!(state.tab, DetailTab::Bespoke);
-        assert!(state.on_joypad_devices_tab());
+        assert_eq!(state.panel, Panel::Devices);
     }
 
     #[test]
@@ -652,13 +788,13 @@ mod tests {
             ParticipantKind::Tool,
             ParticipantState::Ready,
         )]);
-        open_joypad_devices_tab(&mut state, &board);
+        open_joypad_devices_panel(&mut state, &board);
         let telemetry = joypad_telemetry();
 
         // Cursor starts at 0 (pad-a); down moves it to pad-b.
         let action = state.handle_key(key(KeyCode::Down), &board, &telemetry);
         assert!(matches!(action, DisplayAction::None));
-        assert_eq!(state.joypad_cursor, 1);
+        assert_eq!(state.devices.cursor, 1);
 
         let action = state.handle_key(key(KeyCode::Enter), &board, &telemetry);
         assert!(matches!(action, DisplayAction::JoypadConnect(id) if id == "pad-b"));
@@ -672,7 +808,7 @@ mod tests {
             ParticipantKind::Tool,
             ParticipantState::Ready,
         )]);
-        open_joypad_devices_tab(&mut state, &board);
+        open_joypad_devices_panel(&mut state, &board);
         let telemetry = joypad_telemetry();
 
         let action = state.handle_key(key(KeyCode::Char('r')), &board, &telemetry);
@@ -687,27 +823,30 @@ mod tests {
             ParticipantKind::Tool,
             ParticipantState::Ready,
         )]);
-        open_joypad_devices_tab(&mut state, &board);
+        open_joypad_devices_panel(&mut state, &board);
 
         // No devices observed yet: the cursor stays at 0, Enter has nothing
         // to resolve to (a `Connect` action never fires against an empty
         // list).
         let empty = TelemetrySnapshot::default();
         state.handle_key(key(KeyCode::Down), &board, &empty);
-        assert_eq!(state.joypad_cursor, 0);
+        assert_eq!(state.devices.cursor, 0);
         let action = state.handle_key(key(KeyCode::Enter), &board, &empty);
         assert!(matches!(action, DisplayAction::None));
 
         // Two devices: down wraps from the last back to the first.
         let telemetry = joypad_telemetry();
         state.handle_key(key(KeyCode::Down), &board, &telemetry);
-        assert_eq!(state.joypad_cursor, 1);
+        assert_eq!(state.devices.cursor, 1);
         state.handle_key(key(KeyCode::Down), &board, &telemetry);
-        assert_eq!(state.joypad_cursor, 0, "must wrap back to the first device");
+        assert_eq!(
+            state.devices.cursor, 0,
+            "must wrap back to the first device"
+        );
     }
 
     #[test]
-    fn router_traffic_tab_slash_routes_into_the_traffic_filter_buffer() {
+    fn router_traffic_panel_slash_routes_into_the_traffic_filter_buffer() {
         let mut state = AppState::new();
         let board = board_with(&[(
             SITE_TOOL_ROUTER,
@@ -716,31 +855,31 @@ mod tests {
         )]);
         state.sync(&board);
         state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
-        // Overview -> Logs -> Bespoke (Traffic).
+        // Overview -> Logs -> Traffic.
         state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
         state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
-        assert!(state.on_router_traffic_tab());
+        assert_eq!(state.panel, Panel::Traffic);
 
         state.handle_key(
             key(KeyCode::Char('/')),
             &board,
             &TelemetrySnapshot::default(),
         );
-        assert!(state.filtering);
+        assert!(state.traffic.filtering);
         state.handle_key(
             key(KeyCode::Char('x')),
             &board,
             &TelemetrySnapshot::default(),
         );
-        assert_eq!(state.traffic_filter, "x");
+        assert_eq!(state.traffic.filter, "x");
         assert!(
-            state.nav_filter.is_empty(),
+            state.navigator.filter.is_empty(),
             "typing in the Traffic filter must not leak into the navigator filter"
         );
     }
 
     #[test]
-    fn router_traffic_tab_s_cycles_sort() {
+    fn router_traffic_panel_s_cycles_sort() {
         let mut state = AppState::new();
         let board = board_with(&[(
             SITE_TOOL_ROUTER,
@@ -751,12 +890,91 @@ mod tests {
         state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
         state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
         state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
-        assert_eq!(state.traffic_sort, TrafficSort::Rate);
+        assert_eq!(state.traffic.sort, TrafficSort::Rate);
         state.handle_key(
             key(KeyCode::Char('s')),
             &board,
             &TelemetrySnapshot::default(),
         );
-        assert_eq!(state.traffic_sort, TrafficSort::Topic);
+        assert_eq!(state.traffic.sort, TrafficSort::Topic);
+    }
+
+    /// The structural point of the per-panel split: opening the joypad
+    /// Devices panel and moving its cursor must never touch the Traffic
+    /// panel's sort/filter state, and vice versa - the old flat `AppState`
+    /// let both fields be set simultaneously with no way to tell which
+    /// applied; now they simply live in different structs.
+    #[test]
+    fn devices_cursor_and_traffic_sort_are_isolated_per_panel_state() {
+        let mut state = AppState::new();
+        let board = board_with(&[(
+            SITE_TOOL_JOYPAD,
+            ParticipantKind::Tool,
+            ParticipantState::Ready,
+        )]);
+        open_joypad_devices_panel(&mut state, &board);
+        let telemetry = joypad_telemetry();
+        state.handle_key(key(KeyCode::Down), &board, &telemetry);
+        assert_eq!(state.devices.cursor, 1);
+        // The Traffic panel's own state is untouched by Devices interaction.
+        assert_eq!(state.traffic.sort, TrafficSort::Rate);
+        assert!(state.traffic.filter.is_empty());
+        assert_eq!(state.traffic.scroll, 0);
+    }
+
+    #[test]
+    fn resources_pause_freezes_the_displayed_sample_until_resumed() {
+        let mut state = AppState::new();
+        let board = board_with(&[(
+            "tool-telemetry",
+            ParticipantKind::Tool,
+            ParticipantState::Ready,
+        )]);
+        state.sync(&board);
+        state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
+        state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
+        state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
+        assert_eq!(state.panel, Panel::Resources);
+
+        let mut telemetry = TelemetrySnapshot::default();
+        let sample = HostSample {
+            cpu_pct: 55.0,
+            ram_used_bytes: 1,
+            ram_total_bytes: 2,
+            load_1m: 0.1,
+            window_ns: 1,
+        };
+        telemetry.host = Some(Timestamped {
+            value: sample,
+            received_at: Instant::now(),
+        });
+        state.handle_key(key(KeyCode::Char('p')), &board, &telemetry);
+        assert!(state.resources.paused);
+        assert_eq!(
+            state.resources.display_host(None).map(|host| host.cpu_pct),
+            Some(55.0),
+            "pausing must capture the live sample even though `live` afterward is None"
+        );
+    }
+
+    #[test]
+    fn resources_window_key_cycles_the_range() {
+        let mut state = AppState::new();
+        let board = board_with(&[(
+            "tool-telemetry",
+            ParticipantKind::Tool,
+            ParticipantState::Ready,
+        )]);
+        state.sync(&board);
+        state.handle_key(key(KeyCode::Enter), &board, &TelemetrySnapshot::default());
+        state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
+        state.handle_key(key(KeyCode::Right), &board, &TelemetrySnapshot::default());
+        assert_eq!(state.resources.range, ResourcesRange::OneMinute);
+        state.handle_key(
+            key(KeyCode::Char('w')),
+            &board,
+            &TelemetrySnapshot::default(),
+        );
+        assert_eq!(state.resources.range, ResourcesRange::TwoMinutes);
     }
 }

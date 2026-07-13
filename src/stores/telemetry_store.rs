@@ -180,6 +180,15 @@ impl TelemetryStore {
         self.process_by_participant.get(participant)
     }
 
+    /// Every participant's latest `Process` sample plus its receive time -
+    /// the full map, for a caller (`telemetry::TelemetryBackend::snapshot`)
+    /// that needs to hand the whole set to a renderer rather than look up
+    /// one participant at a time.
+    #[must_use]
+    pub fn process_all(&self) -> &BTreeMap<String, Timestamped<ProcessSample>> {
+        &self.process_by_participant
+    }
+
     /// The router's latest `Metrics` sample plus its receive time, or `None`
     /// before the first sample arrives.
     #[must_use]

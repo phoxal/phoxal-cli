@@ -1,9 +1,14 @@
-//! Drawing: turns [`AppState`] + a [`BoardSnapshot`] + the [`LogRouter`]
+//! Drawing: turns [`AppState`] + a [`BoardSnapshot`] + the [`LogStore`]
 //! scrollback into ratatui widgets. Pure rendering - no state mutation, no
 //! I/O - so every function here can be exercised against a
-//! [`ratatui::backend::TestBackend`] in tests without a real terminal.
+//! [`ratatui::backend::TestBackend`] in tests without a real terminal. The
+//! one exception is the `now: Instant` every telemetry-facing `draw_*`
+//! function takes explicitly (never `Instant::now()` internally) so
+//! freshness/staleness checks against `stores::telemetry_store::Timestamped`
+//! stay deterministic in tests too.
 
 use std::collections::VecDeque;
+use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -15,18 +20,19 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::identity::IdentitySummary;
-use crate::launch_plan::{SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SITE_TOOL_TELEMETRY};
 use crate::session::event::{DiagnosticLevel, PhaseOutcome};
+use crate::stores::log_store::LogStore;
+use crate::stores::telemetry_store::{DEFAULT_FRESHNESS_TTL, HostPoint, Timestamped};
 use crate::supervisor::{BoardSnapshot, ClockSample, ParticipantState, ParticipantStatus};
 use crate::telemetry::{
-    HostSample, JoypadDevicesSample, RouterMetricsSample, TelemetrySnapshot, TopicMetric,
+    HostSample, JoypadDevicesSample, ProcessSample, RouterMetricsSample, TelemetrySnapshot,
+    TopicMetric,
 };
 use crate::theme::{Role, Theme, state_symbol};
 use crate::tui::color;
-use crate::tui::groups::bespoke_tab_label;
-use crate::tui::logs::{HostPoint, LogRouter};
+use crate::tui::panel::{Panel, panels_for};
 use crate::tui::startup::{DiagnosticLine, PhaseRow, StartupState};
-use crate::tui::state::{AppState, DetailTab, Focus, NavRow, TrafficSort, View, available_tabs};
+use crate::tui::state::{AppState, Focus, NavRow, TrafficSort, View};
 
 /// Static identity shown on the title bar - resolved once at TUI
 /// construction, not re-derived every frame.
@@ -63,30 +69,42 @@ pub fn simulation_clock_slot(mode: &str, clock: Option<ClockSample>) -> String {
 /// meter: `cpu NN% · ram U/T` from the latest `telemetry::Host` sample, or
 /// `cpu n/a` when none has arrived yet - `tool-telemetry` may not be in the
 /// catalog yet, and that MUST render as a graceful absence, not an error.
+/// A sample older than [`DEFAULT_FRESHNESS_TTL`] as of `now` is marked
+/// `(stale)` rather than shown as if it were still live - receive-time
+/// freshness from `stores::telemetry_store::Timestamped`, not a
+/// last-known-value cache.
 #[must_use]
-pub fn host_resource_slot(host: Option<HostSample>) -> String {
+pub fn host_resource_slot(host: Option<&Timestamped<HostSample>>, now: Instant) -> String {
     let Some(host) = host else {
         return "cpu n/a".to_string();
     };
+    let stale = if host.is_stale(now, DEFAULT_FRESHNESS_TTL) {
+        " (stale)"
+    } else {
+        ""
+    };
     format!(
-        "cpu {:.0}% · ram {}/{}",
-        host.cpu_pct,
-        format_gib(host.ram_used_bytes),
-        format_gib(host.ram_total_bytes),
+        "cpu {:.0}% · ram {}/{}{stale}",
+        host.value.cpu_pct,
+        format_gib(host.value.ram_used_bytes),
+        format_gib(host.value.ram_total_bytes),
     )
 }
 
 /// The theme role the host meter should render in - accent/warn/error by the
-/// higher of CPU/RAM load (`theme::resource_role`), or muted for the `n/a`
-/// case.
+/// higher of CPU/RAM load (`theme::resource_role`), or muted for the `n/a`/
+/// stale case (a stale reading is not a live load signal worth alarming on).
 #[must_use]
-fn host_resource_role(host: Option<HostSample>) -> Role {
+fn host_resource_role(host: Option<&Timestamped<HostSample>>, now: Instant) -> Role {
     let Some(host) = host else {
         return Role::Muted;
     };
-    let cpu_load = f64::from(host.cpu_pct) / 100.0;
-    let ram_load = if host.ram_total_bytes > 0 {
-        host.ram_used_bytes as f64 / host.ram_total_bytes as f64
+    if host.is_stale(now, DEFAULT_FRESHNESS_TTL) {
+        return Role::Muted;
+    }
+    let cpu_load = f64::from(host.value.cpu_pct) / 100.0;
+    let ram_load = if host.value.ram_total_bytes > 0 {
+        host.value.ram_used_bytes as f64 / host.value.ram_total_bytes as f64
     } else {
         0.0
     };
@@ -106,9 +124,10 @@ pub fn draw(
     theme: Theme,
     title: &TitleInfo,
     board: &BoardSnapshot,
-    logs: &mut LogRouter,
+    logs: &mut LogStore,
     state: &AppState,
     telemetry: &TelemetrySnapshot,
+    now: Instant,
     diagnostics: &VecDeque<DiagnosticLine>,
 ) {
     let area = frame.area();
@@ -124,9 +143,9 @@ pub fn draw(
         .split(area);
 
     draw_title_bar(frame, theme, title, telemetry.clock, rows[0]);
-    draw_status_line(frame, theme, board, telemetry.host, rows[1]);
+    draw_status_line(frame, theme, board, telemetry.host.as_ref(), now, rows[1]);
     draw_diagnostics_strip(frame, theme, diagnostics, rows[2]);
-    draw_body(frame, theme, board, logs, state, telemetry, rows[3]);
+    draw_body(frame, theme, board, logs, state, telemetry, now, rows[3]);
     draw_footer(frame, theme, state, rows[4]);
 
     if state.show_help {
@@ -420,7 +439,8 @@ fn draw_status_line(
     frame: &mut Frame,
     theme: Theme,
     board: &BoardSnapshot,
-    host: Option<HostSample>,
+    host: Option<&Timestamped<HostSample>>,
+    now: Instant,
     area: Rect,
 ) {
     let total = board.participants.len();
@@ -444,20 +464,22 @@ fn draw_status_line(
         color::fg(theme, Role::TextPrimary),
     )];
     let right = vec![Span::styled(
-        host_resource_slot(host),
-        color::fg(theme, host_resource_role(host)),
+        host_resource_slot(host, now),
+        color::fg(theme, host_resource_role(host, now)),
     )];
     let line = split_line(area.width, left, right);
     frame.render_widget(Paragraph::new(line), area);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_body(
     frame: &mut Frame,
     theme: Theme,
     board: &BoardSnapshot,
-    logs: &mut LogRouter,
+    logs: &mut LogStore,
     state: &AppState,
     telemetry: &TelemetrySnapshot,
+    now: Instant,
     area: Rect,
 ) {
     let nav_width = (area.width / 3).clamp(16, 36).min(area.width);
@@ -466,7 +488,7 @@ fn draw_body(
         .constraints([Constraint::Length(nav_width), Constraint::Min(0)])
         .split(area);
     draw_navigator(frame, theme, board, state, columns[0]);
-    draw_right_pane(frame, theme, board, logs, state, telemetry, columns[1]);
+    draw_right_pane(frame, theme, board, logs, state, telemetry, now, columns[1]);
 }
 
 fn draw_navigator(
@@ -484,12 +506,13 @@ fn draw_navigator(
 
     let width = inner.width.saturating_sub(1) as usize;
     let items: Vec<ListItem> = state
+        .navigator
         .rows
         .iter()
         .map(|row| navigator_row_item(theme, board, row, width))
         .collect();
     let mut list_state = ListState::default();
-    list_state.select(Some(state.cursor));
+    list_state.select(Some(state.navigator.cursor));
     let list = List::new(items)
         .highlight_style(color::selected(theme, Role::Text))
         .highlight_symbol("▍");
@@ -526,19 +549,22 @@ fn navigator_row_item<'a>(
     }
 }
 
-/// Render one participant row's full text (state symbol/label, id, local
-/// marker, restart count) - split out from `navigator_row_item` so it can be
-/// unit-tested for unicode-width truncation without a `Frame`.
+/// Render one participant row's full text (state SYMBOL and TEXT label,
+/// local marker, restart count, id) - split out from `navigator_row_item` so
+/// it can be unit-tested for unicode-width truncation without a `Frame`.
+/// Carries both the symbol AND the label (design doc part 7) so the state is
+/// legible even where the symbol glyph alone would be ambiguous.
 #[must_use]
 pub fn participant_row_text(status: &ParticipantStatus, width: usize) -> String {
     let symbol = state_symbol(status.state);
+    let label = status.state.label();
     let local = if status.local { "*" } else { " " };
     let restarts = if status.restart_count > 0 {
         format!(" ↻{}", status.restart_count)
     } else {
         String::new()
     };
-    let text = format!("{symbol} {local}{}{restarts}", status.id);
+    let text = format!("{symbol} {label} {local}{}{restarts}", status.id);
     truncate_to_width(&text, width)
 }
 
@@ -567,19 +593,21 @@ pub fn truncate_to_width(text: &str, width: usize) -> String {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_right_pane(
     frame: &mut Frame,
     theme: Theme,
     board: &BoardSnapshot,
-    logs: &mut LogRouter,
+    logs: &mut LogStore,
     state: &AppState,
     telemetry: &TelemetrySnapshot,
+    now: Instant,
     area: Rect,
 ) {
     match &state.view {
         View::Home => draw_overview_home(frame, theme, board, area),
         View::Runtime(id) => {
-            draw_runtime_detail(frame, theme, board, logs, state, telemetry, id, area);
+            draw_runtime_detail(frame, theme, board, logs, state, telemetry, now, id, area);
         }
     }
 }
@@ -673,9 +701,10 @@ fn draw_runtime_detail(
     frame: &mut Frame,
     theme: Theme,
     board: &BoardSnapshot,
-    logs: &mut LogRouter,
+    logs: &mut LogStore,
     state: &AppState,
     telemetry: &TelemetrySnapshot,
+    now: Instant,
     id: &str,
     area: Rect,
 ) {
@@ -684,12 +713,15 @@ fn draw_runtime_detail(
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
 
-    let tabs = available_tabs(id);
-    let titles: Vec<Line> = tabs
+    let panels = panels_for(id);
+    let titles: Vec<Line> = panels
         .iter()
-        .map(|tab| Line::from(tab_label(*tab, id)))
+        .map(|panel| Line::from(panel.label()))
         .collect();
-    let selected = tabs.iter().position(|tab| *tab == state.tab).unwrap_or(0);
+    let selected = panels
+        .iter()
+        .position(|panel| *panel == state.panel)
+        .unwrap_or(0);
     let tabs_widget = Tabs::new(titles)
         .select(selected)
         .highlight_style(color::fg(theme, Role::Accent).add_modifier(Modifier::BOLD))
@@ -704,70 +736,108 @@ fn draw_runtime_detail(
         return;
     };
 
-    match state.tab {
-        DetailTab::Overview => draw_runtime_overview(
+    match state.panel {
+        Panel::Overview => draw_runtime_overview(
             frame,
             theme,
             status,
-            telemetry.process_by_participant.get(id).copied(),
-            state.overview_scroll,
+            telemetry.process_by_participant.get(id),
+            now,
+            state.overview.scroll,
             rows[1],
         ),
-        DetailTab::Logs => draw_runtime_logs(frame, theme, logs, state, id, rows[1]),
-        DetailTab::Bespoke => {
-            draw_bespoke_tab(frame, theme, id, state, logs, telemetry, rows[1]);
+        Panel::Logs => draw_runtime_logs(frame, theme, logs, state, id, rows[1]),
+        Panel::Traffic => {
+            draw_traffic_tab(frame, theme, state, telemetry.router.as_ref(), now, rows[1]);
         }
+        Panel::Devices => {
+            draw_joypad_tab(frame, theme, state, telemetry.joypad.as_ref(), now, rows[1]);
+        }
+        Panel::Resources => draw_resources_tab(
+            frame,
+            theme,
+            state,
+            telemetry.host.as_ref(),
+            &telemetry.host_history,
+            now,
+            rows[1],
+        ),
     }
 }
 
-fn tab_label(tab: DetailTab, id: &str) -> String {
-    match tab {
-        DetailTab::Overview => "Overview".to_string(),
-        DetailTab::Logs => "Logs".to_string(),
-        DetailTab::Bespoke => bespoke_tab_label(id).unwrap_or("Bespoke").to_string(),
-    }
-}
+/// A field the Overview panel would show if its data were plumbed to the
+/// session board, but genuinely is not yet (design doc part 7: "show a clear
+/// unknown, do not fabricate"). `supervisor::ParticipantStatus`/
+/// `BoardSnapshot` carry no artifact reference, declared contract, ownership,
+/// or time-to-ready field today - see this slice's report for the file:line
+/// citations and the follow-up to plumb them.
+const UNKNOWN_FIELD: &str = "unknown (not wired to the board yet)";
 
+#[allow(clippy::too_many_arguments)]
 fn draw_runtime_overview(
     frame: &mut Frame,
     theme: Theme,
     status: &ParticipantStatus,
-    process: Option<crate::telemetry::ProcessSample>,
+    process: Option<&Timestamped<ProcessSample>>,
+    now: Instant,
     scroll: usize,
     area: Rect,
 ) {
     let cpu_text = process.map_or_else(
         || "-".to_string(),
-        |sample| format!("{:.0}%", sample.cpu_pct),
+        |sample| {
+            let stale = if sample.is_stale(now, DEFAULT_FRESHNESS_TTL) {
+                " (stale)"
+            } else {
+                ""
+            };
+            format!("{:.0}%{stale}", sample.value.cpu_pct)
+        },
     );
     let ram_text = process.map_or_else(
         || "-".to_string(),
-        |sample| format!("{}M", sample.rss_bytes / (1024 * 1024)),
+        |sample| format!("{}M", sample.value.rss_bytes / (1024 * 1024)),
     );
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("state    ", color::muted(theme)),
+            Span::styled("state     ", color::muted(theme)),
             Span::raw(theme.participant_state(status.state)),
         ]),
         Line::from(vec![
-            Span::styled("kind     ", color::muted(theme)),
+            Span::styled("kind      ", color::muted(theme)),
             Span::raw(status.kind.label()),
         ]),
         Line::from(vec![
-            Span::styled("local    ", color::muted(theme)),
+            Span::styled("local     ", color::muted(theme)),
             Span::raw(if status.local { "yes" } else { "no" }),
         ]),
         Line::from(vec![
-            Span::styled("restarts ", color::muted(theme)),
+            Span::styled("restarts  ", color::muted(theme)),
             Span::raw(status.restart_count.to_string()),
         ]),
         Line::from(vec![
-            Span::styled("cpu      ", color::muted(theme)),
+            Span::styled("cpu       ", color::muted(theme)),
             Span::raw(cpu_text),
         ]),
         Line::from(vec![
-            Span::styled("ram      ", color::muted(theme)),
+            Span::styled("ram       ", color::muted(theme)),
             Span::raw(ram_text),
+        ]),
+        Line::from(vec![
+            Span::styled("artifact  ", color::muted(theme)),
+            Span::styled(UNKNOWN_FIELD, color::muted(theme)),
+        ]),
+        Line::from(vec![
+            Span::styled("contracts ", color::muted(theme)),
+            Span::styled(UNKNOWN_FIELD, color::muted(theme)),
+        ]),
+        Line::from(vec![
+            Span::styled("ownership ", color::muted(theme)),
+            Span::styled(UNKNOWN_FIELD, color::muted(theme)),
+        ]),
+        Line::from(vec![
+            Span::styled("time to ready ", color::muted(theme)),
+            Span::styled(UNKNOWN_FIELD, color::muted(theme)),
         ]),
         Line::from(vec![
             Span::styled("last error ", color::muted(theme)),
@@ -778,6 +848,15 @@ fn draw_runtime_overview(
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled("command", color::muted(theme))));
         lines.push(Line::from(command.command_line.clone()));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("environment", color::muted(theme))));
+        if command.env.is_empty() {
+            lines.push(Line::from(Span::styled("(none)", color::muted(theme))));
+        } else {
+            for (key, value) in &command.env {
+                lines.push(Line::from(format!("{key}={value}")));
+            }
+        }
     }
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -788,12 +867,12 @@ fn draw_runtime_overview(
 fn draw_runtime_logs(
     frame: &mut Frame,
     theme: Theme,
-    logs: &mut LogRouter,
+    logs: &mut LogStore,
     state: &AppState,
     id: &str,
     area: Rect,
 ) {
-    let filter = state.log_filter.to_lowercase();
+    let filter = state.logs.filter.to_lowercase();
     let lines: Vec<Line> = logs
         .lines_for(id)
         .iter()
@@ -811,58 +890,16 @@ fn draw_runtime_logs(
         .collect();
 
     let height = area.height as usize;
-    let scroll = if state.log_follow {
+    let scroll = if state.logs.follow {
         lines.len().saturating_sub(height)
     } else {
         state
-            .log_scroll
+            .logs
+            .scroll
             .min(lines.len().saturating_sub(height.min(lines.len())))
     };
     let paragraph = Paragraph::new(lines).scroll((scroll as u16, 0));
     frame.render_widget(paragraph, area);
-}
-
-/// Dispatch a bespoke third tab to its tool-specific renderer - the
-/// hardcoded id -> tab mapping (design doc: "hardcode the tool -> tab
-/// mapping; no generic abstraction"), matching `groups::bespoke_tab_label`.
-fn draw_bespoke_tab(
-    frame: &mut Frame,
-    theme: Theme,
-    id: &str,
-    state: &AppState,
-    logs: &LogRouter,
-    telemetry: &TelemetrySnapshot,
-    area: Rect,
-) {
-    if id == SITE_TOOL_ROUTER {
-        draw_traffic_tab(
-            frame,
-            theme,
-            state,
-            logs.latest_traffic_sample_for(id),
-            area,
-        );
-    } else if id == SITE_TOOL_JOYPAD {
-        draw_joypad_tab(frame, theme, state, telemetry.joypad.as_ref(), area);
-    } else if id == SITE_TOOL_TELEMETRY {
-        draw_resources_tab(
-            frame,
-            theme,
-            telemetry.host,
-            logs.telemetry_series_for(id),
-            area,
-        );
-    } else {
-        draw_bespoke_placeholder(frame, theme, id, area);
-    }
-}
-
-fn draw_bespoke_placeholder(frame: &mut Frame, theme: Theme, id: &str, area: Rect) {
-    let label = bespoke_tab_label(id).unwrap_or("Bespoke");
-    frame.render_widget(
-        Paragraph::new(format!("{label} - coming soon")).style(color::muted(theme)),
-        area,
-    );
 }
 
 /// A topic's ingress rate has dropped to effectively zero over the router's
@@ -896,12 +933,20 @@ fn sort_traffic_rows(topics: &mut [&TopicMetric], sort: TrafficSort) {
 /// topic the router has measured ingress for - TOPIC, PRODUCER, RATE, COUNT,
 /// and a live/stale STATUS derived from the measured rate itself (design
 /// doc: "stale if a topic's rate dropped to ~0 over the window"). Header
-/// line carries the router's own aggregate `throughput_msg_s`.
+/// line carries the router's own aggregate `throughput_msg_s` plus the
+/// SAMPLE's own receive-time freshness (distinct from a topic's own
+/// rate-derived staleness below: this is "is the router still publishing
+/// `Metrics` at all", that is "is THIS topic's ingress still flowing").
+/// Per-topic "potential consumers" (who subscribes to a topic) is not shown:
+/// `router::TopicMetric` carries only `topic`/`from_participant`/rate/count,
+/// no consumer list, and nothing else in the session board carries declared
+/// input contracts today - see this slice's report.
 fn draw_traffic_tab(
     frame: &mut Frame,
     theme: Theme,
     state: &AppState,
-    sample: Option<&RouterMetricsSample>,
+    sample: Option<&Timestamped<RouterMetricsSample>>,
+    now: Instant,
     area: Rect,
 ) {
     let rows = Layout::default()
@@ -917,19 +962,22 @@ fn draw_traffic_tab(
         );
         return;
     };
+    let stale = sample.is_stale(now, DEFAULT_FRESHNESS_TTL);
+    let sample = &sample.value;
 
     frame.render_widget(
         Paragraph::new(format!(
-            "throughput {:.1} msg/s · {} topic(s) · sort:{}",
+            "throughput {:.1} msg/s · {} topic(s) · sort:{}{}",
             sample.throughput_msg_s,
             sample.topics.len(),
-            state.traffic_sort.label(),
+            state.traffic.sort.label(),
+            if stale { " · feed stale" } else { "" },
         ))
         .style(color::muted(theme)),
         rows[0],
     );
 
-    let filter = state.traffic_filter.to_lowercase();
+    let filter = state.traffic.filter.to_lowercase();
     let mut topics: Vec<&TopicMetric> = sample
         .topics
         .iter()
@@ -939,7 +987,7 @@ fn draw_traffic_tab(
                 || topic.from_participant.to_lowercase().contains(&filter)
         })
         .collect();
-    sort_traffic_rows(&mut topics, state.traffic_sort);
+    sort_traffic_rows(&mut topics, state.traffic.sort);
 
     let width = rows[1].width as usize;
     let mut lines = vec![Line::from(Span::styled(
@@ -954,7 +1002,8 @@ fn draw_traffic_tab(
 
     let height = rows[1].height as usize;
     let scroll = state
-        .traffic_scroll
+        .traffic
+        .scroll
         .min(lines.len().saturating_sub(height.min(lines.len())));
     let paragraph = Paragraph::new(lines).scroll((scroll as u16, 0));
     frame.render_widget(paragraph, rows[1]);
@@ -994,14 +1043,16 @@ fn traffic_row_line(theme: Theme, topic: &TopicMetric, width: usize) -> Line<'st
 
 /// The joypad Devices tab: pure list navigation over
 /// `telemetry::JoypadDevicesSample::available` (`↑↓` moves
-/// `AppState::joypad_cursor`, a purely local UI cursor), with the
+/// `AppState::devices.cursor`, a purely local UI cursor), with the
 /// AUTHORITATIVE `selected` device (from the tool's own last ack, never a
-/// local guess) marked separately from the cursor highlight.
+/// local guess) marked separately from the cursor highlight, and the
+/// sample's own receive-time freshness/error state surfaced alongside it.
 fn draw_joypad_tab(
     frame: &mut Frame,
     theme: Theme,
     state: &AppState,
-    sample: Option<&JoypadDevicesSample>,
+    sample: Option<&Timestamped<JoypadDevicesSample>>,
+    now: Instant,
     area: Rect,
 ) {
     let Some(sample) = sample else {
@@ -1011,8 +1062,16 @@ fn draw_joypad_tab(
         );
         return;
     };
+    let stale = sample.is_stale(now, DEFAULT_FRESHNESS_TTL);
+    let sample = &sample.value;
 
     let mut lines = Vec::new();
+    if stale {
+        lines.push(Line::from(Span::styled(
+            "stale - tool-joypad has not published recently",
+            color::fg(theme, Role::Warn),
+        )));
+    }
     if sample.available.is_empty() {
         lines.push(Line::from(Span::styled(
             "no gamepads detected",
@@ -1026,12 +1085,12 @@ fn draw_joypad_tab(
         } else {
             " "
         };
-        let cursor = if index == state.joypad_cursor {
+        let cursor = if index == state.devices.cursor {
             "▍"
         } else {
             " "
         };
-        let role = if index == state.joypad_cursor {
+        let role = if index == state.devices.cursor {
             Role::Accent
         } else if device.connected {
             Role::TextPrimary
@@ -1076,15 +1135,22 @@ fn sparkline_line(theme: Theme, values: impl Iterator<Item = f64>) -> Line<'stat
 
 /// The `tool-telemetry` Resources tab: the latest `Host` sample's headline
 /// numbers plus a rolling cpu%/ram% sparkline history from
-/// `LogRouter::telemetry_series_for` (design doc Part 3c/4d).
+/// `stores::telemetry_store::TelemetryStore` (design doc Part 3c/4d/7),
+/// windowed to `state.resources.range` and frozen at the moment of pausing
+/// (`p`) via `ResourcesState::display_host`/`display_history` - see that
+/// type's docs.
 fn draw_resources_tab(
     frame: &mut Frame,
     theme: Theme,
-    host: Option<HostSample>,
-    series: &[HostPoint],
+    state: &AppState,
+    host: Option<&Timestamped<HostSample>>,
+    history: &[HostPoint],
+    now: Instant,
     area: Rect,
 ) {
-    let Some(host) = host else {
+    let live_host = host.map(|sample| sample.value);
+    let stale = host.is_some_and(|sample| sample.is_stale(now, DEFAULT_FRESHNESS_TTL));
+    let Some(host) = state.resources.display_host(live_host.as_ref()).copied() else {
         frame.render_widget(
             Paragraph::new("cpu n/a - tool-telemetry has not published a sample yet")
                 .style(color::muted(theme)),
@@ -1097,7 +1163,25 @@ fn draw_resources_tab(
     } else {
         0.0
     };
+    let displayed_history = state.resources.display_history(history);
+    let window_secs = state.resources.range.seconds();
+    let windowed: Vec<&HostPoint> = displayed_history
+        .iter()
+        .rev()
+        .take_while(|point| {
+            now.saturating_duration_since(point.received_at).as_secs() <= window_secs
+        })
+        .collect();
+    let mut status = Vec::new();
+    if state.resources.paused {
+        status.push("paused".to_string());
+    }
+    if stale {
+        status.push("stale".to_string());
+    }
+    status.push(format!("window {}", state.resources.range.label()));
     let mut lines = vec![
+        Line::from(Span::styled(status.join(" · "), color::muted(theme))),
         Line::from(vec![
             Span::styled("cpu    ", color::muted(theme)),
             Span::raw(format!("{:.0}%", host.cpu_pct)),
@@ -1115,15 +1199,24 @@ fn draw_resources_tab(
             Span::raw(format!("{:.2}", host.load_1m)),
         ]),
         Line::from(""),
-        Line::from(Span::styled("cpu history", color::muted(theme))),
+        Line::from(Span::styled(
+            format!("cpu history ({})", state.resources.range.label()),
+            color::muted(theme),
+        )),
         sparkline_line(
             theme,
-            series.iter().map(|point| f64::from(point.cpu_pct) / 100.0),
+            windowed
+                .iter()
+                .rev()
+                .map(|point| f64::from(point.cpu_pct) / 100.0),
         ),
-        Line::from(Span::styled("ram history", color::muted(theme))),
+        Line::from(Span::styled(
+            format!("ram history ({})", state.resources.range.label()),
+            color::muted(theme),
+        )),
         sparkline_line(
             theme,
-            series.iter().map(|point| {
+            windowed.iter().rev().map(|point| {
                 if point.ram_total_bytes > 0 {
                     point.ram_used_bytes as f64 / point.ram_total_bytes as f64
                 } else {
@@ -1145,7 +1238,7 @@ fn draw_footer(frame: &mut Frame, theme: Theme, state: &AppState, area: Rect) {
 }
 
 fn footer_segments(state: &AppState) -> Vec<&'static str> {
-    if state.filtering {
+    if state.is_filtering() {
         return vec!["type to filter", "↵/Esc done"];
     }
     match state.focus {
@@ -1157,7 +1250,7 @@ fn footer_segments(state: &AppState) -> Vec<&'static str> {
             "? help",
             "q quit",
         ],
-        Focus::Detail if state.tab == DetailTab::Logs => {
+        Focus::Detail if state.panel == Panel::Logs => {
             vec![
                 "↑↓ scroll",
                 "f follow",
@@ -1168,7 +1261,7 @@ fn footer_segments(state: &AppState) -> Vec<&'static str> {
                 "q quit",
             ]
         }
-        Focus::Detail if state.on_router_traffic_tab() => vec![
+        Focus::Detail if state.panel == Panel::Traffic => vec![
             "↑↓ scroll",
             "s sort",
             "/ filter",
@@ -1177,10 +1270,18 @@ fn footer_segments(state: &AppState) -> Vec<&'static str> {
             "? help",
             "q quit",
         ],
-        Focus::Detail if state.on_joypad_devices_tab() => vec![
+        Focus::Detail if state.panel == Panel::Devices => vec![
             "↑↓ select",
             "↵ connect",
             "r rescan",
+            "←→ tab",
+            "Esc back",
+            "? help",
+            "q quit",
+        ],
+        Focus::Detail if state.panel == Panel::Resources => vec![
+            "p pause",
+            "w window",
             "←→ tab",
             "Esc back",
             "? help",
@@ -1226,6 +1327,7 @@ fn draw_help_overlay(frame: &mut Frame, theme: Theme, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn split_line_pads_between_left_and_right() {
@@ -1322,24 +1424,52 @@ mod tests {
 
     #[test]
     fn host_resource_slot_shows_n_a_when_no_sample_has_arrived() {
-        assert_eq!(host_resource_slot(None), "cpu n/a");
-        assert_eq!(host_resource_role(None), Role::Muted);
+        let now = Instant::now();
+        assert_eq!(host_resource_slot(None, now), "cpu n/a");
+        assert_eq!(host_resource_role(None, now), Role::Muted);
     }
 
     #[test]
     fn host_resource_slot_renders_cpu_and_ram_once_a_sample_arrives() {
-        let host = HostSample {
-            cpu_pct: 42.0,
-            ram_used_bytes: 4 * 1024 * 1024 * 1024,
-            ram_total_bytes: 16 * 1024 * 1024 * 1024,
-            load_1m: 0.9,
-            window_ns: 1_000_000_000,
+        let now = Instant::now();
+        let host = Timestamped {
+            value: HostSample {
+                cpu_pct: 42.0,
+                ram_used_bytes: 4 * 1024 * 1024 * 1024,
+                ram_total_bytes: 16 * 1024 * 1024 * 1024,
+                load_1m: 0.9,
+                window_ns: 1_000_000_000,
+            },
+            received_at: now,
         };
-        let text = host_resource_slot(Some(host));
+        let text = host_resource_slot(Some(&host), now);
         assert!(text.contains("cpu 42%"), "{text}");
         assert!(text.contains("ram"), "{text}");
         assert!(text.contains("4.0G"), "{text}");
         assert!(text.contains("16.0G"), "{text}");
+        assert!(!text.contains("stale"), "{text}");
+    }
+
+    /// The receive-time freshness check itself: a sample older than
+    /// `DEFAULT_FRESHNESS_TTL` renders `(stale)` and the muted role, even
+    /// though the value is still cached and could otherwise render as live.
+    #[test]
+    fn host_resource_slot_marks_a_sample_stale_past_the_freshness_ttl() {
+        let received_at = Instant::now();
+        let now = received_at + DEFAULT_FRESHNESS_TTL + Duration::from_secs(1);
+        let host = Timestamped {
+            value: HostSample {
+                cpu_pct: 10.0,
+                ram_used_bytes: 1,
+                ram_total_bytes: 2,
+                load_1m: 0.1,
+                window_ns: 1,
+            },
+            received_at,
+        };
+        let text = host_resource_slot(Some(&host), now);
+        assert!(text.contains("stale"), "{text}");
+        assert_eq!(host_resource_role(Some(&host), now), Role::Muted);
     }
 
     fn topic(name: &str, producer: &str, rate: f32, count: u64) -> TopicMetric {
@@ -1404,22 +1534,26 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let sample = RouterMetricsSample {
-            topics: vec![
-                topic("y2026_1/drive/target", "mission", 12.0, 500),
-                topic("y2026_1/battery/state", "battery", 0.0, 10),
-            ],
-            throughput_msg_s: 12.0,
-            window_ns: 1_000_000_000,
+        let now = Instant::now();
+        let sample = Timestamped {
+            value: RouterMetricsSample {
+                topics: vec![
+                    topic("y2026_1/drive/target", "mission", 12.0, 500),
+                    topic("y2026_1/battery/state", "battery", 0.0, 10),
+                ],
+                throughput_msg_s: 12.0,
+                window_ns: 1_000_000_000,
+            },
+            received_at: now,
         };
         let mut state = AppState::new();
-        state.traffic_filter = "battery".to_string();
+        state.traffic.filter = "battery".to_string();
 
         let backend = TestBackend::new(80, 10);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let theme = Theme::new(crate::theme::ColorCapability::None);
         terminal
-            .draw(|frame| draw_traffic_tab(frame, theme, &state, Some(&sample), frame.area()))
+            .draw(|frame| draw_traffic_tab(frame, theme, &state, Some(&sample), now, frame.area()))
             .expect("draw must not fail");
         let content = buffer_text(terminal.backend().buffer());
         assert!(content.contains("battery"), "{content}");
@@ -1436,30 +1570,34 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let sample = JoypadDevicesSample {
-            available: vec![
-                crate::telemetry::JoypadDevice {
-                    id: "pad-a".to_string(),
-                    name: "Pad A".to_string(),
-                    connected: true,
-                },
-                crate::telemetry::JoypadDevice {
-                    id: "pad-b".to_string(),
-                    name: "Pad B".to_string(),
-                    connected: true,
-                },
-            ],
-            selected: Some("pad-b".to_string()),
-            last_error: None,
+        let now = Instant::now();
+        let sample = Timestamped {
+            value: JoypadDevicesSample {
+                available: vec![
+                    crate::telemetry::JoypadDevice {
+                        id: "pad-a".to_string(),
+                        name: "Pad A".to_string(),
+                        connected: true,
+                    },
+                    crate::telemetry::JoypadDevice {
+                        id: "pad-b".to_string(),
+                        name: "Pad B".to_string(),
+                        connected: true,
+                    },
+                ],
+                selected: Some("pad-b".to_string()),
+                last_error: None,
+            },
+            received_at: now,
         };
         let mut state = AppState::new();
-        state.joypad_cursor = 0; // cursor on pad-a, selection is pad-b
+        state.devices.cursor = 0; // cursor on pad-a, selection is pad-b
 
         let backend = TestBackend::new(60, 10);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let theme = Theme::new(crate::theme::ColorCapability::None);
         terminal
-            .draw(|frame| draw_joypad_tab(frame, theme, &state, Some(&sample), frame.area()))
+            .draw(|frame| draw_joypad_tab(frame, theme, &state, Some(&sample), now, frame.area()))
             .expect("draw must not fail");
         let content = buffer_text(terminal.backend().buffer());
         let pad_a_line = content.lines().find(|line| line.contains("Pad A")).unwrap();
@@ -1471,7 +1609,7 @@ mod tests {
     #[test]
     fn footer_collapses_to_filter_hint_while_filtering() {
         let mut state = AppState::new();
-        state.filtering = true;
+        state.navigator.filtering = true;
         let segments = footer_segments(&state);
         assert!(segments.iter().any(|segment| segment.contains("filter")));
         assert!(!segments.iter().any(|segment| segment.contains("restart")));
@@ -1489,6 +1627,23 @@ mod tests {
             text.width() <= 8,
             "{text} exceeds the requested 8-column budget"
         );
+    }
+
+    /// Design doc part 7: the navigator row must carry both the state
+    /// SYMBOL and its TEXT label, not the symbol alone.
+    #[test]
+    fn participant_row_text_includes_both_the_symbol_and_the_text_label() {
+        let status = ParticipantStatus::new(
+            "drive",
+            crate::participant_kind::ParticipantKind::Service,
+            ParticipantState::Degraded,
+        );
+        let text = participant_row_text(&status, 40);
+        assert!(
+            text.contains(state_symbol(ParticipantState::Degraded)),
+            "{text}"
+        );
+        assert!(text.contains("degraded"), "{text}");
     }
 
     #[test]
@@ -1535,6 +1690,117 @@ mod tests {
             channel: "dev".to_string(),
             mode: "run",
         }
+    }
+
+    /// Fields the Overview panel would show if the session board carried the
+    /// data - artifact reference, declared contracts, ownership, time to
+    /// ready - are genuinely NOT wired anywhere today (see this slice's
+    /// report): they must render the explicit unknown marker rather than a
+    /// fabricated value.
+    #[test]
+    fn overview_shows_unknown_for_fields_not_wired_to_the_board() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let status = ParticipantStatus::new(
+            "drive",
+            crate::participant_kind::ParticipantKind::Service,
+            ParticipantState::Ready,
+        );
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::new(crate::theme::ColorCapability::None);
+        let now = Instant::now();
+        terminal
+            .draw(|frame| draw_runtime_overview(frame, theme, &status, None, now, 0, frame.area()))
+            .expect("draw must not fail");
+        let content = buffer_text(terminal.backend().buffer());
+        assert!(content.contains("artifact"), "{content}");
+        assert!(content.contains("contracts"), "{content}");
+        assert!(content.contains("ownership"), "{content}");
+        assert!(content.contains("time to ready"), "{content}");
+        assert!(
+            content.matches("unknown").count() >= 4,
+            "every unwired field must show the unknown marker: {content}"
+        );
+        // Process telemetry absent -> a plain dash, not a fabricated number.
+        let cpu_line = content
+            .lines()
+            .find(|line| line.trim_start().starts_with("cpu"))
+            .expect("a cpu row must render");
+        assert_eq!(cpu_line.trim_end(), "cpu       -", "{cpu_line:?}");
+    }
+
+    /// The command AND its environment (`ParticipantLaunchCommand::env`) must
+    /// both render once a launch command exists - the brief calls out
+    /// "launch command AND environment" as a field that IS plumbed today but
+    /// was only half-shown (command only, no env).
+    #[test]
+    fn overview_shows_the_launch_command_and_its_environment() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut status = ParticipantStatus::new(
+            "drive",
+            crate::participant_kind::ParticipantKind::Service,
+            ParticipantState::Ready,
+        );
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("PHOXAL_ROBOT_ID".to_string(), "rover-01".to_string());
+        status.launch_command = Some(crate::supervisor::ParticipantLaunchCommand {
+            command_line: "service-drive --config /etc/drive.yaml".to_string(),
+            env,
+        });
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::new(crate::theme::ColorCapability::None);
+        let now = Instant::now();
+        terminal
+            .draw(|frame| draw_runtime_overview(frame, theme, &status, None, now, 0, frame.area()))
+            .expect("draw must not fail");
+        let content = buffer_text(terminal.backend().buffer());
+        assert!(
+            content.contains("service-drive --config /etc/drive.yaml"),
+            "{content}"
+        );
+        assert!(content.contains("environment"), "{content}");
+        assert!(content.contains("PHOXAL_ROBOT_ID=rover-01"), "{content}");
+    }
+
+    /// A live `Process` sample renders its value; a stale one (past
+    /// `DEFAULT_FRESHNESS_TTL`) is marked `(stale)` rather than shown as if
+    /// it were still current.
+    #[test]
+    fn overview_marks_a_stale_process_sample() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let status = ParticipantStatus::new(
+            "drive",
+            crate::participant_kind::ParticipantKind::Service,
+            ParticipantState::Ready,
+        );
+        let received_at = Instant::now();
+        let now = received_at + DEFAULT_FRESHNESS_TTL + Duration::from_secs(1);
+        let process = Timestamped {
+            value: ProcessSample {
+                cpu_pct: 7.0,
+                rss_bytes: 20 * 1024 * 1024,
+                window_ns: 1,
+            },
+            received_at,
+        };
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::new(crate::theme::ColorCapability::None);
+        terminal
+            .draw(|frame| {
+                draw_runtime_overview(frame, theme, &status, Some(&process), now, 0, frame.area())
+            })
+            .expect("draw must not fail");
+        let content = buffer_text(terminal.backend().buffer());
+        assert!(content.contains("7%"), "{content}");
+        assert!(content.contains("(stale)"), "{content}");
     }
 
     /// The runtime navigator's diagnostics strip must show the most recent
@@ -1598,7 +1864,7 @@ mod tests {
         let theme = Theme::new(crate::theme::ColorCapability::None);
         let title = sample_title();
         let board = sample_board();
-        let mut logs = LogRouter::new();
+        let mut logs = LogStore::new();
         let mut state = AppState::new();
         state.sync(&board);
 
@@ -1612,6 +1878,7 @@ mod tests {
                     &mut logs,
                     &state,
                     &TelemetrySnapshot::default(),
+                    Instant::now(),
                     &VecDeque::new(),
                 )
             })
@@ -1641,7 +1908,7 @@ mod tests {
             let theme = Theme::new(crate::theme::ColorCapability::None);
             let title = sample_title();
             let board = sample_board();
-            let mut logs = LogRouter::new();
+            let mut logs = LogStore::new();
             let mut state = AppState::new();
             state.sync(&board);
 
@@ -1655,6 +1922,7 @@ mod tests {
                         &mut logs,
                         &state,
                         &TelemetrySnapshot::default(),
+                        Instant::now(),
                         &VecDeque::new(),
                     )
                 })
@@ -1675,7 +1943,7 @@ mod tests {
         let theme = Theme::new(crate::theme::ColorCapability::None);
         let title = sample_title();
         let board = sample_board();
-        let mut logs = LogRouter::new();
+        let mut logs = LogStore::new();
         let mut state = AppState::new();
         state.sync(&board);
 
@@ -1689,6 +1957,7 @@ mod tests {
                     &mut logs,
                     &state,
                     &TelemetrySnapshot::default(),
+                    Instant::now(),
                     &VecDeque::new(),
                 )
             })
@@ -1708,6 +1977,7 @@ mod tests {
                     &mut logs,
                     &state,
                     &TelemetrySnapshot::default(),
+                    Instant::now(),
                     &VecDeque::new(),
                 )
             })
@@ -1734,7 +2004,7 @@ mod tests {
             let theme = Theme::new(capability);
             let title = sample_title();
             let board = sample_board();
-            let mut logs = LogRouter::new();
+            let mut logs = LogStore::new();
             let mut state = AppState::new();
             state.sync(&board);
 
@@ -1748,6 +2018,7 @@ mod tests {
                         &mut logs,
                         &state,
                         &TelemetrySnapshot::default(),
+                        Instant::now(),
                         &VecDeque::new(),
                     )
                 })

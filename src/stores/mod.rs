@@ -16,10 +16,14 @@
 //! The third store the target design names, `RuntimeStore`, already exists
 //! as `supervisor::BoardBackend`/`BoardSnapshot` and is not rebuilt here.
 //!
-//! This slice is purely additive: `tui::logs::LogRouter` and
-//! `telemetry::TelemetryBackend` are untouched, and nothing yet reads from
-//! these new stores - a later slice swaps the consumers over and deletes the
-//! old coupling.
+//! [`telemetry_store::TelemetryStore`] is now the live store behind
+//! `telemetry::TelemetryBackend` (Wave C2): every `record_*` call from a
+//! background feed task lands here at its actual receive time, so
+//! `TelemetrySnapshot`'s samples carry real freshness. [`log_store::LogStore`]
+//! is now the TUI's log-scrollback ring, replacing the old
+//! `tui::logs::LogRouter` (which conflated log lines with the telemetry
+//! history/traffic-sample coupling this store split apart) - that module has
+//! been deleted.
 
 pub mod log_store;
 pub mod telemetry_store;

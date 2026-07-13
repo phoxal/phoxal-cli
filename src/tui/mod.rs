@@ -34,7 +34,7 @@
 mod color;
 mod groups;
 mod input;
-mod logs;
+mod panel;
 mod render;
 mod startup;
 mod state;
@@ -43,6 +43,7 @@ mod terminal;
 pub(crate) use terminal::TerminalGuard;
 
 use std::io::{self, Stderr};
+use std::time::Instant;
 
 use crossterm::event::{Event, KeyEventKind};
 use ratatui::Terminal;
@@ -52,11 +53,11 @@ use tokio::sync::mpsc;
 use crate::display::DisplayAction;
 use crate::identity::IdentitySummary;
 use crate::session::event::SessionEvent;
+use crate::stores::log_store::LogStore;
 use crate::supervisor::{BoardSnapshot, RoutedLogLine};
 use crate::telemetry::TelemetryBackend;
 use crate::theme::Theme;
 
-pub use logs::LogRouter;
 pub use render::TitleInfo;
 pub use state::AppState;
 
@@ -71,7 +72,7 @@ pub struct TuiDisplay {
     identity: Option<IdentitySummary>,
     startup: startup::StartupState,
     state: AppState,
-    logs: LogRouter,
+    logs: LogStore,
     log_tx: mpsc::UnboundedSender<RoutedLogLine>,
     log_rx: mpsc::UnboundedReceiver<RoutedLogLine>,
     activated: Option<Activated>,
@@ -102,7 +103,7 @@ impl TuiDisplay {
             identity,
             startup: startup::StartupState::new(),
             state: AppState::new(),
-            logs: LogRouter::new(),
+            logs: LogStore::new(),
             log_tx,
             log_rx,
             activated: None,
@@ -152,24 +153,24 @@ impl TuiDisplay {
     /// Drain every routed log line queued since the last redraw, then draw
     /// one frame if activated. Draining happens regardless of activation so
     /// scrollback keeps accumulating even before the alternate screen opens.
-    /// `telemetry` is snapshotted once here and both fed into the
-    /// per-runtime history the reserved `RuntimeLogState` slots keep
-    /// (`LogRouter::record_telemetry`) and passed straight through to
-    /// `render::draw` for the non-historical readouts (sim clock, host meter,
-    /// per-participant CPU/RAM, joypad selection). Renders the dedicated
-    /// startup surface (`render::draw_startup`) instead of the runtime
-    /// navigator while `self.startup.show_startup_surface()` is true - see
-    /// `tui::startup`'s module docs. `self.startup.diagnostics` also feeds
-    /// the navigator's own one-line diagnostics strip once collapsed, so a
-    /// mid-session warning stays visible there too (fixes live-acceptance #2
-    /// for both surfaces).
+    /// `telemetry` is snapshotted once here - the snapshot's samples are
+    /// already timestamped at their actual bus-receive time by
+    /// `TelemetryBackend`/`stores::telemetry_store::TelemetryStore` (Wave
+    /// C2), so `now` (this redraw's own instant) is only needed to compare
+    /// against those receive times for staleness, never to re-stamp a
+    /// sample. Renders the dedicated startup surface (`render::draw_startup`)
+    /// instead of the runtime navigator while
+    /// `self.startup.show_startup_surface()` is true - see `tui::startup`'s
+    /// module docs. `self.startup.diagnostics` also feeds the navigator's own
+    /// one-line diagnostics strip once collapsed, so a mid-session warning
+    /// stays visible there too (fixes live-acceptance #2 for both surfaces).
     pub fn redraw(&mut self, board: &BoardSnapshot, telemetry: &TelemetryBackend) {
         while let Ok(line) = self.log_rx.try_recv() {
             self.logs.record(line);
         }
         self.state.sync(board);
         let snapshot = telemetry.snapshot();
-        self.logs.record_telemetry(&snapshot);
+        let now = Instant::now();
         let Some(activated) = &mut self.activated else {
             return;
         };
@@ -191,6 +192,7 @@ impl TuiDisplay {
                     logs,
                     state,
                     &snapshot,
+                    now,
                     &startup.diagnostics,
                 );
             }

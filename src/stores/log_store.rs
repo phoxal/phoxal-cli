@@ -10,21 +10,16 @@
 //! is, so they get their own bounded ring rather than being folded into a
 //! per-runtime scrollback.
 //!
-//! NOTE: a parallel slice owns `crate::session::event`, which defines a
-//! richer `DiagnosticSource` (an enum: `Tracing`/`Dependency`/`Tool { name }`/
-//! `Supervisor`) plus its own `DiagnosticLevel`, intended to become the
-//! session-wide typed event stream a later `SessionController` drives. Its
-//! shape does not match this module's `DiagnosticEvent` one-for-one (a plain
-//! `String` source label here vs. a closed enum there), and this slice is
-//! scoped to NOT touch `src/session/` - so [`DiagnosticEvent`] below is a
-//! deliberately minimal, local stand-in (source label, level, message)
-//! rather than a reuse. Reconcile the two in a later slice, most likely by
-//! having `LogStore::record_diagnostic` accept an adapted
-//! `session::event::SessionEvent::Diagnostic` payload instead of this local
-//! type.
+//! [`DiagnosticEvent`] reuses `crate::session::event`'s own `DiagnosticSource`/
+//! `DiagnosticLevel` (the session-wide typed event vocabulary
+//! `SessionController` drives both renderers from - see that module's docs)
+//! rather than a local stand-in, so a diagnostic recorded here and one
+//! rendered by the startup surface (`tui::startup::DiagnosticLine`) always
+//! agree on source/level shape.
 
 use std::collections::{BTreeMap, VecDeque};
 
+use crate::session::event::{DiagnosticLevel, DiagnosticSource};
 use crate::supervisor::{LogSource, RoutedLogLine};
 
 /// Bound on a single runtime's scrollback. Matches the existing
@@ -47,20 +42,13 @@ pub struct DisplayedLine {
     pub text: String,
 }
 
-/// Severity of a [`DiagnosticEvent`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum DiagnosticLevel {
-    Info,
-    Warn,
-    Error,
-}
-
 /// One diagnostic event: a tracing record or captured non-bus output,
-/// attributed to a short source label (a tool name, "supervisor", "tracing",
-/// ...) rather than a bus participant id.
+/// attributed to a [`DiagnosticSource`] rather than a bus participant id -
+/// the same source/level vocabulary `session::event::SessionEvent::Diagnostic`
+/// and the startup surface use, so every diagnostic renderer agrees on shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticEvent {
-    pub source: String,
+    pub source: DiagnosticSource,
     pub level: DiagnosticLevel,
     pub message: String,
 }
@@ -68,12 +56,12 @@ pub struct DiagnosticEvent {
 impl DiagnosticEvent {
     #[must_use]
     pub fn new(
-        source: impl Into<String>,
+        source: DiagnosticSource,
         level: DiagnosticLevel,
         message: impl Into<String>,
     ) -> Self {
         Self {
-            source: source.into(),
+            source,
             level,
             message: message.into(),
         }
@@ -252,7 +240,9 @@ mod tests {
         let mut store = LogStore::new();
         for i in 0..(DIAGNOSTIC_CAPACITY + 10) {
             store.record_diagnostic(DiagnosticEvent::new(
-                "tool-router",
+                DiagnosticSource::Tool {
+                    name: "tool-router".to_string(),
+                },
                 DiagnosticLevel::Info,
                 format!("diagnostic {i}"),
             ));
@@ -275,12 +265,12 @@ mod tests {
     fn diagnostics_are_kept_separate_per_level() {
         let mut store = LogStore::new();
         store.record_diagnostic(DiagnosticEvent::new(
-            "tracing",
+            DiagnosticSource::Tracing,
             DiagnosticLevel::Warn,
             "router queue backing up",
         ));
         store.record_diagnostic(DiagnosticEvent::new(
-            "supervisor",
+            DiagnosticSource::Supervisor,
             DiagnosticLevel::Error,
             "participant crashed",
         ));
