@@ -44,6 +44,20 @@ pub struct NativeArtifactDescriptor {
     pub target: Option<String>,
 }
 
+/// Presentation hook for commands that own a multi-row artifact view. The
+/// artifact store reports lifecycle events while retaining all download,
+/// verification, unpack, and atomic activation semantics here.
+pub(crate) trait ArtifactProgressReporter: Sync {
+    fn begin(&self, descriptor: &NativeArtifactDescriptor) -> crate::progress::Row;
+    fn complete(&self, descriptor: &NativeArtifactDescriptor, row: Option<crate::progress::Row>);
+    fn failed(
+        &self,
+        descriptor: &NativeArtifactDescriptor,
+        row: crate::progress::Row,
+        error: &anyhow::Error,
+    );
+}
+
 impl NativeArtifactDescriptor {
     /// Build a descriptor from any resolved official artifact that carries a
     /// built tarball: a service/simulator ([`ResolvedPlatformRuntime`]) or -
@@ -190,20 +204,22 @@ pub fn prepare_descriptors_with_preflight(
         let free = free_disk_bytes(&destination).ok();
         if let Some(ui) = ui {
             ui.info(format!(
-                "artifact preflight: {} package target(s), {} bytes, destination {}",
+                "artifact preflight: {} package target(s), {}, destination {}",
                 missing.len(),
-                total_bytes,
+                crate::human::bytes(total_bytes),
                 destination.display()
             ));
             if let Some(free) = free {
-                ui.info(format!("free disk: {free} bytes"));
+                ui.info(format!("free disk: {}", crate::human::bytes(free)));
             }
         }
         if let Some(free) = free
             && total_bytes > free
         {
             bail!(
-                "artifact download needs {total_bytes} bytes but only {free} bytes are free at {}; run `phoxal cache clean --artifacts` or free disk space",
+                "artifact download needs {} but only {} are free at {}; run `phoxal cache clean --artifacts` or free disk space",
+                crate::human::bytes(total_bytes),
+                crate::human::bytes(free),
                 destination.display()
             );
         }
@@ -562,9 +578,33 @@ fn prepare_descriptor(
     descriptor: &NativeArtifactDescriptor,
     mode: ProvisioningMode,
 ) -> Result<PathBuf> {
+    prepare_descriptor_inner(ui, descriptor, mode, None)
+}
+
+fn prepare_descriptor_reported(
+    descriptor: &NativeArtifactDescriptor,
+    reporter: &dyn ArtifactProgressReporter,
+) -> Result<PathBuf> {
+    prepare_descriptor_inner(
+        None,
+        descriptor,
+        ProvisioningMode::MissingOnly,
+        Some(reporter),
+    )
+}
+
+fn prepare_descriptor_inner(
+    ui: Option<&Ui>,
+    descriptor: &NativeArtifactDescriptor,
+    mode: ProvisioningMode,
+    reporter: Option<&dyn ArtifactProgressReporter>,
+) -> Result<PathBuf> {
     let version_dir = artifact_exec_dir(descriptor)?;
     let binary = version_dir.join(&descriptor.binary_name);
     if mode == ProvisioningMode::MissingOnly && version_dir.is_dir() {
+        if let Some(reporter) = reporter {
+            reporter.complete(descriptor, None);
+        }
         return Ok(binary);
     }
     if descriptor.url.is_empty() {
@@ -576,20 +616,43 @@ fn prepare_descriptor(
         );
     }
 
-    if let Some(ui) = ui {
+    if reporter.is_none()
+        && let Some(ui) = ui
+    {
         ui.info(format!(
             "provisioning {} {} from {}",
             descriptor.kind, descriptor.name, descriptor.url
         ));
     }
     let mode = ui.map_or_else(crate::output_mode::OutputMode::from_env, |ui| ui.mode());
-    let tarball_path = download_blob(descriptor, mode)?;
-    unpack_asset(&tarball_path, &version_dir)?;
-    fs::remove_file(&tarball_path).ok();
-    if binary.is_file() {
-        make_executable(&binary)?;
+    let row = reporter.map(|reporter| reporter.begin(descriptor));
+    let result = (|| {
+        let tarball_path = if let Some(row) = &row {
+            download_blob_inner(descriptor, |delta| row.inc(delta))?
+        } else {
+            download_blob(descriptor, mode)?
+        };
+        unpack_asset(&tarball_path, &version_dir)?;
+        fs::remove_file(&tarball_path).ok();
+        if binary.is_file() {
+            make_executable(&binary)?;
+        }
+        Ok(binary)
+    })();
+    match result {
+        Ok(binary) => {
+            if let Some(reporter) = reporter {
+                reporter.complete(descriptor, row);
+            }
+            Ok(binary)
+        }
+        Err(error) => {
+            if let (Some(reporter), Some(row)) = (reporter, row) {
+                reporter.failed(descriptor, row, &error);
+            }
+            Err(error)
+        }
     }
-    Ok(binary)
 }
 
 /// Download/unpack every descriptor with bounded concurrency, then retarget
@@ -597,6 +660,23 @@ fn prepare_descriptor(
 pub fn prepare_and_activate_descriptors(
     descriptors: &[NativeArtifactDescriptor],
     ui: Option<&Ui>,
+) -> Result<()> {
+    prepare_and_activate_descriptors_inner(descriptors, ui, None)
+}
+
+/// The update command's presentation-aware entry point. Only rendering is
+/// delegated; the same bounded workers and atomic activation path are used.
+pub(crate) fn prepare_and_activate_descriptors_with_progress(
+    descriptors: &[NativeArtifactDescriptor],
+    reporter: &dyn ArtifactProgressReporter,
+) -> Result<()> {
+    prepare_and_activate_descriptors_inner(descriptors, None, Some(reporter))
+}
+
+fn prepare_and_activate_descriptors_inner(
+    descriptors: &[NativeArtifactDescriptor],
+    ui: Option<&Ui>,
+    reporter: Option<&dyn ArtifactProgressReporter>,
 ) -> Result<()> {
     const CONCURRENCY: usize = 4;
     let mut package_versions = std::collections::BTreeMap::new();
@@ -619,8 +699,9 @@ pub fn prepare_and_activate_descriptors(
             let handles = batch
                 .iter()
                 .map(|descriptor| {
-                    scope.spawn(move || {
-                        prepare_descriptor(None, descriptor, ProvisioningMode::MissingOnly)
+                    scope.spawn(move || match reporter {
+                        Some(reporter) => prepare_descriptor_reported(descriptor, reporter),
+                        None => prepare_descriptor(None, descriptor, ProvisioningMode::MissingOnly),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -641,14 +722,16 @@ pub fn prepare_and_activate_descriptors(
             completed,
             total,
         );
-        if let Some(ui) = ui {
+        if reporter.is_none()
+            && let Some(ui) = ui
+        {
             for descriptor in batch {
                 ui.info(format!(
-                    "verified {} {} [{}] ({} bytes)",
+                    "verified {} {} [{}] ({})",
                     descriptor.package_id,
                     descriptor.version,
                     descriptor_scope_label(descriptor),
-                    descriptor.size
+                    crate::human::bytes(descriptor.size)
                 ));
             }
         }
@@ -758,17 +841,17 @@ fn download_blob(
     mode: crate::output_mode::OutputMode,
 ) -> Result<PathBuf> {
     let label = format!(
-        "downloading {} {} [{}] ({} bytes)",
+        "downloading {} {} [{}] ({})",
         descriptor.package_id,
         descriptor.version,
         descriptor_scope_label(descriptor),
-        descriptor.size
+        crate::human::bytes(descriptor.size)
     );
     // `descriptor.size` is the catalog-declared blob size (always known
     // ahead of the request - it is what `verify_blob_bytes` checks the
     // download against), so the byte bar is always determinate here.
     let progress = crate::progress::bytes_bar(label, descriptor.size, mode);
-    match download_blob_inner(descriptor, &progress) {
+    match download_blob_inner(descriptor, |delta| progress.inc(delta)) {
         Ok(path) => {
             progress.finish_and_clear();
             Ok(path)
@@ -785,7 +868,7 @@ fn download_blob(
 
 fn download_blob_inner(
     descriptor: &NativeArtifactDescriptor,
-    progress: &crate::progress::Handle,
+    mut advance: impl FnMut(u64),
 ) -> Result<PathBuf> {
     use std::io::Read;
 
@@ -811,7 +894,7 @@ fn download_blob_inner(
             break;
         }
         bytes.extend_from_slice(&chunk[..read]);
-        progress.inc(read as u64);
+        advance(read as u64);
     }
     verify_blob_bytes(descriptor, &bytes)?;
     let path = artifact_tarball_path(descriptor)?;
@@ -822,11 +905,11 @@ fn download_blob_inner(
 fn verify_blob_bytes(descriptor: &NativeArtifactDescriptor, bytes: &[u8]) -> Result<()> {
     if bytes.len() as u64 != descriptor.size {
         bail!(
-            "size mismatch for {} {}: expected {} bytes, got {}",
+            "size mismatch for {} {}: expected {}, got {}",
             descriptor.package_id,
             descriptor.version,
-            descriptor.size,
-            bytes.len()
+            crate::human::bytes(descriptor.size),
+            crate::human::bytes(bytes.len() as u64)
         );
     }
     let actual = hex::encode(Sha256::digest(bytes));

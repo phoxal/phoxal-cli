@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,6 +8,8 @@ use serde::Serialize;
 
 use crate::AppContext;
 use crate::commands::MessageFormat;
+use crate::native_artifacts::{ArtifactProgressReporter, NativeArtifactDescriptor};
+use crate::output_mode::OutputMode;
 use crate::resolver::{ResolveOptions, discover_robot_yaml, load_robot_with_extras, resolve};
 
 #[derive(Debug, Args)]
@@ -51,12 +54,17 @@ impl Update {
         let catalog_source = app.catalog_source.clone();
         let dry_run = self.dry_run;
         let ui = app.ui;
+        let output_mode = ui.mode();
         let summary = tokio::task::spawn_blocking(move || {
             update(&project_root, catalog_source, dry_run, &ui)
         })
         .await
         .context("update worker failed")??;
-        crate::commands::print_message(&summary, || print_human(&summary), self.message_format)
+        crate::commands::print_message(
+            &summary,
+            || print_human(&summary, output_mode),
+            self.message_format,
+        )
     }
 }
 
@@ -129,7 +137,9 @@ fn update(
         && download_bytes > free
     {
         bail!(
-            "artifact update needs {download_bytes} bytes but only {free} bytes are free at {}",
+            "artifact update needs {} but only {} are free at {}",
+            crate::human::bytes(download_bytes),
+            crate::human::bytes(free),
             destination.display()
         );
     }
@@ -145,13 +155,11 @@ fn update(
     if !dry_run {
         let _lock = crate::native_artifacts::ArtifactStoreLock::exclusive("update")?;
         fs::create_dir_all(&destination)?;
-        ui.info(format!(
-            "downloading {} package target(s), {} bytes, into {}",
-            descriptors.len(),
-            download_bytes,
-            destination.display()
-        ));
-        crate::native_artifacts::prepare_and_activate_descriptors(&descriptors, Some(ui))?;
+        let progress = UpdateProgress::new(ui.mode(), &updates);
+        crate::native_artifacts::prepare_and_activate_descriptors_with_progress(
+            &descriptors,
+            &progress,
+        )?;
     }
 
     Ok(UpdateSummary {
@@ -217,39 +225,134 @@ fn include_existing_target_scopes(
     Ok(())
 }
 
-fn print_human(summary: &UpdateSummary) -> Result<()> {
-    println!(
-        "update {} channel at {} ({} package target(s), {} bytes)",
-        summary.channel, summary.snapshot, summary.package_count, summary.download_bytes
-    );
-    println!("destination: {}", summary.destination.display());
-    if let Some(free) = summary.free_disk_bytes {
-        println!("free disk: {free} bytes");
+fn print_human(summary: &UpdateSummary, output_mode: OutputMode) -> Result<()> {
+    for line in human_lines(summary, output_mode) {
+        println!("{line}");
     }
-    let mut changed = false;
+    Ok(())
+}
+
+fn human_lines(summary: &UpdateSummary, output_mode: OutputMode) -> Vec<String> {
+    if output_mode == OutputMode::Rich && !summary.dry_run {
+        return if summary.updates.iter().any(|update| !update.pinned) {
+            Vec::new()
+        } else {
+            vec!["no updates available".to_string()]
+        };
+    }
+    let marker = if summary.dry_run {
+        "\u{2022}"
+    } else {
+        "\u{2713}"
+    };
+    let mut lines = Vec::new();
     for update in &summary.updates {
         if update.pinned {
             continue;
         }
-        if update.old.as_deref() != Some(update.new.as_str()) {
-            changed = true;
-            println!(
-                "  {} [{}]: {} -> {} ({} bytes)",
-                update.package,
-                update.target.as_deref().unwrap_or("assets"),
-                update.old.as_deref().unwrap_or("missing"),
-                update.new,
-                update.bytes
-            );
+        lines.push(format!("{marker} {}", update_result(update)));
+    }
+    if lines.is_empty() {
+        lines.push("no updates available".to_string());
+    }
+    lines
+}
+
+fn update_result(update: &PackageUpdate) -> String {
+    format!(
+        "{} ({})",
+        update_label(update),
+        crate::human::bytes(update.bytes)
+    )
+}
+
+fn update_label(update: &PackageUpdate) -> String {
+    let version = match update.old.as_deref() {
+        Some(old) if old != update.new => format!("{old} -> {}", update.new),
+        Some(_) => update.new.clone(),
+        None => format!("missing -> {}", update.new),
+    };
+    format!(
+        "{} [{}] {version}",
+        update.package,
+        update.target.as_deref().unwrap_or("assets")
+    )
+}
+
+struct UpdateProgress {
+    rows: crate::progress::Rows,
+    updates: BTreeMap<(String, Option<String>), PackageUpdate>,
+}
+
+impl UpdateProgress {
+    fn new(mode: OutputMode, updates: &[PackageUpdate]) -> Self {
+        Self {
+            rows: crate::progress::Rows::new(mode),
+            updates: updates
+                .iter()
+                .cloned()
+                .map(|update| ((update.package.clone(), update.target.clone()), update))
+                .collect(),
         }
     }
-    for package in &summary.pins_skipped {
-        println!("  {package}: explicit pin skipped by channel update");
+
+    fn update<'a>(&'a self, descriptor: &NativeArtifactDescriptor) -> Option<&'a PackageUpdate> {
+        self.updates
+            .get(&(descriptor.package_id.clone(), descriptor.target.clone()))
     }
-    if !changed {
-        println!("no updates available");
+}
+
+impl ArtifactProgressReporter for UpdateProgress {
+    fn begin(&self, descriptor: &NativeArtifactDescriptor) -> crate::progress::Row {
+        let Some(update) = self.update(descriptor) else {
+            return crate::progress::Row::Silent;
+        };
+        if update.pinned {
+            return crate::progress::Row::Silent;
+        }
+        self.rows.bytes(update_label(update), descriptor.size)
     }
-    Ok(())
+
+    fn complete(&self, descriptor: &NativeArtifactDescriptor, row: Option<crate::progress::Row>) {
+        let Some(update) = self.update(descriptor) else {
+            if let Some(row) = row {
+                row.clear();
+            }
+            return;
+        };
+        if update.pinned {
+            if let Some(row) = row {
+                row.clear();
+            }
+            return;
+        }
+        let message = update_result(update);
+        if let Some(row) = row {
+            row.finish(message);
+        } else {
+            self.rows.completed(message);
+        }
+    }
+
+    fn failed(
+        &self,
+        descriptor: &NativeArtifactDescriptor,
+        row: crate::progress::Row,
+        error: &anyhow::Error,
+    ) {
+        let label = self.update(descriptor).map_or_else(
+            || {
+                format!(
+                    "{} [{}] {}",
+                    descriptor.package_id,
+                    descriptor.target.as_deref().unwrap_or("assets"),
+                    descriptor.version
+                )
+            },
+            update_result,
+        );
+        row.abandon(format!("{label}: {error:#}"));
+    }
 }
 
 #[cfg(unix)]
@@ -335,5 +438,65 @@ mod tests {
         assert_eq!(retained.url, "https://example.invalid/robot");
         assert_eq!(retained.size, 42);
         Ok(())
+    }
+
+    #[test]
+    fn human_update_rows_replace_the_footer_and_hide_pins() {
+        let summary = UpdateSummary {
+            dry_run: false,
+            channel: "stable".to_string(),
+            snapshot: "build-ignored".to_string(),
+            destination: PathBuf::from("/ignored"),
+            package_count: 3,
+            download_bytes: 7_461_785,
+            free_disk_bytes: Some(99),
+            updates: vec![
+                PackageUpdate {
+                    package: "phoxal/simulator-webots-controller".to_string(),
+                    target: Some("aarch64-apple-darwin".to_string()),
+                    old: Some("0.1.7".to_string()),
+                    new: "0.1.9".to_string(),
+                    bytes: 7_461_785,
+                    pinned: false,
+                },
+                PackageUpdate {
+                    package: "phoxal/component-passive_caster".to_string(),
+                    target: None,
+                    old: Some("0.1.0".to_string()),
+                    new: "0.1.0".to_string(),
+                    bytes: 123,
+                    pinned: true,
+                },
+                PackageUpdate {
+                    package: "phoxal/service-drive".to_string(),
+                    target: Some("aarch64-apple-darwin".to_string()),
+                    old: Some("0.19.8".to_string()),
+                    new: "0.19.8".to_string(),
+                    bytes: 7_356_930,
+                    pinned: false,
+                },
+            ],
+            pins_skipped: vec!["phoxal/component-passive_caster".to_string()],
+            coherence: "deferred to W6",
+            config: "deferred to W7",
+        };
+
+        assert_eq!(
+            human_lines(&summary, OutputMode::Plain),
+            vec![
+                "\u{2713} phoxal/simulator-webots-controller [aarch64-apple-darwin] 0.1.7 -> 0.1.9 (7.1 MiB)"
+                    .to_string(),
+                "\u{2713} phoxal/service-drive [aarch64-apple-darwin] 0.19.8 (7.0 MiB)"
+                    .to_string(),
+            ]
+        );
+        assert!(human_lines(&summary, OutputMode::Rich).is_empty());
+
+        let mut all_pinned = summary;
+        all_pinned.updates.retain(|update| update.pinned);
+        assert_eq!(
+            human_lines(&all_pinned, OutputMode::Rich),
+            vec!["no updates available".to_string()]
+        );
     }
 }

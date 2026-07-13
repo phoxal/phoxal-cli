@@ -95,7 +95,7 @@ impl Clean {
                         println!(
                             "{verb} {} ({})",
                             entry.path.display(),
-                            format_bytes(entry.bytes)
+                            crate::human::bytes(entry.bytes)
                         );
                     }
                     println!(
@@ -105,7 +105,7 @@ impl Clean {
                         } else {
                             "freed"
                         },
-                        format_bytes(summary.total_bytes),
+                        crate::human::bytes(summary.total_bytes),
                         if summary.dry_run { " (dry run)" } else { "" }
                     );
                 }
@@ -191,19 +191,4 @@ fn remove_path(path: &Path) -> Result<()> {
         fs::remove_file(path)?;
     }
     Ok(())
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = KIB * 1024;
-    const GIB: u64 = MIB * 1024;
-    if bytes >= GIB {
-        format!("{:.1} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }

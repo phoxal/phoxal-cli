@@ -36,6 +36,7 @@ pub(crate) mod display;
 pub(crate) mod git_artifact;
 pub(crate) mod host_doctor;
 pub mod host_paths;
+pub(crate) mod human;
 pub(crate) mod identity;
 pub(crate) mod launch_env;
 pub mod launch_plan;

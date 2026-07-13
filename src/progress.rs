@@ -29,9 +29,10 @@
 //! `phoxal-cli check`/`deploy` outside any session) does `mode` decide the
 //! fallback behavior, exactly as before.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::output_mode::OutputMode;
 use crate::session::diagnostics::{RouteResult, try_route};
@@ -48,6 +49,116 @@ pub enum Handle {
     Plain,
     Routed,
     Silent,
+}
+
+/// A Docker-build-style group of stable progress rows. Rich terminals redraw
+/// all active rows together; non-interactive and JSON modes stay silent so the
+/// caller can emit one deterministic final list after the work completes.
+pub struct Rows {
+    rich: Option<Arc<MultiProgress>>,
+    theme: Theme,
+}
+
+/// One determinate row owned by a worker. Finishing the row replaces its bar
+/// with a compact result instead of printing a second summary line.
+pub enum Row {
+    Rich {
+        bar: ProgressBar,
+        group: Arc<MultiProgress>,
+        theme: Theme,
+    },
+    Routed,
+    Silent,
+}
+
+impl Rows {
+    #[must_use]
+    pub fn new(mode: OutputMode) -> Self {
+        Self {
+            rich: (mode == OutputMode::Rich)
+                .then(|| Arc::new(MultiProgress::with_draw_target(ProgressDrawTarget::stderr()))),
+            theme: Theme::detect_stderr(mode),
+        }
+    }
+
+    #[must_use]
+    pub fn bytes(&self, message: impl Into<String>, total: u64) -> Row {
+        let message = message.into();
+        if !matches!(try_route_progress(&message), RouteResult::NoSession) {
+            return Row::Routed;
+        }
+        let Some(group) = &self.rich else {
+            return Row::Silent;
+        };
+        let bar = group.add(ProgressBar::new(total));
+        bar.set_style(row_bytes_style(self.theme));
+        bar.enable_steady_tick(Duration::from_millis(90));
+        bar.set_message(message);
+        Row::Rich {
+            bar,
+            group: Arc::clone(group),
+            theme: self.theme,
+        }
+    }
+
+    pub fn completed(&self, message: impl Into<String>) {
+        let message = message.into();
+        if !matches!(try_route_progress(&message), RouteResult::NoSession) {
+            return;
+        }
+        if let Some(group) = &self.rich {
+            let bar = group.add(ProgressBar::new(0));
+            finish_row(&bar, group, self.theme, Role::Success, "\u{2713}", message);
+        }
+    }
+}
+
+impl Row {
+    pub fn inc(&self, delta: u64) {
+        if let Self::Rich { bar, .. } = self {
+            bar.inc(delta);
+        }
+    }
+
+    pub fn finish(self, message: impl Into<String>) {
+        let message = message.into();
+        match self {
+            Self::Rich { bar, group, theme } => {
+                finish_row(&bar, &group, theme, Role::Success, "\u{2713}", message);
+            }
+            Self::Routed => {
+                let _ = try_route(
+                    DiagnosticSource::Dependency,
+                    DiagnosticLevel::Info,
+                    &message,
+                );
+            }
+            Self::Silent => {}
+        }
+    }
+
+    pub fn clear(self) {
+        if let Self::Rich { bar, .. } = self {
+            bar.finish_and_clear();
+        }
+    }
+
+    pub fn abandon(self, message: impl Into<String>) {
+        let message = message.into();
+        match self {
+            Self::Rich { bar, group, theme } => {
+                finish_row(&bar, &group, theme, Role::Error, "\u{2717}", message);
+            }
+            Self::Routed => {
+                let _ = try_route(
+                    DiagnosticSource::Dependency,
+                    DiagnosticLevel::Warn,
+                    &message,
+                );
+            }
+            Self::Silent => {}
+        }
+    }
 }
 
 /// Route `message` through the active session's diagnostics channel, if one
@@ -176,6 +287,31 @@ fn bytes_style(theme: Theme) -> ProgressStyle {
     ProgressStyle::with_template(&template).unwrap_or_else(|_| ProgressStyle::default_bar())
 }
 
+fn row_bytes_style(theme: Theme) -> ProgressStyle {
+    let template = match theme.indicatif_tag(Role::Accent) {
+        Some(tag) => format!(
+            "{{spinner:.{tag}}} {{msg}} {{bytes}}/{{total_bytes}} [{{bar:24.{tag}}}] {{bytes_per_sec}}"
+        ),
+        None => "{spinner} {msg} {bytes}/{total_bytes} [{bar:24}] {bytes_per_sec}".to_string(),
+    };
+    ProgressStyle::with_template(&template)
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .tick_chars(SPINNER_TICK_CHARS)
+}
+
+fn finish_row(
+    bar: &ProgressBar,
+    group: &MultiProgress,
+    theme: Theme,
+    role: Role,
+    mark: &str,
+    message: String,
+) {
+    bar.disable_steady_tick();
+    bar.finish_and_clear();
+    group.suspend(|| eprintln!("{} {message}", theme.paint(role, mark)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +408,16 @@ mod tests {
         // succeeds and never panics/falls back silently to a different
         // style, which `unwrap_or_else` above would otherwise mask.
         let _ = style;
+    }
+
+    #[test]
+    fn grouped_rows_are_silent_outside_rich_mode() {
+        let _guard = DIAGNOSTICS_TEST_LOCK.blocking_lock();
+        let rows = Rows::new(OutputMode::Plain);
+        assert!(matches!(rows.bytes("downloading", 10), Row::Silent));
+        rows.completed("done");
+
+        let rows = Rows::new(OutputMode::Json);
+        assert!(matches!(rows.bytes("downloading", 10), Row::Silent));
     }
 }

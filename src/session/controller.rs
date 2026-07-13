@@ -798,9 +798,9 @@ impl LineRenderer {
     fn print_phase_finished(&self, label: &str, outcome: &PhaseOutcome, elapsed: Duration) {
         match outcome {
             PhaseOutcome::Succeeded => eprintln!(
-                "{} {label} ({:.1}s)",
+                "{} {label} ({})",
                 self.theme.success("\u{2713}"),
-                elapsed.as_secs_f32()
+                crate::human::duration(elapsed)
             ),
             PhaseOutcome::Skipped => {
                 eprintln!("{} {label}", self.theme.muted("\u{b7}"));

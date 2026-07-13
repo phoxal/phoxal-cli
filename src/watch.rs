@@ -334,7 +334,7 @@ async fn apply_watch_result(
 }
 
 fn elapsed_label(started: Instant) -> String {
-    format!("{:.1}s", started.elapsed().as_secs_f32())
+    crate::human::duration(started.elapsed())
 }
 
 fn set_note_all(board: &BoardBackend, target: &WatchTarget, note: impl AsRef<str>) {
