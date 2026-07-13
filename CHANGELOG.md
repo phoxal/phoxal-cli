@@ -4,6 +4,30 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.9.0) - 2026-07-13
+
+
+### Added
+
+- *(simulate)* Serve the robot spawn set over the bus, drop spawn from --config (#120)
+- *(simulate)* Observed-readiness barrier + failure propagation (#122)
+- *(cli-ux)* Branded operational console - theme, TUI, staged startup, live telemetry (#125)
+
+### Fixed
+
+- *(simulate)* Make live Webots simulation work end to end (#116)
+- *(simulate)* Clean Webots shutdown, native IMPORTABLE, in-project base pins (#118)
+- *(simulate)* Fail-fast on terminal graph failure; use framework spawn contracts; atomic state write (#123)
+- *(run/deploy)* Don't pass PHOXAL_CONFIG to configless tools; give telemetry PHOXAL_CONNECT (#126)
+
+### Refactored
+
+- *(artifacts)* Version-atomic store, self-cleaning lock, retire target-independent (#119)
+
+### Tests
+
+- *(output-mode)* Derive cli_version in json baseline from CARGO_PKG_VERSION (#127)
+
 ## [0.8.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.8.1) - 2026-07-11
 
 
