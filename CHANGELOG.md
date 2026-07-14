@@ -4,6 +4,13 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.12.0) - 2026-07-14
+
+
+### Added
+
+- *(update)* Redesign artifact progress (#138)
+
 ## [0.11.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.11.1) - 2026-07-13
 
 
