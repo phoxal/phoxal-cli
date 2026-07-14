@@ -359,8 +359,8 @@ impl BoardBackend {
             }
             status.state = ParticipantState::Failed;
             status.note = Some(format!(
-                "heartbeat stopped: no presence/heartbeat observed for over {}s",
-                stale_after.as_secs()
+                "heartbeat stopped: no presence/heartbeat observed for over {}",
+                crate::human::duration(stale_after)
             ));
         }
     }
@@ -914,9 +914,9 @@ impl RunningParticipant {
                 &self.spec.id,
                 ParticipantState::Failed,
                 Some(format!(
-                    "StartLimitBurst exhausted after {} failures in {}s; last status {status}",
+                    "StartLimitBurst exhausted after {} failures in {}; last status {status}",
                     policy.start_limit_burst,
-                    policy.start_limit_interval.as_secs()
+                    crate::human::duration(policy.start_limit_interval)
                 )),
             );
             return Ok(());
@@ -928,8 +928,8 @@ impl RunningParticipant {
             &self.spec.id,
             ParticipantState::Restarting,
             Some(format!(
-                "exited with {status}; restarting in {}s",
-                policy.restart_delay.as_secs_f32()
+                "exited with {status}; restarting in {}",
+                crate::human::duration(policy.restart_delay)
             )),
         );
         self.restart_at = Some(now + policy.restart_delay);
@@ -1249,18 +1249,18 @@ pub async fn await_participants_ready(
         // missing participant simply keeps waiting for as long as the
         // operator leaves the session open.
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            let waited = started.elapsed().as_secs();
+            let waited = crate::human::duration(started.elapsed());
             for id in &missing {
                 board.set_state(
                     id,
                     ParticipantState::Failed,
                     Some(format!(
-                        "stage readiness timed out after {waited}s: never observed ready"
+                        "stage readiness timed out after {waited}: never observed ready"
                     )),
                 );
             }
             bail!(
-                "stage readiness timed out after {waited}s: participant(s) never observed ready: {}",
+                "stage readiness timed out after {waited}: participant(s) never observed ready: {}",
                 missing.join(", ")
             );
         }

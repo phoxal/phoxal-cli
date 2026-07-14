@@ -139,8 +139,10 @@ fn compact_config_json(launch: &ParticipantLaunch) -> Result<Option<String>> {
     let size = encoded.len();
     if size > MAX_CONFIG_ENV_BYTES {
         bail!(
-            "participant {} PHOXAL_CONFIG is {size} bytes, above the {MAX_CONFIG_ENV_BYTES} byte limit",
-            launch.participant_id
+            "participant {} PHOXAL_CONFIG is {} ({size} bytes), above the {} ({MAX_CONFIG_ENV_BYTES} byte limit)",
+            launch.participant_id,
+            crate::human::bytes(size as u64),
+            crate::human::bytes(MAX_CONFIG_ENV_BYTES as u64)
         );
     }
     Ok(Some(encoded))

@@ -56,8 +56,11 @@ pub fn simulation_clock_slot(mode: &str, clock: Option<ClockSample>) -> String {
     let Some(sample) = clock else {
         return String::new();
     };
-    let seconds = sample.now_ns as f64 / 1_000_000_000.0;
-    format!("step {} · {seconds:.1}s", sample.step)
+    format!(
+        "step {} · {}",
+        sample.step,
+        crate::human::duration(Duration::from_nanos(sample.now_ns))
+    )
 }
 
 /// Right-aligned insertion point on the status line for the host CPU/RAM
@@ -81,8 +84,8 @@ pub fn host_resource_slot(host: Option<&Timestamped<HostSample>>, now: Instant) 
     format!(
         "cpu {:.0}% · ram {}/{}{stale}",
         host.value.cpu_pct,
-        format_gib(host.value.ram_used_bytes),
-        format_gib(host.value.ram_total_bytes),
+        crate::human::bytes_compact(host.value.ram_used_bytes),
+        crate::human::bytes_compact(host.value.ram_total_bytes),
     )
 }
 
@@ -104,13 +107,6 @@ fn host_resource_role(host: Option<&Timestamped<HostSample>>, now: Instant) -> R
         0.0
     };
     crate::theme::resource_role(cpu_load.max(ram_load))
-}
-
-/// Render `bytes` as whole gibibytes with one decimal (`"3.2G"`) - compact
-/// enough that the status line's `cpu NN% · ram U/T` insertion point never
-/// crowds out the left side even on an 80-column terminal.
-fn format_gib(bytes: u64) -> String {
-    format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -294,7 +290,7 @@ fn draw_active_phase_row(frame: &mut Frame, theme: Theme, phase: Option<&PhaseRo
         Some((PhaseOutcome::Succeeded, elapsed)) => Line::from(vec![
             Span::styled("\u{2713} ", color::fg(theme, Role::Success)),
             Span::styled(
-                format!("{} ({:.1}s)", phase.label, elapsed.as_secs_f32()),
+                format!("{} ({})", phase.label, crate::human::duration(*elapsed)),
                 color::fg(theme, Role::TextPrimary),
             ),
         ]),
@@ -807,14 +803,14 @@ fn draw_diagnostics_tab(
 }
 
 fn diagnostic_line(theme: Theme, entry: &DiagnosticEntry, width: usize) -> Line<'static> {
-    let seconds = entry.elapsed.as_secs_f32();
+    let elapsed = crate::human::duration(entry.elapsed);
     let (level, role) = match entry.level {
         DiagnosticLevel::Warn => ("WARN ", Role::Warn),
         DiagnosticLevel::Error => ("ERROR", Role::Error),
         DiagnosticLevel::Info => ("INFO ", Role::TextPrimary),
     };
     let source = truncate_to_width(entry.source.label(), 12);
-    let prefix = format!("+{seconds:>7.1}s  {level}  {source:<12}  ");
+    let prefix = format!("+{elapsed:>8}  {level}  {source:<12}  ");
     let message_width = width.saturating_sub(prefix.width());
     Line::from(vec![
         Span::styled(prefix, color::fg(theme, role)),
@@ -933,7 +929,7 @@ fn format_contract_list(contracts: &[String]) -> String {
 fn format_time_to_ready(time_to_ready: Option<Duration>) -> String {
     time_to_ready.map_or_else(
         || "waiting for first ready".to_string(),
-        |elapsed| format!("{:.1}s", elapsed.as_secs_f32()),
+        crate::human::duration,
     )
 }
 
@@ -962,12 +958,7 @@ fn draw_runtime_overview(
     );
     let ram_text = process.map_or_else(
         || "n/a".to_string(),
-        |sample| {
-            format!(
-                "{:.1} MiB",
-                sample.value.rss_bytes as f64 / (1024.0 * 1024.0)
-            )
-        },
+        |sample| crate::human::bytes(sample.value.rss_bytes),
     );
     let artifact_text = runtime_metadata.and_then(|meta| meta.artifact_ref.clone());
     let ownership_text = runtime_metadata.map(|meta| match meta.ownership {
@@ -1376,8 +1367,8 @@ fn draw_resources_tab(
             Span::styled("ram    ", color::muted(theme)),
             Span::raw(format!(
                 "{} / {} ({ram_pct:.0}%)",
-                format_gib(host.ram_used_bytes),
-                format_gib(host.ram_total_bytes),
+                crate::human::bytes(host.ram_used_bytes),
+                crate::human::bytes(host.ram_total_bytes),
             )),
         ]),
         Line::from(vec![
