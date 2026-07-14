@@ -65,7 +65,7 @@ pub struct CheckOptions {
 /// self-reported anymore - a built binary's linker section carries only its
 /// contracts, see [`crate::participant_metadata`]) plus the extracted
 /// contract list. No `bus_abi` (D1, X-tools slice: dissolved into the
-/// generation-qualified contract key, `phoxal::check::ParticipantApis` no
+/// version-qualified contract key, `phoxal::check::ParticipantApis` no
 /// longer carries it either).
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RawEmitApis {
@@ -151,13 +151,13 @@ pub enum CoherenceMismatchDiagnostic {
     UnservedAsk {
         participant_id: String,
         contract: String,
-        generation: String,
+        version: String,
         served: Vec<String>,
         remedy: &'static str,
     },
 }
 
-const COHERENCE_REMEDY: &str = "align the generation, mark a genuinely external consumer edge #[phoxal(external)], or update the lagging artifact";
+const COHERENCE_REMEDY: &str = "align the version, mark a genuinely external consumer edge #[phoxal(external)], or update the lagging artifact";
 
 impl CoherenceMismatchDiagnostic {
     fn from_mismatch(mismatch: &graph_check::CoherenceMismatch) -> Self {
@@ -177,12 +177,12 @@ impl CoherenceMismatchDiagnostic {
             graph_check::CoherenceMismatch::UnservedAsk {
                 participant_id,
                 contract,
-                generation,
+                version,
                 served,
             } => Self::UnservedAsk {
                 participant_id: participant_id.clone(),
                 contract: contract.clone(),
-                generation: generation.clone(),
+                version: version.clone(),
                 served: served.iter().cloned().collect(),
                 remedy: COHERENCE_REMEDY,
             },
@@ -205,7 +205,7 @@ impl CoherenceMismatchDiagnostic {
             Self::UnservedAsk {
                 participant_id,
                 contract,
-                generation,
+                version,
                 served,
                 remedy,
             } => {
@@ -215,7 +215,7 @@ impl CoherenceMismatchDiagnostic {
                     served.join(", ")
                 };
                 format!(
-                    "participant {participant_id} asks {contract} at {generation}, but the in-set servers provide [{served}]; remedy: {remedy}"
+                    "participant {participant_id} asks {contract} at {version}, but the in-set servers provide [{served}]; remedy: {remedy}"
                 )
             }
         }
@@ -1246,7 +1246,7 @@ pub(crate) fn contract_surface(
             .map(
                 |contract| crate::participant_metadata::ParticipantMetaContract {
                     role: contract.role.clone(),
-                    generation: contract.generation.clone(),
+                    version: contract.version.clone(),
                     contract: contract.contract.clone(),
                     external: contract.external,
                 },
@@ -1423,8 +1423,8 @@ fn raw_emit_apis_from_extracted_metadata(
             id: artifact_id.to_string(),
         },
         participant_class: default_participant_class_for_kind(artifact_kind),
-        // No single API generation to report anymore (D1): a participant's
-        // `Api` may mix contracts from several generations freely, so there
+        // No single API version to report anymore (D1): a participant's
+        // `Api` may mix contracts from several versions freely, so there
         // is no one dated value left to put here.
         api_version: String::new(),
         required_contracts: meta.contracts,
@@ -1696,7 +1696,7 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
             .required_contracts
             .into_iter()
             .map(|contract| graph_check::Contract {
-                family: format!("{}::{}", contract.generation, contract.contract),
+                family: format!("{}::{}", contract.version, contract.contract),
             })
             .collect::<Vec<_>>();
 
@@ -1805,10 +1805,10 @@ mod tests {
             participant_id: participant_id.to_string(),
             contracts: contracts
                 .iter()
-                .map(|(role, generation, contract)| {
+                .map(|(role, version, contract)| {
                     crate::participant_metadata::ParticipantMetaContract {
                         role: (*role).to_string(),
-                        generation: (*generation).to_string(),
+                        version: (*version).to_string(),
                         contract: (*contract).to_string(),
                         external: false,
                     }
@@ -1848,10 +1848,10 @@ mod tests {
     #[test]
     fn coherent_contract_set_passes_every_verb() {
         let surfaces = vec![
-            coherence_surface("producer", &[("publish", "y2026_1", "drive::Target")]),
-            coherence_surface("consumer", &[("subscribe", "y2026_1", "drive::Target")]),
-            coherence_surface("server", &[("serve", "y2026_1", "map::Get")]),
-            coherence_surface("client", &[("ask", "y2026_1", "map::Get")]),
+            coherence_surface("producer", &[("publish", "v1", "drive::Target")]),
+            coherence_surface("consumer", &[("subscribe", "v1", "drive::Target")]),
+            coherence_surface("server", &[("serve", "v1", "map::Get")]),
+            coherence_surface("client", &[("ask", "v1", "map::Get")]),
         ];
         let diagnostics = vec![evaluate_robot_coherence("robot-a", &surfaces)];
         assert_severity_matrix(&diagnostics, true);
@@ -1860,8 +1860,8 @@ mod tests {
     #[test]
     fn pub_sub_disjoint_warns_for_check_and_fails_strict_and_launch_verbs() {
         let surfaces = vec![
-            coherence_surface("producer", &[("publish", "y2026_1", "drive::Target")]),
-            coherence_surface("consumer", &[("subscribe", "y2026_2", "drive::Target")]),
+            coherence_surface("producer", &[("publish", "v1", "drive::Target")]),
+            coherence_surface("consumer", &[("subscribe", "v2", "drive::Target")]),
         ];
         let diagnostics = vec![evaluate_robot_coherence("robot-a", &surfaces)];
         assert!(matches!(
@@ -1874,8 +1874,8 @@ mod tests {
     #[test]
     fn unserved_ask_warns_for_check_and_fails_strict_and_launch_verbs() {
         let surfaces = vec![
-            coherence_surface("server", &[("serve", "y2026_1", "map::Get")]),
-            coherence_surface("client", &[("ask", "y2026_2", "map::Get")]),
+            coherence_surface("server", &[("serve", "v1", "map::Get")]),
+            coherence_surface("client", &[("ask", "v2", "map::Get")]),
         ];
         let diagnostics = vec![evaluate_robot_coherence("robot-a", &surfaces)];
         assert!(matches!(
@@ -1888,12 +1888,12 @@ mod tests {
     #[test]
     fn robot_graphs_are_checked_independently_not_pooled() {
         let robot_a = vec![
-            coherence_surface("a-producer", &[("publish", "y2026_1", "drive::Target")]),
-            coherence_surface("a-consumer", &[("subscribe", "y2026_2", "drive::Target")]),
+            coherence_surface("a-producer", &[("publish", "v1", "drive::Target")]),
+            coherence_surface("a-consumer", &[("subscribe", "v2", "drive::Target")]),
         ];
         let robot_b = vec![coherence_surface(
             "b-producer",
-            &[("publish", "y2026_2", "drive::Target")],
+            &[("publish", "v2", "drive::Target")],
         )];
 
         let diagnostics = [
@@ -1974,14 +1974,14 @@ mod tests {
             &[],
             &sources,
             |image_ref| match image_ref {
-                "mission:ok" => Ok(raw("mission", "y2026_1", &["drive::Target"])),
+                "mission:ok" => Ok(raw("mission", "v1", &["drive::Target"])),
                 unexpected => bail!("unexpected image {unexpected}"),
             },
             |_| bail!("no tools should be fetched"),
             |participant| {
                 let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/runtimes/drive") {
-                    Ok(raw("drive", "y2026_1", &["drive::Target"]))
+                    Ok(raw("drive", "v1", &["drive::Target"]))
                 } else {
                     bail!("unexpected source dir {}", dir.display())
                 }
@@ -2006,14 +2006,14 @@ mod tests {
             &[],
             &sources,
             |image_ref| match image_ref {
-                "mission:ok" => Ok(raw("mission", "y2026_1", &["drive::Target"])),
+                "mission:ok" => Ok(raw("mission", "v1", &["drive::Target"])),
                 unexpected => bail!("unexpected image {unexpected}"),
             },
             |_| bail!("no tools should be fetched"),
             |participant| {
                 let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/components/ddsm115") {
-                    Ok(raw_kind("driver", "ddsm115", "y2026_1", &["drive::Target"]))
+                    Ok(raw_kind("driver", "ddsm115", "v1", &["drive::Target"]))
                 } else {
                     bail!("unexpected source dir {}", dir.display())
                 }
@@ -2050,7 +2050,7 @@ mod tests {
                     Ok(raw_kind_with_role(
                         "tool",
                         "joypad",
-                        "y2026_1",
+                        "v1",
                         &[("drive::Target", "subscribe")],
                         "privileged",
                     ))
@@ -2063,7 +2063,7 @@ mod tests {
                 if dir == Path::new("/fake/project/runtimes/drive") {
                     Ok(raw_with_role(
                         "drive",
-                        "y2026_1",
+                        "v1",
                         &[("drive::Target", "publish")],
                     ))
                 } else {
@@ -2094,7 +2094,7 @@ mod tests {
                     Ok(raw_kind_class(
                         "tool",
                         "joypad",
-                        "y2026_1",
+                        "v1",
                         &["drive::Target", "odometry::State"],
                         "privileged",
                     ))
@@ -2137,13 +2137,13 @@ mod tests {
             },
             |image_ref| {
                 fetched_images.push(image_ref.to_string());
-                Ok(raw("avoid", "y2026_1", &[]))
+                Ok(raw("avoid", "v1", &[]))
             },
             |_| bail!("no tools should be fetched"),
             |participant| {
                 let dir = participant.crate_dir.as_path();
                 built_sources.push(dir.to_path_buf());
-                Ok(raw_kind("driver", "ddsm115", "y2026_1", &[]))
+                Ok(raw_kind("driver", "ddsm115", "v1", &[]))
             },
         )?;
 
@@ -2178,7 +2178,7 @@ mod tests {
             |image_ref| match image_ref {
                 "mission:ok" => Ok(raw_with_role(
                     "mission",
-                    "y2026_1",
+                    "v1",
                     &[("drive::Target", "publish")],
                 )),
                 unexpected => bail!("unexpected image {unexpected}"),
@@ -2187,7 +2187,7 @@ mod tests {
             |_| {
                 Ok(raw_with_role(
                     "drive",
-                    "y2026_1",
+                    "v1",
                     &[("drive::Target", "subscribe")],
                 ))
             },
@@ -2210,7 +2210,7 @@ mod tests {
             &sources,
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
-            |_| Ok(raw("surprise", "y2026_1", &[])),
+            |_| Ok(raw("surprise", "v1", &[])),
         )
         .expect_err("mismatched user service artifact id should abort check");
 
@@ -2231,7 +2231,7 @@ mod tests {
             &[],
             &[],
             |image_ref| match image_ref {
-                "drive:swapped" => Ok(raw("mission", "y2026_1", &[])),
+                "drive:swapped" => Ok(raw("mission", "v1", &[])),
                 unexpected => bail!("unexpected image {unexpected}"),
             },
             |_| bail!("no tools should be fetched"),
@@ -2265,7 +2265,7 @@ mod tests {
                 manifest_extras: &extras,
             },
             |artifact_ref| match artifact_ref {
-                "driver-bno085:swapped" => Ok(raw_kind("service", "bno085", "y2026_1", &[])),
+                "driver-bno085:swapped" => Ok(raw_kind("service", "bno085", "v1", &[])),
                 unexpected => bail!("unexpected artifact {unexpected}"),
             },
             |_| bail!("no tools should be fetched"),
@@ -2299,7 +2299,7 @@ mod tests {
                     Ok(raw_kind_class(
                         "tool",
                         "simulator_webots_controller",
-                        "y2026_1",
+                        "v1",
                         &[],
                         "privileged",
                     ))
@@ -2334,13 +2334,7 @@ mod tests {
             |tool| {
                 let path = tool.binary_path.as_path();
                 if path == Path::new("/fake/cache/joypad") {
-                    Ok(raw_kind_class(
-                        "tool",
-                        "joypad",
-                        "y2026_1",
-                        &[],
-                        "privileged",
-                    ))
+                    Ok(raw_kind_class("tool", "joypad", "v1", &[], "privileged"))
                 } else {
                     bail!("unexpected tool path {}", path.display())
                 }
@@ -2367,13 +2361,7 @@ mod tests {
             |tool| {
                 let path = tool.binary_path.as_path();
                 if path == Path::new("/fake/cache/joypad") {
-                    Ok(raw_kind_class(
-                        "runtime",
-                        "joypad",
-                        "y2026_1",
-                        &[],
-                        "privileged",
-                    ))
+                    Ok(raw_kind_class("runtime", "joypad", "v1", &[], "privileged"))
                 } else {
                     bail!("unexpected tool path {}", path.display())
                 }
@@ -2405,15 +2393,7 @@ mod tests {
             &sources,
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
-            |_| {
-                Ok(raw_kind_class(
-                    "driver",
-                    "ddsm115",
-                    "y2026_1",
-                    &[],
-                    "checked",
-                ))
-            },
+            |_| Ok(raw_kind_class("driver", "ddsm115", "v1", &[], "checked")),
         )?;
 
         assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
@@ -2434,15 +2414,7 @@ mod tests {
             &sources,
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
-            |_| {
-                Ok(raw_kind_class(
-                    "runtime",
-                    "ddsm115",
-                    "y2026_1",
-                    &[],
-                    "checked",
-                ))
-            },
+            |_| Ok(raw_kind_class("runtime", "ddsm115", "v1", &[], "checked")),
         )
         .expect_err("component driver reporting legacy runtime kind should abort check");
 
@@ -2473,7 +2445,7 @@ mod tests {
                     Ok(raw_kind_class(
                         "nonsense",
                         "joypad",
-                        "y2026_1",
+                        "v1",
                         &[],
                         "privileged",
                     ))
@@ -2527,11 +2499,11 @@ mod tests {
                 let dir = participant.crate_dir.as_path();
                 built.push(dir.to_path_buf());
                 if dir == Path::new("/fake/project/runtimes/bad") {
-                    Ok(raw("bad", "y2026_1", &[]))
+                    Ok(raw("bad", "v1", &[]))
                 } else if dir == Path::new("/fake/project/runtimes/other") {
-                    Ok(raw("other", "y2026_1", &[]))
+                    Ok(raw("other", "v1", &[]))
                 } else if dir == Path::new("/fake/project/components/ddsm115") {
-                    Ok(raw_kind("driver", "ddsm115", "y2026_1", &[]))
+                    Ok(raw_kind("driver", "ddsm115", "v1", &[]))
                 } else {
                     bail!("unexpected source participant: {}", dir.display())
                 }
@@ -2576,9 +2548,9 @@ mod tests {
             |participant| {
                 let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/runtimes/other") {
-                    Ok(raw("other", "y2026_1", &[]))
+                    Ok(raw("other", "v1", &[]))
                 } else if dir == Path::new("/fake/project/components/ddsm115") {
-                    Ok(raw_kind("driver", "ddsm115", "y2026_1", &["drive::Target"]))
+                    Ok(raw_kind("driver", "ddsm115", "v1", &["drive::Target"]))
                 } else {
                     bail!("unexpected source dir {}", dir.display())
                 }
@@ -2611,9 +2583,9 @@ mod tests {
             |participant| {
                 let dir = participant.crate_dir.as_path();
                 if dir == Path::new("/fake/project/runtimes/bad") {
-                    Ok(raw("bad", "y2026_1", &["drive::Target"]))
+                    Ok(raw("bad", "v1", &["drive::Target"]))
                 } else if dir == Path::new("/fake/project/runtimes/other") {
-                    Ok(raw("other", "y2026_1", &[]))
+                    Ok(raw("other", "v1", &[]))
                 } else {
                     bail!("unexpected source dir {}", dir.display())
                 }
@@ -2638,7 +2610,7 @@ mod tests {
             &participant,
             |_| {
                 build_count += 1;
-                Ok(raw("sibling", "y2026_1", &[]))
+                Ok(raw("sibling", "v1", &[]))
             },
             None,
         )?;
@@ -2646,7 +2618,7 @@ mod tests {
             &participant,
             |_| {
                 build_count += 1;
-                Ok(raw("sibling", "y2026_1", &[]))
+                Ok(raw("sibling", "v1", &[]))
             },
             None,
         )?;
@@ -2677,7 +2649,7 @@ mod tests {
             |image_ref| match image_ref {
                 "mission:ok" => Ok(raw_with_role(
                     "mission",
-                    "y2026_1",
+                    "v1",
                     &[("drive::Target", "publish")],
                 )),
                 unexpected => bail!("unexpected image {unexpected}"),
@@ -2687,7 +2659,7 @@ mod tests {
                 Ok(raw_kind_with_role(
                     "driver",
                     "ddsm115",
-                    "y2026_1",
+                    "v1",
                     &[("drive::Target", "subscribe")],
                     "checked",
                 ))
@@ -2818,7 +2790,7 @@ mod tests {
             |participant| {
                 let dir = participant.crate_dir.as_path();
                 built.push(dir.to_path_buf());
-                Ok(raw_kind("driver", "ddsm115", "y2026_1", &[]))
+                Ok(raw_kind("driver", "ddsm115", "v1", &[]))
             },
         )?;
 
@@ -2950,7 +2922,7 @@ mod tests {
             |artifact_ref| {
                 fetch_calls += 1;
                 assert_eq!(artifact_ref, "ddsm115-driver-v0.1.0.tar.zst");
-                Ok(raw_kind("driver", "ddsm115", "y2026_1", &[]))
+                Ok(raw_kind("driver", "ddsm115", "v1", &[]))
             },
             |_| bail!("no tools should be fetched"),
             |_| bail!("no source participants should be built"),
@@ -3062,7 +3034,7 @@ mod tests {
             |_| bail!("no tools in this fixture"),
             |participant| {
                 assert_eq!(participant.kind, SourceParticipantKind::OfficialService);
-                Ok(raw_kind("service", "drive", "y2026_1", &[]))
+                Ok(raw_kind("service", "drive", "v1", &[]))
             },
         )?;
         assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
@@ -3073,10 +3045,7 @@ mod tests {
     fn missing_image_is_reported_after_other_images_are_checked() -> Result<()> {
         let images = vec![
             ("mission".to_string(), "mission:ok".to_string()),
-            (
-                "drive".to_string(),
-                "service-drive:y2026_1-stable".to_string(),
-            ),
+            ("drive".to_string(), "service-drive:v1-stable".to_string()),
         ];
 
         let outcome = run_check(
@@ -3084,8 +3053,8 @@ mod tests {
             &[],
             &[],
             |image_ref| match image_ref {
-                "mission:ok" => Ok(raw("mission", "y2026_1", &[])),
-                "service-drive:y2026_1-stable" => {
+                "mission:ok" => Ok(raw("mission", "v1", &[])),
+                "service-drive:v1-stable" => {
                     Err(MissingImageError::new(anyhow!("not found")).into())
                 }
                 unexpected => bail!("unexpected image {unexpected}"),
@@ -3096,7 +3065,7 @@ mod tests {
 
         assert_eq!(
             outcome.missing_images,
-            vec!["service-drive:y2026_1-stable".to_string()]
+            vec!["service-drive:v1-stable".to_string()]
         );
         assert!(!outcome.is_ok());
         Ok(())
@@ -3107,11 +3076,11 @@ mod tests {
         let parsed: RawEmitApis = serde_json::from_str(
             r#"{
                 "artifact": { "kind": "service", "id": "drive", "ignored": true },
-                "api_version": "y2026_1",
+                "api_version": "v1",
                 "required_contracts": [
                     {
                         "role": "publish",
-                        "generation": "y2026_1",
+                        "version": "v1",
                         "contract": "drive::Target",
                         "external": false
                     }
@@ -3123,7 +3092,7 @@ mod tests {
 
         assert_eq!(participant.artifact_id, "drive");
         assert_eq!(participant.participant_class, ParticipantClass::Checked);
-        assert_eq!(participant.api_version, "y2026_1");
+        assert_eq!(participant.api_version, "v1");
         assert_eq!(
             participant
                 .config_schema
@@ -3132,7 +3101,7 @@ mod tests {
                 .and_then(Value::as_str),
             Some("object")
         );
-        assert_eq!(participant.contracts[0].family, "y2026_1::drive::Target");
+        assert_eq!(participant.contracts[0].family, "v1::drive::Target");
         Ok(())
     }
 
@@ -3142,7 +3111,7 @@ mod tests {
             r#"{
                 "artifact": { "kind": "tool", "id": "joypad" },
                 "participant_class": "privileged",
-                "api_version": "y2026_1",
+                "api_version": "v1",
                 "required_contracts": []
             }"#,
         )?;
@@ -3154,7 +3123,7 @@ mod tests {
 
     #[test]
     fn raw_emit_apis_unknown_participant_class_defaults_to_checked() -> Result<()> {
-        let mut raw = raw("drive", "y2026_1", &[]);
+        let mut raw = raw("drive", "v1", &[]);
         raw.participant_class = "future".to_string();
         let participant = graph_check::ParticipantApis::try_from(raw)?;
 
@@ -3263,7 +3232,7 @@ mod tests {
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
             |_| {
-                let mut raw = raw("optional", "y2026_1", &[]);
+                let mut raw = raw("optional", "v1", &[]);
                 raw.config_schema = Some(serde_json::json!({ "type": "null" }));
                 Ok(raw)
             },
@@ -3299,7 +3268,7 @@ mod tests {
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
             |_| {
-                let mut raw = raw("required", "y2026_1", &[]);
+                let mut raw = raw("required", "v1", &[]);
                 raw.config_schema = Some(serde_json::json!({
                     "type": "object",
                     "required": ["gain"],
@@ -3355,7 +3324,7 @@ mod tests {
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
             |_| {
-                let mut raw = raw("avoid", "y2026_1", &[]);
+                let mut raw = raw("avoid", "v1", &[]);
                 raw.config_schema = Some(serde_json::json!({
                     "$schema": "https://json-schema.org/draft/2020-12/schema",
                     "type": "object",
@@ -3451,9 +3420,9 @@ mod tests {
                 .map(
                     |(family, role)| crate::participant_metadata::ParticipantMetaContract {
                         role: (*role).to_string(),
-                        generation: family
+                        version: family
                             .split_once("::")
-                            .map_or(api_version, |(generation, _)| generation)
+                            .map_or(api_version, |(version, _)| version)
                             .to_string(),
                         contract: family
                             .split_once("::")
@@ -3493,9 +3462,9 @@ mod tests {
                         // about role identity (D1: only `family` decides
                         // compatibility), so every contract shares one.
                         role: "publish".to_string(),
-                        generation: family
+                        version: family
                             .split_once("::")
-                            .map_or(api_version, |(generation, _)| generation)
+                            .map_or(api_version, |(version, _)| version)
                             .to_string(),
                         contract: family
                             .split_once("::")

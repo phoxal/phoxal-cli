@@ -88,7 +88,7 @@ mod tests {
     /// `xtask/src/release/metadata.rs`): build a real participant binary -
     /// `tests/fixtures/api-fixture`, a workspace member with a real
     /// `#[derive(phoxal::Api)]` struct publishing
-    /// `phoxal_api::y2026_1::drive::Target` (the fixture writes the fully
+    /// `phoxal_api::v1::drive::Target` (the fixture writes the fully
     /// qualified path rather than a `use ... as api;` alias, since the macro
     /// records the contract type verbatim as written in source) - and
     /// extract its section from the actual built artifact on disk, asserting
@@ -132,7 +132,7 @@ mod tests {
             meta.contracts,
             vec![ParticipantMetaContract {
                 role: "publish".to_string(),
-                generation: "y2026_1".to_string(),
+                version: "v1".to_string(),
                 contract: "drive::Target".to_string(),
                 external: false,
             }]
@@ -208,10 +208,10 @@ mod tests {
     #[test]
     fn extracts_metadata_from_foreign_format_and_arch_object_files() -> Result<()> {
         let payload =
-            br#"{"participant_api":"Api","contracts":[{"role":"publish","generation":"y2026_1","contract":"drive::Target","external":false}],"config_schema":{"type":"null"}}"#;
+            br#"{"participant_api":"Api","contracts":[{"role":"publish","version":"v1","contract":"drive::Target","external":false}],"config_schema":{"type":"null"}}"#;
         let expected = vec![ParticipantMetaContract {
             role: "publish".to_string(),
-            generation: "y2026_1".to_string(),
+            version: "v1".to_string(),
             contract: "drive::Target".to_string(),
             external: false,
         }];

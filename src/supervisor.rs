@@ -10,13 +10,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal::bus::{Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::y2026_1 as api;
-// The simulation clock is re-minted in `y2026_10` (adds the authoritative
-// `step` field the TUI top bar reads directly - see
-// `ClockSample`/`start_clock_feed`); every other `y2026_1` contract
-// this module subscribes to (`presence::Heartbeat`, `logs::Event`) is
-// unaffected and stays on its original generation.
-use phoxal_api::y2026_10 as api10;
+use phoxal_api::v1 as api;
+// The simulation clock lives in preview `v2`; the presence and logs contracts
+// this module also consumes remain on frozen `v1`.
+use phoxal_api::v2 as preview_api;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -1926,17 +1923,17 @@ async fn bus_log_subscriber_loop(
     }
 }
 
-/// The `logs/{participant_id}` contract's generation-qualified wildcard key,
-/// e.g. `y2026_1/logs/*`. `logs::Event::TOPIC` (`ContractBody::TOPIC`) is the
-/// per-participant literal `y2026_1/logs/{participant_id}`, which is not
+/// The `logs/{participant_id}` contract's version-qualified wildcard key,
+/// e.g. `v1/logs/*`. `logs::Event::TOPIC` (`ContractBody::TOPIC`) is the
+/// per-participant literal `v1/logs/{participant_id}`, which is not
 /// itself subscribable across every participant - building the key from
-/// `ContractBody::GENERATION` instead of hand-writing the generation prefix
-/// keeps this in lockstep with the api tree if the generation ever changes.
+/// `ContractBody::VERSION` instead of hand-writing the version prefix
+/// keeps this in lockstep with the api tree if the version ever changes.
 #[must_use]
 pub fn logs_wildcard_topic_key() -> String {
     format!(
         "{}/logs/*",
-        <api::logs::Event as phoxal::bus::ContractBody>::GENERATION
+        <api::logs::Event as phoxal::bus::ContractBody>::VERSION
     )
 }
 
@@ -2002,7 +1999,7 @@ async fn presence_heartbeat_subscriber_loop(
     }
 }
 
-/// One `y2026_10::simulation::Clock` sample, as surfaced to the TUI top bar.
+/// One `v2::simulation::Clock` sample, as surfaced to the TUI top bar.
 /// A new sample means the world advanced; silence means it did not.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClockSample {
@@ -2018,7 +2015,7 @@ pub struct ClockObservation {
     pub latest: Option<ClockSample>,
 }
 
-/// Start a background feed of `y2026_10::simulation::Clock` samples. Returns a
+/// Start a background feed of `v2::simulation::Clock` samples. Returns a
 /// `watch::Receiver` the TUI's telemetry layer polls cheaply, plus the feed
 /// task's handle.
 pub fn start_clock_feed(
@@ -2057,10 +2054,10 @@ async fn clock_feed_loop(
     })
     .await
     .map_err(|error| anyhow!("failed to open bus clock subscription: {error}"))?;
-    let topic = Topic::<Subscribe<api10::simulation::Clock>>::new_static(
-        <api10::simulation::Clock as phoxal::bus::ContractBody>::TOPIC,
+    let topic = Topic::<Subscribe<preview_api::simulation::Clock>>::new_static(
+        <preview_api::simulation::Clock as phoxal::bus::ContractBody>::TOPIC,
     );
-    let subscriber = Subscriber::<api10::simulation::Clock>::new(&bus, &topic, 32).await?;
+    let subscriber = Subscriber::<preview_api::simulation::Clock>::new(&bus, &topic, 32).await?;
     loop {
         let received = subscriber.recv().await?;
         tx.send_modify(|observation| {

@@ -625,10 +625,7 @@ mod tests {
                 CatalogChannel::Stable,
                 &host_target_triple(),
                 true,
-                vec![fixture_contract_for_tests(
-                    "y2026_1::drive::Target",
-                    "publish",
-                )],
+                vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
             ),
             fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable),
             fixture_component_driver_entry_for_tests(
@@ -990,7 +987,7 @@ mod tests {
             artifact_id: artifact_id.to_string(),
             participant_kind: graph_check::ParticipantKind::Service,
             participant_class: graph_check::ParticipantClass::Checked,
-            api_version: "y2026_1".to_string(),
+            api_version: "v1".to_string(),
             config_schema: None,
             scope,
             contracts: Vec::new(),
@@ -1004,7 +1001,7 @@ mod tests {
                 id: id.to_string(),
             },
             participant_class: "checked".to_string(),
-            api_version: "y2026_1".to_string(),
+            api_version: "v1".to_string(),
             required_contracts: Vec::new(),
             config_schema: None,
         }

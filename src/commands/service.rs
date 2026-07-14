@@ -180,10 +180,7 @@ artifacts:
             CatalogChannel::Stable,
             &crate::resolver::host_target_triple(),
             false,
-            vec![fixture_contract_for_tests(
-                "y2026_1::drive::Target",
-                "publish",
-            )],
+            vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
         )]);
         let path = root.join("catalog.json");
         fs::write(&path, serde_json::to_string_pretty(&catalog)?)?;

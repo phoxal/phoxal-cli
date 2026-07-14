@@ -64,7 +64,7 @@ pub struct RuntimeParticipantMetadata {
     pub artifact_ref: Option<String>,
     pub ownership: RuntimeOwnership,
     /// Declared input contracts (`subscribe`/`ask` roles), each rendered as
-    /// its generation-qualified `"<generation>::<contract>"` name, sorted and
+    /// its version-qualified `"<version>::<contract>"` name, sorted and
     /// deduplicated.
     pub input_contracts: Vec<String>,
     /// Declared output contracts (`publish`/`serve` roles), same shape as
@@ -147,7 +147,7 @@ impl RuntimeStore {
                 continue;
             };
             for contract in &surface.contracts {
-                let label = format!("{}::{}", contract.generation, contract.contract);
+                let label = format!("{}::{}", contract.version, contract.contract);
                 match contract.role.as_str() {
                     "publish" | "serve" => entry.output_contracts.push(label),
                     "subscribe" | "ask" => entry.input_contracts.push(label),
@@ -215,7 +215,7 @@ impl RuntimeStore {
     ///
     /// This is an APPROXIMATION, not a live subscription registry: a
     /// participant's declared contract is recorded as its bare
-    /// `"<generation>::<contract>"` name (see [`Self::from_launch_plan`]),
+    /// `"<version>::<contract>"` name (see [`Self::from_launch_plan`]),
     /// while `topic` is the router's own composed wire key, which may embed
     /// additional path segments (namespace/robot/participant) around that
     /// same name rather than equal it byte-for-byte. A participant counts as
@@ -223,7 +223,7 @@ impl RuntimeStore {
     /// within the wire topic - this can undercount (a contract name that
     /// happens not to appear verbatim in the composed key) but should never
     /// overcount from unrelated topics, since contract names are already
-    /// namespaced by generation.
+    /// namespaced by version.
     #[must_use]
     pub fn potential_consumers(&self, topic: &str) -> usize {
         self.metadata
@@ -299,10 +299,10 @@ mod tests {
         }
     }
 
-    fn meta_contract(role: &str, generation: &str, contract: &str) -> ParticipantMetaContract {
+    fn meta_contract(role: &str, version: &str, contract: &str) -> ParticipantMetaContract {
         ParticipantMetaContract {
             role: role.to_string(),
-            generation: generation.to_string(),
+            version: version.to_string(),
             contract: contract.to_string(),
             external: false,
         }
@@ -318,8 +318,8 @@ mod tests {
         let surfaces = vec![ParticipantContractSurface {
             participant_id: "drive".to_string(),
             contracts: vec![
-                meta_contract("publish", "y2026_1", "drive::State"),
-                meta_contract("subscribe", "y2026_1", "drive::Target"),
+                meta_contract("publish", "v1", "drive::State"),
+                meta_contract("subscribe", "v1", "drive::Target"),
             ],
         }];
         let store = RuntimeStore::from_launch_plan(&plan, &surfaces);
@@ -338,14 +338,8 @@ mod tests {
             drive.artifact_ref.as_deref(),
             Some("phoxal/service-drive@0.4.0")
         );
-        assert_eq!(
-            drive.output_contracts,
-            vec!["y2026_1::drive::State".to_string()]
-        );
-        assert_eq!(
-            drive.input_contracts,
-            vec!["y2026_1::drive::Target".to_string()]
-        );
+        assert_eq!(drive.output_contracts, vec!["v1::drive::State".to_string()]);
+        assert_eq!(drive.input_contracts, vec!["v1::drive::Target".to_string()]);
     }
 
     /// A participant this store was never told about (should not happen in
@@ -413,16 +407,16 @@ mod tests {
         let plan = plan_with_one_of_each();
         let surfaces = vec![ParticipantContractSurface {
             participant_id: "drive".to_string(),
-            contracts: vec![meta_contract("subscribe", "y2026_1", "drive::Target")],
+            contracts: vec![meta_contract("subscribe", "v1", "drive::Target")],
         }];
         let store = RuntimeStore::from_launch_plan(&plan, &surfaces);
 
         assert_eq!(
-            store.potential_consumers("dev/rover-01/y2026_1::drive::Target"),
+            store.potential_consumers("dev/rover-01/v1::drive::Target"),
             1
         );
         assert_eq!(
-            store.potential_consumers("dev/rover-01/y2026_1::battery::State"),
+            store.potential_consumers("dev/rover-01/v2::battery::State"),
             0
         );
     }

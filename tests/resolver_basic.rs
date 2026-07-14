@@ -248,10 +248,7 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
             CatalogChannel::Stable,
             &target,
             false,
-            vec![fixture_contract_for_tests(
-                "y2026_1::drive::Target",
-                "publish",
-            )],
+            vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
         ),
         assets_entry,
         driver_entry,
@@ -355,10 +352,7 @@ fn declared_driver_with_no_target_blob_resolves_as_unpublished() -> anyhow::Resu
             CatalogChannel::Stable,
             &host_target_triple(),
             false,
-            vec![fixture_contract_for_tests(
-                "y2026_1::drive::Target",
-                "publish",
-            )],
+            vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
         ),
         fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable),
     ]);
@@ -534,12 +528,12 @@ fn unused_provider_qualified_path_pin_is_rejected() -> anyhow::Result<()> {
 #[test]
 fn artifacts_generation_field_is_rejected_as_a_dead_field() -> anyhow::Result<()> {
     // D1 (X-tools slice): the artifact catalog no longer carries a per-entry
-    // API generation, so `artifacts.generation` cannot mean anything against
+    // API version, so `artifacts.generation` cannot mean anything against
     // it anymore. `resolve()` must reject it explicitly rather than silently
     // ignore it.
     let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
         "artifacts:\n  channel: stable",
-        "artifacts:\n  channel: stable\n  generation: y2026_1",
+        "artifacts:\n  channel: stable\n  generation: v1",
     ))?;
     let error = resolve_with_catalog(&robot, std::path::Path::new("."))
         .expect_err("artifacts.generation should be rejected");
@@ -564,10 +558,7 @@ fn frozen_catalog_is_name_driven_not_entry_channel_driven() -> anyhow::Result<()
             CatalogChannel::Nightly,
             target,
             true,
-            vec![fixture_contract_for_tests(
-                "y2026_1::drive::Target",
-                "publish",
-            )],
+            vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
         ),
         fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable),
     ]);
@@ -761,10 +752,7 @@ fn test_catalog() -> Catalog {
                 CatalogChannel::Stable,
                 &target,
                 false,
-                vec![fixture_contract_for_tests(
-                    "y2026_1::drive::Target",
-                    "publish",
-                )],
+                vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
             )
         })
         .collect::<Vec<_>>();
@@ -781,7 +769,7 @@ fn test_catalog() -> Catalog {
             &target,
             false,
             vec![fixture_contract_for_tests(
-                "y2026_1::component::State",
+                "v1::component::State",
                 "publish",
             )],
         ));
@@ -801,10 +789,7 @@ fn test_catalog() -> Catalog {
             CatalogChannel::Stable,
             &target,
             false,
-            vec![fixture_contract_for_tests(
-                "y2026_1::drive::Target",
-                "subscribe",
-            )],
+            vec![fixture_contract_for_tests("v1::drive::Target", "subscribe")],
         ),
         fixture_simulator_entry_for_tests(
             "webots-supervisor",
@@ -821,7 +806,7 @@ fn test_catalog() -> Catalog {
             &target,
             false,
             vec![fixture_contract_for_tests(
-                "y2026_1::component::MotorCommand",
+                "v1::component::MotorCommand",
                 "publish",
             )],
         ),
