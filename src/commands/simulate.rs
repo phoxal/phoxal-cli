@@ -6,7 +6,7 @@ use clap::{Args, Subcommand};
 use phoxal::bus::{Codec, ContractBody, MessagePack, QueryFailure};
 use phoxal::check as graph_check;
 use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::y2026_8::simulation::{RobotSpawn, SpawnRequest, SpawnSet};
+use phoxal_api::v2::simulation::{RobotSpawn, SpawnRequest, SpawnSet};
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -2047,7 +2047,7 @@ mod tests {
             <SpawnRequest as ContractBody>::TOPIC,
             format!(
                 "{}/simulation/spawn",
-                <SpawnRequest as ContractBody>::GENERATION
+                <SpawnRequest as ContractBody>::VERSION
             )
         );
         let value = serde_json::to_value(SpawnSet {
@@ -2127,10 +2127,7 @@ mod tests {
         add_site_tools(&mut resolved);
         resolved.platform_runtimes.push(platform_runtime(
             "drive",
-            vec![fixture_contract_for_tests(
-                "y2026_1::drive::Target",
-                "publish",
-            )],
+            vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
         ));
         resolved.user_runtimes.push(ResolvedUserRuntime {
             name: "mission".to_string(),
@@ -2313,7 +2310,7 @@ mod tests {
                 artifact_id: SIMULATOR_SUPERVISOR_ARTIFACT_NAME.to_string(),
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
-                api_version: "y2026_1".to_string(),
+                api_version: "v1".to_string(),
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -2449,7 +2446,7 @@ mod tests {
                 artifact_id: "webots-supervisor".to_string(),
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
-                api_version: "y2026_1".to_string(),
+                api_version: "v1".to_string(),
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -2529,7 +2526,7 @@ mod tests {
                 artifact_id: "webots-supervisor".to_string(),
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
-                api_version: "y2026_1".to_string(),
+                api_version: "v1".to_string(),
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -2617,7 +2614,7 @@ mod tests {
                 artifact_id: "webots-supervisor".to_string(),
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
-                api_version: "y2026_1".to_string(),
+                api_version: "v1".to_string(),
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -2627,7 +2624,7 @@ mod tests {
                 artifact_id: "webots-controller".to_string(),
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
-                api_version: "y2026_1".to_string(),
+                api_version: "v1".to_string(),
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -2694,7 +2691,7 @@ mod tests {
                 artifact_id: "webots-supervisor".to_string(),
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
-                api_version: "y2026_1".to_string(),
+                api_version: "v1".to_string(),
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -2704,7 +2701,7 @@ mod tests {
                 artifact_id: "webots-controller".to_string(),
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
-                api_version: "y2026_1".to_string(),
+                api_version: "v1".to_string(),
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -3009,7 +3006,7 @@ artifacts:
                 "[package]\nname = \"driver-{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
             ),
         )?;
-        let json = r#"{"participant_api":"Api","contracts":[{"role":"subscribe","generation":"y2026_1","contract":"component::MotorCommand","external":false}],"config_schema":{"type":"null"}}"#;
+        let json = r#"{"participant_api":"Api","contracts":[{"role":"subscribe","version":"v1","contract":"component::MotorCommand","external":false}],"config_schema":{"type":"null"}}"#;
         let len = json.len();
         fs::write(
             dir.join("src/main.rs"),
@@ -3037,7 +3034,7 @@ artifacts:
             artifact_id: id.to_string(),
             participant_kind: graph_check::ParticipantKind::Service,
             participant_class: graph_check::ParticipantClass::Checked,
-            api_version: "y2026_1".to_string(),
+            api_version: "v1".to_string(),
             config_schema: None,
             scope: graph_check::ParticipantScope::Graph,
             contracts,
@@ -3054,7 +3051,7 @@ artifacts:
             artifact_id: artifact_id.to_string(),
             participant_kind: graph_check::ParticipantKind::Driver,
             participant_class: graph_check::ParticipantClass::Checked,
-            api_version: "y2026_1".to_string(),
+            api_version: "v1".to_string(),
             config_schema: None,
             scope: graph_check::ParticipantScope::ComponentInstance(instance.to_string()),
             contracts,
@@ -3070,7 +3067,7 @@ artifacts:
             artifact_id: "webots-controller".to_string(),
             participant_kind: graph_check::ParticipantKind::Simulator,
             participant_class: graph_check::ParticipantClass::Checked,
-            api_version: "y2026_1".to_string(),
+            api_version: "v1".to_string(),
             config_schema: None,
             scope: graph_check::ParticipantScope::Graph,
             contracts,
@@ -3165,10 +3162,7 @@ robot:
             package: format!("phoxal/service-{name}"),
             kind: ArtifactKind::Service,
             version: "0.1.0".to_string(),
-            artifact_ref: format!(
-                "service-{name}:0.1.0-y2026_1-stable-{}",
-                host_target_triple()
-            ),
+            artifact_ref: format!("service-{name}:0.1.0-v1-stable-{}", host_target_triple()),
             sha256: None,
             url: None,
             size: None,
@@ -3186,10 +3180,7 @@ robot:
             package: format!("phoxal/simulator-{name}"),
             kind: ArtifactKind::Simulator,
             version: "0.1.0".to_string(),
-            artifact_ref: format!(
-                "simulator-{name}:0.1.0-y2026_1-stable-{}",
-                host_target_triple()
-            ),
+            artifact_ref: format!("simulator-{name}:0.1.0-v1-stable-{}", host_target_triple()),
             sha256: None,
             url: None,
             size: None,
@@ -3382,7 +3373,7 @@ robot:
                 artifact_id: "webots-supervisor".to_string(),
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
-                api_version: "y2026_1".to_string(),
+                api_version: "v1".to_string(),
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -3475,7 +3466,7 @@ robot:
                 artifact_id: "webots-supervisor".to_string(),
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
-                api_version: "y2026_1".to_string(),
+                api_version: "v1".to_string(),
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),
@@ -3485,7 +3476,7 @@ robot:
                 artifact_id: "webots-controller".to_string(),
                 participant_kind: graph_check::ParticipantKind::Simulator,
                 participant_class: graph_check::ParticipantClass::Checked,
-                api_version: "y2026_1".to_string(),
+                api_version: "v1".to_string(),
                 config_schema: None,
                 scope: graph_check::ParticipantScope::Graph,
                 contracts: Vec::new(),

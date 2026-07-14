@@ -1,5 +1,5 @@
 //! Live telemetry feed for the TUI (CLI-UX Phase 3/4): background bus
-//! subscribers for the framework's `y2026_9` router/telemetry/joypad
+//! subscribers for the framework's `v2` router/telemetry/joypad
 //! contracts, plus the simulation clock's live step/time readout,
 //! mirroring `supervisor::start_bus_log_subscriber`/
 //! `start_presence_heartbeat_subscriber`'s "subscribe, update a shared
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 use phoxal::bus::{ContractBody, LogicalTime, Publish, Publisher, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::y2026_9 as api;
+use phoxal_api::v2 as api;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -296,7 +296,7 @@ fn now() -> LogicalTime {
     LogicalTime::new(0, u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX))
 }
 
-/// Subscribe `y2026_9::telemetry::Host` and feed every sample into
+/// Subscribe `v2::telemetry::Host` and feed every sample into
 /// `telemetry`, mirroring `supervisor::start_presence_heartbeat_subscriber`'s
 /// "open bus, subscribe, loop `recv`, retry on transport error" shape.
 /// Absence is expected and graceful: `tool-telemetry` may not be in the
@@ -355,7 +355,7 @@ async fn host_feed_loop(
     }
 }
 
-/// Subscribe `y2026_9::telemetry::Process` and demux by envelope source
+/// Subscribe `v2::telemetry::Process` and demux by envelope source
 /// participant, exactly like
 /// `supervisor::presence_heartbeat_subscriber_loop` demuxes
 /// `presence::Heartbeat`: every participant publishes its OWN process sample
@@ -413,7 +413,7 @@ async fn process_feed_loop(
     }
 }
 
-/// Subscribe `y2026_9::router::Metrics` (the Traffic tab's data source).
+/// Subscribe `v2::router::Metrics` (the Traffic tab's data source).
 pub fn start_router_metrics_feed(
     namespace: String,
     robot_id: String,
@@ -466,7 +466,7 @@ async fn router_metrics_feed_loop(
     }
 }
 
-/// Subscribe `y2026_9::joypad::Devices` AND own the `Connect`/`Rescan`
+/// Subscribe `v2::joypad::Devices` AND own the `Connect`/`Rescan`
 /// publishers for the same tool, driven by the returned command channel - the
 /// TUI's Devices tab sends into it (`AppState`'s `DisplayAction::JoypadConnect`/
 /// `JoypadRescan`, relayed by `supervise_until_shutdown`), this loop publishes,

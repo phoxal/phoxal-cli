@@ -677,7 +677,7 @@ pub fn resolve(
         bail!(
             "robot.yaml sets artifacts.generation = '{generation}', which no longer exists: \
              contract compatibility is per-contract name identity now (D1), not a single \
-             per-artifact API-generation ceiling. Remove artifacts.generation from robot.yaml."
+             per-artifact API-version ceiling. Remove artifacts.generation from robot.yaml."
         );
     }
     let channel = robot.artifacts.channel;
@@ -1597,7 +1597,7 @@ fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<Resol
 /// [`resolved_runtime_from_artifact_entry`]. If the entry exists but has no
 /// built artifact for that scope yet (a metadata-only entry, or not yet
 /// published for this target), resolution still succeeds (the entry is real
-/// and versioned - a bare `check` on an older generation must not hard-fail
+/// and versioned - a bare `check` on an older version must not hard-fail
 /// here), but `catalog_runtime` carries `sha256: None, published: false` so a
 /// later staging attempt reports a clear diagnostic instead of silently
 /// succeeding with no bundle to fetch.
@@ -1912,10 +1912,7 @@ mod tests {
                 // without robot.yaml needing any pin at all (D1: no
                 // `artifacts.generation` ceiling to auto-detect anymore).
                 true,
-                vec![fixture_contract_for_tests(
-                    "y2026_1::drive::Target",
-                    "publish",
-                )],
+                vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
             ),
             fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable),
         ])
@@ -2314,7 +2311,7 @@ services:
             package: "phoxal/service-asset".to_string(),
             kind: ArtifactKind::Service,
             version: "0.1.0".to_string(),
-            artifact_ref: "service-asset:y2026_1-stable".to_string(),
+            artifact_ref: "service-asset:v1-stable".to_string(),
             sha256: None,
             url: None,
             size: None,
@@ -2325,7 +2322,7 @@ services:
             target: Some("aarch64-unknown-linux-gnu".to_string()),
         };
 
-        assert_eq!(runtime.artifact_ref(), "service-asset:y2026_1-stable");
+        assert_eq!(runtime.artifact_ref(), "service-asset:v1-stable");
     }
 
     #[test]

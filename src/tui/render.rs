@@ -1725,8 +1725,8 @@ mod tests {
         let sample = Timestamped {
             value: RouterMetricsSample {
                 topics: vec![
-                    topic("y2026_1/drive/target", "mission", 12.0, 500),
-                    topic("y2026_1/battery/state", "battery", 0.0, 10),
+                    topic("v1/drive/target", "mission", 12.0, 500),
+                    topic("v2/battery/state", "battery", 0.0, 10),
                 ],
                 throughput_msg_s: 12.0,
                 window_ns: 1_000_000_000,
@@ -1780,7 +1780,7 @@ mod tests {
         let now = Instant::now();
         let sample = Timestamped {
             value: RouterMetricsSample {
-                topics: vec![topic("y2026_1::drive::Target", "mission", 12.0, 500)],
+                topics: vec![topic("v1::drive::Target", "mission", 12.0, 500)],
                 throughput_msg_s: 12.0,
                 window_ns: 1_000_000_000,
             },
@@ -1819,7 +1819,7 @@ mod tests {
             participant_id: "drive".to_string(),
             contracts: vec![ParticipantMetaContract {
                 role: "subscribe".to_string(),
-                generation: "y2026_1".to_string(),
+                version: "v1".to_string(),
                 contract: "drive::Target".to_string(),
                 external: false,
             }],
@@ -1849,7 +1849,7 @@ mod tests {
         let content = buffer_text(terminal.backend().buffer());
         let row = content
             .lines()
-            .find(|line| line.contains("y2026_1::drive::Target"))
+            .find(|line| line.contains("v1::drive::Target"))
             .expect("the topic row must render");
         assert!(
             row.trim_end().ends_with('1'),
@@ -2056,8 +2056,8 @@ mod tests {
         let metadata = RuntimeParticipantMetadata {
             artifact_ref: Some("phoxal/service-drive@0.4.0".to_string()),
             ownership: crate::stores::runtime_store::RuntimeOwnership::CliManaged,
-            input_contracts: vec!["y2026_1::drive::Target".to_string()],
-            output_contracts: vec!["y2026_1::drive::State".to_string()],
+            input_contracts: vec!["v1::drive::Target".to_string()],
+            output_contracts: vec!["v1::drive::State".to_string()],
         };
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -2080,8 +2080,8 @@ mod tests {
             .expect("draw must not fail");
         let content = buffer_text(terminal.backend().buffer());
         assert!(content.contains("phoxal/service-drive@0.4.0"), "{content}");
-        assert!(content.contains("y2026_1::drive::Target"), "{content}");
-        assert!(content.contains("y2026_1::drive::State"), "{content}");
+        assert!(content.contains("v1::drive::Target"), "{content}");
+        assert!(content.contains("v1::drive::State"), "{content}");
         assert!(content.contains("cli-managed"), "{content}");
         assert!(content.contains("1.5s"), "{content}");
         assert!(

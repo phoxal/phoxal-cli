@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use phoxal::bus::{ContractBody, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::y2026_1 as api;
+use phoxal_api::v1 as api;
 use tokio::time::timeout;
 
 use crate::AppContext;

@@ -163,7 +163,7 @@ pub struct VersionArgs {
 /// What the CLI itself supports, independent of any one robot graph.
 ///
 /// Contract compatibility is per-contract name identity now (D1) - there is
-/// no single graph-wide API version or generation ceiling left to report. So
+/// no single graph-wide API version ceiling to report. So
 /// this reports the CLI's own build identity instead: its version, the wire
 /// codec it speaks, and the linker-section names it reads a participant's
 /// compiled-in `#[derive(phoxal::Api)]` metadata from (see
@@ -259,7 +259,7 @@ pub enum RootCommand {
     #[command(
         about = "Check the robot graph's participants and config against phoxal::check.",
         long_about = "Check the robot graph's participants and config against phoxal::check.\n\n\
-                      Resolves robot.yaml, then reads each available participant's compiled-in contract metadata (official artifacts from the catalog, host tools and locally built user services/component drivers from their own built binary) and validates the graph with phoxal::check. Contract compatibility is per-contract name identity (D1) - two participants naming the same generation-qualified contract are compatible by construction, so there is no wire-shape hash to agree on. This still validates each user service's manifest config against its emitted JSON Schema. Official artifact readiness comes from the configured generated catalog; git component commits resolve live unless pinned to a commit SHA in robot.yaml."
+                      Resolves robot.yaml, then reads each available participant's compiled-in contract metadata (official artifacts from the catalog, host tools and locally built user services/component drivers from their own built binary) and validates the graph with phoxal::check. Contract compatibility is per-contract name identity (D1) - two participants naming the same version-qualified contract are compatible by construction, so there is no wire-shape hash to agree on. This still validates each user service's manifest config against its emitted JSON Schema. Official artifact readiness comes from the configured generated catalog; git component commits resolve live unless pinned to a commit SHA in robot.yaml."
     )]
     Check(check::CheckCmd),
     #[command(about = "Validate robot.yaml structure and user-service phoxal dependencies.")]

@@ -4428,7 +4428,7 @@ mod tests {
                     "test-only-target",
                     false,
                     vec![crate::catalog::fixture_contract_for_tests(
-                        "y2026_1::fixture::Only",
+                        "v1::fixture::Only",
                         "publish",
                     )],
                 ),
