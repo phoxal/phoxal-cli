@@ -4509,6 +4509,9 @@ mod tests {
 robot:
   id: testbot
   namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   structure: structure.urdf
   kinematic:
     kind: differential
@@ -4551,6 +4554,9 @@ services:
 robot:
   id: benchbot
   namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   structure: structure.urdf
   kinematic:
     kind: omnidirectional
@@ -4579,6 +4585,9 @@ artifacts:
 robot:
   id: catalogbot
   namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   structure: structure.urdf
   kinematic:
     kind: omnidirectional
@@ -4603,6 +4612,9 @@ artifacts:
 robot:
   id: testbot
   namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   structure: structure.urdf
   kinematic:
     kind: differential
@@ -5604,6 +5616,9 @@ capabilities:
 robot:
   id: testbot
   namespace: test
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   kinematic:
     kind: omnidirectional
     actuators: []

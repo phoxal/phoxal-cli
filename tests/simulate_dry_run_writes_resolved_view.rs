@@ -121,6 +121,9 @@ fn minimal_robot_yaml() -> &'static str {
 robot:
   id: testbot
   namespace: test
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   structure: structure.urdf
   kinematic:
     kind: differential

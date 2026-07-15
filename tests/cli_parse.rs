@@ -1,9 +1,49 @@
 use clap::{CommandFactory, Parser};
-use phoxal_cli::commands::{Cli, MessageFormat, RootCommand, self_cmd, service, status};
+use phoxal_cli::commands::{Cli, MessageFormat, RootCommand, behavior, self_cmd, service, status};
 
 #[test]
 fn clap_definition_is_valid() {
     Cli::command().debug_assert();
+}
+
+#[test]
+fn parses_behavior_validation_and_test_surface() {
+    let cli = Cli::try_parse_from([
+        "phoxal-cli",
+        "behavior",
+        "validate",
+        "--message-format",
+        "json",
+    ])
+    .expect("behavior validate should parse");
+    let RootCommand::Behavior(command) = cli.command else {
+        panic!("expected behavior command");
+    };
+    let behavior::BehaviorSubcommand::Validate(validate) = command.command else {
+        panic!("expected validate subcommand");
+    };
+    assert_eq!(validate.message_format, MessageFormat::Json);
+
+    let cli = Cli::try_parse_from([
+        "phoxal-cli",
+        "behavior",
+        "test",
+        "navigation.return_to_dock",
+        "--arg",
+        "dock=home",
+        "--scenario",
+        "timeout",
+    ])
+    .expect("behavior test should parse");
+    let RootCommand::Behavior(command) = cli.command else {
+        panic!("expected behavior command");
+    };
+    let behavior::BehaviorSubcommand::Test(test) = command.command else {
+        panic!("expected test subcommand");
+    };
+    assert_eq!(test.behavior_id, "navigation.return_to_dock");
+    assert_eq!(test.args, vec!["dock=home"]);
+    assert_eq!(test.scenario, "timeout");
 }
 
 #[test]
@@ -195,6 +235,53 @@ fn parses_status_release_resume_and_json() {
         panic!("expected resume subcommand");
     };
     assert_eq!(arg.participant, "mission");
+
+    let cli = Cli::try_parse_from([
+        "phoxal-cli",
+        "status",
+        "engage-estop",
+        "--connect",
+        "tcp/robot:7447",
+    ])
+    .expect("status engage-estop should parse");
+    let RootCommand::Status(command) = cli.command else {
+        panic!("expected status command");
+    };
+    let Some(status::StatusSubcommand::EngageEstop(arg)) = command.command else {
+        panic!("expected engage-estop subcommand");
+    };
+    assert_eq!(arg.connect, "tcp/robot:7447");
+
+    let cli = Cli::try_parse_from(["phoxal-cli", "status", "reset-estop"])
+        .expect("status reset-estop should parse");
+    let RootCommand::Status(command) = cli.command else {
+        panic!("expected status command");
+    };
+    assert!(matches!(
+        command.command,
+        Some(status::StatusSubcommand::ResetEstop(_))
+    ));
+
+    for domain in ["safety", "motion", "localization"] {
+        let cli = Cli::try_parse_from([
+            "phoxal-cli",
+            "status",
+            domain,
+            "--connect",
+            "tcp/robot:7447",
+        ])
+        .unwrap_or_else(|error| panic!("status {domain} should parse: {error}"));
+        let RootCommand::Status(command) = cli.command else {
+            panic!("expected status command for {domain}");
+        };
+        let connect = match command.command {
+            Some(status::StatusSubcommand::Safety(arg))
+            | Some(status::StatusSubcommand::Motion(arg))
+            | Some(status::StatusSubcommand::Localization(arg)) => arg.connect,
+            _ => panic!("expected domain-native status command for {domain}"),
+        };
+        assert_eq!(connect, "tcp/robot:7447");
+    }
 }
 
 #[test]

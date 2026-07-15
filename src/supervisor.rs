@@ -12,7 +12,7 @@ use phoxal::bus::{Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::v1 as api;
 // The simulation clock lives in preview `v2`; the presence and logs contracts
-// this module also consumes remain on frozen `v1`.
+// this module also consumes use current production `v1`.
 use phoxal_api::v2 as preview_api;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};

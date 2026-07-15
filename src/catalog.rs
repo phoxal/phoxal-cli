@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::output_mode::OutputMode;
 
-pub use phoxal::catalog::{Artifact, Blob, BuildProvenance, Catalog, Heads};
+pub use phoxal::catalog::{Artifact, Blob, BuildProvenance, Catalog, Heads, OFFICIAL_SERVICES};
 
 pub const DEFAULT_CATALOG_URL: &str =
     "https://github.com/phoxal/framework/releases/latest/download/catalog.json";
@@ -300,29 +300,6 @@ impl std::fmt::Display for ArtifactKind {
         formatter.write_str(self.catalog_kind())
     }
 }
-
-/// The platform model is deliberately explicit and name-driven. Catalog
-/// package parsing never decides what should run.
-pub const OFFICIAL_SERVICES: &[(&str, &str)] = &[
-    ("asset", "phoxal/service-asset"),
-    ("battery", "phoxal/service-battery"),
-    ("drive", "phoxal/service-drive"),
-    ("explore", "phoxal/service-explore"),
-    ("follow", "phoxal/service-follow"),
-    ("frame", "phoxal/service-frame"),
-    ("joint", "phoxal/service-joint"),
-    ("localize", "phoxal/service-localize"),
-    ("map", "phoxal/service-map"),
-    ("mission", "phoxal/service-mission"),
-    ("motion", "phoxal/service-motion"),
-    ("odometry", "phoxal/service-odometry"),
-    ("perception", "phoxal/service-perception"),
-    ("plan", "phoxal/service-plan"),
-    ("power", "phoxal/service-power"),
-    ("presence", "phoxal/service-presence"),
-    ("safety", "phoxal/service-safety"),
-    ("video", "phoxal/service-video"),
-];
 
 /// Standard site tools: every one of these is a hard-required participant.
 /// `resolver::resolve` fails the whole robot if any is absent from the active

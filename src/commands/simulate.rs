@@ -610,9 +610,11 @@ fn prepare_with_mode(
     if mode == SimulateMode::Live {
         let descriptors = crate::native_artifacts::descriptors_for(&resolved.resolved, true, true)?;
         crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, None)?;
+        let resolved_root =
+            stage_resolved_simulation_root(&resolved.project_root, &resolved.resolved.robot)?;
         crate::native_artifacts::stage_component_bundles_into_robot_root(
             &resolved.project_root,
-            &resolved.project_root,
+            &resolved_root,
             &resolved.resolved,
         )
         .context("failed to stage component assets into the simulation robot root")?;
@@ -644,6 +646,40 @@ fn prepare_with_mode(
         },
         runtime_store,
     })
+}
+
+fn stage_resolved_simulation_root(
+    project_root: &Path,
+    robot: &phoxal::model::robot::RobotV0,
+) -> Result<PathBuf> {
+    let root = project_root.join(".phoxal/resolved-simulation");
+    if root.exists() {
+        std::fs::remove_dir_all(&root)
+            .with_context(|| format!("failed to clear {}", root.display()))?;
+    }
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("failed to create {}", root.display()))?;
+    let yaml = serde_yaml::to_string(&phoxal::model::robot::Robot::V0(robot.clone()))
+        .context("failed to serialize resolved simulation robot.yaml")?;
+    std::fs::write(root.join("robot.yaml"), yaml)
+        .context("failed to write resolved simulation robot.yaml")?;
+
+    let structure_source = project_root.join(&robot.robot.structure);
+    let structure_dest = root.join(&robot.robot.structure);
+    if let Some(parent) = structure_dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&structure_source, &structure_dest).with_context(|| {
+        format!(
+            "failed to stage resolved robot structure {}",
+            structure_source.display()
+        )
+    })?;
+    let behaviors = project_root.join("behaviors");
+    if behaviors.is_dir() {
+        copy_dir_recursive(&behaviors, &root.join("behaviors"))?;
+    }
+    Ok(root)
 }
 
 pub(crate) fn resolve_project(
@@ -2881,6 +2917,9 @@ mod tests {
 robot:
   id: testbot
   namespace: test
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   structure: structure.urdf
   kinematic:
     kind: differential
@@ -2924,6 +2963,9 @@ artifacts:
 robot:
   id: testbot
   namespace: test
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   structure: structure.urdf
   kinematic:
     kind: omnidirectional
@@ -3086,6 +3128,9 @@ artifacts:
 robot:
   id: {id}
   namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   structure: structure.urdf
   kinematic:
     kind: omnidirectional

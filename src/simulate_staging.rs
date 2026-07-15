@@ -422,6 +422,9 @@ mod tests {
 robot:
   id: {robot_id}
   namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   kinematic:
     kind: omnidirectional
     actuators: []
@@ -624,6 +627,9 @@ robot:
 robot:
   id: testbot
   namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   kinematic:
     kind: omnidirectional
     actuators: [left_drive.motor]

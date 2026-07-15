@@ -30,6 +30,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::telemetry::{HostSample, JoypadDevicesSample, ProcessSample, RouterMetricsSample};
+use phoxal_api::v1 as state_api;
 
 /// Bound on the Resources tab's rolling host-sample history. Matches the
 /// existing `tui::logs::TELEMETRY_SERIES_CAPACITY` value: at the ~1s
@@ -90,6 +91,8 @@ pub struct TelemetryStore {
     process_by_participant: BTreeMap<String, Timestamped<ProcessSample>>,
     router: Option<Timestamped<RouterMetricsSample>>,
     joypad: Option<Timestamped<JoypadDevicesSample>>,
+    motion: Option<Timestamped<state_api::motion::State>>,
+    drive: Option<Timestamped<state_api::drive::State>>,
 }
 
 impl TelemetryStore {
@@ -137,6 +140,14 @@ impl TelemetryStore {
         self.joypad = Some(Timestamped::new(sample, now));
     }
 
+    pub fn record_motion(&mut self, now: Instant, sample: state_api::motion::State) {
+        self.motion = Some(Timestamped::new(sample, now));
+    }
+
+    pub fn record_drive(&mut self, now: Instant, sample: state_api::drive::State) {
+        self.drive = Some(Timestamped::new(sample, now));
+    }
+
     /// The latest `Host` sample plus its receive time, or `None` before the
     /// first sample arrives.
     #[must_use]
@@ -173,6 +184,14 @@ impl TelemetryStore {
     #[must_use]
     pub fn joypad(&self) -> Option<&Timestamped<JoypadDevicesSample>> {
         self.joypad.as_ref()
+    }
+
+    pub fn motion(&self) -> Option<&Timestamped<state_api::motion::State>> {
+        self.motion.as_ref()
+    }
+
+    pub fn drive(&self) -> Option<&Timestamped<state_api::drive::State>> {
+        self.drive.as_ref()
     }
 }
 
