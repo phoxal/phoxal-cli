@@ -65,7 +65,7 @@ fi
 # --- 1. live dry-run (resolve, no launch-directory writes) ------------------
 
 step "Gate -- robot-v1: phoxal-cli simulation run ${WORLD} --dry-run (live resolve)"
-if ! (cd "${robot_dir}" && rm -rf .phoxal/run .phoxal/webots .phoxal/cache \
+if ! (cd "${robot_dir}" && rm -rf .phoxal/run .phoxal/webots \
         && "${CLI_BIN}" simulation run "${WORLD}" --dry-run >/dev/null); then
   fail "simulation run ${WORLD} --dry-run failed (live resolution, or missing world
   ${WORLD}.wbt). If a git component ref cannot be resolved offline, pin it to a

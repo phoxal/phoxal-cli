@@ -9,7 +9,6 @@ use crate::AppContext;
 use crate::resolver::RobotManifestExtras;
 
 pub mod behavior;
-pub mod cache;
 pub mod check;
 pub mod deploy;
 pub mod doctor;
@@ -275,14 +274,12 @@ pub enum RootCommand {
     Run(run::Run),
     #[command(about = "Stream participant bus logs from a reachable robot.")]
     Logs(logs::Logs),
-    #[command(about = "Show the local supervisor board snapshot.")]
+    #[command(about = "Inspect live robot state through typed bus contracts.")]
     Status(status::Status),
     #[command(about = "Deploy the checked graph as a native systemd payload.")]
     Deploy(deploy::Deploy),
     #[command(about = "Resolve channel heads and atomically update project-vendored artifacts.")]
     Update(update::Update),
-    #[command(about = "Clean selected project-local .phoxal state.")]
-    Cache(cache::CacheCmd),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
     #[command(about = "Inspect the user-service catalog.")]
@@ -355,10 +352,6 @@ impl RootCommand {
             ),
             Self::Deploy(command) => command.dry_run,
             Self::Update(command) => command.dry_run,
-            Self::Cache(command) => {
-                let cache::CacheSubcommand::Clean(clean) = &command.command;
-                clean.dry_run
-            }
             _ => false,
         };
         if plan_only {
@@ -392,10 +385,6 @@ impl RootCommand {
             Self::Status(command) => command.message_format,
             Self::Deploy(command) => command.message_format,
             Self::Update(command) => command.message_format,
-            Self::Cache(command) => {
-                let cache::CacheSubcommand::Clean(clean) = &command.command;
-                clean.message_format
-            }
             Self::Doctor(_) => MessageFormat::Human,
             Self::Service(command) => {
                 let service::ServiceSubcommand::Catalog(catalog) = &command.command;
@@ -420,7 +409,6 @@ impl RootCommand {
             Self::Status(command) => command.run(app).await,
             Self::Deploy(command) => command.run(app).await,
             Self::Update(command) => command.run(app).await,
-            Self::Cache(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
             Self::Service(command) => command.run(app).await,
             Self::Version(command) => command.run(),

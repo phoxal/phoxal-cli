@@ -495,8 +495,7 @@ fn participant_launch(
 
 fn robot_root_for_mode(mode: &LaunchMode, project_root: &Path) -> PathBuf {
     match mode {
-        LaunchMode::Run => project_root.to_path_buf(),
-        LaunchMode::Webots { .. } => project_root.join(".phoxal/resolved-simulation"),
+        LaunchMode::Run | LaunchMode::Webots { .. } => crate::runtime_root::path(project_root),
         // The deployed robot root is the active generation symlink, not the
         // flat `/opt/phoxal` - robot.yaml, structure.urdf, and phoxal-release.json
         // are staged per-generation under `/opt/phoxal/active/` (see deploy's

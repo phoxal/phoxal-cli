@@ -34,8 +34,7 @@ use crate::supervisor::{
     BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
     RouterOwnership, SupervisionStage, SupervisorLock, SupervisorOptions, default_connect_endpoint,
     local_router_reachable, router_ownership, start_bus_log_subscriber,
-    start_presence_heartbeat_subscriber, supervise_until_shutdown, supervisor_actions_path,
-    supervisor_state_path,
+    start_presence_heartbeat_subscriber, supervise_until_shutdown,
 };
 use crate::utils::cargo_binary_name;
 
@@ -144,8 +143,6 @@ impl Run {
 
         let run_dir = crate::host_paths::run_dir()?;
         let _lock = SupervisorLock::acquire(&run_dir)?;
-        let state_file = supervisor_state_path()?;
-        let action_file = supervisor_actions_path()?;
         let project_root = app.project.root().to_path_buf();
         let ui = app.ui;
 
@@ -172,8 +169,6 @@ impl Run {
                 message_format,
                 watch_enabled,
                 watch_options,
-                state_file,
-                action_file,
                 controller.output(),
                 controller.token(),
                 events,
@@ -215,8 +210,6 @@ async fn live_run_setup(
     message_format: MessageFormat,
     watch_enabled: bool,
     watch_options: RunOptions,
-    state_file: PathBuf,
-    action_file: PathBuf,
     output: crate::session::output::OutputContext,
     token: tokio_util::sync::CancellationToken,
     events: mpsc::Sender<crate::session::event::SessionEvent>,
@@ -279,7 +272,7 @@ async fn live_run_setup(
         None
     };
 
-    let stages = stages_for_run(prepared.specs, output);
+    let stages = stages_for_run(prepared.specs, &prepared.plan, output);
     let starting = crate::session::state::SessionState::Preparing
         .start()
         .expect("the controller begins every session in Preparing");
@@ -300,8 +293,6 @@ async fn live_run_setup(
         stages,
         prepared.board,
         SupervisorOptions {
-            state_file: Some(state_file),
-            action_file: Some(action_file),
             action_rx: Some(action_rx),
             token,
             events: Some(events),
@@ -330,6 +321,7 @@ async fn live_run_setup(
 /// and `supervisor::await_participants_ready`.
 fn stages_for_run(
     specs: Vec<ParticipantSpec>,
+    plan: &LaunchPlan,
     output: crate::session::output::OutputContext,
 ) -> Vec<SupervisionStage> {
     let mut router = Vec::new();
@@ -350,8 +342,16 @@ fn stages_for_run(
     // Product decision 6: no unconditional 60s teardown for an interactive
     // session - see `OutputContext::wait_budget`.
     let timeout = output.wait_budget(RUN_STAGE_READY_TIMEOUT);
+    let mut router_stage = SupervisionStage::new("starting router", router, timeout);
+    if let Some(robot) = plan.robots.first() {
+        router_stage = router_stage.with_router_bus_probe(
+            robot.namespace.clone(),
+            robot.id.clone(),
+            default_connect_endpoint(),
+        );
+    }
     vec![
-        SupervisionStage::new("starting router", router, timeout),
+        router_stage,
         SupervisionStage::new("starting tools", tools, timeout),
         SupervisionStage::new("starting drivers", drivers, timeout),
         SupervisionStage::new("starting services", services, timeout),
@@ -441,21 +441,8 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     )?;
     let descriptors = crate::native_artifacts::descriptors_for(&resolved, false, true)?;
     crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
-
-    // Stage every resolved component's asset bundle into the robot root
-    // (`project_root` for `run`) so `PHOXAL_ROBOT_ROOT`-relative asset
-    // resolution finds the same `components/<id>/` shape deploy stages under
-    // `/opt/phoxal/` (docs #21). A no-op for a `Path`-pinned component whose
-    // files already live there.
-    if let Err(error) = crate::native_artifacts::stage_component_bundles_into_robot_root(
-        project_root,
-        project_root,
-        &resolved,
-    ) {
-        ui.warn(format!(
-            "component asset staging into the robot root failed: {error:#}"
-        ));
-    }
+    crate::runtime_root::publish(project_root, &resolved)
+        .context("failed to publish the runtime robot root")?;
 
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;

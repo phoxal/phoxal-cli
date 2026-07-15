@@ -5,34 +5,23 @@ use clap::{Args, Subcommand};
 use phoxal::bus::{LogicalTime, Publish, Publisher, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::v1 as api;
-use tokio::time::MissedTickBehavior;
 use tokio::time::timeout;
 
 use crate::AppContext;
 use crate::commands::{MessageFormat, print_message};
 use crate::launch_plan::DEFAULT_ROUTER_CONNECT;
 use crate::resolver::{discover_robot_yaml, load_robot_with_extras};
-use crate::supervisor::{
-    SupervisorActionRequest, read_supervisor_state, request_supervisor_action,
-    supervisor_state_path,
-};
 
 #[derive(Debug, Args)]
 pub struct Status {
-    #[arg(long, help = "Keep printing the supervisor status snapshot.")]
-    pub watch: bool,
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
     pub message_format: MessageFormat,
     #[command(subcommand)]
-    pub command: Option<StatusSubcommand>,
+    pub command: StatusSubcommand,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum StatusSubcommand {
-    #[command(about = "Stop a managed child and mark it released for a manual run.")]
-    Release(ParticipantArg),
-    #[command(about = "Respawn a released participant under supervisor control.")]
-    Resume(ParticipantArg),
     #[command(about = "Engage the robot-wide software emergency stop.")]
     EngageEstop(EmergencyStopArg),
     #[command(about = "Reset the robot-wide software emergency stop.")]
@@ -43,12 +32,6 @@ pub enum StatusSubcommand {
     Motion(SafetyArg),
     #[command(about = "Inspect the latest domain-native localization estimate.")]
     Localization(SafetyArg),
-}
-
-#[derive(Debug, Args)]
-pub struct ParticipantArg {
-    #[arg(value_name = "PARTICIPANT")]
-    pub participant: String,
 }
 
 #[derive(Debug, Args)]
@@ -75,43 +58,7 @@ pub struct SafetyArg {
 
 impl Status {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        if let Some(command) = &self.command {
-            return run_action(command, app, self.message_format).await;
-        }
-        let path = supervisor_state_path()?;
-        if !self.watch {
-            let snapshot = read_supervisor_state(&path)?;
-            return print_message(
-                &snapshot,
-                || {
-                    print!("{}", snapshot.render());
-                    Ok(())
-                },
-                self.message_format,
-            );
-        }
-
-        let mut ticker = tokio::time::interval(Duration::from_secs(1));
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        loop {
-            ticker.tick().await;
-            match read_supervisor_state(&path) {
-                Ok(snapshot) => {
-                    print_message(
-                        &snapshot,
-                        || {
-                            print!("{}", snapshot.render());
-                            Ok(())
-                        },
-                        self.message_format,
-                    )?;
-                }
-                Err(error) if self.message_format == MessageFormat::Human => {
-                    eprintln!("{error:#}");
-                }
-                Err(_) => {}
-            }
-        }
+        run_action(&self.command, app, self.message_format).await
     }
 }
 
@@ -133,36 +80,8 @@ async fn run_action(
         StatusSubcommand::Motion(arg) => {
             return inspect_motion(app, arg, message_format).await;
         }
-        StatusSubcommand::Localization(arg) => {
-            return inspect_localization(app, arg, message_format).await;
-        }
-        StatusSubcommand::Release(_) | StatusSubcommand::Resume(_) => {}
+        StatusSubcommand::Localization(arg) => inspect_localization(app, arg, message_format).await,
     }
-    let (participant, action, request) = match command {
-        StatusSubcommand::Release(arg) => (
-            arg.participant.as_str(),
-            "release",
-            SupervisorActionRequest::Release {
-                participant: arg.participant.clone(),
-            },
-        ),
-        StatusSubcommand::Resume(arg) => (
-            arg.participant.as_str(),
-            "resume",
-            SupervisorActionRequest::Resume {
-                participant: arg.participant.clone(),
-            },
-        ),
-        StatusSubcommand::EngageEstop(_)
-        | StatusSubcommand::ResetEstop(_)
-        | StatusSubcommand::Safety(_)
-        | StatusSubcommand::Motion(_)
-        | StatusSubcommand::Localization(_) => unreachable!(),
-    };
-    request_supervisor_action(request)?;
-    app.ui
-        .info(format!("queued supervisor {action} for {participant}"));
-    Ok(())
 }
 
 async fn inspect_localization(

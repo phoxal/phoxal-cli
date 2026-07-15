@@ -14,6 +14,8 @@ use crate::resolver::{ResolvedPlatformRuntime, ResolvedTool, official_binary_nam
 use crate::ui::Ui;
 use crate::utils::make_executable;
 
+const SCOPE_DIGEST_FILE: &str = ".phoxal-sha256";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProvisioningMode {
     MissingOnly,
@@ -191,21 +193,18 @@ pub fn prepare_descriptors_with_preflight(
         .filter(|descriptor| should_prepare_descriptor(descriptor))
         .cloned()
         .collect::<Vec<_>>();
-    let missing = actionable
+    let stale = actionable
         .iter()
-        .filter(|descriptor| artifact_exec_dir(descriptor).is_ok_and(|path| !path.is_dir()))
+        .filter(|descriptor| !descriptor_is_current(descriptor))
         .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        let total_bytes = missing
-            .iter()
-            .map(|descriptor| descriptor.size)
-            .sum::<u64>();
+    if !stale.is_empty() {
+        let total_bytes = stale.iter().map(|descriptor| descriptor.size).sum::<u64>();
         let destination = crate::host_paths::artifacts_dir()?;
         let free = free_disk_bytes(&destination).ok();
         if let Some(ui) = ui {
             ui.info(format!(
                 "artifact preflight: {} package target(s), {}, destination {}",
-                missing.len(),
+                stale.len(),
                 crate::human::bytes(total_bytes),
                 destination.display()
             ));
@@ -217,7 +216,7 @@ pub fn prepare_descriptors_with_preflight(
             && total_bytes > free
         {
             bail!(
-                "artifact download needs {} but only {} are free at {}; run `phoxal cache clean --artifacts` or free disk space",
+                "artifact download needs {} but only {} are free at {}; stop active Phoxal commands and remove the project-local `.phoxal/` directory, or free disk space",
                 crate::human::bytes(total_bytes),
                 crate::human::bytes(free),
                 destination.display()
@@ -228,14 +227,14 @@ pub fn prepare_descriptors_with_preflight(
         return Ok(());
     }
     let _lock = ArtifactStoreLock::exclusive("provision")?;
-    if missing.is_empty() {
+    if stale.is_empty() {
         // Finding A3: every actionable descriptor is already staged (a warm
         // cache) - only cheap activation/retargeting remains, which is not
         // itself download work, so no "download" phase appears (Product
         // decision 3).
         return prepare_and_activate_descriptors(&actionable, ui);
     }
-    let count = missing.len();
+    let count = stale.len();
     crate::session::diagnostics::run_phase(
         crate::session::event::PhaseId::new("download"),
         format!(
@@ -581,18 +580,6 @@ fn prepare_descriptor(
     prepare_descriptor_inner(ui, descriptor, mode, None)
 }
 
-fn prepare_descriptor_reported(
-    descriptor: &NativeArtifactDescriptor,
-    reporter: &dyn ArtifactProgressReporter,
-) -> Result<PathBuf> {
-    prepare_descriptor_inner(
-        None,
-        descriptor,
-        ProvisioningMode::MissingOnly,
-        Some(reporter),
-    )
-}
-
 fn prepare_descriptor_inner(
     ui: Option<&Ui>,
     descriptor: &NativeArtifactDescriptor,
@@ -601,7 +588,7 @@ fn prepare_descriptor_inner(
 ) -> Result<PathBuf> {
     let version_dir = artifact_exec_dir(descriptor)?;
     let binary = version_dir.join(&descriptor.binary_name);
-    if mode == ProvisioningMode::MissingOnly && version_dir.is_dir() {
+    if mode == ProvisioningMode::MissingOnly && descriptor_is_current(descriptor) {
         if let Some(reporter) = reporter {
             reporter.complete(descriptor, None);
         }
@@ -632,7 +619,7 @@ fn prepare_descriptor_inner(
         } else {
             download_blob(descriptor, mode)?
         };
-        unpack_asset(&tarball_path, &version_dir)?;
+        unpack_asset(&tarball_path, &version_dir, &descriptor.sha256)?;
         fs::remove_file(&tarball_path).ok();
         if binary.is_file() {
             make_executable(&binary)?;
@@ -645,6 +632,93 @@ fn prepare_descriptor_inner(
                 reporter.complete(descriptor, row);
             }
             Ok(binary)
+        }
+        Err(error) => {
+            if let (Some(reporter), Some(row)) = (reporter, row) {
+                reporter.failed(descriptor, row, &error);
+            }
+            Err(error)
+        }
+    }
+}
+
+struct PreparedScope {
+    final_root: PathBuf,
+    candidate_root: Option<PathBuf>,
+}
+
+impl Drop for PreparedScope {
+    fn drop(&mut self) {
+        if let Some(candidate) = self.candidate_root.take() {
+            let _ = fs::remove_dir_all(candidate);
+        }
+    }
+}
+
+fn prepare_scope_candidate(
+    descriptor: &NativeArtifactDescriptor,
+    ui: Option<&Ui>,
+    reporter: Option<&dyn ArtifactProgressReporter>,
+) -> Result<Option<PreparedScope>> {
+    if descriptor_is_current(descriptor) {
+        if let Some(reporter) = reporter {
+            reporter.complete(descriptor, None);
+        }
+        return Ok(None);
+    }
+    if descriptor.url.is_empty() {
+        bail!(
+            "vendored {} {} for {} is missing; run `phoxal update` online",
+            descriptor.package_id,
+            descriptor.version,
+            descriptor_scope_label(descriptor)
+        );
+    }
+    if reporter.is_none()
+        && let Some(ui) = ui
+    {
+        ui.info(format!(
+            "provisioning {} {} from {}",
+            descriptor.kind, descriptor.name, descriptor.url
+        ));
+    }
+    let mode = ui.map_or_else(crate::output_mode::OutputMode::from_env, |ui| ui.mode());
+    let row = reporter.map(|reporter| reporter.begin(descriptor));
+    let result = (|| {
+        let tarball_path = if let Some(row) = &row {
+            download_blob_inner(descriptor, |delta| row.inc(delta))?
+        } else {
+            download_blob(descriptor, mode)?
+        };
+        let final_root = artifact_exec_dir(descriptor)?;
+        let parent = final_root
+            .parent()
+            .context("artifact scope has no parent")?;
+        fs::create_dir_all(parent)?;
+        let candidate = tempfile::Builder::new()
+            .prefix(".scope-candidate-")
+            .tempdir_in(parent)?;
+        unpack_archive(&tarball_path, candidate.path())?;
+        fs::write(
+            candidate.path().join(SCOPE_DIGEST_FILE),
+            format!("{}\n", descriptor.sha256),
+        )?;
+        fs::remove_file(&tarball_path).ok();
+        let binary = candidate.path().join(&descriptor.binary_name);
+        if binary.is_file() {
+            make_executable(&binary)?;
+        }
+        Ok(PreparedScope {
+            final_root,
+            candidate_root: Some(candidate.keep()),
+        })
+    })();
+    match result {
+        Ok(prepared) => {
+            if let Some(reporter) = reporter {
+                reporter.complete(descriptor, row);
+            }
+            Ok(Some(prepared))
         }
         Err(error) => {
             if let (Some(reporter), Some(row)) = (reporter, row) {
@@ -694,21 +768,22 @@ fn prepare_and_activate_descriptors_inner(
     }
     let total = descriptors.len() as u64;
     let mut completed = 0_u64;
+    let mut prepared_scopes = Vec::new();
     for batch in descriptors.chunks(CONCURRENCY) {
         std::thread::scope(|scope| -> Result<()> {
             let handles = batch
                 .iter()
                 .map(|descriptor| {
-                    scope.spawn(move || match reporter {
-                        Some(reporter) => prepare_descriptor_reported(descriptor, reporter),
-                        None => prepare_descriptor(None, descriptor, ProvisioningMode::MissingOnly),
-                    })
+                    scope.spawn(move || prepare_scope_candidate(descriptor, ui, reporter))
                 })
                 .collect::<Vec<_>>();
             for handle in handles {
-                handle
+                if let Some(prepared) = handle
                     .join()
-                    .map_err(|_| anyhow!("artifact download worker panicked"))??;
+                    .map_err(|_| anyhow!("artifact download worker panicked"))??
+                {
+                    prepared_scopes.push(prepared);
+                }
             }
             Ok(())
         })?;
@@ -736,10 +811,29 @@ fn prepare_and_activate_descriptors_inner(
             }
         }
     }
-    for descriptor in descriptors {
-        retarget_active(descriptor)?;
-    }
+    let publication = ScopePublication::publish(prepared_scopes)?;
+    activate_packages_atomically(&package_versions)?;
+    publication.commit()?;
+    prune_inactive_versions(&package_versions)?;
     Ok(())
+}
+
+/// A scope is reusable only when it was unpacked from the exact catalog blob
+/// selected by the resolver. Version identity alone is insufficient because a
+/// catalog may republish a version with a corrected digest.
+pub(crate) fn descriptor_is_current(descriptor: &NativeArtifactDescriptor) -> bool {
+    let Ok(path) = artifact_exec_dir(descriptor) else {
+        return false;
+    };
+    // Normal commands deliberately resolve through the project-vendored
+    // `active` link without consulting a channel head, so that offline view
+    // has no catalog digest to compare. `update` resolves the live catalog
+    // with a non-empty digest and therefore takes the strict branch below.
+    if descriptor.sha256.is_empty() {
+        return path.is_dir();
+    }
+    fs::read_to_string(path.join(SCOPE_DIGEST_FILE))
+        .is_ok_and(|digest| digest.trim() == descriptor.sha256)
 }
 
 /// Return the selected binary through its package-scoped `active` symlink.
@@ -796,8 +890,15 @@ pub fn artifact_assets_dir_for(package: &str) -> Result<PathBuf> {
     Ok(artifact_package_dir(package)?.join("active").join("assets"))
 }
 
+#[cfg(test)]
 pub fn active_version(descriptor: &NativeArtifactDescriptor) -> Result<Option<String>> {
     active_version_for(&descriptor.package_id)
+}
+
+pub(crate) fn active_version_read_only(
+    descriptor: &NativeArtifactDescriptor,
+) -> Result<Option<String>> {
+    active_version_unlocked(&descriptor.package_id)
 }
 
 pub fn active_version_for(package: &str) -> Result<Option<String>> {
@@ -924,21 +1025,201 @@ fn verify_blob_bytes(descriptor: &NativeArtifactDescriptor, bytes: &[u8]) -> Res
 }
 
 fn retarget_active(descriptor: &NativeArtifactDescriptor) -> Result<()> {
-    let package_dir = artifact_package_dir(&descriptor.package_id)?;
+    retarget_active_version(&descriptor.package_id, &descriptor.version)
+}
+
+fn retarget_active_version(package: &str, version: &str) -> Result<()> {
+    let package_dir = artifact_package_dir(package)?;
     fs::create_dir_all(package_dir.join("versions"))?;
     let partial = package_dir.join(".active.partial");
     if fs::symlink_metadata(&partial).is_ok() {
         fs::remove_file(&partial)?;
     }
     #[cfg(unix)]
-    std::os::unix::fs::symlink(Path::new("versions").join(&descriptor.version), &partial)?;
+    std::os::unix::fs::symlink(Path::new("versions").join(version), &partial)?;
     #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(Path::new("versions").join(&descriptor.version), &partial)?;
+    std::os::windows::fs::symlink_dir(Path::new("versions").join(version), &partial)?;
     fs::rename(&partial, package_dir.join("active"))
         .context("failed to atomically retarget the active artifact version")
 }
 
-fn unpack_asset(asset_path: &Path, root: &Path) -> Result<()> {
+struct PublishedScope {
+    final_root: PathBuf,
+    backup_root: Option<PathBuf>,
+}
+
+struct ScopePublication {
+    scopes: Vec<PublishedScope>,
+    committed: bool,
+}
+
+impl ScopePublication {
+    fn publish(prepared: Vec<PreparedScope>) -> Result<Self> {
+        let mut publication = Self {
+            scopes: Vec::new(),
+            committed: false,
+        };
+        for mut prepared_scope in prepared {
+            let candidate = prepared_scope
+                .candidate_root
+                .take()
+                .context("prepared artifact scope lost its candidate")?;
+            let parent = prepared_scope
+                .final_root
+                .parent()
+                .context("artifact scope has no parent")?;
+            let backup_root = if prepared_scope.final_root.exists() {
+                let reserved = tempfile::Builder::new()
+                    .prefix(".scope-rollback-")
+                    .tempdir_in(parent)?
+                    .keep();
+                fs::remove_dir_all(&reserved)?;
+                fs::rename(&prepared_scope.final_root, &reserved)?;
+                Some(reserved)
+            } else {
+                None
+            };
+            if let Err(error) = fs::rename(&candidate, &prepared_scope.final_root) {
+                if let Some(backup) = &backup_root {
+                    let _ = fs::rename(backup, &prepared_scope.final_root);
+                }
+                let _ = fs::remove_dir_all(candidate);
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to publish prepared artifact scope {}",
+                        prepared_scope.final_root.display()
+                    )
+                });
+            }
+            publication.scopes.push(PublishedScope {
+                final_root: std::mem::take(&mut prepared_scope.final_root),
+                backup_root,
+            });
+        }
+        Ok(publication)
+    }
+
+    fn commit(mut self) -> Result<()> {
+        self.committed = true;
+        for scope in &mut self.scopes {
+            if let Some(backup) = scope.backup_root.take() {
+                fs::remove_dir_all(&backup).with_context(|| {
+                    format!("failed to remove artifact rollback {}", backup.display())
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ScopePublication {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for scope in self.scopes.iter_mut().rev() {
+            let _ = fs::remove_dir_all(&scope.final_root);
+            if let Some(backup) = scope.backup_root.take() {
+                let _ = fs::rename(backup, &scope.final_root);
+            }
+        }
+    }
+}
+
+fn activate_packages_atomically(
+    package_versions: &std::collections::BTreeMap<&String, &String>,
+) -> Result<()> {
+    let previous = package_versions
+        .keys()
+        .map(|package| {
+            let active = artifact_package_dir(package)?.join("active");
+            let target = fs::read_link(&active).ok();
+            Ok(((*package).clone(), target))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut activated: Vec<String> = Vec::new();
+    for (package, version) in package_versions {
+        if let Err(error) = retarget_active_version(package, version) {
+            for restored_package in activated.into_iter().rev() {
+                if let Some((_, target)) = previous
+                    .iter()
+                    .find(|(candidate, _)| candidate == &restored_package)
+                {
+                    restore_active_link(&restored_package, target.as_deref()).ok();
+                }
+            }
+            return Err(error);
+        }
+        activated.push(package.to_string());
+    }
+    Ok(())
+}
+
+fn restore_active_link(package: &str, target: Option<&Path>) -> Result<()> {
+    let package_dir = artifact_package_dir(package)?;
+    let active = package_dir.join("active");
+    let partial = package_dir.join(".active.rollback");
+    if fs::symlink_metadata(&partial).is_ok() {
+        fs::remove_file(&partial)?;
+    }
+    let Some(target) = target else {
+        if fs::symlink_metadata(&active).is_ok() {
+            fs::remove_file(active)?;
+        }
+        return Ok(());
+    };
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, &partial)?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(target, &partial)?;
+    fs::rename(partial, active)?;
+    Ok(())
+}
+
+fn prune_inactive_versions(
+    package_versions: &std::collections::BTreeMap<&String, &String>,
+) -> Result<()> {
+    for (package, selected) in package_versions {
+        let versions = artifact_package_dir(package)?.join("versions");
+        if !versions.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&versions)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() || entry.file_name() == selected.as_str() {
+                continue;
+            }
+            fs::remove_dir_all(entry.path()).with_context(|| {
+                format!(
+                    "failed to prune inactive artifact version {}",
+                    entry.path().display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn inactive_versions(descriptor: &NativeArtifactDescriptor) -> Result<Vec<String>> {
+    let versions = artifact_package_dir(&descriptor.package_id)?.join("versions");
+    if !versions.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut inactive = Vec::new();
+    for entry in fs::read_dir(versions)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            let version = entry.file_name().to_string_lossy().into_owned();
+            if version != descriptor.version && !version.starts_with('.') {
+                inactive.push(version);
+            }
+        }
+    }
+    inactive.sort();
+    Ok(inactive)
+}
+
+fn unpack_asset(asset_path: &Path, root: &Path, digest: &str) -> Result<()> {
     let partial = root
         .parent()
         .context("artifact scope has no parent")?
@@ -955,27 +1236,34 @@ fn unpack_asset(asset_path: &Path, root: &Path) -> Result<()> {
     fs::create_dir_all(&partial)
         .with_context(|| format!("failed to create {}", partial.display()))?;
 
-    if asset_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.ends_with(".tar.gz"))
-    {
-        unpack_tar_gz(asset_path, &partial)?;
-    } else if asset_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.ends_with(".tar"))
-    {
-        unpack_tar(asset_path, &partial)?;
-    } else {
-        unpack_with_system_tar(asset_path, &partial)?;
-    }
+    unpack_archive(asset_path, &partial)?;
+
+    fs::write(partial.join(SCOPE_DIGEST_FILE), format!("{digest}\n"))
+        .context("failed to record the verified artifact digest")?;
 
     if root.exists() {
         fs::remove_dir_all(root)
             .with_context(|| format!("failed to replace {}", root.display()))?;
     }
     fs::rename(&partial, root).with_context(|| format!("failed to finalize {}", root.display()))
+}
+
+fn unpack_archive(asset_path: &Path, dest: &Path) -> Result<()> {
+    if asset_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".tar.gz"))
+    {
+        unpack_tar_gz(asset_path, dest)
+    } else if asset_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".tar"))
+    {
+        unpack_tar(asset_path, dest)
+    } else {
+        unpack_with_system_tar(asset_path, dest)
+    }
 }
 
 fn unpack_tar_gz(asset_path: &Path, dest: &Path) -> Result<()> {
@@ -1090,6 +1378,13 @@ mod tests {
         }
     }
 
+    fn mark_current(descriptor: &NativeArtifactDescriptor) -> Result<()> {
+        let root = artifact_exec_dir(descriptor)?;
+        fs::create_dir_all(&root)?;
+        fs::write(root.join(SCOPE_DIGEST_FILE), &descriptor.sha256)?;
+        Ok(())
+    }
+
     #[test]
     fn blob_size_and_sha_are_both_enforced() {
         let bytes = b"verified";
@@ -1110,6 +1405,81 @@ mod tests {
         fs::create_dir_all(artifact_exec_dir(&new)?)?;
         retarget_active(&new)?;
         assert_eq!(active_version(&new)?.as_deref(), Some("2.0.0"));
+        Ok(())
+    }
+
+    #[test]
+    fn activation_prunes_only_after_the_new_set_is_ready() -> Result<()> {
+        let _root = ScratchPhoxalHome::new()?;
+        let old = descriptor("1.0.0", b"old");
+        let new = descriptor("2.0.0", b"new");
+        mark_current(&old)?;
+        mark_current(&new)?;
+        retarget_active(&old)?;
+
+        prepare_and_activate_descriptors(std::slice::from_ref(&new), None)?;
+
+        assert_eq!(active_version(&new)?.as_deref(), Some("2.0.0"));
+        assert!(!artifact_exec_dir(&old)?.exists());
+        assert!(artifact_exec_dir(&new)?.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn failed_prepare_preserves_the_active_version_and_inactive_fallback() -> Result<()> {
+        let _root = ScratchPhoxalHome::new()?;
+        let old = descriptor("1.0.0", b"old");
+        mark_current(&old)?;
+        retarget_active(&old)?;
+        let mut new = descriptor("2.0.0", b"new");
+        new.url = "http://127.0.0.1:1/drive.tar".to_string();
+
+        assert!(prepare_and_activate_descriptors(std::slice::from_ref(&new), None).is_err());
+
+        assert_eq!(active_version(&old)?.as_deref(), Some("1.0.0"));
+        assert!(artifact_exec_dir(&old)?.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn failed_multi_package_refresh_preserves_every_active_scope_and_link() -> Result<()> {
+        let _root = ScratchPhoxalHome::new()?;
+        let old_drive = descriptor("1.0.0", b"old-drive");
+        let mut old_motion = descriptor("1.0.0", b"old-motion");
+        old_motion.package_id = "phoxal/service-motion".to_string();
+        mark_current(&old_drive)?;
+        mark_current(&old_motion)?;
+        fs::write(
+            artifact_exec_dir(&old_drive)?.join(&old_drive.binary_name),
+            "old-drive",
+        )?;
+        fs::write(
+            artifact_exec_dir(&old_motion)?.join(&old_motion.binary_name),
+            "old-motion",
+        )?;
+        retarget_active(&old_drive)?;
+        retarget_active(&old_motion)?;
+
+        let archive = minimal_tar_gz(&old_drive.binary_name, b"new-drive")?;
+        let addr = spawn_minimal_http_server(archive.clone());
+        let mut refreshed_drive = descriptor("1.0.0", &archive);
+        refreshed_drive.url = format!("http://{addr}/drive.tar.gz");
+        let mut failed_motion = descriptor("2.0.0", b"new-motion");
+        failed_motion.package_id = old_motion.package_id.clone();
+        failed_motion.url = "http://127.0.0.1:1/motion.tar.gz".to_string();
+
+        assert!(prepare_and_activate_descriptors(&[refreshed_drive, failed_motion], None).is_err());
+
+        assert_eq!(active_version(&old_drive)?.as_deref(), Some("1.0.0"));
+        assert_eq!(active_version(&old_motion)?.as_deref(), Some("1.0.0"));
+        assert_eq!(
+            fs::read_to_string(artifact_exec_dir(&old_drive)?.join(&old_drive.binary_name))?,
+            "old-drive"
+        );
+        assert_eq!(
+            fs::read_to_string(artifact_exec_dir(&old_motion)?.join(&old_motion.binary_name))?,
+            "old-motion"
+        );
         Ok(())
     }
 
@@ -1197,7 +1567,7 @@ mod tests {
         let _root = ScratchPhoxalHome::new()?;
         let mut staged = descriptor("1.0.0", b"already-staged");
         staged.url = "http://127.0.0.1:1/drive.tar".to_string();
-        fs::create_dir_all(artifact_exec_dir(&staged)?)?;
+        mark_current(&staged)?;
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         crate::session::diagnostics::install(tx);
@@ -1320,6 +1690,30 @@ mod tests {
         Ok(gz_bytes)
     }
 
+    #[test]
+    fn same_version_with_a_new_catalog_digest_is_refreshed() -> Result<()> {
+        let _root = ScratchPhoxalHome::new()?;
+        let old = descriptor("1.0.0", b"old-catalog-blob");
+        mark_current(&old)?;
+        fs::write(artifact_exec_dir(&old)?.join(&old.binary_name), "old")?;
+        retarget_active(&old)?;
+
+        let archive = minimal_tar_gz(&old.binary_name, b"new")?;
+        let addr = spawn_minimal_http_server(archive.clone());
+        let mut refreshed = descriptor("1.0.0", &archive);
+        refreshed.url = format!("http://{addr}/drive.tar.gz");
+
+        prepare_and_activate_descriptors(std::slice::from_ref(&refreshed), None)?;
+
+        assert!(descriptor_is_current(&refreshed));
+        assert_eq!(
+            fs::read(artifact_exec_dir(&refreshed)?.join(&refreshed.binary_name))?,
+            b"new"
+        );
+        assert_eq!(active_version(&refreshed)?.as_deref(), Some("1.0.0"));
+        Ok(())
+    }
+
     /// Finding C2: `PhaseProgress` used to be constructed only by a render
     /// test, never by production code. This exercises the REAL download
     /// pipeline end to end (a genuine HTTP download of a real tar.gz archive,
@@ -1344,6 +1738,8 @@ mod tests {
         let result = prepare_descriptors_with_preflight(std::slice::from_ref(&fresh), None);
         crate::session::diagnostics::uninstall();
         result?;
+
+        assert!(descriptor_is_current(&fresh));
 
         let mut saw_progress = false;
         while let Ok(event) = rx.try_recv() {

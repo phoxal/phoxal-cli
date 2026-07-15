@@ -93,6 +93,7 @@ fn write_vendored_fixture_binaries(root: &std::path::Path) -> anyhow::Result<()>
         let version_dir = package_dir.join("versions/0.1.0/targets").join(&target);
         fs::create_dir_all(&version_dir)?;
         fs::copy(&source, version_dir.join(binary))?;
+        fs::write(version_dir.join(".phoxal-sha256"), "0".repeat(64))?;
         #[cfg(unix)]
         std::os::unix::fs::symlink("versions/0.1.0", package_dir.join("active"))?;
         #[cfg(windows)]

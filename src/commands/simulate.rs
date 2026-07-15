@@ -38,8 +38,7 @@ use crate::supervisor::{
     RequestedStop, RouterOwnership, SupervisionStage, SupervisorAction, SupervisorLock,
     SupervisorOptions, SupervisorOutcome, await_terminal_graph_failure, default_connect_endpoint,
     local_router_reachable, router_ownership, start_bus_log_subscriber, start_clock_feed,
-    start_presence_heartbeat_subscriber, supervise_until_shutdown, supervisor_actions_path,
-    supervisor_state_path, wait_for_endpoint,
+    start_presence_heartbeat_subscriber, supervise_until_shutdown, wait_for_endpoint,
 };
 use crate::webots_stage_root;
 use crate::world;
@@ -397,8 +396,8 @@ async fn live_simulate_setup(
 
     let run_dir = crate::host_paths::run_dir()?;
     let locks = LiveSimulationLocks::acquire(&run_dir, &crate::host_paths::simulator_lock_path()?)?;
-    let state_file = supervisor_state_path()?;
-    let action_file = supervisor_actions_path()?;
+    crate::runtime_root::publish(&sim.ctx.project_root, &sim.ctx.resolved)
+        .context("failed to publish the simulation runtime robot root")?;
     let board = BoardBackend::new();
     let router_ownership = router_ownership(local_router_reachable(&default_connect_endpoint()));
     let mut runtime_store = sim.runtime_store.clone();
@@ -554,8 +553,6 @@ async fn live_simulate_setup(
         stages,
         board_for_supervise,
         SupervisorOptions {
-            state_file: Some(state_file),
-            action_file: Some(action_file),
             action_rx: Some(action_rx),
             requested_stop: Some(requested_stop),
             cancel_rx: Some(cancel_rx),
@@ -610,14 +607,6 @@ fn prepare_with_mode(
     if mode == SimulateMode::Live {
         let descriptors = crate::native_artifacts::descriptors_for(&resolved.resolved, true, true)?;
         crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, None)?;
-        let resolved_root =
-            stage_resolved_simulation_root(&resolved.project_root, &resolved.resolved.robot)?;
-        crate::native_artifacts::stage_component_bundles_into_robot_root(
-            &resolved.project_root,
-            &resolved_root,
-            &resolved.resolved,
-        )
-        .context("failed to stage component assets into the simulation robot root")?;
     }
     let (plan, contract_surfaces) = build_checked_sim_launch_plan(
         &resolved.project_root,
@@ -646,40 +635,6 @@ fn prepare_with_mode(
         },
         runtime_store,
     })
-}
-
-fn stage_resolved_simulation_root(
-    project_root: &Path,
-    robot: &phoxal::model::robot::RobotV0,
-) -> Result<PathBuf> {
-    let root = project_root.join(".phoxal/resolved-simulation");
-    if root.exists() {
-        std::fs::remove_dir_all(&root)
-            .with_context(|| format!("failed to clear {}", root.display()))?;
-    }
-    std::fs::create_dir_all(&root)
-        .with_context(|| format!("failed to create {}", root.display()))?;
-    let yaml = serde_yaml::to_string(&phoxal::model::robot::Robot::V0(robot.clone()))
-        .context("failed to serialize resolved simulation robot.yaml")?;
-    std::fs::write(root.join("robot.yaml"), yaml)
-        .context("failed to write resolved simulation robot.yaml")?;
-
-    let structure_source = project_root.join(&robot.robot.structure);
-    let structure_dest = root.join(&robot.robot.structure);
-    if let Some(parent) = structure_dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::copy(&structure_source, &structure_dest).with_context(|| {
-        format!(
-            "failed to stage resolved robot structure {}",
-            structure_source.display()
-        )
-    })?;
-    let behaviors = project_root.join("behaviors");
-    if behaviors.is_dir() {
-        copy_dir_recursive(&behaviors, &root.join("behaviors"))?;
-    }
-    Ok(root)
 }
 
 pub(crate) fn resolve_project(
@@ -1329,8 +1284,16 @@ fn stages_for_simulate(
     // Product decision 6: no unconditional 60s teardown for an interactive
     // session - see `OutputContext::wait_budget`.
     let timeout = output.wait_budget(SIMULATE_READINESS_TIMEOUT);
+    let mut router_stage = SupervisionStage::new("starting router", router, timeout);
+    if let Some(robot) = plan.robots.first() {
+        router_stage = router_stage.with_router_bus_probe(
+            robot.namespace.clone(),
+            robot.id.clone(),
+            default_connect_endpoint(),
+        );
+    }
     vec![
-        SupervisionStage::new("starting router", router, timeout),
+        router_stage,
         SupervisionStage::new("starting tools", tools, timeout),
         SupervisionStage::new("starting Webots", webots, timeout),
         SupervisionStage::new("waiting for the simulation supervisor", Vec::new(), timeout)
