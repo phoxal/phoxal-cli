@@ -495,7 +495,8 @@ fn participant_launch(
 
 fn robot_root_for_mode(mode: &LaunchMode, project_root: &Path) -> PathBuf {
     match mode {
-        LaunchMode::Run | LaunchMode::Webots { .. } => project_root.to_path_buf(),
+        LaunchMode::Run => project_root.to_path_buf(),
+        LaunchMode::Webots { .. } => project_root.join(".phoxal/resolved-simulation"),
         // The deployed robot root is the active generation symlink, not the
         // flat `/opt/phoxal` - robot.yaml, structure.urdf, and phoxal-release.json
         // are staged per-generation under `/opt/phoxal/active/` (see deploy's
@@ -749,8 +750,8 @@ mod tests {
                 .iter()
                 .filter(|id| **id == "mission")
                 .count(),
-            2,
-            "official and user mission participants are both represented"
+            1,
+            "only the explicitly authored user mission remains"
         );
         let left_drive = robot
             .participants
@@ -1028,6 +1029,9 @@ mod tests {
 robot:
   id: {id}
   namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   kinematic:
     kind: omnidirectional
     actuators: []
@@ -1079,6 +1083,9 @@ robot:
 robot:
   id: robot_v1
   namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]

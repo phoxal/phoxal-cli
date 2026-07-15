@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 use phoxal::bus::{ContractBody, LogicalTime, Publish, Publisher, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::v2 as api;
+use phoxal_api::{v1 as state_api, v2 as api};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -172,6 +172,8 @@ pub struct TelemetrySnapshot {
     pub process_by_participant: BTreeMap<String, Timestamped<ProcessSample>>,
     pub router: Option<Timestamped<RouterMetricsSample>>,
     pub joypad: Option<Timestamped<JoypadDevicesSample>>,
+    pub motion: Option<Timestamped<state_api::motion::State>>,
+    pub drive: Option<Timestamped<state_api::drive::State>>,
 }
 
 /// A joypad action the TUI's Devices tab asked to publish.
@@ -252,6 +254,8 @@ impl TelemetryBackend {
             process_by_participant: store.process_all().clone(),
             router: store.router().cloned(),
             joypad: store.joypad().cloned(),
+            motion: store.motion().cloned(),
+            drive: store.drive().cloned(),
         };
         drop(store);
         if let Some(rx) = &*self.clock_rx.lock().expect("clock_rx mutex poisoned") {
@@ -286,6 +290,74 @@ impl TelemetryBackend {
             .lock()
             .expect("telemetry mutex poisoned")
             .record_joypad(Instant::now(), sample);
+    }
+
+    fn record_motion(&self, sample: state_api::motion::State) {
+        self.inner
+            .lock()
+            .expect("telemetry mutex poisoned")
+            .record_motion(Instant::now(), sample);
+    }
+
+    fn record_drive(&self, sample: state_api::drive::State) {
+        self.inner
+            .lock()
+            .expect("telemetry mutex poisoned")
+            .record_drive(Instant::now(), sample);
+    }
+}
+
+pub fn start_control_state_feed(
+    namespace: String,
+    robot_id: String,
+    connect: String,
+    telemetry: TelemetryBackend,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            wait_for_endpoint(&connect).await;
+            if let Err(error) = control_state_feed_loop(
+                namespace.clone(),
+                robot_id.clone(),
+                connect.clone(),
+                &telemetry,
+            )
+            .await
+            {
+                tracing::debug!("control-state feed waiting for router: {error:#}");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    })
+}
+
+async fn control_state_feed_loop(
+    namespace: String,
+    robot_id: String,
+    connect: String,
+    telemetry: &TelemetryBackend,
+) -> Result<()> {
+    let bus = Bus::open(BusConfig {
+        namespace,
+        robot_id,
+        participant: "phoxal-cli-control-state".to_string(),
+        incarnation: 0,
+        connect_endpoints: vec![connect],
+    })
+    .await?;
+    let motion_topic = Topic::<Subscribe<state_api::motion::State>>::new_static(
+        <state_api::motion::State as ContractBody>::TOPIC,
+    );
+    let drive_topic = Topic::<Subscribe<state_api::drive::State>>::new_static(
+        <state_api::drive::State as ContractBody>::TOPIC,
+    );
+    let motion = Subscriber::new(&bus, &motion_topic, 32).await?;
+    let drive = Subscriber::new(&bus, &drive_topic, 32).await?;
+    loop {
+        tokio::select! {
+            received = motion.recv() => telemetry.record_motion(received?.body),
+            received = drive.recv() => telemetry.record_drive(received?.body),
+        }
     }
 }
 

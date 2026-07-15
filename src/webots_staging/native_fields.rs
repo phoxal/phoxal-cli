@@ -301,6 +301,7 @@ pub fn native_webots_fields_for_capability(
         | SimulationCapability::Motor(_)
         | SimulationCapability::Battery
         | SimulationCapability::Led
+        | SimulationCapability::EmergencyStop(_)
         | SimulationCapability::Speaker => NativeWebotsFields::default(),
     }
 }

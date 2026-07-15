@@ -424,6 +424,9 @@ serde = "1"
 robot:
   id: testbot
   namespace: test
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   kinematic:
     kind: differential
     left_actuators: [left_drive.motor]

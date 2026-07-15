@@ -27,19 +27,16 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
         vec![
             "asset",
-            "battery",
+            "behavior-executive",
             "drive",
-            "explore",
-            "follow",
             "frame",
             "joint",
             "localize",
             "map",
-            "mission",
             "motion",
+            "navigation",
             "odometry",
             "perception",
-            "plan",
             "power",
             "presence",
             "safety",
@@ -387,19 +384,16 @@ fn resolves_known_api_to_its_official_set() -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
         vec![
             "asset",
-            "battery",
+            "behavior-executive",
             "drive",
-            "explore",
-            "follow",
             "frame",
             "joint",
             "localize",
             "map",
-            "mission",
             "motion",
+            "navigation",
             "odometry",
             "perception",
-            "plan",
             "power",
             "presence",
             "safety",
@@ -817,22 +811,17 @@ fn test_catalog() -> Catalog {
 fn service_names() -> Vec<&'static str> {
     vec![
         "asset",
-        "battery",
         "drive",
-        "explore",
-        "follow",
         "frame",
         "joint",
         "localize",
         "map",
-        "mission",
         "motion",
+        "navigation",
         "odometry",
         "perception",
-        "plan",
         "power",
         "presence",
-        "safety",
         "video",
     ]
 }
@@ -854,6 +843,9 @@ fn minimal_robot_yaml() -> String {
 robot:
   id: testbot
   namespace: test
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
   structure: structure.urdf
   kinematic:
     kind: differential

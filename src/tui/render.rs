@@ -880,6 +880,7 @@ fn draw_runtime_detail(
             telemetry.process_by_participant.get(id),
             runtime.metadata(id),
             runtime.time_to_ready(id),
+            operator_state_line(id, telemetry, now),
             now,
             state.overview.scroll,
             rows[1],
@@ -941,6 +942,7 @@ fn draw_runtime_overview(
     process: Option<&Timestamped<ProcessSample>>,
     runtime_metadata: Option<&RuntimeParticipantMetadata>,
     time_to_ready: Option<Duration>,
+    operator_state: Option<String>,
     now: Instant,
     scroll: usize,
     area: Rect,
@@ -973,7 +975,7 @@ fn draw_runtime_overview(
     let output_contracts_text =
         runtime_metadata.map(|meta| format_contract_list(&meta.output_contracts));
     let time_to_ready_text = runtime_metadata.map(|_| format_time_to_ready(time_to_ready));
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("state     ", color::muted(theme)),
             Span::raw(theme.participant_state(status.state)),
@@ -1023,10 +1025,61 @@ fn draw_runtime_overview(
             Span::raw(status.note.clone().unwrap_or_else(|| "-".to_string())),
         ]),
     ];
+    if let Some(operator_state) = operator_state {
+        lines.insert(
+            1,
+            Line::from(vec![
+                Span::styled("runtime   ", color::muted(theme)),
+                Span::raw(operator_state),
+            ]),
+        );
+    }
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((scroll as u16, 0));
     frame.render_widget(paragraph, area);
+}
+
+fn operator_state_line(id: &str, telemetry: &TelemetrySnapshot, now: Instant) -> Option<String> {
+    let stale_suffix = |received_at: Instant| {
+        if now.duration_since(received_at) > DEFAULT_FRESHNESS_TTL {
+            " (stale)"
+        } else {
+            ""
+        }
+    };
+    if id == "motion" {
+        return telemetry.motion.as_ref().map(|sample| {
+            let safety_reason = sample
+                .value
+                .active_safety_constraints
+                .first()
+                .map(|constraint| format!(" safety={:?}", constraint.reason))
+                .unwrap_or_default();
+            format!(
+                "source={:?} target=({:.2} m/s, {:.2} rad/s) zero={:?}{}{}",
+                sample.value.selected_source,
+                sample.value.final_target.linear_x_mps,
+                sample.value.final_target.angular_z_radps,
+                sample.value.zero_reason,
+                safety_reason,
+                stale_suffix(sample.received_at),
+            )
+        });
+    }
+    if id == "drive" {
+        return telemetry.drive.as_ref().map(|sample| {
+            format!(
+                "authority={:?} target=({:.2} m/s, {:.2} rad/s) stop={:?}{}",
+                sample.value.actuator_authority,
+                sample.value.limited_target.linear_x_mps,
+                sample.value.limited_target.angular_z_radps,
+                sample.value.stop_reason,
+                stale_suffix(sample.received_at),
+            )
+        });
+    }
+    None
 }
 
 fn draw_runtime_logs(
@@ -2015,6 +2068,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                     now,
                     0,
                     frame.area(),
@@ -2072,6 +2126,7 @@ mod tests {
                     None,
                     Some(&metadata),
                     Some(Duration::from_millis(1500)),
+                    None,
                     now,
                     0,
                     frame.area(),
@@ -2120,6 +2175,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                     now,
                     0,
                     frame.area(),
@@ -2165,6 +2221,7 @@ mod tests {
                     theme,
                     &status,
                     Some(&process),
+                    None,
                     None,
                     None,
                     now,

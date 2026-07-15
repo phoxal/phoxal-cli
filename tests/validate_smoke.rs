@@ -6,29 +6,24 @@ fn plan_robot_validates_against_catalog() -> anyhow::Result<()> {
     robot
         .validate_with(&service_names())
         .expect("plan robot should validate against the platform catalog");
-    assert_eq!(service_names().len(), 18);
+    assert_eq!(service_names().len(), 13);
     Ok(())
 }
 
 fn service_names() -> Vec<&'static str> {
     vec![
         "asset",
-        "battery",
         "drive",
-        "explore",
-        "follow",
         "frame",
         "joint",
         "localize",
         "map",
-        "mission",
         "motion",
+        "navigation",
         "odometry",
         "perception",
-        "plan",
         "power",
         "presence",
-        "safety",
         "video",
     ]
 }

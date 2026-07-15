@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::AppContext;
 use crate::resolver::RobotManifestExtras;
 
+pub mod behavior;
 pub mod cache;
 pub mod check;
 pub mod deploy;
@@ -262,6 +263,10 @@ pub enum RootCommand {
                       Resolves robot.yaml, then reads each available participant's compiled-in contract metadata (official artifacts from the catalog, host tools and locally built user services/component drivers from their own built binary) and validates the graph with phoxal::check. Contract compatibility is per-contract name identity (D1) - two participants naming the same version-qualified contract are compatible by construction, so there is no wire-shape hash to agree on. This still validates each user service's manifest config against its emitted JSON Schema. Official artifact readiness comes from the configured generated catalog; git component commits resolve live unless pinned to a commit SHA in robot.yaml."
     )]
     Check(check::CheckCmd),
+    // Preserved prototype for the parked behavior-orchestration design. Keep it
+    // out of the supported command listing until that plan is rewritten.
+    #[command(about = "Experimental behavior-orchestration prototype.", hide = true)]
+    Behavior(behavior::Behavior),
     #[command(about = "Validate robot.yaml structure and user-service phoxal dependencies.")]
     Validate(validate::Validate),
     #[command(about = "Simulate a robot in Webots (see `simulation run`/`simulation join`).")]
@@ -379,6 +384,7 @@ impl RootCommand {
     fn message_format(&self) -> MessageFormat {
         match self {
             Self::Check(command) => command.message_format,
+            Self::Behavior(command) => command.message_format(),
             Self::Validate(_) => MessageFormat::Human,
             Self::Simulation(command) => command.message_format(),
             Self::Run(command) => command.message_format,
@@ -406,6 +412,7 @@ impl RootCommand {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match self {
             Self::Check(command) => command.run(app).await,
+            Self::Behavior(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
             Self::Simulation(command) => command.run(app).await,
             Self::Run(command) => command.run(app).await,
