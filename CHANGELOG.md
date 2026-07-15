@@ -4,6 +4,17 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.13.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.13.0) - 2026-07-15
+
+
+### Added
+
+- Adopt the simplified service topology (#142) [**breaking**]
+
+### Refactored
+
+- *(api)* Consume stable v1 and preview v2 (#141)
+
 ## [0.12.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.12.0) - 2026-07-14
 
 
@@ -92,7 +103,7 @@ All notable changes documented here. The format follows
 - *(cli)* Check user runtimes by building them + running emit-apis (#69)
 - *(cli)* Check component drivers from source (git/path) in `phoxal check` (#70)
 - *(cli)* Add `phoxal deploy build` + migrate compose to the PHOXAL_* launch env (#71)
-- *(cli)* Catalog all 18 official runtimes on one contract API version (#72)
+- *(cli)* Catalog all 18 official runtimes on a single y2026_1 (#72)
 - Reconcile CLI to the rewrite spec + doc polish (plan-vs-code audit) (#73)
 - *(16)* Per-contract schema_id check + 0.20 catch-up (phoxal-cli) (#76)
 - *(06,16)* Catalog consumption, D5 resolution, lifecycle diagnostics (#80)
@@ -331,3 +342,4 @@ All notable changes documented here. The format follows
 ### Tests
 
 - Inline plan_robot.yaml fixture so CI doesn't need sibling framework checkout
+
