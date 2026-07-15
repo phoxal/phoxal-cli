@@ -48,6 +48,7 @@ pub(crate) mod participant_metadata;
 pub(crate) mod progress;
 pub(crate) mod project;
 pub mod resolver;
+pub(crate) mod runtime_root;
 pub(crate) mod session;
 pub(crate) mod shell;
 pub(crate) mod simulate_staging;

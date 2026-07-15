@@ -18,9 +18,9 @@ phoxal-cli service catalog        # print official services from the configured 
 phoxal-cli run --watch            # supervise the graph and hot-swap checked local edits
 phoxal-cli simulation run default # resolve and report the simulation launch plan
 phoxal-cli logs -f                # stream participant bus logs from a reachable robot
-phoxal-cli status                 # print the local supervisor board snapshot
+phoxal-cli status safety          # inspect the latest safety state over the robot bus
 
-phoxal-cli update                 # verify downloads and atomically retarget active versions
+phoxal-cli update                 # verify, activate, and prune project-local artifacts
 phoxal-cli deploy robot@host      # build, render, sync, restart, and report systemd health
 phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build validation
 ```
@@ -33,10 +33,9 @@ phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build va
 | `simulation run <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` hot-swaps service edits and re-checks driver metadata/substitutions without launching drivers. |
 | `simulation join` | Reserved entry point for joining a running multi-robot simulation; currently reports that the workflow is not available yet. |
 | `logs [participant]` | Stream participant bus log events from a reachable robot. `-f`/`--follow` keeps streaming; omit `participant` for every participant. |
-| `status [release|resume <participant>]` | Print the local supervisor board, or explicitly release a managed child for manual/debugger execution and later resume it under supervision. |
+| `status <safety|motion|localization>` | Inspect the latest domain state over the robot bus. `engage-estop` and `reset-estop` publish the robot-wide software emergency-stop request. |
 | `service catalog` | Print official services from the configured artifact catalog. |
-| `update` | Resolve stable/nightly heads, verify downloads, and retarget `active`. Supports `--dry-run` and JSON; cleanup remains explicit through `cache clean --artifacts`. |
-| `cache clean` | Remove selected project-local `artifacts`, `build`, `git`, or `webots` state, with size reporting and `--dry-run`. |
+| `update` | Resolve stable/nightly heads, verify version and catalog SHA, atomically retarget `active`, and prune inactive versions after successful activation. Same-version digest changes are refreshed. Supports `--dry-run` and JSON. |
 | `deploy <user@host>` | Probe the robot arch, resolve/check the graph, cross-build local source artifacts for musl, render native systemd units/env/release record, sync to `/opt/phoxal` and `/etc/systemd/system`, restart `phoxal.target`, and report systemd readiness. Prints the v0 pre-stable warning. `--dry-run --target <arch>` renders hostless for validation. |
 | `doctor` | Check host prerequisites (Webots, Rust toolchain) without changing anything. |
 | `version` | Print the CLI version, wire codec, and participant metadata section names. |
@@ -131,7 +130,8 @@ diagnostics rather than as missing static catalog entries.
 ## Host layout
 
 ```text
-~/.phoxal/simulator.lock            The only host-global item.
+~/.phoxal/simulator.lock            Host-global simulation lease.
+~/.phoxal/cli-update.json           Host-global CLI update-notice metadata.
 
 <project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/targets/<target>/  Unpacked target artifacts.
 <project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/assets/             Unpacked component assets.
@@ -139,8 +139,14 @@ diagnostics rather than as missing static catalog entries.
 <project>/.phoxal/git/              Git-pinned checkouts.
 <project>/.phoxal/build/            Cross-build state.
 <project>/.phoxal/webots/           Webots staging.
-<project>/.phoxal/run/              Supervisor state.
+<project>/.phoxal/run/robot/        Atomic resolved robot root shared by `run` and live simulation.
 ```
+
+To reset all generated project state while no Phoxal command is active, delete
+`<project>/.phoxal/`. Deleting it during `run`, simulation, deploy, or update is
+unsupported because that bypasses the CLI's active locks. Do not delete
+`~/.phoxal/`: it contains host-global state such as the simulator lock and CLI
+updater metadata.
 
 ## License
 

@@ -31,6 +31,7 @@ pub struct PackageUpdate {
     pub new: String,
     pub bytes: u64,
     pub pinned: bool,
+    pub refresh: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -43,6 +44,7 @@ pub struct UpdateSummary {
     pub download_bytes: u64,
     pub free_disk_bytes: Option<u64>,
     pub updates: Vec<PackageUpdate>,
+    pub prune_versions: BTreeMap<String, Vec<String>>,
     pub pins_skipped: Vec<String>,
     pub coherence: &'static str,
     pub config: &'static str,
@@ -112,26 +114,39 @@ fn update(
     include_existing_target_scopes(&mut descriptors, &catalog)?;
     let updates = descriptors
         .iter()
-        .map(|descriptor| PackageUpdate {
-            package: descriptor.package_id.clone(),
-            target: descriptor.target.clone(),
-            old: crate::native_artifacts::active_version(descriptor)
+        .map(|descriptor| {
+            let old = crate::native_artifacts::active_version_read_only(descriptor)
                 .ok()
-                .flatten(),
-            new: descriptor.version.clone(),
-            bytes: descriptor.size,
-            pinned: loaded
-                .robot
-                .artifacts
-                .pins
-                .contains_key(&descriptor.package_id),
+                .flatten();
+            PackageUpdate {
+                package: descriptor.package_id.clone(),
+                target: descriptor.target.clone(),
+                refresh: old.as_deref() == Some(descriptor.version.as_str())
+                    && !crate::native_artifacts::descriptor_is_current(descriptor),
+                old,
+                new: descriptor.version.clone(),
+                bytes: descriptor.size,
+                pinned: loaded
+                    .robot
+                    .artifacts
+                    .pins
+                    .contains_key(&descriptor.package_id),
+            }
         })
         .collect::<Vec<_>>();
     let download_bytes = updates
         .iter()
-        .filter(|update| update.old.as_deref() != Some(update.new.as_str()))
-        .map(|update| update.bytes)
+        .zip(&descriptors)
+        .filter(|(_, descriptor)| !crate::native_artifacts::descriptor_is_current(descriptor))
+        .map(|(update, _)| update.bytes)
         .sum();
+    let mut prune_versions = BTreeMap::new();
+    for descriptor in &descriptors {
+        let versions = crate::native_artifacts::inactive_versions(descriptor)?;
+        if !versions.is_empty() {
+            prune_versions.insert(descriptor.package_id.clone(), versions);
+        }
+    }
     let free_disk_bytes = free_disk_bytes(project_root).ok();
     if let Some(free) = free_disk_bytes
         && download_bytes > free
@@ -171,6 +186,7 @@ fn update(
         download_bytes,
         free_disk_bytes,
         updates,
+        prune_versions,
         pins_skipped,
         coherence: "deferred to W6",
         config: "deferred to W7",
@@ -235,7 +251,11 @@ fn print_human(summary: &UpdateSummary, output_mode: OutputMode) -> Result<()> {
 fn human_lines(summary: &UpdateSummary, output_mode: OutputMode) -> Vec<String> {
     if output_mode == OutputMode::Rich && !summary.dry_run {
         return if summary.updates.iter().any(|update| !update.pinned) {
-            Vec::new()
+            summary
+                .prune_versions
+                .iter()
+                .map(|(package, versions)| format!("pruned {package}: {}", versions.join(", ")))
+                .collect()
         } else {
             vec!["no updates available".to_string()]
         };
@@ -252,6 +272,9 @@ fn human_lines(summary: &UpdateSummary, output_mode: OutputMode) -> Vec<String> 
         }
         lines.push(format!("{marker} {}", update_result(update)));
     }
+    for (package, versions) in &summary.prune_versions {
+        lines.push(format!("{marker} prune {package}: {}", versions.join(", ")));
+    }
     if lines.is_empty() {
         lines.push("no updates available".to_string());
     }
@@ -267,10 +290,14 @@ fn update_result(update: &PackageUpdate) -> String {
 }
 
 fn update_label(update: &PackageUpdate) -> String {
-    let version = match update.old.as_deref() {
-        Some(old) if old != update.new => format!("{old} -> {}", update.new),
-        Some(_) => update.new.clone(),
-        None => format!("missing -> {}", update.new),
+    let version = if update.refresh {
+        format!("refresh {} (catalog digest changed)", update.new)
+    } else {
+        match update.old.as_deref() {
+            Some(old) if old != update.new => format!("{old} -> {}", update.new),
+            Some(_) => update.new.clone(),
+            None => format!("missing -> {}", update.new),
+        }
     };
     format!(
         "{} [{}] {version}",
@@ -390,6 +417,53 @@ mod tests {
     use crate::native_artifacts::NativeArtifactDescriptor;
 
     #[test]
+    fn dry_run_does_not_create_project_state_in_a_clean_project() -> Result<()> {
+        let _scratch = ScratchPhoxalHome::new()?;
+        let root = crate::host_paths::project_root()?;
+        fs::write(
+            root.join("robot.yaml"),
+            r#"schema: robot/v0
+robot:
+  id: robot_v1
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  structure: structure.urdf
+  kinematic:
+    kind: differential
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+  components: {}
+"#,
+        )?;
+        fs::write(root.join("structure.urdf"), "<robot/>")?;
+        let catalog_path = root.join("catalog.json");
+        fs::write(
+            &catalog_path,
+            serde_json::to_vec(&fixture_catalog_for_tests(Vec::new()))?,
+        )?;
+
+        let summary = update(
+            &root,
+            Some(catalog_path.display().to_string()),
+            true,
+            &crate::Ui::from_env(),
+        )?;
+
+        assert!(summary.dry_run);
+        assert!(
+            !root.join(".phoxal").exists(),
+            "dry-run must not create the project state directory"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn update_includes_existing_target_scopes() -> Result<()> {
         let _root = ScratchPhoxalHome::new()?;
         let host = "aarch64-apple-darwin";
@@ -458,6 +532,7 @@ mod tests {
                     new: "0.1.9".to_string(),
                     bytes: 7_461_785,
                     pinned: false,
+                    refresh: false,
                 },
                 PackageUpdate {
                     package: "phoxal/component-passive_caster".to_string(),
@@ -466,6 +541,7 @@ mod tests {
                     new: "0.1.0".to_string(),
                     bytes: 123,
                     pinned: true,
+                    refresh: false,
                 },
                 PackageUpdate {
                     package: "phoxal/service-drive".to_string(),
@@ -474,8 +550,10 @@ mod tests {
                     new: "0.19.8".to_string(),
                     bytes: 7_356_930,
                     pinned: false,
+                    refresh: false,
                 },
             ],
+            prune_versions: BTreeMap::new(),
             pins_skipped: vec!["phoxal/component-passive_caster".to_string()],
             coherence: "deferred to W6",
             config: "deferred to W7",
@@ -491,6 +569,28 @@ mod tests {
             ]
         );
         assert!(human_lines(&summary, OutputMode::Rich).is_empty());
+
+        let mut refresh = summary.clone();
+        refresh.updates = vec![PackageUpdate {
+            package: "phoxal/service-drive".to_string(),
+            target: Some("aarch64-apple-darwin".to_string()),
+            old: Some("0.19.8".to_string()),
+            new: "0.19.8".to_string(),
+            bytes: 7_356_930,
+            pinned: false,
+            refresh: true,
+        }];
+        refresh.prune_versions.insert(
+            "phoxal/service-drive".to_string(),
+            vec!["0.19.7".to_string()],
+        );
+        assert_eq!(
+            human_lines(&refresh, OutputMode::Plain),
+            vec![
+                "✓ phoxal/service-drive [aarch64-apple-darwin] refresh 0.19.8 (catalog digest changed) (7.0 MiB)".to_string(),
+                "✓ prune phoxal/service-drive: 0.19.7".to_string(),
+            ]
+        );
 
         let mut all_pinned = summary;
         all_pinned.updates.retain(|update| update.pinned);

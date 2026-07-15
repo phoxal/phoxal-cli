@@ -207,38 +207,15 @@ fn parses_watch_and_overlay_flags() {
 }
 
 #[test]
-fn parses_status_release_resume_and_json() {
+fn parses_bus_backed_status_commands_and_rejects_file_backed_commands() {
+    assert!(Cli::try_parse_from(["phoxal-cli", "status"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal-cli", "status", "release", "mission"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal-cli", "status", "resume", "mission"]).is_err());
     let cli = Cli::try_parse_from([
         "phoxal-cli",
         "status",
         "--message-format",
         "json",
-        "release",
-        "mission",
-    ])
-    .expect("status release should parse");
-    let RootCommand::Status(command) = cli.command else {
-        panic!("expected status command");
-    };
-    assert_eq!(command.message_format, MessageFormat::Json);
-    let Some(status::StatusSubcommand::Release(arg)) = command.command else {
-        panic!("expected release subcommand");
-    };
-    assert_eq!(arg.participant, "mission");
-
-    let cli = Cli::try_parse_from(["phoxal-cli", "status", "resume", "mission"])
-        .expect("status resume should parse");
-    let RootCommand::Status(command) = cli.command else {
-        panic!("expected status command");
-    };
-    let Some(status::StatusSubcommand::Resume(arg)) = command.command else {
-        panic!("expected resume subcommand");
-    };
-    assert_eq!(arg.participant, "mission");
-
-    let cli = Cli::try_parse_from([
-        "phoxal-cli",
-        "status",
         "engage-estop",
         "--connect",
         "tcp/robot:7447",
@@ -247,7 +224,8 @@ fn parses_status_release_resume_and_json() {
     let RootCommand::Status(command) = cli.command else {
         panic!("expected status command");
     };
-    let Some(status::StatusSubcommand::EngageEstop(arg)) = command.command else {
+    assert_eq!(command.message_format, MessageFormat::Json);
+    let status::StatusSubcommand::EngageEstop(arg) = command.command else {
         panic!("expected engage-estop subcommand");
     };
     assert_eq!(arg.connect, "tcp/robot:7447");
@@ -259,7 +237,7 @@ fn parses_status_release_resume_and_json() {
     };
     assert!(matches!(
         command.command,
-        Some(status::StatusSubcommand::ResetEstop(_))
+        status::StatusSubcommand::ResetEstop(_)
     ));
 
     for domain in ["safety", "motion", "localization"] {
@@ -275,9 +253,9 @@ fn parses_status_release_resume_and_json() {
             panic!("expected status command for {domain}");
         };
         let connect = match command.command {
-            Some(status::StatusSubcommand::Safety(arg))
-            | Some(status::StatusSubcommand::Motion(arg))
-            | Some(status::StatusSubcommand::Localization(arg)) => arg.connect,
+            status::StatusSubcommand::Safety(arg)
+            | status::StatusSubcommand::Motion(arg)
+            | status::StatusSubcommand::Localization(arg) => arg.connect,
             _ => panic!("expected domain-native status command for {domain}"),
         };
         assert_eq!(connect, "tcp/robot:7447");
@@ -353,19 +331,7 @@ fn welcome_is_no_longer_a_flag() {
 }
 
 #[test]
-fn parses_cache_clean_and_dry_run() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "cache", "clean"]).expect("cache clean parses");
-    let RootCommand::Cache(cache) = cli.command else {
-        panic!("expected cache command");
-    };
-    let phoxal_cli::commands::cache::CacheSubcommand::Clean(clean) = cache.command;
-    assert!(!clean.dry_run);
-
-    let cli = Cli::try_parse_from(["phoxal-cli", "cache", "clean", "--dry-run"])
-        .expect("cache clean --dry-run parses");
-    let RootCommand::Cache(cache) = cli.command else {
-        panic!("expected cache command");
-    };
-    let phoxal_cli::commands::cache::CacheSubcommand::Clean(clean) = cache.command;
-    assert!(clean.dry_run);
+fn cache_command_is_removed() {
+    assert!(Cli::try_parse_from(["phoxal-cli", "cache"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal-cli", "cache", "clean"]).is_err());
 }

@@ -319,8 +319,7 @@ pub const fn resource_role(load: f64) -> Role {
 
 /// The color role for a participant state. Ready is success, actively
 /// starting/restarting is steel (neutral-in-progress), degraded is warn,
-/// failed is error; released/stopped are muted (no longer running, not an
-/// error).
+/// failed is error; stopped is muted (no longer running, not an error).
 #[must_use]
 pub const fn state_role(state: ParticipantState) -> Role {
     match state {
@@ -328,7 +327,7 @@ pub const fn state_role(state: ParticipantState) -> Role {
         ParticipantState::Starting | ParticipantState::Restarting => Role::Steel,
         ParticipantState::Degraded => Role::Warn,
         ParticipantState::Failed => Role::Error,
-        ParticipantState::Released | ParticipantState::Stopped => Role::Muted,
+        ParticipantState::Stopped => Role::Muted,
     }
 }
 
@@ -342,7 +341,6 @@ pub const fn state_symbol(state: ParticipantState) -> &'static str {
         ParticipantState::Degraded => "!",
         ParticipantState::Failed => "✗",
         ParticipantState::Restarting => "↻",
-        ParticipantState::Released => "⏏",
         ParticipantState::Stopped => "■",
     }
 }
@@ -551,7 +549,6 @@ mod tests {
             ParticipantState::Degraded,
             ParticipantState::Failed,
             ParticipantState::Restarting,
-            ParticipantState::Released,
             ParticipantState::Stopped,
         ] {
             assert!(!state_symbol(state).is_empty());
