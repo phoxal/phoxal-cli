@@ -4,6 +4,13 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.13.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.13.1) - 2026-07-15
+
+
+### Fixed
+
+- *(deps)* Restore published framework version pins + bump time (#144)
+
 ## [0.13.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.13.0) - 2026-07-15
 
 
