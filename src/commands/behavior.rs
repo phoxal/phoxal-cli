@@ -426,7 +426,7 @@ async fn inspect(app: &AppContext, args: &InspectArgs) -> Result<()> {
     let subscriber = Subscriber::new(&bus, &topic, 32).await?;
     let snapshot = timeout(Duration::from_secs(3), subscriber.recv())
         .await
-        .context("behavior executive did not publish a snapshot")??
+        .context("behavior service did not publish a snapshot")??
         .body;
     print_message(
         &snapshot,
