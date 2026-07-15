@@ -27,7 +27,7 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
         vec![
             "asset",
-            "behavior-executive",
+            "behavior",
             "drive",
             "frame",
             "joint",
@@ -384,7 +384,7 @@ fn resolves_known_api_to_its_official_set() -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
         vec![
             "asset",
-            "behavior-executive",
+            "behavior",
             "drive",
             "frame",
             "joint",

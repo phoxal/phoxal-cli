@@ -2920,7 +2920,7 @@ dependencies = [
 [[package]]
 name = "phoxal"
 version = "0.32.6"
-source = "git+https://github.com/phoxal/framework?branch=codex%2Fservice-topology-simplification#d667515b849d5c7a81c3a95153c41b28a841c815"
+source = "git+https://github.com/phoxal/framework?branch=codex%2Fservice-topology-simplification#2fce0238f75b9667370540347610786485362087"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2950,7 +2950,7 @@ dependencies = [
 [[package]]
 name = "phoxal-api"
 version = "0.20.5"
-source = "git+https://github.com/phoxal/framework?branch=codex%2Fservice-topology-simplification#d667515b849d5c7a81c3a95153c41b28a841c815"
+source = "git+https://github.com/phoxal/framework?branch=codex%2Fservice-topology-simplification#2fce0238f75b9667370540347610786485362087"
 dependencies = [
  "phoxal-bus",
  "phoxal-macros",
@@ -2961,7 +2961,7 @@ dependencies = [
 [[package]]
 name = "phoxal-bus"
 version = "0.21.2"
-source = "git+https://github.com/phoxal/framework?branch=codex%2Fservice-topology-simplification#d667515b849d5c7a81c3a95153c41b28a841c815"
+source = "git+https://github.com/phoxal/framework?branch=codex%2Fservice-topology-simplification#2fce0238f75b9667370540347610786485362087"
 dependencies = [
  "arc-swap",
  "rmp-serde",
@@ -3027,7 +3027,7 @@ dependencies = [
 [[package]]
 name = "phoxal-macros"
 version = "0.21.3"
-source = "git+https://github.com/phoxal/framework?branch=codex%2Fservice-topology-simplification#d667515b849d5c7a81c3a95153c41b28a841c815"
+source = "git+https://github.com/phoxal/framework?branch=codex%2Fservice-topology-simplification#2fce0238f75b9667370540347610786485362087"
 dependencies = [
  "heck",
  "proc-macro2",
