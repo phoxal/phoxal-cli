@@ -2624,7 +2624,6 @@ fn router_env(
         )?)
         .with_context(|| format!("failed to encode PHOXAL_CONFIG for {}", site.id))?,
     );
-    variables.insert(env::CLOCK.to_string(), "real".to_string());
     Ok(EncodedParticipantEnv::from_variables(variables))
 }
 
@@ -2654,7 +2653,6 @@ fn site_tool_env(
                 .with_context(|| format!("failed to encode PHOXAL_CONFIG for {}", site.id))?,
         );
     }
-    variables.insert(env::CLOCK.to_string(), "real".to_string());
     variables.insert(env::CONNECT.to_string(), DEFAULT_ROUTER_CONNECT.to_string());
     Ok(EncodedParticipantEnv::from_variables(variables))
 }
@@ -5790,6 +5788,16 @@ robot:
         assert!(telemetry_unit.contains("After=network-online.target phoxal-router.service"));
         assert!(!telemetry_unit.contains("SupplementaryGroups="));
         assert!(!telemetry_unit.contains("DeviceAllow="));
+        for env_name in ["router.env", "tool-joypad.env", "tool-telemetry.env"] {
+            let contents = payload
+                .env_files
+                .get(&format!("/opt/phoxal/active/env/{env_name}"))
+                .unwrap_or_else(|| panic!("{env_name} must render"));
+            assert!(
+                !contents.contains("PHOXAL_CLOCK="),
+                "tools must not receive a clock selection in {env_name}:\n{contents}"
+            );
+        }
         // Stale-unit cleanup and unit installation both key off `unit_names`
         // generically - proving the new units are IN that list (not just
         // rendered as file content) is what actually wires them into
