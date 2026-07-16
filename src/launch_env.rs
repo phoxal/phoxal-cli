@@ -19,6 +19,7 @@ impl EncodedParticipantEnv {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn variables(&self) -> &BTreeMap<String, String> {
         &self.variables
     }
@@ -44,12 +45,22 @@ impl EncodedParticipantEnv {
     }
 }
 
-/// The `PHOXAL_*` env name paired with its equivalent `--flag`, in the exact
-/// order the framework runner's clap `LaunchCli` declares them (framework
-/// `phoxal/src/participant/launch.rs`). Shared by [`to_controller_args`] (the
-/// Webots `controllerArgs` argv renderer, Part 3) and
-/// `supervisor::render_manual_command_line` (the human-readable manual
-/// command line), so the flag/env pairing lives in exactly one place.
+/// The common `PHOXAL_*` env names paired with their equivalent `--flag`, in
+/// the exact order every framework participant launch policy declares them.
+/// Webots controller arguments use only this clockless surface.
+pub const COMMON_ENV_TO_FLAG: &[(&str, &str)] = &[
+    (env::PARTICIPANT_ID, "--participant-id"),
+    (env::ROBOT_ID, "--robot-id"),
+    (env::NAMESPACE, "--namespace"),
+    (env::ROBOT_ROOT, "--robot-root"),
+    (env::COMPONENT_INSTANCE, "--component-instance"),
+    (env::CONNECT, "--connect"),
+    (env::CONFIG, "--config"),
+];
+
+/// Full environment/flag map for clock-selectable services and drivers. Manual
+/// command rendering uses this; simulator controller arguments deliberately do
+/// not.
 pub const ENV_TO_FLAG: &[(&str, &str)] = &[
     (env::PARTICIPANT_ID, "--participant-id"),
     (env::ROBOT_ID, "--robot-id"),
@@ -62,8 +73,8 @@ pub const ENV_TO_FLAG: &[(&str, &str)] = &[
 ];
 
 /// Render a participant's launch contract as the exact argv the framework
-/// runner's clap `LaunchCli` parses: `--participant-id`, `--robot-id`,
-/// `--namespace`, `--clock` are always emitted; `--robot-root`,
+/// simulator launch policy parses: `--participant-id`, `--robot-id`, and
+/// `--namespace` are always emitted; `--robot-root`,
 /// `--component-instance`, `--connect` (`bus.connect_endpoints` joined with
 /// `,`), and `--config` (compact JSON, one argv element) only when present.
 ///
@@ -73,14 +84,14 @@ pub const ENV_TO_FLAG: &[(&str, &str)] = &[
 /// supervisor and every controller. `controllerArgs` (argv) is per-node, so it
 /// is the only way to give each simulation participant its own contract.
 ///
-/// Built on [`encode_participant_env`], so `--config` is capped by
-/// [`MAX_CONFIG_ENV_BYTES`] the same way (a supervisor's spawn list can grow
-/// large); exceeding it is an error naming the participant.
+/// Uses the same common-field encoder as [`encode_participant_env`], so
+/// `--config` is capped by [`MAX_CONFIG_ENV_BYTES`] the same way (a
+/// supervisor's spawn list can grow large); exceeding it is an error naming
+/// the participant.
 pub fn to_controller_args(launch: &ParticipantLaunch) -> Result<Vec<String>> {
-    let encoded = encode_participant_env(launch)?;
-    let variables = encoded.variables();
-    let mut args = Vec::with_capacity(ENV_TO_FLAG.len() * 2);
-    for (env_key, flag) in ENV_TO_FLAG {
+    let variables = encode_common_participant_variables(launch)?;
+    let mut args = Vec::with_capacity(COMMON_ENV_TO_FLAG.len() * 2);
+    for (env_key, flag) in COMMON_ENV_TO_FLAG {
         if let Some(value) = variables.get(*env_key) {
             args.push((*flag).to_string());
             args.push(value.clone());
@@ -90,6 +101,14 @@ pub fn to_controller_args(launch: &ParticipantLaunch) -> Result<Vec<String>> {
 }
 
 pub fn encode_participant_env(launch: &ParticipantLaunch) -> Result<EncodedParticipantEnv> {
+    let mut variables = encode_common_participant_variables(launch)?;
+    variables.insert(env::CLOCK.to_string(), launch.clock.to_string());
+    Ok(EncodedParticipantEnv { variables })
+}
+
+fn encode_common_participant_variables(
+    launch: &ParticipantLaunch,
+) -> Result<BTreeMap<String, String>> {
     let mut variables = BTreeMap::new();
     variables.insert(
         env::PARTICIPANT_ID.to_string(),
@@ -122,8 +141,7 @@ pub fn encode_participant_env(launch: &ParticipantLaunch) -> Result<EncodedParti
     if let Some(config) = compact_config_json(launch)? {
         variables.insert(env::CONFIG.to_string(), config);
     }
-    variables.insert(env::CLOCK.to_string(), launch.clock.to_string());
-    Ok(EncodedParticipantEnv { variables })
+    Ok(variables)
 }
 
 fn compact_config_json(launch: &ParticipantLaunch) -> Result<Option<String>> {
@@ -286,6 +304,8 @@ mod tests {
             bus: BusProfile {
                 connect_endpoints: vec!["tcp/localhost:7447".to_string()],
             },
+            // Simulator controller arguments ignore this generic launch-record
+            // field; simulator binaries are structurally clockless.
             clock: ClockMode::Simulation,
             config: Some(serde_json::json!({"require_native": true})),
             robot_root: Some(PathBuf::from("/tmp/phoxal/robot")),
@@ -312,8 +332,6 @@ mod tests {
                 "tcp/localhost:7447".to_string(),
                 "--config".to_string(),
                 r#"{"require_native":true}"#.to_string(),
-                "--clock".to_string(),
-                "simulation".to_string(),
             ]
         );
 
@@ -339,8 +357,6 @@ mod tests {
             connect: Option<String>,
             #[arg(long)]
             config: Option<String>,
-            #[arg(long)]
-            clock: String,
         }
         use clap::Parser;
         let mut argv = vec!["phoxal-simulator-webots-controller".to_string()];
@@ -356,7 +372,6 @@ mod tests {
         assert_eq!(parsed.component_instance.as_deref(), Some("left_drive"));
         assert_eq!(parsed.connect.as_deref(), Some("tcp/localhost:7447"));
         assert_eq!(parsed.config.as_deref(), Some(r#"{"require_native":true}"#));
-        assert_eq!(parsed.clock, "simulation");
         Ok(())
     }
 
@@ -385,8 +400,6 @@ mod tests {
                 "robot_v1".to_string(),
                 "--namespace".to_string(),
                 "dev".to_string(),
-                "--clock".to_string(),
-                "simulation".to_string(),
             ]
         );
         Ok(())

@@ -461,39 +461,24 @@ impl SessionController {
         }
     }
 
-    /// Finding C2: `SessionState::Stopped`/`Failed` used to be entirely
-    /// dead - `self` (and its renderer) is CONSUMED the instant this
-    /// function returns, so by the time the caller's own `bail!` on
-    /// `!outcome.graph_healthy()` runs (`run`/`simulation run`), nothing is
-    /// left listening; the session's actual last rendered frame kept
-    /// showing whatever state it was in when the supervisor loop happened to
-    /// end (typically `Stopping`, never advancing to its own natural
-    /// `Stopped`/`Failed` conclusion). Transitions and redraws ONE more
-    /// frame here, before that happens, mirroring `drive_prepare_phase`'s
-    /// own "show the final outcome for at least one frame" best-effort
-    /// redraw. A no-op for an `Err` result (nothing to add to a genuine
-    /// error) or a state that cannot legally reach the target (`to_stopped`/
-    /// `to_failed` reject an illegal source state themselves - e.g. a graph
-    /// that finishes healthily without ever having been cancelled is not in
-    /// `Stopping`, so it simply keeps its current state rather than forcing
-    /// an invalid edge).
+    /// Render the terminal session state once before the controller and its
+    /// renderer are consumed. Participant failures remain visible on the
+    /// board while supervision is running and do not choose this state: a
+    /// user-requested cancellation is a clean `Stopped` session even when its
+    /// final snapshot contains failed participants. Only an internal supervisor
+    /// error becomes `Failed`.
     fn reflect_final_outcome(
         &mut self,
         board: &BoardBackend,
         telemetry: &TelemetryBackend,
         result: &Result<SupervisorOutcome>,
     ) {
-        let Ok(outcome) = result else {
-            return;
-        };
-        let next = if outcome.graph_healthy() {
-            self.state.clone().to_stopped()
-        } else {
-            let reason = FailReason::Terminal(format!(
-                "failed participant(s): {}",
-                outcome.failed_participants.join(", ")
-            ));
-            self.state.clone().to_failed(reason)
+        let next = match result {
+            Ok(_) => self.state.clone().to_stopped(),
+            Err(error) => self
+                .state
+                .clone()
+                .to_failed(FailReason::Terminal(format!("{error:#}"))),
         };
         if let Ok(next) = next {
             self.state = next;
@@ -959,6 +944,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn failed_participant_outcome_still_finishes_as_stopped() {
+        let _guard = super::super::diagnostics::DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .await;
+        let mut controller = SessionController::new(
+            OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false),
+            "test",
+            None,
+        )
+        .expect("Plain mode never touches a real terminal");
+        controller.state = SessionState::Preparing
+            .start()
+            .unwrap()
+            .to_stopping()
+            .unwrap();
+        let board = BoardBackend::new();
+        board.upsert(crate::supervisor::ParticipantStatus::new(
+            "failed-binary",
+            crate::supervisor::ParticipantKind::Service,
+            crate::supervisor::ParticipantState::Failed,
+        ));
+
+        controller.reflect_final_outcome(
+            &board,
+            &TelemetryBackend::new(),
+            &Ok(SupervisorOutcome {
+                failed_participants: vec!["failed-binary".to_string()],
+            }),
+        );
+
+        assert_eq!(controller.state, SessionState::Stopped);
+    }
+
     /// Finding B1: the CRITICAL regression - a controller failure (a
     /// terminal draw/input error) must never just drop the supervisor's
     /// `JoinHandle` and leave it (and every child it owns) detached in the
@@ -982,7 +1001,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
             completed_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(SupervisorOutcome {
-                clean_shutdown: true,
                 failed_participants: Vec::new(),
             })
         });
@@ -1025,7 +1043,6 @@ mod tests {
                 .send(SessionEvent::StagedStartupComplete)
                 .await;
             Ok(SupervisorOutcome {
-                clean_shutdown: true,
                 failed_participants: Vec::new(),
             })
         });

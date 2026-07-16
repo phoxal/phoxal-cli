@@ -8,7 +8,7 @@ use phoxal::check as graph_check;
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::v2::simulation::{RobotSpawn, SpawnRequest, SpawnSet};
 use serde::Serialize;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::AppContext;
@@ -36,8 +36,8 @@ use crate::simulate_staging::{
 use crate::supervisor::{
     BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
     RequestedStop, RouterOwnership, SupervisionStage, SupervisorAction, SupervisorLock,
-    SupervisorOptions, SupervisorOutcome, await_terminal_graph_failure, default_connect_endpoint,
-    local_router_reachable, router_ownership, start_bus_log_subscriber, start_clock_feed,
+    SupervisorOptions, SupervisorOutcome, default_connect_endpoint, local_router_reachable,
+    router_ownership, start_bus_log_subscriber, start_clock_feed,
     start_presence_heartbeat_subscriber, supervise_until_shutdown, wait_for_endpoint,
 };
 use crate::webots_stage_root;
@@ -313,7 +313,6 @@ pub async fn run(
                     setup.supervise_task,
                 )
                 .await;
-            setup.graph_watch.abort();
             if let Some(handle) = setup.watch_handle {
                 handle.abort();
             }
@@ -326,12 +325,15 @@ pub async fn run(
                 feed.abort();
             }
             let outcome = outcome?;
-
-            if !outcome.graph_healthy() {
-                bail!(
-                    "supervisor graph ended unhealthy; failed participants: {}",
+            // Participant failures were already rendered continuously on the
+            // board. `drive_supervision` has consumed and torn down the
+            // controller, so retain a non-fatal plain-mode summary without
+            // converting them into a command error.
+            if !outcome.failed_participants.is_empty() {
+                app.ui.warn(format!(
+                    "simulation stopped with failed participants: {}",
                     outcome.failed_participants.join(", ")
-                );
+                ));
             }
             Ok(sim)
         }
@@ -349,7 +351,6 @@ struct LiveSimSetup {
     telemetry: crate::telemetry::TelemetryBackend,
     runtime_store: crate::stores::runtime_store::RuntimeStore,
     supervise_task: JoinHandle<Result<SupervisorOutcome>>,
-    graph_watch: JoinHandle<()>,
     watch_handle: Option<JoinHandle<()>>,
     spawn_responder: JoinHandle<()>,
     action_tx: mpsc::Sender<SupervisorAction>,
@@ -426,18 +427,6 @@ async fn live_simulate_setup(
     let spawn_responder =
         start_spawn_responder(&sim.plan, spawn_descriptors, router_ownership).await?;
     let requested_stop = RequestedStop::new(WEBOTS_SITE_ID, webots_spec.shutdown_grace);
-    // The expected graph set, captured before `specs` is moved into the
-    // supervisor task: every CLI-managed bus participant
-    // (everything except the Webots app itself, which has
-    // `bus_participant: false`) plus every SIMULATION-MANAGED
-    // participant (the supervisor and each robot's controller), which
-    // have no `ParticipantSpec`/supervised process at all.
-    let expected_bus_ids = specs
-        .iter()
-        .filter(|spec| spec.bus_participant)
-        .map(|spec| spec.id.clone())
-        .chain(simulation_managed_participant_ids(&sim.plan))
-        .collect::<Vec<_>>();
     specs.push(webots_spec);
 
     ui.info(format!(
@@ -490,8 +479,8 @@ async fn live_simulate_setup(
     );
     feed_tasks.push(clock_task);
     // Clock observation is telemetry only. Startup and session state do not
-    // wait for a sample; services consume it independently through their
-    // `--clock simulation` runner.
+    // wait for a sample; clocked services and drivers consume it independently
+    // through their simulation-clock runner policy.
     let telemetry = crate::telemetry::TelemetryBackend::new();
     telemetry.set_clock_feed(clock_rx.clone());
 
@@ -516,10 +505,6 @@ async fn live_simulate_setup(
         None
     };
 
-    // A graph-failure monitor and the process supervisor run concurrently.
-    // Stage readiness is already owned by `supervise_until_shutdown`; the
-    // monitor coordinates teardown if any expected participant later fails.
-    let (cancel_tx, cancel_rx) = oneshot::channel();
     let stages = stages_for_simulate(specs, &sim.plan, output);
 
     // Live telemetry (CLI-UX Phase 3/4): only worth subscribing when
@@ -555,7 +540,6 @@ async fn live_simulate_setup(
         SupervisorOptions {
             action_rx: Some(action_rx),
             requested_stop: Some(requested_stop),
-            cancel_rx: Some(cancel_rx),
             token: token.clone(),
             events: Some(events.clone()),
             emits_running_on_startup_complete: true,
@@ -563,30 +547,12 @@ async fn live_simulate_setup(
         },
     ));
 
-    let graph_watch = tokio::spawn({
-        let board = board.clone();
-        let expected_bus_ids = expected_bus_ids.clone();
-        async move {
-            let failed = await_terminal_graph_failure(
-                &board,
-                &expected_bus_ids,
-                std::time::Duration::from_millis(200),
-            )
-            .await;
-            let _ = cancel_tx.send(format!(
-                "graph ended unhealthy; failed participants: {}",
-                failed.join(", ")
-            ));
-        }
-    });
-
     Ok(LiveSimSetup {
         _locks: locks,
         board,
         telemetry,
         runtime_store,
         supervise_task,
-        graph_watch,
         watch_handle,
         spawn_responder,
         action_tx,

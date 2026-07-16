@@ -462,26 +462,13 @@ fn participant_launch(
         bus: BusProfile {
             connect_endpoints: vec![DEFAULT_ROUTER_CONNECT.to_string()],
         },
+        // This field selects scheduling only for clocked service/driver launch
+        // policies. Simulator binaries have a clockless, fixed host/Webots
+        // policy and their controllerArgs never render this value, so launch
+        // planning needs no simulator-kind exception.
         clock: match mode {
             LaunchMode::Run | LaunchMode::Deploy => ClockMode::Real,
-            // In a Webots simulation the supervisor and per-robot controllers
-            // ARE the clock authority: they are Webots controllers that
-            // self-drive via `wb_robot_step` (both spawn `synchronization TRUE`,
-            // so Webots will not advance until each has stepped) and the
-            // supervisor publishes `simulation/clock` from that advance. They
-            // must therefore run on the REAL scheduler. Only pure-bus
-            // participants (services, component drivers) follow the published
-            // clock in Simulation mode. Giving a simulator ClockMode::Simulation
-            // deadlocks it: its `#[step]` would block waiting for the very
-            // `simulation/clock` feed it is supposed to produce, so the whole
-            // simulation freezes with no clock ever ticking.
-            LaunchMode::Webots { .. } => {
-                if checked.participant_kind == graph_check::ParticipantKind::Simulator {
-                    ClockMode::Real
-                } else {
-                    ClockMode::Simulation
-                }
-            }
+            LaunchMode::Webots { .. } => ClockMode::Simulation,
         },
         config: input
             .manifest_extras
@@ -811,8 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn webots_simulators_use_real_clock_while_services_use_simulation_clock() -> anyhow::Result<()>
-    {
+    fn webots_launch_records_need_no_simulator_clock_exception() -> anyhow::Result<()> {
         let resolved = empty_resolved_robot("robot_v1")?;
         let extras = RobotManifestExtras::default();
         let input = CheckedRobotLaunchInput {
@@ -840,8 +826,8 @@ mod tests {
             simulator.participant_kind = graph_check::ParticipantKind::Simulator;
             assert_eq!(
                 participant_launch(&mode, &input, &simulator).clock,
-                ClockMode::Real,
-                "{participant_id} must never wait on the simulation clock"
+                ClockMode::Simulation,
+                "{participant_id} uses the mode-wide record; its clockless binary policy ignores it"
             );
         }
         assert_eq!(
