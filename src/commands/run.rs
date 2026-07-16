@@ -771,7 +771,7 @@ pub(crate) fn prepare_site_tools(
                 executable: path,
                 args: Vec::new(),
                 cwd: None,
-                env: site_env(site, namespace, robot_id, &plan.mode)?,
+                env: site_env(site, namespace, robot_id)?,
                 shutdown_grace: Duration::from_secs(5),
                 process_group: false,
                 note: None,
@@ -1003,27 +1003,11 @@ pub(crate) fn source_spec_from_launch_record(
     }))
 }
 
-fn site_env(
-    site: &SiteLaunch,
-    namespace: &str,
-    robot_id: &str,
-    mode: &LaunchMode,
-) -> Result<Vec<(String, String)>> {
-    // Joypad commands participate in motion freshness arbitration. During a
-    // simulation they must therefore carry the published simulation clock,
-    // not host wall time. Router and host telemetry remain real-clock tools.
-    let clock = if site.id == crate::launch_plan::SITE_TOOL_JOYPAD
-        && matches!(mode, LaunchMode::Webots { .. })
-    {
-        "simulation"
-    } else {
-        "real"
-    };
+fn site_env(site: &SiteLaunch, namespace: &str, robot_id: &str) -> Result<Vec<(String, String)>> {
     let mut envs = vec![
         (env::PARTICIPANT_ID.to_string(), site.id.clone()),
         (env::NAMESPACE.to_string(), namespace.to_string()),
         (env::ROBOT_ID.to_string(), robot_id.to_string()),
-        (env::CLOCK.to_string(), clock.to_string()),
     ];
     // A configless tool (`phoxal_config == Value::Null`, e.g. joypad/telemetry)
     // must run with `PHOXAL_CONFIG` ABSENT: a unit config (`type Config = ()`)
@@ -1322,7 +1306,7 @@ fn usb_missing(vendor_id: Option<u16>, product_id: Option<u16>) -> Option<String
 mod tests {
     use super::*;
     use crate::launch_plan::{
-        LaunchOwnership, ParticipantLaunchRecord, SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY,
+        LaunchOwnership, ParticipantLaunchRecord, SITE_TOOL_TELEMETRY, STANDARD_SITE_TOOLS,
     };
     use phoxal::participant::launch::{
         BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
@@ -1338,7 +1322,7 @@ mod tests {
             artifact_ref: "phoxal/tool-telemetry@0.1.0".to_string(),
             phoxal_config: serde_json::Value::Null,
         };
-        let env = site_env(&tool, "dev", "rover-01", &LaunchMode::Run).expect("site_env");
+        let env = site_env(&tool, "dev", "rover-01").expect("site_env");
         assert!(
             !env.iter().any(|(k, _)| k == env::CONFIG),
             "configless tool must not get PHOXAL_CONFIG: {env:?}"
@@ -1348,9 +1332,8 @@ mod tests {
             "observable bus tool must get PHOXAL_CONNECT: {env:?}"
         );
         assert!(
-            env.iter()
-                .any(|(key, value)| key == env::CLOCK && value == "real"),
-            "host telemetry uses the real scheduler: {env:?}"
+            !env.iter().any(|(key, _)| key == env::CLOCK),
+            "tools must not receive a clock selection: {env:?}"
         );
     }
 
@@ -1363,7 +1346,7 @@ mod tests {
             artifact_ref: "phoxal/tool-router@0.1.8".to_string(),
             phoxal_config: serde_json::json!({ "uplink": null }),
         };
-        let env = site_env(&router, "dev", "rover-01", &LaunchMode::Run).expect("site_env");
+        let env = site_env(&router, "dev", "rover-01").expect("site_env");
         assert!(
             env.iter().any(|(k, _)| k == env::CONFIG),
             "router must get PHOXAL_CONFIG: {env:?}"
@@ -1372,28 +1355,26 @@ mod tests {
             !env.iter().any(|(k, _)| k == env::CONNECT),
             "router must not get PHOXAL_CONNECT: {env:?}"
         );
+        assert!(
+            !env.iter().any(|(key, _)| key == env::CLOCK),
+            "router must not receive a clock selection: {env:?}"
+        );
     }
 
     #[test]
-    fn joypad_uses_simulation_clock_only_in_webots_mode() {
-        let joypad = SiteLaunch {
-            id: SITE_TOOL_JOYPAD.to_string(),
-            artifact_ref: "phoxal/tool-joypad@0.1.0".to_string(),
-            phoxal_config: serde_json::Value::Null,
-        };
-        let sim = site_env(
-            &joypad,
-            "dev",
-            "rover-01",
-            &LaunchMode::Webots {
-                world: PathBuf::from("worlds/default.wbt"),
-            },
-        )
-        .expect("simulation site env");
-        assert!(sim.contains(&(env::CLOCK.to_string(), "simulation".to_string())));
-
-        let run = site_env(&joypad, "dev", "rover-01", &LaunchMode::Run).expect("run site env");
-        assert!(run.contains(&(env::CLOCK.to_string(), "real".to_string())));
+    fn every_standard_site_tool_uses_the_clockless_launch_path() {
+        for tool_id in STANDARD_SITE_TOOLS {
+            let tool = SiteLaunch {
+                id: (*tool_id).to_string(),
+                artifact_ref: format!("phoxal/{tool_id}@0.1.0"),
+                phoxal_config: serde_json::Value::Null,
+            };
+            let env = site_env(&tool, "dev", "rover-01").expect("site_env");
+            assert!(
+                !env.iter().any(|(key, _)| key == env::CLOCK),
+                "{tool_id} must not receive a clock selection: {env:?}"
+            );
+        }
     }
 
     fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRecord {
