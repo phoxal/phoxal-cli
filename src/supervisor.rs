@@ -18,7 +18,7 @@ use phoxal_api::v2 as preview_api;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, timeout};
 
@@ -222,7 +222,7 @@ pub struct BoardBackend {
     /// - `ready_once` (below) makes that distinction.
     heartbeats: Arc<Mutex<BTreeMap<String, Instant>>>,
     /// Participant ids observed at `Readiness::Ready` at least once during
-    /// their current incarnation. `fail_stale_heartbeats` only applies its 5s
+    /// their current incarnation. `mark_stale_heartbeats` only applies its 5s
     /// liveness sweep to ids in this set: a participant that has never reached
     /// `Ready` is still within a legitimate `#[setup]` (the runner publishes
     /// only one `Initializing` heartbeat before `#[setup]` runs, then nothing
@@ -232,6 +232,11 @@ pub struct BoardBackend {
     /// `reset_participant_liveness` on every (re)spawn so a fresh incarnation
     /// must earn `Ready` again before the sweep applies to it.
     ready_once: Arc<Mutex<BTreeSet<String>>>,
+    /// Participants whose process lifecycle belongs to an external owner
+    /// (currently Webots). Their heartbeat loss is observational: it degrades
+    /// the board entry but cannot become session-teardown authority, and a
+    /// later heartbeat may restore the current readiness.
+    recoverable_presence: Arc<Mutex<BTreeSet<String>>>,
     /// Optional live sink for [`RoutedLogLine`]s - set by
     /// `session::controller::SessionController::drive_supervision` once its
     /// `TuiDisplay` renderer exists, so it can maintain its own bounded
@@ -254,9 +259,11 @@ impl BoardBackend {
 
     /// Record an observed `presence/heartbeat` for `id`, driving its board
     /// state from OBSERVED readiness rather than any spawn-time assumption.
-    /// Ignored for a participant already in a terminal state (`Failed`,
-    /// `Stopped`) - a heartbeat that was in flight when the
-    /// process was independently torn down must not resurrect it.
+    /// Ignored for a supervised participant already in a terminal state
+    /// (`Failed`, `Stopped`) - a heartbeat that was in flight when the process
+    /// was independently torn down must not resurrect it. Externally managed
+    /// participants registered with [`Self::mark_presence_recoverable`] may
+    /// recover from `Failed`/`Degraded` when their owner recreates them.
     pub fn record_heartbeat(&self, id: &str, readiness: api::presence::Readiness) {
         self.heartbeats
             .lock()
@@ -275,12 +282,21 @@ impl BoardBackend {
             .or_insert_with(|| {
                 ParticipantStatus::new(id, ParticipantKind::Service, ParticipantState::Starting)
             });
-        if matches!(
-            status.state,
-            ParticipantState::Failed | ParticipantState::Stopped
-        ) {
+        let recoverable = self
+            .recoverable_presence
+            .lock()
+            .expect("recoverable presence mutex poisoned")
+            .contains(id);
+        if status.state == ParticipantState::Stopped
+            || (status.state == ParticipantState::Failed && !recoverable)
+        {
             return;
         }
+        let was_unobserved = recoverable
+            && matches!(
+                status.state,
+                ParticipantState::Degraded | ParticipantState::Failed
+            );
         status.state = match readiness {
             api::presence::Readiness::Ready => ParticipantState::Ready,
             api::presence::Readiness::Degraded => ParticipantState::Degraded,
@@ -289,12 +305,29 @@ impl BoardBackend {
                 ParticipantState::Starting
             }
         };
+        if was_unobserved
+            && matches!(
+                status.state,
+                ParticipantState::Ready | ParticipantState::Starting
+            )
+        {
+            status.note = Some("Webots-managed participant observed again".to_string());
+        }
+    }
+
+    /// Mark `id` as externally managed presence. Its silence is recoverable
+    /// observation state, not proof that the developer session must end.
+    pub fn mark_presence_recoverable(&self, id: impl Into<String>) {
+        self.recoverable_presence
+            .lock()
+            .expect("recoverable presence mutex poisoned")
+            .insert(id.into());
     }
 
     /// Clear a participant's staleness bookkeeping - its last-heartbeat
     /// timestamp and its "has been `Ready`" bit - so a fresh incarnation
     /// starts with a clean liveness clock and must earn `Ready` again before
-    /// `fail_stale_heartbeats` will apply to it. Called from `spawn_child` on
+    /// `mark_stale_heartbeats` will apply to it. Called from `spawn_child` on
     /// every (re)spawn: the initial spawn, a crash restart, a `swap`, and a
     /// `resume` after `release` all funnel through it. Without this, a
     /// previously-`Ready`-then-crashed participant's stale pre-crash timestamp
@@ -313,35 +346,37 @@ impl BoardBackend {
     }
 
     /// Mark any participant that has reached `Ready` at least once this
-    /// incarnation, is not already in a terminal state, and has gone silent
-    /// for longer than `stale_after` as `Failed`. This is what turns a
-    /// silently-crashed bus participant (process still alive, or
-    /// Webots-managed and therefore invisible to process supervision
-    /// entirely) into a detected failure instead of a board entry stuck at
-    /// `Ready` forever.
+    /// incarnation and has gone silent for longer than `stale_after`.
+    /// CLI-supervised participants become `Failed`; externally managed
+    /// participants become recoverably `Degraded` because pause/deletion is
+    /// owned by Webots and may be followed by recreation.
     ///
     /// Deliberately excludes a participant that has never been observed
     /// `Ready` (only ever `Starting`, e.g. mid a legitimately slow
     /// `#[setup]`) - see the `ready_once` field docs. That case is bounded by
     /// its startup stage's timeout, not this sweep.
-    pub fn fail_stale_heartbeats(&self, stale_after: Duration) {
+    pub fn mark_stale_heartbeats(&self, stale_after: Duration) {
         let now = Instant::now();
-        let stale_ids: Vec<String> = {
+        let stale_ids: Vec<(String, bool)> = {
             let heartbeats = self.heartbeats.lock().expect("heartbeat mutex poisoned");
             let ready_once = self.ready_once.lock().expect("ready-once mutex poisoned");
+            let recoverable = self
+                .recoverable_presence
+                .lock()
+                .expect("recoverable presence mutex poisoned");
             heartbeats
                 .iter()
                 .filter(|(id, seen)| {
                     ready_once.contains(id.as_str()) && now.duration_since(**seen) > stale_after
                 })
-                .map(|(id, _)| id.clone())
+                .map(|(id, _)| (id.clone(), recoverable.contains(id)))
                 .collect()
         };
         if stale_ids.is_empty() {
             return;
         }
         let mut snapshot = self.inner.lock().expect("board mutex poisoned");
-        for id in stale_ids {
+        for (id, recoverable) in stale_ids {
             let Some(status) = snapshot.participants.get_mut(&id) else {
                 continue;
             };
@@ -351,11 +386,19 @@ impl BoardBackend {
             ) {
                 continue;
             }
-            status.state = ParticipantState::Failed;
-            status.note = Some(format!(
-                "heartbeat stopped: no presence/heartbeat observed for over {}",
-                crate::human::duration(stale_after)
-            ));
+            if recoverable {
+                status.state = ParticipantState::Degraded;
+                status.note = Some(format!(
+                    "Webots-managed participant not observed for over {}; waiting for its owner",
+                    crate::human::duration(stale_after)
+                ));
+            } else {
+                status.state = ParticipantState::Failed;
+                status.note = Some(format!(
+                    "heartbeat stopped: no presence/heartbeat observed for over {}",
+                    crate::human::duration(stale_after)
+                ));
+            }
         }
     }
 
@@ -565,12 +608,6 @@ pub struct SupervisorOptions {
     /// `None` for a caller with no renderer to feed (every test in this
     /// module).
     pub events: Option<mpsc::Sender<crate::session::event::SessionEvent>>,
-    /// Fires when readiness or the running contract graph reaches a terminal
-    /// failure and needs the whole session torn down instead of left running
-    /// unhealthy forever. The sent `String` is a human-readable reason,
-    /// followed by orderly `request_participant_stop` + `shutdown_all`, then a
-    /// normal `SupervisorOutcome` reflecting the board's failed participants.
-    pub cancel_rx: Option<oneshot::Receiver<String>>,
     /// Whether staged startup completion should transition the session to
     /// `SessionState::Running`. When `true`, once
     /// every stage has spawned and been observed ready with nothing left
@@ -589,7 +626,6 @@ impl Default for SupervisorOptions {
             requested_stop: None,
             token: tokio_util::sync::CancellationToken::new(),
             events: None,
-            cancel_rx: None,
             emits_running_on_startup_complete: false,
         }
     }
@@ -628,12 +664,12 @@ pub enum SupervisorAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupervisorOutcome {
-    pub clean_shutdown: bool,
     pub failed_participants: Vec<String>,
 }
 
 impl SupervisorOutcome {
     #[must_use]
+    #[cfg(test)]
     pub fn graph_healthy(&self) -> bool {
         self.failed_participants.is_empty()
     }
@@ -740,6 +776,20 @@ impl RunningParticipant {
         Ok(())
     }
 
+    fn record_spawn_failure(
+        &mut self,
+        board: &BoardBackend,
+        operation: &str,
+        error: &anyhow::Error,
+    ) {
+        self.child = None;
+        self.restart_at = None;
+        self.failed = true;
+        let detail = format!("{operation} failed: {error:#}");
+        board.append_log(&self.spec.id, format!("supervisor: {detail}"));
+        board.set_state(&self.spec.id, ParticipantState::Failed, Some(detail));
+    }
+
     async fn wait_for_requested_stop(
         &mut self,
         board: &BoardBackend,
@@ -813,7 +863,9 @@ impl RunningParticipant {
                 return Ok(());
             }
             self.restart_at = None;
-            self.spawn_child(board).await?;
+            if let Err(error) = self.spawn_child(board).await {
+                self.record_spawn_failure(board, "restart spawn", &error);
+            }
             return Ok(());
         }
         let Some(child) = self.child.as_mut() else {
@@ -875,6 +927,7 @@ impl RunningParticipant {
         Ok(())
     }
 
+    #[cfg(test)]
     fn is_active(&self) -> bool {
         !self.failed && (self.child.is_some() || self.restart_at.is_some())
     }
@@ -899,7 +952,10 @@ impl RunningParticipant {
         self.spec = spec;
         self.failed = false;
         self.restart_at = None;
-        self.spawn_child(board).await?;
+        if let Err(error) = self.spawn_child(board).await {
+            self.record_spawn_failure(board, "swap spawn", &error);
+            return Ok(());
+        }
         // `spawn_child` already applied the observed-readiness state (Starting
         // for a bus participant, Ready for a process-only one); attach the
         // swap note without overriding whichever state it landed on.
@@ -1194,6 +1250,20 @@ async fn spawn_stage_emitting(
     })
 }
 
+async fn spawn_until_pending(
+    running: &mut Vec<RunningParticipant>,
+    board: &BoardBackend,
+    events: Option<&mpsc::Sender<crate::session::event::SessionEvent>>,
+    stage_queue: &mut VecDeque<SupervisionStage>,
+) -> Option<PendingStage> {
+    while let Some(stage) = stage_queue.pop_front() {
+        if let Some(pending) = spawn_stage_emitting(running, board, events, stage).await {
+            return Some(pending);
+        }
+    }
+    None
+}
+
 /// Wait until every id in `stage_ids` has been OBSERVED `Ready` on the
 /// board, or `timeout` elapses. Shared by host and simulation staged startup;
 /// returns `Ok(())` on
@@ -1358,45 +1428,24 @@ pub async fn supervise_until_shutdown(
     // or a heartbeat - but keeps a zero-wait stage from stalling a whole
     // startup on an empty `select!` branch), then park on the first stage
     // that actually gates the next one.
-    let mut pending_stage: Option<PendingStage> = None;
-    while let Some(stage) = stage_queue.pop_front() {
-        if let Some(next) =
-            spawn_stage_emitting(&mut running, &board, events_tx.as_ref(), stage).await
-        {
-            pending_stage = Some(next);
-            break;
-        }
-    }
+    let mut pending_stage =
+        spawn_until_pending(&mut running, &board, events_tx.as_ref(), &mut stage_queue).await;
     maybe_emit_staged_startup_complete(&options, events_tx.as_ref(), &pending_stage).await;
 
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut clean_shutdown = false;
-    let mut stage_error = None;
     let mut action_rx = options.action_rx.take();
-    let mut cancel_rx = options.cancel_rx.take();
     loop {
         tokio::select! {
             () = token.cancelled() => {
-                clean_shutdown = true;
                 break;
-            }
-            reason = recv_cancel(&mut cancel_rx) => {
-                if let Some(reason) = reason {
-                    board.append_log(
-                        "supervisor",
-                        format!("supervisor: coordinated shutdown requested: {reason}"),
-                    );
-                    clean_shutdown = false;
-                    break;
-                }
             }
             action = recv_action(&mut action_rx) => {
                 if let Some(action) = action {
                     handle_action(&mut running, &board, action).await?;
                 }
             }
-            // Recreated fresh every loop pass (same pattern as `recv_cancel`/
+            // Recreated fresh every loop pass (the same pattern as
             // `recv_action` above): the ONLY state that must survive a
             // cancelled poll is the stage's own deadline, which lives in
             // `pending_stage` outside this future, not inside it - so
@@ -1421,14 +1470,12 @@ pub async fn supervise_until_shutdown(
                             outcome: crate::session::event::PhaseOutcome::Succeeded,
                             elapsed: stage.started.elapsed(),
                         }).await;
-                        while let Some(next_stage) = stage_queue.pop_front() {
-                            if let Some(next) =
-                                spawn_stage_emitting(&mut running, &board, events_tx.as_ref(), next_stage).await
-                            {
-                                pending_stage = Some(next);
-                                break;
-                            }
-                        }
+                        pending_stage = spawn_until_pending(
+                            &mut running,
+                            &board,
+                            events_tx.as_ref(),
+                            &mut stage_queue,
+                        ).await;
                         maybe_emit_staged_startup_complete(&options, events_tx.as_ref(), &pending_stage).await;
                     }
                     Err(error) => {
@@ -1442,9 +1489,17 @@ pub async fn supervise_until_shutdown(
                             outcome: crate::session::event::PhaseOutcome::Failed { error: format!("{error:#}") },
                             elapsed: stage.started.elapsed(),
                         }).await;
-                        stage_error = Some(anyhow!(reason));
-                        clean_shutdown = false;
-                        break;
+                        pending_stage = spawn_until_pending(
+                            &mut running,
+                            &board,
+                            events_tx.as_ref(),
+                            &mut stage_queue,
+                        ).await;
+                        maybe_emit_staged_startup_complete(
+                            &options,
+                            events_tx.as_ref(),
+                            &pending_stage,
+                        ).await;
                     }
                 }
             }
@@ -1452,13 +1507,7 @@ pub async fn supervise_until_shutdown(
                 for participant in &mut running {
                     participant.poll(&board, &options.restart_policy).await?;
                 }
-                board.fail_stale_heartbeats(HEARTBEAT_STALE_TIMEOUT);
-                if !running.iter().any(RunningParticipant::is_active)
-                    && pending_stage.is_none()
-                    && stage_queue.is_empty()
-                {
-                    break;
-                }
+                board.mark_stale_heartbeats(HEARTBEAT_STALE_TIMEOUT);
             }
         }
     }
@@ -1467,11 +1516,7 @@ pub async fn supervise_until_shutdown(
         request_participant_stop(&mut running, &board, requested_stop).await;
     }
     shutdown_all(&mut running, &board).await;
-    if let Some(error) = stage_error {
-        return Err(error);
-    }
     Ok(SupervisorOutcome {
-        clean_shutdown,
         failed_participants: board.snapshot().failed_participants(),
     })
 }
@@ -1563,20 +1608,6 @@ async fn recv_action(
         action_rx.take();
     }
     action
-}
-
-/// Resolve at most once (a oneshot can only fire once, unlike `action_rx`'s
-/// `mpsc::Receiver`). Keep the receiver in its `Option` while awaiting so a
-/// competing `tokio::select!` branch cannot cancel this future and accidentally
-/// drop the coordinated teardown channel. Take it only after it resolves so an
-/// already-completed receiver is never polled twice.
-async fn recv_cancel(cancel_rx: &mut Option<oneshot::Receiver<String>>) -> Option<String> {
-    let result = match cancel_rx.as_mut() {
-        Some(receiver) => receiver.await,
-        None => return std::future::pending().await,
-    };
-    cancel_rx.take();
-    result.ok()
 }
 
 async fn handle_action(
@@ -2059,26 +2090,6 @@ fn failed_expected_participants(board: &BoardSnapshot, expected_bus_ids: &[Strin
         .collect()
 }
 
-/// Wait until an expected contract-graph participant reaches terminal
-/// `Failed`. Recoverable child crashes are represented as `Restarting`, so
-/// this deliberately does not fire while a restart is pending or after a
-/// participant has recovered to `Starting`/`Ready`.
-pub async fn await_terminal_graph_failure(
-    board: &BoardBackend,
-    expected_bus_ids: &[String],
-    poll_interval: Duration,
-) -> Vec<String> {
-    let mut interval = tokio::time::interval(poll_interval);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    loop {
-        interval.tick().await;
-        let failed = failed_expected_participants(&board.snapshot(), expected_bus_ids);
-        if !failed.is_empty() {
-            return failed;
-        }
-    }
-}
-
 #[must_use]
 pub fn render_log_event(event: &api::logs::Event) -> String {
     let mut message = format!("{:?}: {}", event.level, event.message);
@@ -2253,7 +2264,6 @@ mod tests {
         let status = snapshot.participants.get("webots").expect("webots");
         assert_eq!(status.state, ParticipantState::Failed);
         let outcome = SupervisorOutcome {
-            clean_shutdown: true,
             failed_participants: snapshot.failed_participants(),
         };
         assert!(!outcome.graph_healthy());
@@ -2382,29 +2392,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restart_burst_exhaustion_marks_failed() -> Result<()> {
+    async fn restart_spawn_failure_is_participant_status_not_supervisor_error() -> Result<()> {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "mission",
+            ParticipantKind::Service,
+            ParticipantState::Starting,
+        ));
+        let mut participant = RunningParticipant::spawn(sleep_spec("mission"), &board).await?;
+        participant.stop_current(&board).await?;
+        participant.spec.executable = PathBuf::from("/definitely/missing/phoxal-participant");
+        participant.restart_at = Some(Instant::now());
+
+        participant.poll(&board, &RestartPolicy::default()).await?;
+
+        assert!(participant.failed);
+        let snapshot = board.snapshot();
+        assert_eq!(
+            snapshot.participants["mission"].state,
+            ParticipantState::Failed
+        );
+        assert!(
+            snapshot.participants["mission"]
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("restart spawn failed"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn swap_spawn_failure_is_participant_status_not_supervisor_error() -> Result<()> {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "mission",
+            ParticipantKind::Service,
+            ParticipantState::Starting,
+        ));
+        let mut participant = RunningParticipant::spawn(sleep_spec("mission"), &board).await?;
+        let mut missing = sleep_spec("mission");
+        missing.executable = PathBuf::from("/definitely/missing/phoxal-participant");
+
+        participant
+            .swap(missing, &board, "watch rebuild completed".to_string())
+            .await?;
+
+        assert!(participant.failed);
+        let snapshot = board.snapshot();
+        assert_eq!(
+            snapshot.participants["mission"].state,
+            ParticipantState::Failed
+        );
+        assert!(
+            snapshot.participants["mission"]
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("swap spawn failed"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn all_children_may_fail_without_ending_the_session() -> Result<()> {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "flap",
             ParticipantKind::Service,
             ParticipantState::Starting,
         ));
-        let specs = vec![ParticipantSpec {
+        let flappy = ParticipantSpec {
             id: "flap".to_string(),
             kind: ParticipantKind::Service,
             executable: PathBuf::from("/bin/sh"),
-            args: vec!["-c".to_string(), "echo fail; exit 7".to_string()],
+            args: vec!["-c".to_string(), "exit 7".to_string()],
             cwd: None,
             env: Vec::new(),
             shutdown_grace: Duration::from_millis(10),
             process_group: false,
             note: None,
             bus_participant: true,
-        }];
-        let error = supervise_until_shutdown(
+        };
+        let token = tokio_util::sync::CancellationToken::new();
+        let supervise = tokio::spawn(supervise_until_shutdown(
             vec![SupervisionStage::new(
                 "stage",
-                specs,
+                vec![flappy],
                 WaitBudget::Bounded(Duration::from_secs(5)),
             )],
             board.clone(),
@@ -2412,35 +2484,44 @@ mod tests {
                 restart_policy: RestartPolicy {
                     restart_delay: Duration::from_millis(1),
                     start_limit_interval: Duration::from_secs(60),
-                    start_limit_burst: 3,
+                    start_limit_burst: 1,
                 },
-                action_rx: None,
-                requested_stop: None,
-                token: tokio_util::sync::CancellationToken::new(),
-                events: None,
-                cancel_rx: None,
-                emits_running_on_startup_complete: false,
+                token: token.clone(),
+                ..SupervisorOptions::default()
             },
-        )
-        .await
-        .expect_err("a participant that exhausts restart readiness must fail its stage");
+        ));
 
-        assert!(error.to_string().contains("failed participants: flap"));
-        let snapshot = board.snapshot();
-        let status = snapshot.participants.get("flap").expect("flap status");
-        assert_eq!(status.state, ParticipantState::Failed);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while board.snapshot().participants["flap"].state != ParticipantState::Failed {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the failed child must remain visible on the board");
         assert!(
-            status
+            board.snapshot().participants["flap"]
                 .note
                 .as_deref()
                 .is_some_and(|note| note.contains("StartLimitBurst")),
-            "{status:?}"
+            "restart exhaustion must explain the terminal participant status"
         );
+        tokio::time::sleep(Duration::from_millis(650)).await;
+        assert!(
+            !supervise.is_finished(),
+            "even an all-failed graph must wait for the user's stop action"
+        );
+
+        token.cancel();
+        let outcome = tokio::time::timeout(Duration::from_secs(3), supervise)
+            .await
+            .expect("user stop must tear down promptly")
+            .expect("supervisor task panicked")?;
+        assert_eq!(outcome.failed_participants, vec!["flap"]);
         Ok(())
     }
 
     #[tokio::test]
-    async fn terminal_graph_failure_after_readiness_requests_orderly_teardown() -> Result<()> {
+    async fn participant_failure_stays_visible_until_user_stop() -> Result<()> {
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "webots",
@@ -2462,18 +2543,7 @@ mod tests {
         webots.process_group = true;
         webots.bus_participant = false;
 
-        let expected = vec!["simulator-webots-controller-robot".to_string()];
-        let (cancel_tx, cancel_rx) = oneshot::channel();
-        let monitor_board = board.clone();
-        let monitor = tokio::spawn(async move {
-            let failed =
-                await_terminal_graph_failure(&monitor_board, &expected, Duration::from_millis(10))
-                    .await;
-            let _ = cancel_tx.send(format!(
-                "graph ended unhealthy; failed participants: {}",
-                failed.join(", ")
-            ));
-        });
+        let token = tokio_util::sync::CancellationToken::new();
         let supervise = tokio::spawn(supervise_until_shutdown(
             vec![SupervisionStage::new(
                 "stage",
@@ -2483,7 +2553,7 @@ mod tests {
             board.clone(),
             SupervisorOptions {
                 requested_stop: Some(RequestedStop::new("webots", Duration::from_secs(1))),
-                cancel_rx: Some(cancel_rx),
+                token: token.clone(),
                 ..SupervisorOptions::default()
             },
         ));
@@ -2491,7 +2561,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(75)).await;
         assert!(
             !supervise.is_finished(),
-            "a healthy graph must remain up until an operator or failure stops it"
+            "the session must remain up until the user stops it"
         );
         board.set_state(
             "simulator-webots-controller-robot",
@@ -2499,12 +2569,17 @@ mod tests {
             Some("controller reported terminal failure".to_string()),
         );
 
+        tokio::time::sleep(Duration::from_millis(650)).await;
+        assert!(
+            !supervise.is_finished(),
+            "a failed participant must not terminate the session"
+        );
+
+        token.cancel();
         let outcome = tokio::time::timeout(Duration::from_secs(3), supervise)
             .await
-            .expect("terminal graph failure must tear down promptly")
+            .expect("user stop must tear down promptly")
             .expect("supervisor task panicked")?;
-        monitor.await.expect("terminal failure monitor panicked");
-        assert!(!outcome.clean_shutdown);
         assert!(!outcome.graph_healthy());
         assert_eq!(
             outcome.failed_participants,
@@ -2515,24 +2590,6 @@ mod tests {
             ParticipantState::Stopped
         );
         Ok(())
-    }
-
-    #[tokio::test]
-    async fn terminal_failure_monitor_does_not_fire_for_a_healthy_graph() {
-        let board = BoardBackend::new();
-        board.upsert(ParticipantStatus::new(
-            "mission",
-            ParticipantKind::Service,
-            ParticipantState::Ready,
-        ));
-        let expected = vec!["mission".to_string()];
-
-        let result = tokio::time::timeout(
-            Duration::from_millis(75),
-            await_terminal_graph_failure(&board, &expected, Duration::from_millis(10)),
-        )
-        .await;
-        assert!(result.is_err(), "a healthy graph must not self-teardown");
     }
 
     #[tokio::test]
@@ -2555,7 +2612,8 @@ mod tests {
             note: None,
             bus_participant: true,
         }];
-        let error = supervise_until_shutdown(
+        let token = tokio_util::sync::CancellationToken::new();
+        let supervise = tokio::spawn(supervise_until_shutdown(
             vec![SupervisionStage::new(
                 "stage",
                 specs,
@@ -2570,15 +2628,18 @@ mod tests {
                 },
                 action_rx: None,
                 requested_stop: None,
-                token: tokio_util::sync::CancellationToken::new(),
+                token: token.clone(),
                 events: None,
-                cancel_rx: None,
                 emits_running_on_startup_complete: false,
             },
-        )
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while board.snapshot().participants["logger"].state != ParticipantState::Failed {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
         .await
-        .expect_err("the logger exits before readiness and must fail its stage");
-        assert!(error.to_string().contains("failed participants: logger"));
+        .expect("the logger exits before readiness and must fail its stage");
 
         let snapshot = board.snapshot();
         let status = snapshot.participants.get("logger").expect("logger status");
@@ -2589,6 +2650,9 @@ mod tests {
                 .any(|line| line.contains("stdout: local-line")),
             "{status:?}"
         );
+        token.cancel();
+        let outcome = supervise.await.expect("supervisor task panicked")?;
+        assert_eq!(outcome.failed_participants, vec!["logger"]);
         Ok(())
     }
 
@@ -2644,7 +2708,7 @@ mod tests {
                 Instant::now() - Duration::from_secs(60),
             );
 
-        board.fail_stale_heartbeats(Duration::from_secs(5));
+        board.mark_stale_heartbeats(Duration::from_secs(5));
 
         let snapshot = board.snapshot();
         assert_eq!(
@@ -2658,8 +2722,9 @@ mod tests {
     fn stale_sweep_still_fails_a_participant_that_went_silent_after_ready() {
         // Detection must be preserved: once a participant has genuinely
         // reached `Ready`, going silent for longer than the threshold must
-        // still mark it `Failed` (this is what catches a killed Webots
-        // controller in production).
+        // still mark it `Failed` when its process lifecycle belongs to the
+        // CLI. Webots-owned participants use the recoverable policy tested
+        // below.
         let board = BoardBackend::new();
         board.upsert(ParticipantStatus::new(
             "was-ready",
@@ -2676,13 +2741,83 @@ mod tests {
                 Instant::now() - Duration::from_secs(60),
             );
 
-        board.fail_stale_heartbeats(Duration::from_secs(5));
+        board.mark_stale_heartbeats(Duration::from_secs(5));
 
         let snapshot = board.snapshot();
         assert_eq!(
             snapshot.participants["was-ready"].state,
             ParticipantState::Failed,
             "a participant that reached Ready and then went silent must still be caught"
+        );
+    }
+
+    #[test]
+    fn webots_managed_presence_can_disappear_and_recover() {
+        let id = "simulator-webots-controller-robot-v1";
+        let board = BoardBackend::new();
+        board.mark_presence_recoverable(id);
+        board.upsert(ParticipantStatus::new(
+            id,
+            ParticipantKind::Simulator,
+            ParticipantState::Starting,
+        ));
+        board.record_heartbeat(id, api::presence::Readiness::Ready);
+        board
+            .heartbeats
+            .lock()
+            .expect("heartbeat mutex poisoned")
+            .insert(id.to_string(), Instant::now() - Duration::from_secs(60));
+
+        board.mark_stale_heartbeats(Duration::from_secs(5));
+
+        let snapshot = board.snapshot();
+        assert_eq!(
+            snapshot.participants[id].state,
+            ParticipantState::Degraded,
+            "losing a Webots-owned participant is observable, not terminal"
+        );
+
+        board.record_heartbeat(id, api::presence::Readiness::Ready);
+        let snapshot = board.snapshot();
+        assert_eq!(snapshot.participants[id].state, ParticipantState::Ready);
+        assert_eq!(
+            snapshot.participants[id].note.as_deref(),
+            Some("Webots-managed participant observed again")
+        );
+
+        board.record_heartbeat(id, api::presence::Readiness::Failed);
+        assert_eq!(
+            board.snapshot().participants[id].state,
+            ParticipantState::Failed
+        );
+        board.record_heartbeat(id, api::presence::Readiness::Ready);
+        assert_eq!(
+            board.snapshot().participants[id].state,
+            ParticipantState::Ready,
+            "an externally managed participant recreated after self-reporting Failed may recover"
+        );
+    }
+
+    #[test]
+    fn webots_managed_degraded_heartbeat_keeps_the_degraded_context() {
+        let id = "simulator-webots-controller-robot-v1";
+        let board = BoardBackend::new();
+        board.mark_presence_recoverable(id);
+        board.upsert(ParticipantStatus::new(
+            id,
+            ParticipantKind::Simulator,
+            ParticipantState::Degraded,
+        ));
+        board.set_note(id, "Webots reports degraded operation");
+
+        board.record_heartbeat(id, api::presence::Readiness::Degraded);
+
+        let snapshot = board.snapshot();
+        assert_eq!(snapshot.participants[id].state, ParticipantState::Degraded);
+        assert_eq!(
+            snapshot.participants[id].note.as_deref(),
+            Some("Webots reports degraded operation"),
+            "re-observation must not overwrite a self-reported degraded status with a recovery note"
         );
     }
 
@@ -2734,7 +2869,7 @@ mod tests {
 
         // And the stale timestamp being gone means the sweep must not
         // immediately re-fail the fresh incarnation.
-        board.fail_stale_heartbeats(Duration::from_secs(5));
+        board.mark_stale_heartbeats(Duration::from_secs(5));
         let snapshot = board.snapshot();
         assert_eq!(
             snapshot.participants["mission"].state,
@@ -2828,7 +2963,6 @@ mod tests {
             "the participant that DID heartbeat must not be dragged down by the other's timeout"
         );
         let outcome = SupervisorOutcome {
-            clean_shutdown: true,
             failed_participants: snapshot.failed_participants(),
         };
         assert!(!outcome.graph_healthy());
@@ -2985,12 +3119,12 @@ mod tests {
                 WaitBudget::Bounded(Duration::from_secs(5)),
             ),
         ];
-        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let token = tokio_util::sync::CancellationToken::new();
         let supervise = tokio::spawn(supervise_until_shutdown(
             stages,
             board.clone(),
             SupervisorOptions {
-                cancel_rx: Some(cancel_rx),
+                token: token.clone(),
                 ..SupervisorOptions::default()
             },
         ));
@@ -3010,12 +3144,11 @@ mod tests {
         .await
         .expect("stage two must spawn once stage one is observed ready");
 
-        let _ = cancel_tx.send("test teardown".to_string());
-        let outcome = tokio::time::timeout(Duration::from_secs(3), supervise)
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(3), supervise)
             .await
             .expect("supervisor must exit promptly")
             .expect("supervisor task panicked")?;
-        assert!(!outcome.clean_shutdown);
         Ok(())
     }
 
@@ -3040,12 +3173,12 @@ mod tests {
                 WaitBudget::Bounded(Duration::from_secs(1)),
             ),
         ];
-        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let token = tokio_util::sync::CancellationToken::new();
         let supervise = tokio::spawn(supervise_until_shutdown(
             stages,
             board.clone(),
             SupervisorOptions {
-                cancel_rx: Some(cancel_rx),
+                token: token.clone(),
                 ..SupervisorOptions::default()
             },
         ));
@@ -3064,7 +3197,7 @@ mod tests {
         .await
         .expect("downstream must spawn after router probe success");
 
-        let _ = cancel_tx.send("test teardown".to_string());
+        token.cancel();
         tokio::time::timeout(Duration::from_secs(3), supervise)
             .await
             .expect("supervisor must exit promptly")
@@ -3104,7 +3237,7 @@ mod tests {
             vec![flappy],
             WaitBudget::Bounded(Duration::from_secs(30)),
         )];
-        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let token = tokio_util::sync::CancellationToken::new();
         let supervise = tokio::spawn(supervise_until_shutdown(
             stages,
             board.clone(),
@@ -3114,7 +3247,7 @@ mod tests {
                     start_limit_interval: Duration::from_secs(60),
                     start_limit_burst: 1000,
                 },
-                cancel_rx: Some(cancel_rx),
+                token: token.clone(),
                 ..SupervisorOptions::default()
             },
         ));
@@ -3142,7 +3275,7 @@ mod tests {
             board.snapshot().participants["flap"].state
         );
 
-        let _ = cancel_tx.send("test teardown".to_string());
+        token.cancel();
         tokio::time::timeout(Duration::from_secs(3), supervise)
             .await
             .expect("supervisor must exit promptly")
@@ -3150,12 +3283,8 @@ mod tests {
         Ok(())
     }
 
-    /// A coordinated-shutdown signal (the same `select!` shape a real
-    /// Ctrl-C's `tokio::signal::ctrl_c()` branch uses - sending a real SIGINT
-    /// from a unit test would affect the whole test process, so `cancel_rx`
-    /// is the safe structural equivalent already used elsewhere in this
-    /// module, e.g. `terminal_graph_failure_after_readiness_requests_orderly_teardown`)
-    /// arriving WHILE a stage readiness wait is still pending must still
+    /// Cancelling the session token WHILE a stage readiness wait is still
+    /// pending must still
     /// break the loop and tear down promptly, proving the wait branch never
     /// starves the other `select!` branches.
     #[tokio::test]
@@ -3171,12 +3300,12 @@ mod tests {
             vec![sleep_spec("one")],
             WaitBudget::Bounded(Duration::from_secs(30)),
         )];
-        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let token = tokio_util::sync::CancellationToken::new();
         let supervise = tokio::spawn(supervise_until_shutdown(
             stages,
             board.clone(),
             SupervisorOptions {
-                cancel_rx: Some(cancel_rx),
+                token: token.clone(),
                 ..SupervisorOptions::default()
             },
         ));
@@ -3188,24 +3317,22 @@ mod tests {
             "stage one must still be waiting on its own readiness"
         );
 
-        let _ = cancel_tx.send("test coordinated shutdown".to_string());
+        token.cancel();
         // The proof is promptness itself: `supervise_until_shutdown` must
         // return well inside the timeout even though "one"'s own stage wait
         // was still pending when the cancel arrived - a plain (non-requested)
         // teardown via `shutdown_all` stops the child but does not relabel
         // its board state (that relabeling is `RequestedStop`-specific, see
-        // `request_participant_stop`), so this deliberately does not assert
-        // a final state beyond `clean_shutdown`.
-        let outcome = tokio::time::timeout(Duration::from_secs(3), supervise)
+        // `request_participant_stop`).
+        tokio::time::timeout(Duration::from_secs(3), supervise)
             .await
             .expect("supervisor must exit promptly even mid-stage-wait")
             .expect("supervisor task panicked")?;
-        assert!(!outcome.clean_shutdown);
         Ok(())
     }
 
-    /// A stage that never reaches readiness fails the whole run, naming the
-    /// stalled participant(s) as failed on the board and in the outcome.
+    /// A stage that never reaches readiness marks its stalled participants but
+    /// still leaves the session running until the user stops it.
     #[tokio::test]
     async fn stalled_stage_times_out_and_marks_missing_participants_failed() -> Result<()> {
         let board = BoardBackend::new();
@@ -3219,25 +3346,90 @@ mod tests {
             vec![sleep_spec("one")],
             WaitBudget::Bounded(Duration::from_millis(150)),
         )];
-        let error = tokio::time::timeout(
-            Duration::from_secs(5),
-            supervise_until_shutdown(
-                stages,
-                board.clone(),
-                SupervisorOptions {
-                    ..SupervisorOptions::default()
-                },
-            ),
-        )
+        let token = tokio_util::sync::CancellationToken::new();
+        let supervise = tokio::spawn(supervise_until_shutdown(
+            stages,
+            board.clone(),
+            SupervisorOptions {
+                token: token.clone(),
+                ..SupervisorOptions::default()
+            },
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while board.snapshot().participants["one"].state != ParticipantState::Failed {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
         .await
-        .expect("a stalled stage must fail within its own timeout, never hang")
-        .expect_err("a stalled stage must fail the supervisor");
+        .expect("a stalled stage must be marked within its own timeout");
 
         assert!(
-            error.to_string().contains("stage 'stage-one' stalled"),
-            "the failure must preserve the stalled stage label: {error:#}"
+            !supervise.is_finished(),
+            "a stalled stage is status, not session termination authority"
         );
         assert_eq!(board.snapshot().failed_participants(), vec!["one"]);
+        token.cancel();
+        let outcome = supervise.await.expect("supervisor task panicked")?;
+        assert_eq!(outcome.failed_participants, vec!["one"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_stage_does_not_block_later_stage_or_end_session() -> Result<()> {
+        let board = BoardBackend::new();
+        for id in ["broken", "later"] {
+            board.upsert(ParticipantStatus::new(
+                id,
+                ParticipantKind::Service,
+                ParticipantState::Starting,
+            ));
+        }
+        let mut broken = sleep_spec("broken");
+        broken.executable = PathBuf::from("/definitely/missing/phoxal-participant");
+        let mut later = sleep_spec("later");
+        later.bus_participant = false;
+        let token = tokio_util::sync::CancellationToken::new();
+        let supervise = tokio::spawn(supervise_until_shutdown(
+            vec![
+                SupervisionStage::new(
+                    "broken-stage",
+                    vec![broken],
+                    WaitBudget::Bounded(Duration::from_secs(2)),
+                ),
+                SupervisionStage::new(
+                    "later-stage",
+                    vec![later],
+                    WaitBudget::Bounded(Duration::from_secs(2)),
+                ),
+            ],
+            board.clone(),
+            SupervisorOptions {
+                token: token.clone(),
+                ..SupervisorOptions::default()
+            },
+        ));
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = board.snapshot();
+                if snapshot.participants["broken"].state == ParticipantState::Failed
+                    && snapshot.participants["later"].state == ParticipantState::Ready
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the later stage must start after the earlier stage fails");
+        assert!(
+            !supervise.is_finished(),
+            "stage failure is visible status and the session still waits for user stop"
+        );
+
+        token.cancel();
+        let outcome = supervise.await.expect("supervisor task panicked")?;
+        assert_eq!(outcome.failed_participants, vec!["broken"]);
         Ok(())
     }
 }

@@ -192,12 +192,14 @@ impl Run {
             feed.abort();
         }
         let outcome = outcome?;
-
-        if !outcome.graph_healthy() {
-            bail!(
-                "supervisor graph ended unhealthy; failed participants: {}",
+        // `drive_supervision` consumes and tears down the controller before
+        // returning. During the session the same failures stay visible on the
+        // board; they are status, never command failure.
+        if !outcome.failed_participants.is_empty() {
+            app.ui.warn(format!(
+                "session stopped with failed participants: {}",
                 outcome.failed_participants.join(", ")
-            );
+            ));
         }
         Ok(())
     }
@@ -833,6 +835,7 @@ pub(crate) fn prepare_robot_participants(
                 // detected failure instead of a permanently green board.
                 // `commands::simulate` renders its controllerArgs into the
                 // staged world instead of a `ParticipantSpec` (Part 5).
+                board.mark_presence_recoverable(&id);
                 let mut status =
                     ParticipantStatus::new(&id, kind, ParticipantState::Starting).with_local(local);
                 status.note = Some(
