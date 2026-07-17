@@ -4,6 +4,13 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.15.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.15.0) - 2026-07-17
+
+
+### Added
+
+- *(tui)* Redesign sessions around robot development (#152)
+
 ## [0.14.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.14.2) - 2026-07-17
 
 
