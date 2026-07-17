@@ -147,6 +147,8 @@ impl SessionController {
                         .as_ref()
                         .map_or_else(|| "-".to_string(), |summary| summary.channel.clone()),
                     mode: mode_label,
+                    bus_endpoint: crate::supervisor::default_connect_endpoint(),
+                    started_at: std::time::SystemTime::now(),
                 };
                 let mut tui = Box::new(TuiDisplay::new(output.theme, title, identity));
                 tui.activate()?;
@@ -406,13 +408,13 @@ impl SessionController {
                     cancel_requested = true;
                     self.token.cancel();
                     self.transition_to_stopping();
-                    if let Err(error) = self.redraw(&board.snapshot(), &telemetry) {
+                    if let Err(error) = self.redraw_live(&board, &telemetry) {
                         break SupervisionEnd::Failed(error);
                     }
                 }
                 Some(event) = self.events_rx.recv() => {
                     self.apply_event(event);
-                    if let Err(error) = self.redraw(&board.snapshot(), &telemetry) {
+                    if let Err(error) = self.redraw_live(&board, &telemetry) {
                         break SupervisionEnd::Failed(error);
                     }
                 }
@@ -422,7 +424,7 @@ impl SessionController {
                             let board_snapshot = board.snapshot();
                             let action = handle_input(&mut self.renderer, event, &board_snapshot, &telemetry);
                             self.apply_display_action(action, &telemetry);
-                            if let Err(error) = self.redraw(&board_snapshot, &telemetry) {
+                            if let Err(error) = self.redraw_live(&board, &telemetry) {
                                 break SupervisionEnd::Failed(error);
                             }
                         }
@@ -432,7 +434,7 @@ impl SessionController {
                     }
                 }
                 _ = ticker.tick() => {
-                    if let Err(error) = self.redraw(&board.snapshot(), &telemetry) {
+                    if let Err(error) = self.redraw_live(&board, &telemetry) {
                         break SupervisionEnd::Failed(error);
                     }
                 }
@@ -483,7 +485,7 @@ impl SessionController {
         if let Ok(next) = next {
             self.state = next;
             self.emit_session_changed_locally();
-            let _ = self.redraw(&board.snapshot(), telemetry);
+            let _ = self.redraw_live(board, telemetry);
         }
     }
 
@@ -501,8 +503,11 @@ impl SessionController {
                     let _ = tx.try_send(SupervisorAction::Restart { id });
                 }
             }
-            DisplayAction::JoypadConnect(id) => {
-                telemetry.send_joypad_command(JoypadCommand::Connect(id));
+            DisplayAction::JoypadSelect(id) => {
+                telemetry.send_joypad_command(JoypadCommand::Select(id));
+            }
+            DisplayAction::JoypadSetEnabled(enabled) => {
+                telemetry.send_joypad_command(JoypadCommand::SetEnabled(enabled));
             }
             DisplayAction::JoypadRescan => {
                 telemetry.send_joypad_command(JoypadCommand::Rescan);
@@ -585,6 +590,13 @@ impl SessionController {
             }
             Renderer::None => Ok(()),
         }
+    }
+
+    fn redraw_live(&mut self, board: &BoardBackend, telemetry: &TelemetryBackend) -> Result<()> {
+        if let Renderer::Tui(tui) = &mut self.renderer {
+            tui.set_heartbeats(board.heartbeat_snapshot());
+        }
+        self.redraw(&board.snapshot(), telemetry)
     }
 
     /// Restore the terminal (if a TUI is active) and stop routing tracing

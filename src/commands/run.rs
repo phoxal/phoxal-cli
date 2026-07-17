@@ -226,7 +226,7 @@ async fn live_run_setup(
         RouterOwnership::External => ui.info("reusing reachable external tool-router"),
         RouterOwnership::Managed => ui.info("tool-router will be managed by this session"),
     }
-    report_launch_commands(&prepared.plan, &prepared.specs, message_format)?;
+    report_launch_commands(&prepared.plan, &prepared.specs, message_format, &ui)?;
 
     let mut feed_tasks = prepared
         .robot_log_targets
@@ -599,6 +599,7 @@ pub(crate) fn report_launch_commands(
     plan: &LaunchPlan,
     specs: &[ParticipantSpec],
     message_format: MessageFormat,
+    ui: &crate::Ui,
 ) -> Result<()> {
     let executions_by_id = plan
         .robots
@@ -627,21 +628,27 @@ pub(crate) fn report_launch_commands(
     };
     crate::commands::print_message(
         &output,
-        || {
-            println!("resolved launch participants:");
-            for participant in &output.participants {
-                println!(
-                    "  - {} ({}) -> {}",
-                    participant.id, participant.kind, participant.command_line
-                );
-            }
-            println!(
-                "motion guarantees: e-stop, source freshness, finite values, and robot-authored limits; autonomous motion also requires fresh typed safety constraints"
-            );
-            Ok(())
-        },
+        || report_launch_commands_human(&output, ui),
         message_format,
     )
+}
+
+fn report_launch_commands_human(output: &LaunchCommandReport, ui: &crate::Ui) -> Result<()> {
+    // A live session already owns stdout/stderr, so every human line must
+    // enter its diagnostic stream instead of racing the TUI's alternate-
+    // screen redraw. `Ui` retains the ordinary raw-mode fallback when this
+    // helper is ever used outside a session.
+    ui.info("resolved launch participants:");
+    for participant in &output.participants {
+        ui.info(format!(
+            "  - {} ({}) -> {}",
+            participant.id, participant.kind, participant.command_line
+        ));
+    }
+    ui.info(
+        "motion guarantees: e-stop, source freshness, finite values, and robot-authored limits; autonomous motion also requires fresh typed safety constraints",
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1314,6 +1321,40 @@ mod tests {
     use phoxal::participant::launch::{
         BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
     };
+
+    #[test]
+    fn human_launch_report_enters_the_active_session_diagnostics() -> Result<()> {
+        let _guard = crate::session::diagnostics::DIAGNOSTICS_TEST_LOCK.blocking_lock();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        crate::session::diagnostics::install(tx);
+        let output = LaunchCommandReport {
+            participants: vec![LaunchCommandEntry {
+                id: "drive".to_string(),
+                kind: "official",
+                command_line: "service-drive".to_string(),
+                env: BTreeMap::new(),
+            }],
+        };
+
+        let result = report_launch_commands_human(
+            &output,
+            &crate::Ui::new(crate::output_mode::OutputMode::Rich),
+        );
+        crate::session::diagnostics::uninstall();
+        result?;
+
+        let messages = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                crate::session::event::SessionEvent::Diagnostic { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0], "resolved launch participants:");
+        assert!(messages[1].contains("drive (official) -> service-drive"));
+        assert!(messages[2].starts_with("motion guarantees:"));
+        Ok(())
+    }
 
     #[test]
     fn configless_site_tool_omits_config_and_gets_connect() {

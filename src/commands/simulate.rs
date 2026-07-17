@@ -440,7 +440,7 @@ async fn live_simulate_setup(
             ui.info("tool-router will be managed by this simulation session");
         }
     }
-    crate::commands::run::report_launch_commands(&sim.plan, &specs, options.message_format)?;
+    crate::commands::run::report_launch_commands(&sim.plan, &specs, options.message_format, &ui)?;
 
     let mut feed_tasks = sim
         .plan

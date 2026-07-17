@@ -23,17 +23,31 @@ use phoxal_api::{v1 as state_api, v2 as api};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::stores::telemetry_store::{HostPoint, TelemetryStore, Timestamped};
+use crate::stores::telemetry_store::{TelemetryStore, Timestamped};
 use crate::supervisor::{ClockObservation, wait_for_endpoint};
 
 /// One `telemetry::Host` sample (the host resource meter).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct HostSample {
     pub cpu_pct: f32,
     pub ram_used_bytes: u64,
     pub ram_total_bytes: u64,
+    pub swap_used_bytes: u64,
+    pub swap_total_bytes: u64,
     pub load_1m: f32,
+    pub load_5m: f32,
+    pub load_15m: f32,
+    pub uptime_s: Option<u64>,
+    pub disks: Vec<DiskSample>,
     pub window_ns: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiskSample {
+    pub mount_point: String,
+    pub file_system: String,
+    pub used_bytes: u64,
+    pub total_bytes: u64,
 }
 
 impl From<api::telemetry::Host> for HostSample {
@@ -42,7 +56,22 @@ impl From<api::telemetry::Host> for HostSample {
             cpu_pct: body.cpu_pct,
             ram_used_bytes: body.ram_used_bytes,
             ram_total_bytes: body.ram_total_bytes,
+            swap_used_bytes: body.swap_used_bytes,
+            swap_total_bytes: body.swap_total_bytes,
             load_1m: body.load_1m,
+            load_5m: body.load_5m,
+            load_15m: body.load_15m,
+            uptime_s: body.uptime_s,
+            disks: body
+                .disks
+                .into_iter()
+                .map(|disk| DiskSample {
+                    mount_point: disk.mount_point,
+                    file_system: disk.file_system,
+                    used_bytes: disk.used_bytes,
+                    total_bytes: disk.total_bytes,
+                })
+                .collect(),
             window_ns: body.window_ns,
         }
     }
@@ -69,7 +98,7 @@ impl From<api::telemetry::Process> for ProcessSample {
     }
 }
 
-/// One row of the router Traffic table.
+/// One row of the global Bus page.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicMetric {
     pub topic: String,
@@ -112,7 +141,16 @@ impl From<api::router::Metrics> for RouterMetricsSample {
 pub struct JoypadDevice {
     pub id: String,
     pub name: String,
-    pub connected: bool,
+    pub status: JoypadDeviceStatus,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JoypadDeviceStatus {
+    Ready,
+    Disconnected,
+    Unsupported,
+    #[default]
+    Unknown,
 }
 
 impl From<api::joypad::Device> for JoypadDevice {
@@ -120,7 +158,11 @@ impl From<api::joypad::Device> for JoypadDevice {
         Self {
             id: body.id,
             name: body.name,
-            connected: body.connected,
+            status: match body.status {
+                api::joypad::DeviceStatus::Ready => JoypadDeviceStatus::Ready,
+                api::joypad::DeviceStatus::Disconnected => JoypadDeviceStatus::Disconnected,
+                api::joypad::DeviceStatus::Unsupported => JoypadDeviceStatus::Unsupported,
+            },
         }
     }
 }
@@ -133,6 +175,8 @@ impl From<api::joypad::Device> for JoypadDevice {
 pub struct JoypadDevicesSample {
     pub available: Vec<JoypadDevice>,
     pub selected: Option<String>,
+    pub enabled: bool,
+    pub unavailable_reason: Option<String>,
     pub last_error: Option<String>,
 }
 
@@ -141,6 +185,8 @@ impl From<api::joypad::Devices> for JoypadDevicesSample {
         Self {
             available: body.available.into_iter().map(JoypadDevice::from).collect(),
             selected: body.selected,
+            enabled: body.enabled,
+            unavailable_reason: body.unavailable_reason,
             last_error: body.last_error,
         }
     }
@@ -164,22 +210,17 @@ pub struct TelemetrySnapshot {
     /// the graceful-absence case (the tool may not be in the catalog yet),
     /// rendered as `cpu n/a` rather than a failure.
     pub host: Option<Timestamped<HostSample>>,
-    /// The Resources tab's rolling host-sample history, oldest first -
-    /// advances on every received sample regardless of whether its payload
-    /// differs from the previous one (see `TelemetryStore::record_host`'s
-    /// docs on the value-dedup bug this replaces).
-    pub host_history: Vec<HostPoint>,
     pub process_by_participant: BTreeMap<String, Timestamped<ProcessSample>>,
     pub router: Option<Timestamped<RouterMetricsSample>>,
     pub joypad: Option<Timestamped<JoypadDevicesSample>>,
     pub motion: Option<Timestamped<state_api::motion::State>>,
-    pub drive: Option<Timestamped<state_api::drive::State>>,
 }
 
-/// A joypad action the TUI's Devices tab asked to publish.
+/// A joypad action the global Input page asked to publish.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JoypadCommand {
-    Connect(String),
+    Select(String),
+    SetEnabled(bool),
     Rescan,
 }
 
@@ -201,7 +242,7 @@ pub struct TelemetryBackend {
 }
 
 /// A generous bound for a user-driven command channel (one send per
-/// keypress in the Devices tab, never a hot loop): [`JoypadCommand`]s queue
+/// keypress in Input, never a hot loop): [`JoypadCommand`]s queue
 /// here between redraws, so this only needs to absorb a rapid burst of
 /// key presses, not hold unbounded history.
 const JOYPAD_COMMAND_CHANNEL_CAPACITY: usize = 16;
@@ -226,13 +267,13 @@ impl TelemetryBackend {
             .expect("joypad_command_tx mutex poisoned") = Some(tx);
     }
 
-    /// Publish a joypad `Connect`/`Rescan` command, requested from the TUI's
-    /// Devices tab. A silent no-op if no joypad feed is running (the tool is
+    /// Publish a joypad Select, SetEnabled, or Rescan command from the TUI's
+    /// Input page. A silent no-op if no joypad feed is running (the tool is
     /// absent from the catalog, or the session predates the feed starting),
     /// or if the command channel is full (newest-wins: an overloaded queue
     /// means the feed loop is stalled, so a fresh command is not worth
     /// blocking the TUI's input-handling path over) - there is nothing
-    /// actionable to report to the user beyond what the Devices tab already
+    /// actionable to report to the user beyond what Input already
     /// shows (no device list at all).
     pub fn send_joypad_command(&self, command: JoypadCommand) {
         if let Some(sender) = &*self
@@ -246,16 +287,14 @@ impl TelemetryBackend {
 
     #[must_use]
     pub fn snapshot(&self) -> TelemetrySnapshot {
-        let mut store = self.inner.lock().expect("telemetry mutex poisoned");
+        let store = self.inner.lock().expect("telemetry mutex poisoned");
         let mut snapshot = TelemetrySnapshot {
             clock: None,
             host: store.host().cloned(),
-            host_history: store.host_history().to_vec(),
             process_by_participant: store.process_all().clone(),
             router: store.router().cloned(),
             joypad: store.joypad().cloned(),
             motion: store.motion().cloned(),
-            drive: store.drive().cloned(),
         };
         drop(store);
         if let Some(rx) = &*self.clock_rx.lock().expect("clock_rx mutex poisoned") {
@@ -297,13 +336,6 @@ impl TelemetryBackend {
             .lock()
             .expect("telemetry mutex poisoned")
             .record_motion(Instant::now(), sample);
-    }
-
-    fn record_drive(&self, sample: state_api::drive::State) {
-        self.inner
-            .lock()
-            .expect("telemetry mutex poisoned")
-            .record_drive(Instant::now(), sample);
     }
 }
 
@@ -348,16 +380,9 @@ async fn control_state_feed_loop(
     let motion_topic = Topic::<Subscribe<state_api::motion::State>>::new_static(
         <state_api::motion::State as ContractBody>::TOPIC,
     );
-    let drive_topic = Topic::<Subscribe<state_api::drive::State>>::new_static(
-        <state_api::drive::State as ContractBody>::TOPIC,
-    );
     let motion = Subscriber::new(&bus, &motion_topic, 32).await?;
-    let drive = Subscriber::new(&bus, &drive_topic, 32).await?;
     loop {
-        tokio::select! {
-            received = motion.recv() => telemetry.record_motion(received?.body),
-            received = drive.recv() => telemetry.record_drive(received?.body),
-        }
+        telemetry.record_motion(motion.recv().await?.body);
     }
 }
 
@@ -485,7 +510,7 @@ async fn process_feed_loop(
     }
 }
 
-/// Subscribe `v2::router::Metrics` (the Traffic tab's data source).
+/// Subscribe v2::router::Metrics for the global Bus page.
 pub fn start_router_metrics_feed(
     namespace: String,
     robot_id: String,
@@ -538,15 +563,12 @@ async fn router_metrics_feed_loop(
     }
 }
 
-/// Subscribe `v2::joypad::Devices` AND own the `Connect`/`Rescan`
-/// publishers for the same tool, driven by the returned command channel - the
-/// TUI's Devices tab sends into it (`AppState`'s `DisplayAction::JoypadConnect`/
-/// `JoypadRescan`, relayed by `supervise_until_shutdown`), this loop publishes,
-/// and the SAME loop iteration's next `Devices` receive is the ack the
-/// selection is drawn from (never a local guess - see `JoypadDevicesSample`'s
-/// docs). Returns the command sender (installed on `telemetry` immediately,
-/// before the feed connects, so a command sent while the bus is still
-/// reconnecting is simply queued) plus the feed task's handle.
+/// Subscribe v2::joypad::Devices and own the Select, SetEnabled, and Rescan
+/// publishers. The TUI's Input page sends commands through DisplayAction;
+/// this loop publishes, and the next Devices receive is the authoritative
+/// acknowledgement. The command sender is installed on telemetry immediately,
+/// before the feed connects, so a command sent while the bus reconnects is
+/// queued. The returned handle owns both subscription and command publishing.
 pub fn start_joypad_devices_feed(
     namespace: String,
     robot_id: String,
@@ -598,10 +620,14 @@ async fn joypad_devices_feed_loop(
     );
     let devices_subscriber =
         Subscriber::<api::joypad::Devices>::new(&bus, &devices_topic, 32).await?;
-    let connect_topic = Topic::<Publish<api::joypad::Connect>>::new_static(
-        <api::joypad::Connect as ContractBody>::TOPIC,
+    let select_topic = Topic::<Publish<api::joypad::Select>>::new_static(
+        <api::joypad::Select as ContractBody>::TOPIC,
     );
-    let connect_publisher = Publisher::<api::joypad::Connect>::new(bus.clone(), &connect_topic)?;
+    let select_publisher = Publisher::<api::joypad::Select>::new(bus.clone(), &select_topic)?;
+    let enabled_topic = Topic::<Publish<api::joypad::SetEnabled>>::new_static(
+        <api::joypad::SetEnabled as ContractBody>::TOPIC,
+    );
+    let enabled_publisher = Publisher::<api::joypad::SetEnabled>::new(bus.clone(), &enabled_topic)?;
     let rescan_topic = Topic::<Publish<api::joypad::Rescan>>::new_static(
         <api::joypad::Rescan as ContractBody>::TOPIC,
     );
@@ -614,9 +640,14 @@ async fn joypad_devices_feed_loop(
             }
             command = command_rx.recv() => {
                 match command {
-                    Some(JoypadCommand::Connect(id)) => {
-                        if let Err(error) = connect_publisher.publish_at(now(), api::joypad::Connect { id }).await {
-                            tracing::warn!("joypad connect publish failed: {error:#}");
+                    Some(JoypadCommand::Select(id)) => {
+                        if let Err(error) = select_publisher.publish_at(now(), api::joypad::Select { id }).await {
+                            tracing::warn!("joypad select publish failed: {error:#}");
+                        }
+                    }
+                    Some(JoypadCommand::SetEnabled(enabled)) => {
+                        if let Err(error) = enabled_publisher.publish_at(now(), api::joypad::SetEnabled { enabled }).await {
+                            tracing::warn!("joypad enable publish failed: {error:#}");
                         }
                     }
                     Some(JoypadCommand::Rescan) => {
@@ -661,35 +692,10 @@ mod tests {
             ram_total_bytes: 200,
             load_1m: 0.5,
             window_ns: 1_000_000_000,
+            ..HostSample::default()
         });
         let snapshot = telemetry.snapshot();
         assert_eq!(snapshot.host.map(|host| host.value.cpu_pct), Some(42.0));
-        assert_eq!(snapshot.host_history.len(), 1);
-    }
-
-    /// The bug `TelemetryStore` fixes, exercised through the live
-    /// `TelemetryBackend` path rather than the store directly: two
-    /// consecutive, IDENTICAL `Host` samples must still advance the
-    /// Resources tab's history, since each is a genuinely new receive event
-    /// even though the payload happens not to have changed.
-    #[test]
-    fn record_host_advances_history_on_repeated_identical_samples() {
-        let telemetry = TelemetryBackend::new();
-        let sample = HostSample {
-            cpu_pct: 12.5,
-            ram_used_bytes: 100,
-            ram_total_bytes: 200,
-            load_1m: 0.3,
-            window_ns: 1_000_000_000,
-        };
-        telemetry.record_host(sample);
-        telemetry.record_host(sample);
-        telemetry.record_host(sample);
-        assert_eq!(
-            telemetry.snapshot().host_history.len(),
-            3,
-            "a flat/unchanging live sample must still advance the series"
-        );
     }
 
     #[test]

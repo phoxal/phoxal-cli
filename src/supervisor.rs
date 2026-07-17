@@ -88,6 +88,12 @@ pub struct ParticipantStatus {
     pub last_log_line: Option<String>,
     pub last_log_lines: Vec<String>,
     pub launch_command: Option<ParticipantLaunchCommand>,
+    /// Live child-process details for the interactive session only. These are
+    /// intentionally excluded from the persisted/JSON-stable board shape.
+    #[serde(skip)]
+    pub pid: Option<u32>,
+    #[serde(skip)]
+    pub artifact_size_bytes: Option<u64>,
 }
 
 impl ParticipantStatus {
@@ -103,6 +109,8 @@ impl ParticipantStatus {
             last_log_line: None,
             last_log_lines: Vec::new(),
             launch_command: None,
+            pid: None,
+            artifact_size_bytes: None,
         }
     }
 
@@ -198,6 +206,30 @@ pub enum LogSource {
     Raw,
 }
 
+/// Severity retained with routed logs so the global Logs page can filter
+/// structured events without parsing their rendered text. Raw child output
+/// has no typed level and is conservatively recorded as Info.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LogSeverity {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl From<api::logs::Level> for LogSeverity {
+    fn from(level: api::logs::Level) -> Self {
+        match level {
+            api::logs::Level::Trace => Self::Trace,
+            api::logs::Level::Debug => Self::Debug,
+            api::logs::Level::Info => Self::Info,
+            api::logs::Level::Warn => Self::Warn,
+            api::logs::Level::Error => Self::Error,
+        }
+    }
+}
+
 /// One routed log line, broadcast to [`BoardBackend::set_log_sink`]'s
 /// subscriber (a live TUI) in addition to the bounded 8-line history kept on
 /// the board itself. Kept separate from [`ParticipantStatus::last_log_lines`]
@@ -207,6 +239,7 @@ pub enum LogSource {
 pub struct RoutedLogLine {
     pub participant: String,
     pub source: LogSource,
+    pub severity: LogSeverity,
     pub text: String,
 }
 
@@ -414,6 +447,16 @@ impl BoardBackend {
         let mut snapshot = self.inner.lock().expect("board mutex poisoned");
         if let Some(status) = snapshot.participants.get_mut(id) {
             status.state = state;
+            if matches!(
+                state,
+                ParticipantState::Starting
+                    | ParticipantState::Restarting
+                    | ParticipantState::Failed
+                    | ParticipantState::Stopped
+            ) {
+                status.pid = None;
+                status.artifact_size_bytes = None;
+            }
             if note.is_some() {
                 status.note = note;
             }
@@ -472,6 +515,16 @@ impl BoardBackend {
     /// use, so a live TUI dedups by ROUTING (which of the two called this)
     /// rather than by comparing rendered text - see [`LogSource`].
     pub fn route_log(&self, id: &str, source: LogSource, text: impl Into<String>) {
+        self.route_log_with_severity(id, source, LogSeverity::Info, text);
+    }
+
+    pub fn route_log_with_severity(
+        &self,
+        id: &str,
+        source: LogSource,
+        severity: LogSeverity,
+        text: impl Into<String>,
+    ) {
         let text = text.into();
         self.append_log(id, text.clone());
         let sink = self.log_sink.lock().expect("log sink mutex poisoned");
@@ -483,6 +536,7 @@ impl BoardBackend {
             let _ = sender.try_send(RoutedLogLine {
                 participant: id.to_string(),
                 source,
+                severity,
                 text,
             });
         }
@@ -495,9 +549,32 @@ impl BoardBackend {
         }
     }
 
+    pub fn set_process_details(
+        &self,
+        id: &str,
+        pid: Option<u32>,
+        artifact_size_bytes: Option<u64>,
+    ) {
+        let mut snapshot = self.inner.lock().expect("board mutex poisoned");
+        if let Some(status) = snapshot.participants.get_mut(id) {
+            status.pid = pid;
+            status.artifact_size_bytes = artifact_size_bytes;
+        }
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> BoardSnapshot {
         self.inner.lock().expect("board mutex poisoned").clone()
+    }
+
+    /// Session-only receive instants for the TUI. This stays outside the
+    /// persisted BoardSnapshot and its stable plain/JSON representations.
+    #[must_use]
+    pub fn heartbeat_snapshot(&self) -> BTreeMap<String, Instant> {
+        self.heartbeats
+            .lock()
+            .expect("heartbeat mutex poisoned")
+            .clone()
     }
 }
 
@@ -735,7 +812,13 @@ impl RunningParticipant {
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to spawn {}", self.spec.command_line()))?;
-        let pid = child.id().unwrap_or_default();
+        let pid = child.id();
+        let artifact_size_bytes = fs::metadata(&self.spec.executable)
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len());
+        board.set_process_details(&self.spec.id, pid, artifact_size_bytes);
+        let pid = pid.unwrap_or_default();
         board.append_log(&self.spec.id, format!("supervisor: spawned pid {pid}"));
         board.set_launch_command(&self.spec.id, self.spec.launch_command());
         if let Some(stdout) = child.stdout.take() {
@@ -1913,7 +1996,12 @@ async fn bus_log_subscriber_loop(
     loop {
         let received = subscriber.recv().await?;
         let id = received.metadata.source.participant;
-        board.route_log(&id, LogSource::Bus, render_log_event(&received.body));
+        board.route_log_with_severity(
+            &id,
+            LogSource::Bus,
+            received.body.level.into(),
+            render_log_event(&received.body),
+        );
     }
 }
 
@@ -2107,6 +2195,32 @@ pub fn default_connect_endpoint() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_details_are_session_only_and_clear_with_the_incarnation() {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "motion",
+            ParticipantKind::Service,
+            ParticipantState::Ready,
+        ));
+        board.set_process_details("motion", Some(42), Some(1_024));
+
+        let snapshot = board.snapshot();
+        let status = snapshot.participants.get("motion").expect("motion");
+        assert_eq!(status.pid, Some(42));
+        assert_eq!(status.artifact_size_bytes, Some(1_024));
+        let json = serde_json::to_value(&snapshot).expect("serialize board");
+        let serialized = json.to_string();
+        assert!(!serialized.contains("pid"));
+        assert!(!serialized.contains("artifact_size_bytes"));
+
+        board.set_state("motion", ParticipantState::Restarting, None);
+        let snapshot = board.snapshot();
+        let status = snapshot.participants.get("motion").expect("motion");
+        assert_eq!(status.pid, None);
+        assert_eq!(status.artifact_size_bytes, None);
+    }
 
     fn spec(id: &str) -> ParticipantSpec {
         ParticipantSpec {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live split-recovery gate: robot-v1 simulation run default (phoxal/phoxal-cli#11).
+# Live split-recovery gate against the framework-owned hello-rover example.
 #
 # Proves the separated repos still resolve together:
 #
@@ -25,8 +25,8 @@
 # Usage:
 #   scripts/live-simulate-gate.sh [--live] [ROBOT_DIR]
 #
-# ROBOT_DIR defaults to ../robot-v1 (sibling-clone recovery layout). WORLD is
-# `default` (robot-v1 ships worlds/default.wbt).
+# ROBOT_DIR defaults to ../framework/examples/hello-rover in the sibling-clone
+# layout. WORLD is default.
 
 set -uo pipefail
 
@@ -42,7 +42,7 @@ for arg in "$@"; do
     *) robot_dir="${arg}" ;;
   esac
 done
-robot_dir="${robot_dir:-${CLI_REPO}/../robot-v1}"
+robot_dir="${robot_dir:-${CLI_REPO}/../framework/examples/hello-rover}"
 WORLD="default"
 
 red="\033[31m"; green="\033[32m"; cyan="\033[36m"; reset="\033[0m"
@@ -53,7 +53,7 @@ fail() { printf "${red}FAIL${reset} %s\n" "$1" >&2; exit 1; }
 # --- resolve target + CLI binary -------------------------------------------
 
 [[ -f "${robot_dir}/robot.yaml" ]] \
-  || fail "no robot.yaml in ${robot_dir} (pass ROBOT_DIR; expected the robot-v1 sibling clone)"
+  || fail "no robot.yaml in ${robot_dir} (pass ROBOT_DIR; expected framework/examples/hello-rover)"
 robot_dir="$(cd "${robot_dir}" && pwd)"
 
 CLI_BIN="${CLI_REPO}/target/debug/phoxal-cli"
@@ -64,7 +64,7 @@ fi
 
 # --- 1. live dry-run (resolve, no launch-directory writes) ------------------
 
-step "Gate -- robot-v1: phoxal-cli simulation run ${WORLD} --dry-run (live resolve)"
+step "Gate -- hello-rover: phoxal-cli simulation run ${WORLD} --dry-run (live resolve)"
 if ! (cd "${robot_dir}" && rm -rf .phoxal/run .phoxal/webots \
         && "${CLI_BIN}" simulation run "${WORLD}" --dry-run >/dev/null); then
   fail "simulation run ${WORLD} --dry-run failed (live resolution, or missing world
@@ -88,7 +88,7 @@ fi
 
 # --- 2. live gate ----------------------------------------------------------
 
-step "Gate -- robot-v1: phoxal-cli simulation run ${WORLD} (Ctrl-C after inspection)"
+step "Gate -- hello-rover: phoxal-cli simulation run ${WORLD} (Ctrl-C after inspection)"
 if ! (cd "${robot_dir}" && "${CLI_BIN}" simulation run "${WORLD}"); then
   fail "simulation run ${WORLD} failed"
 fi
