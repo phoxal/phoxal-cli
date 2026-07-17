@@ -23,10 +23,12 @@ pub enum DisplayAction {
     /// `--watch` hot-reload already uses (see
     /// `SessionController::set_restart_channel`).
     Restart(String),
-    /// `↵` on a device row in the joypad Devices tab - publish
-    /// `joypad::Connect { id }`. The selection shown afterward comes from the
+    /// Enter on a device row in Input publishes joypad::Select. The selection
+    /// shown afterward comes from the
     /// tool's own next `Devices` publish (the ack), never set locally here.
-    JoypadConnect(String),
-    /// `r` in the joypad Devices tab - publish `joypad::Rescan {}`.
+    JoypadSelect(String),
+    /// e/x in Input publishes the requested authoritative enable state.
+    JoypadSetEnabled(bool),
+    /// r in Input publishes joypad::Rescan.
     JoypadRescan,
 }

@@ -2919,9 +2919,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal"
-version = "0.34.0"
+version = "0.34.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80152d93261b876b6ecafb978371fcd553c84a0e389f96e57d38cccee8465138"
+checksum = "76be306e58c7a9190de6a02cbd6956f029b1ed63d98365647d59658ea1619059"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2932,7 +2932,7 @@ dependencies = [
  "nalgebra",
  "phoxal-api",
  "phoxal-bus",
- "phoxal-macros 0.23.0",
+ "phoxal-macros",
  "rmp-serde",
  "serde",
  "serde_bytes",
@@ -2950,12 +2950,12 @@ dependencies = [
 
 [[package]]
 name = "phoxal-api"
-version = "0.21.0"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53fa5b6df1fd533bcdedf03b99ed7469292b06c550f4fc3bdcd930172825ad68"
+checksum = "f65badc4d9fd9f15adc30dd266181946fe9ac562bc5b1bf9688382afc8ec8815"
 dependencies = [
  "phoxal-bus",
- "phoxal-macros 0.22.0",
+ "phoxal-macros",
  "serde",
  "serde_bytes",
 ]
@@ -3029,22 +3029,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-macros"
-version = "0.22.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12f1302b63e1541a6ac886b9a36c778051c3f0d2017b52be04587460ab43ec06"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "serde_derive_internals",
- "syn",
-]
-
-[[package]]
-name = "phoxal-macros"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78f08350e45457f9f2ae00936f29929c322e705e7c750dd0e7ce133e00935bcf"
+checksum = "2f3b4b7abd6617b16421b6e6a267fbd8927fe1ee89d40be71abd0c2727e038ae"
 dependencies = [
  "heck",
  "proc-macro2",

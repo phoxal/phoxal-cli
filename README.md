@@ -43,6 +43,25 @@ phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build va
 
 Commands that emit machine-readable state accept `--message-format human|json`.
 
+### Interactive sessions
+
+On an interactive terminal, both `run` and live `simulation run` use the
+same five fixed pages:
+
+| Page | Purpose |
+|---|---|
+| **Overview** | Host CPU, memory, root disk, load, uptime, robot-runtime summary, and direct lifecycle attention. |
+| **Runtimes** | Flat robot-runtime table plus one read-only detail view. Standard tools and Webots internals stay hidden. |
+| **Logs** | One bounded robot-runtime log stream with runtime, severity, and text filters plus follow/pause. |
+| **Bus** | Router-observed topics, producers, ingress rate, count, throughput, and receive-time freshness. |
+| **Input** | Authoritative controller selection and enable state. Selection never enables manual input. |
+
+Use `1`-`5` or the arrow keys to change pages, `?` for contextual help,
+`i` for read-only Session Information, and `q` or Ctrl-C to stop. Input
+starts disabled; `Enter` selects a controller, `e` enables, `x` disables,
+and `r` rescans. Plain and JSON modes retain their existing non-interactive
+output.
+
 ### Dev Path Overrides
 
 Local artifact source overrides use exact provider-qualified package IDs under `artifacts.pins`. Paths that stay inside the project are allowed in the base `robot.yaml`; absolute paths and paths that escape the project are legal only in dev overlays such as `robot.dev.yaml`:
@@ -106,7 +125,7 @@ Example: `phoxal-cli simulation run default` finds `worlds/default.wbt` in the p
 
 ## Live Split-Recovery Gate
 
-`scripts/live-simulate-gate.sh` is the historical split-recovery smoke gate for
+`scripts/live-simulate-gate.sh` is the split-recovery smoke gate for
 the separated repos. The D5 native artifact path now resolves official service
 and driver metadata from the generated artifact catalog; published native
 release assets are still pending. For local development, generate a metadata
@@ -114,7 +133,7 @@ catalog from the framework checkout and pass it with `--catalog` or
 `PHOXAL_ARTIFACT_CATALOG`.
 
 ```sh
-# from the phoxal-cli checkout; ROBOT_DIR defaults to ../robot-v1
+# from the phoxal-cli checkout; ROBOT_DIR defaults to the framework hello-rover example
 scripts/live-simulate-gate.sh            # smoke: live resolve + dry-run report (CI-safe)
 scripts/live-simulate-gate.sh --live     # full live run (needs Webots)
 ```
