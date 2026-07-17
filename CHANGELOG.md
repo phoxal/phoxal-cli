@@ -4,10 +4,17 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
-## [0.14.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.14.1) - 2026-07-16
+## [0.14.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.14.2) - 2026-07-17
 
 
 ### Fixed
+
+- *(simulation)* Respect Webots-owned lifecycle (#150)
+
+## [0.14.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.14.1) - 2026-07-16
+
+
+### Refactored
 
 - *(runtime)* Keep site tools clockless (#148)
 
@@ -363,3 +370,4 @@ All notable changes documented here. The format follows
 ### Tests
 
 - Inline plan_robot.yaml fixture so CI doesn't need sibling framework checkout
+
