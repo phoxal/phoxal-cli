@@ -20,8 +20,11 @@
 
 use std::path::Path;
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::commands::MessageFormat;
 use crate::resolver::{discover_robot_yaml, load_robot};
+use crate::stores::log_store::sanitize_terminal_text;
 use crate::theme::Theme;
 
 /// User-facing shape of this invocation, shown in the welcome card.
@@ -56,6 +59,7 @@ impl TerminalMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentitySummary {
     pub robot: String,
+    pub namespace: String,
     pub channel: String,
     pub manifest: String,
     pub terminal: TerminalMode,
@@ -66,16 +70,30 @@ impl IdentitySummary {
     pub fn discover(project_root: &Path, terminal: TerminalMode) -> Option<Self> {
         let manifest_path = discover_robot_yaml(project_root).ok()?;
         let robot = load_robot(&manifest_path).ok()?;
-        let manifest = pathdiff::diff_paths(&manifest_path, project_root)
-            .unwrap_or(manifest_path)
-            .display()
-            .to_string();
+        let manifest = display_manifest_path(&manifest_path, project_root);
         Some(Self {
             robot: robot.robot.id,
+            namespace: robot.robot.namespace,
             channel: robot.artifacts.channel.as_str().to_string(),
-            manifest: format!("./{manifest}"),
+            manifest,
             terminal,
         })
+    }
+}
+
+fn display_manifest_path(manifest_path: &Path, project_root: &Path) -> String {
+    let display_path = pathdiff::diff_paths(manifest_path, project_root)
+        .unwrap_or_else(|| manifest_path.to_path_buf());
+    let text = display_path.display().to_string();
+    let is_local_relative = display_path.is_relative()
+        && !matches!(
+            display_path.components().next(),
+            Some(std::path::Component::ParentDir)
+        );
+    if is_local_relative {
+        format!("./{text}")
+    } else {
+        text
     }
 }
 
@@ -132,6 +150,7 @@ pub fn print(
 /// │       ◇ ◇     p h o x a l                  │
 /// │      ◇◇◇◇◇     phoxal-cli 0.9.0            │
 /// │    robot      rover-01                     │
+/// │    namespace  dev                          │
 /// │    manifest   ./robot.yaml                 │
 /// │    channel    dev                          │
 /// ╰────────────────────────────────────────────╯
@@ -154,15 +173,19 @@ fn render_welcome_card(summary: &IdentitySummary, theme: Theme, cli_version: &st
         (String::new(), None),
         (
             "robot".to_string(),
-            Some(theme.text_primary(&summary.robot)),
+            Some(theme.text_primary(&sanitize_terminal_text(&summary.robot))),
+        ),
+        (
+            "namespace".to_string(),
+            Some(theme.text_primary(&sanitize_terminal_text(&summary.namespace))),
         ),
         (
             "manifest".to_string(),
-            Some(theme.text_primary(&summary.manifest)),
+            Some(theme.text_primary(&sanitize_terminal_text(&summary.manifest))),
         ),
         (
             "channel".to_string(),
-            Some(theme.text_primary(&summary.channel)),
+            Some(theme.text_primary(&sanitize_terminal_text(&summary.channel))),
         ),
         (
             "terminal".to_string(),
@@ -181,7 +204,7 @@ fn render_welcome_card(summary: &IdentitySummary, theme: Theme, cli_version: &st
         .collect();
     let inner_width = plain_rows
         .iter()
-        .map(|row| row.chars().count())
+        .map(|row| UnicodeWidthStr::width(row.as_str()))
         .max()
         .unwrap_or(0)
         + 4;
@@ -197,7 +220,7 @@ fn render_welcome_card(summary: &IdentitySummary, theme: Theme, cli_version: &st
             None => label.clone(),
         };
         let pad = inner_width
-            .saturating_sub(plain.chars().count())
+            .saturating_sub(UnicodeWidthStr::width(plain.as_str()))
             .saturating_sub(2);
         card.push('\n');
         card.push_str(&theme.border(&VERTICAL.to_string()));
@@ -301,16 +324,35 @@ mod tests {
     }
 
     #[test]
+    fn manifest_display_prefixes_only_paths_inside_the_project() {
+        let project = Path::new("/workspace/robot");
+        assert_eq!(
+            display_manifest_path(Path::new("/workspace/robot/robot.yaml"), project),
+            "./robot.yaml"
+        );
+        assert_eq!(
+            display_manifest_path(Path::new("/workspace/robot/../robot.yaml"), project),
+            "../robot.yaml"
+        );
+        assert_eq!(
+            display_manifest_path(Path::new("/outside/robot.yaml"), Path::new("relative/root")),
+            "/outside/robot.yaml"
+        );
+    }
+
+    #[test]
     fn welcome_card_is_a_closed_rounded_box_containing_every_field() {
         let summary = IdentitySummary {
-            robot: "rover-01".to_string(),
+            robot: "探査-rover-01".to_string(),
+            namespace: "dev".to_string(),
             channel: "stable".to_string(),
             manifest: "./robot.yaml".to_string(),
             terminal: TerminalMode::Full,
         };
         let theme = Theme::new(crate::theme::ColorCapability::None);
         let card = render_welcome_card(&summary, theme, "0.9.0");
-        assert!(card.contains("rover-01"));
+        assert!(card.contains("探査-rover-01"));
+        assert!(card.contains("dev"));
         assert!(card.contains("./robot.yaml"));
         assert!(card.contains("stable"));
         assert!(card.contains("full"));
@@ -318,10 +360,10 @@ mod tests {
         assert!(card.starts_with('╭'));
         assert!(card.trim_end().ends_with('╯'));
         let lines: Vec<&str> = card.lines().collect();
-        let width = lines[0].chars().count();
+        let width = UnicodeWidthStr::width(lines[0]);
         for line in &lines {
             assert_eq!(
-                line.chars().count(),
+                UnicodeWidthStr::width(*line),
                 width,
                 "every card row must share the box width: {line:?}"
             );

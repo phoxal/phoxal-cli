@@ -4,8 +4,9 @@
 use std::cmp::Ordering;
 use std::time::Instant;
 
+use crate::participant_kind::ParticipantKind;
 use crate::stores::log_store::LogStore;
-use crate::stores::runtime_store::RuntimeStore;
+use crate::stores::runtime_store::{RuntimeOrigin, RuntimeStore};
 use crate::supervisor::{BoardSnapshot, ParticipantState, ParticipantStatus};
 use crate::telemetry::TelemetrySnapshot;
 use crate::tui::visibility::is_visible_runtime;
@@ -17,6 +18,26 @@ pub struct RuntimeSummary {
     pub failed: usize,
     pub starting: usize,
     pub restarts: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RuntimeGroup {
+    UserServices,
+    FrameworkServices,
+    Drivers,
+}
+
+impl RuntimeGroup {
+    pub const ALL: [Self; 3] = [Self::UserServices, Self::FrameworkServices, Self::Drivers];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::UserServices => "User services",
+            Self::FrameworkServices => "Framework services",
+            Self::Drivers => "Drivers",
+        }
+    }
 }
 
 pub struct SessionViewModel<'a> {
@@ -93,6 +114,87 @@ impl<'a> SessionViewModel<'a> {
             })
             .collect()
     }
+
+    #[must_use]
+    pub fn summary_for_mode(&self, simulation: bool) -> RuntimeSummary {
+        if !simulation {
+            return self.summary;
+        }
+        let mut summary = RuntimeSummary::default();
+        for status in self
+            .runtimes
+            .iter()
+            .copied()
+            .filter(|status| self.runtime_is_loaded(status, simulation))
+        {
+            match status.state {
+                ParticipantState::Ready => summary.ready += 1,
+                ParticipantState::Degraded => summary.degraded += 1,
+                ParticipantState::Failed => summary.failed += 1,
+                ParticipantState::Starting | ParticipantState::Restarting => summary.starting += 1,
+                ParticipantState::Stopped => {}
+            }
+            summary.restarts = summary.restarts.saturating_add(
+                self.runtime
+                    .observation(&status.id)
+                    .map_or(status.restart_count, |observation| {
+                        observation.displayed_restarts()
+                    }),
+            );
+        }
+        summary
+    }
+
+    #[must_use]
+    pub fn needs_attention_for_mode(&self, simulation: bool) -> Vec<&ParticipantStatus> {
+        self.needs_attention()
+            .into_iter()
+            .filter(|status| self.runtime_is_loaded(status, simulation))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn runtime_is_loaded(&self, status: &ParticipantStatus, simulation: bool) -> bool {
+        !simulation || self.runtime_group(status) != RuntimeGroup::Drivers
+    }
+
+    #[must_use]
+    pub fn runtime_group(&self, status: &ParticipantStatus) -> RuntimeGroup {
+        if status.kind == ParticipantKind::Driver {
+            return RuntimeGroup::Drivers;
+        }
+        if self
+            .runtime
+            .metadata(&status.id)
+            .is_some_and(|metadata| metadata.origin == RuntimeOrigin::UserService)
+        {
+            RuntimeGroup::UserServices
+        } else {
+            RuntimeGroup::FrameworkServices
+        }
+    }
+
+    #[must_use]
+    pub fn runtimes_in(&self, group: RuntimeGroup) -> Vec<(usize, &'a ParticipantStatus)> {
+        self.runtimes
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, status)| self.runtime_group(status) == group)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn runtimes_in_mode(
+        &self,
+        group: RuntimeGroup,
+        simulation: bool,
+    ) -> Vec<(usize, &'a ParticipantStatus)> {
+        self.runtimes_in(group)
+            .into_iter()
+            .filter(|(_, status)| self.runtime_is_loaded(status, simulation))
+            .collect()
+    }
 }
 
 fn runtime_order(
@@ -100,6 +202,18 @@ fn runtime_order(
     right: &ParticipantStatus,
     runtime: &RuntimeStore,
 ) -> Ordering {
+    let group = |status: &ParticipantStatus| {
+        if status.kind == ParticipantKind::Driver {
+            RuntimeGroup::Drivers
+        } else if runtime
+            .metadata(&status.id)
+            .is_some_and(|metadata| metadata.origin == RuntimeOrigin::UserService)
+        {
+            RuntimeGroup::UserServices
+        } else {
+            RuntimeGroup::FrameworkServices
+        }
+    };
     let priority = |status: &ParticipantStatus| match status.state {
         ParticipantState::Failed => 0,
         ParticipantState::Degraded => 1,
@@ -112,9 +226,11 @@ fn runtime_order(
         }
         _ => 4,
     };
-    priority(left)
-        .cmp(&priority(right))
-        .then_with(|| left.id.cmp(&right.id))
+    group(left).cmp(&group(right)).then_with(|| {
+        priority(left)
+            .cmp(&priority(right))
+            .then_with(|| left.id.cmp(&right.id))
+    })
 }
 
 #[cfg(test)]
@@ -147,6 +263,34 @@ mod tests {
                 .map(|status| status.id.as_str())
                 .collect::<Vec<_>>(),
             ["failed", "degraded", "starting", "ready"]
+        );
+    }
+
+    #[test]
+    fn runtime_rows_group_user_framework_then_drivers() {
+        let mut board = BoardSnapshot::default();
+        for (id, kind) in [
+            ("framework", ParticipantKind::Service),
+            ("driver", ParticipantKind::Driver),
+            ("user", ParticipantKind::Service),
+        ] {
+            board.participants.insert(
+                id.to_string(),
+                ParticipantStatus::new(id, kind, ParticipantState::Ready),
+            );
+        }
+        let logs = LogStore::new();
+        let mut runtime = RuntimeStore::new();
+        runtime.set_test_origin("user", RuntimeOrigin::UserService);
+        let telemetry = TelemetrySnapshot::default();
+        let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
+        assert_eq!(
+            model
+                .runtimes
+                .iter()
+                .map(|status| status.id.as_str())
+                .collect::<Vec<_>>(),
+            ["user", "framework", "driver"]
         );
     }
 }

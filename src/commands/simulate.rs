@@ -36,9 +36,9 @@ use crate::simulate_staging::{
 use crate::supervisor::{
     BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
     RequestedStop, RouterOwnership, SupervisionStage, SupervisorAction, SupervisorLock,
-    SupervisorOptions, SupervisorOutcome, default_connect_endpoint, local_router_reachable,
-    router_ownership, start_bus_log_subscriber, start_clock_feed,
-    start_presence_heartbeat_subscriber, supervise_until_shutdown, wait_for_endpoint,
+    SupervisorOptions, default_connect_endpoint, local_router_reachable, router_ownership,
+    start_bus_log_subscriber, start_clock_feed, start_presence_heartbeat_subscriber,
+    supervise_until_shutdown, wait_for_endpoint,
 };
 use crate::webots_stage_root;
 use crate::world;
@@ -266,7 +266,7 @@ pub async fn run(
             );
             let mut controller = crate::session::controller::SessionController::new(
                 app.output,
-                "simulation",
+                crate::session::controller::SessionMode::Simulation,
                 identity,
             )?;
             let events = controller.events();
@@ -303,27 +303,35 @@ pub async fn run(
             );
             let setup = controller.drive_setup(setup).await?;
 
-            controller.set_restart_channel(setup.action_tx);
+            let LiveSimSetup {
+                _locks: locks,
+                board,
+                telemetry,
+                runtime_store,
+                orderly_shutdown_timeout,
+                stages,
+                supervisor_options,
+                action_tx,
+                background_tasks,
+            } = setup;
+            controller.set_restart_channel(action_tx);
+            let supervise_task = tokio::spawn(supervise_until_shutdown(
+                stages,
+                board.clone(),
+                supervisor_options,
+            ));
 
             let outcome = controller
                 .drive_supervision(
-                    setup.board,
-                    setup.telemetry,
-                    setup.runtime_store,
-                    setup.supervise_task,
+                    board,
+                    telemetry,
+                    runtime_store,
+                    orderly_shutdown_timeout,
+                    supervise_task,
                 )
                 .await;
-            if let Some(handle) = setup.watch_handle {
-                handle.abort();
-            }
-            setup.spawn_responder.abort();
-            // Finding B6: every feed task (log/presence subscribers, clock
-            // telemetry, live telemetry) participates in teardown
-            // instead of being leaked under a `_`-prefixed binding for the
-            // rest of the process's life.
-            for feed in setup.feed_tasks {
-                feed.abort();
-            }
+            drop(background_tasks);
+            drop(locks);
             let outcome = outcome?;
             // Participant failures were already rendered continuously on the
             // board. `drive_supervision` has consumed and torn down the
@@ -350,15 +358,15 @@ struct LiveSimSetup {
     board: BoardBackend,
     telemetry: crate::telemetry::TelemetryBackend,
     runtime_store: crate::stores::runtime_store::RuntimeStore,
-    supervise_task: JoinHandle<Result<SupervisorOutcome>>,
-    watch_handle: Option<JoinHandle<()>>,
-    spawn_responder: JoinHandle<()>,
+    orderly_shutdown_timeout: std::time::Duration,
+    stages: Vec<SupervisionStage>,
+    supervisor_options: SupervisorOptions,
     action_tx: mpsc::Sender<SupervisorAction>,
     /// Every feed task that must stay alive for the whole session (log/
     /// presence subscribers, clock telemetry, live telemetry) -
     /// collected here instead of leaked under `_`-prefixed bindings (finding
     /// B6), so the caller can abort every one of them once supervision ends.
-    feed_tasks: Vec<JoinHandle<()>>,
+    background_tasks: crate::commands::run::AbortTasks,
 }
 
 struct LiveSimulationLocks {
@@ -391,14 +399,23 @@ async fn live_simulate_setup(
     output: OutputContext,
     renders_tui: bool,
 ) -> Result<LiveSimSetup> {
+    let ensure_active = || {
+        if token.is_cancelled() {
+            bail!("simulation setup cancelled");
+        }
+        Ok(())
+    };
+    ensure_active()?;
     crate::host_doctor::preflight()
         .map_err(|error| anyhow!("{error}"))
         .context("Webots preflight failed; live simulate cannot launch the simulator")?;
+    ensure_active()?;
 
     let run_dir = crate::host_paths::run_dir()?;
     let locks = LiveSimulationLocks::acquire(&run_dir, &crate::host_paths::simulator_lock_path()?)?;
-    crate::runtime_root::publish(&sim.ctx.project_root, &sim.ctx.resolved)
+    let runtime_root = crate::runtime_root::publish(&sim.ctx.project_root, &sim.ctx.resolved)
         .context("failed to publish the simulation runtime robot root")?;
+    ensure_active()?;
     let board = BoardBackend::new();
     let router_ownership = router_ownership(local_router_reachable(&default_connect_endpoint()));
     let mut runtime_store = sim.runtime_store.clone();
@@ -407,11 +424,13 @@ async fn live_simulate_setup(
     crate::commands::run::prepare_site_tools(
         &sim.plan,
         &sim.ctx.resolved,
+        &runtime_root,
         &board,
         &mut specs,
         router_ownership,
         &ui,
     )?;
+    ensure_active()?;
     crate::commands::run::prepare_robot_participants(
         &sim.plan,
         &sim.ctx.resolved,
@@ -421,11 +440,16 @@ async fn live_simulate_setup(
         &mut specs,
         &ui,
     )?;
+    ensure_active()?;
     prepare_substitution_notes(&sim.plan, &board);
 
     let (webots_spec, spawn_descriptors) = stage_and_prepare_webots_spec(&ui, &sim)?;
+    ensure_active()?;
+    let mut background_tasks = crate::commands::run::AbortTasks::default();
     let spawn_responder =
         start_spawn_responder(&sim.plan, spawn_descriptors, router_ownership).await?;
+    background_tasks.push(spawn_responder);
+    ensure_active()?;
     let requested_stop = RequestedStop::new(WEBOTS_SITE_ID, webots_spec.shutdown_grace);
     specs.push(webots_spec);
 
@@ -442,24 +466,25 @@ async fn live_simulate_setup(
     }
     crate::commands::run::report_launch_commands(&sim.plan, &specs, options.message_format, &ui)?;
 
-    let mut feed_tasks = sim
-        .plan
-        .robots
-        .iter()
-        .map(|robot| {
-            start_bus_log_subscriber(
-                robot.namespace.clone(),
-                robot.id.clone(),
-                default_connect_endpoint(),
-                board.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
+    background_tasks.extend(
+        sim.plan
+            .robots
+            .iter()
+            .map(|robot| {
+                start_bus_log_subscriber(
+                    robot.namespace.clone(),
+                    robot.id.clone(),
+                    default_connect_endpoint(),
+                    board.clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
     // OBSERVED readiness: drive board state from each participant's own
     // presence/heartbeat, including SIMULATION-MANAGED ones (the
     // supervisor and every controller), which have no supervised
     // process of their own to poll.
-    feed_tasks.extend(sim.plan.robots.iter().map(|robot| {
+    background_tasks.extend(sim.plan.robots.iter().map(|robot| {
         start_presence_heartbeat_subscriber(
             robot.namespace.clone(),
             robot.id.clone(),
@@ -477,7 +502,7 @@ async fn live_simulate_setup(
         clock_robot.id.clone(),
         default_connect_endpoint(),
     );
-    feed_tasks.push(clock_task);
+    background_tasks.push(clock_task);
     // Clock observation is telemetry only. Startup and session state do not
     // wait for a sample; clocked services and drivers consume it independently
     // through their simulation-clock runner policy.
@@ -487,12 +512,12 @@ async fn live_simulate_setup(
     // The restart/hot-reload action channel always exists now (not just
     // under `--watch`), matching `commands::run`.
     let (action_tx, action_rx) = mpsc::channel(16);
-    let watch_handle = if options.watch {
+    if options.watch {
         let live_ids = specs
             .iter()
             .map(|spec| spec.id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        Some(crate::watch::spawn_sim_watch(
+        background_tasks.push(crate::watch::spawn_sim_watch(
             crate::watch::SimWatchConfig {
                 ctx: sim.ctx.clone(),
                 options: options.clone(),
@@ -500,10 +525,8 @@ async fn live_simulate_setup(
                 board: board.clone(),
                 action_tx: action_tx.clone(),
             },
-        ))
-    } else {
-        None
-    };
+        ));
+    }
 
     let stages = stages_for_simulate(specs, &sim.plan, output);
 
@@ -521,7 +544,7 @@ async fn live_simulate_setup(
         .map(|robot| (robot.namespace.clone(), robot.id.clone()))
         .collect();
     if renders_tui {
-        feed_tasks.extend(crate::commands::run::start_telemetry_feeds(
+        background_tasks.extend(crate::commands::run::start_telemetry_feeds(
             &site_targets,
             &telemetry,
         ));
@@ -533,30 +556,26 @@ async fn live_simulate_setup(
     let _ = events
         .send(crate::session::event::SessionEvent::SessionChanged { state: starting })
         .await;
-    let board_for_supervise = board.clone();
-    let supervise_task = tokio::spawn(supervise_until_shutdown(
-        stages,
-        board_for_supervise,
-        SupervisorOptions {
-            action_rx: Some(action_rx),
-            requested_stop: Some(requested_stop),
-            token: token.clone(),
-            events: Some(events.clone()),
-            emits_running_on_startup_complete: true,
-            ..SupervisorOptions::default()
-        },
-    ));
+    let supervisor_options = SupervisorOptions {
+        action_rx: Some(action_rx),
+        requested_stop: Some(requested_stop),
+        token: token.clone(),
+        events: Some(events.clone()),
+        emits_running_on_startup_complete: true,
+        ..SupervisorOptions::default()
+    };
 
+    let orderly_shutdown_timeout = crate::supervisor::orderly_shutdown_budget(&stages);
     Ok(LiveSimSetup {
         _locks: locks,
         board,
         telemetry,
         runtime_store,
-        supervise_task,
-        watch_handle,
-        spawn_responder,
+        orderly_shutdown_timeout,
+        stages,
+        supervisor_options,
         action_tx,
-        feed_tasks,
+        background_tasks,
     })
 }
 

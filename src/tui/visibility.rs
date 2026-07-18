@@ -19,11 +19,7 @@ pub fn is_visible_runtime(status: &ParticipantStatus, runtime: &RuntimeStore) ->
 }
 
 fn is_session_internal_runtime_id(id: &str) -> bool {
-    id == "supervisor"
-        || id == "webots"
-        || id.starts_with("tool-")
-        || id.starts_with("simulator-")
-        || id.starts_with("webots-")
+    is_known_internal_id(id)
 }
 
 #[must_use]
@@ -31,16 +27,24 @@ pub fn is_internal_id(id: &str, board: &BoardSnapshot, runtime: &RuntimeStore) -
     if let Some(status) = board.participants.get(id) {
         return !is_visible_runtime(status, runtime);
     }
-    if id == "phoxal-cli"
-        || id.starts_with("tool-")
-        || id.starts_with("webots")
-        || id.contains("supervisor")
-        || id.contains("controller")
-        || id.contains("simulator")
-    {
-        return true;
-    }
-    false
+    is_known_internal_id(id)
+}
+
+fn is_known_internal_id(id: &str) -> bool {
+    id.eq_ignore_ascii_case("phoxal-cli")
+        || starts_with_ignore_ascii_case(id, "phoxal-cli/")
+        || starts_with_ignore_ascii_case(id, "tool-")
+        || id.eq_ignore_ascii_case("supervisor")
+        || id.eq_ignore_ascii_case("webots")
+        || starts_with_ignore_ascii_case(id, "webots-")
+        || starts_with_ignore_ascii_case(id, "simulator-")
+}
+
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 #[cfg(test)]
@@ -89,6 +93,10 @@ mod tests {
             participants: [(status.id.clone(), status)].into(),
         };
         assert!(!is_internal_id("flight-controller", &board, &runtime));
+        assert!(
+            !is_internal_id("arm-controller", &BoardSnapshot::default(), &runtime),
+            "unknown robot-style names stay visible until metadata arrives"
+        );
     }
 
     #[test]
@@ -102,5 +110,24 @@ mod tests {
                 "{id} is session infrastructure, not a robot runtime"
             );
         }
+    }
+
+    #[test]
+    fn cli_diagnostic_sources_are_internal_case_insensitively() {
+        let board = BoardSnapshot::default();
+        let runtime = RuntimeStore::new();
+        for id in ["phoxal-cli", "phoxal-cli/Cli", "phoxal-cli/Supervisor"] {
+            assert!(is_internal_id(id, &board, &runtime), "{id}");
+        }
+
+        let cli = ParticipantStatus::new(
+            "phoxal-cli",
+            ParticipantKind::Service,
+            ParticipantState::Ready,
+        );
+        let board = BoardSnapshot {
+            participants: [(cli.id.clone(), cli)].into(),
+        };
+        assert!(is_internal_id("phoxal-cli", &board, &runtime));
     }
 }

@@ -16,7 +16,7 @@ use phoxal_api::v1 as api;
 // this module also consumes use current production `v1`.
 use phoxal_api::v2 as preview_api;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -39,6 +39,24 @@ pub const START_LIMIT_BURST: usize = 5;
 /// trips it; a genuinely dead/hung participant still gets caught within one
 /// supervisor board render cycle of the deadline passing.
 pub const HEARTBEAT_STALE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_LOG_TEXT_CHARS: usize = 4_096;
+/// Four bytes per Unicode scalar keeps a complete display line bounded before
+/// lossy UTF-8 decoding. Bytes beyond this limit are drained and represented
+/// by one ellipsis when the newline (or EOF) arrives.
+const MAX_CAPTURED_LINE_BYTES: usize = MAX_LOG_TEXT_CHARS * 4;
+
+fn bounded_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let mut bounded = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
+
+fn bounded_log_text(text: &str) -> String {
+    bounded_chars(text, MAX_LOG_TEXT_CHARS)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -282,6 +300,10 @@ pub struct BoardBackend {
     /// the newest line rather than blocking the log-subscriber task that
     /// calls it.
     log_sink: Arc<Mutex<Option<mpsc::Sender<RoutedLogLine>>>>,
+    /// First-seen unknown bus ids already disclosed to the operator. The set
+    /// is deliberately small: an untrusted publisher cannot turn diagnostics
+    /// about rejected ids into another unbounded allocation vector.
+    unknown_bus_ids: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl BoardBackend {
@@ -298,28 +320,17 @@ impl BoardBackend {
     /// participants registered with [`Self::mark_presence_recoverable`] may
     /// recover from `Failed`/`Degraded` when their owner recreates them.
     pub fn record_heartbeat(&self, id: &str, readiness: api::presence::Readiness) {
-        self.heartbeats
-            .lock()
-            .expect("heartbeat mutex poisoned")
-            .insert(id.to_string(), Instant::now());
-        if matches!(readiness, api::presence::Readiness::Ready) {
-            self.ready_once
-                .lock()
-                .expect("ready-once mutex poisoned")
-                .insert(id.to_string());
-        }
-        let mut snapshot = self.inner.lock().expect("board mutex poisoned");
-        let status = snapshot
-            .participants
-            .entry(id.to_string())
-            .or_insert_with(|| {
-                ParticipantStatus::new(id, ParticipantKind::Service, ParticipantState::Starting)
-            });
         let recoverable = self
             .recoverable_presence
             .lock()
             .expect("recoverable presence mutex poisoned")
             .contains(id);
+        let mut snapshot = self.inner.lock().expect("board mutex poisoned");
+        let Some(status) = snapshot.participants.get_mut(id) else {
+            drop(snapshot);
+            self.disclose_unknown_bus_id(id, "heartbeat");
+            return;
+        };
         if status.state == ParticipantState::Stopped
             || (status.state == ParticipantState::Failed && !recoverable)
         {
@@ -345,6 +356,17 @@ impl BoardBackend {
             )
         {
             status.note = Some("Webots-managed participant observed again".to_string());
+        }
+        drop(snapshot);
+        self.heartbeats
+            .lock()
+            .expect("heartbeat mutex poisoned")
+            .insert(id.to_string(), Instant::now());
+        if matches!(readiness, api::presence::Readiness::Ready) {
+            self.ready_once
+                .lock()
+                .expect("ready-once mutex poisoned")
+                .insert(id.to_string());
         }
     }
 
@@ -443,6 +465,15 @@ impl BoardBackend {
             .insert(status.id.clone(), status);
     }
 
+    fn register_planned(&self, id: &str, kind: ParticipantKind) {
+        self.inner
+            .lock()
+            .expect("board mutex poisoned")
+            .participants
+            .entry(id.to_string())
+            .or_insert_with(|| ParticipantStatus::new(id, kind, ParticipantState::Starting));
+    }
+
     pub fn set_state(&self, id: &str, state: ParticipantState, note: Option<String>) {
         let mut snapshot = self.inner.lock().expect("board mutex poisoned");
         if let Some(status) = snapshot.participants.get_mut(id) {
@@ -451,7 +482,6 @@ impl BoardBackend {
                 state,
                 ParticipantState::Starting
                     | ParticipantState::Restarting
-                    | ParticipantState::Failed
                     | ParticipantState::Stopped
             ) {
                 status.pid = None;
@@ -465,13 +495,9 @@ impl BoardBackend {
 
     pub fn set_note(&self, id: &str, note: impl Into<String>) {
         let mut snapshot = self.inner.lock().expect("board mutex poisoned");
-        let status = snapshot
-            .participants
-            .entry(id.to_string())
-            .or_insert_with(|| {
-                ParticipantStatus::new(id, ParticipantKind::Service, ParticipantState::Ready)
-            });
-        status.note = Some(note.into());
+        if let Some(status) = snapshot.participants.get_mut(id) {
+            status.note = Some(note.into());
+        }
     }
 
     pub fn set_restart_count(&self, id: &str, count: u32) {
@@ -482,14 +508,15 @@ impl BoardBackend {
     }
 
     pub fn append_log(&self, id: &str, line: impl Into<String>) {
-        let line = line.into();
+        let _ = self.try_append_log(id, line);
+    }
+
+    fn try_append_log(&self, id: &str, line: impl Into<String>) -> bool {
+        let line = bounded_log_text(&line.into());
         let mut snapshot = self.inner.lock().expect("board mutex poisoned");
-        let status = snapshot
-            .participants
-            .entry(id.to_string())
-            .or_insert_with(|| {
-                ParticipantStatus::new(id, ParticipantKind::Service, ParticipantState::Ready)
-            });
+        let Some(status) = snapshot.participants.get_mut(id) else {
+            return false;
+        };
         status.last_log_line = Some(line.clone());
         status.last_log_lines.push(line);
         const MAX_LAST_LINES: usize = 8;
@@ -497,6 +524,7 @@ impl BoardBackend {
             let drop_count = status.last_log_lines.len() - MAX_LAST_LINES;
             status.last_log_lines.drain(0..drop_count);
         }
+        true
     }
 
     /// Register the live [`RoutedLogLine`] sink for this session's display
@@ -525,8 +553,13 @@ impl BoardBackend {
         severity: LogSeverity,
         text: impl Into<String>,
     ) {
-        let text = text.into();
-        self.append_log(id, text.clone());
+        let text = bounded_log_text(&text.into());
+        if !self.try_append_log(id, text.clone()) {
+            if source == LogSource::Bus {
+                self.disclose_unknown_bus_id(id, "log");
+            }
+            return;
+        }
         let sink = self.log_sink.lock().expect("log sink mutex poisoned");
         if let Some(sender) = sink.as_ref() {
             // Non-blocking: a full channel (redraw overdue) or a closed one
@@ -540,6 +573,22 @@ impl BoardBackend {
                 text,
             });
         }
+    }
+
+    fn disclose_unknown_bus_id(&self, id: &str, signal: &'static str) {
+        const MAX_UNKNOWN_IDS: usize = 64;
+        const MAX_UNKNOWN_ID_CHARS: usize = 128;
+        let id = bounded_chars(id, MAX_UNKNOWN_ID_CHARS);
+        let mut disclosed = self
+            .unknown_bus_ids
+            .lock()
+            .expect("unknown bus id mutex poisoned");
+        if disclosed.contains(&id) || disclosed.len() >= MAX_UNKNOWN_IDS {
+            return;
+        }
+        disclosed.insert(id.clone());
+        drop(disclosed);
+        tracing::warn!(participant = %id, signal, "ignored bus traffic from an unplanned participant");
     }
 
     pub fn set_launch_command(&self, id: &str, command: ParticipantLaunchCommand) {
@@ -763,6 +812,46 @@ struct RunningParticipant {
     failed: bool,
 }
 
+impl Drop for RunningParticipant {
+    fn drop(&mut self) {
+        let Some(child) = self.child.take() else {
+            return;
+        };
+        if let Some(pid) = child.id() {
+            #[cfg(unix)]
+            if self.spec.process_group {
+                if let Err(error) = send_process_group_signal(pid, libc::SIGKILL) {
+                    tracing::warn!(
+                        participant = %self.spec.id,
+                        pid,
+                        error = %error,
+                        "failed to kill supervised process group while dropping participant"
+                    );
+                }
+            } else if let Err(error) = send_process_signal(pid, libc::SIGKILL) {
+                tracing::warn!(
+                    participant = %self.spec.id,
+                    pid,
+                    error = %error,
+                    "failed to kill supervised child while dropping participant"
+                );
+            }
+            #[cfg(not(unix))]
+            if let Err(error) = {
+                let mut child = child;
+                child.start_kill()
+            } {
+                tracing::warn!(
+                    participant = %self.spec.id,
+                    pid,
+                    error = %error,
+                    "failed to kill supervised child while dropping participant"
+                );
+            }
+        }
+    }
+}
+
 impl RunningParticipant {
     async fn spawn(spec: ParticipantSpec, board: &BoardBackend) -> Result<Self> {
         let mut running = Self {
@@ -868,6 +957,7 @@ impl RunningParticipant {
         self.child = None;
         self.restart_at = None;
         self.failed = true;
+        board.set_process_details(&self.spec.id, None, None);
         let detail = format!("{operation} failed: {error:#}");
         board.append_log(&self.spec.id, format!("supervisor: {detail}"));
         board.set_state(&self.spec.id, ParticipantState::Failed, Some(detail));
@@ -882,13 +972,28 @@ impl RunningParticipant {
         let Some(child) = self.child.as_mut() else {
             return Ok(false);
         };
+        let pid = child.id();
         let status = match timeout(budget, child.wait()).await {
             Ok(status) => status.context("failed to wait for requested child stop")?,
             Err(_) => return Ok(false),
         };
+        // The leader has been reaped: clear its PID before any fallible
+        // descendant cleanup so forced-shutdown code can never signal a
+        // recycled process-group id.
         self.child = None;
+        board.set_process_details(&self.spec.id, None, None);
+        let group_stop = async {
+            if self.spec.process_group
+                && let Some(pid) = pid
+            {
+                ensure_process_group_stopped(pid).await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
         join_reader(self.stdout_task.take()).await;
         join_reader(self.stderr_task.take()).await;
+        group_stop?;
         self.failed = true;
         if requested_stop_exit_is_clean(&status, terminate_sent) {
             board.set_state(
@@ -954,6 +1059,7 @@ impl RunningParticipant {
         let Some(child) = self.child.as_mut() else {
             return Ok(());
         };
+        let pid = child.id();
         let Some(status) = child
             .try_wait()
             .with_context(|| format!("failed to poll {}", self.spec.id))?
@@ -962,8 +1068,19 @@ impl RunningParticipant {
         };
 
         self.child = None;
+        board.set_process_details(&self.spec.id, None, None);
+        let group_stop = async {
+            if self.spec.process_group
+                && let Some(pid) = pid
+            {
+                ensure_process_group_stopped(pid).await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
         join_reader(self.stdout_task.take()).await;
         join_reader(self.stderr_task.take()).await;
+        group_stop?;
 
         if status.success() {
             self.failed = true;
@@ -1018,7 +1135,13 @@ impl RunningParticipant {
     async fn stop_current(&mut self, board: &BoardBackend) -> Result<()> {
         if let Some(mut child) = self.child.take() {
             board.append_log(&self.spec.id, "supervisor: stopping");
-            stop_child(&mut child, self.spec.shutdown_grace).await?;
+            stop_child(
+                &mut child,
+                self.spec.shutdown_grace,
+                self.spec.process_group,
+            )
+            .await?;
+            board.set_process_details(&self.spec.id, None, None);
         }
         join_reader(self.stdout_task.take()).await;
         join_reader(self.stderr_task.take()).await;
@@ -1075,13 +1198,34 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
+        let mut reader = reader;
+        let mut chunk = [0_u8; 4_096];
+        let mut line = Vec::with_capacity(MAX_CAPTURED_LINE_BYTES);
+        let mut truncated = false;
         loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => {
-                    board.route_log(&id, LogSource::Raw, format!("{stream}: {line}"));
+            match reader.read(&mut chunk).await {
+                Ok(0) => {
+                    if !line.is_empty() || truncated {
+                        route_captured_line(&board, &id, stream, &line, truncated);
+                    }
+                    break;
                 }
-                Ok(None) => break,
+                Ok(read) => {
+                    for byte in &chunk[..read] {
+                        if *byte == b'\n' {
+                            if line.last() == Some(&b'\r') {
+                                line.pop();
+                            }
+                            route_captured_line(&board, &id, stream, &line, truncated);
+                            line.clear();
+                            truncated = false;
+                        } else if line.len() < MAX_CAPTURED_LINE_BYTES {
+                            line.push(*byte);
+                        } else {
+                            truncated = true;
+                        }
+                    }
+                }
                 Err(error) => {
                     board.append_log(&id, format!("supervisor: failed to read {stream}: {error}"));
                     break;
@@ -1091,9 +1235,25 @@ where
     })
 }
 
+fn route_captured_line(
+    board: &BoardBackend,
+    id: &str,
+    stream: &str,
+    bytes: &[u8],
+    truncated: bool,
+) {
+    let mut text = String::from_utf8_lossy(bytes).into_owned();
+    if truncated {
+        text.push('…');
+    }
+    board.route_log(id, LogSource::Raw, format!("{stream}: {text}"));
+}
+
+const READER_JOIN_BUDGET: Duration = Duration::from_millis(250);
+
 async fn join_reader(task: Option<JoinHandle<()>>) {
     if let Some(task) = task {
-        let _ = timeout(Duration::from_millis(250), task).await;
+        let _ = timeout(READER_JOIN_BUDGET, task).await;
     }
 }
 
@@ -1124,6 +1284,24 @@ pub struct SupervisionStage {
     #[cfg(test)]
     manual_router_readiness: Option<Arc<AtomicBool>>,
     pub timeout: crate::session::output::WaitBudget,
+}
+
+/// Maximum time the controller should allow the supervisor to stop every
+/// launched process sequentially after the first cancel request. Each
+/// participant gets its authored grace, the one-second process-group reap
+/// allowance used by [`kill_child_process_group`], and two bounded reader
+/// joins for stdout and stderr. A second cancel still forces an immediate exit.
+#[must_use]
+pub fn orderly_shutdown_budget(stages: &[SupervisionStage]) -> Duration {
+    stages
+        .iter()
+        .flat_map(|stage| &stage.specs)
+        .fold(Duration::from_secs(1), |budget, spec| {
+            budget
+                .saturating_add(spec.shutdown_grace)
+                .saturating_add(Duration::from_secs(1))
+                .saturating_add(READER_JOIN_BUDGET.saturating_mul(2))
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -1194,6 +1372,11 @@ async fn spawn_stage(
 ) {
     for spec in specs {
         let id = spec.id.clone();
+        // A stage is an authoritative, locally constructed launch plan. It
+        // may therefore register its own row when the stage becomes active,
+        // while unsolicited wire heartbeats and logs remain unable to create
+        // board entries through `record_heartbeat`/`route_log`.
+        board.register_planned(&id, spec.kind);
         match RunningParticipant::spawn(spec, board).await {
             Ok(participant) => running.push(participant),
             Err(error) => {
@@ -1518,14 +1701,22 @@ pub async fn supervise_until_shutdown(
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut action_rx = options.action_rx.take();
-    loop {
+    let mut supervisor_error = None;
+    'supervision: loop {
         tokio::select! {
             () = token.cancelled() => {
                 break;
             }
             action = recv_action(&mut action_rx) => {
-                if let Some(action) = action {
-                    handle_action(&mut running, &board, action).await?;
+                if let Some(action) = action
+                    && let Err(error) = handle_action(&mut running, &board, action).await
+                {
+                    board.append_log(
+                        "supervisor",
+                        format!("supervisor: action failed; shutting down graph: {error:#}"),
+                    );
+                    supervisor_error = Some(error);
+                    break 'supervision;
                 }
             }
             // Recreated fresh every loop pass (the same pattern as
@@ -1588,7 +1779,16 @@ pub async fn supervise_until_shutdown(
             }
             _ = ticker.tick() => {
                 for participant in &mut running {
-                    participant.poll(&board, &options.restart_policy).await?;
+                    if let Err(error) = participant.poll(&board, &options.restart_policy).await {
+                        board.append_log(
+                            "supervisor",
+                            format!(
+                                "supervisor: participant poll failed; shutting down graph: {error:#}"
+                            ),
+                        );
+                        supervisor_error = Some(error);
+                        break 'supervision;
+                    }
                 }
                 board.mark_stale_heartbeats(HEARTBEAT_STALE_TIMEOUT);
             }
@@ -1599,6 +1799,9 @@ pub async fn supervise_until_shutdown(
         request_participant_stop(&mut running, &board, requested_stop).await;
     }
     shutdown_all(&mut running, &board).await;
+    if let Some(error) = supervisor_error {
+        return Err(error).context("supervisor failed after shutting down the process graph");
+    }
     Ok(SupervisorOutcome {
         failed_participants: board.snapshot().failed_participants(),
     })
@@ -1639,7 +1842,11 @@ async fn request_participant_stop(
         );
         return;
     };
-    let terminate_sent = match send_terminate(pid).await {
+    let terminate_sent = match if participant.spec.process_group {
+        send_process_group_terminate(pid)
+    } else {
+        send_terminate(pid)
+    } {
         Ok(()) => {
             board.append_log(
                 &participant.spec.id,
@@ -1729,31 +1936,81 @@ async fn shutdown_all(running: &mut [RunningParticipant], board: &BoardBackend) 
     for participant in running.iter_mut().rev() {
         if let Some(mut child) = participant.child.take() {
             board.append_log(&participant.spec.id, "supervisor: stopping");
-            if let Err(error) = stop_child(&mut child, participant.spec.shutdown_grace).await {
+            if let Err(error) = stop_child(
+                &mut child,
+                participant.spec.shutdown_grace,
+                participant.spec.process_group,
+            )
+            .await
+            {
                 board.set_state(
                     &participant.spec.id,
                     ParticipantState::Failed,
                     Some(format!("failed to stop: {error:#}")),
                 );
             }
+            board.set_process_details(&participant.spec.id, None, None);
         }
         join_reader(participant.stdout_task.take()).await;
         join_reader(participant.stderr_task.take()).await;
     }
 }
 
-pub async fn stop_child(child: &mut Child, budget: Duration) -> Result<()> {
-    if let Some(pid) = child.id() {
-        let _ = send_terminate(pid).await;
+/// Emergency second-cancel path for the terminal controller. Every supervised
+/// child is launched as its own process group and its live leader pid is kept
+/// in the session-only board state. Signal all of those groups before the
+/// controller gives up waiting for the orderly supervisor task, so a forced
+/// CLI exit cannot leave robot runtimes orphaned behind it.
+pub fn force_kill_supervised_process_groups(board: &BoardBackend) {
+    for status in board.snapshot().participants.into_values() {
+        let Some(pid) = status.pid else {
+            continue;
+        };
+        #[cfg(unix)]
+        if let Err(error) = send_process_group_signal(pid, libc::SIGKILL) {
+            tracing::warn!(
+                participant = %status.id,
+                pid,
+                error = %error,
+                "forced process-group shutdown failed"
+            );
+        }
+        #[cfg(not(unix))]
+        tracing::warn!(
+            participant = %status.id,
+            pid,
+            "forced process-group shutdown is unavailable on this platform"
+        );
+    }
+}
+
+pub async fn stop_child(child: &mut Child, budget: Duration, process_group: bool) -> Result<()> {
+    let pid = child.id();
+    if let Some(pid) = pid {
+        let terminate_result = if process_group {
+            send_process_group_terminate(pid)
+        } else {
+            send_terminate(pid)
+        };
+        if let Err(error) = terminate_result {
+            tracing::warn!(pid, process_group, error = %error, "failed to send SIGTERM");
+        }
     }
     match timeout(budget, child.wait()).await {
         Ok(status) => {
             status.context("failed to wait for child")?;
+            if process_group && let Some(pid) = pid {
+                ensure_process_group_stopped(pid).await?;
+            }
             Ok(())
         }
         Err(_) => {
-            child.start_kill().context("failed to kill child")?;
-            child.wait().await.context("failed to wait after kill")?;
+            if process_group {
+                kill_child_process_group(child).await?;
+            } else {
+                child.start_kill().context("failed to kill child")?;
+                child.wait().await.context("failed to wait after kill")?;
+            }
             Ok(())
         }
     }
@@ -1768,14 +2025,7 @@ async fn kill_child_process_group(child: &mut Child) -> Result<()> {
             .wait()
             .await
             .context("failed to wait for process group leader after SIGKILL")?;
-        let kill_deadline = Instant::now() + Duration::from_secs(1);
-        while process_group_alive(pid)? {
-            if Instant::now() >= kill_deadline {
-                bail!("child process group remained alive after SIGKILL");
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        Ok(())
+        wait_for_process_group_exit(pid).await
     }
     #[cfg(not(unix))]
     {
@@ -1786,17 +2036,48 @@ async fn kill_child_process_group(child: &mut Child) -> Result<()> {
 }
 
 #[cfg(unix)]
+async fn ensure_process_group_stopped(pid: u32) -> Result<()> {
+    if process_group_alive(pid)? {
+        send_process_group_signal(pid, libc::SIGKILL)?;
+        wait_for_process_group_exit(pid).await?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn ensure_process_group_stopped(_pid: u32) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn wait_for_process_group_exit(pid: u32) -> Result<()> {
+    let kill_deadline = Instant::now() + Duration::from_secs(1);
+    while process_group_alive(pid)? {
+        if Instant::now() >= kill_deadline {
+            bail!("child process group remained alive after SIGKILL");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn send_process_group_signal(pid: u32, signal: libc::c_int) -> Result<()> {
     let process_group =
         i32::try_from(pid).context("child pid does not fit in a process-group id")?;
     if unsafe { libc::kill(-process_group, signal) } == 0 {
         return Ok(());
     }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
+    Err(std::io::Error::last_os_error()).context("failed to signal child process group")
+}
+
+#[cfg(unix)]
+fn send_process_signal(pid: u32, signal: libc::c_int) -> Result<()> {
+    let process = i32::try_from(pid).context("child pid does not fit in a process id")?;
+    if unsafe { libc::kill(process, signal) } == 0 {
         return Ok(());
     }
-    Err(error).context("failed to signal child process group")
+    Err(std::io::Error::last_os_error()).context("failed to signal child process")
 }
 
 #[cfg(unix)]
@@ -1814,19 +2095,22 @@ fn process_group_alive(pid: u32) -> Result<bool> {
     }
 }
 
-async fn send_terminate(pid: u32) -> Result<()> {
+fn send_process_group_terminate(pid: u32) -> Result<()> {
     #[cfg(unix)]
     {
-        let status = Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .status()
-            .await
-            .context("failed to invoke kill -TERM")?;
-        if !status.success() {
-            bail!("kill -TERM exited with {status}");
-        }
+        send_process_group_signal(pid, libc::SIGTERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
         Ok(())
+    }
+}
+
+fn send_terminate(pid: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        send_process_signal(pid, libc::SIGTERM)
     }
     #[cfg(not(unix))]
     {
@@ -2095,6 +2379,7 @@ pub struct ClockSample {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClockObservation {
     pub latest: Option<ClockSample>,
+    pub received_at: Option<Instant>,
 }
 
 /// Start a background feed of `v2::simulation::Clock` samples. Returns a
@@ -2147,6 +2432,7 @@ async fn clock_feed_loop(
                 now_ns: received.body.now_ns,
                 step: received.body.step,
             });
+            observation.received_at = Some(Instant::now());
         });
     }
 }
@@ -2222,6 +2508,28 @@ mod tests {
         assert_eq!(status.artifact_size_bytes, None);
     }
 
+    #[test]
+    fn failed_status_keeps_a_live_pid_available_for_forced_shutdown() {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "motion",
+            ParticipantKind::Service,
+            ParticipantState::Starting,
+        ));
+        board.set_process_details("motion", Some(42), Some(1_024));
+
+        board.set_state(
+            "motion",
+            ParticipantState::Failed,
+            Some("readiness timed out while the process is still live".to_string()),
+        );
+
+        let snapshot = board.snapshot();
+        let status = snapshot.participants.get("motion").expect("motion");
+        assert_eq!(status.pid, Some(42));
+        assert_eq!(status.artifact_size_bytes, Some(1_024));
+    }
+
     fn spec(id: &str) -> ParticipantSpec {
         ParticipantSpec {
             id: id.to_string(),
@@ -2250,6 +2558,51 @@ mod tests {
             note: None,
             bus_participant: true,
         }
+    }
+
+    #[test]
+    fn orderly_shutdown_budget_covers_grace_group_reap_and_reader_joins() {
+        let mut first = sleep_spec("first");
+        first.shutdown_grace = Duration::from_secs(2);
+        let mut second = sleep_spec("second");
+        second.shutdown_grace = Duration::from_secs(3);
+        let stages = vec![SupervisionStage::new(
+            "all",
+            vec![first, second],
+            WaitBudget::Unbounded,
+        )];
+
+        assert_eq!(orderly_shutdown_budget(&stages), Duration::from_secs(9));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ordinary_stop_kills_the_entire_isolated_process_group() -> Result<()> {
+        let mut grouped = sleep_spec("grouped");
+        grouped.process_group = true;
+        grouped.shutdown_grace = Duration::from_millis(50);
+        grouped.args = vec![
+            "-c".to_string(),
+            "trap '' TERM; sleep 30 & wait".to_string(),
+        ];
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "grouped",
+            ParticipantKind::Service,
+            ParticipantState::Starting,
+        ));
+        let mut participant = RunningParticipant::spawn(grouped, &board).await?;
+        let pid = participant
+            .child
+            .as_ref()
+            .and_then(Child::id)
+            .context("group leader should have a pid")?;
+
+        participant.stop_current(&board).await?;
+
+        assert!(!process_group_alive(pid)?);
+        assert_eq!(board.snapshot().participants["grouped"].pid, None);
+        Ok(())
     }
 
     #[tokio::test]
@@ -2798,6 +3151,75 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_from_an_unplanned_participant_is_ignored() {
+        let board = BoardBackend::new();
+        board.record_heartbeat("unplanned", api::presence::Readiness::Ready);
+        assert!(board.snapshot().participants.is_empty());
+        assert!(board.heartbeat_snapshot().is_empty());
+    }
+
+    #[test]
+    fn bus_log_from_an_unplanned_participant_is_ignored() {
+        let board = BoardBackend::new();
+        let (sender, mut receiver) = mpsc::channel(1);
+        board.set_log_sink(sender);
+
+        board.route_log_with_severity(
+            "\u{1b}[2Junplanned",
+            LogSource::Bus,
+            LogSeverity::Warn,
+            "forged runtime row",
+        );
+
+        assert!(board.snapshot().participants.is_empty());
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn routed_log_text_is_bounded_before_board_retention() {
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "motion",
+            ParticipantKind::Service,
+            ParticipantState::Ready,
+        ));
+        board.route_log("motion", LogSource::Bus, "x".repeat(MAX_LOG_TEXT_CHARS * 2));
+        let retained = board.snapshot().participants["motion"]
+            .last_log_line
+            .clone()
+            .expect("retained line");
+        assert_eq!(retained.chars().count(), MAX_LOG_TEXT_CHARS + 1);
+        assert!(retained.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn captured_newline_free_output_is_bounded_while_it_is_read() {
+        use tokio::io::AsyncWriteExt;
+
+        let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "noisy",
+            ParticipantKind::Service,
+            ParticipantState::Ready,
+        ));
+        let (reader, mut writer) = tokio::io::duplex(1_024);
+        let task = spawn_output_reader(board.clone(), "noisy".to_string(), "stdout", reader);
+        writer
+            .write_all(&vec![b'x'; MAX_CAPTURED_LINE_BYTES * 8])
+            .await
+            .expect("write oversized line");
+        drop(writer);
+        task.await.expect("output reader task");
+
+        let retained = board.snapshot().participants["noisy"]
+            .last_log_line
+            .clone()
+            .expect("retained line");
+        assert_eq!(retained.chars().count(), MAX_LOG_TEXT_CHARS + 1);
+        assert!(retained.ends_with('…'));
+    }
+
+    #[test]
     fn stale_sweep_does_not_fail_a_participant_still_in_setup() {
         // Bug 1: the runner publishes one `Initializing` heartbeat before
         // `#[setup]` runs, then nothing until the post-setup `Ready` beacon.
@@ -3210,10 +3632,7 @@ mod tests {
         let board = BoardBackend::new();
         // Every real caller (`prepare_site_tools`/`prepare_robot_participants`)
         // upserts a `Starting` board entry BEFORE a spec ever reaches the
-        // supervisor - `BoardBackend::append_log`'s missing-entry fallback
-        // defaults to `Ready`, so a spec spawned with no pre-existing entry
-        // would look observed-ready immediately, defeating the gate this
-        // test proves. Mirror that real contract for "one" only - "two"
+        // supervisor. Mirror that real contract for "one" only - "two"
         // deliberately stays un-upserted, so its absence from the board is
         // this test's proof that stage two has not spawned yet.
         board.upsert(ParticipantStatus::new(

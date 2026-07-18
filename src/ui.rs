@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
@@ -163,14 +164,21 @@ impl Ui {
     /// diagnosis remains visible.
     pub fn command_status_captured(&self, command: &mut Command) -> Result<ExitStatus> {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let child = Arc::new(Mutex::new(
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let child = Arc::new(Mutex::new(Some(
             command.spawn().context("failed to spawn command")?,
-        ));
+        )));
         register_child(child.clone());
         let stdout = {
             child
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+                .context("captured child was already reaped")?
                 .stdout
                 .take()
                 .context("child stdout was not piped")
@@ -179,6 +187,8 @@ impl Ui {
             child
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+                .context("captured child was already reaped")?
                 .stderr
                 .take()
                 .context("child stderr was not piped")
@@ -212,15 +222,19 @@ impl Ui {
     }
 }
 
-fn wait_for_captured_child(child: &Arc<Mutex<Child>>) -> Result<ExitStatus> {
+fn wait_for_captured_child(child: &Arc<Mutex<Option<Child>>>) -> Result<ExitStatus> {
     loop {
-        if let Some(status) = child
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .try_wait()
-            .context("failed to wait for command")?
         {
-            return Ok(status);
+            let mut child = child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let running = child
+                .as_mut()
+                .context("captured child was already reaped")?;
+            if let Some(status) = running.try_wait().context("failed to wait for command")? {
+                child.take();
+                return Ok(status);
+            }
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -234,7 +248,8 @@ fn forward_captured_output(
     is_stderr: bool,
     mode: OutputMode,
 ) -> Vec<String> {
-    let mut captured = Vec::new();
+    const MAX_CAPTURED_ERROR_LINES: usize = 200;
+    let mut captured = VecDeque::new();
     for line in BufReader::new(reader).lines().map_while(Result::ok) {
         if line.is_empty() {
             continue;
@@ -246,9 +261,14 @@ fn forward_captured_output(
                 println!("{line}");
             }
         }
-        captured.push(line);
+        if is_stderr {
+            if captured.len() == MAX_CAPTURED_ERROR_LINES {
+                captured.pop_front();
+            }
+            captured.push_back(line);
+        }
     }
-    captured
+    captured.into()
 }
 
 /// Raw output is only permitted when no session owns the terminal and the
@@ -268,5 +288,46 @@ mod tests {
         assert!(!may_write_raw(RouteResult::Dropped, OutputMode::Json));
         assert!(!may_write_raw(RouteResult::NoSession, OutputMode::Json));
         assert!(may_write_raw(RouteResult::NoSession, OutputMode::Plain));
+    }
+
+    #[test]
+    fn captured_output_retains_only_a_bounded_stderr_tail() {
+        let input = (0..250)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let stderr = forward_captured_output(
+            input.as_bytes(),
+            DiagnosticLevel::Info,
+            true,
+            OutputMode::Json,
+        );
+        assert_eq!(stderr.len(), 200);
+        assert_eq!(stderr.first().map(String::as_str), Some("line-50"));
+        assert_eq!(stderr.last().map(String::as_str), Some("line-249"));
+
+        let stdout = forward_captured_output(
+            input.as_bytes(),
+            DiagnosticLevel::Info,
+            false,
+            OutputMode::Json,
+        );
+        assert!(stdout.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reaped_captured_child_is_atomically_removed_from_the_kill_slot() {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("exit 0");
+        let child = Arc::new(Mutex::new(Some(command.spawn().expect("spawn child"))));
+        let status = wait_for_captured_child(&child).expect("wait child");
+        assert!(status.success());
+        assert!(
+            child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        );
     }
 }

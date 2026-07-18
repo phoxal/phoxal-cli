@@ -2,14 +2,14 @@
 
 mod color;
 mod input;
-mod render;
+pub(crate) mod render;
 mod startup;
-mod state;
+pub(crate) mod state;
 mod terminal;
 mod view_model;
 mod visibility;
 
-pub(crate) use terminal::TerminalGuard;
+pub(crate) use terminal::{TerminalGuard, install_panic_hook};
 
 use std::collections::BTreeMap;
 use std::io::{self, Stderr};
@@ -23,15 +23,14 @@ use tokio::sync::mpsc;
 use crate::display::DisplayAction;
 use crate::identity::IdentitySummary;
 use crate::session::event::{DiagnosticLevel, SessionEvent};
-use crate::stores::log_store::LogStore;
+use crate::stores::log_store::{LogStore, sanitize_terminal_text};
 use crate::stores::runtime_store::RuntimeStore;
 use crate::supervisor::{BoardSnapshot, RoutedLogLine};
 use crate::telemetry::TelemetryBackend;
 use crate::theme::Theme;
+use crate::tui::render::TitleInfo;
+use crate::tui::state::AppState;
 use crate::tui::view_model::SessionViewModel;
-
-pub use render::TitleInfo;
-pub use state::AppState;
 
 pub struct TuiDisplay {
     theme: Theme,
@@ -51,10 +50,16 @@ pub struct TuiDisplay {
 const LOG_CHANNEL_CAPACITY: usize = 512;
 
 struct Activated {
-    _guard: terminal::TerminalGuard,
-    terminal: Terminal<CrosstermBackend<Stderr>>,
     input_thread: input::InputThread,
     input_rx: mpsc::Receiver<Event>,
+    terminal: Terminal<CrosstermBackend<Stderr>>,
+    _guard: terminal::TerminalGuard,
+}
+
+impl Drop for Activated {
+    fn drop(&mut self) {
+        self.input_thread.stop_and_join();
+    }
 }
 
 impl std::fmt::Debug for TuiDisplay {
@@ -119,7 +124,8 @@ impl TuiDisplay {
         if self.activated.is_some() {
             return Ok(());
         }
-        let guard = terminal::TerminalGuard::enter()?;
+        let terminal_title = terminal_title(&self.title);
+        let guard = terminal::TerminalGuard::enter(&terminal_title)?;
         let backend = CrosstermBackend::new(io::stderr());
         let mut terminal = Terminal::new(backend)?;
         // Alternate-screen entry does not guarantee a blank buffer. Clear
@@ -127,10 +133,10 @@ impl TuiDisplay {
         terminal.clear()?;
         let (input_thread, input_rx) = input::InputThread::spawn();
         self.activated = Some(Activated {
-            _guard: guard,
-            terminal,
             input_thread,
             input_rx,
+            terminal,
+            _guard: guard,
         });
         Ok(())
     }
@@ -160,9 +166,14 @@ impl TuiDisplay {
                 render::draw_startup(
                     frame,
                     self.theme,
-                    &self.title,
-                    self.identity.as_ref(),
-                    &self.startup,
+                    &render::StartupView {
+                        title: &self.title,
+                        identity: self.identity.as_ref(),
+                        startup: &self.startup,
+                        state: &self.state,
+                        telemetry: &self.telemetry,
+                        now,
+                    },
                 );
             } else {
                 render::draw(
@@ -170,7 +181,7 @@ impl TuiDisplay {
                     self.theme,
                     &self.title,
                     self.identity.as_ref(),
-                    &self.state,
+                    &mut self.state,
                     &model,
                 );
             }
@@ -186,7 +197,9 @@ impl TuiDisplay {
             Some(event) => Ok(Some(event)),
             None => match activated.input_thread.take_error() {
                 Some(error) => Err(error),
-                None => std::future::pending().await,
+                None => Err(io::Error::other(
+                    "terminal input reader stopped unexpectedly",
+                )),
             },
         }
     }
@@ -216,12 +229,17 @@ impl TuiDisplay {
             &self.telemetry,
             Instant::now(),
         );
+        self.state.sync(&model);
         self.state.handle_key(key, &model)
     }
 }
 
 fn needs_full_clear(event: &Event) -> bool {
     matches!(event, Event::Resize(_, _) | Event::FocusGained)
+}
+
+fn terminal_title(title: &TitleInfo) -> String {
+    sanitize_terminal_text(&format!("phoxal-cli {} - {}", title.robot, title.namespace))
 }
 
 #[cfg(test)]
@@ -235,10 +253,12 @@ mod tests {
     fn title() -> TitleInfo {
         TitleInfo {
             robot: "rover-01".to_string(),
-            channel: "dev".to_string(),
-            mode: "run",
+            namespace: "dev".to_string(),
+            channel: "stable".to_string(),
+            mode: crate::session::controller::SessionMode::Run,
             bus_endpoint: "tcp/localhost:7447".to_string(),
             started_at: SystemTime::UNIX_EPOCH,
+            started_instant: Instant::now(),
         }
     }
 
@@ -286,5 +306,16 @@ mod tests {
         assert!(needs_full_clear(&Event::Resize(80, 24)));
         assert!(needs_full_clear(&Event::FocusGained));
         assert!(!needs_full_clear(&Event::FocusLost));
+    }
+
+    #[test]
+    fn terminal_title_names_the_robot_and_namespace() {
+        assert_eq!(terminal_title(&title()), "phoxal-cli rover-01 - dev");
+        let mut unsafe_title = title();
+        unsafe_title.robot = "rover\u{7}spoof".to_string();
+        assert_eq!(
+            terminal_title(&unsafe_title),
+            "phoxal-cli rover spoof - dev"
+        );
     }
 }

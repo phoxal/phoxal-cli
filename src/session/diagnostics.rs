@@ -37,7 +37,7 @@ use super::event::{DiagnosticLevel, DiagnosticSource, PhaseId, PhaseOutcome, Ses
 
 struct ActiveSession {
     sender: mpsc::Sender<SessionEvent>,
-    children: Vec<Arc<Mutex<Child>>>,
+    children: Vec<Arc<Mutex<Option<Child>>>>,
 }
 
 fn sender_cell() -> &'static Mutex<Option<ActiveSession>> {
@@ -107,7 +107,7 @@ pub(crate) fn try_route(
 
 /// Register a captured child owned by the active session. The controller
 /// stops these before waiting on cancelled preparation/setup work.
-pub(crate) fn register_child(child: Arc<Mutex<Child>>) {
+pub(crate) fn register_child(child: Arc<Mutex<Option<Child>>>) {
     if let Some(session) = sender_cell()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -118,7 +118,7 @@ pub(crate) fn register_child(child: Arc<Mutex<Child>>) {
 }
 
 /// Stop tracking a child once its owner has reaped it.
-pub(crate) fn unregister_child(child: &Arc<Mutex<Child>>) {
+pub(crate) fn unregister_child(child: &Arc<Mutex<Option<Child>>>) {
     if let Some(session) = sender_cell()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -140,10 +140,21 @@ pub(crate) fn kill_active_children() {
         .map(|session| session.children.clone())
         .unwrap_or_default();
     for child in children {
-        let _ = child
+        let mut child = child
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .kill();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(child) = child.as_mut() else {
+            continue;
+        };
+        #[cfg(unix)]
+        if let Ok(group) = i32::try_from(child.id()) {
+            // Captured build commands are process-group leaders (see
+            // `Ui::command_status_captured`), so cancellation reaches rustc,
+            // linkers, and any other descendants as well as cargo itself.
+            let _ = unsafe { libc::kill(-group, libc::SIGKILL) };
+        }
+        #[cfg(not(unix))]
+        let _ = child.kill();
     }
 }
 

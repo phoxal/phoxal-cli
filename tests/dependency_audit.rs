@@ -5,6 +5,14 @@ use std::process::Command;
 use serde_json::Value;
 
 const ALLOWED_BASELINE: &[&str] = &["phoxal", "phoxal-api"];
+const ALLOWED_RAW_MODULE_IMPORTS: &[&str] = &[
+    "src/commands/behavior.rs",
+    "src/commands/logs.rs",
+    "src/commands/simulate.rs",
+    "src/commands/status.rs",
+    "src/supervisor.rs",
+    "src/telemetry.rs",
+];
 
 #[test]
 fn phoxal_cli_path_dependencies_do_not_grow_past_the_snapshot() {
@@ -67,6 +75,104 @@ fn phoxal_cli_path_dependencies_do_not_grow_past_the_snapshot() {
     }
 
     panic!("{message}");
+}
+
+#[test]
+fn privileged_raw_bus_imports_do_not_spread_silently() {
+    assert_sorted_unique("ALLOWED_RAW_MODULE_IMPORTS", ALLOWED_RAW_MODULE_IMPORTS);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut rust_files = Vec::new();
+    collect_rust_files(&root.join("src"), &mut rust_files);
+    // Production source is the trust boundary. Test fixtures are excluded
+    // intentionally because this audit itself contains bypass probes and
+    // tests may construct raw bus fixtures without shipping that authority.
+    let mut actual = rust_files
+        .into_iter()
+        .filter_map(|path| {
+            let source = std::fs::read_to_string(&path).ok()?;
+            assert!(
+                !contains_public_raw_reexport(&source),
+                "{} publicly re-exports privileged raw bus authority",
+                path.display()
+            );
+            contains_raw_bus_access(&source).then_some(path)
+        })
+        .map(|path| {
+            path.strip_prefix(root)
+                .expect("source path should be inside the crate")
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect::<Vec<_>>();
+    actual.sort();
+    assert_eq!(actual, ALLOWED_RAW_MODULE_IMPORTS);
+}
+
+fn contains_raw_bus_access(source: &str) -> bool {
+    let compact = source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    if compact.contains("phoxal::raw") {
+        return true;
+    }
+    let mut remainder = compact.as_str();
+    while let Some(start) = remainder.find("phoxal::{") {
+        remainder = &remainder[start + "phoxal::{".len()..];
+        let Some(end) = remainder.find('}') else {
+            break;
+        };
+        if remainder[..end]
+            .split(',')
+            .any(|item| item == "raw" || item.starts_with("raw::") || item.starts_with("rawas"))
+        {
+            return true;
+        }
+        remainder = &remainder[end + 1..];
+    }
+    let mut remainder = compact.as_str();
+    while let Some(start) = remainder.find("usephoxalas") {
+        remainder = &remainder[start + "usephoxalas".len()..];
+        let Some(end) = remainder.find(';') else {
+            break;
+        };
+        let alias = &remainder[..end];
+        if !alias.is_empty() && compact.contains(&format!("{alias}::raw")) {
+            return true;
+        }
+        remainder = &remainder[end + 1..];
+    }
+    false
+}
+
+fn contains_public_raw_reexport(source: &str) -> bool {
+    let compact = source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    compact
+        .split(';')
+        .any(|statement| statement.contains("pubusephoxal") && statement.contains("raw"))
+}
+
+#[test]
+fn raw_bus_audit_recognizes_grouped_alias_and_reexport_bypasses() {
+    assert!(contains_raw_bus_access("use phoxal::{raw::Bus, model};"));
+    assert!(contains_raw_bus_access(
+        "use phoxal as fw; use fw::raw::Bus;"
+    ));
+    assert!(contains_public_raw_reexport("pub use phoxal::raw::Bus;"));
+}
+
+fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(directory).expect("source directory should be readable") {
+        let path = entry.expect("source entry should be readable").path();
+        if path.is_dir() {
+            collect_rust_files(&path, files);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            files.push(path);
+        }
+    }
 }
 
 fn cargo_metadata() -> Value {

@@ -19,6 +19,13 @@ pub enum RuntimeOwnership {
     External,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuntimeOrigin {
+    UserService,
+    #[default]
+    Framework,
+}
+
 impl From<LaunchOwnership> for RuntimeOwnership {
     fn from(ownership: LaunchOwnership) -> Self {
         match ownership {
@@ -32,6 +39,7 @@ impl From<LaunchOwnership> for RuntimeOwnership {
 pub struct RuntimeParticipantMetadata {
     pub artifact_ref: Option<String>,
     pub ownership: RuntimeOwnership,
+    pub origin: RuntimeOrigin,
     pub input_contracts: Vec<String>,
     pub output_contracts: Vec<String>,
 }
@@ -48,6 +56,7 @@ impl RuntimeParticipantMetadata {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeObservation {
     pub incarnation_started_at: Instant,
+    incarnation_ended_at: Option<Instant>,
     pub first_ready_at: Option<Instant>,
     pub last_heartbeat_at: Option<Instant>,
     pub supervisor_restart_count: u32,
@@ -59,7 +68,9 @@ pub struct RuntimeObservation {
 impl RuntimeObservation {
     #[must_use]
     pub fn uptime(&self, now: Instant) -> Duration {
-        now.saturating_duration_since(self.incarnation_started_at)
+        self.incarnation_ended_at
+            .unwrap_or(now)
+            .saturating_duration_since(self.incarnation_started_at)
     }
 
     #[must_use]
@@ -123,6 +134,7 @@ impl RuntimeStore {
                     participant.launch.participant_id.clone(),
                     RuntimeParticipantMetadata {
                         artifact_ref: artifact_ref_for_execution(&participant.execution),
+                        origin: origin_for_execution(&participant.execution),
                         ..RuntimeParticipantMetadata::ownership(participant.launch_ownership)
                     },
                 );
@@ -177,6 +189,11 @@ impl RuntimeStore {
         self.metadata.entry(id.to_string()).or_default().ownership = ownership;
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_test_origin(&mut self, id: &str, origin: RuntimeOrigin) {
+        self.metadata.entry(id.to_string()).or_default().origin = origin;
+    }
+
     pub fn observe_board(&mut self, board: &BoardSnapshot, heartbeats: &BTreeMap<String, Instant>) {
         self.observe_board_at(board, heartbeats, Instant::now());
     }
@@ -187,12 +204,15 @@ impl RuntimeStore {
         heartbeats: &BTreeMap<String, Instant>,
         now: Instant,
     ) {
+        self.observations
+            .retain(|id, _| board.participants.contains_key(id));
         for status in board.participants.values() {
             let observation =
                 self.observations
                     .entry(status.id.clone())
                     .or_insert(RuntimeObservation {
-                        incarnation_started_at: self.session_started_at,
+                        incarnation_started_at: now,
+                        incarnation_ended_at: None,
                         first_ready_at: None,
                         last_heartbeat_at: None,
                         supervisor_restart_count: status.restart_count,
@@ -206,6 +226,7 @@ impl RuntimeStore {
                     && observation.last_state != ParticipantState::Restarting);
             if supervised_restart {
                 observation.incarnation_started_at = now;
+                observation.incarnation_ended_at = None;
                 observation.first_ready_at = None;
                 observation.last_heartbeat_at = None;
                 observation.gap_sustained = false;
@@ -222,6 +243,7 @@ impl RuntimeStore {
                     observation.inferred_restart_count =
                         observation.inferred_restart_count.saturating_add(1);
                     observation.incarnation_started_at = received_at;
+                    observation.incarnation_ended_at = None;
                     observation.first_ready_at = None;
                 }
                 observation.last_heartbeat_at = Some(received_at);
@@ -236,6 +258,14 @@ impl RuntimeStore {
             }
             if status.state == ParticipantState::Ready {
                 observation.first_ready_at.get_or_insert(now);
+            }
+            if matches!(
+                status.state,
+                ParticipantState::Failed | ParticipantState::Stopped
+            ) {
+                observation.incarnation_ended_at.get_or_insert(now);
+            } else {
+                observation.incarnation_ended_at = None;
             }
             observation.last_state = status.state;
         }
@@ -262,6 +292,15 @@ fn artifact_ref_for_execution(execution: &ParticipantExecution) -> Option<String
         ParticipantExecution::ComponentDriver { crate_dir } => {
             Some(format!("local component driver: {}", crate_dir.display()))
         }
+    }
+}
+
+fn origin_for_execution(execution: &ParticipantExecution) -> RuntimeOrigin {
+    match execution {
+        ParticipantExecution::UserService { .. } => RuntimeOrigin::UserService,
+        ParticipantExecution::OfficialArtifact { .. }
+        | ParticipantExecution::SourceArtifact { .. }
+        | ParticipantExecution::ComponentDriver { .. } => RuntimeOrigin::Framework,
     }
 }
 
@@ -313,6 +352,40 @@ mod tests {
     }
 
     #[test]
+    fn terminal_runtime_state_freezes_uptime_until_a_new_incarnation() {
+        let start = Instant::now();
+        let mut store = RuntimeStore::new_at(start);
+        store.observe_board_at(&board(ParticipantState::Ready, 0), &BTreeMap::new(), start);
+        let failed_at = start + Duration::from_secs(4);
+        store.observe_board_at(
+            &board(ParticipantState::Failed, 0),
+            &BTreeMap::new(),
+            failed_at,
+        );
+        assert_eq!(
+            store
+                .observation("drive")
+                .expect("failed runtime observation")
+                .uptime(start + Duration::from_secs(40)),
+            Duration::from_secs(4)
+        );
+
+        let restarted_at = start + Duration::from_secs(41);
+        store.observe_board_at(
+            &board(ParticipantState::Restarting, 1),
+            &BTreeMap::new(),
+            restarted_at,
+        );
+        assert_eq!(
+            store
+                .observation("drive")
+                .expect("restarted runtime observation")
+                .uptime(restarted_at),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
     fn sustained_gap_return_infers_incarnation_without_changing_supervisor_count() {
         let start = Instant::now();
         let mut store = RuntimeStore::new_at(start);
@@ -330,5 +403,27 @@ mod tests {
         assert_eq!(observation.supervisor_restart_count, 0);
         assert_eq!(observation.inferred_restart_count, 1);
         assert_eq!(observation.uptime(returned_at), Duration::ZERO);
+    }
+
+    #[test]
+    fn observations_are_pruned_when_participants_leave_the_board() {
+        let start = Instant::now();
+        let mut store = RuntimeStore::new_at(start);
+        store.observe_board_at(&board(ParticipantState::Ready, 0), &BTreeMap::new(), start);
+        assert!(store.observation("drive").is_some());
+
+        store.observe_board_at(&BoardSnapshot::default(), &BTreeMap::new(), start);
+        assert!(store.observation("drive").is_none());
+
+        let returned = start + Duration::from_secs(9);
+        store.observe_board_at(
+            &board(ParticipantState::Ready, 0),
+            &BTreeMap::new(),
+            returned,
+        );
+        assert_eq!(
+            store.observation("drive").unwrap().incarnation_started_at,
+            returned
+        );
     }
 }

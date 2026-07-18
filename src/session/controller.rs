@@ -62,7 +62,7 @@
 //!   transitions) is forwarded into the TUI via
 //!   [`crate::tui::TuiDisplay::apply_session_event`], which drives a
 //!   dedicated startup surface (welcome card + one active phase row + a
-//!   bounded diagnostics ring) until the session reaches `Running`, then
+//!   direct jump to Logs for errors) until the session reaches `Running`, then
 //!   collapses to the existing runtime navigator -
 //!   see `crate::tui::startup`'s module docs for the pure model.
 
@@ -72,22 +72,27 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use crossterm::event::Event;
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::display::DisplayAction;
+
+const FORCED_REAP_TIMEOUT: Duration = Duration::from_secs(1);
+const OWNED_TASK_CANCEL_TIMEOUT: Duration = Duration::from_secs(1);
 use crate::identity::IdentitySummary;
 use crate::logger::LineLogger;
 use crate::output_mode::OutputMode;
 use crate::supervisor::{BoardBackend, BoardSnapshot, SupervisorAction, SupervisorOutcome};
 use crate::telemetry::{JoypadCommand, TelemetryBackend};
 use crate::theme::Theme;
-use crate::tui::{TerminalGuard, TitleInfo, TuiDisplay};
+use crate::tui::render::TitleInfo;
+use crate::tui::{TerminalGuard, TuiDisplay, install_panic_hook};
 
 use super::diagnostics;
-use super::event::{DiagnosticLevel, PhaseId, PhaseOutcome, SessionEvent};
+use super::event::{DiagnosticLevel, DiagnosticSource, PhaseId, PhaseOutcome, SessionEvent};
 use super::output::OutputContext;
 use super::state::{FailReason, SessionState};
 
@@ -97,6 +102,28 @@ use super::state::{FailReason, SessionState};
 /// never drop an event; a slow/stuck consumer is a bug to fix, not a queue to
 /// grow unboundedly for.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionMode {
+    Run,
+    Simulation,
+}
+
+impl SessionMode {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Simulation => "simulation",
+        }
+    }
+}
+
+impl std::fmt::Display for SessionMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
 
 /// Which renderer owns stderr/the terminal for this session (Target design
 /// parts 4 and 6, minimal this wave - see the module docs).
@@ -115,6 +142,9 @@ pub struct SessionController {
     events_tx: mpsc::Sender<SessionEvent>,
     events_rx: mpsc::Receiver<SessionEvent>,
     renderer: Renderer,
+    interrupts: tokio::signal::unix::Signal,
+    terminates: tokio::signal::unix::Signal,
+    hangups: tokio::signal::unix::Signal,
     /// Lets a TUI's `r restart` input reach the supervisor without the
     /// supervisor knowing about ratatui/input at all: the same
     /// `SupervisorAction` channel `run`/`simulation run` already wires up for
@@ -131,10 +161,20 @@ impl SessionController {
     /// interactive surface for the whole session (Product decision 1).
     pub fn new(
         output: OutputContext,
-        mode_label: &'static str,
+        mode: SessionMode,
         identity: Option<IdentitySummary>,
     ) -> io::Result<Self> {
+        // Background participant/build workers may panic under line or JSON
+        // output too. Install routing independently of alternate-screen entry.
+        install_panic_hook();
         let (events_tx, events_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        // Install every process-level terminal shutdown signal once and keep
+        // the receivers for the controller lifetime. Tokio keeps the global
+        // handler installed after a receiver is dropped, so recreating these
+        // per phase would swallow signals in the setup/supervision gap.
+        let interrupts = signal(SignalKind::interrupt())?;
+        let terminates = signal(SignalKind::terminate())?;
+        let hangups = signal(SignalKind::hangup())?;
 
         let renderer = match output.mode {
             OutputMode::Json => Renderer::None,
@@ -142,19 +182,24 @@ impl SessionController {
                 let title = TitleInfo {
                     robot: identity
                         .as_ref()
-                        .map_or_else(|| "-".to_string(), |summary| summary.robot.clone()),
+                        .map_or_else(|| "unknown".to_string(), |summary| summary.robot.clone()),
+                    namespace: identity.as_ref().map_or_else(
+                        || "unknown".to_string(),
+                        |summary| summary.namespace.clone(),
+                    ),
                     channel: identity
                         .as_ref()
-                        .map_or_else(|| "-".to_string(), |summary| summary.channel.clone()),
-                    mode: mode_label,
+                        .map_or_else(|| "unknown".to_string(), |summary| summary.channel.clone()),
+                    mode,
                     bus_endpoint: crate::supervisor::default_connect_endpoint(),
                     started_at: std::time::SystemTime::now(),
+                    started_instant: std::time::Instant::now(),
                 };
                 let mut tui = Box::new(TuiDisplay::new(output.theme, title, identity));
                 tui.activate()?;
                 Renderer::Tui(tui)
             }
-            _ => Renderer::Line(LineRenderer::new(mode_label, output.theme)),
+            _ => Renderer::Line(LineRenderer::new(mode.label(), output.theme)),
         };
 
         // Do this only after terminal activation succeeds. Otherwise a failed
@@ -169,6 +214,9 @@ impl SessionController {
             events_tx,
             events_rx,
             renderer,
+            interrupts,
+            terminates,
+            hangups,
             restart_tx: None,
         })
     }
@@ -206,7 +254,7 @@ impl SessionController {
 
     /// `true` once the TUI (not the line renderer, not `None`) owns the
     /// terminal - the gate `run`/`simulation run` use to decide whether
-    /// subscribing to the extra live-telemetry bus feeds (host/process/
+    /// subscribing to the extra live-telemetry bus feeds (host/
     /// router/joypad) is worth the connections, since only the TUI can
     /// render them.
     #[must_use]
@@ -305,10 +353,14 @@ impl SessionController {
             self.cancel_owned_task(&mut task).await;
             return Err(error);
         }
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // The initial frame above already represents the bootstrap tick.
+        ticker.tick().await;
         loop {
             tokio::select! {
                 biased;
-                _ = tokio::signal::ctrl_c() => {
+                _ = recv_shutdown_signal(&mut self.interrupts, &mut self.terminates, &mut self.hangups) => {
                     self.cancel_owned_task(&mut task).await;
                     self.teardown();
                     std::process::exit(130);
@@ -316,17 +368,19 @@ impl SessionController {
                 Some(input) = poll_next_input(&mut self.renderer) => {
                     match input {
                         Ok(event) => {
-                            // The only input action that matters before
-                            // supervision exists is Ctrl-C's raw-mode KEY
-                            // form (`handle_input` already maps it to
-                            // `DisplayAction::Quit`, same as the `q` key) -
-                            // a restart/joypad key has nothing to act on yet,
-                            // so it is simply ignored during this phase.
+                            // Navigation and resize input still update the
+                            // startup UI immediately. Quit is the only action
+                            // with an external effect before supervision;
+                            // restart/joypad actions have no target yet.
                             let action = handle_input(&mut self.renderer, event, &empty_board, &empty_telemetry);
                             if matches!(action, DisplayAction::Quit) {
                                 self.cancel_owned_task(&mut task).await;
                                 self.teardown();
                                 std::process::exit(130);
+                            }
+                            if let Err(error) = self.redraw(&empty_board, &empty_telemetry) {
+                                self.cancel_owned_task(&mut task).await;
+                                return Err(error);
                             }
                         }
                         Err(error) => {
@@ -337,6 +391,12 @@ impl SessionController {
                 }
                 Some(event) = self.events_rx.recv() => {
                     self.apply_event(event);
+                    if let Err(error) = self.redraw(&empty_board, &empty_telemetry) {
+                        self.cancel_owned_task(&mut task).await;
+                        return Err(error);
+                    }
+                }
+                _ = ticker.tick() => {
                     if let Err(error) = self.redraw(&empty_board, &empty_telemetry) {
                         self.cancel_owned_task(&mut task).await;
                         return Err(error);
@@ -365,7 +425,12 @@ impl SessionController {
         self.token.cancel();
         self.transition_to_stopping();
         diagnostics::kill_active_children();
-        let _ = task.await;
+        if tokio::time::timeout(OWNED_TASK_CANCEL_TIMEOUT, &mut *task)
+            .await
+            .is_err()
+        {
+            task.abort();
+        }
     }
 
     /// Drive the controller for the rest of the session once board/telemetry
@@ -387,6 +452,7 @@ impl SessionController {
         board: BoardBackend,
         telemetry: TelemetryBackend,
         runtime_store: crate::stores::runtime_store::RuntimeStore,
+        orderly_shutdown_timeout: Duration,
         mut supervise: JoinHandle<Result<SupervisorOutcome>>,
     ) -> Result<SupervisorOutcome> {
         if let Renderer::Tui(tui) = &mut self.renderer {
@@ -396,17 +462,16 @@ impl SessionController {
         let mut ticker = tokio::time::interval(Duration::from_millis(100));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut cancel_requested = false;
-
+        let mut cancel_deadline = None;
         let end = loop {
             tokio::select! {
                 biased;
-                _ = tokio::signal::ctrl_c() => {
-                    if cancel_requested {
-                        self.teardown();
-                        std::process::exit(130);
+                _ = recv_shutdown_signal(&mut self.interrupts, &mut self.terminates, &mut self.hangups) => {
+                    if register_cancel_request(&mut cancel_requested) {
+                        self.force_exit_supervision(&board, &mut supervise).await;
                     }
-                    cancel_requested = true;
                     self.token.cancel();
+                    cancel_deadline = Some(tokio::time::Instant::now() + orderly_shutdown_timeout);
                     self.transition_to_stopping();
                     if let Err(error) = self.redraw_live(&board, &telemetry) {
                         break SupervisionEnd::Failed(error);
@@ -423,6 +488,14 @@ impl SessionController {
                         Ok(event) => {
                             let board_snapshot = board.snapshot();
                             let action = handle_input(&mut self.renderer, event, &board_snapshot, &telemetry);
+                            if action == DisplayAction::Quit
+                                && register_cancel_request(&mut cancel_requested)
+                            {
+                                self.force_exit_supervision(&board, &mut supervise).await;
+                            }
+                            if action == DisplayAction::Quit && cancel_deadline.is_none() {
+                                cancel_deadline = Some(tokio::time::Instant::now() + orderly_shutdown_timeout);
+                            }
                             self.apply_display_action(action, &telemetry);
                             if let Err(error) = self.redraw_live(&board, &telemetry) {
                                 break SupervisionEnd::Failed(error);
@@ -437,6 +510,9 @@ impl SessionController {
                     if let Err(error) = self.redraw_live(&board, &telemetry) {
                         break SupervisionEnd::Failed(error);
                     }
+                }
+                _ = wait_for_cancel_deadline(cancel_deadline), if cancel_deadline.is_some() => {
+                    self.force_exit_supervision(&board, &mut supervise).await;
                 }
                 result = &mut supervise => {
                     break SupervisionEnd::Finished(match result {
@@ -454,13 +530,45 @@ impl SessionController {
         // path any more.
         match end {
             SupervisionEnd::Finished(result) => {
+                // Supervision may finish while a watch/setup worker is inside
+                // spawn_blocking and still owns a registered cargo process
+                // group. Aborting the Tokio task cannot interrupt that
+                // blocking wait, so stop registered children before Drop
+                // uninstalls the session registry.
+                diagnostics::kill_active_children();
                 self.reflect_final_outcome(&board, &telemetry, &result);
                 result
             }
             SupervisionEnd::Failed(error) => {
-                finish_after_failure(&mut self.events_rx, &self.token, supervise, error).await
+                finish_after_failure(&mut self.events_rx, &self.token, &board, supervise, error)
+                    .await
             }
         }
+    }
+
+    async fn force_exit_supervision(
+        &mut self,
+        board: &BoardBackend,
+        supervise: &mut JoinHandle<Result<SupervisorOutcome>>,
+    ) -> ! {
+        self.events_rx.close();
+        self.token.cancel();
+        diagnostics::kill_active_children();
+        crate::supervisor::force_kill_supervised_process_groups(board);
+        if tokio::time::timeout(FORCED_REAP_TIMEOUT, &mut *supervise)
+            .await
+            .is_err()
+        {
+            // Catch a participant that completed its spawn while the first
+            // snapshot was being killed, then stop the no-longer-useful owner
+            // task. At this point every board-visible process group has
+            // received SIGKILL, so aborting cannot orphan a live child.
+            crate::supervisor::force_kill_supervised_process_groups(board);
+            supervise.abort();
+            let _ = supervise.await;
+        }
+        self.teardown();
+        std::process::exit(130);
     }
 
     /// Render the terminal session state once before the controller and its
@@ -499,8 +607,28 @@ impl SessionController {
                 }
             }
             DisplayAction::Restart(id) => {
-                if let Some(tx) = &self.restart_tx {
-                    let _ = tx.try_send(SupervisorAction::Restart { id });
+                let failure = if let Some(tx) = &self.restart_tx {
+                    let action = SupervisorAction::Restart { id: id.clone() };
+                    match tx.try_send(action) {
+                        Ok(()) => None,
+                        Err(mpsc::error::TrySendError::Closed(_)) => Some(format!(
+                            "restart request for {id} was not sent because supervision ended"
+                        )),
+                        Err(mpsc::error::TrySendError::Full(_)) => Some(format!(
+                            "restart request for {id} was not sent because the supervisor is busy; try again"
+                        )),
+                    }
+                } else {
+                    Some(format!(
+                        "restart request for {id} is unavailable in this session"
+                    ))
+                };
+                if let Some(message) = failure {
+                    self.apply_event(SessionEvent::Diagnostic {
+                        source: DiagnosticSource::Cli,
+                        level: DiagnosticLevel::Warn,
+                        message,
+                    });
                 }
             }
             DisplayAction::JoypadSelect(id) => {
@@ -616,6 +744,29 @@ impl SessionController {
     }
 }
 
+fn register_cancel_request(cancel_requested: &mut bool) -> bool {
+    std::mem::replace(cancel_requested, true)
+}
+
+async fn recv_shutdown_signal(
+    interrupts: &mut tokio::signal::unix::Signal,
+    terminates: &mut tokio::signal::unix::Signal,
+    hangups: &mut tokio::signal::unix::Signal,
+) {
+    tokio::select! {
+        _ = interrupts.recv() => {}
+        _ = terminates.recv() => {}
+        _ = hangups.recv() => {}
+    }
+}
+
+async fn wait_for_cancel_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Finding B1/D3: every OTHER exit path (a normal return, an early `?`, a
 /// panic unwind) restores the terminal and uninstalls diagnostics routing
 /// through this `Drop` impl instead of a call to `teardown()` a future code
@@ -650,7 +801,8 @@ enum SupervisionEnd {
 async fn finish_after_failure(
     events_rx: &mut mpsc::Receiver<SessionEvent>,
     token: &CancellationToken,
-    supervise: JoinHandle<Result<SupervisorOutcome>>,
+    board: &BoardBackend,
+    mut supervise: JoinHandle<Result<SupervisorOutcome>>,
     error: anyhow::Error,
 ) -> Result<SupervisorOutcome> {
     // Closing wakes an awaited lifecycle send with an immediate error. Without
@@ -658,7 +810,16 @@ async fn finish_after_failure(
     // controller stopped draining it.
     events_rx.close();
     token.cancel();
-    let _ = supervise.await;
+    diagnostics::kill_active_children();
+    crate::supervisor::force_kill_supervised_process_groups(board);
+    if tokio::time::timeout(FORCED_REAP_TIMEOUT, &mut supervise)
+        .await
+        .is_err()
+    {
+        crate::supervisor::force_kill_supervised_process_groups(board);
+        supervise.abort();
+        let _ = supervise.await;
+    }
     Err(error)
 }
 
@@ -963,7 +1124,7 @@ mod tests {
             .await;
         let mut controller = SessionController::new(
             OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false),
-            "test",
+            SessionMode::Run,
             None,
         )
         .expect("Plain mode never touches a real terminal");
@@ -1016,10 +1177,12 @@ mod tests {
                 failed_participants: Vec::new(),
             })
         });
+        let board = BoardBackend::new();
 
         let result = finish_after_failure(
             &mut events_rx,
             &token,
+            &board,
             supervise,
             anyhow!("terminal draw failed"),
         )
@@ -1058,12 +1221,14 @@ mod tests {
                 failed_participants: Vec::new(),
             })
         });
+        let board = BoardBackend::new();
 
         let result = tokio::time::timeout(
             Duration::from_secs(1),
             finish_after_failure(
                 &mut events_rx,
                 &token,
+                &board,
                 supervise,
                 anyhow!("terminal failed"),
             ),
@@ -1073,6 +1238,64 @@ mod tests {
 
         assert!(token.is_cancelled());
         assert_eq!(result.unwrap_err().to_string(), "terminal failed");
+    }
+
+    /// An orderly supervisor result still ends the session and must terminate
+    /// captured setup workers registered outside the supervisor itself.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn orderly_supervision_end_kills_registered_captured_process_groups() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+        use std::sync::{Arc, Mutex};
+
+        let _guard = super::super::diagnostics::DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .await;
+        let mut controller = SessionController::new(
+            OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false),
+            SessionMode::Run,
+            None,
+        )
+        .expect("Plain mode never touches a real terminal");
+        controller.state = SessionState::Preparing.start().unwrap();
+
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("sleep 30").process_group(0);
+        let child = Arc::new(Mutex::new(Some(
+            command.spawn().expect("spawn captured child"),
+        )));
+        super::super::diagnostics::register_child(child.clone());
+
+        let supervise = tokio::spawn(async {
+            Ok(SupervisorOutcome {
+                failed_participants: Vec::new(),
+            })
+        });
+        controller
+            .drive_supervision(
+                BoardBackend::new(),
+                TelemetryBackend::new(),
+                crate::stores::runtime_store::RuntimeStore::new(),
+                Duration::from_secs(1),
+                supervise,
+            )
+            .await
+            .expect("supervision result");
+
+        let mut child = child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let status = child
+            .as_mut()
+            .expect("captured child remains available for reap")
+            .wait()
+            .expect("reap captured child");
+        child.take();
+        assert!(
+            !status.success(),
+            "orderly end must stop the captured group"
+        );
     }
 
     /// Finding A1: `drive_setup` and `drive_prepare_phase` share one
@@ -1090,7 +1313,7 @@ mod tests {
             .await;
         let mut controller = SessionController::new(
             OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false),
-            "test",
+            SessionMode::Run,
             None,
         )
         .expect("Plain mode never touches a real terminal");
@@ -1109,7 +1332,7 @@ mod tests {
             .await;
         let mut controller = SessionController::new(
             OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false),
-            "test",
+            SessionMode::Run,
             None,
         )
         .expect("Plain mode never touches a real terminal");
@@ -1117,5 +1340,13 @@ mod tests {
             .drive_setup(async { Err(anyhow!("setup failed")) })
             .await;
         assert_eq!(result.unwrap_err().to_string(), "setup failed");
+    }
+
+    #[test]
+    fn repeated_cancel_requests_escalate_on_the_second_request() {
+        let mut requested = false;
+        assert!(!register_cancel_request(&mut requested));
+        assert!(requested);
+        assert!(register_cancel_request(&mut requested));
     }
 }
