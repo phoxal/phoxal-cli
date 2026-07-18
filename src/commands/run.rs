@@ -24,7 +24,8 @@ use crate::component_driver::component_driver_crate_dir;
 use crate::launch_env::encode_participant_env;
 use crate::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution,
-    ParticipantLaunchRecord, PlanContext, SITE_TOOL_ROUTER, SiteLaunch, build_launch_plan,
+    ParticipantLaunchRecord, PlanContext, SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SiteLaunch,
+    build_launch_plan,
 };
 use crate::resolver::{
     ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, discover_robot_yaml,
@@ -117,10 +118,37 @@ struct LiveRunSetup {
     board: BoardBackend,
     telemetry: crate::telemetry::TelemetryBackend,
     runtime_store: crate::stores::runtime_store::RuntimeStore,
-    supervise_task: tokio::task::JoinHandle<Result<crate::supervisor::SupervisorOutcome>>,
-    watch_handle: Option<tokio::task::JoinHandle<()>>,
-    feed_tasks: Vec<tokio::task::JoinHandle<()>>,
+    orderly_shutdown_timeout: Duration,
+    stages: Vec<SupervisionStage>,
+    supervisor_options: SupervisorOptions,
+    background_tasks: AbortTasks,
     action_tx: mpsc::Sender<crate::supervisor::SupervisorAction>,
+}
+
+#[derive(Default)]
+pub(super) struct AbortTasks {
+    handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl AbortTasks {
+    pub(super) fn push(&mut self, handle: tokio::task::JoinHandle<()>) {
+        self.handles.push(handle);
+    }
+
+    pub(super) fn extend(
+        &mut self,
+        handles: impl IntoIterator<Item = tokio::task::JoinHandle<()>>,
+    ) {
+        self.handles.extend(handles);
+    }
+}
+
+impl Drop for AbortTasks {
+    fn drop(&mut self) {
+        for handle in &self.handles {
+            handle.abort();
+        }
+    }
 }
 
 impl Run {
@@ -154,8 +182,11 @@ impl Run {
             app.project.root(),
             crate::identity::TerminalMode::Full,
         );
-        let mut controller =
-            crate::session::controller::SessionController::new(app.output, "run", identity)?;
+        let mut controller = crate::session::controller::SessionController::new(
+            app.output,
+            crate::session::controller::SessionMode::Run,
+            identity,
+        )?;
         let events = controller.events();
 
         let prepared = controller
@@ -175,22 +206,36 @@ impl Run {
                 controller.renders_tui(),
             ))
             .await?;
-        controller.set_restart_channel(setup.action_tx.clone());
+        let LiveRunSetup {
+            board,
+            telemetry,
+            runtime_store,
+            orderly_shutdown_timeout,
+            stages,
+            supervisor_options,
+            background_tasks,
+            action_tx,
+        } = setup;
+        controller.set_restart_channel(action_tx);
+        // Start process supervision only after `drive_setup` has returned its
+        // owned result. A cancellation racing the end of setup can therefore
+        // never discard a freshly spawned supervisor JoinHandle.
+        let supervise_task = tokio::spawn(supervise_until_shutdown(
+            stages,
+            board.clone(),
+            supervisor_options,
+        ));
 
         let outcome = controller
             .drive_supervision(
-                setup.board,
-                setup.telemetry,
-                setup.runtime_store,
-                setup.supervise_task,
+                board,
+                telemetry,
+                runtime_store,
+                orderly_shutdown_timeout,
+                supervise_task,
             )
             .await;
-        if let Some(handle) = setup.watch_handle {
-            handle.abort();
-        }
-        for feed in setup.feed_tasks {
-            feed.abort();
-        }
+        drop(background_tasks);
         let outcome = outcome?;
         // `drive_supervision` consumes and tears down the controller before
         // returning. During the session the same failures stay visible on the
@@ -228,19 +273,22 @@ async fn live_run_setup(
     }
     report_launch_commands(&prepared.plan, &prepared.specs, message_format, &ui)?;
 
-    let mut feed_tasks = prepared
-        .robot_log_targets
-        .iter()
-        .map(|(namespace, robot_id)| {
-            start_bus_log_subscriber(
-                namespace.clone(),
-                robot_id.clone(),
-                default_connect_endpoint(),
-                prepared.board.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    feed_tasks.extend(
+    let mut background_tasks = AbortTasks::default();
+    background_tasks.extend(
+        prepared
+            .robot_log_targets
+            .iter()
+            .map(|(namespace, robot_id)| {
+                start_bus_log_subscriber(
+                    namespace.clone(),
+                    robot_id.clone(),
+                    default_connect_endpoint(),
+                    prepared.board.clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    background_tasks.extend(
         prepared
             .robot_log_targets
             .iter()
@@ -255,13 +303,13 @@ async fn live_run_setup(
     );
 
     let (action_tx, action_rx) = mpsc::channel(16);
-    let watch_handle = if watch_enabled {
+    if watch_enabled {
         let live_ids = prepared
             .specs
             .iter()
             .map(|spec| spec.id.clone())
             .collect::<BTreeSet<_>>();
-        Some(crate::watch::spawn_run_watch(
+        background_tasks.push(crate::watch::spawn_run_watch(
             crate::watch::RunWatchConfig {
                 ctx: prepared.ctx.clone(),
                 options: watch_options,
@@ -269,10 +317,8 @@ async fn live_run_setup(
                 board: prepared.board.clone(),
                 action_tx: action_tx.clone(),
             },
-        ))
-    } else {
-        None
-    };
+        ));
+    }
 
     let stages = stages_for_run(prepared.specs, &prepared.plan, output);
     let starting = crate::session::state::SessionState::Preparing
@@ -284,32 +330,30 @@ async fn live_run_setup(
 
     let telemetry = crate::telemetry::TelemetryBackend::new();
     if renders_tui {
-        feed_tasks.extend(start_telemetry_feeds(
+        background_tasks.extend(start_telemetry_feeds(
             &prepared.robot_log_targets,
             &telemetry,
         ));
     }
 
-    let board = prepared.board.clone();
-    let supervise_task = tokio::spawn(supervise_until_shutdown(
-        stages,
-        prepared.board,
-        SupervisorOptions {
-            action_rx: Some(action_rx),
-            token,
-            events: Some(events),
-            emits_running_on_startup_complete: true,
-            ..SupervisorOptions::default()
-        },
-    ));
+    let board = prepared.board;
+    let supervisor_options = SupervisorOptions {
+        action_rx: Some(action_rx),
+        token,
+        events: Some(events),
+        emits_running_on_startup_complete: true,
+        ..SupervisorOptions::default()
+    };
 
+    let orderly_shutdown_timeout = crate::supervisor::orderly_shutdown_budget(&stages);
     Ok(LiveRunSetup {
         board,
         telemetry,
         runtime_store: prepared.runtime_store,
-        supervise_task,
-        watch_handle,
-        feed_tasks,
+        orderly_shutdown_timeout,
+        stages,
+        supervisor_options,
+        background_tasks,
         action_tx,
     })
 }
@@ -360,7 +404,7 @@ fn stages_for_run(
     ]
 }
 
-/// Start the host/process/router-metrics/joypad-devices telemetry feeds
+/// Start the host/router-metrics/joypad-devices telemetry feeds
 /// (CLI-UX Phase 3/4) against the first robot's bus namespace - the site
 /// tools they subscribe to (`tool-telemetry`, `tool-router`, `tool-joypad`)
 /// are session-scoped, not per-robot, exactly like `prepare_site_tools`'s own
@@ -380,12 +424,6 @@ pub(crate) fn start_telemetry_feeds(
     };
     vec![
         crate::telemetry::start_host_feed(
-            namespace.clone(),
-            robot_id.clone(),
-            default_connect_endpoint(),
-            telemetry.clone(),
-        ),
-        crate::telemetry::start_process_feed(
             namespace.clone(),
             robot_id.clone(),
             default_connect_endpoint(),
@@ -443,7 +481,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     )?;
     let descriptors = crate::native_artifacts::descriptors_for(&resolved, false, true)?;
     crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
-    crate::runtime_root::publish(project_root, &resolved)
+    let runtime_root = crate::runtime_root::publish(project_root, &resolved)
         .context("failed to publish the runtime robot root")?;
 
     let source_participants =
@@ -527,7 +565,15 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     let board = BoardBackend::new();
     let mut specs = Vec::new();
 
-    prepare_site_tools(&plan, &resolved, &board, &mut specs, router_ownership, ui)?;
+    prepare_site_tools(
+        &plan,
+        &resolved,
+        &runtime_root,
+        &board,
+        &mut specs,
+        router_ownership,
+        ui,
+    )?;
     prepare_robot_participants(
         &plan,
         &resolved,
@@ -729,6 +775,7 @@ enum DriverDecision {
 pub(crate) fn prepare_site_tools(
     plan: &LaunchPlan,
     resolved: &ResolvedRobot,
+    robot_root: &Path,
     board: &BoardBackend,
     specs: &mut Vec<ParticipantSpec>,
     router_ownership: RouterOwnership,
@@ -780,9 +827,9 @@ pub(crate) fn prepare_site_tools(
                 executable: path,
                 args: Vec::new(),
                 cwd: None,
-                env: site_env(site, namespace, robot_id)?,
+                env: site_env(site, namespace, robot_id, robot_root)?,
                 shutdown_grace: Duration::from_secs(5),
-                process_group: false,
+                process_group: true,
                 note: None,
                 // The router's own framework runner bus is in-process (no
                 // `PHOXAL_CONNECT`), so its heartbeat is structurally
@@ -871,7 +918,7 @@ pub(crate) fn prepare_robot_participants(
                             shutdown_grace: Duration::from_millis(
                                 participant.launch.shutdown_grace_ms,
                             ),
-                            process_group: false,
+                            process_group: true,
                             note: None,
                             bus_participant: true,
                         }),
@@ -895,7 +942,7 @@ pub(crate) fn prepare_robot_participants(
                         cwd: Some(crate_dir.clone()),
                         env: encode_participant_env(&participant.launch)?.spawn_env(),
                         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
-                        process_group: false,
+                        process_group: true,
                         note: None,
                         bus_participant: true,
                     });
@@ -910,7 +957,7 @@ pub(crate) fn prepare_robot_participants(
                         cwd: Some(crate_dir.clone()),
                         env: encode_participant_env(&participant.launch)?.spawn_env(),
                         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
-                        process_group: false,
+                        process_group: true,
                         note: None,
                         bus_participant: true,
                     });
@@ -944,7 +991,7 @@ pub(crate) fn prepare_robot_participants(
                         cwd: Some(crate_dir.clone()),
                         env: encode_participant_env(&participant.launch)?.spawn_env(),
                         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
-                        process_group: false,
+                        process_group: true,
                         note: None,
                         bus_participant: true,
                     });
@@ -1007,18 +1054,29 @@ pub(crate) fn source_spec_from_launch_record(
         cwd: Some(crate_dir.clone()),
         env: encode_participant_env(&participant.launch)?.spawn_env(),
         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
-        process_group: false,
+        process_group: true,
         note: None,
         bus_participant: true,
     }))
 }
 
-fn site_env(site: &SiteLaunch, namespace: &str, robot_id: &str) -> Result<Vec<(String, String)>> {
+fn site_env(
+    site: &SiteLaunch,
+    namespace: &str,
+    robot_id: &str,
+    robot_root: &Path,
+) -> Result<Vec<(String, String)>> {
     let mut envs = vec![
         (env::PARTICIPANT_ID.to_string(), site.id.clone()),
         (env::NAMESPACE.to_string(), namespace.to_string()),
         (env::ROBOT_ID.to_string(), robot_id.to_string()),
     ];
+    if site.id == SITE_TOOL_JOYPAD {
+        envs.push((
+            env::ROBOT_ROOT.to_string(),
+            robot_root.display().to_string(),
+        ));
+    }
     // A configless tool (`phoxal_config == Value::Null`, e.g. joypad/telemetry)
     // must run with `PHOXAL_CONFIG` ABSENT: a unit config (`type Config = ()`)
     // fails to deserialize `{}` ("invalid type: map, expected unit"), and an
@@ -1366,7 +1424,7 @@ mod tests {
             artifact_ref: "phoxal/tool-telemetry@0.1.0".to_string(),
             phoxal_config: serde_json::Value::Null,
         };
-        let env = site_env(&tool, "dev", "rover-01").expect("site_env");
+        let env = site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
         assert!(
             !env.iter().any(|(k, _)| k == env::CONFIG),
             "configless tool must not get PHOXAL_CONFIG: {env:?}"
@@ -1376,8 +1434,27 @@ mod tests {
             "observable bus tool must get PHOXAL_CONNECT: {env:?}"
         );
         assert!(
+            !env.iter().any(|(k, _)| k == env::ROBOT_ROOT),
+            "telemetry does not need the compiled robot root: {env:?}"
+        );
+        assert!(
             !env.iter().any(|(key, _)| key == env::CLOCK),
             "tools must not receive a clock selection: {env:?}"
+        );
+    }
+
+    #[test]
+    fn joypad_receives_the_compiled_robot_root() {
+        let tool = SiteLaunch {
+            id: SITE_TOOL_JOYPAD.to_string(),
+            artifact_ref: "phoxal/tool-joypad@0.1.0".to_string(),
+            phoxal_config: serde_json::Value::Null,
+        };
+        let env = site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
+        assert!(
+            env.iter()
+                .any(|(key, value)| key == env::ROBOT_ROOT && value == "/tmp/robot"),
+            "joypad needs the compiled robot model: {env:?}"
         );
     }
 
@@ -1390,7 +1467,7 @@ mod tests {
             artifact_ref: "phoxal/tool-router@0.1.8".to_string(),
             phoxal_config: serde_json::json!({ "uplink": null }),
         };
-        let env = site_env(&router, "dev", "rover-01").expect("site_env");
+        let env = site_env(&router, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
         assert!(
             env.iter().any(|(k, _)| k == env::CONFIG),
             "router must get PHOXAL_CONFIG: {env:?}"
@@ -1413,7 +1490,8 @@ mod tests {
                 artifact_ref: format!("phoxal/{tool_id}@0.1.0"),
                 phoxal_config: serde_json::Value::Null,
             };
-            let env = site_env(&tool, "dev", "rover-01").expect("site_env");
+            let env =
+                site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
             assert!(
                 !env.iter().any(|(key, _)| key == env::CLOCK),
                 "{tool_id} must not receive a clock selection: {env:?}"
@@ -1661,6 +1739,7 @@ robot:
         prepare_site_tools(
             &plan,
             &resolved,
+            Path::new("/tmp/project/.phoxal/run/robot"),
             &board,
             &mut specs,
             RouterOwnership::Managed,
@@ -1721,6 +1800,7 @@ robot:
         prepare_site_tools(
             &plan,
             &resolved,
+            Path::new("/tmp/project/.phoxal/run/robot"),
             &board,
             &mut specs,
             RouterOwnership::External,
@@ -1776,5 +1856,16 @@ robot:
             })),
             "driver"
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_setup_background_tasks_aborts_every_handle() {
+        let handle = tokio::spawn(std::future::pending::<()>());
+        let abort = handle.abort_handle();
+        let mut tasks = AbortTasks::default();
+        tasks.push(handle);
+        drop(tasks);
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
     }
 }

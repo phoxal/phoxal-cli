@@ -55,6 +55,13 @@ pub fn selected(theme: Theme, role: Role) -> Style {
     fg(theme, role).add_modifier(Modifier::REVERSED)
 }
 
+/// Soft focus for a candidate that arrows can move to but Enter has not yet
+/// activated. This is deliberately weaker than reversed-video selection.
+#[must_use]
+pub fn candidate(theme: Theme, role: Role) -> Style {
+    fg(theme, role).add_modifier(Modifier::DIM | Modifier::BOLD)
+}
+
 /// A dim/secondary style for muted chrome (group headings, placeholders).
 #[must_use]
 pub fn muted(theme: Theme) -> Style {

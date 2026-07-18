@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
@@ -40,10 +40,10 @@ pub fn publish(project_root: &Path, resolved: &ResolvedRobot) -> Result<PathBuf>
     stage_candidate(project_root, candidate.path(), resolved)?;
     validate_candidate(candidate.path(), resolved)?;
 
-    let candidate = candidate.keep();
     let target = path(project_root);
     let previous = run_dir.join(PREVIOUS_ROBOT_DIR);
     remove_if_present(&previous)?;
+    let candidate = candidate.keep();
     let had_previous = fs::symlink_metadata(&target).is_ok();
     if had_previous {
         fs::rename(&target, &previous).with_context(|| {
@@ -76,6 +76,7 @@ fn stage_candidate(project_root: &Path, candidate: &Path, resolved: &ResolvedRob
         .context("failed to write resolved runtime robot.yaml")?;
 
     let structure = &resolved.robot.robot.structure;
+    ensure_safe_relative_path(structure, "robot structure")?;
     copy_file_preserving_path(project_root, candidate, structure, "robot structure")?;
     if let Some(structure_parent) = structure.parent() {
         let mesh_path = structure_parent.join(MESHES_DIR);
@@ -89,6 +90,18 @@ fn stage_candidate(project_root: &Path, candidate: &Path, resolved: &ResolvedRob
         resolved,
     )
     .context("failed to stage component assets into the runtime robot root")
+}
+
+fn ensure_safe_relative_path(path: &Path, label: &str) -> Result<()> {
+    ensure!(
+        !path.as_os_str().is_empty()
+            && path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_))),
+        "{label} must be a non-empty relative path without '.' or '..': {}",
+        path.display()
+    );
+    Ok(())
 }
 
 fn validate_candidate(candidate: &Path, resolved: &ResolvedRobot) -> Result<()> {
@@ -202,6 +215,7 @@ fn remove_if_present(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::catalog::ArtifactKind;
+    use crate::host_paths::test_support::ScratchPhoxalHome;
     use crate::resolver::host_target_triple;
     use crate::resolver::{ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource};
 
@@ -282,7 +296,39 @@ robot:
     }
 
     #[test]
+    fn robot_structure_cannot_escape_the_runtime_root() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        for structure in [
+            PathBuf::from("../outside.urdf"),
+            PathBuf::from("/tmp/outside.urdf"),
+        ] {
+            let mut resolved = resolved_robot()?;
+            resolved.robot.robot.structure = structure.clone();
+            let error = publish(project.path(), &resolved).unwrap_err().to_string();
+            assert!(error.contains("robot structure must be a non-empty relative path"));
+            assert!(!path(project.path()).exists());
+
+            let run_dir = project.path().join(".phoxal/run");
+            let candidates = fs::read_dir(&run_dir)?
+                .filter_map(std::result::Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".robot-candidate-")
+                })
+                .count();
+            assert_eq!(candidates, 0, "failed candidates must clean themselves up");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn publishes_component_bundle_without_mutating_its_source_tree() -> Result<()> {
+        // Component staging takes the process-wide artifact-store lock. Join
+        // the same serialized scratch-root scope as native-artifact tests so a
+        // parallel test cannot temporarily point this test at its locked store.
+        let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "robot")?;

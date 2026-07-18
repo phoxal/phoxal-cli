@@ -578,6 +578,7 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::supervisor::{ParticipantState, ParticipantStatus};
 
     #[test]
     fn debounce_collapses_save_bursts() {
@@ -640,6 +641,11 @@ mod tests {
     #[tokio::test]
     async fn failed_watch_check_does_not_send_swap_action() {
         let board = BoardBackend::new();
+        board.upsert(ParticipantStatus::new(
+            "mission",
+            ParticipantKind::Service,
+            ParticipantState::Ready,
+        ));
         let (tx, mut rx) = mpsc::channel(1);
         let target = WatchTarget {
             key: "service:mission:/tmp/mission".to_string(),
@@ -691,7 +697,7 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             shutdown_grace: Duration::from_millis(10),
-            process_group: false,
+            process_group: true,
             note: None,
             bus_participant: true,
         };

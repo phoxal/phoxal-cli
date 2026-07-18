@@ -3,7 +3,7 @@
 //! runtime has emitted over the bus, later raw mirrors are dropped by routing
 //! identity rather than fragile text comparison.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::time::Instant;
 
 use crate::session::event::DiagnosticLevel;
@@ -21,14 +21,11 @@ pub struct DisplayedLine {
 }
 
 #[derive(Debug, Clone, Default)]
-struct RuntimeLogState {
-    lines: VecDeque<DisplayedLine>,
-    bus_seen: bool,
-}
-
-#[derive(Debug, Clone, Default)]
 pub struct LogStore {
-    runtimes: BTreeMap<String, RuntimeLogState>,
+    /// Session-lifetime Raw/Bus cutover. Bus ingress is restricted to the
+    /// finite launch plan before it reaches this store, so this set is bounded
+    /// by the session graph and remains correct after both LRU and ring eviction.
+    bus_participants: BTreeSet<String>,
     all: VecDeque<DisplayedLine>,
 }
 
@@ -43,21 +40,20 @@ impl LogStore {
     }
 
     pub(crate) fn record_at(&mut self, line: RoutedLogLine, received_at: Instant) {
-        let state = self.runtimes.entry(line.participant.clone()).or_default();
-        if line.source == LogSource::Raw && state.bus_seen {
+        let participant = sanitize_terminal_text(&line.participant);
+        if line.source == LogSource::Bus {
+            self.bus_participants.insert(participant.clone());
+        }
+        if line.source == LogSource::Raw && self.bus_participants.contains(&participant) {
             return;
         }
-        if line.source == LogSource::Bus {
-            state.bus_seen = true;
-        }
         let displayed = DisplayedLine {
-            participant: line.participant,
+            participant,
             source: line.source,
             severity: line.severity,
-            text: line.text,
+            text: sanitize_terminal_text(&line.text),
             received_at,
         };
-        push_bounded(&mut state.lines, displayed.clone());
         push_bounded(&mut self.all, displayed);
     }
 
@@ -72,33 +68,22 @@ impl LogStore {
             DiagnosticLevel::Warn => LogSeverity::Warn,
             DiagnosticLevel::Error => LogSeverity::Error,
         };
-        let participant = participant.into();
+        let participant = sanitize_terminal_text(&participant.into());
+        let text = text.into();
+        let received_at = Instant::now();
         let displayed = DisplayedLine {
             participant: participant.clone(),
             source: LogSource::Raw,
             severity,
-            text: text.into(),
-            received_at: Instant::now(),
+            text: sanitize_terminal_text(&text),
+            received_at,
         };
-        push_bounded(
-            &mut self.runtimes.entry(participant).or_default().lines,
-            displayed.clone(),
-        );
         push_bounded(&mut self.all, displayed);
     }
 
     #[must_use]
     pub fn lines(&self) -> impl DoubleEndedIterator<Item = &DisplayedLine> {
         self.all.iter()
-    }
-
-    #[must_use]
-    #[cfg(test)]
-    pub fn lines_for(&self, id: &str) -> impl DoubleEndedIterator<Item = &DisplayedLine> {
-        self.runtimes
-            .get(id)
-            .into_iter()
-            .flat_map(|state| state.lines.iter())
     }
 }
 
@@ -107,6 +92,51 @@ fn push_bounded(lines: &mut VecDeque<DisplayedLine>, line: DisplayedLine) {
     if lines.len() > LOG_CAPACITY {
         lines.pop_front();
     }
+}
+
+/// Ratatui ultimately writes cell symbols to the real terminal. Keeping an
+/// embedded CSI/OSC sequence in a log line therefore lets participant output
+/// move the terminal cursor during a frame, which used to leave the scattered
+/// `h`/`n`/`z` markers visible after leaving Logs. Strip ANSI first, then
+/// neutralize every remaining control character before text reaches a cell.
+pub(crate) fn sanitize_terminal_text(text: &str) -> String {
+    console::strip_ansi_codes(text)
+        .chars()
+        .map(|character| {
+            if character.is_control() || is_terminal_format_control(character) {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+fn is_terminal_format_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00ad}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061c}'
+            | '\u{06dd}'
+            | '\u{070f}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08e2}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{13455}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
 }
 
 #[cfg(test)]
@@ -128,28 +158,104 @@ mod tests {
         store.record(line("drive", LogSource::Raw, "booting"));
         store.record(line("drive", LogSource::Bus, "ready"));
         store.record(line("drive", LogSource::Raw, "ready"));
-        let lines = store.lines_for("drive").collect::<Vec<_>>();
+        let lines = store.lines().collect::<Vec<_>>();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].text, "booting");
         assert_eq!(lines[1].source, LogSource::Bus);
     }
 
     #[test]
-    fn session_and_runtime_views_share_the_same_entries() {
+    fn one_global_ring_contains_every_participant() {
         let mut store = LogStore::new();
         store.record(line("drive", LogSource::Bus, "one"));
         store.record(line("mission", LogSource::Bus, "two"));
         assert_eq!(store.lines().count(), 2);
-        assert_eq!(store.lines_for("drive").count(), 1);
+        assert_eq!(
+            store
+                .lines()
+                .filter(|line| line.participant == "drive")
+                .count(),
+            1
+        );
     }
 
     #[test]
-    fn global_and_runtime_rings_are_bounded() {
+    fn global_ring_is_bounded() {
         let mut store = LogStore::new();
         for index in 0..(LOG_CAPACITY + 5) {
             store.record(line("drive", LogSource::Bus, &format!("line {index}")));
         }
         assert_eq!(store.lines().count(), LOG_CAPACITY);
-        assert_eq!(store.lines_for("drive").count(), LOG_CAPACITY);
+    }
+
+    #[test]
+    fn unrelated_participants_do_not_reset_bus_cutover() {
+        let mut store = LogStore::new();
+        let started = Instant::now();
+        store.record_at(line("drive", LogSource::Bus, "bus line"), started);
+        for index in 0..256 {
+            store.record_at(
+                line(&format!("participant-{index}"), LogSource::Raw, "raw"),
+                started + std::time::Duration::from_nanos(index as u64 + 1),
+            );
+        }
+        let before = store.lines().count();
+        store.record_at(
+            line("drive", LogSource::Raw, "mirrored bus line"),
+            started + std::time::Duration::from_secs(1),
+        );
+        assert_eq!(store.lines().count(), before);
+    }
+
+    #[test]
+    fn bus_cutover_survives_lru_and_global_ring_eviction() {
+        let mut store = LogStore::new();
+        let started = Instant::now();
+        store.record_at(line("drive", LogSource::Bus, "bus line"), started);
+        for index in 0..LOG_CAPACITY {
+            store.record_at(
+                line("filler", LogSource::Raw, &format!("line {index}")),
+                started + std::time::Duration::from_nanos(index as u64 + 1),
+            );
+        }
+        assert!(store.lines().all(|line| line.participant != "drive"));
+        store.record_at(
+            line("drive", LogSource::Raw, "mirrored bus line"),
+            started + std::time::Duration::from_secs(1_000),
+        );
+        assert!(
+            store
+                .lines()
+                .all(|line| line.participant != "drive" || line.source == LogSource::Bus)
+        );
+    }
+
+    #[test]
+    fn terminal_control_sequences_are_never_retained() {
+        let mut store = LogStore::new();
+        store.record(line(
+            "drive\u{1b}[2J\u{202e}",
+            LogSource::Raw,
+            "before\u{1b}[7;39Hafter\r\nnext\u{1b}]8;;https://example.com\u{7}link\u{9b}2J\u{7f}\u{202e}",
+        ));
+        let line = store.lines().next().unwrap();
+        assert_eq!(line.participant, "drive ");
+        let text = &line.text;
+        assert!(text.contains("beforeafter  next"));
+        assert!(!text.chars().any(char::is_control));
+        assert!(!text.chars().any(is_terminal_format_control));
+    }
+
+    #[test]
+    fn diagnostics_sanitize_participant_keys_and_text() {
+        let mut store = LogStore::new();
+        store.record_diagnostic(
+            "dr\u{202e}ive",
+            DiagnosticLevel::Error,
+            "failed\u{202e}spoof",
+        );
+        let line = store.lines().next().unwrap();
+        assert_eq!(line.participant, "dr ive");
+        assert_eq!(line.text, "failed spoof");
     }
 }

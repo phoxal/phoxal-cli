@@ -50,17 +50,46 @@ same five fixed pages:
 
 | Page | Purpose |
 |---|---|
-| **Overview** | Host CPU, memory, root disk, load, uptime, robot-runtime summary, and direct lifecycle attention. |
-| **Runtimes** | Flat robot-runtime table plus one read-only detail view. Standard tools and Webots internals stay hidden. |
-| **Logs** | One bounded robot-runtime log stream with runtime, severity, and text filters plus follow/pause. |
-| **Bus** | Router-observed topics, producers, ingress rate, count, throughput, and receive-time freshness. |
-| **Input** | Authoritative controller selection and enable state. Selection never enables manual input. |
+| **Overview** | Robot-runtime summary and direct lifecycle attention; host and simulation state stay visible in the persistent header. |
+| **Runtimes** | User services, framework services, and drivers in separate lists, plus a portable lifecycle and contract-focused detail view. Standard tools and Webots internals stay hidden; per-process CPU/RSS is intentionally omitted because not every runtime executes as a host process. |
+| **Logs** | One bounded stream with source, participant, severity, text, and follow filters. Runtime and tool logs share the same view. |
+| **Bus** | Router throughput history, per-producer rates, topic rates/counts, and receive-time freshness. |
+| **Input** | Devices on the left and read-only controller/command/tool state on the right. Selection never enables manual input. |
 
-Use `1`-`5` or the arrow keys to change pages, `?` for contextual help,
-`i` for read-only Session Information, and `q` or Ctrl-C to stop. Input
-starts disabled; `Enter` selects a controller, `e` enables, `x` disables,
-and `r` rescans. Plain and JSON modes retain their existing non-interactive
-output.
+Navigation follows a menu stack: arrows move a soft cursor, `Enter` opens or
+activates it, and `Esc` backs out one level. When no Help or Session Information
+overlay is open, `1`-`5` open a page directly. `?` opens compact global help,
+`i` opens read-only Session Information, and `q` or Ctrl-C stops.
+
+The full interface needs a terminal of at least 44 columns by 18 rows. Smaller
+terminals show a resize prompt instead of clipping selectable controls.
+
+Page actions are scoped to the active page. **Overview** is a read-only summary.
+On **Runtimes**, Up/Down chooses a runtime, `Enter` opens details, and `Esc`
+closes details before another runtime can be selected; `l` opens Logs for that
+runtime, and `r` restarts it. On **Logs**, Left/Right chooses a control
+and `Enter` activates it; the Source control cycles through All, Runtimes, and
+Tools. `/` edits text, `f` edits the participant filter, `s` changes severity,
+Up scrolls older and pauses live output, Down scrolls toward newer retained
+lines, `Space` pauses or follows, and `End` returns to live output. On **Bus**,
+Left/Right chooses Filter, Sort, or
+Internals, Up/Down scrolls topics, `/` filters, `s` changes sorting, and `a`
+reveals internal topics. On **Input**, Up/Down chooses a device, `Enter` selects
+it, `e` enables, `x` disables, and `r` rescans; input starts disabled and
+selection never enables it. Switching into Input refreshes the device inventory
+automatically. Rejected input actions are reported in Logs, not duplicated in
+multiple Input fields; the latest acknowledgement appears once beside the live
+Input state and remains available in Logs.
+
+The first error in a session opens Logs automatically, closes any overlay or
+runtime detail, resets the filters to all sources at Error severity, and resumes
+live following so the new failure is visible immediately.
+
+While editing a Logs or Bus filter, results update as you type. Use `Backspace`
+to remove text; `Enter` or `Esc` finishes editing and keeps the current text.
+
+Plain and JSON modes retain their existing non-interactive output. The terminal
+title is `phoxal-cli <robot-id> - <namespace>` for the session lifetime.
 
 ### Dev Path Overrides
 

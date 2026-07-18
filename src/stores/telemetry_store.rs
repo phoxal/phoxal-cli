@@ -1,13 +1,14 @@
 //! Receive-time stamped latest telemetry for the live session model.
 
-use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use phoxal_api::v1 as state_api;
 
-use crate::telemetry::{HostSample, JoypadDevicesSample, ProcessSample, RouterMetricsSample};
+use crate::telemetry::{HostSample, JoypadDevicesSample, RouterMetricsSample};
 
 pub const DEFAULT_FRESHNESS_TTL: Duration = Duration::from_secs(3);
+pub const ROUTER_HISTORY_CAPACITY: usize = 60;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Timestamped<T> {
@@ -29,8 +30,8 @@ impl<T> Timestamped<T> {
 #[derive(Debug, Clone, Default)]
 pub struct TelemetryStore {
     host: Option<Timestamped<HostSample>>,
-    process_by_participant: BTreeMap<String, Timestamped<ProcessSample>>,
     router: Option<Timestamped<RouterMetricsSample>>,
+    router_throughput_history: VecDeque<Timestamped<f32>>,
     joypad: Option<Timestamped<JoypadDevicesSample>>,
     motion: Option<Timestamped<state_api::motion::State>>,
 }
@@ -40,12 +41,12 @@ impl TelemetryStore {
         self.host = Some(Timestamped::new(sample, now));
     }
 
-    pub fn record_process(&mut self, now: Instant, participant: String, sample: ProcessSample) {
-        self.process_by_participant
-            .insert(participant, Timestamped::new(sample, now));
-    }
-
     pub fn record_router(&mut self, now: Instant, sample: RouterMetricsSample) {
+        self.router_throughput_history
+            .push_back(Timestamped::new(sample.throughput_msg_s, now));
+        if self.router_throughput_history.len() > ROUTER_HISTORY_CAPACITY {
+            self.router_throughput_history.pop_front();
+        }
         self.router = Some(Timestamped::new(sample, now));
     }
 
@@ -63,13 +64,13 @@ impl TelemetryStore {
     }
 
     #[must_use]
-    pub fn process_all(&self) -> &BTreeMap<String, Timestamped<ProcessSample>> {
-        &self.process_by_participant
+    pub fn router(&self) -> Option<&Timestamped<RouterMetricsSample>> {
+        self.router.as_ref()
     }
 
     #[must_use]
-    pub fn router(&self) -> Option<&Timestamped<RouterMetricsSample>> {
-        self.router.as_ref()
+    pub fn router_throughput_history(&self) -> &VecDeque<Timestamped<f32>> {
+        &self.router_throughput_history
     }
 
     #[must_use]
@@ -90,30 +91,31 @@ mod tests {
     #[test]
     fn freshness_uses_receive_time() {
         let received = Instant::now();
-        let sample = Timestamped::new(ProcessSample::default(), received);
+        let sample = Timestamped::new(RouterMetricsSample::default(), received);
         assert!(!sample.is_stale(received + Duration::from_secs(2), DEFAULT_FRESHNESS_TTL));
         assert!(sample.is_stale(received + Duration::from_secs(4), DEFAULT_FRESHNESS_TTL));
     }
 
     #[test]
-    fn process_samples_are_demultiplexed_by_runtime() {
+    fn router_history_is_bounded_to_one_minute_of_samples() {
         let mut store = TelemetryStore::default();
         let now = Instant::now();
-        store.record_process(
-            now,
-            "drive".to_string(),
-            ProcessSample {
-                cpu_pct: 1.0,
-                rss_bytes: 2,
-                window_ns: 3,
-            },
+        for index in 0..(ROUTER_HISTORY_CAPACITY + 3) {
+            store.record_router(
+                now + Duration::from_secs(index as u64),
+                RouterMetricsSample {
+                    throughput_msg_s: index as f32,
+                    ..RouterMetricsSample::default()
+                },
+            );
+        }
+        assert_eq!(
+            store.router_throughput_history().len(),
+            ROUTER_HISTORY_CAPACITY
         );
         assert_eq!(
-            store
-                .process_all()
-                .get("drive")
-                .map(|sample| sample.value.rss_bytes),
-            Some(2)
+            store.router_throughput_history().front().unwrap().value,
+            3.0
         );
     }
 }

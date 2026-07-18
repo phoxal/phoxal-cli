@@ -10,16 +10,20 @@
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
 use crossterm::event::{self, Event};
 use tokio::sync::mpsc;
 
+use crate::session::diagnostics;
+use crate::session::event::{DiagnosticLevel, DiagnosticSource};
+
 /// How long each `event::poll` call blocks before checking `stop` again -
 /// bounds how quickly the reader thread notices [`InputThread::stop`] was
 /// called.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const JOIN_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Overflow policy: newest-wins. The redraw loop drains this every frame, so
 /// in practice it never holds more than one or two events; this capacity is
@@ -30,13 +34,98 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// bound.
 const INPUT_CHANNEL_CAPACITY: usize = 256;
 
-/// Handle to the background input-reading thread. Not joined on drop (a
-/// blocking `event::poll` cannot be interrupted mid-wait without signaling
-/// the terminal itself); `stop` just asks it to exit on its next poll tick,
-/// and the process exiting takes care of the rest for a short-lived CLI
-/// command either way.
+struct ReaderLifecycle {
+    stop: AtomicBool,
+    finished: Mutex<bool>,
+    finished_changed: Condvar,
+}
+
+impl ReaderLifecycle {
+    fn new() -> Self {
+        Self {
+            stop: AtomicBool::new(false),
+            finished: Mutex::new(false),
+            finished_changed: Condvar::new(),
+        }
+    }
+
+    fn request_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    fn should_stop(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    fn mark_finished(&self) {
+        *self.finished.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.finished_changed.notify_all();
+    }
+
+    fn wait_finished_for(&self, wait: Duration) -> bool {
+        let finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
+        let (finished, _) = self
+            .finished_changed
+            .wait_timeout_while(finished, wait, |finished| !*finished)
+            .unwrap_or_else(PoisonError::into_inner);
+        *finished
+    }
+
+    fn wait_finished(&self) {
+        let mut finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*finished {
+            finished = self
+                .finished_changed
+                .wait(finished)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+fn active_reader() -> &'static Mutex<Weak<ReaderLifecycle>> {
+    static ACTIVE: OnceLock<Mutex<Weak<ReaderLifecycle>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(Weak::new()))
+}
+
+fn register_active_reader(lifecycle: &Arc<ReaderLifecycle>) {
+    *active_reader()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(lifecycle);
+}
+
+fn clear_active_reader(lifecycle: &Arc<ReaderLifecycle>) {
+    let mut active = active_reader()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if active
+        .upgrade()
+        .is_some_and(|registered| Arc::ptr_eq(&registered, lifecycle))
+    {
+        *active = Weak::new();
+    }
+}
+
+/// Panic hooks run before ordinary field drops. Stop the active reader and
+/// wait until it can no longer consume stdin before the hook restores cooked
+/// terminal mode and delegates to the previous panic printer.
+pub(super) fn stop_active_for_panic() {
+    let lifecycle = active_reader()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .upgrade();
+    if let Some(lifecycle) = lifecycle {
+        lifecycle.request_stop();
+        lifecycle.wait_finished();
+    }
+}
+
+/// Handle to the background input-reading thread. `event::poll` is bounded by
+/// [`POLL_INTERVAL`], so teardown can request stop and join before the TUI
+/// restores the shell terminal, preventing the old reader from consuming a
+/// keystroke meant for the prompt.
 pub struct InputThread {
-    stop: Arc<AtomicBool>,
+    lifecycle: Arc<ReaderLifecycle>,
+    thread: Option<std::thread::JoinHandle<()>>,
     /// Set only when the thread ends because `event::poll`/`event::read`
     /// itself failed (the tty went away underneath the session) - never set
     /// by a clean [`Self::stop`] shutdown, so [`Self::take_error`] can tell
@@ -51,12 +140,12 @@ impl InputThread {
     /// end of the channel it forwards events on.
     pub fn spawn() -> (Self, mpsc::Receiver<Event>) {
         let (tx, rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
-        let stop = Arc::new(AtomicBool::new(false));
+        let lifecycle = Arc::new(ReaderLifecycle::new());
         let error = Arc::new(Mutex::new(None));
-        let thread_stop = Arc::clone(&stop);
+        let thread_lifecycle = Arc::clone(&lifecycle);
         let thread_error = Arc::clone(&error);
-        std::thread::spawn(move || {
-            while !thread_stop.load(Ordering::Relaxed) {
+        let thread = std::thread::spawn(move || {
+            while !thread_lifecycle.should_stop() {
                 match event::poll(POLL_INTERVAL) {
                     Ok(true) => match event::read() {
                         Ok(ev) => {
@@ -82,12 +171,45 @@ impl InputThread {
                     }
                 }
             }
+            thread_lifecycle.mark_finished();
         });
-        (Self { stop, error }, rx)
+        register_active_reader(&lifecycle);
+        (
+            Self {
+                lifecycle,
+                thread: Some(thread),
+                error,
+            },
+            rx,
+        )
     }
 
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.lifecycle.request_stop();
+    }
+
+    pub fn stop_and_join(&mut self) {
+        self.stop();
+        if !self.try_join(JOIN_TIMEOUT) {
+            let _ = diagnostics::try_route(
+                DiagnosticSource::Cli,
+                DiagnosticLevel::Warn,
+                "terminal input reader exceeded its join budget; retrying before terminal restoration",
+            );
+        }
+    }
+
+    fn try_join(&mut self, wait: Duration) -> bool {
+        if self.thread.is_none() {
+            return true;
+        }
+        if !self.lifecycle.wait_finished_for(wait) {
+            return false;
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        true
     }
 
     /// Take the terminal read/poll error that ended the reader thread, if
@@ -108,5 +230,52 @@ fn set_error(slot: &Mutex<Option<io::Error>>, error: io::Error) {
 impl Drop for InputThread {
     fn drop(&mut self) {
         self.stop();
+        if !self.try_join(JOIN_TIMEOUT) {
+            let _ = diagnostics::try_route(
+                DiagnosticSource::Cli,
+                DiagnosticLevel::Error,
+                "terminal input reader did not stop after a second join budget; waiting before terminal restoration",
+            );
+            // Terminal safety wins on this impossible-under-the-poll-contract
+            // fallback: never restore cooked mode while a detached reader can
+            // still consume the shell's next keystroke.
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+        clear_active_reader(&self.lifecycle);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_timed_out_join_keeps_the_handle_for_the_restoration_retry() {
+        use std::sync::mpsc as std_mpsc;
+
+        let lifecycle = Arc::new(ReaderLifecycle::new());
+        let error = Arc::new(Mutex::new(None));
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let thread_lifecycle = Arc::clone(&lifecycle);
+        let thread = std::thread::spawn(move || {
+            release_rx.recv().expect("release test reader");
+            thread_lifecycle.mark_finished();
+        });
+        let mut input = InputThread {
+            lifecycle,
+            thread: Some(thread),
+            error,
+        };
+
+        input.stop_and_join();
+        assert!(
+            input.thread.is_some(),
+            "the first timeout must retain the join handle"
+        );
+        release_tx.send(()).expect("release test reader");
+        input.stop_and_join();
+        assert!(input.thread.is_none());
     }
 }
