@@ -4,6 +4,13 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.16.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.16.0) - 2026-07-18
+
+
+### Added
+
+- *(tui)* Refine session interface and navigation (#154)
+
 ## [0.15.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.15.0) - 2026-07-17
 
 
