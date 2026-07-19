@@ -451,6 +451,7 @@ impl PlatformArtifactRef {
             ArtifactKind::ComponentDriver => "official driver",
             ArtifactKind::Tool => "official tool",
             ArtifactKind::Simulator => "official simulator",
+            ArtifactKind::Infrastructure => "official infrastructure",
         }
     }
 }
@@ -740,6 +741,7 @@ pub(crate) fn tool_participants_from_resolved(
     resolved
         .tools
         .iter()
+        .filter(|tool| tool.kind == ArtifactKind::Tool)
         .filter_map(|tool| {
             if tool.path_override.is_some() {
                 None
@@ -850,11 +852,12 @@ pub(crate) fn check_artifact_refs_from_resolved(
         resolved
             .tools
             .iter()
+            .filter(|tool| tool.kind == ArtifactKind::Tool)
             .filter(|tool| tool.path_override.is_none())
             .filter(|tool| tool_env_override(tool).is_none())
             .map(|tool| PlatformArtifactRef {
                 name: tool.name.clone(),
-                kind: ArtifactKind::Tool,
+                kind: tool.kind,
                 artifact_ref: tool.asset.clone(),
                 instances: Vec::new(),
             }),
@@ -916,15 +919,20 @@ pub(crate) fn source_participants_from_resolved(
         ));
     }
 
-    for tool in resolved.tools.iter().filter_map(|tool| {
-        tool.path_override.as_ref().map(|path| {
-            SourceParticipant::tool(
-                tool.name.clone(),
-                tool_emit_apis_id(&tool.name).to_string(),
-                path.clone(),
-            )
+    for tool in resolved
+        .tools
+        .iter()
+        .filter(|tool| tool.kind == ArtifactKind::Tool)
+        .filter_map(|tool| {
+            tool.path_override.as_ref().map(|path| {
+                SourceParticipant::tool(
+                    tool.name.clone(),
+                    tool_emit_apis_id(&tool.name).to_string(),
+                    path.clone(),
+                )
+            })
         })
-    }) {
+    {
         participants.push(tool);
     }
 

@@ -10,8 +10,8 @@ use phoxal::model::robot::{
 use serde_json::Value;
 
 use crate::catalog::{
-    ArtifactKind, Catalog, OFFICIAL_SERVICES, OFFICIAL_SIMULATORS, OFFICIAL_TOOLS,
-    SelectionChannel, select_artifact, selection_channel,
+    ArtifactKind, Catalog, OFFICIAL_INFRASTRUCTURE, OFFICIAL_SERVICES, OFFICIAL_SIMULATORS,
+    OFFICIAL_TOOLS, SelectionChannel, select_artifact, selection_channel,
 };
 use crate::shell;
 use crate::utils::{hash_tree, resolve_project_path};
@@ -245,13 +245,15 @@ pub enum ResolvedComponentSource {
     Catalog,
 }
 
-/// A resolved native tool (`tool-router`, `tool-joypad`). `name` is the short,
+/// A resolved native site artifact (`tool-bus`, `tool-joypad`, or
+/// `infrastructure-router`). `name` is the short,
 /// launch-safe kind-qualified id used for participant/site ids, systemd unit
-/// names, and env var keys (`SITE_TOOL_ROUTER` etc.); `package` is the
-/// canonical provider-qualified identity (`phoxal/tool-router`) used for
+/// names, and env var keys (`SITE_TOOL_BUS` etc.); `package` is the
+/// canonical provider-qualified identity (`phoxal/tool-bus`) used for
 /// catalog lookups and native-artifact provisioning.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedTool {
+    pub kind: ArtifactKind,
     pub name: String,
     pub package: String,
     pub requested: String,
@@ -284,6 +286,7 @@ pub enum ResolvedPathOverrideKind {
     ComponentDriver,
     Tool,
     Simulator,
+    Infrastructure,
 }
 
 impl ResolvedPathOverrideKind {
@@ -295,6 +298,7 @@ impl ResolvedPathOverrideKind {
             Self::ComponentDriver => "component_driver",
             Self::Tool => "tool",
             Self::Simulator => "simulator",
+            Self::Infrastructure => "infrastructure",
         }
     }
 }
@@ -790,6 +794,15 @@ pub fn resolve(
         &tool_target,
         prefer_vendored,
     )?;
+    tools.extend(resolve_native_site_artifacts(
+        robot,
+        catalog,
+        catalog_channel,
+        &tool_target,
+        prefer_vendored,
+        OFFICIAL_INFRASTRUCTURE,
+        ArtifactKind::Infrastructure,
+    )?);
     let path_overrides = apply_path_pins(
         &PathPinContext {
             robot,
@@ -999,7 +1012,11 @@ fn apply_tool_path_pin(
     tool.published = true;
     overrides.push(ResolvedPathOverride {
         key: key.to_string(),
-        kind: ResolvedPathOverrideKind::Tool,
+        kind: if tool.kind == ArtifactKind::Infrastructure {
+            ResolvedPathOverrideKind::Infrastructure
+        } else {
+            ResolvedPathOverrideKind::Tool
+        },
         artifact_name: tool_emit_apis_id(&tool.name).to_string(),
         path: path.to_path_buf(),
     });
@@ -1247,6 +1264,9 @@ fn warn_about_newer_versions(
         collect_newer(robot, catalog, package, tool_target, &mut newer);
     }
     for (_, package) in OFFICIAL_TOOLS {
+        collect_newer(robot, catalog, package, tool_target, &mut newer);
+    }
+    for (_, package) in OFFICIAL_INFRASTRUCTURE {
         collect_newer(robot, catalog, package, tool_target, &mut newer);
     }
     for component in robot.robot.components.values() {
@@ -1702,20 +1722,41 @@ fn resolve_tools(
     target: &str,
     prefer_vendored: bool,
 ) -> Result<Vec<ResolvedTool>> {
+    resolve_native_site_artifacts(
+        robot,
+        catalog,
+        channel,
+        target,
+        prefer_vendored,
+        OFFICIAL_TOOLS,
+        ArtifactKind::Tool,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_native_site_artifacts(
+    robot: &Robot,
+    catalog: Option<&Catalog>,
+    channel: SelectionChannel,
+    target: &str,
+    prefer_vendored: bool,
+    artifacts: &[(&str, &str)],
+    kind: ArtifactKind,
+) -> Result<Vec<ResolvedTool>> {
     let Some(catalog) = catalog else {
-        return OFFICIAL_TOOLS
+        return artifacts
             .iter()
             .map(|(name, package)| {
-                let runtime =
-                    vendored_runtime(name, package, ArtifactKind::Tool, channel, Some(target))?;
+                let runtime = vendored_runtime(name, package, kind, channel, Some(target))?;
                 Ok(ResolvedTool {
-                    name: format!("tool-{name}"),
+                    kind,
+                    name: format!("{}-{name}", kind.catalog_kind()),
                     package: (*package).to_string(),
                     requested: runtime.version.clone(),
                     resolved: runtime.version,
                     repo: "vendored".to_string(),
                     asset: runtime.artifact_ref,
-                    binary_name: official_binary_name(ArtifactKind::Tool, name),
+                    binary_name: official_binary_name(kind, name),
                     sha256: String::new(),
                     url: None,
                     size: None,
@@ -1727,7 +1768,7 @@ fn resolve_tools(
             })
             .collect();
     };
-    OFFICIAL_TOOLS
+    artifacts
         .iter()
         .map(|(artifact_name, package)| {
             if matches!(
@@ -1735,13 +1776,14 @@ fn resolve_tools(
                 Some(ArtifactPin::Path(_) | ArtifactPin::Git(_))
             ) {
                 return Ok(ResolvedTool {
-                    name: format!("tool-{artifact_name}"),
+                    kind,
+                    name: format!("{}-{artifact_name}", kind.catalog_kind()),
                     package: (*package).to_string(),
                     requested: "source".to_string(),
                     resolved: "source".to_string(),
                     repo: "source".to_string(),
                     asset: format!("source:{package}"),
-                    binary_name: official_binary_name(ArtifactKind::Tool, artifact_name),
+                    binary_name: official_binary_name(kind, artifact_name),
                     sha256: String::new(),
                     url: None,
                     size: None,
@@ -1753,22 +1795,18 @@ fn resolve_tools(
             }
             if prefer_vendored
                 && !robot.artifacts.pins.contains_key(*package)
-                && let Ok(runtime) = vendored_runtime(
-                    artifact_name,
-                    package,
-                    ArtifactKind::Tool,
-                    channel,
-                    Some(target),
-                )
+                && let Ok(runtime) =
+                    vendored_runtime(artifact_name, package, kind, channel, Some(target))
             {
                 return Ok(ResolvedTool {
-                    name: format!("tool-{artifact_name}"),
+                    kind,
+                    name: format!("{}-{artifact_name}", kind.catalog_kind()),
                     package: (*package).to_string(),
                     requested: runtime.version.clone(),
                     resolved: runtime.version,
                     repo: "vendored".to_string(),
                     asset: runtime.artifact_ref,
-                    binary_name: official_binary_name(ArtifactKind::Tool, artifact_name),
+                    binary_name: official_binary_name(kind, artifact_name),
                     sha256: String::new(),
                     url: None,
                     size: None,
@@ -1786,13 +1824,14 @@ fn resolve_tools(
                 |blob| blob.url.clone(),
             );
             Ok(ResolvedTool {
-                name: format!("tool-{artifact_name}"),
+                kind,
+                name: format!("{}-{artifact_name}", kind.catalog_kind()),
                 package: entry.package.clone(),
                 requested: entry.version.clone(),
                 resolved: entry.version.clone(),
                 repo: "phoxal/framework".to_string(),
                 asset,
-                binary_name: official_binary_name(ArtifactKind::Tool, artifact_name),
+                binary_name: official_binary_name(kind, artifact_name),
                 sha256: built
                     .map(|blob| blob.sha256.clone())
                     .unwrap_or_else(|| "0".repeat(64)),
@@ -1810,7 +1849,9 @@ fn resolve_tools(
 pub(crate) fn tool_emit_apis_id(tool_name: &str) -> &str {
     tool_name
         .strip_prefix(&format!("{PHOXAL_PROVIDER}/tool-"))
+        .or_else(|| tool_name.strip_prefix(&format!("{PHOXAL_PROVIDER}/infrastructure-")))
         .or_else(|| tool_name.strip_prefix("tool-"))
+        .or_else(|| tool_name.strip_prefix("infrastructure-"))
         .unwrap_or(tool_name)
 }
 
@@ -1824,6 +1865,8 @@ mod identity_tests {
         assert_eq!(tool_emit_apis_id("phoxal/tool-router"), "router");
         assert_eq!(tool_emit_apis_id("tool-router"), "router");
         assert_eq!(tool_emit_apis_id("router"), "router");
+        assert_eq!(tool_emit_apis_id("phoxal/infrastructure-router"), "router");
+        assert_eq!(tool_emit_apis_id("infrastructure-router"), "router");
     }
 
     #[test]
@@ -1869,7 +1912,10 @@ pub(crate) fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
         ArtifactKind::ComponentAssets => {
             unreachable!("component_assets has no runtime binary to name")
         }
-        ArtifactKind::Service | ArtifactKind::Tool | ArtifactKind::Simulator => {
+        ArtifactKind::Service
+        | ArtifactKind::Tool
+        | ArtifactKind::Simulator
+        | ArtifactKind::Infrastructure => {
             format!("phoxal-{kind}-{name}")
         }
     }
@@ -2227,7 +2273,7 @@ services:
     }
 
     #[test]
-    fn load_robot_keeps_typed_bus_section() -> anyhow::Result<()> {
+    fn load_robot_keeps_router_config() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("robot.yaml");
         std::fs::write(
@@ -2247,37 +2293,15 @@ robot:
     right_encoders: [r.encoder]
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
-bus:
-  listen:
-    - tcp/127.0.0.1:7448
-    - serial//dev/ttyUSB0?baudrate=115200
-  uplink:
-    connect: tls/cloud.phoxal.example:7447
-    auth:
-      ca: identity/ca.pem
-      cert: identity/robot.pem
-      key: identity/robot.key
-    retry:
-      initial_ms: 2000
-      max_ms: 10000
+router:
+  config: config/router.json5
 "#,
         )?;
 
         let loaded = load_robot_with_extras(&path)?;
         assert_eq!(
-            loaded.robot.bus.listen,
-            vec![
-                "tcp/127.0.0.1:7448".to_string(),
-                "serial//dev/ttyUSB0?baudrate=115200".to_string(),
-            ]
-        );
-        let uplink = loaded.robot.bus.uplink.expect("uplink parsed");
-        assert_eq!(uplink.connect, "tls/cloud.phoxal.example:7447");
-        assert_eq!(uplink.retry.initial_ms, 2000);
-        assert_eq!(uplink.retry.max_ms, 10000);
-        assert_eq!(
-            uplink.auth.expect("auth").cert,
-            PathBuf::from("identity/robot.pem")
+            loaded.robot.router.config,
+            Some(PathBuf::from("config/router.json5"))
         );
         Ok(())
     }

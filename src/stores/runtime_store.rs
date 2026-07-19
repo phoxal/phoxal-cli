@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use phoxal::check::ParticipantContractSurface;
 
 use crate::launch_plan::{LaunchOwnership, LaunchPlan, ParticipantExecution};
-use crate::supervisor::{BoardSnapshot, ParticipantState, RouterOwnership};
+use crate::supervisor::{BoardSnapshot, ParticipantState};
 
 const SUSTAINED_HEARTBEAT_GAP: Duration = Duration::from_secs(5);
 
@@ -173,15 +173,6 @@ impl RuntimeStore {
     #[must_use]
     pub fn session_uptime(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.session_started_at)
-    }
-
-    pub fn set_router_ownership(&mut self, id: &str, ownership: RouterOwnership) {
-        if let Some(metadata) = self.metadata.get_mut(id) {
-            metadata.ownership = match ownership {
-                RouterOwnership::External => RuntimeOwnership::External,
-                RouterOwnership::Managed => RuntimeOwnership::CliManaged,
-            };
-        }
     }
 
     #[cfg(test)]

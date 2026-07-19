@@ -61,7 +61,7 @@ mod tests {
         let driver =
             ParticipantStatus::new("wheels", ParticipantKind::Driver, ParticipantState::Ready);
         let tool = ParticipantStatus::new(
-            "tool-router",
+            "infrastructure-router",
             ParticipantKind::Tool,
             ParticipantState::Ready,
         );

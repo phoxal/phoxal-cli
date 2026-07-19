@@ -4,7 +4,6 @@ use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -1277,12 +1276,8 @@ pub struct SupervisionStage {
     /// (see [`Self::new`]); extend with [`Self::with_extra_ready_ids`] for a
     /// wait-only id that has no `ParticipantSpec` of its own.
     pub ready_ids: Vec<String>,
-    /// Spawned processes whose terminal failure aborts this stage even when
-    /// readiness is established by a separate probe (notably tool-router).
+    /// Spawned processes whose terminal failure aborts this stage.
     pub failure_ids: Vec<String>,
-    pub router_bus_probe: Option<RouterBusProbe>,
-    #[cfg(test)]
-    manual_router_readiness: Option<Arc<AtomicBool>>,
     pub timeout: crate::session::output::WaitBudget,
 }
 
@@ -1304,13 +1299,6 @@ pub fn orderly_shutdown_budget(stages: &[SupervisionStage]) -> Duration {
         })
 }
 
-#[derive(Debug, Clone)]
-pub struct RouterBusProbe {
-    pub namespace: String,
-    pub robot_id: String,
-    pub connect: String,
-}
-
 impl SupervisionStage {
     #[must_use]
     pub fn new(
@@ -1329,9 +1317,6 @@ impl SupervisionStage {
             specs,
             ready_ids,
             failure_ids,
-            router_bus_probe: None,
-            #[cfg(test)]
-            manual_router_readiness: None,
             timeout,
         }
     }
@@ -1339,28 +1324,6 @@ impl SupervisionStage {
     #[must_use]
     pub fn with_extra_ready_ids(mut self, ids: impl IntoIterator<Item = String>) -> Self {
         self.ready_ids.extend(ids);
-        self
-    }
-
-    #[must_use]
-    pub fn with_router_bus_probe(
-        mut self,
-        namespace: impl Into<String>,
-        robot_id: impl Into<String>,
-        connect: impl Into<String>,
-    ) -> Self {
-        self.router_bus_probe = Some(RouterBusProbe {
-            namespace: namespace.into(),
-            robot_id: robot_id.into(),
-            connect: connect.into(),
-        });
-        self
-    }
-
-    #[cfg(test)]
-    #[must_use]
-    fn with_manual_router_readiness(mut self, ready: Arc<AtomicBool>) -> Self {
-        self.manual_router_readiness = Some(ready);
         self
     }
 }
@@ -1399,31 +1362,10 @@ struct PendingStage {
     label: String,
     ready_ids: Vec<String>,
     failure_ids: Vec<String>,
-    router_bus_readiness: Option<RouterBusReadiness>,
     /// `None` for an unbounded wait (Product decision 6/finding D2) - there is
     /// no `Instant` to ever compare against.
     deadline: Option<Instant>,
     started: Instant,
-}
-
-#[derive(Debug)]
-struct RouterBusReadiness {
-    ready: Arc<AtomicBool>,
-    cancel: Option<Arc<AtomicBool>>,
-}
-
-impl RouterBusReadiness {
-    fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
-    }
-}
-
-impl Drop for RouterBusReadiness {
-    fn drop(&mut self) {
-        if let Some(cancel) = &self.cancel {
-            cancel.store(true, Ordering::Release);
-        }
-    }
 }
 
 /// Send `event` to `events`, if a `SessionController` is listening. Awaits
@@ -1463,16 +1405,9 @@ async fn spawn_stage_emitting(
         specs,
         ready_ids,
         failure_ids,
-        router_bus_probe,
-        #[cfg(test)]
-        manual_router_readiness,
         timeout: stage_timeout,
     } = stage;
-    #[cfg(test)]
-    let has_router_probe = router_bus_probe.is_some() || manual_router_readiness.is_some();
-    #[cfg(not(test))]
-    let has_router_probe = router_bus_probe.is_some();
-    if specs.is_empty() && ready_ids.is_empty() && !has_router_probe {
+    if specs.is_empty() && ready_ids.is_empty() {
         return None;
     }
     let started = Instant::now();
@@ -1485,16 +1420,7 @@ async fn spawn_stage_emitting(
     )
     .await;
     spawn_stage(running, board, specs).await;
-    #[cfg(test)]
-    let router_bus_readiness = manual_router_readiness
-        .map(|ready| RouterBusReadiness {
-            ready,
-            cancel: None,
-        })
-        .or_else(|| router_bus_probe.map(start_router_bus_probe));
-    #[cfg(not(test))]
-    let router_bus_readiness = router_bus_probe.map(start_router_bus_probe);
-    if ready_ids.is_empty() && router_bus_readiness.is_none() {
+    if ready_ids.is_empty() {
         emit_event(
             events,
             crate::session::event::SessionEvent::PhaseFinished {
@@ -1510,7 +1436,6 @@ async fn spawn_stage_emitting(
         label,
         ready_ids,
         failure_ids,
-        router_bus_readiness,
         deadline: stage_timeout.deadline_from(Instant::now()),
         started,
     })
@@ -1545,18 +1470,17 @@ pub async fn await_participants_ready(
     budget: crate::session::output::WaitBudget,
     poll_interval: Duration,
 ) -> Result<()> {
-    await_stage_ready(board, stage_ids, stage_ids, None, budget, poll_interval).await
+    await_stage_ready(board, stage_ids, stage_ids, budget, poll_interval).await
 }
 
 async fn await_stage_ready(
     board: &BoardBackend,
     ready_ids: &[String],
     failure_ids: &[String],
-    router_bus_readiness: Option<&RouterBusReadiness>,
     budget: crate::session::output::WaitBudget,
     poll_interval: Duration,
 ) -> Result<()> {
-    if ready_ids.is_empty() && router_bus_readiness.is_none() {
+    if ready_ids.is_empty() {
         return Ok(());
     }
     let started = Instant::now();
@@ -1574,11 +1498,7 @@ async fn await_stage_ready(
             );
         }
         let missing = missing_ready_participants(&snapshot, ready_ids);
-        let router_ready = match router_bus_readiness {
-            Some(readiness) => readiness.is_ready(),
-            None => true,
-        };
-        if missing.is_empty() && router_ready {
+        if missing.is_empty() {
             return Ok(());
         }
         // `deadline` is `None` for an unbounded wait (Product decision 6) -
@@ -1596,66 +1516,11 @@ async fn await_stage_ready(
                     )),
                 );
             }
-            if !router_ready && let Some(router_id) = failure_ids.first() {
-                board.set_state(
-                    router_id,
-                    ParticipantState::Failed,
-                    Some(format!(
-                        "stage readiness timed out after {waited}: CLI could not open the router bus"
-                    )),
-                );
-            }
-            let mut stalled = missing;
-            if !router_ready {
-                stalled.push("router bus connection".to_string());
-            }
             bail!(
                 "stage readiness timed out after {waited}: participant(s) never observed ready: {}",
-                stalled.join(", ")
+                missing.join(", ")
             );
         }
-    }
-}
-
-fn start_router_bus_probe(probe: RouterBusProbe) -> RouterBusReadiness {
-    let ready = Arc::new(AtomicBool::new(false));
-    let cancel = Arc::new(AtomicBool::new(false));
-    let ready_for_thread = Arc::clone(&ready);
-    let cancel_for_thread = Arc::clone(&cancel);
-    std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
-        while !cancel_for_thread.load(Ordering::Acquire) {
-            // A TCP preflight is only a warning-suppression optimization; the
-            // stage remains gated on the successful Bus::open below.
-            if !endpoint_reachable(&probe.connect, Duration::from_millis(50)) {
-                std::thread::sleep(Duration::from_millis(100));
-                continue;
-            }
-            let opened = runtime.block_on(Bus::open(BusConfig {
-                namespace: probe.namespace.clone(),
-                robot_id: probe.robot_id.clone(),
-                participant: "phoxal-cli-router-readiness".to_string(),
-                incarnation: 0,
-                connect_endpoints: vec![probe.connect.clone()],
-            }));
-            if let Ok(bus) = opened {
-                let _ = runtime.block_on(bus.close());
-                ready_for_thread.store(true, Ordering::Release);
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    });
-    RouterBusReadiness {
-        ready,
-        cancel: Some(cancel),
     }
 }
 
@@ -1728,7 +1593,6 @@ pub async fn supervise_until_shutdown(
                 &board,
                 pending_stage.as_ref().map_or(&[][..], |stage| stage.ready_ids.as_slice()),
                 pending_stage.as_ref().map_or(&[][..], |stage| stage.failure_ids.as_slice()),
-                pending_stage.as_ref().and_then(|stage| stage.router_bus_readiness.as_ref()),
                 pending_stage.as_ref().map_or(WaitBudget::Unbounded, |stage| match stage.deadline {
                     Some(deadline) => WaitBudget::Bounded(deadline.saturating_duration_since(Instant::now())),
                     None => WaitBudget::Unbounded,
@@ -2191,10 +2055,6 @@ fn pid_alive(pid: u32) -> bool {
     }
 }
 
-pub fn local_router_reachable(endpoint: &str) -> bool {
-    endpoint_reachable(endpoint, Duration::from_millis(500))
-}
-
 pub fn endpoint_reachable(endpoint: &str, timeout: Duration) -> bool {
     let Some(address) = endpoint.strip_prefix("tcp/") else {
         return false;
@@ -2216,20 +2076,6 @@ pub fn endpoint_reachable(endpoint: &str, timeout: Duration) -> bool {
 pub(crate) async fn wait_for_endpoint(endpoint: &str) {
     while !endpoint_reachable(endpoint, Duration::from_millis(50)) {
         tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouterOwnership {
-    External,
-    Managed,
-}
-
-pub fn router_ownership(endpoint_reachable: bool) -> RouterOwnership {
-    if endpoint_reachable {
-        RouterOwnership::External
-    } else {
-        RouterOwnership::Managed
     }
 }
 
@@ -2621,12 +2467,6 @@ mod tests {
                 .await
                 .is_err()
         );
-    }
-
-    #[test]
-    fn router_ownership_distinguishes_external_from_managed() {
-        assert_eq!(router_ownership(true), RouterOwnership::External);
-        assert_eq!(router_ownership(false), RouterOwnership::Managed);
     }
 
     #[test]
@@ -3676,59 +3516,6 @@ mod tests {
         })
         .await
         .expect("stage two must spawn once stage one is observed ready");
-
-        token.cancel();
-        tokio::time::timeout(Duration::from_secs(3), supervise)
-            .await
-            .expect("supervisor must exit promptly")
-            .expect("supervisor task panicked")?;
-        Ok(())
-    }
-
-    /// The router gate is independent of process/TCP readiness: downstream
-    /// stays unspawned until the production bus probe reports success.
-    #[tokio::test]
-    async fn router_stage_waits_for_the_probe_before_downstream_spawn() -> Result<()> {
-        let board = BoardBackend::new();
-        let router_ready = Arc::new(AtomicBool::new(false));
-        let mut downstream = sleep_spec("downstream");
-        downstream.bus_participant = false;
-        let stages = vec![
-            SupervisionStage::new(
-                "connecting to router",
-                Vec::new(),
-                WaitBudget::Bounded(Duration::from_secs(5)),
-            )
-            .with_manual_router_readiness(Arc::clone(&router_ready)),
-            SupervisionStage::new(
-                "starting downstream",
-                vec![downstream],
-                WaitBudget::Bounded(Duration::from_secs(1)),
-            ),
-        ];
-        let token = tokio_util::sync::CancellationToken::new();
-        let supervise = tokio::spawn(supervise_until_shutdown(
-            stages,
-            board.clone(),
-            SupervisorOptions {
-                token: token.clone(),
-                ..SupervisorOptions::default()
-            },
-        ));
-
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        assert!(
-            !board.snapshot().participants.contains_key("downstream"),
-            "downstream must remain unspawned while the router probe is pending"
-        );
-        router_ready.store(true, Ordering::Release);
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while !board.snapshot().participants.contains_key("downstream") {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("downstream must spawn after router probe success");
 
         token.cancel();
         tokio::time::timeout(Duration::from_secs(3), supervise)

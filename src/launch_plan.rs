@@ -1,19 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use phoxal::check as graph_check;
 use phoxal::participant::launch::{
     BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::commands::check::{SourceParticipant, SourceParticipantKind};
 use crate::resolver::{ResolvedRobot, ResolvedTool, RobotManifestExtras};
 
 pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
-pub const SITE_TOOL_ROUTER: &str = "tool-router";
+pub const SITE_INFRASTRUCTURE_ROUTER: &str = "infrastructure-router";
+pub const SITE_TOOL_BUS: &str = "tool-bus";
 pub const SITE_TOOL_JOYPAD: &str = "tool-joypad";
 /// The host-resource-meter tool (CLI-UX Phase 3/4): a standard, hard-required
 /// bus participant exactly like `tool-joypad`, published in every mode (Run,
@@ -34,11 +35,11 @@ pub const SITE_TOOL_TELEMETRY: &str = "tool-telemetry";
 /// id-based call sites needed to share (finding A6).
 ///
 /// Finding A6's regression: `simulate`'s metadata/contract filter used to
-/// hardcode only `SITE_TOOL_ROUTER`/`SITE_TOOL_JOYPAD` at three separate call
+/// hardcode only `SITE_INFRASTRUCTURE_ROUTER`/`SITE_TOOL_JOYPAD` at three separate call
 /// sites, silently excluding telemetry's declared graph contracts from
 /// validation even though telemetry is started and readiness-waited exactly
 /// like the other two standard tools.
-pub const STANDARD_SITE_TOOLS: &[&str] = &[SITE_TOOL_ROUTER, SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY];
+pub const STANDARD_SITE_TOOLS: &[&str] = &[SITE_TOOL_BUS, SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -171,29 +172,41 @@ pub fn build_launch_plan(
     Ok(LaunchPlan { mode, site, robots })
 }
 
-/// Builds one [`SiteLaunch`] per [`STANDARD_SITE_TOOLS`] entry, in that
-/// constant's order (router first, matching every caller/test that reads
-/// `plan.site[0]` as the router). Every standard tool is hard-required in
-/// every mode, including Deploy (CLI-UX Phase 4): a deployed robot ships the
-/// full standard set the same way it ships every other official site tool,
-/// ordered by `commands::deploy::render_units` into per-tool systemd units.
-/// Only the router carries real config (`router_config`); every other
-/// standard tool is configless (`type Config = ()`) - `Value::Null` marks
-/// "no config" so the env builders OMIT `PHOXAL_CONFIG` entirely (passing
-/// `{}` would make a unit-config tool fail to deserialize: "invalid type:
-/// map, expected unit").
+/// Builds launch entries for standard site tools. Deploy also receives the
+/// infrastructure router entry used to render its dedicated systemd unit.
 fn build_site_launches(
     mode: &LaunchMode,
     robots: &[CheckedRobotLaunchInput<'_>],
 ) -> Result<Vec<SiteLaunch>> {
-    let mut site = Vec::with_capacity(STANDARD_SITE_TOOLS.len());
+    let mut site = Vec::with_capacity(STANDARD_SITE_TOOLS.len() + 1);
+    if matches!(mode, LaunchMode::Deploy) {
+        if robots.iter().any(|robot| {
+            robot.resolved.tools.iter().any(|artifact| {
+                artifact.kind == crate::catalog::ArtifactKind::Infrastructure
+                    && artifact.path_override.is_some()
+            })
+        }) {
+            bail!(
+                "deploy does not yet build a path-pinned infrastructure router; use the published artifact"
+            );
+        }
+        if robots
+            .iter()
+            .any(|robot| robot.resolved.robot.router.config.is_some())
+        {
+            bail!(
+                "deploy does not yet stage router.config; remove it for the default loopback router or run locally"
+            );
+        }
+        site.push(SiteLaunch {
+            id: SITE_INFRASTRUCTURE_ROUTER.to_string(),
+            artifact_ref: merge_site_tool_artifact(SITE_INFRASTRUCTURE_ROUTER, robots)?,
+            phoxal_config: Value::Null,
+        });
+    }
     for &tool_name in STANDARD_SITE_TOOLS {
         let artifact_ref = merge_site_tool_artifact(tool_name, robots)?;
-        let phoxal_config = if tool_name == SITE_TOOL_ROUTER {
-            router_config(mode, robots)?
-        } else {
-            Value::Null
-        };
+        let phoxal_config = Value::Null;
         site.push(SiteLaunch {
             id: tool_name.to_string(),
             artifact_ref,
@@ -235,56 +248,6 @@ fn resolved_tool<'a>(resolved: &'a ResolvedRobot, tool_name: &str) -> Result<&'a
 
 fn tool_artifact_ref(tool: &ResolvedTool) -> String {
     format!("{}@{}:{}", tool.repo, tool.resolved, tool.asset)
-}
-
-fn router_config(mode: &LaunchMode, robots: &[CheckedRobotLaunchInput<'_>]) -> Result<Value> {
-    let mut listen = BTreeSet::<String>::new();
-    let mut device_claims = BTreeMap::<String, String>::new();
-    for robot in robots {
-        for endpoint in &robot.resolved.robot.bus.listen {
-            let endpoint = endpoint.trim();
-            if endpoint.is_empty() {
-                continue;
-            }
-            if let Some(device) = listen_device_claim(endpoint) {
-                if let Some(existing) = device_claims.get(&device) {
-                    if existing != endpoint {
-                        bail!(
-                            "conflicting router listen claims for device {device}: {existing} and {endpoint}"
-                        );
-                    }
-                } else {
-                    device_claims.insert(device, endpoint.to_string());
-                }
-            }
-            listen.insert(endpoint.to_string());
-        }
-    }
-
-    let mut config = Map::new();
-    if !listen.is_empty() {
-        config.insert(
-            "listen".to_string(),
-            Value::Array(listen.into_iter().map(Value::String).collect()),
-        );
-    }
-    if matches!(mode, LaunchMode::Deploy)
-        && let Some(uplink) = &robots[0].resolved.robot.bus.uplink
-    {
-        config.insert(
-            "uplink".to_string(),
-            serde_json::to_value(uplink).context("failed to encode router uplink config")?,
-        );
-    }
-    Ok(Value::Object(config))
-}
-
-fn listen_device_claim(endpoint: &str) -> Option<String> {
-    let rest = endpoint.strip_prefix("serial/")?;
-    let query = rest.find('?').unwrap_or(rest.len());
-    let fragment = rest.find('#').unwrap_or(rest.len());
-    let device = &rest[..query.min(fragment)];
-    Some(device.to_string())
 }
 
 fn build_robot_launch(
@@ -708,11 +671,8 @@ mod tests {
         )?;
 
         assert_eq!(plan.mode, LaunchMode::Run);
-        assert_eq!(plan.site[0].id, SITE_TOOL_ROUTER);
-        assert_eq!(
-            plan.site[0].phoxal_config,
-            serde_json::json!({"listen": ["serial//dev/ttyUSB0?baudrate=115200"]})
-        );
+        assert_eq!(plan.site[0].id, SITE_TOOL_BUS);
+        assert_eq!(plan.site[0].phoxal_config, Value::Null);
         assert_eq!(plan.site[1].id, SITE_TOOL_JOYPAD);
         assert_eq!(plan.site[2].id, SITE_TOOL_TELEMETRY);
         let robot = &plan.robots[0];
@@ -839,62 +799,6 @@ mod tests {
     }
 
     #[test]
-    fn multi_robot_listen_endpoints_collapse_and_conflicts_error() -> anyhow::Result<()> {
-        let mut left = empty_resolved_robot("left")?;
-        add_site_tools(&mut left);
-        left.robot.bus.listen = vec![
-            "serial//dev/ttyUSB0?baudrate=115200".to_string(),
-            "tcp/127.0.0.1:7448".to_string(),
-        ];
-        let mut right = empty_resolved_robot("right")?;
-        add_site_tools(&mut right);
-        right.robot.bus.listen = vec![
-            "serial//dev/ttyUSB0?baudrate=115200".to_string(),
-            "tcp/127.0.0.1:7448".to_string(),
-        ];
-        let extras = RobotManifestExtras::default();
-        let inputs = [
-            empty_checked_input(Path::new("/tmp/left"), &left, &extras),
-            empty_checked_input(Path::new("/tmp/right"), &right, &extras),
-        ];
-        let plan = build_launch_plan(
-            LaunchMode::Webots {
-                world: PathBuf::from("worlds/test.wbt"),
-            },
-            &inputs,
-        )?;
-        assert_eq!(
-            plan.site[0].phoxal_config,
-            serde_json::json!({
-                "listen": [
-                    "serial//dev/ttyUSB0?baudrate=115200",
-                    "tcp/127.0.0.1:7448"
-                ]
-            })
-        );
-
-        right.robot.bus.listen = vec!["serial//dev/ttyUSB0?baudrate=9600".to_string()];
-        let inputs = [
-            empty_checked_input(Path::new("/tmp/left"), &left, &extras),
-            empty_checked_input(Path::new("/tmp/right"), &right, &extras),
-        ];
-        let error = build_launch_plan(
-            LaunchMode::Webots {
-                world: PathBuf::from("worlds/test.wbt"),
-            },
-            &inputs,
-        )
-        .expect_err("same serial device with different options conflicts");
-        assert!(
-            error
-                .to_string()
-                .contains("conflicting router listen claims"),
-            "{error:#}"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn parity_rejects_missing_and_extra_checked_metadata() -> anyhow::Result<()> {
         let mut resolved = empty_resolved_robot("robot_v1")?;
         add_site_tools(&mut resolved);
@@ -943,7 +847,7 @@ mod tests {
     fn a_catalog_missing_a_standard_site_tool_fails_with_a_remediation_message()
     -> anyhow::Result<()> {
         let mut resolved = empty_resolved_robot("robot_v1")?;
-        resolved.tools.push(tool(SITE_TOOL_ROUTER));
+        resolved.tools.push(tool(SITE_TOOL_BUS));
         resolved.tools.push(tool(SITE_TOOL_JOYPAD));
         // Telemetry deliberately left unresolved, as if the pinned catalog
         // snapshot predates it.
@@ -1040,13 +944,14 @@ robot:
     }
 
     fn add_site_tools(resolved: &mut ResolvedRobot) {
-        resolved.tools.push(tool(SITE_TOOL_ROUTER));
+        resolved.tools.push(tool(SITE_TOOL_BUS));
         resolved.tools.push(tool(SITE_TOOL_JOYPAD));
         resolved.tools.push(tool(SITE_TOOL_TELEMETRY));
     }
 
     fn tool(name: &str) -> ResolvedTool {
         ResolvedTool {
+            kind: crate::catalog::ArtifactKind::Tool,
             name: name.to_string(),
             package: format!("phoxal/{name}"),
             requested: "0.1.0".to_string(),
@@ -1090,9 +995,6 @@ robot:
       mount_link: right_wheel
       driver:
         connection: { type: can, bus: 0, node_id: 2 }
-bus:
-  listen:
-    - serial//dev/ttyUSB0?baudrate=115200
 services:
   mission:
     path: runtimes/mission

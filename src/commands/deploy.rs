@@ -15,7 +15,7 @@ use clap::Args;
 use phoxal::model::robot::v0::{ConnectionConfig, Robot};
 use phoxal::participant::launch::env;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -27,13 +27,13 @@ use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
     check_artifact_refs_from_resolved, extract_emit_apis_from_staged_runtime,
     extract_emit_apis_from_staged_tool, fetch_emit_apis_from_tool, run_check_with_context,
-    source_participants_from_resolved, tool_participants_from_resolved,
+    source_participants_from_resolved,
 };
 use crate::component_driver::component_driver_crate_dir;
 use crate::launch_env::{EncodedParticipantEnv, encode_participant_env};
 use crate::launch_plan::{
     CheckedRobotLaunchInput, DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, ParticipantExecution,
-    ParticipantLaunchRecord, PlanContext, SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SiteLaunch,
+    ParticipantLaunchRecord, PlanContext, SITE_INFRASTRUCTURE_ROUTER, SITE_TOOL_JOYPAD, SiteLaunch,
     build_launch_plan,
 };
 use crate::resolver::{
@@ -1154,24 +1154,13 @@ fn prepare_deploy_after_host_staging(
         })
         .cloned()
         .collect::<Vec<_>>();
-    let coherence_source_participants = all_source_participants
-        .iter()
-        .filter(|participant| {
-            !matches!(participant.kind, SourceParticipantKind::Simulator)
-                && (participant.kind != SourceParticipantKind::Tool
-                    || participant.name == SITE_TOOL_ROUTER)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let coherence_source_participants = checked_source_participants.clone();
     ensure_no_native_c_source_dependencies(&checked_source_participants)?;
     let platform_refs = check_artifact_refs_from_resolved(&host_resolved)
         .into_iter()
-        .filter(|artifact| artifact.kind != ArtifactKind::Tool || artifact.name == SITE_TOOL_ROUTER)
+        .filter(|artifact| artifact.kind != ArtifactKind::Tool)
         .collect::<Vec<_>>();
-    let tool_participants = tool_participants_from_resolved(&host_resolved)?
-        .into_iter()
-        .filter(|tool| tool.name == SITE_TOOL_ROUTER)
-        .collect::<Vec<_>>();
+    let tool_participants = Vec::new();
     let mut official_by_ref = host_resolved
         .platform_runtimes
         .iter()
@@ -1297,9 +1286,9 @@ fn render_payload(input: RenderPayloadInput<'_>) -> Result<RenderedPayload> {
     )?;
     let official_plans = stage_official_artifacts(root.path(), resolved, plan, false)?;
 
-    let identity_files = identity_install_plan(project_root, robot)?;
+    let identity_files = Vec::new();
     let mut env_files = BTreeMap::new();
-    render_env_files(root.path(), plan, &identity_files, &mut env_files)?;
+    render_env_files(root.path(), plan, &mut env_files)?;
 
     let mut rendered_units = BTreeMap::new();
     let unit_names = render_units(
@@ -1532,7 +1521,6 @@ fn stage_source_artifacts(
     ui: &crate::Ui,
 ) -> Result<BTreeMap<String, SourceBuildArtifact>> {
     let needed = needed_source_artifact_ids(plan, source_participants);
-    let router_source = router_source_participant(source_participants, resolved);
     let mut artifacts = BTreeMap::new();
 
     for participant in source_participants {
@@ -1555,22 +1543,6 @@ fn stage_source_artifacts(
         artifacts.insert(artifact_id, artifact);
     }
 
-    if let Some(participant) = router_source {
-        let artifact_id = source_artifact_id(participant);
-        if let std::collections::btree_map::Entry::Vacant(entry) = artifacts.entry(artifact_id) {
-            let artifact = build_source_artifact(
-                project_root,
-                root,
-                resolved,
-                participant,
-                entry.key(),
-                target,
-                ui,
-            )?;
-            entry.insert(artifact);
-        }
-    }
-
     Ok(artifacts)
 }
 
@@ -1590,19 +1562,6 @@ fn needed_source_artifact_ids(
         })
         .map(|participant| source_artifact_id(participant))
         .collect()
-}
-
-fn router_source_participant<'a>(
-    source_participants: &'a [SourceParticipant],
-    resolved: &ResolvedRobot,
-) -> Option<&'a SourceParticipant> {
-    let router = resolved
-        .tools
-        .iter()
-        .find(|tool| tool.name == SITE_TOOL_ROUTER && tool.path_override.is_some())?;
-    source_participants.iter().find(|participant| {
-        participant.kind == SourceParticipantKind::Tool && participant.name == router.name
-    })
 }
 
 fn source_artifact_id(participant: &SourceParticipant) -> String {
@@ -2513,7 +2472,7 @@ fn official_tool_plan(_root: &Path, tool: &ResolvedTool) -> Result<OfficialArtif
     );
     Ok(OfficialArtifactPlan {
         artifact_id: tool.package.clone(),
-        kind: ArtifactKind::Tool,
+        kind: tool.kind,
         version: tool.resolved.clone(),
         sha256,
         url,
@@ -2539,40 +2498,9 @@ fn env_key(value: &str) -> String {
         .collect()
 }
 
-fn identity_install_plan(project_root: &Path, robot: &Robot) -> Result<Vec<IdentityInstallPlan>> {
-    let Some(uplink) = &robot.bus.uplink else {
-        return Ok(Vec::new());
-    };
-    let Some(auth) = &uplink.auth else {
-        return Ok(Vec::new());
-    };
-    let files = [
-        (&auth.ca, "uplink-ca.pem"),
-        (&auth.cert, "uplink-client.pem"),
-        (&auth.key, "uplink-client.key"),
-    ];
-    files
-        .into_iter()
-        .map(|(local, name)| {
-            let local_path = crate::utils::resolve_project_path(project_root, local);
-            if !local_path.is_file() {
-                bail!(
-                    "bus.uplink.auth file {} does not exist",
-                    local_path.display()
-                );
-            }
-            Ok(IdentityInstallPlan {
-                local_path,
-                remote_path: format!("{IDENTITY_DIR}/{name}"),
-            })
-        })
-        .collect()
-}
-
 fn render_env_files(
     root: &Path,
     plan: &LaunchPlan,
-    identity_files: &[IdentityInstallPlan],
     env_files: &mut BTreeMap<String, String>,
 ) -> Result<()> {
     let robot = plan
@@ -2580,9 +2508,7 @@ fn render_env_files(
         .first()
         .context("deploy launch plan has no robot")?;
     for site in &plan.site {
-        if site.id == SITE_TOOL_ROUTER {
-            let router_env = router_env(site, &robot.namespace, &robot.id, identity_files)?;
-            write_env_file(root, "router.env", &router_env, env_files)?;
+        if site.id == SITE_INFRASTRUCTURE_ROUTER {
             continue;
         }
         // Every OTHER standard site tool (`tool-joypad`, `tool-telemetry`) -
@@ -2605,34 +2531,11 @@ fn render_env_files(
     Ok(())
 }
 
-fn router_env(
-    site: &SiteLaunch,
-    namespace: &str,
-    robot_id: &str,
-    identity_files: &[IdentityInstallPlan],
-) -> Result<EncodedParticipantEnv> {
-    let mut variables = BTreeMap::new();
-    variables.insert(env::PARTICIPANT_ID.to_string(), site.id.clone());
-    variables.insert(env::NAMESPACE.to_string(), namespace.to_string());
-    variables.insert(env::ROBOT_ID.to_string(), robot_id.to_string());
-    variables.insert(env::ROBOT_ROOT.to_string(), ACTIVE_ROOT.to_string());
-    variables.insert(
-        env::CONFIG.to_string(),
-        serde_json::to_string(&router_config_with_identity_paths(
-            &site.phoxal_config,
-            identity_files,
-        )?)
-        .with_context(|| format!("failed to encode PHOXAL_CONFIG for {}", site.id))?,
-    );
-    Ok(EncodedParticipantEnv::from_variables(variables))
-}
-
 /// The env for every standard site tool OTHER than the router (`tool-joypad`,
 /// `tool-telemetry`) - a real bus client, unlike the router itself, so it
 /// needs `PHOXAL_CONNECT` set to the same `DEFAULT_ROUTER_CONNECT` every
 /// regular participant's `ParticipantLaunch.bus.connect_endpoints` carries
-/// (`launch_plan::participant_launch`); router transport being local/in-process
-/// is what makes `router_env` the one exception with no `CONNECT` variable.
+/// (`launch_plan::participant_launch`).
 fn site_tool_env(
     site: &SiteLaunch,
     namespace: &str,
@@ -2655,34 +2558,6 @@ fn site_tool_env(
     }
     variables.insert(env::CONNECT.to_string(), DEFAULT_ROUTER_CONNECT.to_string());
     Ok(EncodedParticipantEnv::from_variables(variables))
-}
-
-fn router_config_with_identity_paths(
-    config: &Value,
-    identity_files: &[IdentityInstallPlan],
-) -> Result<Value> {
-    let mut config = config.clone();
-    if identity_files.is_empty() {
-        return Ok(config);
-    }
-    let Value::Object(root) = &mut config else {
-        return Ok(config);
-    };
-    let Some(Value::Object(uplink)) = root.get_mut("uplink") else {
-        return Ok(config);
-    };
-    let mut auth = Map::new();
-    for file in identity_files {
-        if file.remote_path.ends_with("uplink-ca.pem") {
-            auth.insert("ca".to_string(), Value::String(file.remote_path.clone()));
-        } else if file.remote_path.ends_with("uplink-client.pem") {
-            auth.insert("cert".to_string(), Value::String(file.remote_path.clone()));
-        } else if file.remote_path.ends_with("uplink-client.key") {
-            auth.insert("key".to_string(), Value::String(file.remote_path.clone()));
-        }
-    }
-    uplink.insert("auth".to_string(), Value::Object(auth));
-    Ok(config)
 }
 
 fn write_env_file(
@@ -2709,14 +2584,10 @@ fn render_units(
     write_unit(root, "phoxal.target", &target_unit(), rendered_units)?;
     unit_names.push("phoxal.target".to_string());
 
-    let router_binary = if source_builds.contains_key(SITE_TOOL_ROUTER) {
-        SITE_TOOL_ROUTER.to_string()
-    } else {
-        official_plans
-            .get(SITE_TOOL_ROUTER)
-            .map(|tool| tool.install_binary_name.clone())
-            .unwrap_or_else(|| SITE_TOOL_ROUTER.to_string())
-    };
+    let router_binary = official_plans
+        .get(SITE_INFRASTRUCTURE_ROUTER)
+        .map(|tool| tool.install_binary_name.clone())
+        .unwrap_or_else(|| SITE_INFRASTRUCTURE_ROUTER.to_string());
     write_unit(
         root,
         "phoxal-router.service",
@@ -2734,7 +2605,7 @@ fn render_units(
     // (`launch_plan::build_site_launches`), so this loop never renders a unit
     // for a tool that was never resolved.
     for site in &plan.site {
-        if site.id == SITE_TOOL_ROUTER {
+        if site.id == SITE_INFRASTRUCTURE_ROUTER {
             continue;
         }
         let unit_name = site_tool_unit_name(&site.id);
@@ -2792,7 +2663,7 @@ fn target_unit() -> String {
 
 fn router_unit(binary: &str) -> String {
     format!(
-        "[Unit]\nDescription=Phoxal Zenoh router\nAfter=network-online.target\nWants=network-online.target\nPartOf=phoxal.target\nStartLimitIntervalSec={}\nStartLimitBurst={START_LIMIT_BURST}\n\n[Service]\nType=notify\nEnvironmentFile={OPT_ENV}/router.env\nExecStart={OPT_BIN}/{binary}\nRestart=on-failure\nRestartSec=2s\nWatchdogSec={WATCHDOG_SEC}s\nUser=phoxal\nGroup=phoxal\nNoNewPrivileges=true\n\n[Install]\nWantedBy=phoxal.target\n",
+        "[Unit]\nDescription=Phoxal Zenoh router\nAfter=network-online.target\nWants=network-online.target\nPartOf=phoxal.target\nStartLimitIntervalSec={}\nStartLimitBurst={START_LIMIT_BURST}\n\n[Service]\nType=simple\nExecStart={OPT_BIN}/{binary} --listen tcp/localhost:7447\nRestart=on-failure\nRestartSec=2s\nTimeoutStopSec=5s\nUser=phoxal\nGroup=phoxal\nNoNewPrivileges=true\n\n[Install]\nWantedBy=phoxal.target\n",
         START_LIMIT_INTERVAL.as_secs()
     )
 }
@@ -3283,9 +3154,7 @@ fn release_record(
     official_plans: &BTreeMap<String, OfficialArtifactPlan>,
 ) -> Result<ReleaseRecord> {
     let mut artifacts = BTreeMap::<String, ReleaseArtifact>::new();
-    if let Some(router) = source_builds.get(SITE_TOOL_ROUTER) {
-        artifacts.insert(router.artifact_id.clone(), release_source_artifact(router));
-    } else if let Some(router) = official_plans.get(SITE_TOOL_ROUTER) {
+    if let Some(router) = official_plans.get(SITE_INFRASTRUCTURE_ROUTER) {
         artifacts.insert(
             router.artifact_id.clone(),
             release_official_artifact(router),
@@ -4332,7 +4201,9 @@ fn participant_from_unit(unit: &str) -> Option<String> {
     unit.strip_prefix("phoxal-participant-")
         .and_then(|rest| rest.strip_suffix(".service"))
         .map(str::to_string)
-        .or_else(|| (unit == "phoxal-router.service").then(|| SITE_TOOL_ROUTER.to_string()))
+        .or_else(|| {
+            (unit == "phoxal-router.service").then(|| SITE_INFRASTRUCTURE_ROUTER.to_string())
+        })
 }
 
 #[cfg(test)]
@@ -5153,8 +5024,8 @@ capabilities:
             .filter_map(|artifact| artifact["id"].as_str())
             .collect::<BTreeSet<_>>();
         assert!(
-            release_artifact_ids.contains("phoxal/tool-router"),
-            "official tool release record should use package identity: {:?}",
+            release_artifact_ids.contains("phoxal/infrastructure-router"),
+            "official infrastructure release record should use package identity: {:?}",
             payload.release_json["artifacts"]
         );
         assert!(payload.install_plan.scoped_delete.is_empty());
@@ -5166,7 +5037,7 @@ capabilities:
             .as_array()
             .unwrap()
             .iter()
-            .find(|artifact| artifact["id"] == "phoxal/tool-router")
+            .find(|artifact| artifact["id"] == "phoxal/infrastructure-router")
             .unwrap();
         assert_eq!(official["target"], "aarch64-unknown-linux-gnu");
         assert!(official["url"].as_str().unwrap().starts_with("https://"));
@@ -5702,13 +5573,15 @@ robot:
             has_driver: true,
         }])?;
         resolved.tools.push(ResolvedTool {
-            name: SITE_TOOL_ROUTER.to_string(),
-            package: "phoxal/tool-router".to_string(),
+            kind: crate::catalog::ArtifactKind::Infrastructure,
+            name: SITE_INFRASTRUCTURE_ROUTER.to_string(),
+            package: "phoxal/infrastructure-router".to_string(),
             requested: "0.1.0".to_string(),
             resolved: "0.1.0".to_string(),
             repo: "phoxal/framework".to_string(),
-            asset: "phoxal-tool-router-0.1.0-aarch64-unknown-linux-gnu.tar.zst".to_string(),
-            binary_name: "phoxal-tool-router".to_string(),
+            asset: "phoxal-infrastructure-router-0.1.0-aarch64-unknown-linux-gnu.tar.zst"
+                .to_string(),
+            binary_name: "phoxal-infrastructure-router".to_string(),
             sha256: "0".repeat(64),
             url: None,
             size: None,
@@ -5788,7 +5661,12 @@ robot:
         assert!(telemetry_unit.contains("After=network-online.target phoxal-router.service"));
         assert!(!telemetry_unit.contains("SupplementaryGroups="));
         assert!(!telemetry_unit.contains("DeviceAllow="));
-        for env_name in ["router.env", "tool-joypad.env", "tool-telemetry.env"] {
+        assert!(
+            !payload
+                .env_files
+                .contains_key("/opt/phoxal/active/env/router.env")
+        );
+        for env_name in ["tool-joypad.env", "tool-telemetry.env"] {
             let contents = payload
                 .env_files
                 .get(&format!("/opt/phoxal/active/env/{env_name}"))
