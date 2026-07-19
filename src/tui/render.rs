@@ -14,15 +14,16 @@ use ratatui::widgets::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::identity::IdentitySummary;
+#[cfg(test)]
 use crate::launch_plan::SITE_TOOL_JOYPAD;
 use crate::session::controller::SessionMode;
 use crate::session::event::PhaseOutcome;
 use crate::stores::log_store::sanitize_terminal_text;
 use crate::stores::telemetry_store::{DEFAULT_FRESHNESS_TTL, Timestamped};
 use crate::supervisor::{ClockSample, LogSeverity, ParticipantStatus};
-use crate::telemetry::{
-    HostSample, JoypadDeviceStatus, JoypadDevicesSample, TelemetrySnapshot, TopicMetric,
-};
+#[cfg(test)]
+use crate::telemetry::JoypadDevicesSample;
+use crate::telemetry::{HostSample, JoypadDeviceStatus, TelemetrySnapshot, TopicMetric};
 use crate::theme::{Role, Theme, state_role, state_symbol};
 use crate::tui::color;
 use crate::tui::startup::{PhaseRow, StartupState};
@@ -1386,79 +1387,25 @@ fn draw_input(
     let sections = if area.width >= 84 {
         Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
             .split(area)
     } else {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+            .constraints([Constraint::Min(0), Constraint::Length(6)])
             .split(area)
     };
     let joypad = model.telemetry.joypad.as_ref();
     let joypad_is_stale =
         joypad.is_some_and(|sample| sample.is_stale(model.now, DEFAULT_FRESHNESS_TTL));
     let live_joypad = joypad.filter(|sample| !sample.is_stale(model.now, DEFAULT_FRESHNESS_TTL));
-    let status = if joypad_is_stale {
-        "tool state stale"
-    } else {
-        input_status(live_joypad)
-    };
     let selected_id = live_joypad.and_then(|joypad| joypad.value.selected.as_deref());
-    let selected_device = selected_id.and_then(|selected| {
-        joypad?
-            .value
-            .available
-            .iter()
-            .find(|device| device.id == selected)
-    });
-    let selected = selected_device.map_or_else(
-        || {
-            if joypad_is_stale {
-                "unknown · stale".to_string()
-            } else {
-                "None".to_string()
-            }
-        },
-        |device| {
-            format!(
-                "{} · {}",
-                sanitize_terminal_text(&device.name),
-                sanitize_terminal_text(&short_device_id(&device.id))
-            )
-        },
-    );
-    let connection = if joypad_is_stale {
-        "unknown · stale"
-    } else {
-        selected_connection(live_joypad.map(|joypad| &joypad.value))
-    };
-    let enabled = live_joypad.map_or(
-        if joypad_is_stale {
-            "unknown · stale"
-        } else {
-            "n/a"
-        },
-        |joypad| {
-            if joypad.value.enabled {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        },
-    );
-    let (command, source, motion_updated) = model.telemetry.motion.as_ref().map_or_else(
+    let (linear, angular, motion_updated) = model.telemetry.motion.as_ref().map_or_else(
         || ("n/a".to_string(), "n/a".to_string(), "n/a".to_string()),
         |motion| {
             (
-                format!(
-                    "linear {:.3} m/s · angular {:.3} rad/s",
-                    motion.value.final_target.linear_x_mps,
-                    motion.value.final_target.angular_z_radps
-                ),
-                motion
-                    .value
-                    .selected_source
-                    .map_or_else(|| "none".to_string(), |source| format!("{source:?}")),
+                format!("{:.3} m/s", motion.value.final_target.linear_x_mps),
+                format!("{:.3} rad/s", motion.value.final_target.angular_z_radps),
                 format!(
                     "{} ago{}",
                     crate::human::duration(model.now.saturating_duration_since(motion.received_at)),
@@ -1471,61 +1418,11 @@ fn draw_input(
             )
         },
     );
-    let robot_model = live_joypad.map_or_else(
-        || {
-            if joypad_is_stale {
-                "Last tool state stale".to_string()
-            } else {
-                "Waiting for tool".to_string()
-            }
-        },
-        |joypad| robot_model_status(joypad.value.unavailable_reason.as_deref()),
-    );
-    let tool_heartbeat = model
-        .runtime
-        .observation(SITE_TOOL_JOYPAD)
-        .and_then(|observation| observation.last_seen_age(model.now))
-        .map_or_else(
-            || "Waiting for heartbeat".to_string(),
-            |age| {
-                format!(
-                    "{} ago{}",
-                    crate::human::duration(age),
-                    if age > DEFAULT_FRESHNESS_TTL {
-                        " · stale"
-                    } else {
-                        " · live"
-                    }
-                )
-            },
-        );
-    let device_state_updated = joypad.map_or_else(
-        || "Not received".to_string(),
-        |joypad| {
-            format!(
-                "{} ago{}",
-                crate::human::duration(model.now.saturating_duration_since(joypad.received_at)),
-                if joypad_is_stale {
-                    " · stale"
-                } else {
-                    " · live"
-                }
-            )
-        },
-    );
     let overview = vec![
-        Line::from(format!("Controller       {status}")),
-        Line::from(format!("Manual control   {enabled}")),
-        Line::from(format!("Selected         {selected}")),
-        Line::from(format!("Connection       {connection}")),
-        Line::from(""),
-        Line::from(format!("Command          {command}")),
-        Line::from(format!("Command source   {source}")),
-        Line::from(format!("Motion update    {motion_updated}")),
-        Line::from(""),
-        Line::from(format!("Joypad heartbeat {tool_heartbeat}")),
-        Line::from(format!("Device state     {device_state_updated}")),
-        Line::from(format!("Robot model      {robot_model}")),
+        Line::from("Command"),
+        Line::from(format!("linear  {linear}")),
+        Line::from(format!("angular {angular}")),
+        Line::from(format!("Motion update {motion_updated}")),
     ];
     let devices = live_joypad
         .map(|joypad| joypad.value.available.as_slice())
@@ -1534,9 +1431,7 @@ fn draw_input(
     let items = devices
         .iter()
         .map(|device| {
-            let selected = live_joypad
-                .and_then(|sample| sample.value.selected.as_deref())
-                .is_some_and(|selected| selected == device.id);
+            let selected = selected_id.is_some_and(|selected| selected == device.id);
             let item = ListItem::new(device_row(device, selected, device_width));
             if selected {
                 item.style(color::fg(theme, Role::Accent).add_modifier(Modifier::BOLD))
@@ -1546,11 +1441,19 @@ fn draw_input(
         })
         .collect::<Vec<_>>();
     let items = if items.is_empty() {
-        vec![ListItem::new(if joypad_is_stale {
-            "Controller state stale · waiting for live tool"
+        let empty_state = if joypad_is_stale {
+            "Controller state stale · waiting for live tool".to_string()
+        } else if let Some(reason) =
+            live_joypad.and_then(|sample| sample.value.unavailable_reason.as_deref())
+        {
+            sanitize_and_fit_cell(
+                &format!("Input unavailable · {reason}"),
+                usize::from(device_width).saturating_sub(2),
+            )
         } else {
-            "No controllers observed · r to rescan"
-        })]
+            "No controllers observed · r to rescan".to_string()
+        };
+        vec![ListItem::new(empty_state)]
     } else {
         items
     };
@@ -1564,7 +1467,22 @@ fn draw_input(
     let devices_title = live_joypad.map_or_else(
         || "Devices · Select / Enable / Disable / Rescan".to_string(),
         |joypad| {
-            if joypad.value.devices_truncated == 0 {
+            if let Some(reason) = joypad
+                .value
+                .unavailable_reason
+                .as_deref()
+                .filter(|_| !devices.is_empty())
+            {
+                let omitted = if joypad.value.devices_truncated == 0 {
+                    String::new()
+                } else {
+                    format!(" · +{} omitted", joypad.value.devices_truncated)
+                };
+                sanitize_and_fit_cell(
+                    &format!("Devices · Input unavailable · {reason}{omitted}"),
+                    usize::from(device_width),
+                )
+            } else if joypad.value.devices_truncated == 0 {
                 "Devices · Select / Enable / Disable / Rescan".to_string()
             } else {
                 format!(
@@ -1590,49 +1508,10 @@ fn draw_input(
     );
     frame.render_widget(
         Paragraph::new(overview)
-            .block(shell_block(theme, "Input · read only"))
+            .block(shell_block(theme, "Motion"))
             .wrap(Wrap { trim: true }),
         sections[1],
     );
-}
-
-fn input_status(joypad: Option<&Timestamped<JoypadDevicesSample>>) -> &'static str {
-    let Some(joypad) = joypad else {
-        return "waiting for tool";
-    };
-    if joypad
-        .value
-        .unavailable_reason
-        .as_deref()
-        .is_some_and(gamepad_backend_unavailable)
-    {
-        return "backend unavailable";
-    }
-    let Some(selected) = joypad.value.selected.as_deref() else {
-        return if joypad.value.available.is_empty() {
-            "no controller"
-        } else if joypad
-            .value
-            .available
-            .iter()
-            .any(|device| device.status == JoypadDeviceStatus::Ready)
-        {
-            "compatible unselected"
-        } else {
-            "unsupported"
-        };
-    };
-    match joypad
-        .value
-        .available
-        .iter()
-        .find(|device| device.id == selected)
-        .map(|device| device.status)
-    {
-        Some(JoypadDeviceStatus::Ready) => "ready selected",
-        Some(JoypadDeviceStatus::Disconnected) => "disconnected",
-        Some(JoypadDeviceStatus::Unsupported | JoypadDeviceStatus::Unknown) | None => "unsupported",
-    }
 }
 
 fn short_device_id(id: &str) -> String {
@@ -1670,58 +1549,6 @@ fn device_status_label(status: JoypadDeviceStatus) -> &'static str {
         JoypadDeviceStatus::Disconnected => "Disconnected",
         JoypadDeviceStatus::Unsupported => "Unsupported",
         JoypadDeviceStatus::Unknown => "Unknown",
-    }
-}
-
-fn friendly_unavailable_reason(reason: &str) -> String {
-    if reason.contains("no robot model is bound") || reason.contains("without a robot root") {
-        "Not loaded · joypad tool missing robot root".to_string()
-    } else {
-        format!("Unavailable · {}", sanitize_terminal_text(reason))
-    }
-}
-
-fn gamepad_backend_unavailable(reason: &str) -> bool {
-    reason
-        .split(';')
-        .map(str::trim)
-        .any(|part| part.starts_with("gamepad backend unavailable"))
-}
-
-fn robot_model_status(reason: Option<&str>) -> String {
-    let Some(reason) = reason else {
-        return "Loaded".to_string();
-    };
-    let model_reason = reason
-        .split(';')
-        .map(str::trim)
-        .filter(|part| !part.is_empty() && !part.starts_with("gamepad backend unavailable"))
-        .collect::<Vec<_>>()
-        .join("; ");
-    if model_reason.is_empty() {
-        "Loaded".to_string()
-    } else {
-        friendly_unavailable_reason(&model_reason)
-    }
-}
-
-fn selected_connection(joypad: Option<&JoypadDevicesSample>) -> &'static str {
-    let Some(joypad) = joypad else {
-        return "n/a";
-    };
-    let Some(selected) = joypad.selected.as_deref() else {
-        return "unselected";
-    };
-    match joypad
-        .available
-        .iter()
-        .find(|device| device.id == selected)
-        .map(|device| device.status)
-    {
-        Some(JoypadDeviceStatus::Ready) => "connected",
-        Some(JoypadDeviceStatus::Disconnected) => "disconnected",
-        Some(JoypadDeviceStatus::Unsupported) => "unsupported",
-        Some(JoypadDeviceStatus::Unknown) | None => "unknown",
     }
 }
 
@@ -2458,10 +2285,51 @@ mod tests {
         let rendered = render_page(Page::Input, &telemetry);
         assert!(!rendered.contains("selection failed"));
         assert!(!rendered.contains("Last error"));
+
+        let unavailable = TelemetrySnapshot {
+            joypad: Some(Timestamped {
+                received_at: now,
+                value: JoypadDevicesSample {
+                    unavailable_reason: Some("gamepad backend unavailable".to_string()),
+                    ..JoypadDevicesSample::default()
+                },
+            }),
+            ..TelemetrySnapshot::default()
+        };
+        let rendered = render_page(Page::Input, &unavailable);
+        assert!(
+            rendered.contains("Input unavailable · gamepad backend unavailable"),
+            "{rendered}"
+        );
+
+        let unavailable_with_device = TelemetrySnapshot {
+            joypad: Some(Timestamped {
+                received_at: now,
+                value: JoypadDevicesSample {
+                    available: vec![JoypadDevice {
+                        id: "pad".to_string(),
+                        name: "Pad".to_string(),
+                        status: JoypadDeviceStatus::Ready,
+                    }]
+                    .into(),
+                    unavailable_reason: Some(
+                        "manual input requires differential kinematics".to_string(),
+                    ),
+                    ..JoypadDevicesSample::default()
+                },
+            }),
+            ..TelemetrySnapshot::default()
+        };
+        let rendered = render_page(Page::Input, &unavailable_with_device);
+        assert!(
+            rendered.contains("Devices · Input unavailable"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("manual input requires"), "{rendered}");
     }
 
     #[test]
-    fn device_state_age_is_not_mistaken_for_tool_liveness() {
+    fn motion_panel_stays_compact_when_input_state_is_stale() {
         let now = Instant::now();
         let old = now - DEFAULT_FRESHNESS_TTL - Duration::from_secs(1);
         let telemetry = TelemetrySnapshot {
@@ -2519,16 +2387,30 @@ mod tests {
         let mut state = AppState::default();
         state.page = Page::Input;
         let rendered = render_model(&title(), &state, &model, 100, 28);
-        assert!(rendered.contains("Device state"));
-        assert!(rendered.contains("Joypad heartbeat"));
+        assert!(rendered.contains("Motion"));
+        assert!(rendered.contains("Command"));
         assert!(rendered.contains("Motion update"));
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.contains("angular 0.000 rad/s")),
+            "{rendered}"
+        );
         assert!(rendered.contains("stale"));
-        assert!(rendered.contains("live"));
-        assert!(rendered.contains("Manual control   unknown · stale"));
-        assert!(rendered.contains("Connection       unknown · stale"));
-        assert!(!rendered.contains("Manual control   enabled"));
-        assert!(!rendered.contains("Connection       connected"));
-        assert!(!rendered.contains("Waiting for heartbeat"));
+        for removed in [
+            "Manual control",
+            "Selected",
+            "Connection",
+            "Command source",
+            "Joypad heartbeat",
+            "Device state",
+            "Robot model",
+        ] {
+            assert!(
+                !rendered.contains(removed),
+                "unexpected {removed}: {rendered}"
+            );
+        }
     }
 
     #[test]
@@ -2568,11 +2450,7 @@ mod tests {
 
         let rendered = render_model(&sim_title, &state, &model, 100, 28);
         assert!(rendered.contains("step    7"), "{rendered}");
-        assert!(rendered.contains("Device state     0ms ago"), "{rendered}");
-        assert!(
-            rendered.contains("Joypad heartbeat 0ms ago · live"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("Motion"), "{rendered}");
     }
 
     #[test]
@@ -2784,95 +2662,12 @@ mod tests {
     }
 
     #[test]
-    fn input_status_comes_only_from_authoritative_tool_state() {
-        let now = Instant::now();
-        let sample = |value| Timestamped {
-            value,
-            received_at: now,
-        };
-        assert_eq!(input_status(None), "waiting for tool");
-        assert_eq!(
-            input_status(Some(&sample(JoypadDevicesSample::default()))),
-            "no controller"
-        );
-        let ready_device = JoypadDevice {
-            id: "pad".to_string(),
-            name: "Pad".to_string(),
-            status: JoypadDeviceStatus::Ready,
-        };
-        assert_eq!(
-            input_status(Some(&sample(JoypadDevicesSample {
-                available: vec![ready_device.clone()].into(),
-                ..JoypadDevicesSample::default()
-            }))),
-            "compatible unselected"
-        );
-        assert_eq!(
-            input_status(Some(&sample(JoypadDevicesSample {
-                available: vec![ready_device].into(),
-                selected: Some("pad".to_string()),
-                ..JoypadDevicesSample::default()
-            }))),
-            "ready selected"
-        );
-        for (device_status, expected) in [
-            (JoypadDeviceStatus::Disconnected, "disconnected"),
-            (JoypadDeviceStatus::Unsupported, "unsupported"),
-        ] {
-            assert_eq!(
-                input_status(Some(&sample(JoypadDevicesSample {
-                    available: vec![JoypadDevice {
-                        id: "pad".to_string(),
-                        name: "Pad".to_string(),
-                        status: device_status,
-                    }]
-                    .into(),
-                    selected: Some("pad".to_string()),
-                    ..JoypadDevicesSample::default()
-                }))),
-                expected
-            );
-        }
-        assert_eq!(
-            input_status(Some(&sample(JoypadDevicesSample {
-                available: vec![JoypadDevice {
-                    id: "pad".to_string(),
-                    name: "Pad".to_string(),
-                    status: JoypadDeviceStatus::Ready,
-                }]
-                .into(),
-                unavailable_reason: Some("no motion limits".to_string()),
-                ..JoypadDevicesSample::default()
-            }))),
-            "compatible unselected"
-        );
-        assert_eq!(
-            input_status(Some(&sample(JoypadDevicesSample {
-                unavailable_reason: Some("gamepad backend unavailable: denied".to_string()),
-                ..JoypadDevicesSample::default()
-            }))),
-            "backend unavailable"
-        );
-        assert_eq!(
-            robot_model_status(Some("gamepad backend unavailable: denied")),
-            "Loaded"
-        );
-        assert_eq!(
-            robot_model_status(Some(
-                "manual input requires differential robot kinematics; gamepad backend unavailable: denied"
-            )),
-            "Unavailable · manual input requires differential robot kinematics"
-        );
-        assert_eq!(
-            robot_model_status(Some(
-                "no robot model is bound (this participant was launched without a robot root)"
-            )),
-            "Not loaded · joypad tool missing robot root"
-        );
-
+    fn input_page_uses_devices_and_compact_motion_panels() {
         let rendered = render_page(Page::Input, &TelemetrySnapshot::default());
-        assert!(rendered.contains("Controller       waiting for tool"));
-        assert!(rendered.contains("Robot model      Waiting for tool"));
+        assert!(rendered.contains("Devices"));
+        assert!(rendered.contains("Motion"));
+        assert!(rendered.contains("Command"));
+        assert!(rendered.contains("Motion update"));
     }
 
     #[test]
