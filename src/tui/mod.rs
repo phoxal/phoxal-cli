@@ -13,7 +13,7 @@ pub(crate) use terminal::{TerminalGuard, install_panic_hook};
 
 use std::collections::BTreeMap;
 use std::io::{self, Stderr};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyEventKind};
 use ratatui::Terminal;
@@ -53,6 +53,8 @@ struct Activated {
     input_thread: input::InputThread,
     input_rx: mpsc::Receiver<Event>,
     terminal: Terminal<CrosstermBackend<Stderr>>,
+    last_title_refresh: Instant,
+    title_refreshes_remaining: u8,
     _guard: terminal::TerminalGuard,
 }
 
@@ -131,11 +133,14 @@ impl TuiDisplay {
         // Alternate-screen entry does not guarantee a blank buffer. Clear
         // before any session preparation can write or the first frame draws.
         terminal.clear()?;
+        let _ = terminal::TerminalGuard::set_title(&terminal_title);
         let (input_thread, input_rx) = input::InputThread::spawn();
         self.activated = Some(Activated {
             input_thread,
             input_rx,
             terminal,
+            last_title_refresh: Instant::now(),
+            title_refreshes_remaining: 5,
             _guard: guard,
         });
         Ok(())
@@ -186,6 +191,13 @@ impl TuiDisplay {
                 );
             }
         })?;
+        if activated.title_refreshes_remaining > 0
+            && activated.last_title_refresh.elapsed() >= Duration::from_secs(1)
+        {
+            let _ = terminal::TerminalGuard::set_title(&terminal_title(&self.title));
+            activated.last_title_refresh = Instant::now();
+            activated.title_refreshes_remaining -= 1;
+        }
         Ok(())
     }
 
@@ -213,6 +225,9 @@ impl TuiDisplay {
         if needs_full_clear(&event) {
             if let Some(activated) = &mut self.activated {
                 let _ = activated.terminal.clear();
+                let _ = terminal::TerminalGuard::set_title(&terminal_title(&self.title));
+                activated.last_title_refresh = Instant::now();
+                activated.title_refreshes_remaining = 2;
             }
             return DisplayAction::None;
         }
@@ -239,7 +254,10 @@ fn needs_full_clear(event: &Event) -> bool {
 }
 
 fn terminal_title(title: &TitleInfo) -> String {
-    sanitize_terminal_text(&format!("phoxal-cli {} - {}", title.robot, title.namespace))
+    sanitize_terminal_text(&format!(
+        "phoxal-cli - {} - {}",
+        title.robot, title.namespace
+    ))
 }
 
 #[cfg(test)]
@@ -310,12 +328,12 @@ mod tests {
 
     #[test]
     fn terminal_title_names_the_robot_and_namespace() {
-        assert_eq!(terminal_title(&title()), "phoxal-cli rover-01 - dev");
+        assert_eq!(terminal_title(&title()), "phoxal-cli - rover-01 - dev");
         let mut unsafe_title = title();
         unsafe_title.robot = "rover\u{7}spoof".to_string();
         assert_eq!(
             terminal_title(&unsafe_title),
-            "phoxal-cli rover spoof - dev"
+            "phoxal-cli - rover spoof - dev"
         );
     }
 }

@@ -160,6 +160,13 @@ impl TerminalGuard {
         TUI_ACTIVE.store(true, Ordering::SeqCst);
         Ok(Self)
     }
+
+    /// Reassert the title after terminal initialization. Some embedded
+    /// terminals apply their command-start title after alternate-screen entry,
+    /// so the title set by [`Self::enter`] can otherwise be immediately lost.
+    pub fn set_title(title: &str) -> io::Result<()> {
+        execute!(io::stderr(), SetTitle(title))
+    }
 }
 
 impl Drop for TerminalGuard {
