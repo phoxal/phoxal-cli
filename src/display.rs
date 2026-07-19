@@ -1,8 +1,7 @@
 //! [`DisplayAction`]: what a renderer's input handling asks the session to
 //! do. Produced by [`crate::tui::TuiDisplay::handle_input`] and consumed by
 //! [`crate::session::controller::SessionController`], which owns terminal
-//! acquisition, renderer selection (the TUI or the append-only line
-//! renderer), and cancellation directly - the old `Display` enum that used to
+//! acquisition, the TUI, and cancellation directly - the old `Display` enum that used to
 //! live here (picking and driving the renderer from inside
 //! `crate::supervisor::supervise_until_shutdown`'s own `select!` loop) is
 //! superseded by that controller and has been removed; the supervisor no

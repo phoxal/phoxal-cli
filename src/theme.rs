@@ -19,8 +19,6 @@ use std::io::IsTerminal;
 
 use console::Style;
 
-use crate::output_mode::OutputMode;
-
 use crate::supervisor::ParticipantState;
 
 /// A brand color in its canonical truecolor form. Every degraded
@@ -147,16 +145,11 @@ impl Theme {
 
     /// Detect the theme for stderr, the stream every piece of decoration in
     /// this CLI (identity, progress, log lines) writes to, given the
-    /// session's already-computed [`OutputMode`].
-    ///
-    /// `--plain`/`--quiet` (via a [`OutputMode::Plain`] mode) also force
-    /// [`ColorCapability::None`] even on a genuine TTY: "plain" output should
-    /// mean plain, the same way `--message-format json` forces it below.
-    /// [`OutputMode::Json`] forces it too, belt-and-suspenders with
-    /// [`crate::ui::Ui`]'s own json gate.
+    /// invocation's already-computed interactive flag. `--plain`/`--quiet`
+    /// force [`ColorCapability::None`] even on a genuine TTY.
     #[must_use]
-    pub fn detect_stderr(mode: OutputMode) -> Self {
-        if !mode.allows_progress_drawing() {
+    pub fn detect_stderr(interactive: bool) -> Self {
+        if !interactive {
             return Self::new(ColorCapability::None);
         }
         Self::new(detect_color_capability(

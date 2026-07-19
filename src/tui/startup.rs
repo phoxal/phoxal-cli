@@ -114,8 +114,7 @@ impl StartupState {
                 // (or a mismatched current phase) still needs to render
                 // SOMETHING rather than silently vanishing - fall back to the
                 // bare id as its label, mirroring
-                // `session::controller::LineRenderer`'s own defensive
-                // fallback.
+                // the controller's own defensive fallback.
                 _ => {
                     self.phase = Some(PhaseRow {
                         id: id.clone(),
@@ -223,7 +222,7 @@ mod tests {
 
     /// A `Finished` for an id whose `Started` was never observed must not
     /// panic or silently vanish - it becomes its own row with the bare id as
-    /// a label, exactly like `LineRenderer`'s own defensive fallback.
+    /// a label, matching the controller's defensive fallback.
     #[test]
     fn a_finish_for_an_unseen_phase_still_renders_a_row() {
         let mut state = StartupState::new();

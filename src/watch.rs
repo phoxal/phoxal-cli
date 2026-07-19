@@ -370,7 +370,7 @@ fn recheck_run_target(
         project_root,
         loaded.robot.artifacts.channel,
         &loaded.extras,
-        options.output_mode,
+        options.interactive,
     )?;
     let resolved = resolve(
         &loaded.robot,
@@ -380,7 +380,7 @@ fn recheck_run_target(
             emit_update_notice: false,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
-            output_mode: options.output_mode,
+            interactive: options.interactive,
             ..ResolveOptions::default()
         },
     )?;
@@ -454,7 +454,6 @@ fn recheck_run_target(
     crate::commands::check::enforce_coherence(
         crate::commands::check::CoherenceVerb::Run,
         &coherence,
-        crate::commands::MessageFormat::Human,
     )?;
     Ok(WatchOutcome::Swaps(specs_for_target(&plan, target)?))
 }
@@ -474,7 +473,6 @@ fn recheck_sim_target(
         &resolved.resolved,
         &resolved.manifest_extras,
         resolved.catalog.as_ref(),
-        options.message_format,
     )?;
     if target.kind == WatchTargetKind::Driver {
         return Ok(WatchOutcome::MetadataOnly);
@@ -489,9 +487,8 @@ fn specs_for_target(plan: &LaunchPlan, target: &WatchTarget) -> Result<Vec<Parti
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     // `--watch` is an interactive dev-loop feature; there is no `AppContext`
-    // this deep in the hot-reload swap path, so the mode is recomputed fresh
-    // rather than threaded the long way through the watch loop for a rare
-    // pairing (`--watch` with `--message-format json`).
+    // this deep in the hot-reload swap path, so the terminal flag is
+    // recomputed fresh rather than threaded through the watch loop.
     let ui = crate::Ui::from_env();
     let mut specs = Vec::new();
     for participant in plan

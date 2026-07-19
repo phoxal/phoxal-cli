@@ -49,12 +49,9 @@ pub struct ResolveOptions {
     /// Override native tool asset target triple. Host-native run/sim use the
     /// host triple; deploy ships robot-native tools.
     pub tool_target_triple: Option<String>,
-    /// The session's output mode, threaded into a git-ref resolution
-    /// spinner (`resolve_git_ref`) - no process-global mode cell. Defaults
-    /// to [`OutputMode::Plain`](crate::output_mode::OutputMode), the safe
-    /// non-drawing choice, for callers (mostly tests) with no real session
-    /// mode to report.
-    pub output_mode: crate::output_mode::OutputMode,
+    /// Whether progress may draw interactively, threaded into git-ref
+    /// resolution without process-global state. Defaults to batch-safe false.
+    pub interactive: bool,
 }
 
 impl Default for ResolveOptions {
@@ -66,7 +63,7 @@ impl Default for ResolveOptions {
             resolve_component_asset_commits: true,
             official_target_triple: None,
             tool_target_triple: None,
-            output_mode: crate::output_mode::OutputMode::default(),
+            interactive: false,
         }
     }
 }
@@ -785,7 +782,7 @@ pub fn resolve(
         resolve_source_commits: options.resolve_source_commits,
         resolve_component_asset_commits: options.resolve_component_asset_commits,
         prefer_vendored,
-        output_mode: options.output_mode,
+        interactive: options.interactive,
     })?;
     let mut tools = resolve_tools(
         robot,
@@ -808,7 +805,7 @@ pub fn resolve(
             robot,
             project_root,
             resolve_source_commits: options.resolve_source_commits,
-            output_mode: options.output_mode,
+            interactive: options.interactive,
         },
         &mut platform_runtimes,
         &mut simulators,
@@ -849,7 +846,7 @@ struct PathPinContext<'a> {
     robot: &'a Robot,
     project_root: &'a Path,
     resolve_source_commits: bool,
-    output_mode: crate::output_mode::OutputMode,
+    interactive: bool,
 }
 
 fn apply_path_pins(
@@ -870,7 +867,7 @@ fn apply_path_pins(
                 let Some(path) = resolve_git_artifact_pin_path(
                     pin,
                     context.resolve_source_commits,
-                    context.output_mode,
+                    context.interactive,
                 )?
                 else {
                     continue;
@@ -923,12 +920,12 @@ fn is_component_package_key(key: &str, components: &[ResolvedComponent]) -> bool
 fn resolve_git_artifact_pin_path(
     pin: &phoxal::model::robot::v0::ArtifactGitPin,
     resolve_source_commits: bool,
-    mode: crate::output_mode::OutputMode,
+    interactive: bool,
 ) -> Result<Option<PathBuf>> {
     if !resolve_source_commits {
         return Ok(None);
     }
-    let commit = resolve_component_commit(&pin.git, &pin.rev, mode)?;
+    let commit = resolve_component_commit(&pin.git, &pin.rev, interactive)?;
     let repo_dir = crate::git_artifact::ensure_git_artifact(&pin.git, &commit)?;
     Ok(Some(crate::git_artifact::subdir(
         repo_dir,
@@ -1413,15 +1410,11 @@ fn resolved_runtime_from_expected_package(
 /// is returned as-is with no network access. Any other ref (a tag or branch
 /// name) is resolved live via `git ls-remote`; if the network is unavailable the
 /// failure is reported with an actionable fix.
-fn resolve_component_commit(
-    url: &str,
-    git_ref: &str,
-    mode: crate::output_mode::OutputMode,
-) -> Result<String> {
+fn resolve_component_commit(url: &str, git_ref: &str, interactive: bool) -> Result<String> {
     if is_full_commit_sha(git_ref) {
         return Ok(git_ref.to_string());
     }
-    resolve_git_ref(url, git_ref, mode).with_context(|| {
+    resolve_git_ref(url, git_ref, interactive).with_context(|| {
         format!(
             "could not resolve git ref '{git_ref}' from {url} without network access. \
              Pin artifacts.pins.<package>.rev to an explicit commit SHA in robot.yaml, \
@@ -1434,13 +1427,11 @@ pub(crate) fn is_full_commit_sha(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|byte| byte.is_ascii_hexdigit())
 }
 
-pub fn resolve_git_ref(
-    url: &str,
-    git_ref: &str,
-    mode: crate::output_mode::OutputMode,
-) -> Result<String> {
-    let progress =
-        crate::progress::spinner(format!("resolving git ref {git_ref} from {url}"), mode);
+pub fn resolve_git_ref(url: &str, git_ref: &str, interactive: bool) -> Result<String> {
+    let progress = crate::progress::spinner(
+        format!("resolving git ref {git_ref} from {url}"),
+        interactive,
+    );
     let result = resolve_git_ref_inner(url, git_ref);
     match &result {
         Ok(_) => progress.finish_and_clear(),
@@ -1545,7 +1536,7 @@ struct ComponentResolveContext<'a> {
     resolve_source_commits: bool,
     resolve_component_asset_commits: bool,
     prefer_vendored: bool,
-    output_mode: crate::output_mode::OutputMode,
+    interactive: bool,
 }
 
 fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<ResolvedComponent>> {
@@ -1635,7 +1626,7 @@ fn resolve_component_package(
             kind,
             pin,
             resolve_git_ref,
-            context.output_mode,
+            context.interactive,
         );
     }
 
@@ -1678,7 +1669,7 @@ fn resolve_pinned_component_package(
     kind: ArtifactKind,
     pin: &ArtifactPin,
     resolve_git_ref: bool,
-    mode: crate::output_mode::OutputMode,
+    interactive: bool,
 ) -> Result<ResolvedComponentPackage> {
     let source = match pin {
         ArtifactPin::Path(pin) => ResolvedComponentSource::Path {
@@ -1690,7 +1681,7 @@ fn resolve_pinned_component_package(
             // `git ls-remote`. Flows that never read this package's local
             // files leave `resolve_git_ref` off and skip this entirely.
             let commit = if resolve_git_ref {
-                resolve_component_commit(&pin.git, &pin.rev, mode)?
+                resolve_component_commit(&pin.git, &pin.rev, interactive)?
             } else {
                 String::new()
             };

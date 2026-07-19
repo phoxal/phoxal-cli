@@ -106,7 +106,7 @@ pub struct ParticipantStatus {
     pub last_log_lines: Vec<String>,
     pub launch_command: Option<ParticipantLaunchCommand>,
     /// Live child-process details for the interactive session only. These are
-    /// intentionally excluded from the persisted/JSON-stable board shape.
+    /// intentionally excluded from the persisted board shape.
     #[serde(skip)]
     pub pid: Option<u32>,
     #[serde(skip)]
@@ -534,9 +534,8 @@ impl BoardBackend {
     }
 
     /// Record a log line from a known routing source: updates the board's own
-    /// bounded 8-line history exactly like [`Self::append_log`] (so
-    /// `--message-format json`'s `status` snapshot and the legacy board model
-    /// stay unchanged), then additionally forwards it to the live sink
+    /// bounded 8-line history exactly like [`Self::append_log`], then
+    /// additionally forwards it to the live sink
     /// registered by [`Self::set_log_sink`], if any. This is the single
     /// funnel both [`bus_log_subscriber_loop`] and [`spawn_output_reader`]
     /// use, so a live TUI dedups by ROUTING (which of the two called this)

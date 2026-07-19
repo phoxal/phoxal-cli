@@ -128,16 +128,12 @@ pub(crate) fn install_panic_hook() {
 
 /// RAII terminal ownership: entering raw mode + the alternate screen on
 /// construction, restoring both on drop. Construct only when
-/// [`TerminalGuard::should_use_terminal`] is true (an interactive stderr
-/// under [`crate::output_mode::OutputMode::Rich`]) - never on a piped stream.
+/// [`TerminalGuard::should_use_terminal`] is true - never on a piped stream.
 pub struct TerminalGuard;
 
 impl TerminalGuard {
-    /// Whether a full-screen TUI may take over this process's stderr:
-    /// The caller chooses `OutputMode::Rich`; this method adds a direct
-    /// `is_terminal` check, belt-and-suspenders per the design note
-    /// that a TUI must never take over a non-interactive stream even if the
-    /// cached output mode were somehow stale.
+    /// Whether a full-screen TUI may take over this process's stderr. The
+    /// direct `is_terminal` check ensures a TUI never owns a pipe.
     #[must_use]
     pub fn should_use_terminal(stderr: &Stderr) -> bool {
         stderr.is_terminal()

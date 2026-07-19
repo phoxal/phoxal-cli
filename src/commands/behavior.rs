@@ -12,7 +12,6 @@ use serde::Serialize;
 use tokio::time::timeout;
 
 use crate::AppContext;
-use crate::commands::{MessageFormat, print_message};
 use crate::launch_plan::DEFAULT_ROUTER_CONNECT;
 use crate::resolver::{discover_robot_yaml, load_robot_with_extras};
 
@@ -48,8 +47,6 @@ pub struct ValidateArgs {
         help = "Explicit robot root or robot.yaml path."
     )]
     pub robot: Option<PathBuf>,
-    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
-    pub message_format: MessageFormat,
 }
 
 #[derive(Debug, Args)]
@@ -59,8 +56,6 @@ pub struct TestArgs {
     pub args: Vec<String>,
     #[arg(long, default_value = "happy")]
     pub scenario: String,
-    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
-    pub message_format: MessageFormat,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -89,8 +84,6 @@ pub struct InspectArgs {
     pub execution: String,
     #[arg(long, default_value = DEFAULT_ROUTER_CONNECT)]
     pub connect: String,
-    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
-    pub message_format: MessageFormat,
 }
 
 #[derive(Debug, Args)]
@@ -157,18 +150,6 @@ impl FakeScenario {
 }
 
 impl Behavior {
-    pub fn message_format(&self) -> MessageFormat {
-        match &self.command {
-            BehaviorSubcommand::Validate(args) => args.message_format,
-            BehaviorSubcommand::Test(args) => args.message_format,
-            BehaviorSubcommand::Inspect(args) => args.message_format,
-            BehaviorSubcommand::Request(_)
-            | BehaviorSubcommand::Pause(_)
-            | BehaviorSubcommand::Resume(_)
-            | BehaviorSubcommand::Cancel(_) => MessageFormat::Human,
-        }
-    }
-
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match &self.command {
             BehaviorSubcommand::Validate(args) => validate(app, args),
@@ -213,26 +194,20 @@ fn validate(app: &AppContext, args: &ValidateArgs) -> Result<()> {
             })
             .collect(),
     };
-    print_message(
-        &summary,
-        || {
-            println!(
-                "ok: {} behavior definition(s) validated",
-                summary.definitions.len()
-            );
-            if let Some(root) = &summary.root {
-                println!("root: {root}");
-            }
-            for definition in &summary.definitions {
-                println!(
-                    "  {} {} {}",
-                    definition.id, definition.version, definition.content_hash
-                );
-            }
-            Ok(())
-        },
-        args.message_format,
-    )
+    println!(
+        "ok: {} behavior definition(s) validated",
+        summary.definitions.len()
+    );
+    if let Some(root) = &summary.root {
+        println!("root: {root}");
+    }
+    for definition in &summary.definitions {
+        println!(
+            "  {} {} {}",
+            definition.id, definition.version, definition.content_hash
+        );
+    }
+    Ok(())
 }
 
 fn test(app: &AppContext, args: &TestArgs) -> Result<()> {
@@ -265,20 +240,14 @@ fn test(app: &AppContext, args: &TestArgs) -> Result<()> {
         args: parsed,
         visited_nodes,
     };
-    print_message(
-        &summary,
-        || {
-            println!(
-                "{}: {} ({}, {} node(s))",
-                summary.behavior_id,
-                summary.outcome,
-                summary.scenario,
-                summary.visited_nodes.len()
-            );
-            Ok(())
-        },
-        args.message_format,
-    )
+    println!(
+        "{}: {} ({}, {} node(s))",
+        summary.behavior_id,
+        summary.outcome,
+        summary.scenario,
+        summary.visited_nodes.len()
+    );
+    Ok(())
 }
 
 fn validate_test_args(
@@ -428,21 +397,14 @@ async fn inspect(app: &AppContext, args: &InspectArgs) -> Result<()> {
         .await
         .context("behavior service did not publish a snapshot")??
         .body;
-    print_message(
-        &snapshot,
-        || {
-            println!(
-                "execution: {}",
-                snapshot.execution_id.as_deref().unwrap_or("idle")
-            );
-            println!("status: {:?}", snapshot.status);
-            if let Some(path) = &snapshot.active_node_path {
-                println!("active node: {path}");
-            }
-            Ok(())
-        },
-        args.message_format,
-    )?;
+    println!(
+        "execution: {}",
+        snapshot.execution_id.as_deref().unwrap_or("idle")
+    );
+    println!("status: {:?}", snapshot.status);
+    if let Some(path) = &snapshot.active_node_path {
+        println!("active node: {path}");
+    }
     bus.close().await?;
     Ok(())
 }

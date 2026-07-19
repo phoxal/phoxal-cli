@@ -6,9 +6,8 @@
 //! never a raw write racing an active redraw or corrupting the alternate
 //! screen.
 //!
-//! Uses a process-global cell for the session's event sender (unlike
-//! `crate::progress`'s spinner/bar, which take their `OutputMode` as an
-//! explicit parameter): [`install`] is called once by
+//! Uses a process-global cell for the session's event sender. [`install`] is
+//! called once by
 //! [`super::controller::SessionController::new`] for the lifetime of one
 //! `run`/`simulation run` session; [`uninstall`] restores direct stderr
 //! writing on teardown. Every OTHER verb (and any code running before a
@@ -86,7 +85,7 @@ pub(crate) enum RouteResult {
 /// Try to route one operator-facing message (`crate::ui::Ui::info`/`warn`/
 /// `error`) through the active session's event channel instead of letting the
 /// caller write it directly to stderr. Diagnostics may be dropped under
-/// backpressure, but a live session's terminal/JSON ownership is never lost.
+/// backpressure, but a live session's terminal ownership is never lost.
 pub(crate) fn try_route(
     source: DiagnosticSource,
     level: DiagnosticLevel,

@@ -1,8 +1,8 @@
 //! [`SessionController`]: the one lifecycle owner for `run`/`simulation run`
 //! (Target design part 1). It owns terminal acquisition/restoration, the
 //! root [`CancellationToken`], the current [`SessionState`], the bounded
-//! [`SessionEvent`] receiver, and picks the TUI or line renderer from an
-//! [`OutputContext`] - replacing the old `Stepper` + display-activation
+//! [`SessionEvent`] receiver, and owns the TUI selected by the command's hard
+//! TTY gate - replacing the old `Stepper` + display-activation
 //! handoff + supervisor-owned `Display` design.
 //!
 //! # Cancellation (fixes live-acceptance #4, finding A1)
@@ -37,25 +37,18 @@
 //! [`SessionController`] restores the terminal and uninstalls diagnostics
 //! routing on EVERY exit path, not just an explicit call some branches used
 //! to skip: [`Drop`] uninstalls diagnostics routing unconditionally, and
-//! dropping the `Renderer` field (either via `Drop` or the explicit
-//! process-exit path's [`SessionController::teardown`]) restores the terminal
-//! through the `Tui` renderer's own `TerminalGuard` chain. A terminal
+//! dropping the TUI field (either via `Drop` or the explicit process-exit
+//! path's [`SessionController::teardown`]) restores the terminal through its
+//! `TerminalGuard` chain. A terminal
 //! draw/input failure inside [`SessionController::drive_supervision`] no
 //! longer just tears down the renderer and returns: it cancels the root
 //! token and AWAITS the supervisor's `JoinHandle` first (see
 //! `finish_after_failure`), so a dropped `JoinHandle` never silently detaches
 //! the supervisor (and every child it owns) in the background.
 //!
-//! # Renderer (Target design parts 4 and 6; this wave keeps part 6 minimal)
+//! # TUI
 //!
-//! - [`OutputMode::Json`] selects no renderer at all - stdout stays the
-//!   command's JSON document, stderr stays empty.
-//! - [`OutputMode::Plain`] (or `Rich` without a real TTY) selects
-//!   [`LineRenderer`]: one append-only line per event, reusing
-//!   [`crate::logger::LineLogger`]'s board-diff shape for participant state
-//!   and adding phase/diagnostic/session lines from the event stream.
-//! - [`OutputMode::Rich`] on a real TTY selects the existing
-//!   [`crate::tui::TuiDisplay`], activated immediately (before preparation
+//! A real TTY selects [`crate::tui::TuiDisplay`], activated immediately (before preparation
 //!   even starts) rather than gated behind a stepper hand-off, so the
 //!   alternate screen is the ONE surface from command start to shutdown.
 //!   Every [`SessionEvent`] this controller applies (phase/diagnostic/session
@@ -83,11 +76,8 @@ use crate::display::DisplayAction;
 const FORCED_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 const OWNED_TASK_CANCEL_TIMEOUT: Duration = Duration::from_secs(1);
 use crate::identity::IdentitySummary;
-use crate::logger::LineLogger;
-use crate::output_mode::OutputMode;
 use crate::supervisor::{BoardBackend, BoardSnapshot, SupervisorAction, SupervisorOutcome};
 use crate::telemetry::{JoypadCommand, TelemetryBackend};
-use crate::theme::Theme;
 use crate::tui::render::TitleInfo;
 use crate::tui::{TerminalGuard, TuiDisplay, install_panic_hook};
 
@@ -125,14 +115,6 @@ impl std::fmt::Display for SessionMode {
     }
 }
 
-/// Which renderer owns stderr/the terminal for this session (Target design
-/// parts 4 and 6, minimal this wave - see the module docs).
-enum Renderer {
-    Tui(Box<TuiDisplay>),
-    Line(LineRenderer),
-    None,
-}
-
 /// The one lifecycle owner for a `run`/`simulation run` session. See the
 /// module docs.
 pub struct SessionController {
@@ -141,16 +123,14 @@ pub struct SessionController {
     state: SessionState,
     events_tx: mpsc::Sender<SessionEvent>,
     events_rx: mpsc::Receiver<SessionEvent>,
-    renderer: Renderer,
+    tui: Option<Box<TuiDisplay>>,
     interrupts: tokio::signal::unix::Signal,
     terminates: tokio::signal::unix::Signal,
     hangups: tokio::signal::unix::Signal,
-    /// Lets a TUI's `r restart` input reach the supervisor without the
+    /// Lets the TUI's `r restart` input reach the supervisor without the
     /// supervisor knowing about ratatui/input at all: the same
     /// `SupervisorAction` channel `run`/`simulation run` already wires up for
-    /// `--watch` hot-reload, shared here rather than duplicated. `None` under
-    /// the `Line`/no renderer (no interactive input exists to produce a
-    /// restart in the first place).
+    /// `--watch` hot-reload, shared here rather than duplicated.
     restart_tx: Option<mpsc::Sender<SupervisorAction>>,
 }
 
@@ -164,8 +144,15 @@ impl SessionController {
         mode: SessionMode,
         identity: Option<IdentitySummary>,
     ) -> io::Result<Self> {
-        // Background participant/build workers may panic under line or JSON
-        // output too. Install routing independently of alternate-screen entry.
+        Self::build(output, mode, identity, true)
+    }
+
+    fn build(
+        output: OutputContext,
+        mode: SessionMode,
+        identity: Option<IdentitySummary>,
+        activate_tui: bool,
+    ) -> io::Result<Self> {
         install_panic_hook();
         let (events_tx, events_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         // Install every process-level terminal shutdown signal once and keep
@@ -176,30 +163,34 @@ impl SessionController {
         let terminates = signal(SignalKind::terminate())?;
         let hangups = signal(SignalKind::hangup())?;
 
-        let renderer = match output.mode {
-            OutputMode::Json => Renderer::None,
-            OutputMode::Rich if TerminalGuard::should_use_terminal(&io::stderr()) => {
-                let title = TitleInfo {
-                    robot: identity
-                        .as_ref()
-                        .map_or_else(|| "unknown".to_string(), |summary| summary.robot.clone()),
-                    namespace: identity.as_ref().map_or_else(
-                        || "unknown".to_string(),
-                        |summary| summary.namespace.clone(),
-                    ),
-                    channel: identity
-                        .as_ref()
-                        .map_or_else(|| "unknown".to_string(), |summary| summary.channel.clone()),
-                    mode,
-                    bus_endpoint: crate::supervisor::default_connect_endpoint(),
-                    started_at: std::time::SystemTime::now(),
-                    started_instant: std::time::Instant::now(),
-                };
-                let mut tui = Box::new(TuiDisplay::new(output.theme, title, identity));
-                tui.activate()?;
-                Renderer::Tui(tui)
+        let tui = if activate_tui {
+            if !output.interactive || !TerminalGuard::should_use_terminal(&io::stderr()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "interactive `run` and `simulation run` sessions require a terminal; run this command in a TTY",
+                ));
             }
-            _ => Renderer::Line(LineRenderer::new(mode.label(), output.theme)),
+            let title = TitleInfo {
+                robot: identity
+                    .as_ref()
+                    .map_or_else(|| "unknown".to_string(), |summary| summary.robot.clone()),
+                namespace: identity.as_ref().map_or_else(
+                    || "unknown".to_string(),
+                    |summary| summary.namespace.clone(),
+                ),
+                channel: identity
+                    .as_ref()
+                    .map_or_else(|| "unknown".to_string(), |summary| summary.channel.clone()),
+                mode,
+                bus_endpoint: crate::supervisor::default_connect_endpoint(),
+                started_at: std::time::SystemTime::now(),
+                started_instant: std::time::Instant::now(),
+            };
+            let mut tui = Box::new(TuiDisplay::new(output.theme, title, identity));
+            tui.activate()?;
+            Some(tui)
+        } else {
+            None
         };
 
         // Do this only after terminal activation succeeds. Otherwise a failed
@@ -213,12 +204,26 @@ impl SessionController {
             state: SessionState::Preparing,
             events_tx,
             events_rx,
-            renderer,
+            tui,
             interrupts,
             terminates,
             hangups,
             restart_tx: None,
         })
+    }
+
+    #[cfg(test)]
+    fn new_for_test(mode: SessionMode) -> io::Result<Self> {
+        Self::build(
+            OutputContext::new(
+                false,
+                crate::theme::Theme::new(crate::theme::ColorCapability::None),
+                false,
+            ),
+            mode,
+            None,
+            false,
+        )
     }
 
     /// The root cancellation signal: pass a clone into `SupervisorOptions`
@@ -230,7 +235,7 @@ impl SessionController {
     }
 
     /// The event sender: clone it into preparation and the supervisor so
-    /// both can emit [`SessionEvent`]s the renderer consumes.
+    /// both can emit [`SessionEvent`]s the TUI consumes.
     #[must_use]
     pub fn events(&self) -> mpsc::Sender<SessionEvent> {
         self.events_tx.clone()
@@ -238,14 +243,12 @@ impl SessionController {
 
     /// Wire a TUI's `r restart` key to the supervisor's own action channel
     /// (the same one `--watch` hot-reload already uses). A no-op call is
-    /// harmless for the `Line`/`None` renderers - they never produce a
-    /// `DisplayAction::Restart` in the first place.
     pub fn set_restart_channel(&mut self, tx: mpsc::Sender<SupervisorAction>) {
         self.restart_tx = Some(tx);
     }
 
     pub fn set_bus_endpoint(&mut self, endpoint: String) {
-        if let Renderer::Tui(tui) = &mut self.renderer {
+        if let Some(tui) = &mut self.tui {
             tui.set_bus_endpoint(endpoint);
         }
     }
@@ -258,14 +261,14 @@ impl SessionController {
         self.output
     }
 
-    /// `true` once the TUI (not the line renderer, not `None`) owns the
+    /// `true` once the TUI owns the
     /// terminal - the gate `run`/`simulation run` use to decide whether
     /// subscribing to the extra live-telemetry bus feeds (host/
     /// router/joypad) is worth the connections, since only the TUI can
     /// render them.
     #[must_use]
     pub const fn renders_tui(&self) -> bool {
-        matches!(self.renderer, Renderer::Tui(_))
+        self.tui.is_some()
     }
 
     /// Drive one bracketed "Preparing" phase while `prepare` (a blocking
@@ -371,14 +374,14 @@ impl SessionController {
                     self.teardown();
                     std::process::exit(130);
                 }
-                Some(input) = poll_next_input(&mut self.renderer) => {
+                Some(input) = poll_next_input(&mut self.tui) => {
                     match input {
                         Ok(event) => {
                             // Navigation and resize input still update the
                             // startup UI immediately. Quit is the only action
                             // with an external effect before supervision;
                             // restart/joypad actions have no target yet.
-                            let action = handle_input(&mut self.renderer, event, &empty_board, &empty_telemetry);
+                            let action = handle_input(&mut self.tui, event, &empty_board, &empty_telemetry);
                             if matches!(action, DisplayAction::Quit) {
                                 self.cancel_owned_task(&mut task).await;
                                 self.teardown();
@@ -443,16 +446,14 @@ impl SessionController {
     /// exist: redraws on a ticker, forwards `SessionEvent`s, bridges TUI
     /// input (restart/joypad) back to the supervisor/telemetry, and waits for
     /// `supervise` (the spawned `supervise_until_shutdown` task) to finish or
-    /// Ctrl-C to cancel it. Consumes `self` so the renderer (and, for the
-    /// TUI, the terminal) is torn down exactly once, on every return path.
+    /// Ctrl-C to cancel it. Consumes `self` so the TUI and terminal are torn
+    /// down exactly once, on every return path.
     ///
     /// `runtime_store` carries this session's launch-time participant
     /// metadata (finding A5 - artifact reference, declared contracts,
     /// ownership) resolved once by the caller from its `LaunchPlan` and
-    /// contract-check outcome; installed into the TUI (if any) alongside the
-    /// board's log sink, right before this loop starts. The `Line`/`None`
-    /// renderers have no runtime-detail view to feed it to, so it is simply
-    /// dropped for them.
+    /// contract-check outcome; installed into the TUI alongside the board's
+    /// log sink, right before this loop starts.
     pub async fn drive_supervision(
         mut self,
         board: BoardBackend,
@@ -461,7 +462,7 @@ impl SessionController {
         orderly_shutdown_timeout: Duration,
         mut supervise: JoinHandle<Result<SupervisorOutcome>>,
     ) -> Result<SupervisorOutcome> {
-        if let Renderer::Tui(tui) = &mut self.renderer {
+        if let Some(tui) = &mut self.tui {
             board.set_log_sink(tui.log_sender());
             tui.set_runtime_store(runtime_store);
         }
@@ -489,11 +490,11 @@ impl SessionController {
                         break SupervisionEnd::Failed(error);
                     }
                 }
-                Some(input) = poll_next_input(&mut self.renderer) => {
+                Some(input) = poll_next_input(&mut self.tui) => {
                     match input {
                         Ok(event) => {
                             let board_snapshot = board.snapshot();
-                            let action = handle_input(&mut self.renderer, event, &board_snapshot, &telemetry);
+                            let action = handle_input(&mut self.tui, event, &board_snapshot, &telemetry);
                             if action == DisplayAction::Quit
                                 && register_cancel_request(&mut cancel_requested)
                             {
@@ -529,8 +530,8 @@ impl SessionController {
             }
         };
         // Finding B1: a terminal draw/input failure must not just tear down
-        // the renderer and leave the supervisor (and every child it owns)
-        // detached in the background. `self` (and its `Renderer`/diagnostics
+        // the TUI and leave the supervisor (and every child it owns)
+        // detached in the background. `self` (and its terminal/diagnostics
         // routing) is restored via `Drop` once this function returns - see
         // the module docs - so there is no explicit `teardown()` call on this
         // path any more.
@@ -695,39 +696,28 @@ impl SessionController {
         }
     }
 
-    /// Hand one event to whichever renderer owns the terminal - the `Line`
-    /// renderer prints it as an append-only line, the TUI folds it into its
-    /// startup model (`TuiDisplay::apply_session_event`) so the NEXT
-    /// `redraw` shows it. `Renderer::None` (JSON mode) drops it: JSON stdout
-    /// must stay byte-identical and stderr must stay empty.
+    /// Fold one event into the TUI startup model so the next redraw shows it.
     fn forward_to_renderer(&mut self, event: &SessionEvent) {
-        match &mut self.renderer {
-            Renderer::Line(line) => line.handle_event(event),
-            Renderer::Tui(tui) => tui.apply_session_event(event),
-            Renderer::None => {}
+        if let Some(tui) = &mut self.tui {
+            tui.apply_session_event(event);
         }
     }
 
     /// Draw one frame. An `Err` is a genuine terminal I/O failure (the TUI's
     /// underlying tty went away) - the caller fails the session rather than
-    /// silently leaving a stale screen up forever; `Line`/`None` never draw
-    /// to a terminal and so never fail here.
+    /// silently leaving a stale screen up forever.
     fn redraw(&mut self, board: &BoardSnapshot, telemetry: &TelemetryBackend) -> Result<()> {
         crate::update_notice::poll_session();
-        match &mut self.renderer {
-            Renderer::Tui(tui) => tui
+        match &mut self.tui {
+            Some(tui) => tui
                 .redraw(board, telemetry)
                 .context("failed to draw the interactive session frame"),
-            Renderer::Line(line) => {
-                line.redraw_board(board);
-                Ok(())
-            }
-            Renderer::None => Ok(()),
+            None => Ok(()),
         }
     }
 
     fn redraw_live(&mut self, board: &BoardBackend, telemetry: &TelemetryBackend) -> Result<()> {
-        if let Renderer::Tui(tui) = &mut self.renderer {
+        if let Some(tui) = &mut self.tui {
             tui.set_heartbeats(board.heartbeat_snapshot());
         }
         self.redraw(&board.snapshot(), telemetry)
@@ -739,14 +729,14 @@ impl SessionController {
     /// `Drop` impl, so it must call this explicitly first. Every OTHER exit
     /// path (normal return, `?`, an early `return`) relies on `Drop` instead
     /// (see below) - idempotent either way, since `Drop` runs on an
-    /// already-`None` renderer harmlessly.
+    /// already-empty TUI harmlessly.
     fn teardown(&mut self) {
         diagnostics::uninstall();
-        // Dropping the old `Renderer` value here (rather than waiting for
+        // Dropping the old TUI value here (rather than waiting for
         // `Self`'s own end-of-scope drop) restores the terminal
         // SYNCHRONOUSLY, so it is safe to call `std::process::exit`
         // immediately afterward - `exit` never runs `Drop` impls.
-        self.renderer = Renderer::None;
+        self.tui = None;
     }
 }
 
@@ -777,7 +767,7 @@ async fn wait_for_cancel_deadline(deadline: Option<tokio::time::Instant>) {
 /// panic unwind) restores the terminal and uninstalls diagnostics routing
 /// through this `Drop` impl instead of a call to `teardown()` a future code
 /// path could forget. Uninstalling diagnostics here is what closes the gap:
-/// dropping `self.renderer` (a struct field, dropped automatically after this
+/// dropping `self.tui` (a struct field, dropped automatically after this
 /// method body runs) already restored the terminal on its own for the `Tui`
 /// variant (`TerminalGuard`'s own `Drop`), but nothing previously guaranteed
 /// diagnostics routing was ALSO torn down on every path.
@@ -829,36 +819,35 @@ async fn finish_after_failure(
     Err(error)
 }
 
-/// Poll the active renderer for its next input event, if any. A free
-/// function taking only `&mut Renderer` (rather than a `SessionController`
+/// Poll the active TUI for its next input event, if any. A free
+/// function taking only the TUI field (rather than a `SessionController`
 /// method taking `&mut self`) so its future, used directly inside
 /// `drive_supervision`'s `tokio::select!`, borrows only the `renderer` field -
 /// disjoint from the `events_rx` field another branch borrows in the same
-/// `select!` invocation. `Line`/`None` never produce input, so this future
-/// simply never resolves for them - safe to poll repeatedly every loop pass.
+/// `select!` invocation. The test-only empty case never resolves.
 /// `Some(Err(_))` is a genuine terminal read failure (see
 /// `TuiDisplay::next_input`'s docs) - the caller fails the session rather
 /// than silently going input-deaf.
-async fn poll_next_input(renderer: &mut Renderer) -> Option<io::Result<Event>> {
-    match renderer {
-        Renderer::Tui(tui) => match tui.next_input().await {
+async fn poll_next_input(tui: &mut Option<Box<TuiDisplay>>) -> Option<io::Result<Event>> {
+    match tui {
+        Some(tui) => match tui.next_input().await {
             Ok(Some(event)) => Some(Ok(event)),
             Ok(None) => std::future::pending().await,
             Err(error) => Some(Err(error)),
         },
-        Renderer::Line(_) | Renderer::None => std::future::pending().await,
+        None => std::future::pending().await,
     }
 }
 
 fn handle_input(
-    renderer: &mut Renderer,
+    tui: &mut Option<Box<TuiDisplay>>,
     event: Event,
     board: &BoardSnapshot,
     telemetry: &TelemetryBackend,
 ) -> DisplayAction {
-    match renderer {
-        Renderer::Tui(tui) => tui.handle_input(event, board, telemetry),
-        Renderer::Line(_) | Renderer::None => DisplayAction::None,
+    match tui {
+        Some(tui) => tui.handle_input(event, board, telemetry),
+        None => DisplayAction::None,
     }
 }
 
@@ -885,117 +874,10 @@ fn reduce_staged_startup_complete(current: SessionState) -> SessionState {
     current.clone().to_running().unwrap_or(current)
 }
 
-/// The append-only renderer for `OutputMode::Plain` (or `Rich` without a real
-/// TTY) - Target design part 4/6. Reuses [`LineLogger`]'s board-diff shape
-/// for participant lines and adds one line per phase/diagnostic/session
-/// event; never redraws or emits cursor control.
-struct LineRenderer {
-    mode_label: &'static str,
-    theme: Theme,
-    board_logger: LineLogger,
-    /// A `HashMap`, not a `BTreeMap`: [`PhaseId`] intentionally derives only
-    /// `Eq + Hash` (see its own docs), not `Ord` - phase ids are dynamic,
-    /// never a fixed sortable set.
-    phase_labels: std::collections::HashMap<PhaseId, String>,
-}
-
-impl LineRenderer {
-    fn new(mode_label: &'static str, theme: Theme) -> Self {
-        Self {
-            mode_label,
-            theme,
-            board_logger: LineLogger::new(mode_label, theme),
-            phase_labels: std::collections::HashMap::new(),
-        }
-    }
-
-    fn redraw_board(&mut self, board: &BoardSnapshot) {
-        self.board_logger.redraw(board);
-    }
-
-    fn handle_event(&mut self, event: &SessionEvent) {
-        match event {
-            SessionEvent::PhaseStarted { id, label } => {
-                self.phase_labels.insert(id.clone(), label.clone());
-                eprintln!("{label}...");
-            }
-            SessionEvent::PhaseProgress { .. } => {
-                // Append-only: no live in-place counter under Plain/non-TTY -
-                // matches the design's "no cursor control" rule.
-            }
-            SessionEvent::PhaseFinished {
-                id,
-                outcome,
-                elapsed,
-            } => {
-                let label = self
-                    .phase_labels
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(|| id.to_string());
-                self.print_phase_finished(&label, outcome, *elapsed);
-            }
-            SessionEvent::Diagnostic {
-                source,
-                level,
-                message,
-            } => {
-                eprintln!(
-                    "{}",
-                    format_diagnostic(self.theme, source.label(), *level, message)
-                );
-            }
-            SessionEvent::SessionChanged { state } => {
-                eprintln!(
-                    "{:<5} session [{}] {}",
-                    "info",
-                    self.mode_label,
-                    state.label()
-                );
-            }
-            // The controller intercepts this before it reaches a renderer,
-            // reduces it into `SessionChanged`, and forwards that instead.
-            SessionEvent::StagedStartupComplete => {}
-        }
-    }
-
-    fn print_phase_finished(&self, label: &str, outcome: &PhaseOutcome, elapsed: Duration) {
-        match outcome {
-            PhaseOutcome::Succeeded => eprintln!(
-                "{} {label} ({})",
-                self.theme.success("\u{2713}"),
-                crate::human::duration(elapsed)
-            ),
-            PhaseOutcome::Skipped => {
-                eprintln!("{} {label}", self.theme.muted("\u{b7}"));
-            }
-            PhaseOutcome::Failed { error } => {
-                eprintln!("{} {label}", self.theme.error("\u{2717}"));
-                eprintln!("  {error}");
-            }
-        }
-    }
-}
-
-fn format_diagnostic(theme: Theme, source: &str, level: DiagnosticLevel, message: &str) -> String {
-    let level_word = match level {
-        DiagnosticLevel::Info => "info",
-        DiagnosticLevel::Warn => "warn",
-        DiagnosticLevel::Error => "error",
-    };
-    let role = match level {
-        DiagnosticLevel::Info => crate::theme::Role::TextPrimary,
-        DiagnosticLevel::Warn => crate::theme::Role::Warn,
-        DiagnosticLevel::Error => crate::theme::Role::Error,
-    };
-    format!("{:<5} {}: {message}", level_word, theme.paint(role, source))
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::event::DiagnosticSource;
     use super::*;
-    use crate::theme::ColorCapability;
 
     fn changed(state: SessionState) -> SessionEvent {
         SessionEvent::SessionChanged { state }
@@ -1068,38 +950,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn format_diagnostic_includes_the_level_word_and_source() {
-        let theme = Theme::new(ColorCapability::None);
-        let text = format_diagnostic(theme, "cli", DiagnosticLevel::Warn, "connection retrying");
-        assert!(text.contains("warn"), "{text}");
-        assert!(text.contains("cli"), "{text}");
-        assert!(text.contains("connection retrying"), "{text}");
-    }
-
-    #[test]
-    fn line_renderer_finishes_a_phase_using_its_started_label() {
-        let mut renderer = LineRenderer::new("run", Theme::new(ColorCapability::None));
-        renderer.handle_event(&SessionEvent::PhaseStarted {
-            id: PhaseId::new("download"),
-            label: "Downloading artifacts".to_string(),
-        });
-        assert_eq!(
-            renderer
-                .phase_labels
-                .get(&PhaseId::new("download"))
-                .map(String::as_str),
-            Some("Downloading artifacts")
-        );
-        // Finishing must not panic even for an id whose Started line was
-        // never recorded (defensive - falls back to the bare id).
-        renderer.handle_event(&SessionEvent::PhaseFinished {
-            id: PhaseId::new("unseen"),
-            outcome: PhaseOutcome::Succeeded,
-            elapsed: Duration::from_millis(5),
-        });
-    }
-
     /// `StagedStartupComplete` is the only path to `Running`; it must reach
     /// `Running` from `Starting`, and must not resurrect a session already
     /// on to `Stopping`.
@@ -1128,12 +978,8 @@ mod tests {
         let _guard = super::super::diagnostics::DIAGNOSTICS_TEST_LOCK
             .lock()
             .await;
-        let mut controller = SessionController::new(
-            OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false),
-            SessionMode::Run,
-            None,
-        )
-        .expect("Plain mode never touches a real terminal");
+        let mut controller =
+            SessionController::new_for_test(SessionMode::Run).expect("test controller");
         controller.state = SessionState::Preparing
             .start()
             .unwrap()
@@ -1258,12 +1104,8 @@ mod tests {
         let _guard = super::super::diagnostics::DIAGNOSTICS_TEST_LOCK
             .lock()
             .await;
-        let mut controller = SessionController::new(
-            OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false),
-            SessionMode::Run,
-            None,
-        )
-        .expect("Plain mode never touches a real terminal");
+        let mut controller =
+            SessionController::new_for_test(SessionMode::Run).expect("test controller");
         controller.state = SessionState::Preparing.start().unwrap();
 
         let mut command = Command::new("/bin/sh");
@@ -1307,8 +1149,8 @@ mod tests {
     /// Finding A1: `drive_setup` and `drive_prepare_phase` share one
     /// cancelable loop; this proves the plumbing for the new `drive_setup`
     /// method (simulate's "intermediate setup" gap) actually runs an
-    /// arbitrary future to completion and returns its value. `OutputMode::Plain`
-    /// never touches a real terminal, so this needs no TUI/terminal fixture.
+    /// arbitrary future to completion and returns its value. The test-only
+    /// controller never touches a real terminal.
     /// `SessionController::new` installs a diagnostics sender into the same
     /// process-global cell `session::diagnostics`'s own tests (and
     /// `progress`'s) touch - serialize through their shared lock.
@@ -1317,12 +1159,8 @@ mod tests {
         let _guard = super::super::diagnostics::DIAGNOSTICS_TEST_LOCK
             .lock()
             .await;
-        let mut controller = SessionController::new(
-            OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false),
-            SessionMode::Run,
-            None,
-        )
-        .expect("Plain mode never touches a real terminal");
+        let mut controller =
+            SessionController::new_for_test(SessionMode::Run).expect("test controller");
         let result = controller
             .drive_setup(async { Ok::<_, anyhow::Error>(42) })
             .await;
@@ -1336,12 +1174,8 @@ mod tests {
         let _guard = super::super::diagnostics::DIAGNOSTICS_TEST_LOCK
             .lock()
             .await;
-        let mut controller = SessionController::new(
-            OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false),
-            SessionMode::Run,
-            None,
-        )
-        .expect("Plain mode never touches a real terminal");
+        let mut controller =
+            SessionController::new_for_test(SessionMode::Run).expect("test controller");
         let result: Result<()> = controller
             .drive_setup(async { Err(anyhow!("setup failed")) })
             .await;

@@ -8,13 +8,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
 use phoxal::model::robot::v0::ConnectionConfig;
 use phoxal::participant::launch::env;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
 use crate::AppContext;
-use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, build_emit_apis_from_source, check_artifact_refs_from_resolved,
     extract_emit_apis_from_staged_runtime, extract_emit_apis_from_staged_tool,
@@ -267,8 +266,6 @@ pub struct Run {
         help = "Apply a robot.<env>.yaml overlay before running (repeatable). Path pins are only legal through overlays."
     )]
     pub env: Vec<String>,
-    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
-    pub message_format: MessageFormat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -284,11 +281,10 @@ pub struct RunOptions {
     pub catalog_source: Option<String>,
     pub overlays: Vec<String>,
     pub watch: bool,
-    pub message_format: MessageFormat,
-    /// The session's output mode, threaded into a catalog fetch's spinner
+    /// Whether progress may draw interactively, threaded into catalog fetches
     /// (`watch::recheck_run_target` runs `--watch` rechecks with no
     /// `AppContext` in scope) - no process-global mode cell.
-    pub output_mode: crate::output_mode::OutputMode,
+    pub interactive: bool,
 }
 
 #[derive(Debug)]
@@ -354,14 +350,12 @@ impl Run {
             catalog_source: app.catalog_source.clone(),
             overlays: self.env.clone(),
             watch: self.watch,
-            message_format: self.message_format,
-            output_mode: app.output.mode,
+            interactive: app.output.decorated(),
         };
         if options.drivers == DriversMode::Off && !options.drivers_subset.is_empty() {
             bail!("--driver cannot be combined with --drivers off");
         }
         let watch_enabled = options.watch;
-        let message_format = options.message_format;
         let watch_options = options.clone();
 
         let run_dir = crate::host_paths::run_dir()?;
@@ -370,8 +364,8 @@ impl Run {
         let ui = app.ui;
 
         // One interactive surface for the whole session (Product decision
-        // 1): the controller starts its renderer (a TUI's alternate screen,
-        // or the append-only line renderer) right now, before preparation
+        // 1): the controller starts the TUI's alternate screen right now,
+        // before preparation
         // even begins - see `SessionController::new`'s docs.
         let identity = crate::identity::IdentitySummary::discover(
             app.project.root(),
@@ -392,7 +386,6 @@ impl Run {
             .drive_setup(live_run_setup(
                 prepared,
                 app.ui,
-                message_format,
                 watch_enabled,
                 watch_options,
                 controller.output(),
@@ -449,7 +442,6 @@ impl Run {
 async fn live_run_setup(
     mut prepared: PreparedRun,
     ui: crate::Ui,
-    message_format: MessageFormat,
     watch_enabled: bool,
     watch_options: RunOptions,
     output: crate::session::output::OutputContext,
@@ -467,7 +459,7 @@ async fn live_run_setup(
         prepared.plan.site.len()
     ));
     ui.info(format!("infrastructure router ready on {connect}"));
-    report_launch_commands(&prepared.plan, &prepared.specs, message_format, &ui)?;
+    report_launch_commands(&prepared.plan, &prepared.specs, &ui)?;
 
     let mut background_tasks = AbortTasks::default();
     background_tasks.extend(
@@ -651,7 +643,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         project_root,
         loaded.robot.artifacts.channel,
         &loaded.extras,
-        ui.mode(),
+        ui.interactive(),
     )?;
     let resolved = resolve(
         &loaded.robot,
@@ -661,6 +653,7 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
             emit_update_notice: true,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
+            interactive: options.interactive,
             ..ResolveOptions::default()
         },
     )?;
@@ -737,7 +730,6 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     crate::commands::check::enforce_coherence(
         crate::commands::check::CoherenceVerb::Run,
         &coherence,
-        options.message_format,
     )?;
     // Finding A5: resolved once here, from the same `plan`/`outcome` this
     // function already built - see `RuntimeStore::from_launch_plan`'s docs.
@@ -782,28 +774,26 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     })
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct LaunchCommandReport {
     participants: Vec<LaunchCommandEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct LaunchCommandEntry {
     id: String,
     kind: &'static str,
     command_line: String,
-    env: BTreeMap<String, String>,
 }
 
-/// The pre-staged-startup (Phase 0) launch-report `kind` string, preserved
-/// byte-for-byte for `--message-format json` backward compatibility even
-/// though the board's own `ParticipantKind` is now the finer-grained shared
+/// The pre-staged-startup launch-report `kind` string. The board's
+/// own `ParticipantKind` is the finer-grained shared
 /// `Tool`/`Service`/`Driver`/`Simulator` split plus a `local` bit (Part 1) -
 /// see `participant_kind`'s module docs. A site launch (the router, the
 /// joypad, the Webots app in `simulate`) has no `ParticipantExecution` of
 /// its own and is always `"site-tool"`; everything else follows the
-/// pre-consolidation mapping this report has always used.
-fn legacy_launch_kind_label(execution: Option<&ParticipantExecution>) -> &'static str {
+/// compact operator-facing mapping.
+fn launch_kind_label(execution: Option<&ParticipantExecution>) -> &'static str {
     match execution {
         None => "site-tool",
         Some(
@@ -818,7 +808,6 @@ fn legacy_launch_kind_label(execution: Option<&ParticipantExecution>) -> &'stati
 pub(crate) fn report_launch_commands(
     plan: &LaunchPlan,
     specs: &[ParticipantSpec],
-    message_format: MessageFormat,
     ui: &crate::Ui,
 ) -> Result<()> {
     let executions_by_id = plan
@@ -839,18 +828,13 @@ pub(crate) fn report_launch_commands(
                 let launch = spec.launch_command();
                 LaunchCommandEntry {
                     id: spec.id.clone(),
-                    kind: legacy_launch_kind_label(executions_by_id.get(spec.id.as_str()).copied()),
+                    kind: launch_kind_label(executions_by_id.get(spec.id.as_str()).copied()),
                     command_line: launch.command_line,
-                    env: launch.env,
                 }
             })
             .collect(),
     };
-    crate::commands::print_message(
-        &output,
-        || report_launch_commands_human(&output, ui),
-        message_format,
-    )
+    report_launch_commands_human(&output, ui)
 }
 
 fn report_launch_commands_human(output: &LaunchCommandReport, ui: &crate::Ui) -> Result<()> {
@@ -1360,11 +1344,9 @@ fn native_pending_official_note(
 /// stdout/stderr is CAPTURED and routed as `SessionEvent::Diagnostic`s
 /// (`ui.command_status_captured`, below) instead of inherited straight
 /// through to this process's own stdout/stderr - a raw child write racing an
-/// active TUI redraw could corrupt the alternate-screen frame, and under
-/// `--message-format json` it could leak onto a stderr the contract promises
-/// stays empty. This still reports progress with a single themed (and
-/// `--message-format json`-silenced, via `Ui::info`) line rather than an
-/// animated spinner - `crate::progress`'s own session-routing (see its
+/// active TUI redraw could corrupt the alternate-screen frame. This still
+/// reports progress with a single themed line rather than an animated
+/// spinner - `crate::progress`'s own session-routing (see its
 /// module docs) already keeps a spinner from colliding with captured build
 /// output, but a single line is simpler here and matches
 /// `check::build_and_locate_binary`'s equivalent build.
@@ -1521,14 +1503,10 @@ mod tests {
                 id: "drive".to_string(),
                 kind: "official",
                 command_line: "service-drive".to_string(),
-                env: BTreeMap::new(),
             }],
         };
 
-        let result = report_launch_commands_human(
-            &output,
-            &crate::Ui::new(crate::output_mode::OutputMode::Rich),
-        );
+        let result = report_launch_commands_human(&output, &crate::Ui::new(true));
         crate::session::diagnostics::uninstall();
         result?;
 
@@ -1660,8 +1638,7 @@ mod tests {
                 catalog_source: None,
                 overlays: Vec::new(),
                 watch: false,
-                message_format: MessageFormat::Human,
-                output_mode: crate::output_mode::OutputMode::from_env(),
+                interactive: false,
             },
             &plan,
         )?;
@@ -1678,8 +1655,7 @@ mod tests {
                 catalog_source: None,
                 overlays: Vec::new(),
                 watch: false,
-                message_format: MessageFormat::Human,
-                output_mode: crate::output_mode::OutputMode::from_env(),
+                interactive: false,
             },
             &plan,
         )
@@ -1698,8 +1674,7 @@ mod tests {
                 catalog_source: None,
                 overlays: Vec::new(),
                 watch: false,
-                message_format: MessageFormat::Human,
-                output_mode: crate::output_mode::OutputMode::from_env(),
+                interactive: false,
             },
             &plan,
         )?;
@@ -1725,22 +1700,21 @@ mod tests {
         assert_eq!(missing.as_deref(), Some("/definitely/not/a/phoxal/device"));
     }
 
-    /// The `--message-format json` launch report's `kind` string is a
-    /// Phase-0 contract that must stay byte-identical even though the
+    /// The launch report's `kind` string stays byte-identical even though the
     /// board's own `ParticipantKind` is now the finer-grained shared
     /// `Tool`/`Service`/`Driver`/`Simulator` split plus a `local` bit (Part
-    /// 1 kind consolidation) - see `legacy_launch_kind_label`'s docs.
+    /// 1 kind consolidation) - see `launch_kind_label`'s docs.
     #[test]
-    fn legacy_launch_kind_label_matches_the_pre_consolidation_strings() {
-        assert_eq!(legacy_launch_kind_label(None), "site-tool");
+    fn launch_kind_label_matches_the_operator_facing_strings() {
+        assert_eq!(launch_kind_label(None), "site-tool");
         assert_eq!(
-            legacy_launch_kind_label(Some(&ParticipantExecution::OfficialArtifact {
+            launch_kind_label(Some(&ParticipantExecution::OfficialArtifact {
                 artifact_ref: "phoxal/service-drive@1.0.0".to_string(),
             })),
             "official"
         );
         assert_eq!(
-            legacy_launch_kind_label(Some(&ParticipantExecution::SourceArtifact {
+            launch_kind_label(Some(&ParticipantExecution::SourceArtifact {
                 kind: "service".to_string(),
                 crate_dir: PathBuf::from("/tmp/drive"),
             })),
@@ -1748,13 +1722,13 @@ mod tests {
             "a locally source-overridden official artifact stayed bucketed as \"official\" pre-consolidation"
         );
         assert_eq!(
-            legacy_launch_kind_label(Some(&ParticipantExecution::UserService {
+            launch_kind_label(Some(&ParticipantExecution::UserService {
                 crate_dir: PathBuf::from("/tmp/mission"),
             })),
             "user-service"
         );
         assert_eq!(
-            legacy_launch_kind_label(Some(&ParticipantExecution::ComponentDriver {
+            launch_kind_label(Some(&ParticipantExecution::ComponentDriver {
                 crate_dir: PathBuf::from("/tmp/ddsm115"),
             })),
             "driver"

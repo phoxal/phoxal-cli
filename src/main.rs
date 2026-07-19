@@ -9,31 +9,24 @@ use tracing_subscriber::EnvFilter;
 use phoxal_cli::AppContext;
 use phoxal_cli::SessionAwareWriter;
 use phoxal_cli::Ui;
-use phoxal_cli::commands::{Cli, MessageFormat};
+use phoxal_cli::commands::Cli;
 
 #[tokio::main()]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let message_format = cli.message_format();
-    init_tracing(message_format);
+    init_tracing();
 
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            if message_format == MessageFormat::Human {
-                Ui::from_env().error(format!("{error:#}"));
-            }
+            Ui::from_env().error(format!("{error:#}"));
             ExitCode::from(1)
         }
     }
 }
 
-fn init_tracing(message_format: MessageFormat) {
-    let env_filter = if message_format == MessageFormat::Json {
-        EnvFilter::new("off")
-    } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
-    };
+fn init_tracing() {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     // `SessionAwareWriter` routes every line through whichever `run`/
     // `simulation run` session (if any) has called `session::diagnostics::install`
     // at the moment of the write, falling back to the normal stderr write

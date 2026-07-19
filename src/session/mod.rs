@@ -1,7 +1,7 @@
 //! The event-driven session core: the typed lifecycle event stream
 //! ([`event`]), the pure session state machine ([`state`]), the immutable
 //! output contract ([`output`]), and the [`controller::SessionController`]
-//! that owns terminal/cancellation/renderer selection and drives `run`/
+//! that owns terminal/cancellation/TUI lifecycle and drives `run`/
 //! `simulation run` end to end.
 //!
 //! [`event`] and [`state`] are pure data plus pure transitions - no terminal,

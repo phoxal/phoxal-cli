@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use crate::Project;
 use crate::Ui;
-use crate::commands::MessageFormat;
 use crate::session::output::OutputContext;
 use anyhow::Result;
 
@@ -17,9 +16,9 @@ pub struct AppContext {
     /// The output contract for `run`/`simulation run`'s `SessionController`.
     /// [`AppContext::new`] fills this with a reasonable default computed from
     /// the live environment (matching [`crate::ui::Ui::from_env`]'s own
-    /// fallback), since `--plain`/`--message-format` are not yet known at
+    /// fallback), since `--plain` is not yet known at
     /// construction time; [`crate::commands::dispatch`] overwrites it (and
-    /// `ui`'s mode alongside it) with the precise value computed from the
+    /// `ui` alongside it) with the precise value computed from the
     /// actual CLI invocation before any command runs (see that function's
     /// docs).
     pub output: OutputContext,
@@ -44,14 +43,9 @@ impl AppContext {
                 std::env::set_var("PHOXAL_QUIET", "1");
             }
         }
-        let output = OutputContext::compute(
-            std::io::stderr().is_terminal(),
-            false,
-            quiet,
-            MessageFormat::Human,
-        );
+        let output = OutputContext::compute(std::io::stderr().is_terminal(), false, quiet);
         Ok(Self {
-            ui: Ui::new(output.mode),
+            ui: Ui::new(output.decorated()),
             project: Project::new(workspace_root)?,
             catalog_source,
             offline,
