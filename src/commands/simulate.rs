@@ -23,8 +23,7 @@ use crate::commands::check::{
 use crate::component_driver::{component_assets_dir, component_driver_crate_dir};
 use crate::launch_plan::{
     CheckedRobotLaunchInput, DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, PlanContext,
-    SITE_TOOL_ROUTER, STANDARD_SITE_TOOLS, SubstitutedContract, SubstitutionRecord,
-    build_launch_plan,
+    STANDARD_SITE_TOOLS, SubstitutedContract, SubstitutionRecord, build_launch_plan,
 };
 use crate::resolver::{
     ResolveOptions, ResolvedPlatformRuntime, ResolvedRobot, RobotManifestExtras, resolve,
@@ -35,10 +34,9 @@ use crate::simulate_staging::{
 };
 use crate::supervisor::{
     BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
-    RequestedStop, RouterOwnership, SupervisionStage, SupervisorAction, SupervisorLock,
-    SupervisorOptions, default_connect_endpoint, local_router_reachable, router_ownership,
+    RequestedStop, SupervisionStage, SupervisorAction, SupervisorLock, SupervisorOptions,
     start_bus_log_subscriber, start_clock_feed, start_presence_heartbeat_subscriber,
-    supervise_until_shutdown, wait_for_endpoint,
+    wait_for_endpoint,
 };
 use crate::webots_stage_root;
 use crate::world;
@@ -304,6 +302,8 @@ pub async fn run(
             let setup = controller.drive_setup(setup).await?;
 
             let LiveSimSetup {
+                router,
+                connect,
                 _locks: locks,
                 board,
                 telemetry,
@@ -314,12 +314,10 @@ pub async fn run(
                 action_tx,
                 background_tasks,
             } = setup;
+            controller.set_bus_endpoint(connect);
             controller.set_restart_channel(action_tx);
-            let supervise_task = tokio::spawn(supervise_until_shutdown(
-                stages,
-                board.clone(),
-                supervisor_options,
-            ));
+            let supervise_task =
+                tokio::spawn(router.supervise(stages, board.clone(), supervisor_options));
 
             let outcome = controller
                 .drive_supervision(
@@ -352,6 +350,8 @@ pub async fn run(
 /// completes: the board/telemetry/supervisor task `drive_supervision` needs,
 /// plus every ancillary task that must be aborted once supervision ends.
 struct LiveSimSetup {
+    router: crate::commands::run::InfrastructureRouter,
+    connect: String,
     // Keep both session-wide locks alive for the entire supervision lifetime,
     // not merely while this setup future is being assembled.
     _locks: LiveSimulationLocks,
@@ -392,7 +392,7 @@ impl LiveSimulationLocks {
 /// once it returns.
 async fn live_simulate_setup(
     ui: crate::Ui,
-    sim: SimPlan,
+    mut sim: SimPlan,
     options: SimulateOptions,
     events: mpsc::Sender<crate::session::event::SessionEvent>,
     token: tokio_util::sync::CancellationToken,
@@ -417,9 +417,7 @@ async fn live_simulate_setup(
         .context("failed to publish the simulation runtime robot root")?;
     ensure_active()?;
     let board = BoardBackend::new();
-    let router_ownership = router_ownership(local_router_reachable(&default_connect_endpoint()));
-    let mut runtime_store = sim.runtime_store.clone();
-    runtime_store.set_router_ownership(SITE_TOOL_ROUTER, router_ownership);
+    let runtime_store = sim.runtime_store.clone();
     let mut specs = Vec::new();
     crate::commands::run::prepare_site_tools(
         &sim.plan,
@@ -427,7 +425,6 @@ async fn live_simulate_setup(
         &runtime_root,
         &board,
         &mut specs,
-        router_ownership,
         &ui,
     )?;
     ensure_active()?;
@@ -440,14 +437,20 @@ async fn live_simulate_setup(
         &mut specs,
         &ui,
     )?;
+    let (router, connect) = crate::commands::run::start_infrastructure_router(
+        &sim.ctx.resolved,
+        &sim.ctx.project_root,
+        &ui,
+    )
+    .await?;
+    crate::commands::run::apply_session_connect(&mut sim.plan, &mut specs, &connect);
     ensure_active()?;
     prepare_substitution_notes(&sim.plan, &board);
 
     let (webots_spec, spawn_descriptors) = stage_and_prepare_webots_spec(&ui, &sim)?;
     ensure_active()?;
     let mut background_tasks = crate::commands::run::AbortTasks::default();
-    let spawn_responder =
-        start_spawn_responder(&sim.plan, spawn_descriptors, router_ownership).await?;
+    let spawn_responder = start_spawn_responder(&sim.plan, spawn_descriptors, &connect).await?;
     background_tasks.push(spawn_responder);
     ensure_active()?;
     let requested_stop = RequestedStop::new(WEBOTS_SITE_ID, webots_spec.shutdown_grace);
@@ -458,12 +461,7 @@ async fn live_simulate_setup(
         sim.plan.robots.len(),
         sim.plan.site.len()
     ));
-    match router_ownership {
-        RouterOwnership::External => ui.info("reusing reachable external tool-router"),
-        RouterOwnership::Managed => {
-            ui.info("tool-router will be managed by this simulation session");
-        }
-    }
+    ui.info(format!("infrastructure router ready on {connect}"));
     crate::commands::run::report_launch_commands(&sim.plan, &specs, options.message_format, &ui)?;
 
     background_tasks.extend(
@@ -474,7 +472,7 @@ async fn live_simulate_setup(
                 start_bus_log_subscriber(
                     robot.namespace.clone(),
                     robot.id.clone(),
-                    default_connect_endpoint(),
+                    connect.clone(),
                     board.clone(),
                 )
             })
@@ -488,7 +486,7 @@ async fn live_simulate_setup(
         start_presence_heartbeat_subscriber(
             robot.namespace.clone(),
             robot.id.clone(),
-            default_connect_endpoint(),
+            connect.clone(),
             board.clone(),
         )
     }));
@@ -500,7 +498,7 @@ async fn live_simulate_setup(
     let (clock_rx, clock_task) = start_clock_feed(
         clock_robot.namespace.clone(),
         clock_robot.id.clone(),
-        default_connect_endpoint(),
+        connect.clone(),
     );
     background_tasks.push(clock_task);
     // Clock observation is telemetry only. Startup and session state do not
@@ -544,9 +542,10 @@ async fn live_simulate_setup(
         .map(|robot| (robot.namespace.clone(), robot.id.clone()))
         .collect();
     if renders_tui {
-        background_tasks.extend(crate::commands::run::start_telemetry_feeds(
+        background_tasks.extend(crate::commands::run::start_telemetry_feeds_at(
             &site_targets,
             &telemetry,
+            &connect,
         ));
     }
 
@@ -567,6 +566,8 @@ async fn live_simulate_setup(
 
     let orderly_shutdown_timeout = crate::supervisor::orderly_shutdown_budget(&stages);
     Ok(LiveSimSetup {
+        router,
+        connect,
         _locks: locks,
         board,
         telemetry,
@@ -1247,14 +1248,11 @@ fn stages_for_simulate(
     plan: &LaunchPlan,
     output: OutputContext,
 ) -> Vec<SupervisionStage> {
-    let mut router = Vec::new();
     let mut tools = Vec::new();
     let mut webots = Vec::new();
     let mut services = Vec::new();
     for spec in specs {
-        if spec.id == crate::launch_plan::SITE_TOOL_ROUTER {
-            router.push(spec);
-        } else if spec.id == WEBOTS_SITE_ID {
+        if spec.id == WEBOTS_SITE_ID {
             webots.push(spec);
         } else if spec.kind == ParticipantKind::Tool {
             tools.push(spec);
@@ -1269,16 +1267,7 @@ fn stages_for_simulate(
     // Product decision 6: no unconditional 60s teardown for an interactive
     // session - see `OutputContext::wait_budget`.
     let timeout = output.wait_budget(SIMULATE_READINESS_TIMEOUT);
-    let mut router_stage = SupervisionStage::new("starting router", router, timeout);
-    if let Some(robot) = plan.robots.first() {
-        router_stage = router_stage.with_router_bus_probe(
-            robot.namespace.clone(),
-            robot.id.clone(),
-            default_connect_endpoint(),
-        );
-    }
     vec![
-        router_stage,
         SupervisionStage::new("starting tools", tools, timeout),
         SupervisionStage::new("starting Webots", webots, timeout),
         SupervisionStage::new("waiting for the simulation supervisor", Vec::new(), timeout)
@@ -1409,7 +1398,7 @@ fn stage_and_prepare_webots_spec(
 async fn start_spawn_responder(
     launch_plan: &LaunchPlan,
     robots: Vec<RobotSpawn>,
-    router_ownership: RouterOwnership,
+    connect: &str,
 ) -> Result<JoinHandle<()>> {
     let robot = launch_plan
         .robots
@@ -1420,7 +1409,7 @@ async fn start_spawn_responder(
         robot_id: robot.id.clone(),
         participant: "phoxal-cli-simulation-spawn".to_string(),
         incarnation: 0,
-        connect_endpoints: vec![default_connect_endpoint()],
+        connect_endpoints: vec![connect.to_string()],
     };
     let response = MessagePack::encode(&SpawnSet {
         revision: 1,
@@ -1467,11 +1456,9 @@ async fn start_spawn_responder(
     // to supervision. With a CLI-managed router, the router is itself launched
     // by that supervision call, so the responder retries in parallel and the
     // supervisor's bounded query retry bridges the bootstrap dependency.
-    if router_ownership == RouterOwnership::External {
-        ready_rx
-            .await
-            .context("simulation spawn responder exited before declaring its queryable")?;
-    }
+    ready_rx
+        .await
+        .context("simulation spawn responder exited before declaring its queryable")?;
 
     Ok(handle)
 }
@@ -1981,7 +1968,7 @@ mod tests {
         fixture_contract_for_tests, fixture_tool_entry_for_tests,
     };
     use crate::host_paths::test_support::ScratchPhoxalHome;
-    use crate::launch_plan::{SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SITE_TOOL_TELEMETRY};
+    use crate::launch_plan::{SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY};
     use crate::resolver::{
         ResolvedComponent, ResolvedComponentSource, ResolvedPathOverride, ResolvedPathOverrideKind,
         ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, host_target_triple,
@@ -3186,13 +3173,14 @@ robot:
     }
 
     fn add_site_tools(resolved: &mut ResolvedRobot) {
-        resolved.tools.push(tool(SITE_TOOL_ROUTER));
+        resolved.tools.push(tool(crate::launch_plan::SITE_TOOL_BUS));
         resolved.tools.push(tool(SITE_TOOL_JOYPAD));
         resolved.tools.push(tool(SITE_TOOL_TELEMETRY));
     }
 
     fn tool(name: &str) -> ResolvedTool {
         ResolvedTool {
+            kind: crate::catalog::ArtifactKind::Tool,
             name: name.to_string(),
             package: format!("phoxal/{name}"),
             requested: "0.1.0".to_string(),

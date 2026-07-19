@@ -8,8 +8,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
 use phoxal::model::robot::v0::ConnectionConfig;
 use phoxal::participant::launch::env;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
 use crate::AppContext;
@@ -24,7 +25,7 @@ use crate::component_driver::component_driver_crate_dir;
 use crate::launch_env::encode_participant_env;
 use crate::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution,
-    ParticipantLaunchRecord, PlanContext, SITE_TOOL_JOYPAD, SITE_TOOL_ROUTER, SiteLaunch,
+    ParticipantLaunchRecord, PlanContext, SITE_INFRASTRUCTURE_ROUTER, SITE_TOOL_JOYPAD, SiteLaunch,
     build_launch_plan,
 };
 use crate::resolver::{
@@ -33,9 +34,9 @@ use crate::resolver::{
 };
 use crate::supervisor::{
     BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
-    RouterOwnership, SupervisionStage, SupervisorLock, SupervisorOptions, default_connect_endpoint,
-    local_router_reachable, router_ownership, start_bus_log_subscriber,
-    start_presence_heartbeat_subscriber, supervise_until_shutdown,
+    SupervisionStage, SupervisorLock, SupervisorOptions, SupervisorOutcome,
+    default_connect_endpoint, start_bus_log_subscriber, start_presence_heartbeat_subscriber,
+    supervise_until_shutdown,
 };
 use crate::utils::cargo_binary_name;
 
@@ -46,6 +47,199 @@ use crate::utils::cargo_binary_name;
 /// quickly on a loaded host; generous enough to absorb ordinary scheduling
 /// jitter without masking a genuinely hung participant.
 const RUN_STAGE_READY_TIMEOUT: Duration = Duration::from_secs(60);
+const ROUTER_READY_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Deserialize)]
+struct RouterReadyEvent {
+    event: String,
+    listen: Vec<String>,
+}
+
+pub(crate) struct InfrastructureRouter {
+    child: tokio::process::Child,
+    stdout_task: tokio::task::JoinHandle<()>,
+    stderr_task: tokio::task::JoinHandle<()>,
+}
+
+impl InfrastructureRouter {
+    async fn stop(mut self) {
+        if let Some(pid) = self.child.id() {
+            // SAFETY: `pid` is the live child id returned by Tokio. SIGTERM
+            // lets the router close its Zenoh session before the bounded
+            // fallback below forces termination.
+            let _ = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        }
+        if tokio::time::timeout(Duration::from_secs(5), self.child.wait())
+            .await
+            .is_err()
+        {
+            let _ = self.child.kill().await;
+            let _ = self.child.wait().await;
+        }
+        self.stdout_task.abort();
+        self.stderr_task.abort();
+    }
+
+    pub(crate) async fn supervise(
+        mut self,
+        stages: Vec<SupervisionStage>,
+        board: BoardBackend,
+        options: SupervisorOptions,
+    ) -> Result<SupervisorOutcome> {
+        let token = options.token.clone();
+        let supervisor = supervise_until_shutdown(stages, board, options);
+        tokio::pin!(supervisor);
+        tokio::select! {
+            outcome = &mut supervisor => {
+                self.stop().await;
+                outcome
+            }
+            status = self.child.wait() => {
+                token.cancel();
+                let _ = supervisor.await;
+                self.stdout_task.abort();
+                self.stderr_task.abort();
+                let status = status.context("failed to wait for infrastructure router")?;
+                bail!("infrastructure router exited while the session was active: {status}")
+            }
+        }
+    }
+}
+
+pub(crate) async fn start_infrastructure_router(
+    resolved: &ResolvedRobot,
+    project_root: &Path,
+    ui: &crate::Ui,
+) -> Result<(InfrastructureRouter, String)> {
+    let binary = locate_tool_binary(resolved, SITE_INFRASTRUCTURE_ROUTER, ui)?
+        .context("phoxal-infrastructure-router is not staged; run `phoxal update`")?;
+    let mut command = tokio::process::Command::new(binary);
+    if let Some(config) = &resolved.robot.router.config {
+        let config = crate::utils::resolve_project_path(project_root, config);
+        anyhow::ensure!(
+            config.is_file(),
+            "router.config file {} does not exist",
+            config.display()
+        );
+        command.arg("--config").arg(config);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .context("failed to launch phoxal-infrastructure-router")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("router stdout was not captured")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("router stderr was not captured")?;
+    let stderr_tail = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let task_stderr_tail = std::sync::Arc::clone(&stderr_tail);
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::info!(target: "infrastructure_router", "{line}");
+            if let Ok(mut tail) = task_stderr_tail.lock() {
+                tail.push_str(&line);
+                tail.push('\n');
+                if tail.len() > 8_192 {
+                    let mut drain = tail.len() - 8_192;
+                    while !tail.is_char_boundary(drain) {
+                        drain += 1;
+                    }
+                    tail.drain(..drain);
+                }
+            }
+        }
+    });
+    let mut lines = BufReader::new(stdout).lines();
+    let readiness = tokio::time::timeout(ROUTER_READY_TIMEOUT, async {
+        loop {
+            let line = lines
+                .next_line()
+                .await?
+                .context("infrastructure router exited before reporting readiness")?;
+            let event: RouterReadyEvent = serde_json::from_str(&line)
+                .with_context(|| format!("invalid infrastructure router event: {line}"))?;
+            if event.event == "ready" {
+                break parse_router_ready(&line);
+            }
+            tracing::info!(target: "infrastructure_router", "{line}");
+        }
+    })
+    .await
+    .context("timed out waiting for infrastructure router readiness")?;
+    let endpoint = match readiness {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            let _ = tokio::time::timeout(Duration::from_millis(100), async {
+                while stderr_tail.lock().is_ok_and(|tail| tail.is_empty()) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            let tail = stderr_tail
+                .lock()
+                .map(|tail| tail.clone())
+                .unwrap_or_default();
+            if tail.is_empty() {
+                return Err(error);
+            }
+            return Err(error.context(format!("infrastructure router stderr:\n{tail}")));
+        }
+    };
+    let stdout_task = tokio::spawn(async move {
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::info!(target: "infrastructure_router", "{line}");
+        }
+    });
+    Ok((
+        InfrastructureRouter {
+            child,
+            stdout_task,
+            stderr_task,
+        },
+        endpoint,
+    ))
+}
+
+fn parse_router_ready(line: &str) -> Result<String> {
+    let ready: RouterReadyEvent = serde_json::from_str(line)
+        .with_context(|| format!("invalid infrastructure router readiness event: {line}"))?;
+    anyhow::ensure!(
+        ready.event == "ready",
+        "unexpected router event {}",
+        ready.event
+    );
+    ready
+        .listen
+        .first()
+        .cloned()
+        .context("infrastructure router reported no listener endpoint")
+}
+
+pub(crate) fn apply_session_connect(
+    plan: &mut LaunchPlan,
+    specs: &mut [ParticipantSpec],
+    endpoint: &str,
+) {
+    for robot in &mut plan.robots {
+        for participant in &mut robot.participants {
+            participant.launch.bus.connect_endpoints = vec![endpoint.to_string()];
+        }
+    }
+    for spec in specs {
+        if let Some((_, value)) = spec.env.iter_mut().find(|(key, _)| key == env::CONNECT) {
+            *value = endpoint.to_string();
+        }
+    }
+}
 
 #[derive(Debug, Args)]
 pub struct Run {
@@ -104,7 +298,6 @@ struct PreparedRun {
     board: BoardBackend,
     specs: Vec<ParticipantSpec>,
     robot_log_targets: Vec<(String, String)>,
-    router_ownership: RouterOwnership,
     /// Finding A5: this session's launch-time participant metadata, resolved
     /// once here from `plan` and the contract-check `outcome` - see
     /// `crate::stores::runtime_store::RuntimeStore`'s own docs.
@@ -115,6 +308,8 @@ struct PreparedRun {
 /// supervision. Keeping this whole phase behind `drive_setup` means raw-mode
 /// Ctrl-C remains polled until the supervisor loop takes ownership.
 struct LiveRunSetup {
+    router: InfrastructureRouter,
+    connect: String,
     board: BoardBackend,
     telemetry: crate::telemetry::TelemetryBackend,
     runtime_store: crate::stores::runtime_store::RuntimeStore,
@@ -207,6 +402,8 @@ impl Run {
             ))
             .await?;
         let LiveRunSetup {
+            router,
+            connect,
             board,
             telemetry,
             runtime_store,
@@ -216,15 +413,13 @@ impl Run {
             background_tasks,
             action_tx,
         } = setup;
+        controller.set_bus_endpoint(connect);
         controller.set_restart_channel(action_tx);
         // Start process supervision only after `drive_setup` has returned its
         // owned result. A cancellation racing the end of setup can therefore
         // never discard a freshly spawned supervisor JoinHandle.
-        let supervise_task = tokio::spawn(supervise_until_shutdown(
-            stages,
-            board.clone(),
-            supervisor_options,
-        ));
+        let supervise_task =
+            tokio::spawn(router.supervise(stages, board.clone(), supervisor_options));
 
         let outcome = controller
             .drive_supervision(
@@ -252,7 +447,7 @@ impl Run {
 
 #[allow(clippy::too_many_arguments)]
 async fn live_run_setup(
-    prepared: PreparedRun,
+    mut prepared: PreparedRun,
     ui: crate::Ui,
     message_format: MessageFormat,
     watch_enabled: bool,
@@ -262,15 +457,16 @@ async fn live_run_setup(
     events: mpsc::Sender<crate::session::event::SessionEvent>,
     renders_tui: bool,
 ) -> Result<LiveRunSetup> {
+    let (router, connect) =
+        start_infrastructure_router(&prepared.ctx.resolved, &prepared.ctx.project_root, &ui)
+            .await?;
+    apply_session_connect(&mut prepared.plan, &mut prepared.specs, &connect);
     ui.info(format!(
         "launch plan resolved: {} robot(s), {} site tool(s)",
         prepared.plan.robots.len(),
         prepared.plan.site.len()
     ));
-    match prepared.router_ownership {
-        RouterOwnership::External => ui.info("reusing reachable external tool-router"),
-        RouterOwnership::Managed => ui.info("tool-router will be managed by this session"),
-    }
+    ui.info(format!("infrastructure router ready on {connect}"));
     report_launch_commands(&prepared.plan, &prepared.specs, message_format, &ui)?;
 
     let mut background_tasks = AbortTasks::default();
@@ -282,7 +478,7 @@ async fn live_run_setup(
                 start_bus_log_subscriber(
                     namespace.clone(),
                     robot_id.clone(),
-                    default_connect_endpoint(),
+                    connect.clone(),
                     prepared.board.clone(),
                 )
             })
@@ -296,7 +492,7 @@ async fn live_run_setup(
                 start_presence_heartbeat_subscriber(
                     namespace.clone(),
                     robot_id.clone(),
-                    default_connect_endpoint(),
+                    connect.clone(),
                     prepared.board.clone(),
                 )
             }),
@@ -320,7 +516,7 @@ async fn live_run_setup(
         ));
     }
 
-    let stages = stages_for_run(prepared.specs, &prepared.plan, output);
+    let stages = stages_for_run(prepared.specs, output);
     let starting = crate::session::state::SessionState::Preparing
         .start()
         .expect("the controller begins every session in Preparing");
@@ -330,9 +526,10 @@ async fn live_run_setup(
 
     let telemetry = crate::telemetry::TelemetryBackend::new();
     if renders_tui {
-        background_tasks.extend(start_telemetry_feeds(
+        background_tasks.extend(start_telemetry_feeds_at(
             &prepared.robot_log_targets,
             &telemetry,
+            &connect,
         ));
     }
 
@@ -347,6 +544,8 @@ async fn live_run_setup(
 
     let orderly_shutdown_timeout = crate::supervisor::orderly_shutdown_budget(&stages);
     Ok(LiveRunSetup {
+        router,
+        connect,
         board,
         telemetry,
         runtime_store: prepared.runtime_store,
@@ -367,37 +566,22 @@ async fn live_run_setup(
 /// and `supervisor::await_participants_ready`.
 fn stages_for_run(
     specs: Vec<ParticipantSpec>,
-    plan: &LaunchPlan,
     output: crate::session::output::OutputContext,
 ) -> Vec<SupervisionStage> {
-    let mut router = Vec::new();
     let mut tools = Vec::new();
     let mut drivers = Vec::new();
     let mut services = Vec::new();
     for spec in specs {
-        if spec.id == SITE_TOOL_ROUTER {
-            router.push(spec);
-        } else {
-            match spec.kind {
-                ParticipantKind::Tool => tools.push(spec),
-                ParticipantKind::Driver => drivers.push(spec),
-                ParticipantKind::Service | ParticipantKind::Simulator => services.push(spec),
-            }
+        match spec.kind {
+            ParticipantKind::Tool => tools.push(spec),
+            ParticipantKind::Driver => drivers.push(spec),
+            ParticipantKind::Service | ParticipantKind::Simulator => services.push(spec),
         }
     }
     // Product decision 6: no unconditional 60s teardown for an interactive
     // session - see `OutputContext::wait_budget`.
     let timeout = output.wait_budget(RUN_STAGE_READY_TIMEOUT);
-    let mut router_stage = SupervisionStage::new("starting router", router, timeout);
-    if let Some(robot) = plan.robots.first() {
-        router_stage = router_stage.with_router_bus_probe(
-            robot.namespace.clone(),
-            robot.id.clone(),
-            default_connect_endpoint(),
-        );
-    }
     vec![
-        router_stage,
         SupervisionStage::new("starting tools", tools, timeout),
         SupervisionStage::new("starting drivers", drivers, timeout),
         SupervisionStage::new("starting services", services, timeout),
@@ -415,9 +599,10 @@ fn stages_for_run(
 /// exactly the graceful-absence rendering the TUI already handles (`cpu
 /// n/a`). Shared by both `run` and `commands::simulate` (`simulate` wires in
 /// the sim-clock feed separately - see `TelemetryBackend::set_clock_feed`).
-pub(crate) fn start_telemetry_feeds(
+pub(crate) fn start_telemetry_feeds_at(
     robot_log_targets: &[(String, String)],
     telemetry: &crate::telemetry::TelemetryBackend,
+    connect: &str,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let Some((namespace, robot_id)) = robot_log_targets.first() else {
         return Vec::new();
@@ -426,25 +611,25 @@ pub(crate) fn start_telemetry_feeds(
         crate::telemetry::start_host_feed(
             namespace.clone(),
             robot_id.clone(),
-            default_connect_endpoint(),
+            connect.to_string(),
             telemetry.clone(),
         ),
         crate::telemetry::start_router_metrics_feed(
             namespace.clone(),
             robot_id.clone(),
-            default_connect_endpoint(),
+            connect.to_string(),
             telemetry.clone(),
         ),
         crate::telemetry::start_joypad_devices_feed(
             namespace.clone(),
             robot_id.clone(),
-            default_connect_endpoint(),
+            connect.to_string(),
             telemetry.clone(),
         ),
         crate::telemetry::start_control_state_feed(
             namespace.clone(),
             robot_id.clone(),
-            default_connect_endpoint(),
+            connect.to_string(),
             telemetry.clone(),
         ),
     ]
@@ -556,24 +741,14 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
     )?;
     // Finding A5: resolved once here, from the same `plan`/`outcome` this
     // function already built - see `RuntimeStore::from_launch_plan`'s docs.
-    let router_ownership = router_ownership(local_router_reachable(&default_connect_endpoint()));
-    let mut runtime_store = crate::stores::runtime_store::RuntimeStore::from_launch_plan(
+    let runtime_store = crate::stores::runtime_store::RuntimeStore::from_launch_plan(
         &plan,
         &outcome.contract_surfaces,
     );
-    runtime_store.set_router_ownership(SITE_TOOL_ROUTER, router_ownership);
     let board = BoardBackend::new();
     let mut specs = Vec::new();
 
-    prepare_site_tools(
-        &plan,
-        &resolved,
-        &runtime_root,
-        &board,
-        &mut specs,
-        router_ownership,
-        ui,
-    )?;
+    prepare_site_tools(&plan, &resolved, &runtime_root, &board, &mut specs, ui)?;
     prepare_robot_participants(
         &plan,
         &resolved,
@@ -603,7 +778,6 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         plan,
         board,
         specs,
-        router_ownership,
         runtime_store,
     })
 }
@@ -778,7 +952,6 @@ pub(crate) fn prepare_site_tools(
     robot_root: &Path,
     board: &BoardBackend,
     specs: &mut Vec<ParticipantSpec>,
-    router_ownership: RouterOwnership,
     ui: &crate::Ui,
 ) -> Result<()> {
     let namespace = plan
@@ -793,33 +966,10 @@ pub(crate) fn prepare_site_tools(
         .unwrap_or("site");
 
     for site in &plan.site {
-        let should_launch =
-            site.id != SITE_TOOL_ROUTER || router_ownership == RouterOwnership::Managed;
-        // A site tool (the router transport, or the joypad peripheral) is not
-        // a contract-graph participant - it is not gated by OBSERVED
-        // readiness. The router's own framework runner bus is in-process (no
-        // `PHOXAL_CONNECT`), so its heartbeat is structurally unobservable by
-        // the CLI's presence subscriber; its liveness is transitively proven
-        // instead by every downstream participant that talks through it
-        // reaching `Ready` on the barrier. So readiness here is process /
-        // transport liveness, not a heartbeat: `Ready` immediately once
-        // spawned (managed) or immediately here (external, since
-        // `RouterOwnership::External` already means `local_router_reachable`
-        // proved the transport is up).
-        let initial_state = if should_launch {
-            ParticipantState::Starting
-        } else {
-            ParticipantState::Ready
-        };
-        let mut status = ParticipantStatus::new(&site.id, ParticipantKind::Tool, initial_state)
-            .with_local(site_tool_is_local(resolved, &site.id));
-        if !should_launch {
-            status.note = Some("external router reused".to_string());
-        }
+        let status =
+            ParticipantStatus::new(&site.id, ParticipantKind::Tool, ParticipantState::Starting)
+                .with_local(site_tool_is_local(resolved, &site.id));
         board.upsert(status);
-        if !should_launch {
-            continue;
-        }
         match locate_tool_binary(resolved, &site.id, ui)? {
             Some(path) => specs.push(ParticipantSpec {
                 id: site.id.clone(),
@@ -831,19 +981,7 @@ pub(crate) fn prepare_site_tools(
                 shutdown_grace: Duration::from_secs(5),
                 process_group: true,
                 note: None,
-                // The router's own framework runner bus is in-process (no
-                // `PHOXAL_CONNECT`), so its heartbeat is structurally
-                // unobservable by the CLI's presence subscriber - it keeps
-                // the old spawn-is-ready behavior, gated in the staged
-                // startup by the transport probe (`router_ownership`/
-                // `local_router_reachable`) instead of a heartbeat. Every
-                // OTHER site tool (`tool-joypad`, `tool-telemetry`) is a real
-                // bus participant and can be gated like any other stage
-                // member. `tool-telemetry` simply never appears in
-                // `plan.site` at all when the catalog snapshot in use
-                // predates it (`launch_plan::build_site_launches`), so this
-                // loop never has to special-case its absence.
-                bus_participant: site.id != SITE_TOOL_ROUTER,
+                bus_participant: true,
             }),
             None => board.set_state(
                 &site.id,
@@ -1077,11 +1215,10 @@ fn site_env(
             robot_root.display().to_string(),
         ));
     }
-    // A configless tool (`phoxal_config == Value::Null`, e.g. joypad/telemetry)
+    // A configless tool (`phoxal_config == Value::Null`)
     // must run with `PHOXAL_CONFIG` ABSENT: a unit config (`type Config = ()`)
     // fails to deserialize `{}` ("invalid type: map, expected unit"), and an
-    // absent var uses the runner's null/unit fallback. Only a tool that carries
-    // real config (the router) gets `PHOXAL_CONFIG`.
+    // absent var uses the runner's null/unit fallback.
     if !site.phoxal_config.is_null() {
         envs.push((
             env::CONFIG.to_string(),
@@ -1089,13 +1226,7 @@ fn site_env(
                 .with_context(|| format!("failed to encode PHOXAL_CONFIG for {}", site.id))?,
         ));
     }
-    // Every site tool OTHER than the router is a real bus client (joypad and
-    // telemetry are observable bus participants), so it needs the connect
-    // endpoint to reach the router's bus and publish its heartbeat/telemetry.
-    // The router itself is the transport and takes no `PHOXAL_CONNECT`.
-    if site.id != SITE_TOOL_ROUTER {
-        envs.push((env::CONNECT.to_string(), default_connect_endpoint()));
-    }
+    envs.push((env::CONNECT.to_string(), default_connect_endpoint()));
     Ok(envs)
 }
 
@@ -1459,30 +1590,6 @@ mod tests {
     }
 
     #[test]
-    fn router_site_tool_gets_config_and_no_connect() {
-        // The router carries real config and IS the transport, so it gets
-        // PHOXAL_CONFIG but no PHOXAL_CONNECT (it does not connect to itself).
-        let router = SiteLaunch {
-            id: SITE_TOOL_ROUTER.to_string(),
-            artifact_ref: "phoxal/tool-router@0.1.8".to_string(),
-            phoxal_config: serde_json::json!({ "uplink": null }),
-        };
-        let env = site_env(&router, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
-        assert!(
-            env.iter().any(|(k, _)| k == env::CONFIG),
-            "router must get PHOXAL_CONFIG: {env:?}"
-        );
-        assert!(
-            !env.iter().any(|(k, _)| k == env::CONNECT),
-            "router must not get PHOXAL_CONNECT: {env:?}"
-        );
-        assert!(
-            !env.iter().any(|(key, _)| key == env::CLOCK),
-            "router must not receive a clock selection: {env:?}"
-        );
-    }
-
-    #[test]
     fn every_standard_site_tool_uses_the_clockless_launch_path() {
         for tool_id in STANDARD_SITE_TOOLS {
             let tool = SiteLaunch {
@@ -1618,210 +1725,6 @@ mod tests {
         assert_eq!(missing.as_deref(), Some("/definitely/not/a/phoxal/device"));
     }
 
-    /// Scoped `PHOXAL_ARTIFACT_<ID>_PATH` override so `locate_tool_binary` /
-    /// `locate_official_binary` resolve without a real `cargo build` or
-    /// native-artifact cache. Points at the test binary itself (always a
-    /// real file). SAFETY: env mutation only races with another thread also
-    /// touching process env; this guard uses a key unique to this test
-    /// (`env_key` of a test-only id) and restores the prior (absent) value on
-    /// drop, mirroring the existing `WebotsHomeEnvGuard` precedent in
-    /// `commands::simulate`.
-    struct ArtifactPathEnvGuard {
-        key: String,
-    }
-
-    impl ArtifactPathEnvGuard {
-        fn set(id: &str) -> Self {
-            let key = format!("PHOXAL_ARTIFACT_{}_PATH", env_key(id));
-            let path = std::env::current_exe().expect("test binary path");
-            // SAFETY: scoped to this test via a unique env key, restored on
-            // drop before the next test can observe it.
-            unsafe {
-                std::env::set_var(&key, path);
-            }
-            Self { key }
-        }
-    }
-
-    impl Drop for ArtifactPathEnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: only ever clears the key this guard set.
-            unsafe {
-                std::env::remove_var(&self.key);
-            }
-        }
-    }
-
-    fn resolved_robot_with_router() -> Result<ResolvedRobot> {
-        let yaml = r#"schema: robot/v0
-robot:
-  id: robot_v1
-  namespace: dev
-  motion_limits:
-    max_linear_speed_mps: 0.6
-    max_angular_speed_radps: 2.0
-  structure: structure.urdf
-  kinematic:
-    kind: omnidirectional
-    actuators: []
-    encoders: []
-  components: {}
-"#;
-        let robot = phoxal::model::robot::v0::Robot::parse_from_string(yaml)?;
-        Ok(ResolvedRobot {
-            robot,
-            channel: crate::catalog::SelectionChannel::Stable,
-            target: host_target_triple(),
-            catalog_snapshot: None,
-            platform_runtimes: Vec::new(),
-            simulators: Vec::new(),
-            user_runtimes: Vec::new(),
-            components: Vec::new(),
-            tools: vec![crate::resolver::ResolvedTool {
-                name: SITE_TOOL_ROUTER.to_string(),
-                package: format!("phoxal/{SITE_TOOL_ROUTER}"),
-                requested: "0.1.0".to_string(),
-                resolved: "0.1.0".to_string(),
-                repo: "phoxal/framework".to_string(),
-                asset: format!("{SITE_TOOL_ROUTER}-0.1.0-{}.tar.gz", host_target_triple()),
-                binary_name: SITE_TOOL_ROUTER.to_string(),
-                sha256: "0".repeat(64),
-                url: None,
-                size: None,
-                published: false,
-                path_override: None,
-                channel: crate::catalog::SelectionChannel::Stable,
-                target: host_target_triple(),
-            }],
-            path_overrides: Vec::new(),
-        })
-    }
-
-    /// The router is the bus transport, not a contract-graph participant: it
-    /// must come out of `prepare_site_tools` with `bus_participant: false`
-    /// (excluded from startup-stage heartbeat waits, marked
-    /// `Ready` on spawn), while an ordinary robot participant produced by
-    /// `prepare_robot_participants` stays `bus_participant: true`
-    /// (heartbeat-gated by observed readiness). This is the fix
-    /// for the regression where a managed `tool-router` hung at `Starting`
-    /// forever because its heartbeat is structurally unobservable (its
-    /// framework runner bus is in-process, disconnected from the zenoh
-    /// network it itself serves).
-    #[test]
-    fn site_tool_is_not_bus_participant_but_robot_participant_is() -> Result<()> {
-        let _router_guard = ArtifactPathEnvGuard::set(SITE_TOOL_ROUTER);
-        let official_id = "site_tool_test_official_svc";
-        let _official_guard = ArtifactPathEnvGuard::set(official_id);
-
-        let resolved = resolved_robot_with_router()?;
-        let plan = LaunchPlan {
-            mode: LaunchMode::Run,
-            site: vec![SiteLaunch {
-                id: SITE_TOOL_ROUTER.to_string(),
-                artifact_ref: "phoxal/tool-router@0.1.0".to_string(),
-                phoxal_config: Value::Null,
-            }],
-            robots: vec![crate::launch_plan::RobotLaunch {
-                id: "robot".to_string(),
-                namespace: "dev".to_string(),
-                participants: vec![participant(
-                    official_id,
-                    ParticipantExecution::OfficialArtifact {
-                        artifact_ref: "phoxal/service-drive@0.1.0".to_string(),
-                    },
-                )],
-                substitutions: Vec::new(),
-            }],
-        };
-        let board = BoardBackend::new();
-        let mut specs = Vec::new();
-
-        prepare_site_tools(
-            &plan,
-            &resolved,
-            Path::new("/tmp/project/.phoxal/run/robot"),
-            &board,
-            &mut specs,
-            RouterOwnership::Managed,
-            &crate::Ui::from_env(),
-        )?;
-        prepare_robot_participants(
-            &plan,
-            &resolved,
-            Path::new("/tmp/project"),
-            &DriverPolicy::drivers_off_for_sim(),
-            &board,
-            &mut specs,
-            &crate::Ui::from_env(),
-        )?;
-
-        let router_spec = specs
-            .iter()
-            .find(|spec| spec.id == SITE_TOOL_ROUTER)
-            .expect("router spec present");
-        assert!(
-            !router_spec.bus_participant,
-            "router (bus transport) must not be heartbeat-gated"
-        );
-
-        let robot_spec = specs
-            .iter()
-            .find(|spec| spec.id == official_id)
-            .expect("robot participant spec present");
-        assert!(
-            robot_spec.bus_participant,
-            "a real contract-graph participant must stay heartbeat-gated"
-        );
-
-        Ok(())
-    }
-
-    /// A reused external router (`RouterOwnership::External`) never gets a
-    /// `ParticipantSpec` at all - `local_router_reachable` already proved the
-    /// transport is up, so it must be marked `Ready` on the board directly,
-    /// not left at `Starting` forever (nothing will ever move it out of that
-    /// state: it has no spawned process and, being a site tool, is excluded
-    /// from the heartbeat-driven barrier too).
-    #[test]
-    fn external_router_reused_is_marked_ready_not_starting() -> Result<()> {
-        let resolved = resolved_robot_with_router()?;
-        let plan = LaunchPlan {
-            mode: LaunchMode::Run,
-            site: vec![SiteLaunch {
-                id: SITE_TOOL_ROUTER.to_string(),
-                artifact_ref: "phoxal/tool-router@0.1.0".to_string(),
-                phoxal_config: Value::Null,
-            }],
-            robots: Vec::new(),
-        };
-        let board = BoardBackend::new();
-        let mut specs = Vec::new();
-
-        prepare_site_tools(
-            &plan,
-            &resolved,
-            Path::new("/tmp/project/.phoxal/run/robot"),
-            &board,
-            &mut specs,
-            RouterOwnership::External,
-            &crate::Ui::from_env(),
-        )?;
-
-        assert!(
-            specs.is_empty(),
-            "an external router must not get a ParticipantSpec"
-        );
-        let snapshot = board.snapshot();
-        let status = snapshot
-            .participants
-            .get(SITE_TOOL_ROUTER)
-            .expect("router status present on board");
-        assert_eq!(status.state, ParticipantState::Ready);
-        assert_eq!(status.note.as_deref(), Some("external router reused"));
-
-        Ok(())
-    }
-
     /// The `--message-format json` launch report's `kind` string is a
     /// Phase-0 contract that must stay byte-identical even though the
     /// board's own `ParticipantKind` is now the finer-grained shared
@@ -1867,5 +1770,56 @@ robot:
         drop(tasks);
         tokio::task::yield_now().await;
         assert!(abort.is_finished());
+    }
+
+    #[test]
+    fn router_ready_event_selects_first_listener_and_tolerates_additive_fields() {
+        assert_eq!(
+            parse_router_ready(
+                r#"{"event":"ready","listen":["tcp/127.0.0.1:7448"],"future":true}"#
+            )
+            .expect("ready event"),
+            "tcp/127.0.0.1:7448"
+        );
+        assert!(parse_router_ready(r#"{"event":"ready","listen":[]}"#).is_err());
+        assert!(parse_router_ready(r#"{"event":"starting","listen":["tcp/x"]}"#).is_err());
+    }
+
+    #[test]
+    fn selected_router_endpoint_reaches_plan_and_spawn_environment() {
+        let mut plan = plan_with_drivers(&["imu"]);
+        let mut specs = vec![ParticipantSpec {
+            id: "tool-bus".to_string(),
+            kind: ParticipantKind::Tool,
+            executable: PathBuf::from("/tmp/tool-bus"),
+            args: Vec::new(),
+            cwd: None,
+            env: vec![(
+                env::CONNECT.to_string(),
+                crate::launch_plan::DEFAULT_ROUTER_CONNECT.to_string(),
+            )],
+            shutdown_grace: Duration::from_secs(1),
+            process_group: true,
+            note: None,
+            bus_participant: true,
+        }];
+
+        apply_session_connect(&mut plan, &mut specs, "tcp/127.0.0.1:7448");
+
+        assert!(
+            plan.robots
+                .iter()
+                .flat_map(|robot| &robot.participants)
+                .all(|participant| participant.launch.bus.connect_endpoints
+                    == ["tcp/127.0.0.1:7448"])
+        );
+        assert_eq!(
+            specs[0]
+                .env
+                .iter()
+                .find(|(key, _)| key == env::CONNECT)
+                .map(|(_, value)| value.as_str()),
+            Some("tcp/127.0.0.1:7448")
+        );
     }
 }

@@ -95,7 +95,7 @@ impl NativeArtifactDescriptor {
         }
         Ok(Some(Self {
             package_id: tool.package.clone(),
-            kind: ArtifactKind::Tool,
+            kind: tool.kind,
             name: crate::resolver::tool_emit_apis_id(&tool.name).to_string(),
             version: tool.resolved.clone(),
             url: tool.url.clone().unwrap_or_default(),

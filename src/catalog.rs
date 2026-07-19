@@ -269,6 +269,7 @@ pub enum ArtifactKind {
     ComponentDriver,
     Tool,
     Simulator,
+    Infrastructure,
 }
 
 impl ArtifactKind {
@@ -280,6 +281,7 @@ impl ArtifactKind {
             Self::ComponentDriver => "driver",
             Self::Tool => "tool",
             Self::Simulator => "simulator",
+            Self::Infrastructure => "infrastructure",
         }
     }
 
@@ -291,6 +293,7 @@ impl ArtifactKind {
             Self::ComponentDriver => "component_driver",
             Self::Tool => "tool",
             Self::Simulator => "simulator",
+            Self::Infrastructure => "infrastructure",
         }
     }
 }
@@ -307,10 +310,12 @@ impl std::fmt::Display for ArtifactKind {
 /// is outdated, and the remediation is `phoxal update`, not a silent
 /// degrade (product decision 9).
 pub const OFFICIAL_TOOLS: &[(&str, &str)] = &[
+    ("bus", "phoxal/tool-bus"),
     ("joypad", "phoxal/tool-joypad"),
-    ("router", "phoxal/tool-router"),
     ("telemetry", "phoxal/tool-telemetry"),
 ];
+
+pub const OFFICIAL_INFRASTRUCTURE: &[(&str, &str)] = &[("router", "phoxal/infrastructure-router")];
 
 pub const OFFICIAL_SIMULATORS: &[(&str, &str)] = &[
     ("webots-controller", "phoxal/simulator-webots-controller"),
@@ -453,6 +458,7 @@ pub fn fixture_catalog_for_tests(entries: Vec<CatalogFixtureEntry>) -> Catalog {
     for (_, package) in OFFICIAL_SERVICES
         .iter()
         .chain(OFFICIAL_TOOLS)
+        .chain(OFFICIAL_INFRASTRUCTURE)
         .chain(OFFICIAL_SIMULATORS)
     {
         if existing.contains(*package) {

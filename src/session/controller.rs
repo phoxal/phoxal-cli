@@ -244,6 +244,12 @@ impl SessionController {
         self.restart_tx = Some(tx);
     }
 
+    pub fn set_bus_endpoint(&mut self, endpoint: String) {
+        if let Renderer::Tui(tui) = &mut self.renderer {
+            tui.set_bus_endpoint(endpoint);
+        }
+    }
+
     /// The current output context, e.g. for a caller deciding whether an
     /// interactive wait may run unbounded (see `commands::run`/`simulate`'s
     /// `interactive_wait_budget`).

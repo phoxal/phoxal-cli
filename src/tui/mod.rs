@@ -93,6 +93,10 @@ impl TuiDisplay {
         }
     }
 
+    pub(crate) fn set_bus_endpoint(&mut self, endpoint: String) {
+        self.title.bus_endpoint = endpoint;
+    }
+
     pub fn set_runtime_store(&mut self, runtime: RuntimeStore) {
         self.runtime = runtime;
     }

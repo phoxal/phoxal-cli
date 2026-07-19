@@ -460,13 +460,18 @@ fn tools_resolve_from_catalog_entries() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
     let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
 
-    for tool_name in ["tool-router", "tool-joypad", "tool-telemetry"] {
+    for (tool_name, package) in [
+        ("tool-bus", "phoxal/tool-bus"),
+        ("tool-joypad", "phoxal/tool-joypad"),
+        ("tool-telemetry", "phoxal/tool-telemetry"),
+        ("infrastructure-router", "phoxal/infrastructure-router"),
+    ] {
         let tool = resolved
             .tools
             .iter()
             .find(|tool| tool.name == tool_name)
             .unwrap_or_else(|| panic!("{tool_name} resolved"));
-        assert_eq!(tool.package, format!("phoxal/{tool_name}"));
+        assert_eq!(tool.package, package);
         assert_eq!(tool.repo, "phoxal/framework", "{tool_name} repo");
         assert_eq!(tool.resolved, "0.1.0", "{tool_name} version");
     }

@@ -1131,7 +1131,7 @@ fn draw_bus(
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from("Router telemetry has not arrived yet."),
-                Line::from("Waiting for tool-router on v2/router/metrics…"),
+                Line::from("Waiting for tool-bus on v2/router/metrics…"),
             ])
             .block(shell_block(theme, "Router status")),
             rows[1],

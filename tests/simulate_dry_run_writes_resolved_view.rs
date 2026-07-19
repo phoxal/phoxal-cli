@@ -49,7 +49,7 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
     assert_eq!(
         site_ids,
         vec![
-            phoxal_cli::launch_plan::SITE_TOOL_ROUTER,
+            phoxal_cli::launch_plan::SITE_TOOL_BUS,
             phoxal_cli::launch_plan::SITE_TOOL_JOYPAD,
             phoxal_cli::launch_plan::SITE_TOOL_TELEMETRY,
         ]
