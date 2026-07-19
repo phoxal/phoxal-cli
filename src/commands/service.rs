@@ -5,7 +5,6 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::AppContext;
-use crate::commands::MessageFormat;
 use crate::resolver::{discover_robot_yaml, load_robot_with_extras};
 
 #[derive(Debug, Args)]
@@ -21,15 +20,7 @@ pub enum ServiceSubcommand {
 }
 
 #[derive(Debug, Args)]
-pub struct Catalog {
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = MessageFormat::Human,
-        help = "Output format for the catalog listing."
-    )]
-    pub message_format: MessageFormat,
-}
+pub struct Catalog {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ServiceCatalogSummary {
@@ -55,34 +46,28 @@ impl Catalog {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let root = app.project.root().to_path_buf();
         let catalog_source = app.catalog_source.clone();
-        let mode = app.output.mode;
+        let interactive = app.output.decorated();
         let summary = tokio::task::spawn_blocking(move || {
-            service_catalog_summary(&root, catalog_source, mode)
+            service_catalog_summary(&root, catalog_source, interactive)
         })
         .await
         .context("service catalog worker failed")??;
-        crate::commands::print_message(
-            &summary,
-            || {
-                for entry in &summary.entries {
-                    println!(
-                        "{} -> versions [{}] ({})",
-                        entry.id,
-                        entry.versions.join(", "),
-                        entry.participant_kind
-                    );
-                }
-                Ok(())
-            },
-            self.message_format,
-        )
+        for entry in &summary.entries {
+            println!(
+                "{} -> versions [{}] ({})",
+                entry.id,
+                entry.versions.join(", "),
+                entry.participant_kind
+            );
+        }
+        Ok(())
     }
 }
 
 pub fn service_catalog_summary(
     project_start: &Path,
     catalog_source: Option<String>,
-    mode: crate::output_mode::OutputMode,
+    interactive: bool,
 ) -> Result<ServiceCatalogSummary> {
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
@@ -95,7 +80,7 @@ pub fn service_catalog_summary(
         project_root,
         loaded.robot.artifacts.channel,
         &loaded.extras,
-        mode,
+        interactive,
     )?
     .ok_or_else(|| anyhow::anyhow!("artifact catalog unavailable"))?;
     Ok(ServiceCatalogSummary {
@@ -132,11 +117,7 @@ mod tests {
         fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
         let catalog = write_catalog(temp.path())?;
 
-        let summary = service_catalog_summary(
-            temp.path(),
-            Some(catalog),
-            crate::output_mode::OutputMode::from_env(),
-        )?;
+        let summary = service_catalog_summary(temp.path(), Some(catalog), false)?;
 
         assert_eq!(
             summary.entries.len(),

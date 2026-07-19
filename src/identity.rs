@@ -9,8 +9,8 @@
 //! for the robot's). Gating lives beside
 //! [`crate::update_notice::NoticePolicy`] in [`crate::commands::dispatch`]:
 //! [`IdentityPolicy::allowed`] is the single suppression rule, deliberately
-//! independent of `--plain` (a plain run still gets the card - `--plain` only
-//! turns off redraw/spinner-style decoration, see [`crate::output_mode`]).
+//! independent of `--plain` for finite commands. Interactive foreground
+//! sessions reject `--plain` because they always use the full-screen TUI.
 //! A `run`/`simulation run` session under a real TTY renders the SAME card
 //! inside its own TUI startup frame instead
 //! (`crate::tui::render::draw_startup`); `dispatch` skips this module's
@@ -22,7 +22,6 @@ use std::path::Path;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::commands::MessageFormat;
 use crate::resolver::{discover_robot_yaml, load_robot};
 use crate::stores::log_store::sanitize_terminal_text;
 use crate::theme::Theme;
@@ -32,8 +31,6 @@ use crate::theme::Theme;
 pub enum TerminalMode {
     /// Full-screen interactive session.
     Full,
-    /// Live session using append-only output.
-    Plain,
     /// Read-only preview such as `simulation run --dry-run`.
     PlanOnly,
     /// A finite command that does not own a live session.
@@ -45,7 +42,6 @@ impl TerminalMode {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Full => "full",
-            Self::Plain => "plain",
             Self::PlanOnly => "plan only",
             Self::OneShot => "one shot",
         }
@@ -99,9 +95,7 @@ fn display_manifest_path(manifest_path: &Path, project_root: &Path) -> String {
 
 /// The suppression rule for the welcome card. Deliberately does **not**
 /// include `--plain`: the card is decoration shown once at command start, not
-/// a redraw, so it survives `--plain` the same way a `Ui::info` line does. It
-/// is suppressed by:
-/// - `--message-format json` (identity is not part of the JSON contract),
+/// a redraw, so it survives `--plain` for finite commands. It is suppressed by:
 /// - `--quiet`,
 /// - a non-TTY stderr (piped/redirected - nothing interactive is reading it),
 /// - a machine verb (`version`, `logs`, `status`, `service`, `self`) whose
@@ -110,17 +104,13 @@ fn display_manifest_path(manifest_path: &Path, project_root: &Path) -> String {
 pub struct IdentityPolicy {
     pub interactive: bool,
     pub quiet: bool,
-    pub message_format: MessageFormat,
     pub machine_verb: bool,
 }
 
 impl IdentityPolicy {
     #[must_use]
     pub fn allowed(self) -> bool {
-        self.interactive
-            && !self.quiet
-            && self.message_format == MessageFormat::Human
-            && !self.machine_verb
+        self.interactive && !self.quiet && !self.machine_verb
     }
 }
 
@@ -266,25 +256,17 @@ mod tests {
         overrides(IdentityPolicy {
             interactive: true,
             quiet: false,
-            message_format: MessageFormat::Human,
             machine_verb: false,
         })
     }
 
     #[test]
-    fn identity_is_allowed_for_a_default_interactive_human_run() {
+    fn identity_is_allowed_for_a_default_interactive_run() {
         assert!(policy(|policy| policy).allowed());
     }
 
     #[test]
-    fn identity_is_suppressed_by_json_quiet_non_tty_or_machine_verb() {
-        assert!(
-            !policy(|policy| IdentityPolicy {
-                message_format: MessageFormat::Json,
-                ..policy
-            })
-            .allowed()
-        );
+    fn identity_is_suppressed_by_quiet_non_tty_or_machine_verb() {
         assert!(
             !policy(|policy| IdentityPolicy {
                 quiet: true,
@@ -311,7 +293,7 @@ mod tests {
     #[test]
     fn plain_is_not_part_of_the_identity_suppression_rule() {
         // `IdentityPolicy` has no `plain` field at all: `--plain` only
-        // changes `OutputMode` (progress drawing), never this gate.
+        // changes progress styling, never this gate.
         let policy = policy(|policy| policy);
         assert!(policy.allowed());
     }

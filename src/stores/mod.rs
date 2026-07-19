@@ -17,7 +17,7 @@
 //!   ready) resolved once from the launch plan and its contract-check
 //!   outcome. Finding A5: an earlier version of this doc claimed this store
 //!   "already exists as `supervisor::BoardBackend`/`BoardSnapshot`" - that
-//!   was wrong. The board is the persisted, JSON-stable lifecycle record;
+//!   was wrong. The board is the persisted lifecycle record;
 //!   none of the above belongs on it, so it stayed `unknown` in the Overview
 //!   panel until this sidecar was added. See that module's own docs.
 //!

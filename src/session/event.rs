@@ -1,6 +1,6 @@
 //! The typed session lifecycle event: the single vocabulary
-//! [`super::controller::SessionController`] uses to drive both the TUI and
-//! the plain/line renderer from one bounded channel.
+//! [`super::controller::SessionController`] uses to drive the TUI from one
+//! bounded channel.
 //!
 //! Nothing here depends on `supervisor`, `tui`, or `telemetry`, keeping the
 //! dependency pointed one way so this module (and its tests) build and run
@@ -12,8 +12,8 @@
 //! looking scaffolding for a "fully event-sourced" renderer. Neither was ever
 //! constructed by production code: participant rows are read straight off
 //! `supervisor::BoardSnapshot` (board polling, not events - see
-//! `session::controller::LineRenderer`'s own docs on why that stays the
-//! source of truth) and live telemetry flows through
+//! the session controller's own docs on why that stays the source of truth)
+//! and live telemetry flows through
 //! `telemetry::TelemetryBackend`/`stores::telemetry_store::TelemetryStore`
 //! instead. Removed rather than kept "for later" (YAGNI) - this event
 //! vocabulary should only ever carry what a real producer emits.
@@ -75,9 +75,8 @@ impl std::fmt::Display for PhaseId {
 ///
 /// P4/C2 triage: none of the three phases wired so far (download/build/
 /// validate - finding A3) ever produces `Skipped`, since each is gated to
-/// only start when it has confirmed real work; both renderers
-/// (`session::controller::LineRenderer`, `tui::render`) already handle it
-/// correctly, tested directly. Kept rather than removed: a future phase that
+/// only start when it has confirmed real work; the TUI renderer already
+/// handles it correctly, tested directly. Kept rather than removed: a future phase that
 /// starts and then finds nothing to do (e.g. a cache-hit build) is a real,
 /// anticipated producer, not speculative scaffolding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,21 +122,6 @@ pub enum DiagnosticSource {
     Supervisor,
 }
 
-impl DiagnosticSource {
-    /// A short, stable label for this source - shared by the `LineRenderer`
-    /// (`session::controller`) and the TUI's startup diagnostics area
-    /// (`tui::render`), so both renderers name a source identically.
-    #[must_use]
-    pub fn label(&self) -> &str {
-        match self {
-            Self::Tracing | Self::Cli => "cli",
-            Self::Dependency => "dependency",
-            Self::Tool { name } => name.as_str(),
-            Self::Supervisor => "supervisor",
-        }
-    }
-}
-
 /// Severity of a [`SessionEvent::Diagnostic`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DiagnosticLevel {
@@ -146,8 +130,8 @@ pub enum DiagnosticLevel {
     Error,
 }
 
-/// The one typed lifecycle event stream a `SessionController` will use to
-/// drive both the TUI and the plain/line renderer.
+/// The one typed lifecycle event stream a `SessionController` uses to drive
+/// the TUI.
 ///
 /// The operation performing work emits its own phase events; nothing here
 /// reconstructs progress by polling other state.
@@ -207,21 +191,6 @@ mod tests {
         let id: PhaseId = "router".into();
         assert_eq!(id.as_str(), "router");
         assert_eq!(id.to_string(), "router");
-    }
-
-    #[test]
-    fn diagnostic_source_label_covers_every_variant() {
-        assert_eq!(DiagnosticSource::Tracing.label(), "cli");
-        assert_eq!(DiagnosticSource::Cli.label(), "cli");
-        assert_eq!(DiagnosticSource::Dependency.label(), "dependency");
-        assert_eq!(DiagnosticSource::Supervisor.label(), "supervisor");
-        assert_eq!(
-            DiagnosticSource::Tool {
-                name: "router".to_string()
-            }
-            .label(),
-            "router"
-        );
     }
 
     #[test]

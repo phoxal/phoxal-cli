@@ -6,49 +6,41 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::output_mode::OutputMode;
 use crate::session::diagnostics::{RouteResult, register_child, try_route, unregister_child};
 use crate::session::event::{DiagnosticLevel, DiagnosticSource};
 use crate::theme::Theme;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ui {
-    mode: OutputMode,
+    interactive: bool,
 }
 
 impl Ui {
-    /// Construct with an explicit, already-known output mode - the preferred
+    /// Construct with an explicit, already-known interactive flag - the preferred
     /// constructor everywhere an `AppContext`/`OutputContext` is in scope
     /// (i.e. everywhere downstream of `commands::dispatch`).
-    pub fn new(mode: OutputMode) -> Self {
-        Self { mode }
+    pub fn new(interactive: bool) -> Self {
+        Self { interactive }
     }
 
-    /// Compute the mode fresh from the live environment. For the narrow set
+    /// Compute the flag fresh from the live environment. For the narrow set
     /// of call sites with no `AppContext` in scope: `main`'s top-level
     /// pre-dispatch error path, and tests/library callers that do not care
     /// which mode they get.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::new(OutputMode::from_env())
+        use std::io::IsTerminal;
+        Self::new(std::io::stderr().is_terminal())
     }
 
-    /// This `Ui`'s output mode - for a caller that needs to pass the same
-    /// mode on to another mode-aware helper (a spinner, a catalog fetch)
-    /// without threading a second, separate parameter alongside `ui`.
+    /// Whether this `Ui` may draw interactive terminal decoration.
     #[must_use]
-    pub const fn mode(&self) -> OutputMode {
-        self.mode
+    pub const fn interactive(&self) -> bool {
+        self.interactive
     }
 
     fn theme(&self) -> Theme {
-        Theme::detect_stderr(self.mode)
-    }
-
-    /// `--message-format json` promises stdout carries only the JSON
-    /// document and stderr carries nothing (see [`crate::output_mode`]).
-    fn should_print_decoration(&self) -> bool {
-        !self.mode.is_json()
+        Theme::detect_stderr(self.interactive)
     }
 
     pub fn step<T>(
@@ -57,12 +49,10 @@ impl Ui {
         callback: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
         let title_ref = title.as_ref();
-        if self.should_print_decoration()
-            && matches!(
-                try_route(DiagnosticSource::Cli, DiagnosticLevel::Info, title_ref),
-                RouteResult::NoSession
-            )
-        {
+        if matches!(
+            try_route(DiagnosticSource::Cli, DiagnosticLevel::Info, title_ref),
+            RouteResult::NoSession
+        ) {
             let theme = self.theme();
             eprintln!("{} {}", theme.accent(">"), theme.bold(title_ref));
         }
@@ -80,9 +70,6 @@ impl Ui {
     }
 
     pub fn info(&self, message: impl AsRef<str>) {
-        if !self.should_print_decoration() {
-            return;
-        }
         let message = message.as_ref();
         if !matches!(
             try_route(DiagnosticSource::Cli, DiagnosticLevel::Info, message),
@@ -95,9 +82,6 @@ impl Ui {
     }
 
     pub fn success(&self, message: impl AsRef<str>) {
-        if !self.should_print_decoration() {
-            return;
-        }
         let message = message.as_ref();
         if !matches!(
             try_route(DiagnosticSource::Cli, DiagnosticLevel::Info, message),
@@ -110,9 +94,6 @@ impl Ui {
     }
 
     pub fn warn(&self, message: impl AsRef<str>) {
-        if !self.should_print_decoration() {
-            return;
-        }
         let message = message.as_ref();
         if !matches!(
             try_route(DiagnosticSource::Cli, DiagnosticLevel::Warn, message),
@@ -125,9 +106,6 @@ impl Ui {
     }
 
     pub fn error(&self, message: impl AsRef<str>) {
-        if !self.should_print_decoration() {
-            return;
-        }
         let message = message.as_ref();
         if !matches!(
             try_route(DiagnosticSource::Cli, DiagnosticLevel::Error, message),
@@ -151,8 +129,7 @@ impl Ui {
     /// as `SessionEvent::Diagnostic`s, instead of inherited straight through
     /// to this process's own stdout/stderr (findings A2/B2). A raw child
     /// write racing an active TUI redraw can corrupt the alternate-screen
-    /// frame; under `--message-format json` it would also leak onto a stderr
-    /// the contract promises stays empty. Falls back to a direct
+    /// frame. Falls back to a direct
     /// `eprintln!`/`println!` for a line that arrives when no session is
     /// installed (`try_route` returns `false`) - identical to `Ui::info`/
     /// `warn`'s own fallback, so a caller with no active session (a bare
@@ -200,12 +177,11 @@ impl Ui {
                 return Err(error);
             }
         };
-        let mode = self.mode;
         let stdout_thread = std::thread::spawn(move || {
-            forward_captured_output(stdout, DiagnosticLevel::Info, false, mode)
+            forward_captured_output(stdout, DiagnosticLevel::Info, false)
         });
         let stderr_thread = std::thread::spawn(move || {
-            forward_captured_output(stderr, DiagnosticLevel::Info, true, mode)
+            forward_captured_output(stderr, DiagnosticLevel::Info, true)
         });
         let status = wait_for_captured_child(&child);
         unregister_child(&child);
@@ -246,7 +222,6 @@ fn forward_captured_output(
     reader: impl Read,
     level: DiagnosticLevel,
     is_stderr: bool,
-    mode: OutputMode,
 ) -> Vec<String> {
     const MAX_CAPTURED_ERROR_LINES: usize = 200;
     let mut captured = VecDeque::new();
@@ -254,7 +229,7 @@ fn forward_captured_output(
         if line.is_empty() {
             continue;
         }
-        if may_write_raw(try_route(DiagnosticSource::Dependency, level, &line), mode) {
+        if may_write_raw(try_route(DiagnosticSource::Dependency, level, &line)) {
             if is_stderr {
                 eprintln!("{line}");
             } else {
@@ -272,9 +247,9 @@ fn forward_captured_output(
 }
 
 /// Raw output is only permitted when no session owns the terminal and the
-/// invocation is not JSON. `Dropped` is intentionally not a fallback case.
-fn may_write_raw(route: RouteResult, mode: OutputMode) -> bool {
-    matches!(route, RouteResult::NoSession) && !mode.is_json()
+/// `Dropped` is intentionally not a fallback case.
+fn may_write_raw(route: RouteResult) -> bool {
+    matches!(route, RouteResult::NoSession)
 }
 
 #[cfg(test)]
@@ -283,11 +258,8 @@ mod tests {
 
     #[test]
     fn active_but_full_session_never_falls_back_to_raw_output() {
-        assert!(!may_write_raw(RouteResult::Dropped, OutputMode::Rich));
-        assert!(!may_write_raw(RouteResult::Dropped, OutputMode::Plain));
-        assert!(!may_write_raw(RouteResult::Dropped, OutputMode::Json));
-        assert!(!may_write_raw(RouteResult::NoSession, OutputMode::Json));
-        assert!(may_write_raw(RouteResult::NoSession, OutputMode::Plain));
+        assert!(!may_write_raw(RouteResult::Dropped));
+        assert!(may_write_raw(RouteResult::NoSession));
     }
 
     #[test]
@@ -296,22 +268,12 @@ mod tests {
             .map(|index| format!("line-{index}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let stderr = forward_captured_output(
-            input.as_bytes(),
-            DiagnosticLevel::Info,
-            true,
-            OutputMode::Json,
-        );
+        let stderr = forward_captured_output(input.as_bytes(), DiagnosticLevel::Info, true);
         assert_eq!(stderr.len(), 200);
         assert_eq!(stderr.first().map(String::as_str), Some("line-50"));
         assert_eq!(stderr.last().map(String::as_str), Some("line-249"));
 
-        let stdout = forward_captured_output(
-            input.as_bytes(),
-            DiagnosticLevel::Info,
-            false,
-            OutputMode::Json,
-        );
+        let stdout = forward_captured_output(input.as_bytes(), DiagnosticLevel::Info, false);
         assert!(stdout.is_empty());
     }
 

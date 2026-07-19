@@ -1,18 +1,14 @@
-//! The explicit output contract for one session (`run`/`simulation run`):
-//! which renderer applies, the theme it draws with, and whether the
-//! invocation asked for `--quiet`.
+//! The explicit output contract for one invocation: whether terminal
+//! decoration is interactive, the theme it uses, and whether `--quiet` was
+//! requested.
 //!
-//! Built ONCE in [`crate::commands::dispatch`] from the same inputs
-//! [`crate::output_mode::OutputMode::compute`] uses, and threaded explicitly
-//! into [`super::controller::SessionController`], `AppContext::ui`, and every
-//! other mode-aware helper (`crate::progress`, catalog/artifact fetches, git
-//! ref resolution) from there - there is no process-global mode cell
-//! anywhere in the crate.
+//! Built once in [`crate::commands::dispatch`] and threaded explicitly into
+//! [`super::controller::SessionController`], `AppContext::ui`, and helpers
+//! that may draw progress. Interactive foreground sessions are admitted only
+//! on a real TTY, so the controller itself has exactly one renderer: the TUI.
 
 use std::time::{Duration, Instant};
 
-use crate::commands::MessageFormat;
-use crate::output_mode::OutputMode;
 use crate::theme::Theme;
 
 /// A readiness/stage-wait budget for an interactive session (Product decision
@@ -60,50 +56,56 @@ impl WaitBudget {
 /// The immutable output contract for one `run`/`simulation run` invocation.
 #[derive(Debug, Clone, Copy)]
 pub struct OutputContext {
-    pub mode: OutputMode,
+    pub interactive: bool,
     pub theme: Theme,
     pub quiet: bool,
 }
 
 impl OutputContext {
     #[must_use]
-    pub const fn new(mode: OutputMode, theme: Theme, quiet: bool) -> Self {
-        Self { mode, theme, quiet }
+    pub const fn new(interactive: bool, theme: Theme, quiet: bool) -> Self {
+        Self {
+            interactive,
+            theme,
+            quiet,
+        }
+    }
+
+    /// Whether finite-command presentation may use color and redraw progress.
+    /// A quiet live session still owns its TUI, while quiet finite commands
+    /// preserve their append-only, uncolored output.
+    #[must_use]
+    pub const fn decorated(self) -> bool {
+        self.interactive && !self.quiet
     }
 
     /// The wait budget for an interactive-session readiness/stage wait
-    /// (Product decision 6). Only [`OutputMode::Rich`] - a true interactive
-    /// TTY console that actually renders a live "waiting" state - gets
+    /// (Product decision 6). Only a true interactive TTY console that renders
+    /// a live "waiting" state gets
     /// [`WaitBudget::Unbounded`]: a missing clock/participant becomes a named
     /// `waiting`/`degraded` console state, never an automatic teardown,
-    /// because an operator is watching it. [`OutputMode::Plain`] (a non-TTY
-    /// or `--plain` stream - piped, redirected, or a CI log) and
-    /// [`OutputMode::Json`] (a machine/batch invocation) both have no
-    /// interactive console to show that state in, so both keep `Bounded`: an
-    /// append-only or machine caller must get a deterministic failure instead
-    /// of hanging forever on a missing clock. Any future headless
+    /// because an operator is watching it. Non-interactive callers have no
+    /// console to show that state in, so they keep `Bounded`: a batch caller
+    /// must get a deterministic failure instead of hanging forever. Any future headless
     /// bounded-wait policy should be an explicit, separate opt-in - never
     /// implicitly shared with the interactive session the way the old fixed
     /// 60s constant was.
     #[must_use]
     pub const fn wait_budget(self, bounded: Duration) -> WaitBudget {
-        if self.mode.allows_progress_drawing() {
+        if self.interactive {
             WaitBudget::Unbounded
         } else {
             WaitBudget::Bounded(bounded)
         }
     }
 
-    /// Build from the same inputs [`OutputMode::compute`] uses, plus the
-    /// theme detected off the same stream. Called once in
-    /// [`crate::commands::dispatch`]; every other caller (a unit test, or any
-    /// code running outside `dispatch`) should prefer [`Self::new`] with an
-    /// explicit mode instead of re-deriving from the live environment, so
-    /// tests stay deterministic.
+    /// Build from the terminal and global presentation flags. Called once in
+    /// [`crate::commands::dispatch`]; other callers should prefer [`Self::new`]
+    /// so tests stay deterministic.
     #[must_use]
-    pub fn compute(is_tty: bool, plain: bool, quiet: bool, message_format: MessageFormat) -> Self {
-        let mode = OutputMode::compute(is_tty, plain, quiet, message_format);
-        Self::new(mode, Theme::detect_stderr(mode), quiet)
+    pub fn compute(is_tty: bool, plain: bool, quiet: bool) -> Self {
+        let interactive = is_tty && !plain;
+        Self::new(interactive, Theme::detect_stderr(interactive), quiet)
     }
 }
 
@@ -113,40 +115,35 @@ mod tests {
     use crate::theme::ColorCapability;
 
     #[test]
-    fn compute_matches_output_mode_compute() {
-        let ctx = OutputContext::compute(true, false, false, MessageFormat::Human);
-        assert_eq!(ctx.mode, OutputMode::Rich);
+    fn compute_respects_terminal_and_global_flags() {
+        let ctx = OutputContext::compute(true, false, false);
+        assert!(ctx.interactive);
         assert!(!ctx.quiet);
 
-        let ctx = OutputContext::compute(false, false, false, MessageFormat::Human);
-        assert_eq!(ctx.mode, OutputMode::Plain);
-
-        let ctx = OutputContext::compute(true, false, false, MessageFormat::Json);
-        assert_eq!(ctx.mode, OutputMode::Json);
+        assert!(!OutputContext::compute(false, false, false).interactive);
+        assert!(!OutputContext::compute(true, true, false).interactive);
+        assert!(OutputContext::compute(true, false, true).interactive);
+        assert!(OutputContext::compute(true, false, true).quiet);
+        assert!(!OutputContext::compute(true, false, true).decorated());
     }
 
     #[test]
     fn new_is_a_plain_immutable_constructor() {
-        let ctx = OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), true);
-        assert_eq!(ctx.mode, OutputMode::Plain);
+        let ctx = OutputContext::new(false, Theme::new(ColorCapability::None), true);
+        assert!(!ctx.interactive);
         assert!(ctx.quiet);
     }
 
-    /// Product decision 6: only `Rich` - the true interactive TTY console -
-    /// gets the unbounded wait. `Plain` (piped/non-TTY/CI) and `Json`
-    /// (machine callers) have no interactive console to show a "waiting"
-    /// state in, so both must keep a bounded, deterministic failure instead
-    /// of hanging forever on a missing clock.
+    /// Product decision 6: only the interactive TTY console gets the
+    /// unbounded wait. Batch callers keep a bounded, deterministic failure.
     #[test]
     fn wait_budget_is_bounded_unless_rich() {
         let bounded = Duration::from_secs(60);
-        let rich = OutputContext::new(OutputMode::Rich, Theme::new(ColorCapability::None), false);
-        let plain = OutputContext::new(OutputMode::Plain, Theme::new(ColorCapability::None), false);
-        let json = OutputContext::new(OutputMode::Json, Theme::new(ColorCapability::None), false);
+        let interactive = OutputContext::new(true, Theme::new(ColorCapability::None), false);
+        let batch = OutputContext::new(false, Theme::new(ColorCapability::None), false);
 
-        assert_eq!(rich.wait_budget(bounded), WaitBudget::Unbounded);
-        assert_eq!(plain.wait_budget(bounded), WaitBudget::Bounded(bounded));
-        assert_eq!(json.wait_budget(bounded), WaitBudget::Bounded(bounded));
+        assert_eq!(interactive.wait_budget(bounded), WaitBudget::Unbounded);
+        assert_eq!(batch.wait_budget(bounded), WaitBudget::Bounded(bounded));
     }
 
     /// D2: `Unbounded` has no deadline at all - a caller must handle that

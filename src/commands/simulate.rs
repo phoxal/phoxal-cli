@@ -13,7 +13,6 @@ use tokio::task::JoinHandle;
 
 use crate::AppContext;
 use crate::catalog::Catalog;
-use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
     check_artifact_refs_from_resolved, extract_emit_apis_from_staged_runtime,
@@ -100,23 +99,12 @@ impl Simulation {
         }
     }
 
-    #[must_use]
-    pub fn message_format(&self) -> MessageFormat {
-        match &self.command {
-            SimulationSubcommand::Run(command) => command.message_format,
-            SimulationSubcommand::Join(_) => MessageFormat::Human,
-        }
-    }
-
     /// Only `simulation run` consumes artifacts (catalog/resolver), so only
     /// it participates in the update-notice check; `simulation join` is a
     /// pure stub today and never touches a robot project.
     #[must_use]
-    pub fn update_notice_format(&self) -> Option<MessageFormat> {
-        match &self.command {
-            SimulationSubcommand::Run(command) => Some(command.message_format),
-            SimulationSubcommand::Join(_) => None,
-        }
+    pub fn consumes_artifacts(&self) -> bool {
+        matches!(self.command, SimulationSubcommand::Run(_))
     }
 }
 
@@ -132,8 +120,6 @@ pub struct SimulationRun {
         help = "Resolve and write run artifacts without starting simulation processes."
     )]
     pub dry_run: bool,
-    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
-    pub message_format: MessageFormat,
     #[arg(
         long,
         help = "Watch local source artifacts and hot-reload checked changes."
@@ -180,16 +166,15 @@ pub enum SimulateMode {
 pub struct SimulateOptions {
     pub world: String,
     pub catalog_source: Option<String>,
-    pub message_format: MessageFormat,
     pub watch: bool,
     pub overlays: Vec<String>,
     pub target: Option<String>,
-    /// The session's [`OutputMode`](crate::output_mode::OutputMode), carried
+    /// Whether progress may draw interactively, carried
     /// alongside the other options so `resolve_project`/`prepare_with_mode`
     /// (which run inside a `spawn_blocking` worker with no `AppContext` in
     /// scope) can thread it into a catalog fetch's spinner without a
     /// process-global mode cell.
-    pub output_mode: crate::output_mode::OutputMode,
+    pub interactive: bool,
 }
 
 /// Pairs the sim `LaunchPlan` with its `PlanContext` (Part 3/6): replaces the
@@ -224,11 +209,10 @@ impl SimulationRun {
         let options = SimulateOptions {
             world: self.world.clone(),
             catalog_source: app.catalog_source.clone(),
-            message_format: self.message_format,
             watch: self.watch,
             overlays: self.env.clone(),
             target: self.target.clone(),
-            output_mode: app.output.mode,
+            interactive: app.output.decorated(),
         };
         let mode = if self.dry_run {
             SimulateMode::DryRun
@@ -247,11 +231,10 @@ pub async fn run(
     match mode {
         SimulateMode::DryRun => {
             let project_root = app.project.root().to_path_buf();
-            let message_format = options.message_format;
             let sim = tokio::task::spawn_blocking(move || prepare(&project_root, options))
                 .await
                 .context("simulate dry-run worker failed")??;
-            report_plan_only(&sim, message_format)?;
+            report_plan_only(&sim)?;
             Ok(sim)
         }
         SimulateMode::Live => {
@@ -462,7 +445,7 @@ async fn live_simulate_setup(
         sim.plan.site.len()
     ));
     ui.info(format!("infrastructure router ready on {connect}"));
-    crate::commands::run::report_launch_commands(&sim.plan, &specs, options.message_format, &ui)?;
+    crate::commands::run::report_launch_commands(&sim.plan, &specs, &ui)?;
 
     background_tasks.extend(
         sim.plan
@@ -600,7 +583,6 @@ fn prepare_with_mode(
         &resolved.resolved,
         &resolved.manifest_extras,
         resolved.catalog.as_ref(),
-        options.message_format,
     )?;
     // Finding A5: resolved once here, from the same `plan`/`contract_surfaces`
     // this function already has - see `RuntimeStore::from_launch_plan`'s docs.
@@ -642,24 +624,21 @@ pub(crate) fn resolve_project(
     };
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
-    let catalog = crate::commands::catalog_or_vendored(
-        crate::catalog::load_pinned_catalog(
-            crate::catalog::CatalogLoadOptions {
-                cli_source: options.catalog_source.clone(),
-                robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
-                    if source.is_absolute() {
-                        source.clone()
-                    } else {
-                        project_root.join(source)
-                    }
-                }),
-                offline: false,
-            },
-            crate::catalog::selection_channel(robot.artifacts.channel),
-            options.output_mode,
-        ),
-        options.output_mode,
-    )?;
+    let catalog = crate::commands::catalog_or_vendored(crate::catalog::load_pinned_catalog(
+        crate::catalog::CatalogLoadOptions {
+            cli_source: options.catalog_source.clone(),
+            robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
+                if source.is_absolute() {
+                    source.clone()
+                } else {
+                    project_root.join(source)
+                }
+            }),
+            offline: false,
+        },
+        crate::catalog::selection_channel(robot.artifacts.channel),
+        options.interactive,
+    ))?;
 
     // Always resolve live git component driver commits so driver metadata can
     // be staged. Component asset git refs are resolved only for live simulate,
@@ -682,6 +661,7 @@ pub(crate) fn resolve_project(
             resolve_source_commits: true,
             resolve_component_asset_commits: mode == SimulateMode::Live,
             official_target_triple: official_target,
+            interactive: options.interactive,
             ..ResolveOptions::default()
         },
     )?;
@@ -710,7 +690,6 @@ pub(crate) fn build_checked_sim_launch_plan(
     resolved: &ResolvedRobot,
     manifest_extras: &RobotManifestExtras,
     catalog: Option<&Catalog>,
-    message_format: MessageFormat,
 ) -> Result<(LaunchPlan, Vec<graph_check::ParticipantContractSurface>)> {
     let source_participants = sim_source_participants(project_root, resolved, catalog)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
@@ -833,7 +812,6 @@ pub(crate) fn build_checked_sim_launch_plan(
     crate::commands::check::enforce_coherence(
         crate::commands::check::CoherenceVerb::Simulate,
         &coherence,
-        message_format,
     )?;
     Ok((plan, contract_surfaces))
 }
@@ -1047,61 +1025,55 @@ fn sim_checked_participants(
         .collect()
 }
 
-fn report_plan_only(sim: &SimPlan, message_format: MessageFormat) -> Result<()> {
+fn report_plan_only(sim: &SimPlan) -> Result<()> {
     let output = build_dry_run_output(sim);
-    crate::commands::print_message(
-        &output,
-        || {
-            println!("channel: {}", sim.ctx.resolved.channel);
-            if let Some(revision) = &sim.ctx.resolved.catalog_snapshot {
-                println!("catalog revision: {revision}");
-            }
-            println!(
-                "official services ({}):",
-                sim.ctx.resolved.platform_runtimes.len()
-            );
-            for runtime in &sim.ctx.resolved.platform_runtimes {
-                println!("  - {} -> {}", runtime.name, runtime.artifact_ref());
-            }
-            println!("world: {}", output.world_path.display());
-            println!("router: {}", output.bus_connect);
-            // Out of the project tree now (`<project>/.phoxal/webots`,
-            // see `webots_stage_root`), so print it explicitly for discoverability
-            // even though nothing is written in dry-run mode.
-            if let Ok(root) = webots_stage_root::root() {
-                println!("staged simulation to {}", root.display());
-            }
-            println!("site tools:");
-            for tool in &output.native_tools {
-                println!("  - {tool}");
-            }
-            println!(
-                "webots app (CLI-managed, id \"{WEBOTS_SITE_ID}\"): would launch pointed at staged world {}",
-                output.webots_app.intended_staged_world_path.display()
-            );
-            if !output.simulator_artifacts.is_empty() {
-                println!("simulator artifacts:");
-                for artifact in &output.simulator_artifacts {
-                    println!("  - {artifact}");
-                }
-            }
-            if !output.simulation_managed_participants.is_empty() {
-                println!("simulation-managed participants (launched by Webots, not the CLI):");
-                for participant in &output.simulation_managed_participants {
-                    println!("  - {participant}");
-                }
-            }
-            if !output.substitutions.is_empty() {
-                println!("substitutions:");
-                for substitution in &output.substitutions {
-                    println!("  - {substitution}");
-                }
-            }
-            println!("dry-run - no files written and no simulation processes started");
-            Ok(())
-        },
-        message_format,
-    )
+    println!("channel: {}", sim.ctx.resolved.channel);
+    if let Some(revision) = &sim.ctx.resolved.catalog_snapshot {
+        println!("catalog revision: {revision}");
+    }
+    println!(
+        "official services ({}):",
+        sim.ctx.resolved.platform_runtimes.len()
+    );
+    for runtime in &sim.ctx.resolved.platform_runtimes {
+        println!("  - {} -> {}", runtime.name, runtime.artifact_ref());
+    }
+    println!("world: {}", output.world_path.display());
+    println!("router: {}", output.bus_connect);
+    // Out of the project tree now (`<project>/.phoxal/webots`,
+    // see `webots_stage_root`), so print it explicitly for discoverability
+    // even though nothing is written in dry-run mode.
+    if let Ok(root) = webots_stage_root::root() {
+        println!("staged simulation to {}", root.display());
+    }
+    println!("site tools:");
+    for tool in &output.native_tools {
+        println!("  - {tool}");
+    }
+    println!(
+        "webots app (CLI-managed, id \"{WEBOTS_SITE_ID}\"): would launch pointed at staged world {}",
+        output.webots_app.intended_staged_world_path.display()
+    );
+    if !output.simulator_artifacts.is_empty() {
+        println!("simulator artifacts:");
+        for artifact in &output.simulator_artifacts {
+            println!("  - {artifact}");
+        }
+    }
+    if !output.simulation_managed_participants.is_empty() {
+        println!("simulation-managed participants (launched by Webots, not the CLI):");
+        for participant in &output.simulation_managed_participants {
+            println!("  - {participant}");
+        }
+    }
+    if !output.substitutions.is_empty() {
+        println!("substitutions:");
+        for substitution in &output.substitutions {
+            println!("  - {substitution}");
+        }
+    }
+    println!("dry-run - no files written and no simulation processes started");
+    Ok(())
 }
 
 /// Build the dry-run report body (Part 6): must show the Webots app as the

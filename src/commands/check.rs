@@ -11,7 +11,6 @@ use serde_json::Value;
 
 use crate::AppContext;
 use crate::catalog::ArtifactKind;
-use crate::commands::MessageFormat;
 use crate::component_driver::component_driver_crate_dir;
 use crate::resolver::{
     ResolveOptions, ResolvedComponent, ResolvedComponentSource, ResolvedPlatformRuntime,
@@ -28,13 +27,6 @@ pub struct CheckCmd {
         help = "Only build/check the named user service crate after resolving the full project."
     )]
     pub service: Option<String>,
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = MessageFormat::Human,
-        help = "Output format for the check result."
-    )]
-    pub message_format: MessageFormat,
     #[arg(
         long = "env",
         value_name = "ENV",
@@ -320,25 +312,9 @@ fn format_coherence_error(diagnostics: &[RobotCoherenceDiagnostic]) -> String {
 pub(crate) fn enforce_coherence(
     verb: CoherenceVerb,
     diagnostics: &[RobotCoherenceDiagnostic],
-    message_format: MessageFormat,
 ) -> Result<()> {
     if coherence_disposition(verb, true, diagnostics) == CoherenceDisposition::Pass {
         return Ok(());
-    }
-    if message_format == MessageFormat::Json {
-        #[derive(Serialize)]
-        struct CoherenceFailure<'a> {
-            status: &'static str,
-            coherence: &'a [RobotCoherenceDiagnostic],
-        }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&CoherenceFailure {
-                status: "error",
-                coherence: diagnostics,
-            })?
-        );
-        bail!("participant contract coherence check failed")
     }
     bail!("{}", format_coherence_error(diagnostics))
 }
@@ -359,62 +335,29 @@ impl CheckCmd {
             .await
             .context("check worker failed")??;
 
-        // Keep the human warning before the hard outcome check, but JSON's
-        // output contract reserves stderr for no bytes at all.
-        if self.message_format == MessageFormat::Human {
-            eprintln!(
-                "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
-            );
-        }
+        eprintln!(
+            "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
+        );
 
         ensure_check_outcome_ok(&result.channel, &result.outcome)?;
         match coherence_disposition(CoherenceVerb::Check, result.strict, &result.coherence) {
             CoherenceDisposition::Pass => {}
-            CoherenceDisposition::Warning if self.message_format == MessageFormat::Human => {
+            CoherenceDisposition::Warning => {
                 eprintln!("warning: {}", format_coherence_error(&result.coherence));
             }
-            CoherenceDisposition::Warning => {}
             CoherenceDisposition::Failure => {
-                enforce_coherence(CoherenceVerb::Check, &result.coherence, self.message_format)?;
+                enforce_coherence(CoherenceVerb::Check, &result.coherence)?;
             }
         }
-
-        let output = CheckOutput {
-            status: if coherence_is_ok(&result.coherence) {
-                "ok"
-            } else {
-                "warning"
-            },
-            channel: result.channel.clone(),
-            catalog_snapshot: result.catalog_snapshot.clone(),
-            participant_count: result.participant_count,
-            coherence: result.coherence.clone(),
-        };
-        crate::commands::print_message(
-            &output,
-            || {
-                println!(
-                    "ok: {} participants validated (channel {})",
-                    result.participant_count, result.channel
-                );
-                if let Some(revision) = &result.catalog_snapshot {
-                    println!("catalog revision: {revision}");
-                }
-                Ok(())
-            },
-            self.message_format,
-        )?;
+        println!(
+            "ok: {} participants validated (channel {})",
+            result.participant_count, result.channel
+        );
+        if let Some(revision) = &result.catalog_snapshot {
+            println!("catalog revision: {revision}");
+        }
         Ok(())
     }
-}
-
-#[derive(Debug, Serialize)]
-struct CheckOutput {
-    status: &'static str,
-    channel: String,
-    catalog_snapshot: Option<String>,
-    participant_count: usize,
-    coherence: Vec<RobotCoherenceDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -473,24 +416,21 @@ fn run(
     };
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
-    let catalog = crate::commands::catalog_or_vendored(
-        crate::catalog::load_pinned_catalog(
-            crate::catalog::CatalogLoadOptions {
-                cli_source: options.catalog_source.clone(),
-                robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
-                    if source.is_absolute() {
-                        source.clone()
-                    } else {
-                        project_root.join(source)
-                    }
-                }),
-                offline: false,
-            },
-            crate::catalog::selection_channel(robot.artifacts.channel),
-            ui.mode(),
-        ),
-        ui.mode(),
-    )?;
+    let catalog = crate::commands::catalog_or_vendored(crate::catalog::load_pinned_catalog(
+        crate::catalog::CatalogLoadOptions {
+            cli_source: options.catalog_source.clone(),
+            robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
+                if source.is_absolute() {
+                    source.clone()
+                } else {
+                    project_root.join(source)
+                }
+            }),
+            offline: false,
+        },
+        crate::catalog::selection_channel(robot.artifacts.channel),
+        ui.interactive(),
+    ))?;
     // `check` resolves live git component refs so component drivers can be
     // located and staged. A path-only / official-only graph needs no component
     // network; a git component pinned to a commit SHA resolves offline; a
@@ -512,7 +452,7 @@ fn run(
             resolve_component_asset_commits: false,
             official_target_triple: target_triple.clone(),
             tool_target_triple: target_triple,
-            output_mode: ui.mode(),
+            interactive: ui.interactive(),
         },
     )?;
     let descriptors = crate::native_artifacts::descriptors_for(&resolved, false, false)?;
@@ -1579,11 +1519,11 @@ fn build_and_locate_binary(crate_dir: &Path, binary_name: &str) -> Result<PathBu
     // and the `run_check_with_context` callback used identically by
     // `run`/`deploy`/`simulate`/`watch`) - adding a `mode` parameter here
     // would have to ripple through that whole shared contract. Recomputing
-    // fresh from the environment is the explicit, non-global fallback
-    // (`OutputMode::from_env`'s docs) for exactly this case.
+    // fresh from the environment is the explicit, non-global fallback.
+    use std::io::IsTerminal;
     let progress = crate::progress::spinner(
         format!("building `{binary_name}` in {}", crate_dir.display()),
-        crate::output_mode::OutputMode::from_env(),
+        std::io::stderr().is_terminal(),
     );
     let result = crate::shell::run_output(
         "cargo",

@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -611,13 +611,13 @@ fn prepare_descriptor_inner(
             descriptor.kind, descriptor.name, descriptor.url
         ));
     }
-    let mode = ui.map_or_else(crate::output_mode::OutputMode::from_env, |ui| ui.mode());
+    let interactive = ui.map_or_else(|| std::io::stderr().is_terminal(), Ui::interactive);
     let row = reporter.map(|reporter| reporter.begin(descriptor));
     let result = (|| {
         let tarball_path = if let Some(row) = &row {
             download_blob_inner(descriptor, |delta| row.inc(delta))?
         } else {
-            download_blob(descriptor, mode)?
+            download_blob(descriptor, interactive)?
         };
         unpack_asset(&tarball_path, &version_dir, &descriptor.sha256)?;
         fs::remove_file(&tarball_path).ok();
@@ -682,13 +682,13 @@ fn prepare_scope_candidate(
             descriptor.kind, descriptor.name, descriptor.url
         ));
     }
-    let mode = ui.map_or_else(crate::output_mode::OutputMode::from_env, |ui| ui.mode());
+    let interactive = ui.map_or_else(|| std::io::stderr().is_terminal(), Ui::interactive);
     let row = reporter.map(|reporter| reporter.begin(descriptor));
     let result = (|| {
         let tarball_path = if let Some(row) = &row {
             download_blob_inner(descriptor, |delta| row.inc(delta))?
         } else {
-            download_blob(descriptor, mode)?
+            download_blob(descriptor, interactive)?
         };
         let final_root = artifact_exec_dir(descriptor)?;
         let parent = final_root
@@ -937,10 +937,7 @@ pub fn existing_target_scopes(package: &str) -> Result<Vec<String>> {
     Ok(targets)
 }
 
-fn download_blob(
-    descriptor: &NativeArtifactDescriptor,
-    mode: crate::output_mode::OutputMode,
-) -> Result<PathBuf> {
+fn download_blob(descriptor: &NativeArtifactDescriptor, interactive: bool) -> Result<PathBuf> {
     let label = format!(
         "downloading {} {} [{}] ({})",
         descriptor.package_id,
@@ -951,7 +948,7 @@ fn download_blob(
     // `descriptor.size` is the catalog-declared blob size (always known
     // ahead of the request - it is what `verify_blob_bytes` checks the
     // download against), so the byte bar is always determinate here.
-    let progress = crate::progress::bytes_bar(label, descriptor.size, mode);
+    let progress = crate::progress::bytes_bar(label, descriptor.size, interactive);
     match download_blob_inner(descriptor, |delta| progress.inc(delta)) {
         Ok(path) => {
             progress.finish_and_clear();

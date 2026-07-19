@@ -6,11 +6,11 @@
 //! snapshot" pattern.
 //!
 //! Kept deliberately separate from `supervisor::BoardBackend`/`BoardSnapshot`
-//! (participant board state, persisted to the state file and surfaced by
-//! `--message-format json`): telemetry never reaches either of those, only
-//! the live TUI reads it (`TelemetryBackend::snapshot`), so it can carry
-//! whatever shape is convenient for rendering without touching the
-//! JSON-stable board contract.
+//! (participant board state, persisted to the state file): telemetry never
+//! reaches either of those, only the live TUI reads it
+//! (`TelemetryBackend::snapshot`), so it can carry
+//! whatever shape is convenient for rendering without touching the persisted
+//! board contract.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

@@ -8,9 +8,6 @@ use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-
-use crate::commands::MessageFormat;
 
 const LATEST_RELEASE_URL: &str = "https://github.com/phoxal/phoxal-cli/releases/latest";
 const RELEASE_TAG_URL: &str = "https://github.com/phoxal/phoxal-cli/releases/tag";
@@ -37,7 +34,6 @@ pub(crate) enum UpdateNotice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NoticePolicy {
     pub(crate) artifact_consuming: bool,
-    pub(crate) message_format: MessageFormat,
     pub(crate) quiet: bool,
     pub(crate) interactive: bool,
     /// A rich session owns the terminal through its TUI. Human notices are
@@ -133,22 +129,6 @@ fn offer_to_state(state: &mut InvocationState, notice: UpdateNotice) {
     }
 }
 
-pub(crate) fn take_json_updates() -> Option<serde_json::Value> {
-    let mut invocation = invocation()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let state = invocation.as_mut()?;
-    if !state.policy.artifact_consuming
-        || state.policy.quiet
-        || !state.policy.interactive
-        || state.policy.message_format != MessageFormat::Json
-    {
-        return None;
-    }
-    poll_pending_cli(state);
-    state.notice.take().as_ref().map(json_updates)
-}
-
 pub(crate) fn finish() {
     let mut invocation = invocation()
         .lock()
@@ -174,11 +154,7 @@ fn render_human(
     notice: Option<&UpdateNotice>,
     routed_notice: Option<&UpdateNotice>,
 ) -> Option<String> {
-    if !policy.artifact_consuming
-        || policy.quiet
-        || !policy.interactive
-        || policy.message_format != MessageFormat::Human
-    {
+    if !policy.artifact_consuming || policy.quiet || !policy.interactive {
         return None;
     }
     let notice = notice?;
@@ -195,13 +171,6 @@ fn format_human(notice: &UpdateNotice) -> String {
             "Update available! {} -> {}, run `{}`, release notes: {}",
             update.current, update.latest, update.upgrade_command, update.release_notes_url
         ),
-    }
-}
-
-fn json_updates(notice: &UpdateNotice) -> serde_json::Value {
-    match notice {
-        UpdateNotice::Artifacts(newer) => json!(newer),
-        UpdateNotice::Cli(update) => json!({ "cli": update }),
     }
 }
 
@@ -419,21 +388,13 @@ mod tests {
 
     use super::*;
 
-    fn policy(message_format: MessageFormat) -> NoticePolicy {
+    fn policy() -> NoticePolicy {
         NoticePolicy {
             artifact_consuming: true,
-            message_format,
             quiet: false,
             interactive: true,
             tui: false,
         }
-    }
-
-    #[test]
-    fn artifact_json_notice_has_a_structured_updates_available_field() {
-        let updates = vec!["phoxal/service-drive 0.5.0 -> 0.6.0".to_string()];
-        let value = json_updates(&UpdateNotice::Artifacts(updates.clone()));
-        assert_eq!(value[0], updates[0]);
     }
 
     #[test]
@@ -442,15 +403,15 @@ mod tests {
         for suppressed in [
             NoticePolicy {
                 quiet: true,
-                ..policy(MessageFormat::Human)
+                ..policy()
             },
             NoticePolicy {
                 interactive: false,
-                ..policy(MessageFormat::Human)
+                ..policy()
             },
             NoticePolicy {
                 artifact_consuming: false,
-                ..policy(MessageFormat::Human)
+                ..policy()
             },
         ] {
             assert_eq!(render_human(suppressed, Some(&notice), None), None);
@@ -478,7 +439,7 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(
-            render_human(policy(MessageFormat::Human), Some(&notice), None).unwrap(),
+            render_human(policy(), Some(&notice), None).unwrap(),
             "Update available! 1.0.0 -> 1.1.0, run `phoxal-cli self upgrade`, release notes: https://github.com/phoxal/phoxal-cli/releases/tag/v1.1.0"
         );
     }
@@ -490,7 +451,7 @@ mod tests {
             render_human(
                 NoticePolicy {
                     tui: true,
-                    ..policy(MessageFormat::Human)
+                    ..policy()
                 },
                 Some(&notice),
                 Some(&notice),
@@ -501,7 +462,7 @@ mod tests {
             render_human(
                 NoticePolicy {
                     tui: true,
-                    ..policy(MessageFormat::Human)
+                    ..policy()
                 },
                 Some(&notice),
                 None,
@@ -509,22 +470,6 @@ mod tests {
             .is_some(),
             "an offer made before Diagnostics is installed must retain its stderr fallback"
         );
-    }
-
-    #[test]
-    fn cli_json_mode_uses_a_structured_field_instead_of_banner_text() {
-        let notice = UpdateNotice::Cli(
-            update_from_release(
-                "1.0.0",
-                "1.1.0",
-                "https://github.com/phoxal/phoxal-cli/releases/tag/v1.1.0",
-            )
-            .unwrap(),
-        );
-        let value = json_updates(&notice);
-        assert_eq!(value["cli"]["current"], "1.0.0");
-        assert_eq!(value["cli"]["latest"], "1.1.0");
-        assert_eq!(value["cli"]["upgrade_command"], UPGRADE_COMMAND);
     }
 
     struct FakeSource {
@@ -626,7 +571,7 @@ mod tests {
     #[test]
     fn one_notice_slot_prefers_artifact_updates_over_cli_updates() {
         let mut state = InvocationState {
-            policy: policy(MessageFormat::Human),
+            policy: policy(),
             notice: None,
             routed_notice: None,
             pending_cli: None,
@@ -656,7 +601,7 @@ mod tests {
     fn pending_network_check_poll_never_waits_for_a_result() {
         let (sender, receiver) = mpsc::channel();
         let mut state = InvocationState {
-            policy: policy(MessageFormat::Human),
+            policy: policy(),
             notice: None,
             routed_notice: None,
             pending_cli: Some(receiver),

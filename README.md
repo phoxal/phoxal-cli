@@ -29,19 +29,20 @@ phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build va
 |---|---|
 | `check` | Resolve `robot.yaml`, stage participants, extract their embedded metadata sections, and validate the graph against `phoxal::check`. `--service <name>` scopes user-service selection. `--strict` additionally fails on coherence warnings. |
 | `validate` | Lower-level `robot.yaml` structure and user-service phoxal-dependency checks that back `check`. |
-| `run` | Supervise the resolved host-native graph. `--watch` rebuilds changed local participants, re-runs the graph proof, and swaps the checked process in place. `--message-format json` prints exact participant launch command lines and env. |
+| `run` | Supervise the resolved host-native graph in the terminal UI. `--watch` rebuilds changed local participants, re-runs the graph proof, and swaps the checked process in place. |
 | `simulation run <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` hot-swaps service edits and re-checks driver metadata/substitutions without launching drivers. |
 | `simulation join` | Reserved entry point for joining a running multi-robot simulation; currently reports that the workflow is not available yet. |
 | `logs [participant]` | Stream participant bus log events from a reachable robot. `-f`/`--follow` keeps streaming; omit `participant` for every participant. |
 | `status <safety|motion|localization>` | Inspect the latest domain state over the robot bus. `engage-estop` and `reset-estop` publish the robot-wide software emergency-stop request. |
 | `service catalog` | Print official services from the configured artifact catalog. |
-| `update` | Resolve stable/nightly heads, verify version and catalog SHA, atomically retarget `active`, and prune inactive versions after successful activation. Same-version digest changes are refreshed. Supports `--dry-run` and JSON. |
+| `update` | Resolve stable/nightly heads, verify version and catalog SHA, atomically retarget `active`, and prune inactive versions after successful activation. Same-version digest changes are refreshed. Supports `--dry-run`. |
 | `deploy <user@host>` | Probe the robot arch, resolve/check the graph, cross-build local source artifacts for musl, render native systemd units/env/release record, sync to `/opt/phoxal` and `/etc/systemd/system`, restart `phoxal.target`, and report systemd readiness. Prints the v0 pre-stable warning. `--dry-run --target <arch>` renders hostless for validation. |
 | `doctor` | Check host prerequisites (Webots, Rust toolchain) without changing anything. |
 | `version` | Print the CLI version, wire codec, and participant metadata section names. |
 | `self upgrade` | Update the CLI binary itself. |
 
-Commands that emit machine-readable state accept `--message-format human|json`.
+Finite commands print plain, pipe-friendly text. Live `run` and `simulation run`
+sessions require a terminal and fail with an actionable error when redirected.
 
 ### Interactive sessions
 
@@ -88,8 +89,8 @@ live following so the new failure is visible immediately.
 While editing a Logs or Bus filter, results update as you type. Use `Backspace`
 to remove text; `Enter` or `Esc` finishes editing and keeps the current text.
 
-Plain and JSON modes retain their existing non-interactive output. The terminal
-title is `phoxal-cli <robot-id> - <namespace>` for the session lifetime.
+The terminal title is `phoxal-cli <robot-id> - <namespace>` for the session
+lifetime.
 
 ### Dev Path Overrides
 

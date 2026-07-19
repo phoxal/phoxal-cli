@@ -22,7 +22,6 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::AppContext;
 use crate::catalog::ArtifactKind;
-use crate::commands::MessageFormat;
 use crate::commands::check::{
     CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
     check_artifact_refs_from_resolved, extract_emit_apis_from_staged_runtime,
@@ -94,13 +93,6 @@ pub struct Deploy {
     pub env: Vec<String>,
     #[arg(
         long,
-        value_enum,
-        default_value_t = MessageFormat::Human,
-        help = "Output format for the deploy report."
-    )]
-    pub message_format: MessageFormat,
-    #[arg(
-        long,
         default_value_t = 30,
         help = "Health readiness deadline after restart, in seconds."
     )]
@@ -114,7 +106,6 @@ pub(crate) struct DeployOptions {
     pub target: Option<String>,
     pub overlays: Vec<String>,
     pub catalog_source: Option<String>,
-    pub message_format: MessageFormat,
     pub health_timeout: Duration,
 }
 
@@ -410,7 +401,6 @@ impl Deploy {
             target: self.target.clone(),
             overlays: self.env.clone(),
             catalog_source: app.catalog_source.clone(),
-            message_format: self.message_format,
             health_timeout: Duration::from_secs(self.health_timeout_sec),
         };
         let project_root = app.project.root().to_path_buf();
@@ -418,12 +408,10 @@ impl Deploy {
         let result = tokio::task::spawn_blocking(move || run(&project_root, options, &ui))
             .await
             .context("deploy worker failed")??;
-        if self.message_format == MessageFormat::Human {
-            eprintln!(
-                "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
-            );
-        }
-        report(result, self.message_format)
+        eprintln!(
+            "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
+        );
+        report(result)
     }
 }
 
@@ -941,7 +929,7 @@ fn prepare_deploy(
         project_root,
         loaded.robot.artifacts.channel,
         &loaded.extras,
-        ui.mode(),
+        ui.interactive(),
     )?;
     let mut resolved = resolve(
         &loaded.robot,
@@ -954,7 +942,7 @@ fn prepare_deploy(
             resolve_component_asset_commits: false,
             official_target_triple: Some(target.official_triple.clone()),
             tool_target_triple: Some(target.official_triple.clone()),
-            output_mode: ui.mode(),
+            interactive: ui.interactive(),
         },
     )?;
     if let Some(catalog) = catalog.as_ref() {
@@ -972,7 +960,7 @@ fn prepare_deploy(
                 resolve_component_asset_commits: false,
                 official_target_triple: Some(crate::resolver::host_target_triple()),
                 tool_target_triple: Some(crate::resolver::host_target_triple()),
-                output_mode: ui.mode(),
+                interactive: ui.interactive(),
             },
         )?;
         let catalog = catalog
@@ -1216,7 +1204,6 @@ fn prepare_deploy_after_host_staging(
     crate::commands::check::enforce_coherence(
         crate::commands::check::CoherenceVerb::Deploy,
         &coherence,
-        options.message_format,
     )?;
 
     let project_root = project_root.to_path_buf();
@@ -3561,40 +3548,34 @@ fn report_from_payload(
     }
 }
 
-fn report(report: DeployReport, message_format: MessageFormat) -> Result<()> {
-    crate::commands::print_message(
-        &report,
-        || {
-            println!("mode: {}", report.mode);
-            println!("target_arch: {}", report.target_arch);
-            println!("official_target: {}", report.official_target_triple);
-            println!("local_target: {}", report.local_target_triple);
-            println!("payload_root: {}", report.payload_root.display());
-            println!("install plan:");
-            println!("{}", serde_json::to_string_pretty(&report.install_plan)?);
-            println!("rendered units:");
-            for (path, contents) in &report.rendered_units {
-                println!("--- {path}");
-                print!("{contents}");
-            }
-            println!("env files:");
-            for (path, contents) in &report.env_files {
-                println!("--- {path}");
-                print!("{contents}");
-            }
-            println!("release.json:");
-            println!("{}", serde_json::to_string_pretty(&report.release_json)?);
-            if let Some(delivery) = report.delivery {
-                println!("official_delivery: {delivery:?}");
-            }
-            if let Some(health) = &report.health {
-                println!("health:");
-                println!("{}", serde_json::to_string_pretty(health)?);
-            }
-            Ok(())
-        },
-        message_format,
-    )
+fn report(report: DeployReport) -> Result<()> {
+    println!("mode: {}", report.mode);
+    println!("target_arch: {}", report.target_arch);
+    println!("official_target: {}", report.official_target_triple);
+    println!("local_target: {}", report.local_target_triple);
+    println!("payload_root: {}", report.payload_root.display());
+    println!("install plan:");
+    println!("{}", serde_json::to_string_pretty(&report.install_plan)?);
+    println!("rendered units:");
+    for (path, contents) in &report.rendered_units {
+        println!("--- {path}");
+        print!("{contents}");
+    }
+    println!("env files:");
+    for (path, contents) in &report.env_files {
+        println!("--- {path}");
+        print!("{contents}");
+    }
+    println!("release.json:");
+    println!("{}", serde_json::to_string_pretty(&report.release_json)?);
+    if let Some(delivery) = report.delivery {
+        println!("official_delivery: {delivery:?}");
+    }
+    if let Some(health) = &report.health {
+        println!("health:");
+        println!("{}", serde_json::to_string_pretty(health)?);
+    }
+    Ok(())
 }
 
 fn format_health_failure(report: &HealthReport) -> String {
@@ -4913,7 +4894,6 @@ capabilities:
             target: Some("aarch64".to_string()),
             overlays: vec!["dev".to_string()],
             catalog_source: None,
-            message_format: MessageFormat::Human,
             health_timeout: Duration::from_secs(3),
         }
     }
@@ -4925,7 +4905,6 @@ capabilities:
             target: None,
             overlays: vec!["dev".to_string()],
             catalog_source: None,
-            message_format: MessageFormat::Human,
             health_timeout: Duration::from_secs(3),
         }
     }

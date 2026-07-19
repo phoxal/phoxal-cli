@@ -7,9 +7,7 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::AppContext;
-use crate::commands::MessageFormat;
 use crate::native_artifacts::{ArtifactProgressReporter, NativeArtifactDescriptor};
-use crate::output_mode::OutputMode;
 use crate::resolver::{ResolveOptions, discover_robot_yaml, load_robot_with_extras, resolve};
 
 #[derive(Debug, Args)]
@@ -19,8 +17,6 @@ pub struct Update {
         help = "Plan and report the update without downloading or changing active versions."
     )]
     pub dry_run: bool,
-    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
-    pub message_format: MessageFormat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -56,17 +52,13 @@ impl Update {
         let catalog_source = app.catalog_source.clone();
         let dry_run = self.dry_run;
         let ui = app.ui;
-        let output_mode = ui.mode();
+        let interactive = ui.interactive();
         let summary = tokio::task::spawn_blocking(move || {
             update(&project_root, catalog_source, dry_run, &ui)
         })
         .await
         .context("update worker failed")??;
-        crate::commands::print_message(
-            &summary,
-            || print_human(&summary, output_mode),
-            self.message_format,
-        )
+        print_human(&summary, interactive)
     }
 }
 
@@ -94,7 +86,7 @@ fn update(
             offline: false,
         },
         channel,
-        ui.mode(),
+        ui.interactive(),
     )?
     .context("update requires a reachable artifact catalog; --offline cannot update")?;
     let resolved = resolve(
@@ -170,7 +162,7 @@ fn update(
     if !dry_run {
         let _lock = crate::native_artifacts::ArtifactStoreLock::exclusive("update")?;
         fs::create_dir_all(&destination)?;
-        let progress = UpdateProgress::new(ui.mode(), &updates);
+        let progress = UpdateProgress::new(ui.interactive(), &updates);
         crate::native_artifacts::prepare_and_activate_descriptors_with_progress(
             &descriptors,
             &progress,
@@ -241,15 +233,15 @@ fn include_existing_target_scopes(
     Ok(())
 }
 
-fn print_human(summary: &UpdateSummary, output_mode: OutputMode) -> Result<()> {
-    for line in human_lines(summary, output_mode) {
+fn print_human(summary: &UpdateSummary, interactive: bool) -> Result<()> {
+    for line in human_lines(summary, interactive) {
         println!("{line}");
     }
     Ok(())
 }
 
-fn human_lines(summary: &UpdateSummary, output_mode: OutputMode) -> Vec<String> {
-    if output_mode == OutputMode::Rich && !summary.dry_run {
+fn human_lines(summary: &UpdateSummary, interactive: bool) -> Vec<String> {
+    if interactive && !summary.dry_run {
         return if summary.updates.iter().any(|update| !update.pinned) {
             summary
                 .prune_versions
@@ -312,9 +304,9 @@ struct UpdateProgress {
 }
 
 impl UpdateProgress {
-    fn new(mode: OutputMode, updates: &[PackageUpdate]) -> Self {
+    fn new(interactive: bool, updates: &[PackageUpdate]) -> Self {
         Self {
-            rows: crate::progress::Rows::new(mode),
+            rows: crate::progress::Rows::new(interactive),
             updates: updates
                 .iter()
                 .cloned()
@@ -560,7 +552,7 @@ robot:
         };
 
         assert_eq!(
-            human_lines(&summary, OutputMode::Plain),
+            human_lines(&summary, false),
             vec![
                 "\u{2713} phoxal/simulator-webots-controller [aarch64-apple-darwin] 0.1.7 -> 0.1.9 (7.1 MiB)"
                     .to_string(),
@@ -568,7 +560,7 @@ robot:
                     .to_string(),
             ]
         );
-        assert!(human_lines(&summary, OutputMode::Rich).is_empty());
+        assert!(human_lines(&summary, true).is_empty());
 
         let mut refresh = summary.clone();
         refresh.updates = vec![PackageUpdate {
@@ -585,7 +577,7 @@ robot:
             vec!["0.19.7".to_string()],
         );
         assert_eq!(
-            human_lines(&refresh, OutputMode::Plain),
+            human_lines(&refresh, false),
             vec![
                 "✓ phoxal/service-drive [aarch64-apple-darwin] refresh 0.19.8 (catalog digest changed) (7.0 MiB)".to_string(),
                 "✓ prune phoxal/service-drive: 0.19.7".to_string(),
@@ -595,7 +587,7 @@ robot:
         let mut all_pinned = summary;
         all_pinned.updates.retain(|update| update.pinned);
         assert_eq!(
-            human_lines(&all_pinned, OutputMode::Rich),
+            human_lines(&all_pinned, true),
             vec!["no updates available".to_string()]
         );
     }

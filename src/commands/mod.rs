@@ -1,8 +1,8 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use anyhow::Result;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use anyhow::{Result, bail};
+use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 use crate::AppContext;
@@ -21,38 +21,6 @@ pub mod status;
 pub mod update;
 pub mod validate;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum MessageFormat {
-    #[default]
-    Human,
-    Json,
-}
-
-pub fn print_message<T: Serialize>(
-    value: &T,
-    human: impl FnOnce() -> Result<()>,
-    format: MessageFormat,
-) -> Result<()> {
-    match format {
-        MessageFormat::Human => human(),
-        MessageFormat::Json => {
-            let value = json_message_value(value)?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
-            Ok(())
-        }
-    }
-}
-
-fn json_message_value<T: Serialize>(value: &T) -> Result<serde_json::Value> {
-    let mut value = serde_json::to_value(value)?;
-    if let Some(updates) = crate::update_notice::take_json_updates()
-        && let Some(object) = value.as_object_mut()
-    {
-        object.insert("updates_available".to_string(), updates);
-    }
-    Ok(value)
-}
-
 /// Load the artifact catalog for a robot project. There is no `refresh`
 /// parameter anymore: [`crate::catalog::load_catalog`] always fetches the
 /// remote catalog fresh (no on-disk cache of the fetch) unless an explicit
@@ -68,7 +36,7 @@ pub(crate) fn load_catalog_for_robot(
         project_root,
         channel,
         manifest_extras,
-        app.output.mode,
+        app.output.decorated(),
     )
 }
 
@@ -77,7 +45,7 @@ pub(crate) fn load_catalog_for_robot_from_source(
     project_root: &std::path::Path,
     channel: phoxal::model::robot::v0::Channel,
     manifest_extras: &RobotManifestExtras,
-    mode: crate::output_mode::OutputMode,
+    interactive: bool,
 ) -> Result<Option<crate::catalog::Catalog>> {
     let robot_source = manifest_extras.catalog_source.as_ref().map(|source| {
         if source.is_absolute() {
@@ -86,28 +54,24 @@ pub(crate) fn load_catalog_for_robot_from_source(
             project_root.join(source)
         }
     });
-    catalog_or_vendored(
-        crate::catalog::load_pinned_catalog(
-            crate::catalog::CatalogLoadOptions {
-                cli_source: catalog_source,
-                robot_source,
-                offline: false,
-            },
-            crate::catalog::selection_channel(channel),
-            mode,
-        ),
-        mode,
-    )
+    catalog_or_vendored(crate::catalog::load_pinned_catalog(
+        crate::catalog::CatalogLoadOptions {
+            cli_source: catalog_source,
+            robot_source,
+            offline: false,
+        },
+        crate::catalog::selection_channel(channel),
+        interactive,
+    ))
 }
 
 pub(crate) fn catalog_or_vendored(
     loaded: Result<Option<crate::catalog::Catalog>>,
-    mode: crate::output_mode::OutputMode,
 ) -> Result<Option<crate::catalog::Catalog>> {
     match loaded {
         Ok(catalog) => Ok(catalog),
         Err(error) if crate::host_paths::artifacts_dir().is_ok_and(|path| path.is_dir()) => {
-            if std::env::var_os("PHOXAL_QUIET").is_none() && !mode.is_json() {
+            if std::env::var_os("PHOXAL_QUIET").is_none() {
                 let message = format!(
                     "catalog unreachable, continuing with project-vendored files: {error:#}"
                 );
@@ -150,15 +114,7 @@ pub fn long_version() -> &'static str {
 }
 
 #[derive(Debug, Args)]
-pub struct VersionArgs {
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = MessageFormat::Human,
-        help = "Output format for the version report."
-    )]
-    pub message_format: MessageFormat,
-}
+pub struct VersionArgs {}
 
 /// What the CLI itself supports, independent of any one robot graph.
 ///
@@ -185,23 +141,16 @@ pub fn version_summary() -> VersionSummary {
 
 impl VersionArgs {
     pub fn run(&self) -> Result<()> {
-        let summary = version_summary();
-        print_message(
-            &summary,
-            || {
-                println!("phoxal-cli {}", long_version());
-                println!(
-                    "default catalog URL: {}",
-                    crate::catalog::DEFAULT_CATALOG_URL
-                );
-                println!(
-                    "catalog override env: {}",
-                    crate::catalog::CATALOG_SOURCE_ENV
-                );
-                Ok(())
-            },
-            self.message_format,
-        )
+        println!("phoxal-cli {}", long_version());
+        println!(
+            "default catalog URL: {}",
+            crate::catalog::DEFAULT_CATALOG_URL
+        );
+        println!(
+            "catalog override env: {}",
+            crate::catalog::CATALOG_SOURCE_ENV
+        );
+        Ok(())
     }
 }
 
@@ -246,7 +195,7 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
-        help = "Force append-only stderr output: no spinner/progress redraw, no interactive TUI beyond the plain welcome card and log lines."
+        help = "Disable terminal styling and progress redraw for finite commands. Interactive run/simulation sessions require the TUI and reject this flag."
     )]
     pub plain: bool,
 
@@ -291,13 +240,11 @@ pub enum RootCommand {
 }
 
 impl RootCommand {
-    fn update_notice_format(&self) -> Option<MessageFormat> {
+    fn consumes_artifacts(&self) -> bool {
         match self {
-            Self::Check(command) => Some(command.message_format),
-            Self::Simulation(command) => command.update_notice_format(),
-            Self::Run(command) => Some(command.message_format),
-            Self::Deploy(command) => Some(command.message_format),
-            _ => None,
+            Self::Check(_) | Self::Run(_) | Self::Deploy(_) => true,
+            Self::Simulation(command) => command.consumes_artifacts(),
+            _ => false,
         }
     }
 
@@ -338,13 +285,8 @@ impl RootCommand {
         }
     }
 
-    /// Label the welcome card with the invocation's terminal shape. A dry
-    /// run is always `plan only`; a live session is `full` when the TUI owns
-    /// the terminal and `plain` otherwise; finite commands are `one shot`.
-    fn welcome_terminal_mode(
-        &self,
-        output_mode: crate::output_mode::OutputMode,
-    ) -> crate::identity::TerminalMode {
+    /// Label the welcome card with the invocation's terminal shape.
+    fn welcome_terminal_mode(&self) -> crate::identity::TerminalMode {
         let plan_only = match self {
             Self::Simulation(command) => matches!(
                 &command.command,
@@ -357,44 +299,9 @@ impl RootCommand {
         if plan_only {
             crate::identity::TerminalMode::PlanOnly
         } else if self.enters_interactive_session() {
-            if output_mode == crate::output_mode::OutputMode::Rich {
-                crate::identity::TerminalMode::Full
-            } else {
-                crate::identity::TerminalMode::Plain
-            }
+            crate::identity::TerminalMode::Full
         } else {
             crate::identity::TerminalMode::OneShot
-        }
-    }
-
-    /// The `--message-format` every verb answers with, defaulting to
-    /// [`MessageFormat::Human`] for the handful of verbs (`validate`,
-    /// `logs`, `doctor`) that have no format flag of their own. Broader than
-    /// [`Self::update_notice_format`] (which only covers the four
-    /// artifact-consuming verbs): this feeds [`crate::output_mode::OutputMode`]
-    /// and [`crate::identity::IdentityPolicy`], which both need to know
-    /// `--json` was requested regardless of which verb it was.
-    fn message_format(&self) -> MessageFormat {
-        match self {
-            Self::Check(command) => command.message_format,
-            Self::Behavior(command) => command.message_format(),
-            Self::Validate(_) => MessageFormat::Human,
-            Self::Simulation(command) => command.message_format(),
-            Self::Run(command) => command.message_format,
-            Self::Logs(_) => MessageFormat::Human,
-            Self::Status(command) => command.message_format,
-            Self::Deploy(command) => command.message_format,
-            Self::Update(command) => command.message_format,
-            Self::Doctor(_) => MessageFormat::Human,
-            Self::Service(command) => {
-                let service::ServiceSubcommand::Catalog(catalog) = &command.command;
-                catalog.message_format
-            }
-            Self::Version(command) => command.message_format,
-            Self::SelfCmd(command) => {
-                let self_cmd::SelfSubcommand::Upgrade(upgrade) = &command.command;
-                upgrade.message_format
-            }
         }
     }
 
@@ -417,35 +324,23 @@ impl RootCommand {
     }
 }
 
-impl Cli {
-    /// The invocation-wide output contract, exposed so the binary can silence
-    /// tracing and its top-level error reporter before dispatch starts.
-    #[must_use]
-    pub fn message_format(&self) -> MessageFormat {
-        self.command.message_format()
-    }
-}
-
 pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
-    let interactive = std::io::stderr().is_terminal();
-    let message_format = cli.command.message_format();
-    let output = crate::session::output::OutputContext::compute(
-        interactive,
-        cli.plain,
-        cli.quiet,
-        message_format,
-    );
+    let terminal = std::io::stderr().is_terminal();
+    if cli.command.enters_interactive_session() && cli.plain {
+        bail!("interactive `run` and `simulation run` sessions require the TUI; remove `--plain`");
+    }
+    if cli.command.enters_interactive_session() && !terminal {
+        bail!(
+            "interactive `run` and `simulation run` sessions require a terminal; run this command in a TTY"
+        );
+    }
+    let output = crate::session::output::OutputContext::compute(terminal, cli.plain, cli.quiet);
 
     let policy = crate::update_notice::NoticePolicy {
-        artifact_consuming: cli.command.update_notice_format().is_some(),
-        message_format: cli
-            .command
-            .update_notice_format()
-            .unwrap_or(MessageFormat::Human),
+        artifact_consuming: cli.command.consumes_artifacts(),
         quiet: cli.quiet,
-        interactive,
-        tui: cli.command.enters_interactive_session()
-            && output.mode == crate::output_mode::OutputMode::Rich,
+        interactive: terminal,
+        tui: cli.command.enters_interactive_session(),
     };
     crate::update_notice::begin(policy);
     if policy.artifact_consuming && !policy.quiet && policy.interactive {
@@ -456,36 +351,34 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
     // from the same inputs the notice policy above uses, plus the theme
     // detected off the same stream, and threaded explicitly into every
     // long-running operation below (catalog fetch, artifact download, git
-    // resolve, cargo builds, the simulate readiness wait, `AppContext::ui`'s
-    // own JSON gate) via `AppContext::output`/`AppContext::ui` - no
+    // resolve, cargo builds, and the simulate readiness wait) via
+    // `AppContext::output`/`AppContext::ui` - no
     // process-global mode cell.
     let app = &AppContext {
         output,
-        ui: crate::Ui::new(output.mode),
+        ui: crate::Ui::new(output.decorated()),
         ..app.clone()
     };
 
-    // The welcome card: gated independently of the output mode above (see
+    // The welcome card: gated independently of progress styling above (see
     // `crate::identity::IdentityPolicy` - `--plain` is deliberately not part
-    // of this rule). A Rich-mode `run`/`simulation run` session renders the
+    // of this rule). A `run`/`simulation run` session renders the
     // SAME card inside its own TUI startup frame instead (Product decision
     // 4) - printing it here too would show it twice, once on the outgoing
     // primary screen and once inside the alternate screen the session then
     // opens.
     let identity_policy = crate::identity::IdentityPolicy {
-        interactive,
+        interactive: terminal,
         quiet: cli.quiet,
-        message_format,
         machine_verb: cli.command.is_machine_verb(),
     };
-    let card_rendered_by_the_session_itself = cli.command.enters_interactive_session()
-        && output.mode == crate::output_mode::OutputMode::Rich;
+    let card_rendered_by_the_session_itself = cli.command.enters_interactive_session();
     if !card_rendered_by_the_session_itself {
         crate::identity::print(
             identity_policy,
             app.project.root(),
-            cli.command.welcome_terminal_mode(output.mode),
-            crate::theme::Theme::detect_stderr(output.mode),
+            cli.command.welcome_terminal_mode(),
+            crate::theme::Theme::detect_stderr(output.decorated()),
             version_summary().cli_version,
         );
     }
@@ -530,50 +423,12 @@ mod tests {
     }
 
     #[test]
-    fn version_args_json_mode_prints_only_the_summary_document() -> Result<()> {
-        let args = VersionArgs {
-            message_format: MessageFormat::Json,
-        };
-        let summary = version_summary();
-        let mut printed = String::new();
-        print_message(
-            &summary,
-            || {
-                printed.push_str("human path should not run in json mode");
-                Ok(())
-            },
-            args.message_format,
-        )?;
-        assert!(printed.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn version_args_human_mode_runs_the_human_closure_not_json() -> Result<()> {
-        let args = VersionArgs {
-            message_format: MessageFormat::Human,
-        };
-        let summary = version_summary();
-        let mut ran_human = false;
-        print_message(
-            &summary,
-            || {
-                ran_human = true;
-                Ok(())
-            },
-            args.message_format,
-        )?;
-        assert!(ran_human);
-        Ok(())
-    }
-
-    #[test]
     fn update_and_non_artifact_verbs_are_excluded_from_update_notices() {
         let update = Cli::try_parse_from(["phoxal-cli", "update"]).unwrap();
-        assert_eq!(update.command.update_notice_format(), None);
+        assert!(!update.command.consumes_artifacts());
 
         let version = Cli::try_parse_from(["phoxal-cli", "version"]).unwrap();
-        assert_eq!(version.command.update_notice_format(), None);
+        assert!(!version.command.consumes_artifacts());
     }
 
     /// `enters_interactive_session` decides whether `dispatch` skips its own
@@ -605,67 +460,31 @@ mod tests {
     }
 
     #[test]
-    fn welcome_terminal_mode_distinguishes_full_plain_plan_and_one_shot() {
+    fn welcome_terminal_mode_distinguishes_full_plan_and_one_shot() {
         let live = Cli::try_parse_from(["phoxal-cli", "simulation", "run", "default"])
             .expect("live simulation should parse");
         assert_eq!(
-            live.command
-                .welcome_terminal_mode(crate::output_mode::OutputMode::Rich),
+            live.command.welcome_terminal_mode(),
             crate::identity::TerminalMode::Full
-        );
-        assert_eq!(
-            live.command
-                .welcome_terminal_mode(crate::output_mode::OutputMode::Plain),
-            crate::identity::TerminalMode::Plain
         );
 
         let plan = Cli::try_parse_from(["phoxal-cli", "simulation", "run", "default", "--dry-run"])
             .expect("simulation plan should parse");
         assert_eq!(
-            plan.command
-                .welcome_terminal_mode(crate::output_mode::OutputMode::Rich),
+            plan.command.welcome_terminal_mode(),
             crate::identity::TerminalMode::PlanOnly
         );
 
         let check = Cli::try_parse_from(["phoxal-cli", "check"]).expect("check should parse");
         assert_eq!(
-            check
-                .command
-                .welcome_terminal_mode(crate::output_mode::OutputMode::Rich),
+            check.command.welcome_terminal_mode(),
             crate::identity::TerminalMode::OneShot
         );
     }
 
     #[test]
-    fn artifact_consuming_verb_exposes_its_message_format_to_notice_gate() {
-        let check =
-            Cli::try_parse_from(["phoxal-cli", "check", "--message-format", "json"]).unwrap();
-        assert_eq!(
-            check.command.update_notice_format(),
-            Some(MessageFormat::Json)
-        );
-    }
-
-    #[test]
-    fn json_output_path_embeds_the_structured_updates_available_field() {
-        crate::update_notice::begin(crate::update_notice::NoticePolicy {
-            artifact_consuming: true,
-            message_format: MessageFormat::Json,
-            quiet: false,
-            interactive: true,
-            tui: false,
-        });
-        crate::update_notice::offer(crate::update_notice::UpdateNotice::Artifacts(vec![
-            "phoxal/service-drive 1.0.0 -> 1.1.0".to_string(),
-        ]));
-
-        let value = json_message_value(&serde_json::json!({ "status": "ok" })).unwrap();
-
-        assert_eq!(value["status"], "ok");
-        assert_eq!(
-            value["updates_available"][0],
-            "phoxal/service-drive 1.0.0 -> 1.1.0"
-        );
-        crate::update_notice::finish();
+    fn artifact_consuming_verb_reaches_notice_gate() {
+        let check = Cli::try_parse_from(["phoxal-cli", "check"]).unwrap();
+        assert!(check.command.consumes_artifacts());
     }
 }
