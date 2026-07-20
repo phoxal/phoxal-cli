@@ -294,6 +294,7 @@ impl std::fmt::Display for ArtifactKind {
 /// degrade (product decision 9).
 pub const OFFICIAL_TOOLS: &[(&str, &str)] = &[
     ("bus", "phoxal/tool-bus"),
+    ("device", "phoxal/tool-device"),
     ("joypad", "phoxal/tool-joypad"),
     ("log", "phoxal/tool-log"),
     ("telemetry", "phoxal/tool-telemetry"),

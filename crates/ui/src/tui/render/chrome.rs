@@ -104,12 +104,12 @@ pub(super) fn draw_header(
         sections[0],
     );
     frame.render_widget(
-        Paragraph::new(header_host_lines(
-            telemetry.host.as_ref(),
+        Paragraph::new(header_device_lines(
+            telemetry.device.as_ref(),
             now,
             sections[1].width,
         ))
-        .block(shell_block(theme, "Host")),
+        .block(shell_block(theme, "Device · main")),
         sections[1],
     );
     frame.render_widget(
@@ -142,13 +142,18 @@ pub(super) fn compact_header_status(
             " {} · channel {} · {} · {}",
             title.mode,
             sanitize_terminal_text(&title.channel),
-            host_resource_slot(telemetry.host.as_ref(), now),
+            device_resource_slot(telemetry.device.as_ref(), now),
             simulation_clock_slot(title.mode, telemetry.clock, now)
         );
     }
-    let cpu = telemetry.host.as_ref().map_or_else(
+    let cpu = telemetry.device.as_ref().map_or_else(
         || "cpu n/a".to_string(),
-        |host| format!("cpu {:.0}%", host.value.cpu_pct),
+        |device| {
+            device
+                .value
+                .cpu_pct
+                .map_or_else(|| "cpu n/a".to_string(), |value| format!("cpu {value:.0}%"))
+        },
     );
     let clock = match title.mode {
         SessionMode::Simulation => telemetry.clock.map_or_else(
@@ -199,13 +204,13 @@ pub(super) fn header_identity_lines(
     lines
 }
 
-pub(super) fn header_host_lines(
-    host: Option<&Timestamped<HostSample>>,
+pub(super) fn header_device_lines(
+    device: Option<&Timestamped<DeviceSample>>,
     now: Instant,
     width: u16,
 ) -> Vec<Line<'static>> {
     let row = |label: &str, value: String| Line::from(format!("{label:<12}{value}"));
-    let Some(host) = host else {
+    let Some(device) = device else {
         return vec![
             row("CPU", "n/a".to_string()),
             row("RAM", "n/a".to_string()),
@@ -214,10 +219,12 @@ pub(super) fn header_host_lines(
             row("state", "waiting for telemetry".to_string()),
         ];
     };
-    let disk = host
+    let disk = device
         .value
         .disks
-        .iter()
+        .as_deref()
+        .into_iter()
+        .flatten()
         .find(|disk| disk.mount_point == "/")
         .map_or_else(
             || "n/a".to_string(),
@@ -230,36 +237,55 @@ pub(super) fn header_host_lines(
             },
         );
     vec![
-        row("CPU", format!("{:.1}%", host.value.cpu_pct)),
+        row(
+            "CPU",
+            device
+                .value
+                .cpu_pct
+                .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1}%")),
+        ),
         row(
             "RAM",
-            format!(
-                "{}/{}",
-                human::bytes_compact(host.value.ram_used_bytes),
-                human::bytes_compact(host.value.ram_total_bytes)
-            ),
+            device
+                .value
+                .ram_used_bytes
+                .zip(device.value.ram_total_bytes)
+                .map_or_else(
+                    || "n/a".to_string(),
+                    |(used, total)| {
+                        format!(
+                            "{}/{}",
+                            human::bytes_compact(used),
+                            human::bytes_compact(total)
+                        )
+                    },
+                ),
         ),
         row("DISK (root)", disk),
         row(
             "load",
-            if width < 32 {
-                format!(
-                    "{:.1}/{:.1}/{:.1}",
-                    host.value.load_1m, host.value.load_5m, host.value.load_15m
-                )
-            } else {
-                format!(
-                    "{:.2} / {:.2} / {:.2}",
-                    host.value.load_1m, host.value.load_5m, host.value.load_15m
-                )
-            },
+            device
+                .value
+                .load_1m
+                .zip(device.value.load_5m)
+                .zip(device.value.load_15m)
+                .map_or_else(
+                    || "n/a".to_string(),
+                    |((one, five), fifteen)| {
+                        if width < 32 {
+                            format!("{one:.1}/{five:.1}/{fifteen:.1}")
+                        } else {
+                            format!("{one:.2} / {five:.2} / {fifteen:.2}")
+                        }
+                    },
+                ),
         ),
         row(
             "state",
-            if host.is_stale(now, DEFAULT_FRESHNESS_TTL) {
+            if device.is_stale(now, DEFAULT_FRESHNESS_TTL) {
                 "stale".to_string()
-            } else if host.value.disks_truncated > 0 {
-                format!("live · +{} disks omitted", host.value.disks_truncated)
+            } else if device.value.disks_truncated > 0 {
+                format!("live · +{} disks omitted", device.value.disks_truncated)
             } else {
                 "live".to_string()
             },

@@ -15,8 +15,8 @@ use phoxal_cli_core::project::catalog::{
     fixture_contract_for_tests, fixture_service_entry_for_tests,
 };
 use phoxal_cli_core::project::launch_plan::{
-    CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_BUS, ROBOT_TOOL_LOG, SITE_TOOL_JOYPAD,
-    SITE_TOOL_TELEMETRY, SubstitutionRecord, build_launch_plan,
+    CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_BUS, ROBOT_TOOL_DEVICE, ROBOT_TOOL_LOG,
+    ROBOT_TOOL_TELEMETRY, SITE_TOOL_JOYPAD, SubstitutionRecord, build_launch_plan,
 };
 use phoxal_cli_core::project::resolver::{
     ResolveOptions, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
@@ -196,7 +196,6 @@ fn launch_plan_covers_site_singletons_services_and_component_instances() -> Resu
     assert_eq!(plan.mode, LaunchMode::Run);
     assert_eq!(plan.site[0].id, SITE_TOOL_JOYPAD);
     assert_eq!(plan.site[0].phoxal_config, Value::Null);
-    assert_eq!(plan.site[1].id, SITE_TOOL_TELEMETRY);
     let robot = &plan.robots[0];
     assert_eq!(robot.id, "robot_v1");
     assert_eq!(robot.substitutions, Vec::<SubstitutionRecord>::new());
@@ -215,6 +214,8 @@ fn launch_plan_covers_site_singletons_services_and_component_instances() -> Resu
     assert!(participant_ids.contains(&"right_drive"));
     assert!(participant_ids.contains(&"tool-bus-robot_v1"));
     assert!(participant_ids.contains(&"tool-log-robot_v1"));
+    assert!(participant_ids.contains(&"tool-telemetry-robot_v1"));
+    assert!(participant_ids.contains(&"tool-device-robot_v1"));
     assert_eq!(
         participant_ids
             .iter()
@@ -270,7 +271,8 @@ fn add_launch_plan_site_tools(resolved: &mut ResolvedRobot) {
     resolved.tools.push(launch_plan_tool(ROBOT_TOOL_BUS));
     resolved.tools.push(launch_plan_tool(SITE_TOOL_JOYPAD));
     resolved.tools.push(launch_plan_tool(ROBOT_TOOL_LOG));
-    resolved.tools.push(launch_plan_tool(SITE_TOOL_TELEMETRY));
+    resolved.tools.push(launch_plan_tool(ROBOT_TOOL_TELEMETRY));
+    resolved.tools.push(launch_plan_tool(ROBOT_TOOL_DEVICE));
 }
 
 fn launch_plan_tool(name: &str) -> ResolvedTool {

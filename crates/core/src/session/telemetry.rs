@@ -13,23 +13,24 @@ use crate::session::stores::telemetry::RobotScope;
 use crate::session::stores::telemetry::Timestamped;
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct HostSample {
-    pub cpu_pct: f32,
-    pub ram_used_bytes: u64,
-    pub ram_total_bytes: u64,
-    pub swap_used_bytes: u64,
-    pub swap_total_bytes: u64,
-    pub load_1m: f32,
-    pub load_5m: f32,
-    pub load_15m: f32,
+pub struct DeviceSample {
+    pub device_id: String,
+    pub cpu_pct: Option<f32>,
+    pub ram_used_bytes: Option<u64>,
+    pub ram_total_bytes: Option<u64>,
+    pub swap_used_bytes: Option<u64>,
+    pub swap_total_bytes: Option<u64>,
+    pub load_1m: Option<f32>,
+    pub load_5m: Option<f32>,
+    pub load_15m: Option<f32>,
     pub uptime_s: Option<u64>,
-    pub disks: Arc<Vec<DiskSample>>,
+    pub disks: Option<Arc<Vec<DeviceDiskSample>>>,
     pub disks_truncated: u32,
     pub window_ns: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DiskSample {
+pub struct DeviceDiskSample {
     pub mount_point: String,
     pub file_system: String,
     pub used_bytes: u64,
@@ -232,7 +233,7 @@ pub struct ClockObservation {
 pub struct TelemetrySnapshot {
     pub scope: Option<RobotScope>,
     pub clock: Option<Timestamped<ClockSample>>,
-    pub host: Option<Timestamped<HostSample>>,
+    pub device: Option<Timestamped<DeviceSample>>,
     pub router: Option<Timestamped<RouterMetricsSample>>,
     pub router_throughput_history: Vec<Timestamped<f32>>,
     pub runtimes: BTreeMap<String, Timestamped<RuntimePerformanceSample>>,

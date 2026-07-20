@@ -1,5 +1,5 @@
 //! Live telemetry feed for the TUI (CLI-UX Phase 3/4): background bus
-//! subscribers for the framework's `v2` router/host-telemetry/joypad
+//! subscribers for the framework's retained stable tool telemetry and preview joypad
 //! contracts, plus the simulation clock's live step/time readout,
 //! mirroring `supervisor::start_bus_log_subscriber`/
 //! `start_liveliness_observer`'s "observe, update shared
@@ -33,49 +33,39 @@ use phoxal_cli_core::session::reconcile::{
 use phoxal_cli_core::session::stores::log::sanitize_terminal_text;
 use phoxal_cli_core::session::stores::telemetry::{RobotScope, TelemetryStore, Timestamped};
 use phoxal_cli_core::session::telemetry::{
-    ClockObservation, DiskSample, HostSample, JoypadCommand, JoypadDevice, JoypadDeviceStatus,
-    JoypadDevicesSample, RouterMetricsSample, RuntimeBufferKind, RuntimeDirection,
-    RuntimeFeedStatus, RuntimePerformanceSample, RuntimeStepSample, RuntimeTopicSample,
-    TelemetrySnapshot, TopicMetric,
+    ClockObservation, DeviceDiskSample, DeviceSample, JoypadCommand, JoypadDevice,
+    JoypadDeviceStatus, JoypadDevicesSample, RouterMetricsSample, RuntimeBufferKind,
+    RuntimeDirection, RuntimeFeedStatus, RuntimePerformanceSample, RuntimeStepSample,
+    RuntimeTopicSample, TelemetrySnapshot, TopicMetric,
 };
 
-const MAX_HOST_DISKS: usize = 32;
+const MAX_DEVICE_DISKS: usize = 32;
 const MAX_ROUTER_TOPICS: usize = 256;
 const MAX_JOYPAD_DEVICES: usize = 64;
 const MAX_REMOTE_TEXT_CHARS: usize = 256;
 const MAX_EXPECTED_RUNTIME_PARTICIPANTS: usize = 1024;
 
-fn host_sample_from(body: api::telemetry::Host) -> HostSample {
-    let wire_truncated = body
-        .disks
-        .iter()
-        .filter(|disk| disk.mount_point.is_empty())
-        .filter_map(|disk| {
-            disk.file_system
-                .strip_prefix('+')
-                .and_then(|value| value.strip_suffix(" omitted"))
-                .and_then(|value| value.parse::<u32>().ok())
-        })
-        .fold(0_u32, u32::saturating_add);
-    let received_disks = body
-        .disks
-        .iter()
-        .filter(|disk| !disk.mount_point.is_empty())
-        .count();
-    let disks = body
-        .disks
-        .into_iter()
-        .filter(|disk| !disk.mount_point.is_empty())
-        .take(MAX_HOST_DISKS)
-        .map(|disk| DiskSample {
-            mount_point: bounded_remote_text(&disk.mount_point),
-            file_system: bounded_remote_text(&disk.file_system),
-            used_bytes: disk.used_bytes,
-            total_bytes: disk.total_bytes,
-        })
-        .collect::<Vec<_>>();
-    let locally_truncated = received_disks.saturating_sub(disks.len());
-    HostSample {
+fn device_sample_from(record: state_api::tool::device::Record) -> DeviceSample {
+    let body = record.sample;
+    let received_disks = body.disks.as_ref().map_or(0, Vec::len);
+    let disks = body.disks.map(|disks| {
+        Arc::new(
+            disks
+                .into_iter()
+                .take(MAX_DEVICE_DISKS)
+                .map(|disk| DeviceDiskSample {
+                    mount_point: bounded_remote_text(&disk.mount_point),
+                    file_system: bounded_remote_text(&disk.file_system),
+                    used_bytes: disk.used_bytes,
+                    total_bytes: disk.total_bytes,
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    let locally_truncated =
+        received_disks.saturating_sub(disks.as_ref().map_or(0, |rows| rows.len()));
+    DeviceSample {
+        device_id: bounded_remote_text(&body.device_id),
         cpu_pct: body.cpu_pct,
         ram_used_bytes: body.ram_used_bytes,
         ram_total_bytes: body.ram_total_bytes,
@@ -85,8 +75,9 @@ fn host_sample_from(body: api::telemetry::Host) -> HostSample {
         load_5m: body.load_5m,
         load_15m: body.load_15m,
         uptime_s: body.uptime_s,
-        disks: Arc::new(disks),
-        disks_truncated: wire_truncated
+        disks,
+        disks_truncated: record
+            .truncated
             .saturating_add(u32::try_from(locally_truncated).unwrap_or(u32::MAX)),
         window_ns: body.window_ns,
     }
@@ -258,7 +249,7 @@ fn runtime_record_from(body: state_api::tool::runtime::Record) -> RuntimePerform
 /// trusting a long-cached value as if it were still live. See the
 /// `stores::telemetry_store` module documentation for the store contract.
 /// Live-telemetry state shared between the background feed tasks
-/// (`start_host_feed` etc.) and the TUI's redraw path
+/// (`start_device_feed` etc.) and the TUI's redraw path
 /// (`TuiDisplay::redraw`/`render::draw`). Cheap to clone (an `Arc` handle);
 /// every feed task and the TUI hold their own clone.
 ///
@@ -331,7 +322,7 @@ impl TelemetryBackend {
         let mut snapshot = TelemetrySnapshot {
             scope: Some(scope.clone()),
             clock: None,
-            host: store.host().cloned(),
+            device: store.device(scope).cloned(),
             router: store.router(scope).cloned(),
             router_throughput_history: store.router_throughput_history(scope).collect(),
             runtimes: store.runtimes(scope),
@@ -350,11 +341,11 @@ impl TelemetryBackend {
         snapshot
     }
 
-    fn record_host(&self, sample: HostSample) {
+    fn record_device(&self, scope: RobotScope, sample: DeviceSample) {
         self.inner
             .lock()
             .expect("telemetry mutex poisoned")
-            .record_host(Instant::now(), sample);
+            .record_device(scope, Instant::now(), sample);
     }
 
     fn record_router_at(
@@ -467,68 +458,215 @@ async fn control_state_feed_loop(
     result
 }
 
-/// Subscribe `v2::telemetry::Host` and feed every sample into
-/// `telemetry`, mirroring `supervisor::start_liveliness_observer`'s
-/// "open bus, subscribe, loop `recv`, retry on transport error" shape.
-/// Absence is expected and graceful: `tool-telemetry` may not be in the
-/// catalog yet, in which case this task simply never observes a sample and
-/// `TelemetrySnapshot::host` stays `None` forever - the caller does not treat
-/// that as an error.
-pub fn start_host_feed(
+/// Reconcile one robot root's retained `main` device observation with its
+/// live follow feed. Device totals stay scoped to that robot root and are
+/// never attributed to a runtime.
+pub fn start_device_feed(
     namespace: String,
     robot_id: String,
     connect: String,
     telemetry: TelemetryBackend,
+    mut recovery_epochs: watch::Receiver<u64>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let scope = RobotScope {
+            namespace: namespace.clone(),
+            robot_id: robot_id.clone(),
+        };
         loop {
             wait_for_endpoint(&connect).await;
-            match host_feed_loop(
-                namespace.clone(),
-                robot_id.clone(),
-                connect.clone(),
-                &telemetry,
-            )
+            let bus = match Bus::open(BusConfig {
+                namespace: namespace.clone(),
+                robot_id: robot_id.clone(),
+                participant: "phoxal-cli-tool-device-consumer".to_string(),
+                incarnation: 0,
+                connect_endpoints: vec![connect.clone()],
+            })
             .await
             {
-                Ok(()) => break,
+                Ok(bus) => bus,
                 Err(error) => {
-                    tracing::debug!("telemetry host feed waiting for router: {error:#}");
+                    tracing::debug!("device telemetry feed waiting for router: {error}");
                     tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
                 }
+            };
+            let feed = device_feed_loop(&bus, &scope, &telemetry);
+            tokio::pin!(feed);
+            let result = tokio::select! {
+                result = &mut feed => Some(result),
+                changed = recovery_epochs.changed() => {
+                    if changed.is_err() { break; }
+                    tracing::debug!(
+                        recovery_epoch = *recovery_epochs.borrow_and_update(),
+                        "recreating device snapshot/follow transport after graph recovery"
+                    );
+                    None
+                }
+            };
+            close_feed_bus(&bus, "tool-telemetry/device").await;
+            if let Some(result) = result {
+                let error =
+                    result.expect_err("device telemetry feed loop is intentionally endless");
+                tracing::debug!("device telemetry feed waiting for router: {error:#}");
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
     })
 }
 
-async fn host_feed_loop(
-    namespace: String,
-    robot_id: String,
-    connect: String,
+async fn device_feed_loop(
+    bus: &Bus,
+    scope: &RobotScope,
     telemetry: &TelemetryBackend,
-) -> Result<()> {
-    let bus = Bus::open(BusConfig {
-        namespace,
-        robot_id,
-        participant: "phoxal-cli-telemetry-host".to_string(),
-        incarnation: 0,
-        connect_endpoints: vec![connect],
-    })
-    .await
-    .map_err(|error| anyhow!("failed to open bus telemetry/host subscription: {error}"))?;
-    let result = async {
-        let topic = Topic::<Subscribe<api::telemetry::Host>>::new_static(
-            <api::telemetry::Host as ContractBody>::TOPIC,
-        );
-        let subscriber = Subscriber::<api::telemetry::Host>::new(&bus, &topic, 32).await?;
+) -> Result<Infallible> {
+    let follow_topic = state_api::topic::new().tool().device().follow();
+    let subscriber =
+        Subscriber::<state_api::tool::device::Follow>::new(bus, &follow_topic, 128).await?;
+    let snapshot_topic = state_api::topic::new().tool().device().snapshot();
+    let querier = Querier::<
+        state_api::tool::device::SnapshotRequest,
+        state_api::tool::device::Snapshot,
+    >::new(bus.clone(), &snapshot_topic, DEFAULT_QUERY_TIMEOUT)?;
+    let mut reconciler = Reconciler::new(256);
+    let mut local_drops = subscriber.dropped();
+    let mut retry_backoff =
+        RetryBackoff::new(Duration::from_millis(10), Duration::from_millis(250));
+
+    'query: loop {
+        reconciler.begin_query();
+        let query = querier.query(state_api::tool::device::SnapshotRequest {
+            device_id: Some("main".to_string()),
+            limit: 1,
+            before_sequence: None,
+        });
+        tokio::pin!(query);
+        let snapshot = loop {
+            tokio::select! {
+                response = &mut query => break response.map_err(|error| anyhow!("tool-telemetry device snapshot query failed: {error}"))?,
+                received = subscriber.recv() => {
+                    let received = received?;
+                    let observed = subscriber.dropped();
+                    if observed != local_drops {
+                        local_drops = observed;
+                        let _ = reconciler.local_drop();
+                        prepare_device_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+                        continue 'query;
+                    }
+                    let _ = reconciler.follow(DeviceRecordFollow::from(received.body));
+                }
+            }
+        };
+        let anchor = Cursor {
+            generation: snapshot.cursor.generation.clone(),
+            sequence: snapshot.cursor.sequence,
+        };
+        if snapshot.records.len() > 1
+            || snapshot.records.first().is_some_and(|record| {
+                record.sequence != anchor.sequence || record.sample.device_id != "main"
+            })
+        {
+            tracing::warn!("tool-telemetry device snapshot violated its bounded query contract");
+            let _ = reconciler.local_drop();
+            prepare_device_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+            continue 'query;
+        }
+        let anchor_generation = anchor.generation.clone();
+        let records = snapshot
+            .records
+            .into_iter()
+            .map(|record| DeviceRecordFollow {
+                cursor: Cursor {
+                    generation: anchor_generation.clone(),
+                    sequence: record.sequence,
+                },
+                record,
+            });
+        let outcome = reconciler.install(anchor, records.collect());
+        if !apply_device_outcome(telemetry, scope, outcome) {
+            prepare_device_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+            continue 'query;
+        }
+        retry_backoff.reset();
         loop {
             let received = subscriber.recv().await?;
-            telemetry.record_host(host_sample_from(received.body));
+            let observed = subscriber.dropped();
+            if observed != local_drops {
+                local_drops = observed;
+                let _ = reconciler.local_drop();
+                prepare_device_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+                continue 'query;
+            }
+            if !apply_device_outcome(
+                telemetry,
+                scope,
+                reconciler.follow(DeviceRecordFollow::from(received.body)),
+            ) {
+                prepare_device_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+                continue 'query;
+            }
         }
     }
-    .await;
-    close_feed_bus(&bus, "telemetry/host").await;
-    result
+}
+
+#[derive(Debug, Clone)]
+struct DeviceRecordFollow {
+    cursor: Cursor,
+    record: state_api::tool::device::Record,
+}
+
+impl From<state_api::tool::device::Follow> for DeviceRecordFollow {
+    fn from(follow: state_api::tool::device::Follow) -> Self {
+        Self {
+            cursor: Cursor {
+                generation: follow.cursor.generation,
+                sequence: follow.cursor.sequence,
+            },
+            record: follow.record,
+        }
+    }
+}
+
+impl Sequenced for DeviceRecordFollow {
+    fn cursor(&self) -> Cursor {
+        self.cursor.clone()
+    }
+}
+
+fn apply_device_outcome(
+    telemetry: &TelemetryBackend,
+    scope: &RobotScope,
+    outcome: ReconcileOutcome<DeviceRecordFollow>,
+) -> bool {
+    match outcome {
+        ReconcileOutcome::Installed { snapshot, replay } => {
+            if let Some(latest) = snapshot
+                .into_iter()
+                .chain(replay)
+                .filter(|item| item.record.sample.device_id == "main")
+                .max_by_key(|item| item.record.sequence)
+            {
+                telemetry.record_device(scope.clone(), device_sample_from(latest.record));
+            }
+            true
+        }
+        ReconcileOutcome::Append(item) if item.record.sample.device_id == "main" => {
+            telemetry.record_device(scope.clone(), device_sample_from(item.record));
+            true
+        }
+        ReconcileOutcome::Append(_) | ReconcileOutcome::Buffered => true,
+        ReconcileOutcome::Requery => false,
+    }
+}
+
+async fn prepare_device_requery(
+    subscriber: &Subscriber<state_api::tool::device::Follow>,
+    local_drops: &mut u64,
+    backoff: &mut RetryBackoff,
+) {
+    while subscriber.try_recv().is_some() {}
+    *local_drops = subscriber.dropped();
+    tokio::time::sleep(backoff.next_delay()).await;
 }
 
 /// Reconcile tool-bus's complete bounded snapshot with its live follow feed.
@@ -770,7 +908,7 @@ fn timestamp_router_snapshot(
 
 /// Reconcile tool-telemetry's paginated retained runtime history with its live
 /// follow feed. The adapter owns transport recovery only; it never changes
-/// lifecycle state or samples host-process resources.
+/// lifecycle state or samples device resources.
 pub fn start_runtime_performance_feed(
     namespace: String,
     robot_id: String,
@@ -1367,7 +1505,7 @@ mod tests {
     fn snapshot_is_empty_by_default_graceful_absence() {
         let telemetry = TelemetryBackend::new();
         let snapshot = telemetry.snapshot(&scope("r1"));
-        assert!(snapshot.host.is_none());
+        assert!(snapshot.device.is_none());
         assert!(snapshot.clock.is_none());
         assert!(snapshot.router.is_none());
         assert!(snapshot.joypad.is_none());
@@ -1397,18 +1535,74 @@ mod tests {
     }
 
     #[test]
-    fn record_host_is_visible_on_the_next_snapshot() {
+    fn record_device_is_scoped_to_its_robot_root() {
         let telemetry = TelemetryBackend::new();
-        telemetry.record_host(HostSample {
-            cpu_pct: 42.0,
-            ram_used_bytes: 100,
-            ram_total_bytes: 200,
-            load_1m: 0.5,
-            window_ns: 1_000_000_000,
-            ..HostSample::default()
-        });
+        telemetry.record_device(
+            scope("r1"),
+            DeviceSample {
+                device_id: "main".to_string(),
+                cpu_pct: Some(42.0),
+                ram_used_bytes: Some(100),
+                ram_total_bytes: Some(200),
+                load_1m: Some(0.5),
+                window_ns: 1_000_000_000,
+                ..DeviceSample::default()
+            },
+        );
         let snapshot = telemetry.snapshot(&scope("r1"));
-        assert_eq!(snapshot.host.map(|host| host.value.cpu_pct), Some(42.0));
+        assert_eq!(
+            snapshot.device.and_then(|device| device.value.cpu_pct),
+            Some(42.0)
+        );
+        assert!(telemetry.snapshot(&scope("r2")).device.is_none());
+    }
+
+    #[test]
+    fn device_reconciliation_installs_only_the_latest_main_sample() {
+        fn item(sequence: u64, device_id: &str, cpu_pct: f32) -> DeviceRecordFollow {
+            DeviceRecordFollow {
+                cursor: Cursor {
+                    generation: "generation-a".to_string(),
+                    sequence,
+                },
+                record: state_api::tool::device::Record {
+                    sequence,
+                    sample: state_api::tool::device::Sample {
+                        device_id: device_id.to_string(),
+                        cpu_pct: Some(cpu_pct),
+                        ram_used_bytes: None,
+                        ram_total_bytes: None,
+                        swap_used_bytes: None,
+                        swap_total_bytes: None,
+                        load_1m: None,
+                        load_5m: None,
+                        load_15m: None,
+                        uptime_s: None,
+                        disks: None,
+                        window_ns: 1,
+                    },
+                    truncated: 0,
+                },
+            }
+        }
+
+        let telemetry = TelemetryBackend::new();
+        let target = scope("r1");
+        assert!(apply_device_outcome(
+            &telemetry,
+            &target,
+            ReconcileOutcome::Installed {
+                snapshot: vec![item(1, "main", 10.0), item(2, "other", 99.0)],
+                replay: vec![item(3, "main", 30.0)],
+            },
+        ));
+        assert_eq!(
+            telemetry
+                .snapshot(&target)
+                .device
+                .and_then(|device| device.value.cpu_pct),
+            Some(30.0)
+        );
     }
 
     #[test]
@@ -1501,34 +1695,39 @@ mod tests {
         assert_eq!(joypad.available.len(), MAX_JOYPAD_DEVICES);
         assert_eq!(joypad.devices_truncated, 7);
 
-        let host = host_sample_from(api::telemetry::Host {
-            cpu_pct: 0.0,
-            ram_used_bytes: 0,
-            ram_total_bytes: 0,
-            swap_used_bytes: 0,
-            swap_total_bytes: 0,
-            load_1m: 0.0,
-            load_5m: 0.0,
-            load_15m: 0.0,
-            uptime_s: None,
-            disks: (0..(MAX_HOST_DISKS + 4))
-                .map(|index| api::telemetry::Disk {
-                    mount_point: format!("/disk-{index}"),
-                    file_system: "fs".to_string(),
-                    used_bytes: 0,
-                    total_bytes: 1,
-                })
-                .chain(std::iter::once(api::telemetry::Disk {
-                    mount_point: String::new(),
-                    file_system: "+3 omitted".to_string(),
-                    used_bytes: 0,
-                    total_bytes: 0,
-                }))
-                .collect(),
-            window_ns: 1,
+        let device = device_sample_from(state_api::tool::device::Record {
+            sequence: 1,
+            sample: state_api::tool::device::Sample {
+                device_id: "main".to_string(),
+                cpu_pct: None,
+                ram_used_bytes: None,
+                ram_total_bytes: None,
+                swap_used_bytes: None,
+                swap_total_bytes: None,
+                load_1m: None,
+                load_5m: None,
+                load_15m: None,
+                uptime_s: None,
+                disks: Some(
+                    (0..(MAX_DEVICE_DISKS + 4))
+                        .map(|index| state_api::tool::device::Disk {
+                            mount_point: format!("/disk-{index}"),
+                            file_system: "fs".to_string(),
+                            used_bytes: 0,
+                            total_bytes: 1,
+                        })
+                        .collect(),
+                ),
+                window_ns: 1,
+            },
+            truncated: 3,
         });
-        assert_eq!(host.disks.len(), MAX_HOST_DISKS);
-        assert_eq!(host.disks_truncated, 7);
+        assert_eq!(
+            device.disks.as_deref().map_or(0, Vec::len),
+            MAX_DEVICE_DISKS
+        );
+        assert_eq!(device.disks_truncated, 7);
+        assert!(device.cpu_pct.is_none());
     }
 
     #[test]

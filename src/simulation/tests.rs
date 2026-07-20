@@ -17,9 +17,9 @@ use phoxal_cli_core::project::catalog::{
     fixture_contract_for_tests, fixture_tool_entry_for_tests,
 };
 use phoxal_cli_core::project::launch_plan::{
-    CheckedRobotLaunchInput, LaunchMode, LaunchPlan, PlanContext,
-    SIMULATOR_CONTROLLER_ARTIFACT_NAME, SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
-    SIMULATOR_SUPERVISOR_PROVIDER_ID, SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY, build_launch_plan,
+    CheckedRobotLaunchInput, LaunchMode, LaunchPlan, PlanContext, ROBOT_TOOL_DEVICE,
+    ROBOT_TOOL_TELEMETRY, SIMULATOR_CONTROLLER_ARTIFACT_NAME, SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
+    SIMULATOR_SUPERVISOR_PROVIDER_ID, SITE_TOOL_JOYPAD, build_launch_plan,
     simulator_controller_provider_id,
 };
 use phoxal_cli_core::project::resolver::{
@@ -240,7 +240,9 @@ fn one_instance_substitution_is_checked_and_rendered() -> Result<()> {
             "drive",
             controller_id.as_str(),
             "tool-bus-robot_v1",
-            "tool-log-robot_v1"
+            "tool-device-robot_v1",
+            "tool-log-robot_v1",
+            "tool-telemetry-robot_v1",
         ]
     );
     Ok(())
@@ -379,7 +381,9 @@ fn path_overridden_simulators_use_the_same_provider_ids_as_official() -> Result<
             controller_id.as_str(),
             supervisor_id.as_str(),
             "tool-bus-robot_v1",
-            "tool-log-robot_v1"
+            "tool-device-robot_v1",
+            "tool-log-robot_v1",
+            "tool-telemetry-robot_v1",
         ]
     );
     for id in [&controller_id, &supervisor_id] {
@@ -451,7 +455,9 @@ fn sim_launch_set_matches_checked_robot_participants_without_drivers() -> Result
             "mission",
             controller_id.as_str(),
             "tool-bus-robot_v1",
-            "tool-log-robot_v1"
+            "tool-device-robot_v1",
+            "tool-log-robot_v1",
+            "tool-telemetry-robot_v1",
         ]
     );
     assert_eq!(
@@ -1249,7 +1255,8 @@ fn add_site_tools(resolved: &mut ResolvedRobot) {
     resolved
         .tools
         .push(tool(phoxal_cli_core::project::launch_plan::ROBOT_TOOL_LOG));
-    resolved.tools.push(tool(SITE_TOOL_TELEMETRY));
+    resolved.tools.push(tool(ROBOT_TOOL_TELEMETRY));
+    resolved.tools.push(tool(ROBOT_TOOL_DEVICE));
 }
 
 fn tool(name: &str) -> ResolvedTool {

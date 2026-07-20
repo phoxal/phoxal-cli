@@ -46,12 +46,6 @@ pub(crate) fn start_telemetry_feeds_at(
     let namespace = &first.scope.namespace;
     let robot_id = &first.scope.robot_id;
     let mut feeds = vec![
-        crate::telemetry::start_host_feed(
-            namespace.clone(),
-            robot_id.clone(),
-            connect.to_string(),
-            telemetry.clone(),
-        ),
         crate::telemetry::start_joypad_devices_feed(
             namespace.clone(),
             robot_id.clone(),
@@ -67,6 +61,13 @@ pub(crate) fn start_telemetry_feeds_at(
     ];
     feeds.extend(robot_targets.iter().flat_map(|target| {
         [
+            crate::telemetry::start_device_feed(
+                target.scope.namespace.clone(),
+                target.scope.robot_id.clone(),
+                connect.to_string(),
+                telemetry.clone(),
+                recovery_epochs.clone(),
+            ),
             crate::telemetry::start_router_metrics_feed(
                 target.scope.namespace.clone(),
                 target.scope.robot_id.clone(),

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use phoxal_api::v1 as state_api;
 
 use crate::session::telemetry::{
-    HostSample, JoypadDevicesSample, RouterMetricsSample, RuntimeFeedStatus,
+    DeviceSample, JoypadDevicesSample, RouterMetricsSample, RuntimeFeedStatus,
     RuntimePerformanceSample,
 };
 
@@ -53,7 +53,7 @@ struct RuntimeTelemetry {
 
 #[derive(Debug, Clone, Default)]
 pub struct TelemetryStore {
-    host: Option<Timestamped<HostSample>>,
+    devices: BTreeMap<RobotScope, Timestamped<DeviceSample>>,
     routers: BTreeMap<RobotScope, RouterTelemetry>,
     runtimes: BTreeMap<RobotScope, RuntimeTelemetry>,
     joypad: Option<Timestamped<JoypadDevicesSample>>,
@@ -61,8 +61,8 @@ pub struct TelemetryStore {
 }
 
 impl TelemetryStore {
-    pub fn record_host(&mut self, now: Instant, sample: HostSample) {
-        self.host = Some(Timestamped::new(sample, now));
+    pub fn record_device(&mut self, scope: RobotScope, now: Instant, sample: DeviceSample) {
+        self.devices.insert(scope, Timestamped::new(sample, now));
     }
 
     pub fn record_router(&mut self, scope: RobotScope, now: Instant, sample: RouterMetricsSample) {
@@ -159,8 +159,8 @@ impl TelemetryStore {
     }
 
     #[must_use]
-    pub fn host(&self) -> Option<&Timestamped<HostSample>> {
-        self.host.as_ref()
+    pub fn device(&self, scope: &RobotScope) -> Option<&Timestamped<DeviceSample>> {
+        self.devices.get(scope)
     }
 
     #[must_use]

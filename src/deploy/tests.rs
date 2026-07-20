@@ -1422,13 +1422,13 @@ fn dry_run_stays_offline_for_catalog_resolved_component_driver() -> Result<()> {
     Ok(())
 }
 
-/// Deploy ships the site tools (`tool-joypad`, `tool-telemetry`) and the
-/// per-robot retention tools (`tool-bus`, `tool-log`) alongside the router.
+/// Deploy ships site `tool-joypad` and one per-robot `tool-bus`, `tool-device`,
+/// `tool-log`, and `tool-telemetry` alongside the router.
 /// Each gets its own unit ordered after the router, and
 /// `tool-joypad` carries the `/dev/input` tool-privilege grant
 /// (`unit_privileges_for_tool`). `write_basic_project`'s fixture catalog
 /// auto-fills every `OFFICIAL_TOOLS`/`OFFICIAL_OPTIONAL_TOOLS` entry
-/// (`catalog::fixture_catalog_for_tests`), so all three resolve here.
+/// (`catalog::fixture_catalog_for_tests`), so the complete set resolves here.
 #[test]
 fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;
@@ -1454,13 +1454,6 @@ fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {
     assert!(joypad_unit.contains("After=network-online.target phoxal-router.service"));
     assert!(joypad_unit.contains("SupplementaryGroups=input"));
     assert!(joypad_unit.contains("DeviceAllow=/dev/input/* rw"));
-    let telemetry_unit = payload
-        .rendered_units
-        .get("/etc/systemd/system/phoxal-tool-telemetry.service")
-        .expect("tool-telemetry unit must render");
-    assert!(telemetry_unit.contains("After=network-online.target phoxal-router.service"));
-    assert!(!telemetry_unit.contains("SupplementaryGroups="));
-    assert!(!telemetry_unit.contains("DeviceAllow="));
     assert!(
         !payload
             .env_files
@@ -1468,9 +1461,10 @@ fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {
     );
     for env_name in [
         "tool-joypad.env",
-        "tool-telemetry.env",
         "tool-bus-testbot.env",
+        "tool-device-testbot.env",
         "tool-log-testbot.env",
+        "tool-telemetry-testbot.env",
     ] {
         let contents = payload
             .env_files
@@ -1490,24 +1484,21 @@ fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {
             .unit_names
             .contains(&"phoxal-tool-joypad.service".to_string())
     );
-    assert!(
-        payload
-            .unit_names
-            .contains(&"phoxal-tool-telemetry.service".to_string())
-    );
-    for tool in ["tool-bus-testbot", "tool-log-testbot"] {
+    for tool in [
+        "tool-bus-testbot",
+        "tool-device-testbot",
+        "tool-log-testbot",
+        "tool-telemetry-testbot",
+    ] {
         let unit_name = format!("phoxal-participant-{tool}.service");
         let unit = payload
             .rendered_units
             .get(&format!("/etc/systemd/system/{unit_name}"))
             .unwrap_or_else(|| panic!("{tool} participant unit must render"));
         assert!(unit.contains("After=network-online.target phoxal-router.service"));
-        assert!(
-            !unit.contains(
-                "phoxal-participant-tool-bus-testbot.service phoxal-participant-tool-log-testbot.service"
-            ),
-            "retention tools must not order after themselves: {unit}"
-        );
+        assert!(!unit.contains(&format!("After=phoxal-participant-{tool}.service")));
+        assert!(!unit.contains("SupplementaryGroups="));
+        assert!(!unit.contains("DeviceAllow="));
         assert!(payload.unit_names.contains(&unit_name));
     }
     Ok(())

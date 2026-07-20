@@ -39,7 +39,7 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
     // mode including `simulate` - no
     // opt-in flag, no graceful-degrade path. `fixture_catalog_for_tests`
     // auto-fills every `catalog::OFFICIAL_TOOLS` entry not explicitly listed
-    // in `write_catalog` above, which is why joypad and telemetry resolve
+    // in `write_catalog` above, which is why the standard tools resolve
     // here despite not being in that fixture list.
     let site_ids = plan
         .plan
@@ -49,10 +49,7 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
         .collect::<Vec<_>>();
     assert_eq!(
         site_ids,
-        vec![
-            phoxal_cli_core::project::launch_plan::SITE_TOOL_JOYPAD,
-            phoxal_cli_core::project::launch_plan::SITE_TOOL_TELEMETRY,
-        ]
+        vec![phoxal_cli_core::project::launch_plan::SITE_TOOL_JOYPAD]
     );
     assert_eq!(
         plan.plan.robots[0]
@@ -65,7 +62,12 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
                 _ => None,
             })
             .collect::<Vec<_>>(),
-        vec!["tool-bus-testbot", "tool-log-testbot"]
+        vec![
+            "tool-bus-testbot",
+            "tool-device-testbot",
+            "tool-log-testbot",
+            "tool-telemetry-testbot",
+        ]
     );
     assert_eq!(
         plan.ctx.resolved.platform_runtimes.len(),

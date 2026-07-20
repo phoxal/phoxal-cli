@@ -11,7 +11,7 @@ use phoxal_cli_core::session::stores::telemetry::RobotScope;
 use phoxal_cli_core::session::{
     BoardSnapshot, LogSource, ParticipantState, ParticipantStatus, RoutedLogLine,
 };
-use phoxal_cli_core::session::{DiskSample, JoypadDevice};
+use phoxal_cli_core::session::{DeviceDiskSample, JoypadDevice};
 use phoxal_cli_core::session::{
     RuntimeBufferKind, RuntimeDirection, RuntimePerformanceSample, RuntimeStepSample,
     RuntimeTopicSample,
@@ -172,23 +172,25 @@ fn every_fixed_page_renders_with_empty_data() {
 fn responsive_header_and_tabs_cover_compact_expanded_and_too_small_sizes() {
     let now = Instant::now();
     let telemetry = TelemetrySnapshot {
-        host: Some(Timestamped {
+        device: Some(Timestamped {
             received_at: now,
-            value: HostSample {
-                cpu_pct: 10.0,
-                ram_used_bytes: 2,
-                ram_total_bytes: 4,
-                load_1m: 0.1,
-                load_5m: 0.2,
-                load_15m: 0.3,
-                disks: vec![DiskSample {
-                    mount_point: "/".to_string(),
-                    used_bytes: 10,
-                    total_bytes: 100,
-                    ..DiskSample::default()
-                }]
-                .into(),
-                ..HostSample::default()
+            value: DeviceSample {
+                cpu_pct: Some(10.0),
+                ram_used_bytes: Some(2),
+                ram_total_bytes: Some(4),
+                load_1m: Some(0.1),
+                load_5m: Some(0.2),
+                load_15m: Some(0.3),
+                disks: Some(
+                    vec![DeviceDiskSample {
+                        mount_point: "/".to_string(),
+                        used_bytes: 10,
+                        total_bytes: 100,
+                        ..DeviceDiskSample::default()
+                    }]
+                    .into(),
+                ),
+                ..DeviceSample::default()
             },
         }),
         clock: Some(Timestamped {
@@ -213,7 +215,7 @@ fn responsive_header_and_tabs_cover_compact_expanded_and_too_small_sizes() {
     assert!(compact.contains("Input"), "{compact}");
 
     let expanded = render_model(&simulation_title, &AppState::default(), &model, 80, 24);
-    assert!(expanded.contains("Host"), "{expanded}");
+    assert!(expanded.contains("Device · main"), "{expanded}");
     assert!(expanded.contains("Simulation"), "{expanded}");
     assert!(expanded.contains("DISK (root)"), "{expanded}");
 
@@ -1072,27 +1074,29 @@ fn stale_simulation_clock_is_presented_as_paused() {
 #[test]
 fn header_renders_root_disk_and_staleness() {
     let old = Instant::now() - DEFAULT_FRESHNESS_TTL - Duration::from_secs(1);
-    let host = Timestamped {
+    let device = Timestamped {
         received_at: old,
-        value: HostSample {
-            cpu_pct: 10.0,
-            ram_used_bytes: 2,
-            ram_total_bytes: 4,
-            load_1m: 0.1,
-            load_5m: 0.2,
-            load_15m: 0.3,
+        value: DeviceSample {
+            cpu_pct: Some(10.0),
+            ram_used_bytes: Some(2),
+            ram_total_bytes: Some(4),
+            load_1m: Some(0.1),
+            load_5m: Some(0.2),
+            load_15m: Some(0.3),
             uptime_s: Some(65),
-            disks: vec![DiskSample {
-                mount_point: "/".to_string(),
-                file_system: "apfs".to_string(),
-                used_bytes: 10,
-                total_bytes: 100,
-            }]
-            .into(),
-            ..HostSample::default()
+            disks: Some(
+                vec![DeviceDiskSample {
+                    mount_point: "/".to_string(),
+                    file_system: "apfs".to_string(),
+                    used_bytes: 10,
+                    total_bytes: 100,
+                }]
+                .into(),
+            ),
+            ..DeviceSample::default()
         },
     };
-    let lines = header_host_lines(Some(&host), Instant::now(), 40)
+    let lines = header_device_lines(Some(&device), Instant::now(), 40)
         .into_iter()
         .map(|line| line.to_string())
         .collect::<Vec<_>>()
@@ -1101,11 +1105,26 @@ fn header_renders_root_disk_and_staleness() {
     assert!(lines.contains("stale"));
 
     let telemetry = TelemetrySnapshot {
-        host: Some(host),
+        device: Some(device),
         ..TelemetrySnapshot::default()
     };
     let rendered = render_page_at(Page::Overview, &telemetry, 80, 24);
     assert!(rendered.contains("0.1/0.2/0.3"), "{rendered}");
+
+    let unavailable = Timestamped {
+        received_at: Instant::now(),
+        value: DeviceSample {
+            device_id: "main".to_string(),
+            ..DeviceSample::default()
+        },
+    };
+    let unavailable_lines = header_device_lines(Some(&unavailable), Instant::now(), 40)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(unavailable_lines.contains("CPU         n/a"));
+    assert!(unavailable_lines.contains("RAM         n/a"));
 }
 
 #[test]
