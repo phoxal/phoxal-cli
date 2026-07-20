@@ -54,13 +54,14 @@
 //!   Every [`SessionEvent`] this controller applies (phase/diagnostic/session
 //!   transitions) is forwarded into the TUI via
 //!   [`crate::tui::TuiDisplay::apply_session_event`], which drives a
-//!   dedicated startup surface (welcome card + one active phase row + a
+//!   dedicated startup surface (session metadata + one active phase row + a
 //!   direct jump to Logs for errors) until the session reaches `Running`, then
 //!   collapses to the existing runtime navigator -
 //!   see `crate::tui::startup`'s module docs for the pure model.
 
 use std::future::Future;
 use std::io;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -75,7 +76,6 @@ use crate::display::DisplayAction;
 
 const FORCED_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 const OWNED_TASK_CANCEL_TIMEOUT: Duration = Duration::from_secs(1);
-use crate::identity::IdentitySummary;
 use crate::supervisor::{BoardBackend, BoardSnapshot, SupervisorAction, SupervisorOutcome};
 use crate::telemetry::{JoypadCommand, TelemetryBackend};
 use crate::tui::render::TitleInfo;
@@ -109,6 +109,50 @@ impl SessionMode {
     }
 }
 
+fn session_title(project_root: &Path, mode: SessionMode) -> TitleInfo {
+    let mut title = unknown_session_title(mode);
+    let Ok(manifest_path) = crate::resolver::discover_robot_yaml(project_root) else {
+        return title;
+    };
+    let Ok(robot) = crate::resolver::load_robot(&manifest_path) else {
+        return title;
+    };
+    title.robot = robot.robot.id;
+    title.namespace = robot.robot.namespace;
+    title.channel = robot.artifacts.channel.as_str().to_string();
+    title.manifest = display_manifest_path(&manifest_path, project_root);
+    title
+}
+
+fn display_manifest_path(manifest_path: &Path, project_root: &Path) -> String {
+    let display_path =
+        pathdiff::diff_paths(manifest_path, project_root).unwrap_or_else(|| manifest_path.into());
+    let display = display_path.display().to_string();
+    if display_path.is_relative()
+        && !matches!(
+            display_path.components().next(),
+            Some(std::path::Component::ParentDir)
+        )
+    {
+        format!("./{display}")
+    } else {
+        display
+    }
+}
+
+fn unknown_session_title(mode: SessionMode) -> TitleInfo {
+    TitleInfo {
+        robot: "unknown".to_string(),
+        namespace: "unknown".to_string(),
+        channel: "unknown".to_string(),
+        manifest: "n/a".to_string(),
+        mode,
+        bus_endpoint: crate::supervisor::default_connect_endpoint(),
+        started_at: std::time::SystemTime::now(),
+        started_instant: std::time::Instant::now(),
+    }
+}
+
 impl std::fmt::Display for SessionMode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.label())
@@ -139,20 +183,11 @@ impl SessionController {
     /// this means entering the alternate screen right now, before the
     /// caller's preparation has even started, so there is exactly one
     /// interactive surface for the whole session (Product decision 1).
-    pub fn new(
-        output: OutputContext,
-        mode: SessionMode,
-        identity: Option<IdentitySummary>,
-    ) -> io::Result<Self> {
-        Self::build(output, mode, identity, true)
+    pub fn new(output: OutputContext, mode: SessionMode, project_root: &Path) -> io::Result<Self> {
+        Self::build(output, session_title(project_root, mode), true)
     }
 
-    fn build(
-        output: OutputContext,
-        mode: SessionMode,
-        identity: Option<IdentitySummary>,
-        activate_tui: bool,
-    ) -> io::Result<Self> {
+    fn build(output: OutputContext, title: TitleInfo, activate_tui: bool) -> io::Result<Self> {
         install_panic_hook();
         let (events_tx, events_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         // Install every process-level terminal shutdown signal once and keep
@@ -170,23 +205,7 @@ impl SessionController {
                     "interactive `run` and `simulation run` sessions require a terminal; run this command in a TTY",
                 ));
             }
-            let title = TitleInfo {
-                robot: identity
-                    .as_ref()
-                    .map_or_else(|| "unknown".to_string(), |summary| summary.robot.clone()),
-                namespace: identity.as_ref().map_or_else(
-                    || "unknown".to_string(),
-                    |summary| summary.namespace.clone(),
-                ),
-                channel: identity
-                    .as_ref()
-                    .map_or_else(|| "unknown".to_string(), |summary| summary.channel.clone()),
-                mode,
-                bus_endpoint: crate::supervisor::default_connect_endpoint(),
-                started_at: std::time::SystemTime::now(),
-                started_instant: std::time::Instant::now(),
-            };
-            let mut tui = Box::new(TuiDisplay::new(output.theme, title, identity));
+            let mut tui = Box::new(TuiDisplay::new(output.theme, title));
             tui.activate()?;
             Some(tui)
         } else {
@@ -197,7 +216,6 @@ impl SessionController {
         // constructor would leave a process-global diagnostics sender pointing
         // at a receiver that was immediately dropped.
         diagnostics::install(events_tx.clone());
-        crate::update_notice::poll_session();
         Ok(Self {
             output,
             token: CancellationToken::new(),
@@ -217,11 +235,9 @@ impl SessionController {
         Self::build(
             OutputContext::new(
                 false,
-                crate::theme::Theme::new(crate::theme::ColorCapability::None),
-                false,
+                phoxal_cli_ui::Theme::new(phoxal_cli_ui::ColorCapability::None),
             ),
-            mode,
-            None,
+            unknown_session_title(mode),
             false,
         )
     }
@@ -707,7 +723,6 @@ impl SessionController {
     /// underlying tty went away) - the caller fails the session rather than
     /// silently leaving a stale screen up forever.
     fn redraw(&mut self, board: &BoardSnapshot, telemetry: &TelemetryBackend) -> Result<()> {
-        crate::update_notice::poll_session();
         match &mut self.tui {
             Some(tui) => tui
                 .redraw(board, telemetry)
@@ -883,6 +898,19 @@ mod tests {
         SessionEvent::SessionChanged { state }
     }
 
+    #[test]
+    fn manifest_display_prefixes_only_paths_inside_the_project() {
+        let project = Path::new("/workspace/robot");
+        assert_eq!(
+            display_manifest_path(Path::new("/workspace/robot/robot.yaml"), project),
+            "./robot.yaml"
+        );
+        assert_eq!(
+            display_manifest_path(Path::new("/workspace/robot.yaml"), project),
+            "../robot.yaml"
+        );
+    }
+
     /// The controller's own reducer over a fake event stream must follow the
     /// exact chain a real session drives:
     /// `Preparing -> Starting -> Running -> Stopping -> Stopped`.
@@ -988,7 +1016,7 @@ mod tests {
         let board = BoardBackend::new();
         board.upsert(crate::supervisor::ParticipantStatus::new(
             "failed-binary",
-            crate::supervisor::ParticipantKind::Service,
+            phoxal_cli_core::session::ParticipantKind::Service,
             crate::supervisor::ParticipantState::Failed,
         ));
 

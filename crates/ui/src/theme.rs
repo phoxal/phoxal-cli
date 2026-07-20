@@ -1,25 +1,17 @@
 //! The shared visual theme: the locked brand palette, terminal color-capability
-//! detection, and state/resource styling helpers.
+//! detection, and resource styling helpers.
 //!
 //! This is the single source of color/style for the CLI. No other call site
-//! hard-codes a color after this: [`crate::ui::Ui`] routes every message
-//! through [`Theme`], the progress primitive ([`crate::progress`]) styles its
-//! spinner/bar through it, and the identity header/welcome card
-//! ([`crate::identity`]) uses it for the box and accents. A later full-screen
-//! TUI reuses the same palette, state styling, and non-color symbols so the
-//! rendering stays one system end to end.
+//! hard-codes a color after this. Finite output and the full-screen TUI reuse
+//! the same palette so rendering stays one system end to end.
 //!
 //! Every role degrades deliberately across four capability tiers
 //! ([`ColorCapability`]): truecolor, 256-color, basic 16-color, and colorless.
-//! Selection/state is never color-only - [`state_symbol`] and
-//! [`ParticipantState::label`](crate::supervisor::ParticipantState::label)
-//! give every state a marker and a word that survive `--plain`/`NO_COLOR`.
+//! Selection and state remain legible without color.
 
 use std::io::IsTerminal;
 
 use console::Style;
-
-use crate::supervisor::ParticipantState;
 
 /// A brand color in its canonical truecolor form. Every degraded
 /// representation ([`ColorCapability::Ansi256`], [`ColorCapability::Ansi16`])
@@ -143,10 +135,8 @@ impl Theme {
         Self { capability }
     }
 
-    /// Detect the theme for stderr, the stream every piece of decoration in
-    /// this CLI (identity, progress, log lines) writes to, given the
-    /// invocation's already-computed interactive flag. `--plain`/`--quiet`
-    /// force [`ColorCapability::None`] even on a genuine TTY.
+    /// Detect the theme for stderr from the invocation's already-computed
+    /// interactive flag. Batch output always uses [`ColorCapability::None`].
     #[must_use]
     pub fn detect_stderr(interactive: bool) -> Self {
         if !interactive {
@@ -256,33 +246,6 @@ impl Theme {
         self.paint(Role::Border, text)
     }
 
-    /// A participant state rendered as a non-color-dependent badge (symbol +
-    /// label, see [`state_symbol`]) colored by [`state_role`]. Reused as-is by
-    /// a later TUI/logger so every state reads identically everywhere.
-    #[must_use]
-    pub fn participant_state(self, state: ParticipantState) -> String {
-        let badge = format!("{} {}", state_symbol(state), state.label());
-        self.paint(state_role(state), &badge)
-    }
-
-    /// The dotted color spec `indicatif` templates understand
-    /// (`console::Style::from_dotted_str`), or `None` under
-    /// [`ColorCapability::None`] so the caller can build a colorless
-    /// template. `indicatif` templates have no truecolor syntax, so
-    /// [`ColorCapability::TrueColor`] degrades one step further to the
-    /// nearest 256-color index here - visually indistinguishable for a thin
-    /// spinner/bar glyph.
-    #[must_use]
-    pub fn indicatif_tag(self, role: Role) -> Option<String> {
-        match self.capability {
-            ColorCapability::None => None,
-            ColorCapability::TrueColor | ColorCapability::Ansi256 => {
-                Some(rgb_to_ansi256(role.rgb()).to_string())
-            }
-            ColorCapability::Ansi16 => Some(ansi16_name(rgb_to_ansi16(role.rgb())).to_string()),
-        }
-    }
-
     /// A resource-load meter fill: `load` (0.0-1.0) of `width` block
     /// characters, colored accent -> warn -> error as load rises. The filled
     /// count is itself the non-color signal (a screen reader or a
@@ -308,45 +271,6 @@ pub const fn resource_role(load: f64) -> Role {
     } else {
         Role::Error
     }
-}
-
-/// The color role for a participant state. Ready is success, actively
-/// starting/restarting is steel (neutral-in-progress), degraded is warn,
-/// failed is error; stopped is muted (no longer running, not an error).
-#[must_use]
-pub const fn state_role(state: ParticipantState) -> Role {
-    match state {
-        ParticipantState::Ready => Role::Success,
-        ParticipantState::Starting | ParticipantState::Restarting => Role::Steel,
-        ParticipantState::Degraded => Role::Warn,
-        ParticipantState::Failed => Role::Error,
-        ParticipantState::Stopped => Role::Muted,
-    }
-}
-
-/// A color-independent glyph for a participant state, so state is always
-/// legible without color (`--plain`, `NO_COLOR`, piped output).
-#[must_use]
-pub const fn state_symbol(state: ParticipantState) -> &'static str {
-    match state {
-        ParticipantState::Starting => "…",
-        ParticipantState::Ready => "✓",
-        ParticipantState::Degraded => "!",
-        ParticipantState::Failed => "✗",
-        ParticipantState::Restarting => "↻",
-        ParticipantState::Stopped => "■",
-    }
-}
-
-/// Rounded box-drawing glyphs shared by the welcome card today and any later
-/// panel/TUI chrome.
-pub mod box_style {
-    pub const TOP_LEFT: char = '╭';
-    pub const TOP_RIGHT: char = '╮';
-    pub const BOTTOM_LEFT: char = '╰';
-    pub const BOTTOM_RIGHT: char = '╯';
-    pub const HORIZONTAL: char = '─';
-    pub const VERTICAL: char = '│';
 }
 
 /// Map a truecolor role to the nearest xterm 256-color palette index: the
@@ -393,19 +317,6 @@ fn rgb_distance_sq(a: Rgb, b: Rgb) -> u32 {
     let dg = i32::from(a.1) - i32::from(b.1);
     let db = i32::from(a.2) - i32::from(b.2);
     (dr * dr + dg * dg + db * db) as u32
-}
-
-fn ansi16_name(color: console::Color) -> &'static str {
-    match color {
-        console::Color::Black => "black",
-        console::Color::Red => "red",
-        console::Color::Green => "green",
-        console::Color::Yellow => "yellow",
-        console::Color::Blue => "blue",
-        console::Color::Magenta => "magenta",
-        console::Color::Cyan => "cyan",
-        console::Color::White | console::Color::Color256(_) => "white",
-    }
 }
 
 #[cfg(test)]
@@ -470,7 +381,6 @@ mod tests {
         let theme = Theme::new(ColorCapability::None);
         assert_eq!(theme.accent("hello"), "hello");
         assert_eq!(theme.bold("hello"), "hello");
-        assert_eq!(theme.indicatif_tag(Role::Accent), None);
     }
 
     #[test]
@@ -532,29 +442,5 @@ mod tests {
         let meter = theme.resource_meter(0.5, 10);
         assert_eq!(meter.chars().filter(|c| *c == '█').count(), 5);
         assert_eq!(meter.chars().filter(|c| *c == '░').count(), 5);
-    }
-
-    #[test]
-    fn every_participant_state_has_a_symbol_and_a_role() {
-        for state in [
-            ParticipantState::Starting,
-            ParticipantState::Ready,
-            ParticipantState::Degraded,
-            ParticipantState::Failed,
-            ParticipantState::Restarting,
-            ParticipantState::Stopped,
-        ] {
-            assert!(!state_symbol(state).is_empty());
-            let _ = state_role(state);
-        }
-        assert_eq!(state_role(ParticipantState::Ready), Role::Success);
-        assert_eq!(state_role(ParticipantState::Failed), Role::Error);
-        assert_eq!(state_role(ParticipantState::Degraded), Role::Warn);
-    }
-
-    #[test]
-    fn participant_state_badge_always_carries_the_label_text() {
-        let theme = Theme::new(ColorCapability::None);
-        assert_eq!(theme.participant_state(ParticipantState::Ready), "✓ ready");
     }
 }

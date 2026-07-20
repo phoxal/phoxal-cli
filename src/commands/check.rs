@@ -17,7 +17,9 @@ use crate::resolver::{
     ResolvedRobot, RobotManifestExtras, discover_robot_yaml, load_robot_with_extras, resolve,
     tool_emit_apis_id,
 };
-use crate::utils::{cargo_binary_name, resolve_project_path};
+use phoxal_cli_core::check::participant_metadata;
+use phoxal_cli_core::project::tooling::{cargo_binary_name, resolve_project_path};
+use phoxal_cli_core::session::ParticipantKind;
 
 #[derive(Debug, Args)]
 pub struct CheckCmd {
@@ -49,13 +51,12 @@ pub struct CheckOptions {
     pub catalog_source: Option<String>,
     pub overlays: Vec<String>,
     pub target: Option<String>,
-    pub emit_update_notice: bool,
     pub strict: bool,
 }
 
 /// The CLI's own participant-report shape: known artifact identity (never
 /// self-reported anymore - a built binary's linker section carries only its
-/// contracts, see [`crate::participant_metadata`]) plus the extracted
+/// contracts, see [`participant_metadata`]) plus the extracted
 /// contract list. No `bus_abi` (D1, X-tools slice: dissolved into the
 /// version-qualified contract key, `phoxal::check::ParticipantApis` no
 /// longer carries it either).
@@ -65,7 +66,7 @@ pub struct RawEmitApis {
     #[serde(default = "default_participant_class")]
     pub participant_class: String,
     pub api_version: String,
-    pub required_contracts: Vec<crate::participant_metadata::ParticipantMetaContract>,
+    pub required_contracts: Vec<participant_metadata::ParticipantMetaContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<Value>,
 }
@@ -327,7 +328,6 @@ impl CheckCmd {
             catalog_source: app.catalog_source.clone(),
             overlays: self.env.clone(),
             target: self.target.clone(),
-            emit_update_notice: true,
             strict: self.strict,
         };
         let ui = app.ui;
@@ -429,7 +429,6 @@ fn run(
             offline: false,
         },
         crate::catalog::selection_channel(robot.artifacts.channel),
-        ui.interactive(),
     ))?;
     // `check` resolves live git component refs so component drivers can be
     // located and staged. A path-only / official-only graph needs no component
@@ -447,12 +446,10 @@ fn run(
         catalog.as_ref(),
         ResolveOptions {
             refresh_channel_head: false,
-            emit_update_notice: options.emit_update_notice,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             official_target_triple: target_triple.clone(),
             tool_target_triple: target_triple,
-            interactive: ui.interactive(),
         },
     )?;
     let descriptors = crate::native_artifacts::descriptors_for(&resolved, false, false)?;
@@ -621,7 +618,8 @@ impl SourceParticipant {
 
 /// A source participant's role plus whether it has a known official/catalog
 /// identity it locally overrides. Deliberately kept as its own enum rather
-/// than collapsed into the shared `participant_kind::ParticipantKind`: every
+/// than collapsed into the shared
+/// `phoxal_cli_core::session::participant_kind::ParticipantKind`: every
 /// `SourceParticipant` already carries a `crate_dir`, so it is inherently
 /// "local" in the supervisor's sense - the real orthogonal bit this domain
 /// needs is "does an official/catalog identity exist for this name" (see
@@ -643,8 +641,7 @@ pub enum SourceParticipantKind {
 
 impl SourceParticipantKind {
     #[must_use]
-    pub const fn shared_kind(self) -> crate::participant_kind::ParticipantKind {
-        use crate::participant_kind::ParticipantKind;
+    pub const fn shared_kind(self) -> ParticipantKind {
         match self {
             Self::UserService | Self::OfficialService => ParticipantKind::Service,
             Self::ComponentDriver => ParticipantKind::Driver,
@@ -1191,14 +1188,12 @@ pub(crate) fn contract_surface(
         contracts: raw
             .required_contracts
             .iter()
-            .map(
-                |contract| crate::participant_metadata::ParticipantMetaContract {
-                    role: contract.role.clone(),
-                    version: contract.version.clone(),
-                    contract: contract.contract.clone(),
-                    external: contract.external,
-                },
-            )
+            .map(|contract| participant_metadata::ParticipantMetaContract {
+                role: contract.role.clone(),
+                version: contract.version.clone(),
+                contract: contract.contract.clone(),
+                external: contract.external,
+            })
             .collect(),
     }
 }
@@ -1263,7 +1258,7 @@ pub(crate) fn extract_emit_apis_from_staged_runtime(
         return Ok(raw_emit_apis_from_extracted_metadata(
             runtime.kind.emit_apis_kind(),
             &runtime.name,
-            crate::participant_metadata::ParticipantMeta {
+            participant_metadata::ParticipantMeta {
                 participant_api: "fixture".to_string(),
                 contracts: Vec::new(),
                 config_schema: serde_json::json!({ "type": "null" }),
@@ -1276,7 +1271,7 @@ pub(crate) fn extract_emit_apis_from_staged_runtime(
         crate::native_artifacts::ProvisioningMode::MissingOnly,
     )?
     .ok_or_else(|| anyhow!("{} has no staged binary", runtime.package))?;
-    let meta = crate::participant_metadata::extract_participant_metadata(&binary)
+    let meta = participant_metadata::extract_participant_metadata(&binary)
         .with_context(|| format!("failed to extract API metadata from {}", binary.display()))?;
     Ok(raw_emit_apis_from_extracted_metadata(
         runtime.kind.emit_apis_kind(),
@@ -1298,7 +1293,7 @@ pub(crate) fn extract_emit_apis_from_staged_tool(
         return Ok(raw_emit_apis_from_extracted_metadata(
             "tool",
             crate::resolver::tool_emit_apis_id(&tool.name),
-            crate::participant_metadata::ParticipantMeta {
+            participant_metadata::ParticipantMeta {
                 participant_api: "fixture".to_string(),
                 contracts: Vec::new(),
                 config_schema: serde_json::json!({ "type": "null" }),
@@ -1311,7 +1306,7 @@ pub(crate) fn extract_emit_apis_from_staged_tool(
         crate::native_artifacts::ProvisioningMode::MissingOnly,
     )?
     .ok_or_else(|| anyhow!("{} has no staged binary", tool.package))?;
-    let meta = crate::participant_metadata::extract_participant_metadata(&binary)
+    let meta = participant_metadata::extract_participant_metadata(&binary)
         .with_context(|| format!("failed to extract API metadata from {}", binary.display()))?;
     Ok(raw_emit_apis_from_extracted_metadata(
         "tool",
@@ -1341,13 +1336,14 @@ fn default_participant_class_for_kind(artifact_kind: &str) -> String {
 /// artifact identity, so the identity is supplied from what is already known
 /// about `tool`; contracts and the config schema both come from the section.
 pub(crate) fn fetch_emit_apis_from_tool(tool: &ToolParticipant) -> Result<RawEmitApis> {
-    let meta = crate::participant_metadata::extract_participant_metadata(&tool.binary_path)
-        .with_context(|| {
+    let meta = participant_metadata::extract_participant_metadata(&tool.binary_path).with_context(
+        || {
             format!(
                 "failed to extract API metadata from {}",
                 tool.binary_path.display()
             )
-        })?;
+        },
+    )?;
     Ok(raw_emit_apis_from_extracted_metadata(
         "tool",
         crate::resolver::tool_emit_apis_id(&tool.name),
@@ -1359,11 +1355,11 @@ pub(crate) fn fetch_emit_apis_from_tool(tool: &ToolParticipant) -> Result<RawEmi
 /// already-known artifact identity - the shared tail of
 /// [`fetch_emit_apis_from_tool`] and [`build_emit_apis_by_building`].
 ///
-/// [`ParticipantMeta`]: crate::participant_metadata::ParticipantMeta
+/// [`ParticipantMeta`]: participant_metadata::ParticipantMeta
 fn raw_emit_apis_from_extracted_metadata(
     artifact_kind: &str,
     artifact_id: &str,
-    meta: crate::participant_metadata::ParticipantMeta,
+    meta: participant_metadata::ParticipantMeta,
 ) -> RawEmitApis {
     RawEmitApis {
         artifact: RawArtifact {
@@ -1485,8 +1481,8 @@ fn build_emit_apis_by_building(participant: &SourceParticipant) -> Result<RawEmi
     })?;
     let binary_name = cargo_binary_name(&crate_dir, None)?;
     let binary_path = build_and_locate_binary(&crate_dir, &binary_name)?;
-    let meta = crate::participant_metadata::extract_participant_metadata(&binary_path)
-        .with_context(|| {
+    let meta =
+        participant_metadata::extract_participant_metadata(&binary_path).with_context(|| {
             format!(
                 "failed to extract API metadata from {}",
                 binary_path.display()
@@ -1507,24 +1503,12 @@ fn build_emit_apis_by_building(participant: &SourceParticipant) -> Result<RawEmi
 /// would miss it. Cargo's own artifact messages are workspace-aware
 /// regardless of layout.
 fn build_and_locate_binary(crate_dir: &Path, binary_name: &str) -> Result<PathBuf> {
-    // `run_output` fully captures the child's stdout/stderr (nothing is
-    // inherited), so an animated spinner here never collides with cargo's
-    // own live compiler output - unlike `run::build_source_binary`, whose
-    // `cargo build` inherits the terminal so its errors stream live and gets
-    // a static themed line instead (see that function's doc comment).
-    //
-    // This sits behind `build_emit_apis_by_building`, which is itself passed
-    // around as a bare fn pointer matching a shared closure signature (the
-    // `build_by_building` parameter of `build_emit_apis_from_source_with_diagnostics`,
-    // and the `run_check_with_context` callback used identically by
-    // `run`/`deploy`/`simulate`/`watch`) - adding a `mode` parameter here
-    // would have to ripple through that whole shared contract. Recomputing
-    // fresh from the environment is the explicit, non-global fallback.
-    use std::io::IsTerminal;
-    let progress = crate::progress::spinner(
-        format!("building `{binary_name}` in {}", crate_dir.display()),
-        std::io::stderr().is_terminal(),
-    );
+    // `run_output` fully captures the child's stdout/stderr, so emit one
+    // append-only status line before starting the captured build.
+    let progress = crate::progress::status(format!(
+        "building `{binary_name}` in {}",
+        crate_dir.display()
+    ));
     let result = crate::shell::run_output(
         "cargo",
         [
@@ -1538,10 +1522,7 @@ fn build_and_locate_binary(crate_dir: &Path, binary_name: &str) -> Result<PathBu
     )
     .with_context(|| format!("failed to spawn `cargo build --bin {binary_name}`"));
     let output = match result {
-        Ok(output) => {
-            progress.finish_and_clear();
-            output
-        }
+        Ok(output) => output,
         Err(error) => {
             progress.abandon_with_message(format!("failed to build `{binary_name}`: {error:#}"));
             return Err(error);
@@ -1753,14 +1734,14 @@ mod tests {
             participant_id: participant_id.to_string(),
             contracts: contracts
                 .iter()
-                .map(|(role, version, contract)| {
-                    crate::participant_metadata::ParticipantMetaContract {
+                .map(
+                    |(role, version, contract)| participant_metadata::ParticipantMetaContract {
                         role: (*role).to_string(),
                         version: (*version).to_string(),
                         contract: (*contract).to_string(),
                         external: false,
-                    }
-                })
+                    },
+                )
                 .collect(),
         }
     }
@@ -3366,7 +3347,7 @@ mod tests {
             required_contracts: contracts
                 .iter()
                 .map(
-                    |(family, role)| crate::participant_metadata::ParticipantMetaContract {
+                    |(family, role)| participant_metadata::ParticipantMetaContract {
                         role: (*role).to_string(),
                         version: family
                             .split_once("::")
@@ -3404,23 +3385,21 @@ mod tests {
             api_version: api_version.to_string(),
             required_contracts: contracts
                 .iter()
-                .map(
-                    |family| crate::participant_metadata::ParticipantMetaContract {
-                        // A single default role: nothing in these fixtures cares
-                        // about role identity (D1: only `family` decides
-                        // compatibility), so every contract shares one.
-                        role: "publish".to_string(),
-                        version: family
-                            .split_once("::")
-                            .map_or(api_version, |(version, _)| version)
-                            .to_string(),
-                        contract: family
-                            .split_once("::")
-                            .map_or(*family, |(_, contract)| contract)
-                            .to_string(),
-                        external: false,
-                    },
-                )
+                .map(|family| participant_metadata::ParticipantMetaContract {
+                    // A single default role: nothing in these fixtures cares
+                    // about role identity (D1: only `family` decides
+                    // compatibility), so every contract shares one.
+                    role: "publish".to_string(),
+                    version: family
+                        .split_once("::")
+                        .map_or(api_version, |(version, _)| version)
+                        .to_string(),
+                    contract: family
+                        .split_once("::")
+                        .map_or(*family, |(_, contract)| contract)
+                        .to_string(),
+                    external: false,
+                })
                 .collect(),
             config_schema: None,
         }

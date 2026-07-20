@@ -31,11 +31,11 @@ use phoxal::participant::launch::ParticipantLaunch;
 use phoxal_api::v2::simulation::RobotSpawn;
 use serde::Serialize;
 
-use crate::launch_env::to_controller_args;
 use crate::webots_staging::{
     self, RobotInstance, WebotsController, externproto_for_generated_proto, generate_robot_proto,
     proto_name_for_robot, relative_mesh_url_prefix, render_robot_instance_node, stage_world,
 };
+use phoxal_cli_core::session::launch_env::to_controller_args;
 
 /// The supervisor's controller artifact name (Webots `controller` field).
 pub const SUPERVISOR_CONTROLLER_NAME: &str = "phoxal-simulator-webots-supervisor";

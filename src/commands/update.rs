@@ -86,7 +86,6 @@ fn update(
             offline: false,
         },
         channel,
-        ui.interactive(),
     )?
     .context("update requires a reachable artifact catalog; --offline cannot update")?;
     let resolved = resolve(
@@ -145,8 +144,8 @@ fn update(
     {
         bail!(
             "artifact update needs {} but only {} are free at {}",
-            crate::human::bytes(download_bytes),
-            crate::human::bytes(free),
+            phoxal_cli_core::session::human::bytes(download_bytes),
+            phoxal_cli_core::session::human::bytes(free),
             destination.display()
         );
     }
@@ -277,7 +276,7 @@ fn update_result(update: &PackageUpdate) -> String {
     format!(
         "{} ({})",
         update_label(update),
-        crate::human::bytes(update.bytes)
+        phoxal_cli_core::session::human::bytes(update.bytes)
     )
 }
 
@@ -329,20 +328,14 @@ impl ArtifactProgressReporter for UpdateProgress {
         if update.pinned {
             return crate::progress::Row::Silent;
         }
-        self.rows.bytes(update_label(update), descriptor.size)
+        self.rows.begin(update_label(update))
     }
 
     fn complete(&self, descriptor: &NativeArtifactDescriptor, row: Option<crate::progress::Row>) {
         let Some(update) = self.update(descriptor) else {
-            if let Some(row) = row {
-                row.clear();
-            }
             return;
         };
         if update.pinned {
-            if let Some(row) = row {
-                row.clear();
-            }
             return;
         }
         let message = update_result(update);

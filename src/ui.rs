@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 
 use crate::session::diagnostics::{RouteResult, register_child, try_route, unregister_child};
 use crate::session::event::{DiagnosticLevel, DiagnosticSource};
-use crate::theme::Theme;
+use phoxal_cli_ui::Theme;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ui {

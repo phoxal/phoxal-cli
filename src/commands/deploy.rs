@@ -29,7 +29,6 @@ use crate::commands::check::{
     source_participants_from_resolved,
 };
 use crate::component_driver::component_driver_crate_dir;
-use crate::launch_env::{EncodedParticipantEnv, encode_participant_env};
 use crate::launch_plan::{
     CheckedRobotLaunchInput, DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, ParticipantExecution,
     ParticipantLaunchRecord, PlanContext, SITE_INFRASTRUCTURE_ROUTER, SITE_TOOL_JOYPAD, SiteLaunch,
@@ -40,7 +39,10 @@ use crate::resolver::{
     discover_robot_yaml, load_robot_with_extras, resolve,
 };
 use crate::supervisor::{START_LIMIT_BURST, START_LIMIT_INTERVAL};
-use crate::utils::{cargo_binary_name, hash_tree, make_executable};
+use phoxal_cli_core::project::tooling::{
+    cargo_binary_name, hash_tree, make_executable, resolve_project_path,
+};
+use phoxal_cli_core::session::launch_env::{EncodedParticipantEnv, encode_participant_env};
 
 const OPT_ROOT: &str = "/opt/phoxal";
 const ACTIVE_ROOT: &str = "/opt/phoxal/active";
@@ -929,7 +931,6 @@ fn prepare_deploy(
         project_root,
         loaded.robot.artifacts.channel,
         &loaded.extras,
-        ui.interactive(),
     )?;
     let mut resolved = resolve(
         &loaded.robot,
@@ -937,12 +938,10 @@ fn prepare_deploy(
         catalog.as_ref(),
         ResolveOptions {
             refresh_channel_head: false,
-            emit_update_notice: true,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             official_target_triple: Some(target.official_triple.clone()),
             tool_target_triple: Some(target.official_triple.clone()),
-            interactive: ui.interactive(),
         },
     )?;
     if let Some(catalog) = catalog.as_ref() {
@@ -955,12 +954,10 @@ fn prepare_deploy(
             catalog.as_ref(),
             ResolveOptions {
                 refresh_channel_head: false,
-                emit_update_notice: false,
                 resolve_source_commits: false,
                 resolve_component_asset_commits: false,
                 official_target_triple: Some(crate::resolver::host_target_triple()),
                 tool_target_triple: Some(crate::resolver::host_target_triple()),
-                interactive: ui.interactive(),
             },
         )?;
         let catalog = catalog
@@ -1621,7 +1618,7 @@ fn build_source_artifact(
 }
 
 fn source_kind(kind: SourceParticipantKind) -> ArtifactKind {
-    use crate::participant_kind::ParticipantKind;
+    use phoxal_cli_core::session::ParticipantKind;
     match kind.shared_kind() {
         ParticipantKind::Service => ArtifactKind::Service,
         ParticipantKind::Driver => ArtifactKind::ComponentDriver,
@@ -1647,7 +1644,7 @@ fn source_record(
                 Ok(serde_json::json!({ "git": git, "rev": rev }))
             }
             ResolvedComponentSource::Path { path } => {
-                let full = crate::utils::resolve_project_path(project_root, path);
+                let full = resolve_project_path(project_root, path);
                 Ok(serde_json::json!({
                     "path": path.display().to_string(),
                     "tree": format!("sha256:{}", hash_tree(&full)?)
@@ -3087,7 +3084,7 @@ fn stage_declared_metadata_file(
     label: &str,
 ) -> Result<String> {
     validate_payload_relative_path(relative_path, label)?;
-    let source = crate::utils::resolve_project_path(project_root, relative_path);
+    let source = resolve_project_path(project_root, relative_path);
     copy_metadata_file(&source, &payload_root.join(relative_path), label)?;
     Ok(opt_remote_path(relative_path))
 }

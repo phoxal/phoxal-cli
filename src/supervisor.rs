@@ -22,8 +22,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, timeout};
 
 use crate::launch_plan::DEFAULT_ROUTER_CONNECT;
-pub use crate::participant_kind::ParticipantKind;
 use crate::session::output::WaitBudget;
+use phoxal_cli_core::session::ParticipantKind;
+use phoxal_cli_core::session::{human, launch_env};
 
 pub const SUPERVISOR_LOCK_FILE: &str = "supervisor.lock";
 pub const RESTART_SEC: Duration = Duration::from_secs(2);
@@ -95,7 +96,7 @@ pub struct ParticipantStatus {
     /// Whether this participant runs from a locally resolved directory
     /// (user-authored source, or a local path-pin override) rather than a
     /// fetched catalog artifact. Orthogonal to `kind` - see
-    /// `crate::participant_kind` module docs. Defaults to `false`
+    /// `phoxal_cli_core::session::participant_kind` module docs. Defaults to `false`
     /// (catalog) via [`Self::new`]; set explicitly with [`Self::with_local`].
     #[serde(default)]
     pub local: bool,
@@ -444,13 +445,13 @@ impl BoardBackend {
                 status.state = ParticipantState::Degraded;
                 status.note = Some(format!(
                     "Webots-managed participant not observed for over {}; waiting for its owner",
-                    crate::human::duration(stale_after)
+                    human::duration(stale_after)
                 ));
             } else {
                 status.state = ParticipantState::Failed;
                 status.note = Some(format!(
                     "heartbeat stopped: no presence/heartbeat observed for over {}",
-                    crate::human::duration(stale_after)
+                    human::duration(stale_after)
                 ));
             }
         }
@@ -668,7 +669,7 @@ fn render_manual_command_line(spec: &ParticipantSpec) -> String {
     let env = spec.env.iter().cloned().collect::<BTreeMap<_, _>>();
     let mut parts = vec![shell_quote(&spec.executable.display().to_string())];
     parts.extend(spec.args.iter().map(|arg| shell_quote(arg)));
-    for (env_key, flag) in crate::launch_env::ENV_TO_FLAG {
+    for (env_key, flag) in launch_env::ENV_TO_FLAG {
         if let Some(value) = env.get(*env_key) {
             parts.push((*flag).to_string());
             parts.push(shell_quote(value));
@@ -1105,7 +1106,7 @@ impl RunningParticipant {
                 Some(format!(
                     "StartLimitBurst exhausted after {} failures in {}; last status {status}",
                     policy.start_limit_burst,
-                    crate::human::duration(policy.start_limit_interval)
+                    human::duration(policy.start_limit_interval)
                 )),
             );
             return Ok(());
@@ -1118,7 +1119,7 @@ impl RunningParticipant {
             ParticipantState::Restarting,
             Some(format!(
                 "exited with {status}; restarting in {}",
-                crate::human::duration(policy.restart_delay)
+                human::duration(policy.restart_delay)
             )),
         );
         self.restart_at = Some(now + policy.restart_delay);
@@ -1505,7 +1506,7 @@ async fn await_stage_ready(
         // missing participant simply keeps waiting for as long as the
         // operator leaves the session open.
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            let waited = crate::human::duration(started.elapsed());
+            let waited = human::duration(started.elapsed());
             for id in &missing {
                 board.set_state(
                     id,

@@ -21,7 +21,7 @@ pub fn make_executable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn hash_tree(path: &Path) -> Result<String> {
+pub fn hash_tree(path: &Path) -> Result<String> {
     let mut files = Vec::new();
     collect_hash_files(path, path, &mut files)?;
     files.sort();
@@ -50,7 +50,7 @@ fn collect_hash_files(root: &Path, path: &Path, files: &mut Vec<PathBuf>) -> Res
     Ok(())
 }
 
-pub(crate) fn resolve_project_path(project_root: &Path, path: &Path) -> PathBuf {
+pub fn resolve_project_path(project_root: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -58,7 +58,7 @@ pub(crate) fn resolve_project_path(project_root: &Path, path: &Path) -> PathBuf 
     }
 }
 
-pub(crate) fn cargo_binary_name(crate_dir: &Path, preferred_name: Option<&str>) -> Result<String> {
+pub fn cargo_binary_name(crate_dir: &Path, preferred_name: Option<&str>) -> Result<String> {
     let manifest_path = crate_dir.join("Cargo.toml");
     let contents = fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;

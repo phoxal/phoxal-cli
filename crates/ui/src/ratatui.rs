@@ -1,7 +1,6 @@
 //! Bridge [`crate::theme::Theme`]'s role-based palette into ratatui
 //! [`Style`]/[`Color`], degrading through the exact same four
-//! [`ColorCapability`] tiers the rest of the CLI already uses (spinner,
-//! stepper, identity line) - see `theme`'s module docs. No color is ever
+//! [`ColorCapability`] tiers the rest of the CLI already uses. No color is ever
 //! picked directly here; every call site asks for a [`Role`] and this module
 //! is the only place that turns one into a ratatui `Color`.
 
@@ -11,7 +10,7 @@ use crate::theme::{ColorCapability, Rgb, Role, Theme, rgb_to_ansi16, rgb_to_ansi
 
 /// `role`'s color at `theme`'s capability - `Color::Reset` (no color at all)
 /// under [`ColorCapability::None`], matching [`Theme::paint`]'s own
-/// colorless passthrough so a `--plain`/`NO_COLOR`/non-truecolor terminal
+/// colorless passthrough so a `NO_COLOR`/non-truecolor terminal
 /// never receives an escape sequence the terminal cannot render faithfully.
 #[must_use]
 pub fn color(theme: Theme, role: Role) -> Color {

@@ -307,9 +307,9 @@ impl Write for SessionWriter {
 /// The `sender_cell()` this module installs into is process-global, and it
 /// is now read from OTHER modules' tests too (`session::controller`, which
 /// constructs a real `SessionController` and so calls [`install`] from
-/// `#[tokio::test]` `async fn`s; `progress`, whose `spinner`/`bytes_bar` call
+/// `#[tokio::test]` `async fn`s; `progress`, whose `status` calls
 /// [`try_route`] and must see NO session installed to exercise their own
-/// `Silent`/`Plain`/`Rich` fallback from plain, synchronous `#[test]` `fn`s).
+/// `Silent`/`Plain`/`Routed` fallback from plain, synchronous `#[test]` `fn`s).
 /// Every test anywhere in the crate that installs, uninstalls, or depends on
 /// nothing being installed MUST acquire this lock first, or two such tests
 /// running concurrently (the default `cargo test` behavior) can flip each

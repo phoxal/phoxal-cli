@@ -228,7 +228,7 @@ fn parses_check_service_and_strict() {
 }
 
 #[test]
-fn parses_deploy_update_and_global_plain() {
+fn parses_deploy_and_update() {
     let cli = Cli::try_parse_from([
         "phoxal-cli",
         "deploy",
@@ -252,11 +252,8 @@ fn parses_deploy_update_and_global_plain() {
     assert_eq!(command.target.as_deref(), Some("aarch64"));
 
     assert!(Cli::try_parse_from(["phoxal-cli", "update", "--dry-run"]).is_ok());
-    let cli = Cli::try_parse_from(["phoxal-cli", "--plain", "check"])
-        .expect("global --plain should parse before a verb");
-    assert!(cli.plain);
-    let cli = Cli::try_parse_from(["phoxal-cli", "check", "--plain"])
-        .expect("global --plain should also parse after a verb");
-    assert!(cli.plain);
+    assert!(Cli::try_parse_from(["phoxal-cli", "--plain", "check"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal-cli", "check", "--plain"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal-cli", "--quiet", "check"]).is_err());
     assert!(Cli::try_parse_from(["phoxal-cli", "--welcome", "check"]).is_err());
 }

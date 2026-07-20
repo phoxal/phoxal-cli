@@ -1,10 +1,10 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use crate::Project;
 use crate::Ui;
 use crate::session::output::OutputContext;
 use anyhow::Result;
+use phoxal_cli_core::Project;
 
 #[derive(Debug, Clone)]
 pub struct AppContext {
@@ -12,15 +12,8 @@ pub struct AppContext {
     pub project: Project,
     pub catalog_source: Option<String>,
     pub offline: bool,
-    pub quiet: bool,
     /// The output contract for `run`/`simulation run`'s `SessionController`.
-    /// [`AppContext::new`] fills this with a reasonable default computed from
-    /// the live environment (matching [`crate::ui::Ui::from_env`]'s own
-    /// fallback), since `--plain` is not yet known at
-    /// construction time; [`crate::commands::dispatch`] overwrites it (and
-    /// `ui` alongside it) with the precise value computed from the
-    /// actual CLI invocation before any command runs (see that function's
-    /// docs).
+    /// [`AppContext::new`] computes it once from stderr's terminal state.
     pub output: OutputContext,
 }
 
@@ -29,7 +22,6 @@ impl AppContext {
         workspace_root: PathBuf,
         catalog_source: Option<String>,
         offline: bool,
-        quiet: bool,
     ) -> Result<Self> {
         // SAFETY: AppContext is constructed once during single-threaded CLI
         // startup, before workers are spawned. Path helpers use this to keep
@@ -39,17 +31,13 @@ impl AppContext {
             if offline {
                 std::env::set_var(crate::catalog::OFFLINE_ENV, "1");
             }
-            if quiet {
-                std::env::set_var("PHOXAL_QUIET", "1");
-            }
         }
-        let output = OutputContext::compute(std::io::stderr().is_terminal(), false, quiet);
+        let output = OutputContext::compute(std::io::stderr().is_terminal());
         Ok(Self {
             ui: Ui::new(output.decorated()),
             project: Project::new(workspace_root)?,
             catalog_source,
             offline,
-            quiet,
             output,
         })
     }

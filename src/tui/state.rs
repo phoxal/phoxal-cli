@@ -811,9 +811,9 @@ mod tests {
     use crossterm::event::{KeyEventKind, KeyEventState};
 
     use super::*;
-    use crate::participant_kind::ParticipantKind;
     use crate::stores::log_store::LogStore;
     use crate::stores::runtime_store::RuntimeStore;
+    use phoxal_cli_core::session::ParticipantKind;
 
     #[test]
     fn non_ascii_filters_match_case_insensitively() {

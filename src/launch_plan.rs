@@ -718,7 +718,8 @@ mod tests {
             mission.launch.config,
             Some(serde_json::json!({"message": "line\nquoted \"value\""}))
         );
-        let encoded = crate::launch_env::encode_participant_env(&mission.launch)?;
+        let encoded =
+            phoxal_cli_core::session::launch_env::encode_participant_env(&mission.launch)?;
         assert_eq!(
             encoded
                 .variables()

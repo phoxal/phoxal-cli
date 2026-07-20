@@ -1,5 +1,5 @@
 //! The pure startup-surface model: which phase (if any) is currently active,
-//! and whether the dedicated startup surface (welcome card + active phase)
+//! and whether the dedicated startup surface (session metadata + active phase)
 //! should render at all
 //! INSTEAD of the runtime navigator.
 //!
@@ -21,7 +21,7 @@
 //! [`StartupState::show_startup_surface`] is `true` until the session has
 //! reached [`SessionState::Running`], then stays `false` for the rest of the
 //! session. Later stopping or failure events do not yank the operator back to
-//! the welcome card/phase row and make the console feel like it is restarting.
+//! the startup phase row and make the console feel like it is restarting.
 //! The ratchet is TUI-only presentation state; it is not a second lifecycle
 //! authority.
 

@@ -298,8 +298,8 @@ fn origin_for_execution(execution: &ParticipantExecution) -> RuntimeOrigin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::participant_kind::ParticipantKind;
     use crate::supervisor::ParticipantStatus;
+    use phoxal_cli_core::session::ParticipantKind;
 
     fn board(state: ParticipantState, restarts: u32) -> BoardSnapshot {
         let mut board = BoardSnapshot::default();

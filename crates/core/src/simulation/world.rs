@@ -1,3 +1,5 @@
+//! Project-local Webots world resolution for simulation plans.
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
