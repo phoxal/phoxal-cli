@@ -139,17 +139,75 @@ async fn ordinary_stop_kills_the_entire_isolated_process_group() -> Result<()> {
 async fn closed_action_receiver_is_consumed_once_then_stays_pending() {
     let (action_tx, action_rx) = mpsc::channel(1);
     drop(action_tx);
-    let mut action_rx = Some(action_rx);
+    let action_rx = SupervisorActionReceiver::new(action_rx);
 
-    assert!(recv_action(&mut action_rx).await.is_none());
-    assert!(action_rx.is_none());
+    assert!(recv_action(Some(&action_rx)).await.is_none());
 
     // A closed receiver is terminal, not a stream of immediate `None`s;
     // otherwise it would win every supervisor `select!` pass and spin.
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), recv_action(&mut action_rx))
+        tokio::time::timeout(Duration::from_millis(20), recv_action(Some(&action_rx)))
             .await
             .is_err()
+    );
+}
+
+#[test]
+fn recovery_epoch_clears_presence_and_preserves_webots_ownership() {
+    let board = BoardBackend::new();
+    let mut webots =
+        ParticipantStatus::new("webots", ParticipantKind::Tool, ParticipantState::Ready);
+    webots.note = Some("CLI-managed Webots application".to_string());
+    webots.pid = Some(41);
+    webots.restart_count = 2;
+    board.upsert(webots);
+    let mut controller = ParticipantStatus::new(
+        "simulator-webots-controller-robot",
+        ParticipantKind::Simulator,
+        ParticipantState::Ready,
+    );
+    controller.note = Some("SimulationManaged: launched by Webots".to_string());
+    board.upsert(controller);
+    board.record_presence("webots", true);
+    board.record_presence("simulator-webots-controller-robot", true);
+
+    let epoch = board.begin_recovery_epoch(
+        &[(
+            "webots".to_string(),
+            Some("CLI-managed Webots application".to_string()),
+        )],
+        &["simulator-webots-controller-robot".to_string()],
+    );
+
+    assert_eq!(epoch, 1);
+    assert_eq!(board.recovery_epoch(), 1);
+    assert!(!board.is_present("webots"));
+    assert!(!board.is_present("simulator-webots-controller-robot"));
+    let snapshot = board.snapshot();
+    assert_eq!(
+        snapshot.participants["webots"].state,
+        ParticipantState::Starting
+    );
+    assert_eq!(snapshot.participants["webots"].pid, None);
+    assert_eq!(snapshot.participants["webots"].restart_count, 0);
+    assert_eq!(
+        snapshot.participants["simulator-webots-controller-robot"]
+            .note
+            .as_deref(),
+        Some("SimulationManaged: launched by Webots")
+    );
+
+    board.record_presence("simulator-webots-controller-robot", true);
+    assert_eq!(
+        board.snapshot().participants["simulator-webots-controller-robot"].state,
+        ParticipantState::Starting,
+        "observations from the dead router must be fenced"
+    );
+    board.enable_presence_for_recovery();
+    board.record_presence("simulator-webots-controller-robot", true);
+    assert_eq!(
+        board.snapshot().participants["simulator-webots-controller-robot"].state,
+        ParticipantState::Ready
     );
 }
 

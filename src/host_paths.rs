@@ -40,14 +40,16 @@ pub fn webots_dir() -> Result<PathBuf> {
     project_state_dir().map(|root| root.join("webots"))
 }
 
-pub fn run_dir() -> Result<PathBuf> {
-    project_state_dir().map(|root| root.join("run"))
-}
-
 pub fn simulator_lock_path() -> Result<PathBuf> {
     dirs::home_dir()
         .context("$HOME is not set; cannot locate the simulator lock")
         .map(|home| home.join(".phoxal").join("simulator.lock"))
+}
+
+pub fn supervisor_lock_path() -> Result<PathBuf> {
+    dirs::home_dir()
+        .context("$HOME is not set; cannot locate the supervisor lock")
+        .map(|home| home.join(".phoxal").join("supervisor.lock"))
 }
 
 #[cfg(test)]

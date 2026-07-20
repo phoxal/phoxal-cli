@@ -5,7 +5,9 @@ use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::launch_env;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
@@ -97,10 +99,10 @@ impl Default for RestartPolicy {
 /// `session::controller::SessionController::drive_supervision`, and this
 /// loop never reads it - so an earlier `telemetry: TelemetryBackend` field
 /// here was dead weight, not a real dependency.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SupervisorOptions {
     pub restart_policy: RestartPolicy,
-    pub action_rx: Option<mpsc::Receiver<SupervisorAction>>,
+    pub action_rx: Option<SupervisorActionReceiver>,
     pub requested_stop: Option<RequestedStop>,
     /// The session's root cancellation signal (`session::SessionController`
     /// owns the sender half): a Ctrl-C observed by the controller cancels
@@ -139,7 +141,7 @@ impl Default for SupervisorOptions {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RequestedStop {
     pub(crate) participant_id: String,
     pub(crate) grace: Duration,
@@ -168,6 +170,39 @@ pub enum SupervisorAction {
     /// the exact same stop/spawn/board-note sequence a hot-reload swap
     /// already goes through.
     Restart { id: String },
+}
+
+#[derive(Clone)]
+pub struct SupervisorActionReceiver {
+    inner: Arc<Mutex<Option<mpsc::Receiver<SupervisorAction>>>>,
+}
+
+impl std::fmt::Debug for SupervisorActionReceiver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SupervisorActionReceiver(..)")
+    }
+}
+
+impl SupervisorActionReceiver {
+    #[must_use]
+    pub fn new(receiver: mpsc::Receiver<SupervisorAction>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Some(receiver))),
+        }
+    }
+
+    pub(crate) async fn recv(&self) -> Option<SupervisorAction> {
+        let mut receiver = self.inner.lock().await;
+        let Some(active) = receiver.as_mut() else {
+            drop(receiver);
+            return std::future::pending().await;
+        };
+        let action = active.recv().await;
+        if action.is_none() {
+            receiver.take();
+        }
+        action
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

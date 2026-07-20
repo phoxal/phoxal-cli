@@ -8,19 +8,21 @@ use phoxal_cli_core::session::ParticipantKind;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
 const NOT_PRESENT_NOTE: &str =
     "participant not present on the robot bus; process lifecycle is unchanged";
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BoardBackend {
     inner: Arc<Mutex<BoardSnapshot>>,
     /// Current robot-scoped Liveliness membership. This mirrors Zenoh's
     /// binary present/not-present observation without timestamps, leases, or
     /// inferred instances. Replacement processes may overlap under one stable
     /// key, producing continuous presence rather than another `Alive` event.
-    present: Arc<Mutex<BTreeSet<String>>>,
+    presence: Arc<Mutex<PresenceState>>,
+    recovery_epoch: Arc<AtomicU64>,
     /// Optional live sink for [`RoutedLogLine`]s - set by
     /// `session::controller::SessionController::drive_supervision` once its
     /// `TuiDisplay` renderer exists, so it can maintain its own bounded
@@ -37,6 +39,27 @@ pub struct BoardBackend {
     /// is deliberately small: an untrusted publisher cannot turn diagnostics
     /// about rejected ids into another unbounded allocation vector.
     unknown_bus_ids: Arc<Mutex<BTreeSet<String>>>,
+}
+
+#[derive(Debug, Default)]
+struct PresenceState {
+    enabled: bool,
+    ids: BTreeSet<String>,
+}
+
+impl Default for BoardBackend {
+    fn default() -> Self {
+        Self {
+            inner: Arc::default(),
+            presence: Arc::new(Mutex::new(PresenceState {
+                enabled: true,
+                ids: BTreeSet::new(),
+            })),
+            recovery_epoch: Arc::default(),
+            log_sink: Arc::default(),
+            unknown_bus_ids: Arc::default(),
+        }
+    }
 }
 
 impl BoardBackend {
@@ -63,16 +86,14 @@ impl BoardBackend {
             self.disclose_unknown_bus_id(id, "liveliness");
             return;
         };
+        let mut presence = self.presence.lock().expect("presence mutex poisoned");
+        if !presence.enabled {
+            return;
+        }
         if present {
-            self.present
-                .lock()
-                .expect("presence mutex poisoned")
-                .insert(id.to_string());
+            presence.ids.insert(id.to_string());
         } else {
-            self.present
-                .lock()
-                .expect("presence mutex poisoned")
-                .remove(id);
+            presence.ids.remove(id);
         }
         if matches!(
             status.state,
@@ -95,10 +116,55 @@ impl BoardBackend {
 
     #[must_use]
     pub fn is_present(&self, id: &str) -> bool {
-        self.present
+        self.presence
             .lock()
             .expect("presence mutex poisoned")
+            .ids
             .contains(id)
+    }
+
+    /// Fence observations from the dead router and reset every graph-owned row
+    /// before a replacement router or child is started. Wait-only rows are
+    /// Webots-owned participants, so their ownership notes are preserved.
+    pub(crate) fn begin_recovery_epoch(
+        &self,
+        spawned: &[(String, Option<String>)],
+        wait_only: &[String],
+    ) -> u64 {
+        let mut snapshot = self.inner.lock().expect("board mutex poisoned");
+        let mut presence = self.presence.lock().expect("presence mutex poisoned");
+        presence.enabled = false;
+        presence.ids.clear();
+        for (id, note) in spawned {
+            if let Some(status) = snapshot.participants.get_mut(id) {
+                status.state = ParticipantState::Starting;
+                status.note.clone_from(note);
+                status.pid = None;
+                status.artifact_size_bytes = None;
+                status.restart_count = 0;
+            }
+        }
+        for id in wait_only {
+            if let Some(status) = snapshot.participants.get_mut(id) {
+                status.state = ParticipantState::Starting;
+                status.pid = None;
+                status.artifact_size_bytes = None;
+                status.restart_count = 0;
+            }
+        }
+        self.recovery_epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub(crate) fn enable_presence_for_recovery(&self) {
+        self.presence
+            .lock()
+            .expect("presence mutex poisoned")
+            .enabled = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recovery_epoch(&self) -> u64 {
+        self.recovery_epoch.load(Ordering::SeqCst)
     }
 
     pub fn upsert(&self, status: ParticipantStatus) {

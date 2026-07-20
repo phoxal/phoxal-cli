@@ -9,6 +9,7 @@ use crate::supervisor::BoardBackend;
 use crate::supervisor::RequestedStop;
 use crate::supervisor::SupervisionStage;
 use crate::supervisor::SupervisorAction;
+use crate::supervisor::SupervisorIdentity;
 use crate::supervisor::SupervisorLock;
 use crate::supervisor::SupervisorOptions;
 use crate::supervisor::start_bus_log_subscriber;
@@ -26,8 +27,9 @@ use tokio::sync::mpsc;
 pub(crate) struct LiveSimSetup {
     pub(crate) router: crate::run::InfrastructureRouter,
     pub(crate) connect: String,
-    // Keep both session-wide locks alive for the entire supervision lifetime,
-    // not merely while this setup future is being assembled.
+    // Keep the simulation-specific lease alive for the entire supervision
+    // lifetime. The foreground-supervisor lock is held by the command from
+    // before preparation until this setup and supervision have both ended.
     pub(crate) _locks: LiveSimulationLocks,
     pub(crate) board: BoardBackend,
     pub(crate) telemetry: crate::telemetry::TelemetryBackend,
@@ -44,18 +46,16 @@ pub(crate) struct LiveSimSetup {
 }
 
 pub(crate) struct LiveSimulationLocks {
-    _run_lock: SupervisorLock,
     _simulator_lock: SupervisorLock,
 }
 
 impl LiveSimulationLocks {
     pub(crate) fn acquire(
-        run_dir: &std::path::Path,
         simulator_lock_path: &std::path::Path,
+        identity: SupervisorIdentity,
     ) -> Result<Self> {
         Ok(Self {
-            _run_lock: SupervisorLock::acquire(run_dir)?,
-            _simulator_lock: SupervisorLock::acquire_path(simulator_lock_path)?,
+            _simulator_lock: SupervisorLock::acquire_path(simulator_lock_path, identity)?,
         })
     }
 }
@@ -88,8 +88,11 @@ pub(crate) async fn live_simulate_setup(
         .context("Webots preflight failed; live simulate cannot launch the simulator")?;
     ensure_active()?;
 
-    let run_dir = crate::host_paths::run_dir()?;
-    let locks = LiveSimulationLocks::acquire(&run_dir, &crate::host_paths::simulator_lock_path()?)?;
+    let identity = SupervisorIdentity::resolve(
+        &sim.ctx.project_root,
+        phoxal_cli_core::session::SessionMode::Simulation,
+    );
+    let locks = LiveSimulationLocks::acquire(&crate::host_paths::simulator_lock_path()?, identity)?;
     let runtime_root = crate::runtime_root::publish(&sim.ctx.project_root, &sim.ctx.resolved)
         .context("failed to publish the simulation runtime robot root")?;
     ensure_active()?;
@@ -230,7 +233,7 @@ pub(crate) async fn live_simulate_setup(
         .send(phoxal_cli_core::session::event::SessionEvent::SessionChanged { state: starting })
         .await;
     let supervisor_options = SupervisorOptions {
-        action_rx: Some(action_rx),
+        action_rx: Some(crate::supervisor::SupervisorActionReceiver::new(action_rx)),
         requested_stop: Some(requested_stop),
         token: token.clone(),
         events: Some(events.clone()),

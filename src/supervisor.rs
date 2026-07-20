@@ -4,7 +4,6 @@ use phoxal_api::v1 as api;
 // The simulation clock lives in preview `v2`; log contracts use production
 // `v1`, while participant presence is Zenoh Liveliness rather than an API body.
 
-pub const SUPERVISOR_LOCK_FILE: &str = "supervisor.lock";
 pub const RESTART_SEC: Duration = Duration::from_secs(2);
 pub const START_LIMIT_INTERVAL: Duration = Duration::from_secs(60);
 pub const START_LIMIT_BURST: usize = 5;
@@ -47,8 +46,8 @@ mod board;
 pub(crate) use board::BoardBackend;
 mod spec;
 pub(crate) use spec::{
-    ParticipantSpec, RequestedStop, RestartPolicy, SupervisorAction, SupervisorOptions,
-    SupervisorOutcome,
+    ParticipantSpec, RequestedStop, RestartPolicy, SupervisorAction, SupervisorActionReceiver,
+    SupervisorOptions, SupervisorOutcome,
 };
 mod process;
 pub(crate) use process::RunningParticipant;
@@ -72,7 +71,7 @@ pub(crate) use signals::{
     stop_child,
 };
 mod lock;
-pub(crate) use lock::SupervisorLock;
+pub(crate) use lock::{SupervisorIdentity, SupervisorLock};
 mod bus;
 pub(crate) use bus::{
     default_connect_endpoint, failed_expected_participants, logs_wildcard_topic_key,
