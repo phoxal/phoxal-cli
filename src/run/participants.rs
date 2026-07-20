@@ -23,6 +23,7 @@ use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::launch_env::{encode_participant_env, encode_tool_env};
+use phoxal_cli_core::session::stores::telemetry::RobotScope;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -56,7 +57,11 @@ pub(crate) fn prepare_site_tools(
     for site in &plan.site {
         let status =
             ParticipantStatus::new(&site.id, ParticipantKind::Tool, ParticipantState::Starting)
-                .with_local(site_tool_is_local(resolved, &site.id));
+                .with_local(site_tool_is_local(resolved, &site.id))
+                .with_scope(RobotScope {
+                    namespace: namespace.to_string(),
+                    robot_id: robot_id.to_string(),
+                });
         board.upsert(status);
         match locate_tool_binary(resolved, &site.id, ui)? {
             Some(path) => specs.push(ParticipantSpec {
@@ -96,6 +101,10 @@ pub(crate) fn prepare_robot_participants(
         .map(|runtime| (runtime.name.as_str(), runtime))
         .collect::<BTreeMap<_, _>>();
     for robot in &plan.robots {
+        let scope = RobotScope {
+            namespace: robot.namespace.clone(),
+            robot_id: robot.id.clone(),
+        };
         for participant in &robot.participants {
             let id = participant.launch.participant_id.clone();
             let (kind, local) = participant_kind(&participant.execution);
@@ -114,8 +123,9 @@ pub(crate) fn prepare_robot_participants(
                 // `Degraded`, not synthesized process failure authority.
                 // `crate::simulation` renders its controllerArgs into the
                 // staged world instead of a `ParticipantSpec` (Part 5).
-                let mut status =
-                    ParticipantStatus::new(&id, kind, ParticipantState::Starting).with_local(local);
+                let mut status = ParticipantStatus::new(&id, kind, ParticipantState::Starting)
+                    .with_local(local)
+                    .with_scope(scope.clone());
                 status.note = Some(
                     "SimulationManaged: launched by Webots via the supervisor, not the CLI supervisor"
                         .to_string(),
@@ -124,7 +134,9 @@ pub(crate) fn prepare_robot_participants(
                 continue;
             }
             board.upsert(
-                ParticipantStatus::new(&id, kind, ParticipantState::Starting).with_local(local),
+                ParticipantStatus::new(&id, kind, ParticipantState::Starting)
+                    .with_local(local)
+                    .with_scope(scope.clone()),
             );
             match &participant.execution {
                 ParticipantExecution::OfficialTool { .. } => {

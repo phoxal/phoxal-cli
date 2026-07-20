@@ -17,7 +17,7 @@ pub use command::{DriversMode, Run, RunOptions};
 mod stages;
 pub(crate) use stages::stages_for_run;
 mod telemetry;
-pub(crate) use telemetry::start_telemetry_feeds_at;
+pub(crate) use telemetry::{RobotFeedTarget, start_telemetry_feeds_at};
 mod prepare;
 pub(crate) use prepare::prepare_run;
 mod report;

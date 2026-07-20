@@ -33,8 +33,8 @@ use phoxal_cli_core::session::stores::log::sanitize_terminal_text;
 use phoxal_cli_core::session::stores::telemetry::{DEFAULT_FRESHNESS_TTL, Timestamped};
 use phoxal_cli_core::session::{ClockSample, LogSeverity, ParticipantState, ParticipantStatus};
 use phoxal_cli_core::session::{
-    HostSample, JoypadDeviceStatus, RuntimeBufferKind, RuntimeDirection, TelemetrySnapshot,
-    TopicMetric,
+    HostSample, JoypadDeviceStatus, RuntimeBufferKind, RuntimeDirection, RuntimePerformanceSample,
+    TelemetrySnapshot, TopicMetric,
 };
 
 #[derive(Debug, Clone)]

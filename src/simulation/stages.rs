@@ -51,12 +51,17 @@ pub(crate) fn stages_for_simulate(
 
 pub(crate) fn prepare_substitution_notes(plan: &LaunchPlan, board: &BoardBackend) {
     for robot in &plan.robots {
+        let scope = phoxal_cli_core::session::stores::telemetry::RobotScope {
+            namespace: robot.namespace.clone(),
+            robot_id: robot.id.clone(),
+        };
         for substitution in &robot.substitutions {
             let mut status = ParticipantStatus::new(
                 &substitution.component_instance,
                 ParticipantKind::Driver,
                 ParticipantState::Ready,
-            );
+            )
+            .with_scope(scope.clone());
             status.note = Some(substitution_note(substitution));
             board.upsert(status);
         }

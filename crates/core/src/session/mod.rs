@@ -19,6 +19,6 @@ pub use participant_kind::ParticipantKind;
 pub use telemetry::{
     ClockObservation, ClockSample, DiskSample, HostSample, JoypadCommand, JoypadDevice,
     JoypadDeviceStatus, JoypadDevicesSample, RouterMetricsSample, RuntimeBufferKind,
-    RuntimeDirection, RuntimePerformanceSample, RuntimePerformanceSummary, RuntimeStepSample,
-    RuntimeTopicSample, ScopedRuntimePerformance, TelemetrySnapshot, TopicMetric,
+    RuntimeDirection, RuntimeFeedStatus, RuntimePerformanceSample, RuntimePerformanceSummary,
+    RuntimeStepSample, RuntimeTopicSample, TelemetrySnapshot, TopicMetric,
 };

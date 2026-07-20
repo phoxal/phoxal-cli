@@ -6,13 +6,12 @@ use std::time::{Duration, Instant};
 use phoxal_api::v1 as state_api;
 
 use crate::session::telemetry::{
-    HostSample, JoypadDevicesSample, RouterMetricsSample, RuntimePerformanceSample,
-    ScopedRuntimePerformance,
+    HostSample, JoypadDevicesSample, RouterMetricsSample, RuntimeFeedStatus,
+    RuntimePerformanceSample,
 };
 
 pub const DEFAULT_FRESHNESS_TTL: Duration = Duration::from_secs(3);
 pub const ROUTER_HISTORY_CAPACITY: usize = 60;
-pub const RUNTIME_HISTORY_CAPACITY: usize = 4096;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Timestamped<T> {
@@ -48,7 +47,8 @@ struct RouterTelemetry {
 
 #[derive(Debug, Clone, Default)]
 struct RuntimeTelemetry {
-    by_participant: BTreeMap<String, VecDeque<Timestamped<RuntimePerformanceSample>>>,
+    latest_by_participant: BTreeMap<String, Timestamped<RuntimePerformanceSample>>,
+    status: RuntimeFeedStatus,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -101,22 +101,21 @@ impl TelemetryStore {
         scope: RobotScope,
         now: Instant,
         samples: Vec<RuntimePerformanceSample>,
+        status: RuntimeFeedStatus,
     ) {
         let runtime = self.runtimes.entry(scope).or_default();
-        runtime.by_participant.clear();
-        for sample in samples
-            .into_iter()
-            .rev()
-            .take(RUNTIME_HISTORY_CAPACITY)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-        {
-            runtime
-                .by_participant
-                .entry(sample.participant_id.clone())
-                .or_default()
-                .push_back(Timestamped::new(sample, now));
+        runtime.latest_by_participant.clear();
+        runtime.status = status;
+        for sample in samples {
+            let replace = runtime
+                .latest_by_participant
+                .get(&sample.participant_id)
+                .is_none_or(|current| current.value.sequence < sample.sequence);
+            if replace {
+                runtime
+                    .latest_by_participant
+                    .insert(sample.participant_id.clone(), Timestamped::new(sample, now));
+            }
         }
     }
 
@@ -128,55 +127,27 @@ impl TelemetryStore {
     ) {
         let runtime = self.runtimes.entry(scope).or_default();
         runtime
-            .by_participant
-            .entry(sample.participant_id.clone())
-            .or_default()
-            .push_back(Timestamped::new(sample, now));
-        while runtime
-            .by_participant
-            .values()
-            .map(VecDeque::len)
-            .sum::<usize>()
-            > RUNTIME_HISTORY_CAPACITY
-        {
-            let oldest = runtime
-                .by_participant
-                .iter()
-                .filter_map(|(id, history)| {
-                    history
-                        .front()
-                        .map(|sample| (id.clone(), sample.value.sequence))
-                })
-                .min_by_key(|(_, sequence)| *sequence)
-                .map(|(id, _)| id);
-            let Some(oldest) = oldest else { break };
-            if let Some(history) = runtime.by_participant.get_mut(&oldest) {
-                history.pop_front();
-                if history.is_empty() {
-                    runtime.by_participant.remove(&oldest);
-                }
-            }
-        }
+            .latest_by_participant
+            .insert(sample.participant_id.clone(), Timestamped::new(sample, now));
     }
 
     #[must_use]
-    pub fn runtimes(&self, scope: &RobotScope) -> Vec<ScopedRuntimePerformance> {
+    pub fn runtimes(
+        &self,
+        scope: &RobotScope,
+    ) -> BTreeMap<String, Timestamped<RuntimePerformanceSample>> {
         self.runtimes
             .get(scope)
-            .into_iter()
-            .flat_map(|runtime| {
-                runtime.by_participant.values().filter_map(|history| {
-                    history
-                        .back()
-                        .cloned()
-                        .map(|sample| ScopedRuntimePerformance {
-                            namespace: scope.namespace.clone(),
-                            robot_id: scope.robot_id.clone(),
-                            sample,
-                        })
-                })
+            .map_or_else(BTreeMap::new, |runtime| {
+                runtime.latest_by_participant.clone()
             })
-            .collect()
+    }
+
+    #[must_use]
+    pub fn runtime_status(&self, scope: &RobotScope) -> RuntimeFeedStatus {
+        self.runtimes
+            .get(scope)
+            .map_or_else(RuntimeFeedStatus::default, |runtime| runtime.status)
     }
 
     pub fn record_joypad(&mut self, now: Instant, sample: JoypadDevicesSample) {
@@ -395,21 +366,26 @@ mod tests {
             scope("r1"),
             now,
             vec![runtime(1, "drive"), runtime(2, "drive")],
+            RuntimeFeedStatus::default(),
         );
-        store.install_runtime_history(scope("r2"), now, vec![runtime(3, "camera")]);
-        store.install_runtime_history(scope("r1"), now, vec![runtime(4, "drive")]);
+        store.install_runtime_history(
+            scope("r2"),
+            now,
+            vec![runtime(3, "camera")],
+            RuntimeFeedStatus::default(),
+        );
+        store.install_runtime_history(
+            scope("r1"),
+            now,
+            vec![runtime(4, "drive")],
+            RuntimeFeedStatus::default(),
+        );
 
-        let runtimes = store.runtimes();
-        assert_eq!(runtimes.len(), 2);
-        assert!(runtimes.iter().any(|runtime| {
-            runtime.robot_id == "r1"
-                && runtime.sample.value.participant_id == "drive"
-                && runtime.sample.value.sequence == 4
-        }));
-        assert!(runtimes.iter().any(|runtime| {
-            runtime.robot_id == "r2"
-                && runtime.sample.value.participant_id == "camera"
-                && runtime.sample.value.sequence == 3
-        }));
+        let r1 = store.runtimes(&scope("r1"));
+        let r2 = store.runtimes(&scope("r2"));
+        assert_eq!(r1.len(), 1);
+        assert_eq!(r2.len(), 1);
+        assert_eq!(r1["drive"].value.sequence, 4);
+        assert_eq!(r2["camera"].value.sequence, 3);
     }
 }

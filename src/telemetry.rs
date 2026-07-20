@@ -12,6 +12,7 @@
 //! whatever shape is convenient for rendering without touching the persisted
 //! board contract.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -34,8 +35,8 @@ use phoxal_cli_core::session::stores::telemetry::{RobotScope, TelemetryStore, Ti
 use phoxal_cli_core::session::telemetry::{
     ClockObservation, DiskSample, HostSample, JoypadCommand, JoypadDevice, JoypadDeviceStatus,
     JoypadDevicesSample, RouterMetricsSample, RuntimeBufferKind, RuntimeDirection,
-    RuntimePerformanceSample, RuntimeStepSample, RuntimeTopicSample, TelemetrySnapshot,
-    TopicMetric,
+    RuntimeFeedStatus, RuntimePerformanceSample, RuntimeStepSample, RuntimeTopicSample,
+    TelemetrySnapshot, TopicMetric,
 };
 
 const MAX_HOST_DISKS: usize = 32;
@@ -327,11 +328,13 @@ impl TelemetryBackend {
     pub fn snapshot(&self, scope: &RobotScope) -> TelemetrySnapshot {
         let store = self.inner.lock().expect("telemetry mutex poisoned");
         let mut snapshot = TelemetrySnapshot {
+            scope: Some(scope.clone()),
             clock: None,
             host: store.host().cloned(),
             router: store.router(scope).cloned(),
             router_throughput_history: store.router_throughput_history(scope).collect(),
             runtimes: store.runtimes(scope),
+            runtime_status: store.runtime_status(scope),
             joypad: store.joypad().cloned(),
             motion: store.motion().cloned(),
         };
@@ -377,11 +380,16 @@ impl TelemetryBackend {
             .install_router_history(scope, samples, current);
     }
 
-    fn install_runtimes(&self, scope: RobotScope, samples: Vec<RuntimePerformanceSample>) {
+    fn install_runtimes(
+        &self,
+        scope: RobotScope,
+        samples: Vec<RuntimePerformanceSample>,
+        status: RuntimeFeedStatus,
+    ) {
         self.inner
             .lock()
             .expect("telemetry mutex poisoned")
-            .install_runtime_history(scope, Instant::now(), samples);
+            .install_runtime_history(scope, Instant::now(), samples, status);
     }
 
     fn record_runtime(&self, scope: RobotScope, sample: RuntimePerformanceSample) {
@@ -765,6 +773,7 @@ fn timestamp_router_snapshot(
 pub fn start_runtime_performance_feed(
     namespace: String,
     robot_id: String,
+    expected_participant_ids: Vec<String>,
     connect: String,
     telemetry: TelemetryBackend,
     mut recovery_epochs: watch::Receiver<u64>,
@@ -774,6 +783,7 @@ pub fn start_runtime_performance_feed(
             namespace: namespace.clone(),
             robot_id: robot_id.clone(),
         };
+        let mut last_capacity_evictions = None;
         loop {
             wait_for_endpoint(&connect).await;
             let bus = match Bus::open(BusConfig {
@@ -792,7 +802,13 @@ pub fn start_runtime_performance_feed(
                     continue;
                 }
             };
-            let feed = runtime_performance_feed_loop(&bus, &scope, &telemetry);
+            let feed = runtime_performance_feed_loop(
+                &bus,
+                &scope,
+                &expected_participant_ids,
+                &telemetry,
+                &mut last_capacity_evictions,
+            );
             tokio::pin!(feed);
             let result = tokio::select! {
                 result = &mut feed => Some(result),
@@ -822,8 +838,20 @@ pub fn start_runtime_performance_feed(
 async fn runtime_performance_feed_loop(
     bus: &Bus,
     scope: &RobotScope,
+    expected_participant_ids: &[String],
     telemetry: &TelemetryBackend,
+    last_capacity_evictions: &mut Option<u64>,
 ) -> Result<Infallible> {
+    const MAX_EXPECTED_PARTICIPANTS: usize = 1024;
+    let expected = expected_participant_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if expected.len() > MAX_EXPECTED_PARTICIPANTS {
+        return Err(anyhow!(
+            "runtime telemetry expected participant set exceeds {MAX_EXPECTED_PARTICIPANTS}"
+        ));
+    }
     let follow_topic = state_api::topic::new().tool().runtime().follow();
     let subscriber =
         Subscriber::<state_api::tool::runtime::Follow>::new(bus, &follow_topic, 512).await?;
@@ -839,87 +867,87 @@ async fn runtime_performance_feed_loop(
 
     'query: loop {
         reconciler.begin_query();
-        let mut before_sequence = None;
-        let mut first_cursor: Option<Cursor> = None;
-        let mut records = Vec::new();
-        let mut capacity_evictions = 0_u64;
-        loop {
-            let query = querier.query(state_api::tool::runtime::SnapshotRequest {
+        let Some(anchor_snapshot) = query_runtime_snapshot(
+            &querier,
+            &subscriber,
+            &mut reconciler,
+            &mut local_drops,
+            state_api::tool::runtime::SnapshotRequest {
                 participant_id: None,
-                limit: 64,
-                before_sequence,
-            });
-            tokio::pin!(query);
-            let snapshot = loop {
-                tokio::select! {
-                    response = &mut query => {
-                        break response.map_err(|error| anyhow!("tool-telemetry runtime snapshot query failed: {error}"))?;
-                    }
-                    received = subscriber.recv() => {
-                        let received = received?;
-                        let observed = subscriber.dropped();
-                        if observed != local_drops {
-                            local_drops = observed;
-                            let _ = reconciler.local_drop();
-                            prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
-                            continue 'query;
-                        }
-                        if matches!(reconciler.follow(RuntimeRecordFollow::from(received.body)), ReconcileOutcome::Requery) {
-                            prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
-                            continue 'query;
-                        }
-                    }
-                }
+                limit: 1,
+                before_sequence: None,
+            },
+        )
+        .await?
+        else {
+            prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+            continue 'query;
+        };
+        let Some(anchor) = runtime_anchor_cursor(&anchor_snapshot) else {
+            runtime_protocol_violation(&mut reconciler, "invalid anchor page");
+            prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+            continue 'query;
+        };
+        let mut capacity_evictions = anchor_snapshot.capacity_evictions;
+        let mut records = anchor_snapshot.records;
+        for participant_id in &expected {
+            let Some(snapshot) = query_runtime_snapshot(
+                &querier,
+                &subscriber,
+                &mut reconciler,
+                &mut local_drops,
+                state_api::tool::runtime::SnapshotRequest {
+                    participant_id: Some(participant_id.clone()),
+                    limit: 1,
+                    before_sequence: Some(anchor.sequence),
+                },
+            )
+            .await?
+            else {
+                prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+                continue 'query;
             };
-            let cursor = Cursor {
-                generation: snapshot.cursor.generation,
-                sequence: snapshot.cursor.sequence,
-            };
-            if let Some(first) = &first_cursor {
-                if first.generation != cursor.generation {
-                    let _ = reconciler.local_drop();
-                    prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff)
-                        .await;
-                    continue 'query;
-                }
-            } else {
-                first_cursor = Some(cursor.clone());
+            if !runtime_participant_page_is_valid(&snapshot, &anchor, participant_id) {
+                runtime_protocol_violation(&mut reconciler, "invalid participant page");
+                prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+                continue 'query;
             }
             capacity_evictions = capacity_evictions.max(snapshot.capacity_evictions);
-            let generation = cursor.generation.clone();
-            records.extend(
-                snapshot
-                    .records
-                    .into_iter()
-                    .map(|record| RuntimeRecordFollow {
-                        cursor: Cursor {
-                            generation: generation.clone(),
-                            sequence: record.sequence,
-                        },
-                        record,
-                    }),
-            );
-            before_sequence = snapshot.next_before_sequence;
-            if before_sequence.is_none() {
-                break;
+            records.extend(snapshot.records);
+        }
+        let mut latest_by_participant = BTreeMap::new();
+        for record in records {
+            if expected.contains(&record.participant_id)
+                && latest_by_participant
+                    .get(&record.participant_id)
+                    .is_none_or(|current: &state_api::tool::runtime::Record| {
+                        current.sequence < record.sequence
+                    })
+            {
+                latest_by_participant.insert(record.participant_id.clone(), record);
             }
         }
-        if capacity_evictions > 0 {
-            tracing::warn!(
-                capacity_evictions,
-                "tool-telemetry runtime history was shortened by its memory bound"
-            );
-        }
-        records.sort_by_key(|record| record.cursor.sequence);
-        let outcome = reconciler.install(
-            first_cursor.expect("runtime snapshot has a cursor"),
-            records,
-        );
-        if !apply_runtime_outcome(telemetry, scope, outcome) {
+        let snapshot = latest_by_participant
+            .into_values()
+            .map(|record| RuntimeRecordFollow {
+                cursor: Cursor {
+                    generation: anchor.generation.clone(),
+                    sequence: record.sequence,
+                },
+                record,
+            })
+            .collect();
+        let status = RuntimeFeedStatus {
+            snapshot_incomplete: false,
+            capacity_evictions,
+        };
+        let outcome = reconciler.install(anchor, snapshot);
+        if !apply_runtime_outcome(telemetry, scope, &expected, outcome, status) {
             let _ = reconciler.local_drop();
             prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
             continue 'query;
         }
+        disclose_capacity_evictions(last_capacity_evictions, capacity_evictions);
         retry_backoff.reset();
 
         loop {
@@ -933,13 +961,108 @@ async fn runtime_performance_feed_loop(
             }
             let outcome = reconciler.follow(RuntimeRecordFollow::from(received.body));
             if matches!(outcome, ReconcileOutcome::Requery)
-                || !apply_runtime_outcome(telemetry, scope, outcome)
+                || !apply_runtime_outcome(
+                    telemetry,
+                    scope,
+                    &expected,
+                    outcome,
+                    RuntimeFeedStatus {
+                        snapshot_incomplete: false,
+                        capacity_evictions,
+                    },
+                )
             {
                 prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
                 continue 'query;
             }
         }
     }
+}
+
+async fn query_runtime_snapshot(
+    querier: &Querier<
+        state_api::tool::runtime::SnapshotRequest,
+        state_api::tool::runtime::Snapshot,
+    >,
+    subscriber: &Subscriber<state_api::tool::runtime::Follow>,
+    reconciler: &mut Reconciler<RuntimeRecordFollow>,
+    local_drops: &mut u64,
+    request: state_api::tool::runtime::SnapshotRequest,
+) -> Result<Option<state_api::tool::runtime::Snapshot>> {
+    let query = querier.query(request);
+    tokio::pin!(query);
+    loop {
+        tokio::select! {
+            response = &mut query => {
+                return response
+                    .map(Some)
+                    .map_err(|error| anyhow!("tool-telemetry runtime snapshot query failed: {error}"));
+            }
+            received = subscriber.recv() => {
+                let received = received?;
+                let observed = subscriber.dropped();
+                if observed != *local_drops {
+                    *local_drops = observed;
+                    let _ = reconciler.local_drop();
+                    return Ok(None);
+                }
+                let _ = reconciler.follow(RuntimeRecordFollow::from(received.body));
+            }
+        }
+    }
+}
+
+fn runtime_protocol_violation(
+    reconciler: &mut Reconciler<RuntimeRecordFollow>,
+    reason: &'static str,
+) {
+    tracing::warn!(
+        reason,
+        "tool-telemetry runtime snapshot violated its bounded query contract"
+    );
+    let _ = reconciler.local_drop();
+}
+
+fn runtime_anchor_cursor(snapshot: &state_api::tool::runtime::Snapshot) -> Option<Cursor> {
+    let cursor = Cursor {
+        generation: snapshot.cursor.generation.clone(),
+        sequence: snapshot.cursor.sequence,
+    };
+    (snapshot.records.len() <= 1
+        && snapshot
+            .records
+            .first()
+            .is_none_or(|record| record.sequence == cursor.sequence))
+    .then_some(cursor)
+}
+
+fn runtime_participant_page_is_valid(
+    snapshot: &state_api::tool::runtime::Snapshot,
+    anchor: &Cursor,
+    participant_id: &str,
+) -> bool {
+    snapshot.cursor.generation == anchor.generation
+        && snapshot.cursor.sequence >= anchor.sequence
+        && snapshot.records.len() <= 1
+        && snapshot.records.first().is_none_or(|record| {
+            record.participant_id == participant_id && record.sequence < anchor.sequence
+        })
+}
+
+fn disclose_capacity_evictions(previous: &mut Option<u64>, current: u64) {
+    let delta = capacity_eviction_delta(*previous, current);
+    if delta > 0 {
+        tracing::warn!(
+            capacity_evictions = current,
+            new_capacity_evictions = delta,
+            "tool-telemetry runtime history was shortened by its memory bound"
+        );
+    }
+    *previous = Some(current);
+}
+
+fn capacity_eviction_delta(previous: Option<u64>, current: u64) -> u64 {
+    previous.map_or(current, |prior| current.saturating_sub(prior))
 }
 
 async fn prepare_runtime_requery(
@@ -979,7 +1102,9 @@ impl Sequenced for RuntimeRecordFollow {
 fn apply_runtime_outcome(
     telemetry: &TelemetryBackend,
     scope: &RobotScope,
+    expected: &BTreeSet<String>,
     outcome: ReconcileOutcome<RuntimeRecordFollow>,
+    status: RuntimeFeedStatus,
 ) -> bool {
     match outcome {
         ReconcileOutcome::Installed { snapshot, replay } => {
@@ -988,13 +1113,17 @@ fn apply_runtime_outcome(
                 snapshot
                     .into_iter()
                     .chain(replay)
+                    .filter(|item| expected.contains(&item.record.participant_id))
                     .map(|item| runtime_record_from(item.record))
                     .collect(),
+                status,
             );
             true
         }
         ReconcileOutcome::Append(item) => {
-            telemetry.record_runtime(scope.clone(), runtime_record_from(item.record));
+            if expected.contains(&item.record.participant_id) {
+                telemetry.record_runtime(scope.clone(), runtime_record_from(item.record));
+            }
             true
         }
         ReconcileOutcome::Buffered => true,
@@ -1128,6 +1257,86 @@ mod tests {
             namespace: "acme".to_string(),
             robot_id: robot_id.to_string(),
         }
+    }
+
+    fn runtime_record(sequence: u64, participant_id: &str) -> state_api::tool::runtime::Record {
+        state_api::tool::runtime::Record {
+            sequence,
+            participant_id: participant_id.to_string(),
+            truncated: 0,
+            window_ns: 1,
+            step: None,
+            topics: Vec::new(),
+            overflow: None,
+        }
+    }
+
+    fn runtime_snapshot(
+        generation: &str,
+        sequence: u64,
+        records: Vec<state_api::tool::runtime::Record>,
+    ) -> state_api::tool::runtime::Snapshot {
+        state_api::tool::runtime::Snapshot {
+            cursor: state_api::tool::Cursor {
+                generation: generation.to_string(),
+                sequence,
+            },
+            records,
+            capacity_evictions: 0,
+            next_before_sequence: Some(1),
+        }
+    }
+
+    #[test]
+    fn runtime_query_pages_reject_hostile_anchor_and_filtered_responses() {
+        let anchor = runtime_anchor_cursor(&runtime_snapshot(
+            "g",
+            10,
+            vec![runtime_record(10, "drive")],
+        ))
+        .expect("valid anchor");
+        assert!(
+            runtime_anchor_cursor(&runtime_snapshot("g", 10, vec![runtime_record(9, "drive")],))
+                .is_none()
+        );
+        assert!(
+            runtime_anchor_cursor(&runtime_snapshot(
+                "g",
+                10,
+                vec![runtime_record(10, "drive"), runtime_record(10, "camera")],
+            ))
+            .is_none()
+        );
+
+        assert!(runtime_participant_page_is_valid(
+            &runtime_snapshot("g", 11, vec![runtime_record(8, "drive")]),
+            &anchor,
+            "drive",
+        ));
+        for invalid in [
+            runtime_snapshot("other", 11, vec![runtime_record(8, "drive")]),
+            runtime_snapshot("g", 9, vec![runtime_record(8, "drive")]),
+            runtime_snapshot("g", 11, vec![runtime_record(10, "drive")]),
+            runtime_snapshot("g", 11, vec![runtime_record(8, "camera")]),
+            runtime_snapshot(
+                "g",
+                11,
+                vec![runtime_record(8, "drive"), runtime_record(7, "drive")],
+            ),
+        ] {
+            assert!(!runtime_participant_page_is_valid(
+                &invalid, &anchor, "drive"
+            ));
+        }
+    }
+
+    #[test]
+    fn capacity_evictions_disclose_only_positive_cumulative_edges() {
+        assert_eq!(capacity_eviction_delta(None, 0), 0);
+        assert_eq!(capacity_eviction_delta(None, 4), 4);
+        assert_eq!(capacity_eviction_delta(Some(4), 4), 0);
+        assert_eq!(capacity_eviction_delta(Some(4), 7), 3);
+        assert_eq!(capacity_eviction_delta(Some(7), 2), 0);
     }
 
     #[test]

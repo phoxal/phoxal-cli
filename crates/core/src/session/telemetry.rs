@@ -3,11 +3,13 @@
 //! Bus adapters populate these bounded records; this module has no bus,
 //! process, command, or terminal authority.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use phoxal_api::v1 as state_api;
 
+use crate::session::stores::telemetry::RobotScope;
 use crate::session::stores::telemetry::Timestamped;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -162,8 +164,10 @@ impl RuntimePerformanceSample {
                     .saturating_add(row.bounded_evictions);
                 summary.decode_errors = summary.decode_errors.saturating_add(row.decode_errors);
                 if row.capacity > 0 {
-                    let current = row.current_depth as f64 / row.capacity as f64 * 100.0;
-                    let high = row.high_water_depth as f64 / row.capacity as f64 * 100.0;
+                    let current =
+                        (row.current_depth as f64 / row.capacity as f64 * 100.0).clamp(0.0, 100.0);
+                    let high = (row.high_water_depth as f64 / row.capacity as f64 * 100.0)
+                        .clamp(0.0, 100.0);
                     summary.current_pressure_pct = Some(
                         summary
                             .current_pressure_pct
@@ -181,11 +185,10 @@ impl RuntimePerformanceSample {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ScopedRuntimePerformance {
-    pub namespace: String,
-    pub robot_id: String,
-    pub sample: Timestamped<RuntimePerformanceSample>,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeFeedStatus {
+    pub snapshot_incomplete: bool,
+    pub capacity_evictions: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -228,23 +231,27 @@ pub struct ClockObservation {
 
 #[derive(Debug, Clone, Default)]
 pub struct TelemetrySnapshot {
+    pub scope: Option<RobotScope>,
     pub clock: Option<Timestamped<ClockSample>>,
     pub host: Option<Timestamped<HostSample>>,
     pub router: Option<Timestamped<RouterMetricsSample>>,
     pub router_throughput_history: Vec<Timestamped<f32>>,
-    pub runtimes: Vec<ScopedRuntimePerformance>,
+    pub runtimes: BTreeMap<String, Timestamped<RuntimePerformanceSample>>,
+    pub runtime_status: RuntimeFeedStatus,
     pub joypad: Option<Timestamped<JoypadDevicesSample>>,
     pub motion: Option<Timestamped<state_api::motion::State>>,
 }
 
 impl TelemetrySnapshot {
     #[must_use]
-    pub fn runtime(&self, participant_id: &str) -> Option<&Timestamped<RuntimePerformanceSample>> {
-        self.runtimes
-            .iter()
-            .filter(|runtime| runtime.sample.value.participant_id == participant_id)
-            .max_by_key(|runtime| runtime.sample.received_at)
-            .map(|runtime| &runtime.sample)
+    pub fn runtime(
+        &self,
+        scope: &RobotScope,
+        participant_id: &str,
+    ) -> Option<&Timestamped<RuntimePerformanceSample>> {
+        (self.scope.as_ref() == Some(scope))
+            .then(|| self.runtimes.get(participant_id))
+            .flatten()
     }
 }
 
@@ -332,5 +339,56 @@ mod tests {
         assert_eq!(summary.headroom_ns, None);
         assert_eq!(summary.message_rate_hz, 10.0);
         assert_eq!(summary.current_pressure_pct, None);
+    }
+
+    #[test]
+    fn runtime_lookup_requires_the_exact_robot_scope_even_for_the_same_id() {
+        let now = Instant::now();
+        let r1 = crate::session::stores::telemetry::RobotScope {
+            namespace: "acme".to_string(),
+            robot_id: "r1".to_string(),
+        };
+        let r2 = crate::session::stores::telemetry::RobotScope {
+            namespace: "acme".to_string(),
+            robot_id: "r2".to_string(),
+        };
+        let sample = RuntimePerformanceSample {
+            sequence: 1,
+            participant_id: "drive".to_string(),
+            truncated: 0,
+            window_ns: 1,
+            step: None,
+            topics: Arc::default(),
+            overflow: None,
+        };
+        let snapshot = TelemetrySnapshot {
+            scope: Some(r1.clone()),
+            runtimes: BTreeMap::from([("drive".to_string(), Timestamped::new(sample, now))]),
+            ..TelemetrySnapshot::default()
+        };
+
+        assert!(snapshot.runtime(&r1, "drive").is_some());
+        assert!(snapshot.runtime(&r2, "drive").is_none());
+    }
+
+    #[test]
+    fn runtime_pressure_is_clamped_when_hostile_depth_exceeds_capacity() {
+        let sample = RuntimePerformanceSample {
+            sequence: 1,
+            participant_id: "drive".to_string(),
+            truncated: 0,
+            window_ns: 1,
+            step: None,
+            topics: Arc::new(vec![topic(
+                RuntimeBufferKind::Subscriber,
+                2,
+                u64::MAX,
+                u64::MAX,
+            )]),
+            overflow: None,
+        };
+        let summary = sample.summary();
+        assert_eq!(summary.current_pressure_pct, Some(100.0));
+        assert_eq!(summary.high_water_pressure_pct, Some(100.0));
     }
 }

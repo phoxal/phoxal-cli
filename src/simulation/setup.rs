@@ -212,12 +212,7 @@ pub(crate) async fn live_simulate_setup(
     // already exists for the title telemetry - but host/process/
     // router/joypad each open their own bus connection, so those
     // stay Tui-gated.
-    let site_targets: Vec<(String, String)> = sim
-        .plan
-        .robots
-        .iter()
-        .map(|robot| (robot.namespace.clone(), robot.id.clone()))
-        .collect();
+    let site_targets = crate::run::RobotFeedTarget::from_plan(&sim.plan);
     if renders_tui {
         background_tasks.extend(crate::run::start_telemetry_feeds_at(
             &site_targets,

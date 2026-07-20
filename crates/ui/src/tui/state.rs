@@ -252,8 +252,12 @@ impl AppState {
             if let Some(index) = detail_index {
                 self.runtime_cursor = index;
                 self.runtime_cursor_id = Some(detail_id.to_string());
+                self.runtime_topic_offset = self
+                    .runtime_topic_offset
+                    .min(model.runtime_topic_count(detail_id).saturating_sub(1));
             } else {
                 self.runtime_detail_id = None;
+                self.runtime_topic_offset = 0;
             }
         }
         let mut missing_selected_runtime = false;
@@ -485,7 +489,12 @@ impl AppState {
             }
             KeyCode::Down => {
                 if self.runtime_detail_id.is_some() {
-                    self.runtime_topic_offset = self.runtime_topic_offset.saturating_add(1);
+                    let max_offset = self
+                        .runtime_detail_id
+                        .as_deref()
+                        .map_or(0, |id| model.runtime_topic_count(id).saturating_sub(1));
+                    self.runtime_topic_offset =
+                        self.runtime_topic_offset.saturating_add(1).min(max_offset);
                 } else {
                     self.move_runtime_cursor(model, 1);
                 }

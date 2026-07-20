@@ -1,5 +1,7 @@
 //! Tests for this module.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crossterm::event::{KeyEventKind, KeyEventState};
@@ -8,6 +10,7 @@ use super::*;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::stores::log::LogStore;
 use phoxal_cli_core::session::stores::runtime::RuntimeStore;
+use phoxal_cli_core::session::stores::telemetry::RobotScope;
 
 #[test]
 fn non_ascii_filters_match_case_insensitively() {
@@ -20,7 +23,8 @@ use phoxal_cli_core::session::{
     BoardSnapshot, LogSource, ParticipantState, ParticipantStatus, RoutedLogLine,
 };
 use phoxal_cli_core::session::{
-    JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, TelemetrySnapshot,
+    JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, RuntimeBufferKind, RuntimeDirection,
+    RuntimePerformanceSample, RuntimeTopicSample, TelemetrySnapshot,
 };
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -733,14 +737,52 @@ fn simulation_runtime_navigation_skips_physical_driver_rows() {
 
 #[test]
 fn runtime_detail_arrows_scroll_topics_and_escape_resets_offset() {
+    let scope = RobotScope {
+        namespace: "dev".to_string(),
+        robot_id: "rover".to_string(),
+    };
     let mut board = BoardSnapshot::default();
     board.participants.insert(
         "alpha".to_string(),
-        ParticipantStatus::new("alpha", ParticipantKind::Service, ParticipantState::Ready),
+        ParticipantStatus::new("alpha", ParticipantKind::Service, ParticipantState::Ready)
+            .with_scope(scope.clone()),
     );
     let logs = LogStore::new();
     let runtime = RuntimeStore::new();
-    let telemetry = TelemetrySnapshot::default();
+    let topic = |name: &str| RuntimeTopicSample {
+        topic: name.to_string(),
+        direction: RuntimeDirection::Publish,
+        buffer_kind: RuntimeBufferKind::Outbound,
+        count: 0,
+        rate_hz: 0.0,
+        drops: 0,
+        latest_overwrites: 0,
+        bounded_evictions: 0,
+        capacity: 1,
+        current_depth: 0,
+        high_water_depth: 0,
+        decode_errors: 0,
+        overflowed_rows: 0,
+    };
+    let telemetry = TelemetrySnapshot {
+        scope: Some(scope),
+        runtimes: BTreeMap::from([(
+            "alpha".to_string(),
+            Timestamped::new(
+                RuntimePerformanceSample {
+                    sequence: 1,
+                    participant_id: "alpha".to_string(),
+                    truncated: 0,
+                    window_ns: 1,
+                    step: None,
+                    topics: Arc::new(vec![topic("one"), topic("two")]),
+                    overflow: None,
+                },
+                Instant::now(),
+            ),
+        )]),
+        ..TelemetrySnapshot::default()
+    };
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
     let mut state = AppState {
         page: Page::Runtimes,
@@ -751,9 +793,10 @@ fn runtime_detail_arrows_scroll_topics_and_escape_resets_offset() {
     state.handle_key(key(KeyCode::Enter), &model);
     state.handle_key(key(KeyCode::Down), &model);
     state.handle_key(key(KeyCode::Down), &model);
-    assert_eq!(state.runtime_topic_offset, 2);
-    state.handle_key(key(KeyCode::Up), &model);
+    state.handle_key(key(KeyCode::Down), &model);
     assert_eq!(state.runtime_topic_offset, 1);
+    state.handle_key(key(KeyCode::Up), &model);
+    assert_eq!(state.runtime_topic_offset, 0);
     state.handle_key(key(KeyCode::Esc), &model);
     assert!(state.runtime_detail_id.is_none());
     assert_eq!(state.runtime_topic_offset, 0);
