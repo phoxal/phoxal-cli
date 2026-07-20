@@ -4,6 +4,13 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.19.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.19.0) - 2026-07-20
+
+
+### Added
+
+- *(telemetry)* Add retained robot diagnostics (#166)
+
 ## [0.18.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.18.0) - 2026-07-20
 
 
