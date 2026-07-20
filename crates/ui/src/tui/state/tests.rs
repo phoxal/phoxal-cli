@@ -732,6 +732,34 @@ fn simulation_runtime_navigation_skips_physical_driver_rows() {
 }
 
 #[test]
+fn runtime_detail_arrows_scroll_topics_and_escape_resets_offset() {
+    let mut board = BoardSnapshot::default();
+    board.participants.insert(
+        "alpha".to_string(),
+        ParticipantStatus::new("alpha", ParticipantKind::Service, ParticipantState::Ready),
+    );
+    let logs = LogStore::new();
+    let runtime = RuntimeStore::new();
+    let telemetry = TelemetrySnapshot::default();
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
+    let mut state = AppState {
+        page: Page::Runtimes,
+        navigation: NavigationLevel::Page,
+        ..AppState::default()
+    };
+
+    state.handle_key(key(KeyCode::Enter), &model);
+    state.handle_key(key(KeyCode::Down), &model);
+    state.handle_key(key(KeyCode::Down), &model);
+    assert_eq!(state.runtime_topic_offset, 2);
+    state.handle_key(key(KeyCode::Up), &model);
+    assert_eq!(state.runtime_topic_offset, 1);
+    state.handle_key(key(KeyCode::Esc), &model);
+    assert!(state.runtime_detail_id.is_none());
+    assert_eq!(state.runtime_topic_offset, 0);
+}
+
+#[test]
 fn disappearing_frozen_runtime_returns_to_the_runtime_list() {
     let mut board = BoardSnapshot::default();
     for id in ["alpha", "beta"] {

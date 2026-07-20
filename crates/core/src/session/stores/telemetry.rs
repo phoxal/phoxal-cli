@@ -5,10 +5,14 @@ use std::time::{Duration, Instant};
 
 use phoxal_api::v1 as state_api;
 
-use crate::session::telemetry::{HostSample, JoypadDevicesSample, RouterMetricsSample};
+use crate::session::telemetry::{
+    HostSample, JoypadDevicesSample, RouterMetricsSample, RuntimePerformanceSample,
+    ScopedRuntimePerformance,
+};
 
 pub const DEFAULT_FRESHNESS_TTL: Duration = Duration::from_secs(3);
 pub const ROUTER_HISTORY_CAPACITY: usize = 60;
+pub const RUNTIME_HISTORY_CAPACITY: usize = 4096;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Timestamped<T> {
@@ -43,9 +47,15 @@ struct RouterTelemetry {
 }
 
 #[derive(Debug, Clone, Default)]
+struct RuntimeTelemetry {
+    by_participant: BTreeMap<String, VecDeque<Timestamped<RuntimePerformanceSample>>>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct TelemetryStore {
     host: Option<Timestamped<HostSample>>,
     routers: BTreeMap<RobotScope, RouterTelemetry>,
+    runtimes: BTreeMap<RobotScope, RuntimeTelemetry>,
     joypad: Option<Timestamped<JoypadDevicesSample>>,
     motion: Option<Timestamped<state_api::motion::State>>,
 }
@@ -84,6 +94,89 @@ impl TelemetryStore {
         router.latest = current
             .or_else(|| samples.last().cloned())
             .map(|sample| Timestamped::new(sample.value, sample.received_at));
+    }
+
+    pub fn install_runtime_history(
+        &mut self,
+        scope: RobotScope,
+        now: Instant,
+        samples: Vec<RuntimePerformanceSample>,
+    ) {
+        let runtime = self.runtimes.entry(scope).or_default();
+        runtime.by_participant.clear();
+        for sample in samples
+            .into_iter()
+            .rev()
+            .take(RUNTIME_HISTORY_CAPACITY)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            runtime
+                .by_participant
+                .entry(sample.participant_id.clone())
+                .or_default()
+                .push_back(Timestamped::new(sample, now));
+        }
+    }
+
+    pub fn record_runtime(
+        &mut self,
+        scope: RobotScope,
+        now: Instant,
+        sample: RuntimePerformanceSample,
+    ) {
+        let runtime = self.runtimes.entry(scope).or_default();
+        runtime
+            .by_participant
+            .entry(sample.participant_id.clone())
+            .or_default()
+            .push_back(Timestamped::new(sample, now));
+        while runtime
+            .by_participant
+            .values()
+            .map(VecDeque::len)
+            .sum::<usize>()
+            > RUNTIME_HISTORY_CAPACITY
+        {
+            let oldest = runtime
+                .by_participant
+                .iter()
+                .filter_map(|(id, history)| {
+                    history
+                        .front()
+                        .map(|sample| (id.clone(), sample.value.sequence))
+                })
+                .min_by_key(|(_, sequence)| *sequence)
+                .map(|(id, _)| id);
+            let Some(oldest) = oldest else { break };
+            if let Some(history) = runtime.by_participant.get_mut(&oldest) {
+                history.pop_front();
+                if history.is_empty() {
+                    runtime.by_participant.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn runtimes(&self, scope: &RobotScope) -> Vec<ScopedRuntimePerformance> {
+        self.runtimes
+            .get(scope)
+            .into_iter()
+            .flat_map(|runtime| {
+                runtime.by_participant.values().filter_map(|history| {
+                    history
+                        .back()
+                        .cloned()
+                        .map(|sample| ScopedRuntimePerformance {
+                            namespace: scope.namespace.clone(),
+                            robot_id: scope.robot_id.clone(),
+                            sample,
+                        })
+                })
+            })
+            .collect()
     }
 
     pub fn record_joypad(&mut self, now: Instant, sample: JoypadDevicesSample) {
@@ -136,6 +229,18 @@ mod tests {
         RobotScope {
             namespace: "acme".to_string(),
             robot_id: robot_id.to_string(),
+        }
+    }
+
+    fn runtime(sequence: u64, participant_id: &str) -> RuntimePerformanceSample {
+        RuntimePerformanceSample {
+            sequence,
+            participant_id: participant_id.to_string(),
+            truncated: 0,
+            window_ns: 1,
+            step: None,
+            topics: std::sync::Arc::default(),
+            overflow: None,
         }
     }
 
@@ -280,5 +385,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2.0]
         );
+    }
+
+    #[test]
+    fn runtime_snapshot_replacement_is_scoped_and_latest_is_per_participant() {
+        let mut store = TelemetryStore::default();
+        let now = Instant::now();
+        store.install_runtime_history(
+            scope("r1"),
+            now,
+            vec![runtime(1, "drive"), runtime(2, "drive")],
+        );
+        store.install_runtime_history(scope("r2"), now, vec![runtime(3, "camera")]);
+        store.install_runtime_history(scope("r1"), now, vec![runtime(4, "drive")]);
+
+        let runtimes = store.runtimes();
+        assert_eq!(runtimes.len(), 2);
+        assert!(runtimes.iter().any(|runtime| {
+            runtime.robot_id == "r1"
+                && runtime.sample.value.participant_id == "drive"
+                && runtime.sample.value.sequence == 4
+        }));
+        assert!(runtimes.iter().any(|runtime| {
+            runtime.robot_id == "r2"
+                && runtime.sample.value.participant_id == "camera"
+                && runtime.sample.value.sequence == 3
+        }));
     }
 }

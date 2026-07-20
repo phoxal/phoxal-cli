@@ -176,6 +176,7 @@ pub struct AppState {
     pub runtime_cursor: usize,
     runtime_cursor_id: Option<String>,
     pub runtime_detail_id: Option<String>,
+    pub runtime_topic_offset: usize,
     pub simulation: bool,
     pub log_source_filter: LogSourceFilter,
     pub log_filter_cursor: usize,
@@ -207,6 +208,7 @@ impl Default for AppState {
             runtime_cursor: 0,
             runtime_cursor_id: None,
             runtime_detail_id: None,
+            runtime_topic_offset: 0,
             simulation: false,
             log_source_filter: LogSourceFilter::All,
             log_filter_cursor: 0,
@@ -324,6 +326,7 @@ impl AppState {
         self.error_log_opened = true;
         self.editing = None;
         self.runtime_detail_id = None;
+        self.runtime_topic_offset = 0;
         self.show_help = false;
         self.show_info = false;
         self.page = Page::Logs;
@@ -385,6 +388,7 @@ impl AppState {
 
         if key.code == KeyCode::Esc {
             if self.page == Page::Runtimes && self.runtime_detail_id.take().is_some() {
+                self.runtime_topic_offset = 0;
                 return DisplayAction::None;
             }
             if self.navigation == NavigationLevel::Page {
@@ -427,6 +431,7 @@ impl AppState {
         self.tab_cursor = page.index();
         self.navigation = NavigationLevel::Page;
         self.runtime_detail_id = None;
+        self.runtime_topic_offset = 0;
         if changed && page == Page::Input {
             DisplayAction::JoypadRescan
         } else {
@@ -465,16 +470,23 @@ impl AppState {
 
     fn handle_runtimes(&mut self, key: KeyEvent, model: &SessionViewModel<'_>) -> DisplayAction {
         match key.code {
-            KeyCode::Enter => {
+            KeyCode::Enter if self.runtime_detail_id.is_none() => {
                 self.runtime_detail_id =
                     self.selected_runtime(model).map(|status| status.id.clone());
                 self.runtime_cursor_id.clone_from(&self.runtime_detail_id);
+                self.runtime_topic_offset = 0;
             }
-            KeyCode::Up if self.runtime_detail_id.is_none() => {
-                self.move_runtime_cursor(model, -1);
+            KeyCode::Up => {
+                if self.runtime_detail_id.is_some() {
+                    self.runtime_topic_offset = self.runtime_topic_offset.saturating_sub(1);
+                } else {
+                    self.move_runtime_cursor(model, -1);
+                }
             }
             KeyCode::Down => {
-                if self.runtime_detail_id.is_none() {
+                if self.runtime_detail_id.is_some() {
+                    self.runtime_topic_offset = self.runtime_topic_offset.saturating_add(1);
+                } else {
                     self.move_runtime_cursor(model, 1);
                 }
             }

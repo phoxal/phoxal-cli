@@ -99,6 +99,7 @@ impl BoardBackend {
         } else {
             presence.ids.remove(id);
         }
+        status.present = Some(present);
         if matches!(
             status.state,
             ParticipantState::Failed | ParticipantState::Stopped
@@ -146,6 +147,7 @@ impl BoardBackend {
                 status.pid = None;
                 status.artifact_size_bytes = None;
                 status.restart_count = 0;
+                status.present = None;
             }
         }
         for id in wait_only {
@@ -154,6 +156,7 @@ impl BoardBackend {
                 status.pid = None;
                 status.artifact_size_bytes = None;
                 status.restart_count = 0;
+                status.present = None;
             }
         }
         let epoch = self.recovery_epoch.fetch_add(1, Ordering::SeqCst) + 1;
@@ -357,5 +360,24 @@ impl BoardBackend {
     #[must_use]
     pub fn snapshot(&self) -> BoardSnapshot {
         self.inner.lock().expect("board mutex poisoned").clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn liveliness_presence_is_explicit_and_recovery_resets_it_to_unknown() {
+        let board = BoardBackend::new();
+        board.register_planned("drive", ParticipantKind::Service);
+
+        board.record_presence("drive", true);
+        assert_eq!(board.snapshot().participants["drive"].present, Some(true));
+        board.record_presence("drive", false);
+        assert_eq!(board.snapshot().participants["drive"].present, Some(false));
+
+        board.begin_recovery_epoch(&[("drive".to_string(), None)], &[]);
+        assert_eq!(board.snapshot().participants["drive"].present, None);
     }
 }

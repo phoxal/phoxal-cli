@@ -33,7 +33,9 @@ use phoxal_cli_core::session::stores::log::sanitize_terminal_text;
 use phoxal_cli_core::session::stores::telemetry::{RobotScope, TelemetryStore, Timestamped};
 use phoxal_cli_core::session::telemetry::{
     ClockObservation, DiskSample, HostSample, JoypadCommand, JoypadDevice, JoypadDeviceStatus,
-    JoypadDevicesSample, RouterMetricsSample, TelemetrySnapshot, TopicMetric,
+    JoypadDevicesSample, RouterMetricsSample, RuntimeBufferKind, RuntimeDirection,
+    RuntimePerformanceSample, RuntimeStepSample, RuntimeTopicSample, TelemetrySnapshot,
+    TopicMetric,
 };
 
 const MAX_HOST_DISKS: usize = 32;
@@ -192,6 +194,59 @@ fn bounded_remote_text(text: &str) -> String {
         .collect()
 }
 
+fn runtime_topic_from(body: state_api::tool::RuntimeTopic) -> RuntimeTopicSample {
+    RuntimeTopicSample {
+        topic: if body.topic.is_empty() {
+            "Other/unobserved topics".to_string()
+        } else {
+            bounded_remote_text(&body.topic)
+        },
+        direction: match body.direction {
+            state_api::tool::RuntimeDirection::Publish => RuntimeDirection::Publish,
+            state_api::tool::RuntimeDirection::Subscribe => RuntimeDirection::Subscribe,
+            state_api::tool::RuntimeDirection::Mixed => RuntimeDirection::Mixed,
+        },
+        buffer_kind: match body.buffer_kind {
+            state_api::tool::RuntimeBufferKind::Outbound => RuntimeBufferKind::Outbound,
+            state_api::tool::RuntimeBufferKind::Latest => RuntimeBufferKind::Latest,
+            state_api::tool::RuntimeBufferKind::Subscriber => RuntimeBufferKind::Subscriber,
+            state_api::tool::RuntimeBufferKind::Mixed => RuntimeBufferKind::Mixed,
+        },
+        count: body.count,
+        rate_hz: body.rate_hz,
+        drops: body.drops,
+        latest_overwrites: body.latest_overwrites,
+        bounded_evictions: body.bounded_evictions,
+        capacity: body.capacity,
+        current_depth: body.current_depth,
+        high_water_depth: body.high_water_depth,
+        decode_errors: body.decode_errors,
+        overflowed_rows: body.overflowed_rows,
+    }
+}
+
+fn runtime_record_from(body: state_api::tool::runtime::Record) -> RuntimePerformanceSample {
+    RuntimePerformanceSample {
+        sequence: body.sequence,
+        participant_id: bounded_remote_text(&body.participant_id),
+        truncated: body.truncated,
+        window_ns: body.window_ns,
+        step: body.step.map(|step| RuntimeStepSample {
+            target_period_ns: step.target_period_ns,
+            completed: step.completed,
+            errors: step.errors,
+            mean_duration_ns: step.mean_duration_ns,
+            max_duration_ns: step.max_duration_ns,
+            mean_lateness_ns: step.mean_lateness_ns,
+            max_lateness_ns: step.max_lateness_ns,
+            missed_ticks: step.missed_ticks,
+            overruns: step.overruns,
+        }),
+        topics: Arc::new(body.topics.into_iter().map(runtime_topic_from).collect()),
+        overflow: body.overflow.map(runtime_topic_from),
+    }
+}
+
 /// A snapshot of the selected robot's live telemetry feeds, cloned once per TUI redraw
 /// (mirrors `BoardBackend::snapshot`). Every latest-value field is a
 /// [`Timestamped`] carrying the [`Instant`] the underlying sample was
@@ -276,6 +331,7 @@ impl TelemetryBackend {
             host: store.host().cloned(),
             router: store.router(scope).cloned(),
             router_throughput_history: store.router_throughput_history(scope).collect(),
+            runtimes: store.runtimes(scope),
             joypad: store.joypad().cloned(),
             motion: store.motion().cloned(),
         };
@@ -319,6 +375,20 @@ impl TelemetryBackend {
             .lock()
             .expect("telemetry mutex poisoned")
             .install_router_history(scope, samples, current);
+    }
+
+    fn install_runtimes(&self, scope: RobotScope, samples: Vec<RuntimePerformanceSample>) {
+        self.inner
+            .lock()
+            .expect("telemetry mutex poisoned")
+            .install_runtime_history(scope, Instant::now(), samples);
+    }
+
+    fn record_runtime(&self, scope: RobotScope, sample: RuntimePerformanceSample) {
+        self.inner
+            .lock()
+            .expect("telemetry mutex poisoned")
+            .record_runtime(scope, Instant::now(), sample);
     }
 
     fn record_joypad(&self, sample: JoypadDevicesSample) {
@@ -687,6 +757,249 @@ fn timestamp_router_snapshot(
     }
     timestamped.reverse();
     (timestamped, current)
+}
+
+/// Reconcile tool-telemetry's paginated retained runtime history with its live
+/// follow feed. The adapter owns transport recovery only; it never changes
+/// lifecycle state or samples host-process resources.
+pub fn start_runtime_performance_feed(
+    namespace: String,
+    robot_id: String,
+    connect: String,
+    telemetry: TelemetryBackend,
+    mut recovery_epochs: watch::Receiver<u64>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let scope = RobotScope {
+            namespace: namespace.clone(),
+            robot_id: robot_id.clone(),
+        };
+        loop {
+            wait_for_endpoint(&connect).await;
+            let bus = match Bus::open(BusConfig {
+                namespace: namespace.clone(),
+                robot_id: robot_id.clone(),
+                participant: "phoxal-cli-tool-telemetry-consumer".to_string(),
+                incarnation: 0,
+                connect_endpoints: vec![connect.clone()],
+            })
+            .await
+            {
+                Ok(bus) => bus,
+                Err(error) => {
+                    tracing::debug!("runtime telemetry feed waiting for router: {error}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            let feed = runtime_performance_feed_loop(&bus, &scope, &telemetry);
+            tokio::pin!(feed);
+            let result = tokio::select! {
+                result = &mut feed => Some(result),
+                changed = recovery_epochs.changed() => {
+                    if changed.is_err() { break; }
+                    tracing::debug!(
+                        recovery_epoch = *recovery_epochs.borrow_and_update(),
+                        "recreating tool-telemetry snapshot/follow transport after graph recovery"
+                    );
+                    None
+                }
+            };
+            close_feed_bus(&bus, "tool-telemetry/runtime").await;
+            match result {
+                None => continue,
+                Some(result) => {
+                    let error =
+                        result.expect_err("runtime telemetry feed loop is intentionally endless");
+                    tracing::debug!("runtime telemetry feed waiting for router: {error:#}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    })
+}
+
+async fn runtime_performance_feed_loop(
+    bus: &Bus,
+    scope: &RobotScope,
+    telemetry: &TelemetryBackend,
+) -> Result<Infallible> {
+    let follow_topic = state_api::topic::new().tool().runtime().follow();
+    let subscriber =
+        Subscriber::<state_api::tool::runtime::Follow>::new(bus, &follow_topic, 512).await?;
+    let snapshot_topic = state_api::topic::new().tool().runtime().snapshot();
+    let querier = Querier::<
+        state_api::tool::runtime::SnapshotRequest,
+        state_api::tool::runtime::Snapshot,
+    >::new(bus.clone(), &snapshot_topic, DEFAULT_QUERY_TIMEOUT)?;
+    let mut reconciler = Reconciler::new(4096);
+    let mut local_drops = subscriber.dropped();
+    let mut retry_backoff =
+        RetryBackoff::new(Duration::from_millis(10), Duration::from_millis(250));
+
+    'query: loop {
+        reconciler.begin_query();
+        let mut before_sequence = None;
+        let mut first_cursor: Option<Cursor> = None;
+        let mut records = Vec::new();
+        let mut capacity_evictions = 0_u64;
+        loop {
+            let query = querier.query(state_api::tool::runtime::SnapshotRequest {
+                participant_id: None,
+                limit: 64,
+                before_sequence,
+            });
+            tokio::pin!(query);
+            let snapshot = loop {
+                tokio::select! {
+                    response = &mut query => {
+                        break response.map_err(|error| anyhow!("tool-telemetry runtime snapshot query failed: {error}"))?;
+                    }
+                    received = subscriber.recv() => {
+                        let received = received?;
+                        let observed = subscriber.dropped();
+                        if observed != local_drops {
+                            local_drops = observed;
+                            let _ = reconciler.local_drop();
+                            prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+                            continue 'query;
+                        }
+                        if matches!(reconciler.follow(RuntimeRecordFollow::from(received.body)), ReconcileOutcome::Requery) {
+                            prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+                            continue 'query;
+                        }
+                    }
+                }
+            };
+            let cursor = Cursor {
+                generation: snapshot.cursor.generation,
+                sequence: snapshot.cursor.sequence,
+            };
+            if let Some(first) = &first_cursor {
+                if first.generation != cursor.generation {
+                    let _ = reconciler.local_drop();
+                    prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff)
+                        .await;
+                    continue 'query;
+                }
+            } else {
+                first_cursor = Some(cursor.clone());
+            }
+            capacity_evictions = capacity_evictions.max(snapshot.capacity_evictions);
+            let generation = cursor.generation.clone();
+            records.extend(
+                snapshot
+                    .records
+                    .into_iter()
+                    .map(|record| RuntimeRecordFollow {
+                        cursor: Cursor {
+                            generation: generation.clone(),
+                            sequence: record.sequence,
+                        },
+                        record,
+                    }),
+            );
+            before_sequence = snapshot.next_before_sequence;
+            if before_sequence.is_none() {
+                break;
+            }
+        }
+        if capacity_evictions > 0 {
+            tracing::warn!(
+                capacity_evictions,
+                "tool-telemetry runtime history was shortened by its memory bound"
+            );
+        }
+        records.sort_by_key(|record| record.cursor.sequence);
+        let outcome = reconciler.install(
+            first_cursor.expect("runtime snapshot has a cursor"),
+            records,
+        );
+        if !apply_runtime_outcome(telemetry, scope, outcome) {
+            let _ = reconciler.local_drop();
+            prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+            continue 'query;
+        }
+        retry_backoff.reset();
+
+        loop {
+            let received = subscriber.recv().await?;
+            let observed = subscriber.dropped();
+            if observed != local_drops {
+                local_drops = observed;
+                let _ = reconciler.local_drop();
+                prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+                continue 'query;
+            }
+            let outcome = reconciler.follow(RuntimeRecordFollow::from(received.body));
+            if matches!(outcome, ReconcileOutcome::Requery)
+                || !apply_runtime_outcome(telemetry, scope, outcome)
+            {
+                prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+                continue 'query;
+            }
+        }
+    }
+}
+
+async fn prepare_runtime_requery(
+    subscriber: &Subscriber<state_api::tool::runtime::Follow>,
+    local_drops: &mut u64,
+    backoff: &mut RetryBackoff,
+) {
+    while subscriber.try_recv().is_some() {}
+    *local_drops = subscriber.dropped();
+    tokio::time::sleep(backoff.next_delay()).await;
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeRecordFollow {
+    cursor: Cursor,
+    record: state_api::tool::runtime::Record,
+}
+
+impl From<state_api::tool::runtime::Follow> for RuntimeRecordFollow {
+    fn from(follow: state_api::tool::runtime::Follow) -> Self {
+        Self {
+            cursor: Cursor {
+                generation: follow.cursor.generation,
+                sequence: follow.cursor.sequence,
+            },
+            record: follow.record,
+        }
+    }
+}
+
+impl Sequenced for RuntimeRecordFollow {
+    fn cursor(&self) -> Cursor {
+        self.cursor.clone()
+    }
+}
+
+fn apply_runtime_outcome(
+    telemetry: &TelemetryBackend,
+    scope: &RobotScope,
+    outcome: ReconcileOutcome<RuntimeRecordFollow>,
+) -> bool {
+    match outcome {
+        ReconcileOutcome::Installed { snapshot, replay } => {
+            telemetry.install_runtimes(
+                scope.clone(),
+                snapshot
+                    .into_iter()
+                    .chain(replay)
+                    .map(|item| runtime_record_from(item.record))
+                    .collect(),
+            );
+            true
+        }
+        ReconcileOutcome::Append(item) => {
+            telemetry.record_runtime(scope.clone(), runtime_record_from(item.record));
+            true
+        }
+        ReconcileOutcome::Buffered => true,
+        ReconcileOutcome::Requery => false,
+    }
 }
 
 /// Subscribe v2::joypad::Devices and own the Select, SetEnabled, and Rescan

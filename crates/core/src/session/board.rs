@@ -60,6 +60,10 @@ pub struct ParticipantStatus {
     pub pid: Option<u32>,
     #[serde(skip)]
     pub artifact_size_bytes: Option<u64>,
+    /// Current robot-bus Liveliness observation for presentation only. `None`
+    /// means the observer has not established graph state in this epoch.
+    #[serde(skip)]
+    pub present: Option<bool>,
 }
 
 impl ParticipantStatus {
@@ -77,6 +81,7 @@ impl ParticipantStatus {
             launch_command: None,
             pid: None,
             artifact_size_bytes: None,
+            present: None,
         }
     }
 

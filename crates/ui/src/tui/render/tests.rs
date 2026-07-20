@@ -11,6 +11,10 @@ use phoxal_cli_core::session::{
     BoardSnapshot, LogSource, ParticipantState, ParticipantStatus, RoutedLogLine,
 };
 use phoxal_cli_core::session::{DiskSample, JoypadDevice};
+use phoxal_cli_core::session::{
+    RuntimeBufferKind, RuntimeDirection, RuntimePerformanceSample, RuntimeStepSample,
+    RuntimeTopicSample, ScopedRuntimePerformance,
+};
 
 fn title() -> TitleInfo {
     TitleInfo {
@@ -301,6 +305,113 @@ fn runtime_page_keeps_the_three_group_boxes_when_empty() {
         assert!(rendered.contains(label), "missing {label}: {rendered}");
     }
     assert!(rendered.contains("No user runtimes"));
+}
+
+fn performance_sample(participant_id: &str, received_at: Instant) -> ScopedRuntimePerformance {
+    ScopedRuntimePerformance {
+        namespace: "dev".to_string(),
+        robot_id: "rover".to_string(),
+        sample: Timestamped::new(
+            RuntimePerformanceSample {
+                sequence: 1,
+                participant_id: participant_id.to_string(),
+                truncated: 0,
+                window_ns: 1_000_000_000,
+                step: Some(RuntimeStepSample {
+                    target_period_ns: 20_000_000,
+                    completed: 50,
+                    max_duration_ns: 10_000_000,
+                    ..RuntimeStepSample::default()
+                }),
+                topics: vec![RuntimeTopicSample {
+                    topic: "v1/drive/target".to_string(),
+                    direction: RuntimeDirection::Subscribe,
+                    buffer_kind: RuntimeBufferKind::Subscriber,
+                    count: 10,
+                    rate_hz: 10.0,
+                    drops: 1,
+                    latest_overwrites: 0,
+                    bounded_evictions: 0,
+                    capacity: 8,
+                    current_depth: 2,
+                    high_water_depth: 4,
+                    decode_errors: 0,
+                    overflowed_rows: 0,
+                }]
+                .into(),
+                overflow: None,
+            },
+            received_at,
+        ),
+    }
+}
+
+#[test]
+fn runtime_rows_distinguish_fresh_stalled_and_missing_portable_progress() {
+    let now = Instant::now();
+    let mut board = BoardSnapshot::default();
+    let mut fresh =
+        ParticipantStatus::new("fresh", ParticipantKind::Service, ParticipantState::Ready);
+    fresh.present = Some(true);
+    let mut stalled =
+        ParticipantStatus::new("stalled", ParticipantKind::Service, ParticipantState::Ready);
+    stalled.present = Some(true);
+    let mut missing = ParticipantStatus::new(
+        "missing",
+        ParticipantKind::Service,
+        ParticipantState::Degraded,
+    );
+    missing.present = Some(false);
+    for status in [fresh, stalled, missing] {
+        board.participants.insert(status.id.clone(), status);
+    }
+    let telemetry = TelemetrySnapshot {
+        runtimes: vec![
+            performance_sample("fresh", now),
+            performance_sample("stalled", now - Duration::from_secs(4)),
+            performance_sample("missing", now),
+        ],
+        ..TelemetrySnapshot::default()
+    };
+    let logs = LogStore::new();
+    let runtime = RuntimeStore::new();
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
+    let wide = runtime_columns(100);
+
+    assert!(runtime_row(board.participants.get("fresh").unwrap(), &model, wide).contains("10.0/s"));
+    assert!(
+        runtime_row(board.participants.get("stalled").unwrap(), &model, wide).contains("stalled")
+    );
+    assert!(
+        runtime_row(board.participants.get("missing").unwrap(), &model, wide).contains("missing")
+    );
+}
+
+#[test]
+fn runtime_detail_renders_portable_summary_and_topic_pressure() {
+    let now = Instant::now();
+    let mut board = BoardSnapshot::default();
+    let mut status =
+        ParticipantStatus::new("drive", ParticipantKind::Service, ParticipantState::Ready);
+    status.present = Some(true);
+    board.participants.insert(status.id.clone(), status);
+    let telemetry = TelemetrySnapshot {
+        runtimes: vec![performance_sample("drive", now)],
+        ..TelemetrySnapshot::default()
+    };
+    let logs = LogStore::new();
+    let runtime = RuntimeStore::new();
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
+    let mut state = AppState::default();
+    state.page = Page::Runtimes;
+    state.navigation = NavigationLevel::Page;
+    state.runtime_detail_id = Some("drive".to_string());
+
+    let rendered = render_model(&title(), &state, &model, 120, 36);
+    assert!(rendered.contains("Portable performance"), "{rendered}");
+    assert!(rendered.contains("budget"), "{rendered}");
+    assert!(rendered.contains("v1/drive/target"), "{rendered}");
+    assert!(rendered.contains("DEPTH"), "{rendered}");
 }
 
 #[test]
