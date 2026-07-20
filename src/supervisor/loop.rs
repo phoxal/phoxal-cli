@@ -13,7 +13,6 @@ use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::process::Child;
-use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 pub async fn supervise_until_shutdown(
@@ -37,14 +36,14 @@ pub async fn supervise_until_shutdown(
 
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut action_rx = options.action_rx.take();
+    let action_rx = options.action_rx.take();
     let mut supervisor_error = None;
     'supervision: loop {
         tokio::select! {
             () = token.cancelled() => {
                 break;
             }
-            action = recv_action(&mut action_rx) => {
+            action = recv_action(action_rx.as_ref()) => {
                 if let Some(action) = action
                     && let Err(error) = handle_action(&mut running, &board, action).await
                 {
@@ -223,16 +222,12 @@ pub(crate) async fn request_participant_stop(
 }
 
 pub(crate) async fn recv_action(
-    action_rx: &mut Option<mpsc::Receiver<SupervisorAction>>,
+    action_rx: Option<&super::SupervisorActionReceiver>,
 ) -> Option<SupervisorAction> {
-    let action = match action_rx {
+    match action_rx {
         Some(action_rx) => action_rx.recv().await,
-        None => return std::future::pending().await,
-    };
-    if action.is_none() {
-        action_rx.take();
+        None => std::future::pending().await,
     }
-    action
 }
 
 pub(crate) async fn handle_action(

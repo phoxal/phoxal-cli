@@ -50,6 +50,12 @@ pub fn simulator_lock_path() -> Result<PathBuf> {
         .map(|home| home.join(".phoxal").join("simulator.lock"))
 }
 
+pub fn supervisor_lock_path() -> Result<PathBuf> {
+    dirs::home_dir()
+        .context("$HOME is not set; cannot locate the supervisor lock")
+        .map(|home| home.join(".phoxal").join("supervisor.lock"))
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::ffi::OsString;

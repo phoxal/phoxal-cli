@@ -8,6 +8,7 @@ use crate::AppContext;
 use crate::supervisor::BoardBackend;
 use crate::supervisor::ParticipantSpec;
 use crate::supervisor::SupervisionStage;
+use crate::supervisor::SupervisorIdentity;
 use crate::supervisor::SupervisorLock;
 use crate::supervisor::SupervisorOptions;
 use crate::supervisor::start_bus_log_subscriber;
@@ -135,8 +136,11 @@ impl Run {
         let watch_enabled = options.watch;
         let watch_options = options.clone();
 
-        let run_dir = crate::host_paths::run_dir()?;
-        let _lock = SupervisorLock::acquire(&run_dir)?;
+        let identity = SupervisorIdentity::resolve(
+            app.project.root(),
+            phoxal_cli_core::session::SessionMode::Run,
+        )?;
+        let _lock = SupervisorLock::acquire(identity)?;
         let project_root = app.project.root().to_path_buf();
         let ui = app.ui;
 
@@ -300,7 +304,7 @@ async fn live_run_setup(
 
     let board = prepared.board;
     let supervisor_options = SupervisorOptions {
-        action_rx: Some(action_rx),
+        action_rx: Some(crate::supervisor::SupervisorActionReceiver::new(action_rx)),
         token,
         events: Some(events),
         emits_running_on_startup_complete: true,

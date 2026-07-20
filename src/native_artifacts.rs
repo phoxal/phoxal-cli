@@ -13,6 +13,7 @@ mod lock;
 pub(crate) use lock::ArtifactStoreLock;
 #[cfg(windows)]
 pub(crate) use lock::WindowsOverlapped;
+pub(crate) use lock::{try_advisory_lock, unlock_advisory};
 mod prepare;
 pub(crate) use prepare::{PreparedScope, prepare_descriptor, prepare_scope_candidate};
 mod activation;

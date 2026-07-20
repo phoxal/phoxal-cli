@@ -49,20 +49,20 @@ fn webots_launch_starts_realtime_batch_mode() {
 fn live_simulation_locks_remain_held_until_the_setup_owner_drops() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let simulator_lock = temp.path().join("simulator.lock");
-    let locks = LiveSimulationLocks::acquire(temp.path(), &simulator_lock)?;
-
+    let identity = crate::supervisor::SupervisorIdentity {
+        project: temp.path().join("project"),
+        entry: temp.path().join("project/robot.yaml"),
+        mode: "simulation".to_string(),
+        pid: std::process::id(),
+    };
+    let locks = LiveSimulationLocks::acquire(&simulator_lock, identity.clone())?;
     assert!(
-        SupervisorLock::acquire(temp.path()).is_err(),
-        "the run lock must remain held after setup returns"
-    );
-    assert!(
-        SupervisorLock::acquire_path(&simulator_lock).is_err(),
+        SupervisorLock::acquire_path(&simulator_lock, identity.clone()).is_err(),
         "the simulator lock must remain held after setup returns"
     );
 
     drop(locks);
-    SupervisorLock::acquire(temp.path())?;
-    SupervisorLock::acquire_path(&simulator_lock)?;
+    SupervisorLock::acquire_path(&simulator_lock, identity)?;
     Ok(())
 }
 

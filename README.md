@@ -3,7 +3,7 @@
 Consumer CLI for the Phoxal robot framework.
 You run it from a robot project: it reads `robot.yaml`, resolves the graph against a verified generated artifact catalog when official artifacts are needed, and drives the develop, simulate, and deploy loop.
 It owns the resolver and `robot.yaml` discovery.
-There is no lockfile or global artifact cache. The project's git-ignored `.phoxal/` tree is the vendored set; `phoxal update` is the explicit channel-head mutation boundary.
+There is no dependency lockfile or global artifact cache. The project's git-ignored `.phoxal/` tree is the vendored set; `phoxal update` is the explicit channel-head mutation boundary.
 Production reproducibility comes from explicit `artifacts.pins` plus the deployed `phoxal-release.json` record.
 
 ## Commands
@@ -179,6 +179,7 @@ diagnostics rather than as missing static catalog entries.
 ## Host layout
 
 ```text
+~/.phoxal/supervisor.lock           Stable per-user foreground-supervisor authority.
 ~/.phoxal/simulator.lock            Host-global simulation lease.
 
 <project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/targets/<target>/  Unpacked target artifacts.
@@ -193,7 +194,10 @@ diagnostics rather than as missing static catalog entries.
 To reset all generated project state while no Phoxal command is active, delete
 `<project>/.phoxal/`. Deleting it during `run`, simulation, deploy, or update is
 unsupported because that bypasses the CLI's active locks. Do not delete
-`~/.phoxal/`: it contains host-global state such as the simulator lock.
+`~/.phoxal/`: it contains host-global state such as the supervisor and
+simulator locks. The supervisor lock inode is intentionally permanent; while
+held, its JSON metadata identifies the canonical project, canonical robot
+entry, session mode, and owning PID for conflict diagnostics.
 
 ## License
 
