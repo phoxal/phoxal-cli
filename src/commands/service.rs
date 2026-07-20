@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::AppContext;
-use crate::resolver::{discover_robot_yaml, load_robot_with_extras};
+use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot_with_extras};
 
 #[derive(Debug, Args)]
 pub struct Service {
@@ -80,7 +80,7 @@ pub fn service_catalog_summary(
     )?
     .ok_or_else(|| anyhow::anyhow!("artifact catalog unavailable"))?;
     Ok(ServiceCatalogSummary {
-        entries: crate::catalog::OFFICIAL_SERVICES
+        entries: phoxal_cli_core::project::catalog::OFFICIAL_SERVICES
             .iter()
             .map(|(_, package)| ServiceCatalogEntry {
                 id: (*package).to_string(),
@@ -102,7 +102,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::catalog::{
+    use phoxal_cli_core::project::catalog::{
         SelectionChannel as CatalogChannel, fixture_catalog_for_tests, fixture_contract_for_tests,
         fixture_service_entry_for_tests,
     };
@@ -117,7 +117,7 @@ mod tests {
 
         assert_eq!(
             summary.entries.len(),
-            crate::catalog::OFFICIAL_SERVICES.len()
+            phoxal_cli_core::project::catalog::OFFICIAL_SERVICES.len()
         );
         let entry = summary
             .entries

@@ -1,17 +1,9 @@
-//! The event-driven session core: the typed lifecycle event stream
-//! ([`event`]), the pure session state machine ([`state`]), the immutable
-//! output contract ([`output`]), and the [`controller::SessionController`]
-//! that owns terminal/cancellation/TUI lifecycle and drives `run`/
-//! `simulation run` end to end.
+//! Root adapters for terminal, diagnostics, cancellation, and session output.
 //!
-//! [`event`] and [`state`] are pure data plus pure transitions - no terminal,
-//! channel, or supervisor wiring lives there. That keeps them independently
-//! testable and free of a dependency on the heavier `supervisor`/`tui`
-//! modules; [`controller`] is the slice that wires them to a real terminal,
-//! a real `CancellationToken`, and the supervisor.
+//! Typed lifecycle events and the pure state machine live in
+//! `phoxal_cli_core::session`; this module connects them to the process and TUI
+//! adapters used by interactive commands.
 
 pub mod controller;
 pub mod diagnostics;
-pub mod event;
 pub mod output;
-pub mod state;

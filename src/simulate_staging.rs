@@ -9,7 +9,7 @@
 //! - Declares an `EXTERNPROTO` for each robot's generated PROTO.
 //! - Never adds a robot as a static instance node - robots are always
 //!   supervisor-spawned at runtime, never pre-baked (see the module doc on
-//!   `commands::simulate`).
+//!   `crate::simulation`).
 //! - Adds exactly one static root node: the Webots supervisor `Robot` node
 //!   (`supervisor TRUE`, `controller "phoxal-simulator-webots-supervisor"`).
 //!   Its `--config` contains only non-spawn settings. Robot nodes are served
@@ -83,11 +83,11 @@ pub struct SupervisorConfig {
 /// P4/C2 triage: `supervisor_launch`/`controller_launches` are real,
 /// correctly-populated values (their EFFECT already lives in the staged
 /// world's baked-in `controllerArgs`), but the real caller
-/// (`commands::simulate::stage_and_prepare_webots_spec`) only needs
+/// (`crate::simulation::stage_and_prepare_webots_spec`) only needs
 /// `staged_world_path`/`spawn_descriptors` afterward - these two exist for
 /// test introspection of what was actually rendered
 /// (`staged.supervisor_launch`/`staged.controller_launches` in this module's
-/// and `commands::simulate`'s own tests), not because they are unused
+/// and `crate::simulation`'s own tests), not because they are unused
 /// byproducts.
 pub struct StagedSimulationWorld {
     pub staged_world_path: PathBuf,

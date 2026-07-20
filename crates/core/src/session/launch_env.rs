@@ -1,3 +1,5 @@
+//! Stable participant launch-environment encoding.
+
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};

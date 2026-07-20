@@ -34,11 +34,12 @@ pub enum ReportFormat {
 
 impl Validate {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let robot_path = crate::resolver::discover_robot_yaml(app.project.root())?;
+        let robot_path =
+            phoxal_cli_core::project::resolver::discover_robot_yaml(app.project.root())?;
         let project_root = robot_path
             .parent()
             .context("robot.yaml did not have a parent directory")?;
-        let loaded = crate::resolver::load_robot_with_extras(&robot_path)?;
+        let loaded = phoxal_cli_core::project::resolver::load_robot_with_extras(&robot_path)?;
         let robot = loaded.robot;
         let catalog = crate::commands::load_catalog_for_robot(
             app,
@@ -48,7 +49,7 @@ impl Validate {
         )?;
         let platform_names = catalog
             .as_ref()
-            .map(crate::catalog::service_names)
+            .map(phoxal_cli_core::project::catalog::service_names)
             .unwrap_or_default();
         let platform_name_refs = platform_names
             .iter()
@@ -192,16 +193,16 @@ fn phoxal_dependency(dep: &TomlValue) -> PhoxalDependency {
     PhoxalDependency::Unparsable
 }
 
-fn print_text_report(robot: &Robot, catalog: Option<&crate::catalog::Catalog>) {
+fn print_text_report(robot: &Robot, catalog: Option<&phoxal_cli_core::project::catalog::Catalog>) {
     println!("robot: {}", robot.robot.id);
     println!(
         "channel: {}",
-        crate::catalog::selection_channel(robot.artifacts.channel)
+        phoxal_cli_core::project::catalog::selection_channel(robot.artifacts.channel)
     );
     println!("platform_services:");
-    for (_, package) in crate::catalog::OFFICIAL_SERVICES {
+    for (_, package) in phoxal_cli_core::project::catalog::OFFICIAL_SERVICES {
         let found = catalog.and_then(|catalog| {
-            crate::catalog::latest_by_package(catalog)
+            phoxal_cli_core::project::catalog::latest_by_package(catalog)
                 .get(package)
                 .map(|artifact| artifact.version.as_str())
         });
@@ -228,13 +229,16 @@ fn print_text_report(robot: &Robot, catalog: Option<&crate::catalog::Catalog>) {
     }
 }
 
-fn print_json_report(robot: &Robot, catalog: Option<&crate::catalog::Catalog>) -> Result<()> {
+fn print_json_report(
+    robot: &Robot,
+    catalog: Option<&phoxal_cli_core::project::catalog::Catalog>,
+) -> Result<()> {
     let report = serde_json::json!({
         "robot": robot.robot.id,
-        "channel": crate::catalog::selection_channel(robot.artifacts.channel).as_str(),
-        "platform_services": crate::catalog::OFFICIAL_SERVICES.iter().map(|(_, package)| {
+        "channel": phoxal_cli_core::project::catalog::selection_channel(robot.artifacts.channel).as_str(),
+        "platform_services": phoxal_cli_core::project::catalog::OFFICIAL_SERVICES.iter().map(|(_, package)| {
             let version = catalog.and_then(|catalog| {
-                crate::catalog::latest_by_package(catalog)
+                phoxal_cli_core::project::catalog::latest_by_package(catalog)
                     .get(package)
                     .map(|artifact| artifact.version.clone())
             });

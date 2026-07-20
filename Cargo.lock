@@ -2977,8 +2977,12 @@ dependencies = [
  "hex",
  "object",
  "phoxal",
+ "phoxal-api",
+ "reqwest",
+ "semver",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.11.0",
  "tempfile",
  "toml",
@@ -2997,8 +3001,16 @@ dependencies = [
 name = "phoxal-cli-ui"
 version = "0.17.0"
 dependencies = [
+ "anyhow",
  "console",
+ "crossterm",
+ "phoxal",
+ "phoxal-api",
+ "phoxal-cli-core",
  "ratatui",
+ "tokio",
+ "tracing",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

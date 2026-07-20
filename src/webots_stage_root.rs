@@ -13,7 +13,7 @@
 //! hold real generated files (they are synthesized fresh every play, so
 //! there is nothing to link to), while `controllers/<name>/<name>` and
 //! `meshes/<component>` are symlinks into the vendored/path-pinned source so
-//! that source stays authoritative (see `commands::simulate`).
+//! that source stays authoritative (see `crate::simulation`).
 
 use std::path::PathBuf;
 

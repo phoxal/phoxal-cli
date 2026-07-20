@@ -32,7 +32,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing_subscriber::fmt::MakeWriter;
 
-use super::event::{DiagnosticLevel, DiagnosticSource, PhaseId, PhaseOutcome, SessionEvent};
+use phoxal_cli_core::session::event::{
+    DiagnosticLevel, DiagnosticSource, PhaseId, PhaseOutcome, SessionEvent,
+};
 
 struct ActiveSession {
     sender: mpsc::Sender<SessionEvent>,
@@ -224,7 +226,7 @@ pub(crate) fn phase_progress(id: impl Into<PhaseId>, completed: u64, total: u64)
 /// visible at all - so this channel practically never fills. An awaited
 /// `blocking_send` would also risk a genuine panic: this function runs from
 /// synchronous code that is not always on a dedicated `spawn_blocking`
-/// thread (`commands::simulate::live_simulate_setup` calls synchronous
+/// thread (`crate::simulation::live_simulate_setup` calls synchronous
 /// build code directly from a plain `tokio::spawn`ed async task), and
 /// `blocking_send` panics if called from a runtime's own worker thread.
 pub(crate) fn run_phase<T>(

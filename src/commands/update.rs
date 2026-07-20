@@ -7,8 +7,12 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::AppContext;
-use crate::native_artifacts::{ArtifactProgressReporter, NativeArtifactDescriptor};
-use crate::resolver::{ResolveOptions, discover_robot_yaml, load_robot_with_extras, resolve};
+use crate::native_artifacts::ArtifactProgressReporter;
+use crate::resolver::resolve;
+use phoxal_cli_core::artifacts::NativeArtifactDescriptor;
+use phoxal_cli_core::project::resolver::{
+    ResolveOptions, discover_robot_yaml, load_robot_with_extras,
+};
 
 #[derive(Debug, Args)]
 pub struct Update {
@@ -71,7 +75,8 @@ fn update(
     let robot_path = discover_robot_yaml(project_start)?;
     let project_root = robot_path.parent().context("robot.yaml has no parent")?;
     let loaded = load_robot_with_extras(&robot_path)?;
-    let channel = crate::catalog::selection_channel(loaded.robot.artifacts.channel);
+    let channel =
+        phoxal_cli_core::project::catalog::selection_channel(loaded.robot.artifacts.channel);
     let robot_source = loaded.extras.catalog_source.as_ref().map(|source| {
         if source.is_absolute() {
             source.clone()
@@ -79,8 +84,8 @@ fn update(
             project_root.join(source)
         }
     });
-    let catalog = crate::catalog::load_pinned_catalog(
-        crate::catalog::CatalogLoadOptions {
+    let catalog = phoxal_cli_core::project::catalog::load_pinned_catalog(
+        phoxal_cli_core::project::catalog::CatalogLoadOptions {
             cli_source: catalog_source,
             robot_source,
             offline: false,
@@ -185,8 +190,8 @@ fn update(
 }
 
 fn include_existing_target_scopes(
-    descriptors: &mut Vec<crate::native_artifacts::NativeArtifactDescriptor>,
-    catalog: &crate::catalog::Catalog,
+    descriptors: &mut Vec<phoxal_cli_core::artifacts::NativeArtifactDescriptor>,
+    catalog: &phoxal_cli_core::project::catalog::Catalog,
 ) -> Result<()> {
     let current = descriptors.clone();
     for descriptor in current {
@@ -394,12 +399,12 @@ fn free_disk_bytes(_path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{
+    use crate::host_paths::test_support::ScratchPhoxalHome;
+    use phoxal_cli_core::artifacts::NativeArtifactDescriptor;
+    use phoxal_cli_core::project::catalog::{
         SelectionChannel, fixture_blob_for_tests, fixture_catalog_for_tests,
         fixture_service_entry_for_tests,
     };
-    use crate::host_paths::test_support::ScratchPhoxalHome;
-    use crate::native_artifacts::NativeArtifactDescriptor;
 
     #[test]
     fn dry_run_does_not_create_project_state_in_a_clean_project() -> Result<()> {
@@ -478,7 +483,7 @@ robot:
         let catalog = fixture_catalog_for_tests(vec![entry]);
         let mut descriptors = vec![NativeArtifactDescriptor {
             package_id: package.to_string(),
-            kind: crate::catalog::ArtifactKind::Service,
+            kind: phoxal_cli_core::project::catalog::ArtifactKind::Service,
             name: "drive".to_string(),
             version: "1.2.3".to_string(),
             url: "https://example.invalid/host".to_string(),

@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 use crate::AppContext;
-use crate::resolver::RobotManifestExtras;
+use phoxal_cli_core::project::resolver::RobotManifestExtras;
 
 pub mod behavior;
 pub mod check;
@@ -22,7 +22,7 @@ pub mod update;
 pub mod validate;
 
 /// Load the artifact catalog for a robot project. There is no `refresh`
-/// parameter anymore: [`crate::catalog::load_catalog`] always fetches the
+/// parameter anymore: [`phoxal_cli_core::project::catalog::load_catalog`] always fetches the
 /// remote catalog fresh (no on-disk cache of the fetch) unless an explicit
 /// local/URL source is given - see its docs.
 pub(crate) fn load_catalog_for_robot(
@@ -30,7 +30,7 @@ pub(crate) fn load_catalog_for_robot(
     project_root: &std::path::Path,
     channel: phoxal::model::robot::v0::Channel,
     manifest_extras: &RobotManifestExtras,
-) -> Result<Option<crate::catalog::Catalog>> {
+) -> Result<Option<phoxal_cli_core::project::catalog::Catalog>> {
     load_catalog_for_robot_from_source(
         app.catalog_source.clone(),
         project_root,
@@ -44,7 +44,7 @@ pub(crate) fn load_catalog_for_robot_from_source(
     project_root: &std::path::Path,
     channel: phoxal::model::robot::v0::Channel,
     manifest_extras: &RobotManifestExtras,
-) -> Result<Option<crate::catalog::Catalog>> {
+) -> Result<Option<phoxal_cli_core::project::catalog::Catalog>> {
     let robot_source = manifest_extras.catalog_source.as_ref().map(|source| {
         if source.is_absolute() {
             source.clone()
@@ -52,19 +52,19 @@ pub(crate) fn load_catalog_for_robot_from_source(
             project_root.join(source)
         }
     });
-    catalog_or_vendored(crate::catalog::load_pinned_catalog(
-        crate::catalog::CatalogLoadOptions {
+    catalog_or_vendored(phoxal_cli_core::project::catalog::load_pinned_catalog(
+        phoxal_cli_core::project::catalog::CatalogLoadOptions {
             cli_source: catalog_source,
             robot_source,
             offline: false,
         },
-        crate::catalog::selection_channel(channel),
+        phoxal_cli_core::project::catalog::selection_channel(channel),
     ))
 }
 
 pub(crate) fn catalog_or_vendored(
-    loaded: Result<Option<crate::catalog::Catalog>>,
-) -> Result<Option<crate::catalog::Catalog>> {
+    loaded: Result<Option<phoxal_cli_core::project::catalog::Catalog>>,
+) -> Result<Option<phoxal_cli_core::project::catalog::Catalog>> {
     match loaded {
         Ok(catalog) => Ok(catalog),
         Err(error) if crate::host_paths::artifacts_dir().is_ok_and(|path| path.is_dir()) => {
@@ -72,8 +72,8 @@ pub(crate) fn catalog_or_vendored(
                 format!("catalog unreachable, continuing with project-vendored files: {error:#}");
             if matches!(
                 crate::session::diagnostics::try_route(
-                    crate::session::event::DiagnosticSource::Cli,
-                    crate::session::event::DiagnosticLevel::Warn,
+                    phoxal_cli_core::session::event::DiagnosticSource::Cli,
+                    phoxal_cli_core::session::event::DiagnosticLevel::Warn,
                     &message,
                 ),
                 crate::session::diagnostics::RouteResult::NoSession
@@ -133,11 +133,11 @@ impl VersionArgs {
         println!("phoxal-cli {}", long_version());
         println!(
             "default catalog URL: {}",
-            crate::catalog::DEFAULT_CATALOG_URL
+            phoxal_cli_core::project::catalog::DEFAULT_CATALOG_URL
         );
         println!(
             "catalog override env: {}",
-            crate::catalog::CATALOG_SOURCE_ENV
+            phoxal_cli_core::project::catalog::CATALOG_SOURCE_ENV
         );
         Ok(())
     }
@@ -160,7 +160,7 @@ pub struct Cli {
     pub project_path: Option<PathBuf>,
     #[arg(
         long = "catalog",
-        env = crate::catalog::CATALOG_SOURCE_ENV,
+        env = phoxal_cli_core::project::catalog::CATALOG_SOURCE_ENV,
         global = true,
         value_name = "PATH_OR_HTTPS_URL",
         help = "Artifact catalog override. Local paths are read directly; HTTPS sources (including the default) are always fetched fresh - there is no on-disk cache of this fetch."
@@ -168,7 +168,7 @@ pub struct Cli {
     pub catalog_source: Option<String>,
     #[arg(
         long,
-        env = crate::catalog::OFFLINE_ENV,
+        env = phoxal_cli_core::project::catalog::OFFLINE_ENV,
         global = true,
         help = "Use only project-vendored artifacts and skip catalog probes."
     )]

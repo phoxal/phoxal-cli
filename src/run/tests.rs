@@ -1,0 +1,323 @@
+//! Tests for this module.
+
+use super::build::missing_device_path;
+use super::environment::env_key;
+use super::participants::site_env;
+use super::report::{
+    LaunchCommandEntry, LaunchCommandReport, launch_kind_label, report_launch_commands_human,
+};
+use super::router::parse_router_ready;
+use super::*;
+use anyhow::Result;
+use phoxal::model::robot::v0::ConnectionConfig;
+use phoxal::participant::launch::env;
+use phoxal::participant::launch::{
+    BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
+};
+use phoxal_cli_core::project::launch_plan::{
+    LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
+    SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY, STANDARD_SITE_TOOLS, SiteLaunch,
+};
+use phoxal_cli_core::session::ParticipantKind;
+use std::path::{Path, PathBuf};
+
+use crate::supervisor::{ParticipantSpec, default_connect_endpoint};
+
+#[test]
+fn human_launch_report_enters_the_active_session_diagnostics() -> Result<()> {
+    let _guard = crate::session::diagnostics::DIAGNOSTICS_TEST_LOCK.blocking_lock();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    crate::session::diagnostics::install(tx);
+    let output = LaunchCommandReport {
+        participants: vec![LaunchCommandEntry {
+            id: "drive".to_string(),
+            kind: "official",
+            command_line: "service-drive".to_string(),
+        }],
+    };
+
+    let result = report_launch_commands_human(&output, &crate::Ui::new(true));
+    crate::session::diagnostics::uninstall();
+    result?;
+
+    let messages = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|event| match event {
+            phoxal_cli_core::session::event::SessionEvent::Diagnostic { message, .. } => {
+                Some(message)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0], "resolved launch participants:");
+    assert!(messages[1].contains("drive (official) -> service-drive"));
+    assert!(messages[2].starts_with("motion guarantees:"));
+    Ok(())
+}
+
+#[test]
+fn configless_site_tool_omits_config_and_gets_connect() {
+    // A configless tool (phoxal_config == Value::Null, e.g. joypad/telemetry)
+    // must NOT receive PHOXAL_CONFIG - a unit config rejects `{}` - and, being
+    // a real bus client, MUST receive PHOXAL_CONNECT to reach the router bus.
+    let tool = SiteLaunch {
+        id: SITE_TOOL_TELEMETRY.to_string(),
+        artifact_ref: "phoxal/tool-telemetry@0.1.0".to_string(),
+        phoxal_config: serde_json::Value::Null,
+    };
+    let env = site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
+    assert!(
+        !env.iter().any(|(k, _)| k == env::CONFIG),
+        "configless tool must not get PHOXAL_CONFIG: {env:?}"
+    );
+    assert!(
+        env.iter().any(|(k, _)| k == env::CONNECT),
+        "observable bus tool must get PHOXAL_CONNECT: {env:?}"
+    );
+    assert!(
+        !env.iter().any(|(k, _)| k == env::ROBOT_ROOT),
+        "telemetry does not need the compiled robot root: {env:?}"
+    );
+    assert!(
+        !env.iter().any(|(key, _)| key == env::CLOCK),
+        "tools must not receive a clock selection: {env:?}"
+    );
+}
+
+#[test]
+fn joypad_receives_the_compiled_robot_root() {
+    let tool = SiteLaunch {
+        id: SITE_TOOL_JOYPAD.to_string(),
+        artifact_ref: "phoxal/tool-joypad@0.1.0".to_string(),
+        phoxal_config: serde_json::Value::Null,
+    };
+    let env = site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
+    assert!(
+        env.iter()
+            .any(|(key, value)| key == env::ROBOT_ROOT && value == "/tmp/robot"),
+        "joypad needs the compiled robot model: {env:?}"
+    );
+}
+
+#[test]
+fn every_standard_site_tool_uses_the_clockless_launch_path() {
+    for tool_id in STANDARD_SITE_TOOLS {
+        let tool = SiteLaunch {
+            id: (*tool_id).to_string(),
+            artifact_ref: format!("phoxal/{tool_id}@0.1.0"),
+            phoxal_config: serde_json::Value::Null,
+        };
+        let env = site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
+        assert!(
+            !env.iter().any(|(key, _)| key == env::CLOCK),
+            "{tool_id} must not receive a clock selection: {env:?}"
+        );
+    }
+}
+
+fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRecord {
+    ParticipantLaunchRecord {
+        artifact_id: id.to_string(),
+        execution,
+        launch: ParticipantLaunch {
+            participant_id: id.to_string(),
+            namespace: "dev".to_string(),
+            robot_id: "robot".to_string(),
+            bus: BusProfile {
+                connect_endpoints: vec![default_connect_endpoint()],
+            },
+            clock: ClockMode::Real,
+            config: None,
+            robot_root: Some(PathBuf::from("/tmp/robot")),
+            component_instance: None,
+            shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
+        },
+        launch_ownership: LaunchOwnership::CliManaged,
+    }
+}
+
+fn plan_with_drivers(ids: &[&str]) -> LaunchPlan {
+    LaunchPlan {
+        mode: LaunchMode::Run,
+        site: Vec::new(),
+        robots: vec![phoxal_cli_core::project::launch_plan::RobotLaunch {
+            id: "robot".to_string(),
+            namespace: "dev".to_string(),
+            participants: ids
+                .iter()
+                .map(|id| {
+                    participant(
+                        id,
+                        ParticipantExecution::ComponentDriver {
+                            crate_dir: PathBuf::from("/tmp/driver"),
+                        },
+                    )
+                })
+                .collect(),
+            substitutions: Vec::new(),
+        }],
+    }
+}
+
+#[test]
+fn driver_subset_is_strict() -> Result<()> {
+    let plan = plan_with_drivers(&["imu", "left_drive"]);
+    let policy = DriverPolicy::from_options(
+        &RunOptions {
+            drivers: DriversMode::On,
+            drivers_subset: vec!["imu".to_string()],
+            catalog_source: None,
+            overlays: Vec::new(),
+            watch: false,
+        },
+        &plan,
+    )?;
+    assert_eq!(policy.decision("imu"), DriverDecision::Launch);
+    assert_eq!(
+        policy.decision("left_drive"),
+        DriverDecision::Degraded("not selected by --driver".to_string())
+    );
+
+    let err = DriverPolicy::from_options(
+        &RunOptions {
+            drivers: DriversMode::On,
+            drivers_subset: vec!["missing".to_string()],
+            catalog_source: None,
+            overlays: Vec::new(),
+            watch: false,
+        },
+        &plan,
+    )
+    .expect_err("unknown drivers must fail");
+    assert!(err.to_string().contains("unknown driver id"));
+    Ok(())
+}
+
+#[test]
+fn drivers_off_degrades_every_driver() -> Result<()> {
+    let plan = plan_with_drivers(&["imu"]);
+    let policy = DriverPolicy::from_options(
+        &RunOptions {
+            drivers: DriversMode::Off,
+            drivers_subset: Vec::new(),
+            catalog_source: None,
+            overlays: Vec::new(),
+            watch: false,
+        },
+        &plan,
+    )?;
+    assert_eq!(
+        policy.decision("imu"),
+        DriverDecision::Degraded("drivers off".to_string())
+    );
+    Ok(())
+}
+
+#[test]
+fn path_override_env_key_is_stable() {
+    assert_eq!(env_key("tool-router"), "TOOL_ROUTER");
+    assert_eq!(env_key("left_drive"), "LEFT_DRIVE");
+}
+
+#[test]
+fn serial_device_missing_is_loud() {
+    let missing = missing_device_path(&ConnectionConfig::Serial {
+        port: "/definitely/not/a/phoxal/device".to_string(),
+        baud: 115200,
+    });
+    assert_eq!(missing.as_deref(), Some("/definitely/not/a/phoxal/device"));
+}
+
+/// The launch report's `kind` string stays byte-identical even though the
+/// board's own `ParticipantKind` is now the finer-grained shared
+/// `Tool`/`Service`/`Driver`/`Simulator` split plus a `local` bit (Part
+/// 1 kind consolidation) - see `launch_kind_label`'s docs.
+#[test]
+fn launch_kind_label_matches_the_operator_facing_strings() {
+    assert_eq!(launch_kind_label(None), "site-tool");
+    assert_eq!(
+        launch_kind_label(Some(&ParticipantExecution::OfficialArtifact {
+            artifact_ref: "phoxal/service-drive@1.0.0".to_string(),
+        })),
+        "official"
+    );
+    assert_eq!(
+        launch_kind_label(Some(&ParticipantExecution::SourceArtifact {
+            kind: "service".to_string(),
+            crate_dir: PathBuf::from("/tmp/drive"),
+        })),
+        "official",
+        "a locally source-overridden official artifact stayed bucketed as \"official\" pre-consolidation"
+    );
+    assert_eq!(
+        launch_kind_label(Some(&ParticipantExecution::UserService {
+            crate_dir: PathBuf::from("/tmp/mission"),
+        })),
+        "user-service"
+    );
+    assert_eq!(
+        launch_kind_label(Some(&ParticipantExecution::ComponentDriver {
+            crate_dir: PathBuf::from("/tmp/ddsm115"),
+        })),
+        "driver"
+    );
+}
+
+#[tokio::test]
+async fn dropping_setup_background_tasks_aborts_every_handle() {
+    let handle = tokio::spawn(std::future::pending::<()>());
+    let abort = handle.abort_handle();
+    let mut tasks = AbortTasks::default();
+    tasks.push(handle);
+    drop(tasks);
+    tokio::task::yield_now().await;
+    assert!(abort.is_finished());
+}
+
+#[test]
+fn router_ready_event_selects_first_listener_and_tolerates_additive_fields() {
+    assert_eq!(
+        parse_router_ready(r#"{"event":"ready","listen":["tcp/127.0.0.1:7448"],"future":true}"#)
+            .expect("ready event"),
+        "tcp/127.0.0.1:7448"
+    );
+    assert!(parse_router_ready(r#"{"event":"ready","listen":[]}"#).is_err());
+    assert!(parse_router_ready(r#"{"event":"starting","listen":["tcp/x"]}"#).is_err());
+}
+
+#[test]
+fn selected_router_endpoint_reaches_plan_and_spawn_environment() {
+    let mut plan = plan_with_drivers(&["imu"]);
+    let mut specs = vec![ParticipantSpec {
+        id: "tool-bus".to_string(),
+        kind: ParticipantKind::Tool,
+        executable: PathBuf::from("/tmp/tool-bus"),
+        args: Vec::new(),
+        cwd: None,
+        env: vec![(
+            env::CONNECT.to_string(),
+            phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT.to_string(),
+        )],
+        shutdown_grace: Duration::from_secs(1),
+        process_group: true,
+        note: None,
+        bus_participant: true,
+    }];
+
+    apply_session_connect(&mut plan, &mut specs, "tcp/127.0.0.1:7448");
+
+    assert!(
+        plan.robots
+            .iter()
+            .flat_map(|robot| &robot.participants)
+            .all(|participant| participant.launch.bus.connect_endpoints == ["tcp/127.0.0.1:7448"])
+    );
+    assert_eq!(
+        specs[0]
+            .env
+            .iter()
+            .find(|(key, _)| key == env::CONNECT)
+            .map(|(_, value)| value.as_str()),
+        Some("tcp/127.0.0.1:7448")
+    );
+}

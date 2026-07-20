@@ -1,16 +1,17 @@
 use std::fs;
 
 use phoxal::model::robot::RobotV0 as Robot;
-use phoxal_cli::catalog::{
+use phoxal_cli::resolver::{host_target_triple, resolve};
+use phoxal_cli_core::project::catalog::{
     Catalog, SelectionChannel as CatalogChannel, fixture_artifact_for_tests,
     fixture_catalog_for_tests, fixture_component_assets_entry_for_tests,
     fixture_component_driver_entry_for_tests, fixture_contract_for_tests,
     fixture_service_entry_for_tests, fixture_simulator_entry_for_tests,
     fixture_tool_entry_for_tests,
 };
-use phoxal_cli::resolver::{
+use phoxal_cli_core::project::resolver::{
     ResolveOptions, ResolvedComponentSource, ResolvedPathOverrideKind, ResolvedRobot,
-    host_target_triple, load_robot_with_extras, load_robot_with_extras_and_overlays, resolve,
+    load_robot_with_extras, load_robot_with_extras_and_overlays,
 };
 
 #[test]
@@ -71,7 +72,7 @@ fn catalog_component_drivers_do_not_enter_platform_service_set() -> anyhow::Resu
         resolved
             .platform_runtimes
             .iter()
-            .all(|runtime| runtime.kind == phoxal_cli::catalog::ArtifactKind::Service)
+            .all(|runtime| runtime.kind == phoxal_cli_core::project::catalog::ArtifactKind::Service)
     );
     assert!(
         !resolved
@@ -103,7 +104,7 @@ fn driverless_component_resolves_assets_only() -> anyhow::Result<()> {
     assert_eq!(assets.package, "phoxal/component-ddsm115");
     assert_eq!(
         assets.source,
-        phoxal_cli::resolver::ResolvedComponentSource::Catalog
+        phoxal_cli_core::project::resolver::ResolvedComponentSource::Catalog
     );
 
     Ok(())
@@ -575,7 +576,7 @@ fn frozen_catalog_is_name_driven_not_entry_channel_driven() -> anyhow::Result<()
 
     assert_eq!(
         resolved.platform_runtimes.len(),
-        phoxal_cli::catalog::OFFICIAL_SERVICES.len()
+        phoxal_cli_core::project::catalog::OFFICIAL_SERVICES.len()
     );
     Ok(())
 }

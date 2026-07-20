@@ -29,7 +29,7 @@ impl AppContext {
         unsafe {
             std::env::set_var(crate::host_paths::PROJECT_ROOT_ENV, &workspace_root);
             if offline {
-                std::env::set_var(crate::catalog::OFFLINE_ENV, "1");
+                std::env::set_var(phoxal_cli_core::project::catalog::OFFLINE_ENV, "1");
             }
         }
         let output = OutputContext::compute(std::io::stderr().is_terminal());

@@ -3,8 +3,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::git_artifact;
-use crate::native_artifacts::{self, NativeArtifactDescriptor, ProvisioningMode};
-use crate::resolver::{ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource};
+use crate::native_artifacts;
+use phoxal_cli_core::artifacts::{NativeArtifactDescriptor, ProvisioningMode};
+use phoxal_cli_core::project::resolver::{
+    ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
+};
 use phoxal_cli_core::project::tooling::resolve_project_path;
 
 /// Locate the on-disk source directory for a component instance's resolved

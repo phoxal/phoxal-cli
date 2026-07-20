@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+pub mod catalog;
+pub mod launch_plan;
+pub mod resolver;
 pub mod tooling;
 
 // Bundle-layout conventions. These were `pub` constants in `phoxal::runtime` up to
