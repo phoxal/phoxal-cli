@@ -74,7 +74,7 @@ pub(super) fn draw_logs(
             state.log_follow
                 || state
                     .log_pause_anchor
-                    .is_none_or(|anchor| line.received_at <= anchor)
+                    .is_none_or(|anchor| line.event_time <= anchor)
         })
         .collect::<Vec<_>>();
     let height = usize::from(rows[1].height.saturating_sub(2));

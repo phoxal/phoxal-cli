@@ -184,7 +184,7 @@ pub struct AppState {
     pub log_severity: SeverityFilter,
     pub log_scroll: usize,
     pub log_follow: bool,
-    pub log_pause_anchor: Option<std::time::Instant>,
+    pub log_pause_anchor: Option<std::time::SystemTime>,
     pub bus_filter: String,
     pub bus_sort: BusSort,
     pub bus_scroll: usize,
@@ -615,7 +615,17 @@ impl AppState {
 
     fn pause_logs(&mut self, model: &SessionViewModel<'_>) {
         if self.log_follow {
-            self.log_pause_anchor = Some(model.now);
+            let participant = CaseInsensitiveNeedle::new(&self.log_runtime_filter);
+            let text = CaseInsensitiveNeedle::new(&self.log_text_filter);
+            self.log_pause_anchor = Some(
+                model
+                    .logs
+                    .lines()
+                    .filter(|line| self.log_line_matches(line, model, &participant, &text))
+                    .map(|line| line.event_time)
+                    .max()
+                    .unwrap_or_else(std::time::SystemTime::now),
+            );
         }
         self.log_follow = false;
     }
@@ -709,7 +719,7 @@ impl AppState {
                 self.log_follow
                     || self
                         .log_pause_anchor
-                        .is_none_or(|anchor| line.received_at <= anchor)
+                        .is_none_or(|anchor| line.event_time <= anchor)
             })
             .count()
     }

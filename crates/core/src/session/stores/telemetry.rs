@@ -100,31 +100,21 @@ impl TelemetryStore {
     }
 
     #[must_use]
-    pub fn router(&self) -> Option<&Timestamped<RouterMetricsSample>> {
-        self.routers
-            .values()
-            .filter_map(|router| router.latest.as_ref())
-            .max_by_key(|sample| sample.received_at)
-    }
-
-    #[must_use]
-    pub fn router_throughput_history(&self) -> Vec<Timestamped<f32>> {
-        let mut history = self
-            .routers
-            .values()
-            .flat_map(|router| router.throughput_history.iter().copied())
-            .collect::<Vec<_>>();
-        history.sort_by_key(|sample| sample.received_at);
-        let keep_from = history.len().saturating_sub(ROUTER_HISTORY_CAPACITY);
-        history.drain(..keep_from);
-        history
-    }
-
-    #[cfg(test)]
-    fn router_for(&self, scope: &RobotScope) -> Option<&Timestamped<RouterMetricsSample>> {
+    pub fn router(&self, scope: &RobotScope) -> Option<&Timestamped<RouterMetricsSample>> {
         self.routers
             .get(scope)
             .and_then(|router| router.latest.as_ref())
+    }
+
+    #[must_use]
+    pub fn router_throughput_history(
+        &self,
+        scope: &RobotScope,
+    ) -> impl DoubleEndedIterator<Item = Timestamped<f32>> + '_ {
+        self.routers
+            .get(scope)
+            .into_iter()
+            .flat_map(|router| router.throughput_history.iter().copied())
     }
 
     #[must_use]
@@ -172,11 +162,15 @@ mod tests {
             );
         }
         assert_eq!(
-            store.router_throughput_history().len(),
+            store.router_throughput_history(&scope("r1")).count(),
             ROUTER_HISTORY_CAPACITY
         );
         assert_eq!(
-            store.router_throughput_history().first().unwrap().value,
+            store
+                .router_throughput_history(&scope("r1"))
+                .next()
+                .unwrap()
+                .value,
             3.0
         );
     }
@@ -215,14 +209,21 @@ mod tests {
         store.install_router_history(scope("r1"), samples, Some(current));
 
         assert_eq!(
-            store.router_throughput_history().len(),
+            store.router_throughput_history(&scope("r1")).count(),
             ROUTER_HISTORY_CAPACITY
         );
         assert_eq!(
-            store.router_throughput_history().first().unwrap().value,
+            store
+                .router_throughput_history(&scope("r1"))
+                .next()
+                .unwrap()
+                .value,
             3.0
         );
-        assert_eq!(store.router().unwrap().value.throughput_msg_s, 99.0);
+        assert_eq!(
+            store.router(&scope("r1")).unwrap().value.throughput_msg_s,
+            99.0
+        );
     }
 
     #[test]
@@ -258,20 +259,26 @@ mod tests {
         );
 
         assert_eq!(
-            store
-                .router_for(&scope("r1"))
-                .unwrap()
-                .value
-                .throughput_msg_s,
+            store.router(&scope("r1")).unwrap().value.throughput_msg_s,
             3.0
         );
         assert_eq!(
-            store
-                .router_for(&scope("r2"))
-                .unwrap()
-                .value
-                .throughput_msg_s,
+            store.router(&scope("r2")).unwrap().value.throughput_msg_s,
             2.0
+        );
+        assert_eq!(
+            store
+                .router_throughput_history(&scope("r1"))
+                .map(|sample| sample.value)
+                .collect::<Vec<_>>(),
+            vec![3.0]
+        );
+        assert_eq!(
+            store
+                .router_throughput_history(&scope("r2"))
+                .map(|sample| sample.value)
+                .collect::<Vec<_>>(),
+            vec![2.0]
         );
     }
 }

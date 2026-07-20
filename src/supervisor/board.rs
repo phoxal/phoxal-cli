@@ -257,37 +257,23 @@ impl BoardBackend {
         *self.log_sink.lock().expect("log sink mutex poisoned") = Some(sender);
     }
 
-    /// Record a log line from a known routing source: updates the board's own
-    /// bounded 8-line history exactly like [`Self::append_log`], then
-    /// additionally forwards it to the live sink
-    /// registered by [`Self::set_log_sink`], if any. This is the single
-    /// funnel both [`bus_log_subscriber_loop`] and [`spawn_output_reader`]
-    /// use, so a live TUI dedups by ROUTING (which of the two called this)
-    /// rather than by comparing rendered text - see [`LogSource`].
-    pub fn route_log(&self, id: &str, source: LogSource, text: impl Into<String>) {
-        self.route_log_with_severity(id, source, LogSeverity::Info, text);
-    }
-
-    pub fn route_log_with_severity(
-        &self,
-        id: &str,
-        source: LogSource,
-        severity: LogSeverity,
-        text: impl Into<String>,
-    ) -> bool {
+    /// Record one unscoped captured stdout/stderr line. Robot bus records must
+    /// use [`Self::route_log_line`] so their typed severity, producer event
+    /// time, and robot scope cannot be omitted.
+    pub fn route_log(&self, id: &str, text: impl Into<String>) -> bool {
         self.route_log_line(RoutedLogLine {
             participant: id.to_string(),
-            source,
-            severity,
+            source: LogSource::Raw,
+            severity: LogSeverity::Info,
             text: text.into(),
             event_time: SystemTime::now(),
             scope: None,
         })
     }
 
-    /// Route a complete record when the producer supplied its own event time.
-    /// Retained tool-log replay uses this path so snapshot replacement does
-    /// not rewrite chronology to receive time.
+    /// Route a complete robot-scoped bus record when the producer supplied its
+    /// own event time. Retained tool-log replay uses this exclusive bus path so
+    /// snapshot replacement does not rewrite chronology or lose robot scope.
     pub fn route_log_line(&self, mut line: RoutedLogLine) -> bool {
         line.text = bounded_log_text(&line.text);
         let id = &line.participant;

@@ -27,7 +27,6 @@ pub struct Reconciler<T> {
     buffer: VecDeque<T>,
     buffer_capacity: usize,
     querying: bool,
-    buffer_overflowed: bool,
 }
 
 impl<T: Sequenced> Reconciler<T> {
@@ -38,7 +37,6 @@ impl<T: Sequenced> Reconciler<T> {
             buffer: VecDeque::with_capacity(buffer_capacity),
             buffer_capacity: buffer_capacity.max(1),
             querying: true,
-            buffer_overflowed: false,
         }
     }
 
@@ -46,15 +44,9 @@ impl<T: Sequenced> Reconciler<T> {
         self.querying = true;
     }
 
-    #[must_use]
-    pub fn buffer_overflowed(&self) -> bool {
-        self.buffer_overflowed
-    }
-
     pub fn local_drop(&mut self) -> ReconcileOutcome<T> {
         self.begin_query();
         self.buffer.clear();
-        self.buffer_overflowed = false;
         ReconcileOutcome::Requery
     }
 
@@ -62,7 +54,6 @@ impl<T: Sequenced> Reconciler<T> {
         if self.querying {
             if self.buffer.len() == self.buffer_capacity {
                 self.buffer.pop_front();
-                self.buffer_overflowed = true;
             }
             self.buffer.push_back(item);
             return ReconcileOutcome::Buffered;
@@ -77,7 +68,6 @@ impl<T: Sequenced> Reconciler<T> {
         {
             self.begin_query();
             self.buffer.clear();
-            self.buffer_overflowed = false;
             return ReconcileOutcome::Requery;
         }
         self.cursor = Some(next);
@@ -92,7 +82,6 @@ impl<T: Sequenced> Reconciler<T> {
             if next.generation != installed.generation {
                 self.begin_query();
                 self.buffer.clear();
-                self.buffer_overflowed = false;
                 return ReconcileOutcome::Requery;
             }
             if next.sequence <= installed.sequence {
@@ -101,7 +90,6 @@ impl<T: Sequenced> Reconciler<T> {
             if next.sequence != installed.sequence.saturating_add(1) {
                 self.begin_query();
                 self.buffer.clear();
-                self.buffer_overflowed = false;
                 return ReconcileOutcome::Requery;
             }
             installed = next;
@@ -109,7 +97,6 @@ impl<T: Sequenced> Reconciler<T> {
         }
         self.cursor = Some(installed);
         self.querying = false;
-        self.buffer_overflowed = false;
         ReconcileOutcome::Installed { snapshot, replay }
     }
 }
@@ -212,7 +199,6 @@ mod tests {
         let mut reconciler = Reconciler::new(1);
         assert_eq!(reconciler.follow(item("a", 1)), ReconcileOutcome::Buffered);
         assert_eq!(reconciler.follow(item("a", 2)), ReconcileOutcome::Buffered);
-        assert!(reconciler.buffer_overflowed());
         assert_eq!(
             reconciler.install(
                 Cursor {
@@ -226,7 +212,6 @@ mod tests {
                 replay: vec![item("a", 2)],
             }
         );
-        assert!(!reconciler.buffer_overflowed());
     }
 
     #[test]

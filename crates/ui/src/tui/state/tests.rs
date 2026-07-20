@@ -225,8 +225,9 @@ fn logs_keep_independent_filters_severity_and_follow_state() {
 }
 
 #[test]
-fn paused_logs_exclude_lines_received_after_the_pause_anchor() {
+fn paused_logs_exclude_lines_with_event_time_after_the_pause_anchor() {
     let started = Instant::now();
+    let before_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
     let mut logs = LogStore::new();
     logs.record_at(
         RoutedLogLine {
@@ -234,7 +235,7 @@ fn paused_logs_exclude_lines_received_after_the_pause_anchor() {
             source: LogSource::Bus,
             severity: LogSeverity::Info,
             text: "before pause".to_string(),
-            event_time: std::time::SystemTime::UNIX_EPOCH,
+            event_time: before_time,
             scope: None,
         },
         started,
@@ -250,7 +251,7 @@ fn paused_logs_exclude_lines_received_after_the_pause_anchor() {
     {
         let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, started);
         state.handle_key(key(KeyCode::Char(' ')), &model);
-        assert_eq!(state.log_pause_anchor, Some(started));
+        assert_eq!(state.log_pause_anchor, Some(before_time));
         assert_eq!(state.filtered_log_count(&model), 1);
     }
 
@@ -260,7 +261,7 @@ fn paused_logs_exclude_lines_received_after_the_pause_anchor() {
             source: LogSource::Bus,
             severity: LogSeverity::Info,
             text: "after pause".to_string(),
-            event_time: std::time::SystemTime::UNIX_EPOCH,
+            event_time: before_time + std::time::Duration::from_secs(1),
             scope: None,
         },
         started + std::time::Duration::from_secs(1),
@@ -272,6 +273,7 @@ fn paused_logs_exclude_lines_received_after_the_pause_anchor() {
 
 #[test]
 fn pausing_an_empty_log_view_freezes_before_the_first_matching_line() {
+    let started = Instant::now();
     let board = BoardSnapshot::default();
     let mut logs = LogStore::new();
     let runtime = RuntimeStore::new();
@@ -282,26 +284,64 @@ fn pausing_an_empty_log_view_freezes_before_the_first_matching_line() {
         ..AppState::default()
     };
     {
-        let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
+        let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, started);
         state.handle_key(key(KeyCode::Char(' ')), &model);
     }
     let anchor = state
         .log_pause_anchor
-        .expect("paused empty view still needs a wall-time anchor");
+        .expect("paused empty view still needs an event-time fallback");
     logs.record_at(
         RoutedLogLine {
             participant: "motion".to_string(),
             source: LogSource::Bus,
             severity: LogSeverity::Info,
             text: "first line after pause".to_string(),
-            event_time: std::time::SystemTime::UNIX_EPOCH,
+            event_time: anchor + std::time::Duration::from_secs(1),
             scope: None,
         },
-        anchor + std::time::Duration::from_secs(1),
+        started + std::time::Duration::from_secs(1),
     );
-    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, anchor);
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, started);
     assert_eq!(state.filtered_log_count(&model), 0);
     assert!(!state.log_follow);
+}
+
+#[test]
+fn identical_bus_snapshot_replacement_preserves_paused_visibility() {
+    let started = Instant::now();
+    let event_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(7);
+    let scope = phoxal_cli_core::session::LogScope {
+        namespace: "acme".to_string(),
+        robot_id: "r1".to_string(),
+    };
+    let retained = || RoutedLogLine {
+        participant: "motion".to_string(),
+        source: LogSource::Bus,
+        severity: LogSeverity::Info,
+        text: "retained".to_string(),
+        event_time,
+        scope: Some(scope.clone()),
+    };
+    let mut logs = LogStore::new();
+    logs.replace_bus(scope.clone(), vec![retained()]);
+    let board = BoardSnapshot::default();
+    let runtime = RuntimeStore::new();
+    let telemetry = TelemetrySnapshot::default();
+    let mut state = AppState {
+        page: Page::Logs,
+        navigation: NavigationLevel::Page,
+        ..AppState::default()
+    };
+
+    {
+        let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, started);
+        state.handle_key(key(KeyCode::Char(' ')), &model);
+        assert_eq!(state.log_pause_anchor, Some(event_time));
+        assert_eq!(state.filtered_log_count(&model), 1);
+    }
+    logs.replace_bus(scope.clone(), vec![retained()]);
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, started);
+    assert_eq!(state.filtered_log_count(&model), 1);
 }
 
 #[test]

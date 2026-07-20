@@ -192,7 +192,7 @@ fn bounded_remote_text(text: &str) -> String {
         .collect()
 }
 
-/// A snapshot of every live telemetry feed, cloned once per TUI redraw
+/// A snapshot of the selected robot's live telemetry feeds, cloned once per TUI redraw
 /// (mirrors `BoardBackend::snapshot`). Every latest-value field is a
 /// [`Timestamped`] carrying the [`Instant`] the underlying sample was
 /// actually RECEIVED off the bus (recorded by `TelemetryBackend::record_*`
@@ -269,13 +269,13 @@ impl TelemetryBackend {
     }
 
     #[must_use]
-    pub fn snapshot(&self) -> TelemetrySnapshot {
+    pub fn snapshot(&self, scope: &RobotScope) -> TelemetrySnapshot {
         let store = self.inner.lock().expect("telemetry mutex poisoned");
         let mut snapshot = TelemetrySnapshot {
             clock: None,
             host: store.host().cloned(),
-            router: store.router().cloned(),
-            router_throughput_history: store.router_throughput_history(),
+            router: store.router(scope).cloned(),
+            router_throughput_history: store.router_throughput_history(scope).collect(),
             joypad: store.joypad().cloned(),
             motion: store.motion().cloned(),
         };
@@ -810,10 +810,17 @@ async fn close_feed_bus(bus: &Bus, feed: &str) {
 mod tests {
     use super::*;
 
+    fn scope(robot_id: &str) -> RobotScope {
+        RobotScope {
+            namespace: "acme".to_string(),
+            robot_id: robot_id.to_string(),
+        }
+    }
+
     #[test]
     fn snapshot_is_empty_by_default_graceful_absence() {
         let telemetry = TelemetryBackend::new();
-        let snapshot = telemetry.snapshot();
+        let snapshot = telemetry.snapshot(&scope("r1"));
         assert!(snapshot.host.is_none());
         assert!(snapshot.clock.is_none());
         assert!(snapshot.router.is_none());
@@ -854,7 +861,7 @@ mod tests {
             window_ns: 1_000_000_000,
             ..HostSample::default()
         });
-        let snapshot = telemetry.snapshot();
+        let snapshot = telemetry.snapshot(&scope("r1"));
         assert_eq!(snapshot.host.map(|host| host.value.cpu_pct), Some(42.0));
     }
 
@@ -1015,10 +1022,7 @@ mod tests {
     fn telemetry_snapshots_share_large_latest_value_storage() {
         let telemetry = TelemetryBackend::new();
         telemetry.record_router_at(
-            RobotScope {
-                namespace: "acme".to_string(),
-                robot_id: "r1".to_string(),
-            },
+            scope("r1"),
             Instant::now(),
             RouterMetricsSample {
                 topics: Arc::new(vec![TopicMetric {
@@ -1031,9 +1035,56 @@ mod tests {
                 ..RouterMetricsSample::default()
             },
         );
-        let first = telemetry.snapshot().router.expect("first router sample");
-        let second = telemetry.snapshot().router.expect("second router sample");
+        let first = telemetry
+            .snapshot(&scope("r1"))
+            .router
+            .expect("first router sample");
+        let second = telemetry
+            .snapshot(&scope("r1"))
+            .router
+            .expect("second router sample");
         assert!(Arc::ptr_eq(&first.value.topics, &second.value.topics));
+    }
+
+    #[test]
+    fn router_snapshot_is_explicitly_scoped_without_cross_robot_flicker() {
+        let telemetry = TelemetryBackend::new();
+        let now = Instant::now();
+        telemetry.record_router_at(
+            scope("r1"),
+            now,
+            RouterMetricsSample {
+                throughput_msg_s: 1.0,
+                ..RouterMetricsSample::default()
+            },
+        );
+        telemetry.record_router_at(
+            scope("r2"),
+            now + Duration::from_secs(1),
+            RouterMetricsSample {
+                throughput_msg_s: 2.0,
+                ..RouterMetricsSample::default()
+            },
+        );
+
+        let r1 = telemetry.snapshot(&scope("r1"));
+        let r2 = telemetry.snapshot(&scope("r2"));
+        assert_eq!(r1.router.unwrap().value.throughput_msg_s, 1.0);
+        assert_eq!(
+            r1.router_throughput_history
+                .iter()
+                .map(|sample| sample.value)
+                .collect::<Vec<_>>(),
+            vec![1.0]
+        );
+        assert_eq!(r2.router.unwrap().value.throughput_msg_s, 2.0);
+        assert_eq!(
+            r2.router_throughput_history
+                .iter()
+                .map(|sample| sample.value)
+                .collect::<Vec<_>>(),
+            vec![2.0]
+        );
     }
 
     #[test]
@@ -1041,13 +1092,16 @@ mod tests {
         let telemetry = TelemetryBackend::new();
         let (tx, rx) = watch::channel(ClockObservation::default());
         telemetry.set_clock_feed(rx);
-        assert!(telemetry.snapshot().clock.is_none());
+        assert!(telemetry.snapshot(&scope("r1")).clock.is_none());
         tx.send_modify(|observation| {
             observation.latest =
                 Some(phoxal_cli_core::session::telemetry::ClockSample { now_ns: 5, step: 3 });
             observation.received_at = Some(Instant::now());
         });
-        let sample = telemetry.snapshot().clock.expect("clock sample");
+        let sample = telemetry
+            .snapshot(&scope("r1"))
+            .clock
+            .expect("clock sample");
         assert_eq!(sample.value.step, 3);
     }
 

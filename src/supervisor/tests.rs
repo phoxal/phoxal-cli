@@ -756,12 +756,17 @@ fn bus_log_from_an_unplanned_participant_is_ignored() {
     let (sender, mut receiver) = mpsc::channel(1);
     board.set_log_sink(sender);
 
-    board.route_log_with_severity(
-        "\u{1b}[2Junplanned",
-        LogSource::Bus,
-        LogSeverity::Warn,
-        "forged runtime row",
-    );
+    board.route_log_line(RoutedLogLine {
+        participant: "\u{1b}[2Junplanned".to_string(),
+        source: LogSource::Bus,
+        severity: LogSeverity::Warn,
+        text: "forged runtime row".to_string(),
+        event_time: std::time::SystemTime::UNIX_EPOCH,
+        scope: Some(LogScope {
+            namespace: "acme".to_string(),
+            robot_id: "r1".to_string(),
+        }),
+    });
 
     assert!(board.snapshot().participants.is_empty());
     assert!(receiver.try_recv().is_err());
@@ -775,7 +780,17 @@ fn routed_log_text_is_bounded_before_board_retention() {
         ParticipantKind::Service,
         ParticipantState::Ready,
     ));
-    board.route_log("motion", LogSource::Bus, "x".repeat(MAX_LOG_TEXT_CHARS * 2));
+    board.route_log_line(RoutedLogLine {
+        participant: "motion".to_string(),
+        source: LogSource::Bus,
+        severity: LogSeverity::Info,
+        text: "x".repeat(MAX_LOG_TEXT_CHARS * 2),
+        event_time: std::time::SystemTime::UNIX_EPOCH,
+        scope: Some(LogScope {
+            namespace: "acme".to_string(),
+            robot_id: "r1".to_string(),
+        }),
+    });
     let retained = board.snapshot().participants["motion"]
         .last_log_line
         .clone()
