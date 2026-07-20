@@ -4,6 +4,20 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.18.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.18.0) - 2026-07-20
+
+
+### Added
+
+- *(supervisor)* Recover foreground process graphs (#164)
+
+### Refactored
+
+- *(cli)* Remove alternate output modes
+- *(cli)* Establish core and UI crate boundaries (#161)
+- Complete CLI crate reorganization (#162)
+- *(supervisor)* Consume Zenoh Liveliness
+
 ## [0.17.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.17.0) - 2026-07-19
 
 
