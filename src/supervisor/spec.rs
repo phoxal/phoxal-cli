@@ -19,13 +19,14 @@ pub struct ParticipantSpec {
     pub shutdown_grace: Duration,
     pub process_group: bool,
     pub note: Option<String>,
-    /// Whether this participant is a checked phoxal bus participant that
-    /// publishes its own `presence/heartbeat` (true for essentially every
-    /// spec - services, drivers, and site tools built on the shared runner).
-    /// `false` only for a process with no participant heartbeat of its own:
+    /// Whether this participant is a checked Phoxal bus participant that
+    /// declares its own Zenoh Liveliness token after setup (true for
+    /// essentially every spec - services, drivers, and site tools built on
+    /// the shared runner). `false` only for a process with no participant
+    /// Liveliness token of its own:
     /// the router (readiness is a separate CLI-owned bus probe) and the Webots
     /// application (process-lifecycle readiness). Drives whether the
-    /// supervisor waits for an observed heartbeat before marking the process
+    /// supervisor waits for observed presence before marking the process
     /// `Ready`.
     pub bus_participant: bool,
 }

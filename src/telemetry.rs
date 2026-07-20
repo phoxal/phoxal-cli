@@ -2,7 +2,7 @@
 //! subscribers for the framework's `v2` router/host-telemetry/joypad
 //! contracts, plus the simulation clock's live step/time readout,
 //! mirroring `supervisor::start_bus_log_subscriber`/
-//! `start_presence_heartbeat_subscriber`'s "subscribe, update a shared
+//! `start_liveliness_observer`'s "observe, update shared
 //! snapshot" pattern.
 //!
 //! Kept deliberately separate from `supervisor::BoardBackend`/`BoardSnapshot`
@@ -366,7 +366,7 @@ async fn control_state_feed_loop(
 }
 
 /// Subscribe `v2::telemetry::Host` and feed every sample into
-/// `telemetry`, mirroring `supervisor::start_presence_heartbeat_subscriber`'s
+/// `telemetry`, mirroring `supervisor::start_liveliness_observer`'s
 /// "open bus, subscribe, loop `recv`, retry on transport error" shape.
 /// Absence is expected and graceful: `tool-telemetry` may not be in the
 /// catalog yet, in which case this task simply never observes a sample and

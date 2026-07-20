@@ -13,7 +13,7 @@ use crate::supervisor::SupervisorLock;
 use crate::supervisor::SupervisorOptions;
 use crate::supervisor::start_bus_log_subscriber;
 use crate::supervisor::start_clock_feed;
-use crate::supervisor::start_presence_heartbeat_subscriber;
+use crate::supervisor::start_liveliness_observer;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -37,7 +37,7 @@ pub(crate) struct LiveSimSetup {
     pub(crate) supervisor_options: SupervisorOptions,
     pub(crate) action_tx: mpsc::Sender<SupervisorAction>,
     /// Every feed task that must stay alive for the whole session (log/
-    /// presence subscribers, clock telemetry, live telemetry) -
+    /// Liveliness observers, clock telemetry, live telemetry) -
     /// collected here instead of leaked under `_`-prefixed bindings (finding
     /// B6), so the caller can abort every one of them once supervision ends.
     pub(crate) background_tasks: crate::run::AbortTasks,
@@ -153,11 +153,11 @@ pub(crate) async fn live_simulate_setup(
             .collect::<Vec<_>>(),
     );
     // OBSERVED readiness: drive board state from each participant's own
-    // presence/heartbeat, including SIMULATION-MANAGED ones (the
+    // Liveliness token, including SIMULATION-MANAGED ones (the
     // supervisor and every controller), which have no supervised
     // process of their own to poll.
     background_tasks.extend(sim.plan.robots.iter().map(|robot| {
-        start_presence_heartbeat_subscriber(
+        start_liveliness_observer(
             robot.namespace.clone(),
             robot.id.clone(),
             connect.clone(),

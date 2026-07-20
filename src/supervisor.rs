@@ -1,22 +1,14 @@
 use std::time::Duration;
 
 use phoxal_api::v1 as api;
-// The simulation clock lives in preview `v2`; the presence and logs contracts
-// this module also consumes use current production `v1`.
+// The simulation clock lives in preview `v2`; log contracts use production
+// `v1`, while participant presence is Zenoh Liveliness rather than an API body.
 
 pub const SUPERVISOR_LOCK_FILE: &str = "supervisor.lock";
 pub const RESTART_SEC: Duration = Duration::from_secs(2);
 pub const START_LIMIT_INTERVAL: Duration = Duration::from_secs(60);
 pub const START_LIMIT_BURST: usize = 5;
 
-/// How long a bus participant may go silent (no `presence/heartbeat`) after
-/// having been observed at least once before the supervisor marks it `Failed`.
-/// Comfortably above the runner's 1 Hz heartbeat cadence
-/// (`phoxal::participant::heartbeat::HEARTBEAT_INTERVAL`) and the presence
-/// service's own 3 s stale threshold, so ordinary scheduling jitter never
-/// trips it; a genuinely dead/hung participant still gets caught within one
-/// supervisor board render cycle of the deadline passing.
-pub const HEARTBEAT_STALE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_LOG_TEXT_CHARS: usize = 4_096;
 /// Four bytes per Unicode scalar keeps a complete display line bounded before
 /// lossy UTF-8 decoding. Bytes beyond this limit are drained and represented
@@ -85,7 +77,7 @@ mod bus;
 pub(crate) use bus::{
     default_connect_endpoint, failed_expected_participants, logs_wildcard_topic_key,
     missing_ready_participants, render_log_event, start_bus_log_subscriber, start_clock_feed,
-    start_presence_heartbeat_subscriber, wait_for_endpoint,
+    start_liveliness_observer, wait_for_endpoint,
 };
 
 #[cfg(test)]

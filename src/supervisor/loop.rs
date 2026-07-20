@@ -1,10 +1,10 @@
 //! Main supervision loop, actions, and orderly shutdown.
 
 use super::{
-    BoardBackend, HEARTBEAT_STALE_TIMEOUT, ParticipantState, RequestedStop, RunningParticipant,
-    SupervisionStage, SupervisorAction, SupervisorOptions, SupervisorOutcome, await_stage_ready,
-    emit_event, join_reader, maybe_emit_staged_startup_complete, send_process_group_terminate,
-    send_terminate, spawn_until_pending, stop_child,
+    BoardBackend, ParticipantState, RequestedStop, RunningParticipant, SupervisionStage,
+    SupervisorAction, SupervisorOptions, SupervisorOutcome, await_stage_ready, emit_event,
+    join_reader, maybe_emit_staged_startup_complete, send_process_group_terminate, send_terminate,
+    spawn_until_pending, stop_child,
 };
 use crate::session::output::WaitBudget;
 use anyhow::Context;
@@ -28,7 +28,7 @@ pub async fn supervise_until_shutdown(
 
     // Spawn every leading stage that has nothing to wait for back-to-back
     // (uncommon in practice - every real stage waits on at least the router
-    // or a heartbeat - but keeps a zero-wait stage from stalling a whole
+    // or Liveliness - but keeps a zero-wait stage from stalling a whole
     // startup on an empty `select!` branch), then park on the first stage
     // that actually gates the next one.
     let mut pending_stage =
@@ -126,7 +126,6 @@ pub async fn supervise_until_shutdown(
                         break 'supervision;
                     }
                 }
-                board.mark_stale_heartbeats(HEARTBEAT_STALE_TIMEOUT);
             }
         }
     }

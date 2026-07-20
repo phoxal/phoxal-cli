@@ -11,7 +11,7 @@ use crate::supervisor::SupervisionStage;
 use crate::supervisor::SupervisorLock;
 use crate::supervisor::SupervisorOptions;
 use crate::supervisor::start_bus_log_subscriber;
-use crate::supervisor::start_presence_heartbeat_subscriber;
+use crate::supervisor::start_liveliness_observer;
 use anyhow::Result;
 use anyhow::bail;
 use clap::Args;
@@ -254,7 +254,7 @@ async fn live_run_setup(
             .robot_log_targets
             .iter()
             .map(|(namespace, robot_id)| {
-                start_presence_heartbeat_subscriber(
+                start_liveliness_observer(
                     namespace.clone(),
                     robot_id.clone(),
                     connect.clone(),

@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use crate::session::output::WaitBudget;
 
 #[test]
-fn process_details_are_session_only_and_clear_with_the_incarnation() {
+fn process_details_are_session_only_and_clear_with_a_restart() {
     let board = BoardBackend::new();
     board.upsert(ParticipantStatus::new(
         "motion",
@@ -374,7 +374,7 @@ async fn watch_swap_does_not_consume_restart_budget() -> Result<()> {
     let snapshot = board.snapshot();
     let status = snapshot.participants.get("mission").expect("mission");
     // OBSERVED readiness: swap lands back at `Starting` (this fixture
-    // never heartbeats), but the swap note is still attached immediately.
+    // never appears in Liveliness), but the swap note is still attached immediately.
     assert_eq!(status.state, ParticipantState::Starting);
     assert_eq!(status.note.as_deref(), Some("ok 0.1s, restarted"));
 
@@ -652,21 +652,20 @@ fn spawn_no_longer_marks_a_bus_participant_ready() {
     // The core observed-readiness invariant: `bus_participant: true` (the
     // default for every real phoxal participant, see the field docs) must
     // stay `Starting` through a successful spawn - `Ready` now comes only
-    // from an observed heartbeat (`BoardBackend::record_heartbeat`).
+    // from an observed Liveliness appearance (`BoardBackend::record_presence`).
     let board = BoardBackend::new();
     board.upsert(ParticipantStatus::new(
         "mission",
         ParticipantKind::Service,
         ParticipantState::Starting,
     ));
-    board.record_heartbeat("mission", api::presence::Readiness::Initializing);
     let snapshot = board.snapshot();
     assert_eq!(
         snapshot.participants["mission"].state,
         ParticipantState::Starting
     );
 
-    board.record_heartbeat("mission", api::presence::Readiness::Ready);
+    board.record_presence("mission", true);
     let snapshot = board.snapshot();
     assert_eq!(
         snapshot.participants["mission"].state,
@@ -675,11 +674,10 @@ fn spawn_no_longer_marks_a_bus_participant_ready() {
 }
 
 #[test]
-fn heartbeat_from_an_unplanned_participant_is_ignored() {
+fn liveliness_from_an_unplanned_participant_is_ignored() {
     let board = BoardBackend::new();
-    board.record_heartbeat("unplanned", api::presence::Readiness::Ready);
+    board.record_presence("unplanned", true);
     assert!(board.snapshot().participants.is_empty());
-    assert!(board.heartbeat_snapshot().is_empty());
 }
 
 #[test]
@@ -744,150 +742,72 @@ async fn captured_newline_free_output_is_bounded_while_it_is_read() {
 }
 
 #[test]
-fn stale_sweep_does_not_fail_a_participant_still_in_setup() {
-    // Bug 1: the runner publishes one `Initializing` heartbeat before
-    // `#[setup]` runs, then nothing until the post-setup `Ready` beacon.
-    // A participant whose `#[setup]` legitimately runs long is therefore
-    // heartbeat-silent, and must NOT be false-`Failed` by the 5s sweep -
-    // that case belongs to the startup stage's own (longer) timeout.
-    let board = BoardBackend::new();
-    board.upsert(ParticipantStatus::new(
-        "slow-setup",
-        ParticipantKind::Service,
-        ParticipantState::Starting,
-    ));
-    board.record_heartbeat("slow-setup", api::presence::Readiness::Initializing);
-    // Back-date the recorded heartbeat well past the staleness threshold
-    // without sleeping, matching this module's deterministic style.
-    board
-        .heartbeats
-        .lock()
-        .expect("heartbeat mutex poisoned")
-        .insert(
-            "slow-setup".to_string(),
-            Instant::now() - Duration::from_secs(60),
-        );
-
-    board.mark_stale_heartbeats(Duration::from_secs(5));
-
-    let snapshot = board.snapshot();
-    assert_eq!(
-        snapshot.participants["slow-setup"].state,
-        ParticipantState::Starting,
-        "a participant that never reached Ready must not be marked Failed by the sweep"
-    );
-}
-
-#[test]
-fn stale_sweep_still_fails_a_participant_that_went_silent_after_ready() {
-    // Detection must be preserved: once a participant has genuinely
-    // reached `Ready`, going silent for longer than the threshold must
-    // still mark it `Failed` when its process lifecycle belongs to the
-    // CLI. Webots-owned participants use the recoverable policy tested
-    // below.
-    let board = BoardBackend::new();
-    board.upsert(ParticipantStatus::new(
-        "was-ready",
-        ParticipantKind::Service,
-        ParticipantState::Starting,
-    ));
-    board.record_heartbeat("was-ready", api::presence::Readiness::Ready);
-    board
-        .heartbeats
-        .lock()
-        .expect("heartbeat mutex poisoned")
-        .insert(
-            "was-ready".to_string(),
-            Instant::now() - Duration::from_secs(60),
-        );
-
-    board.mark_stale_heartbeats(Duration::from_secs(5));
-
-    let snapshot = board.snapshot();
-    assert_eq!(
-        snapshot.participants["was-ready"].state,
-        ParticipantState::Failed,
-        "a participant that reached Ready and then went silent must still be caught"
-    );
-}
-
-#[test]
-fn webots_managed_presence_can_disappear_and_recover() {
+fn presence_loss_is_observational_and_can_recover() {
     let id = "simulator-webots-controller-robot-v1";
     let board = BoardBackend::new();
-    board.mark_presence_recoverable(id);
     board.upsert(ParticipantStatus::new(
         id,
         ParticipantKind::Simulator,
         ParticipantState::Starting,
     ));
-    board.record_heartbeat(id, api::presence::Readiness::Ready);
-    board
-        .heartbeats
-        .lock()
-        .expect("heartbeat mutex poisoned")
-        .insert(id.to_string(), Instant::now() - Duration::from_secs(60));
-
-    board.mark_stale_heartbeats(Duration::from_secs(5));
+    board.record_presence(id, true);
+    board.record_presence(id, false);
 
     let snapshot = board.snapshot();
     assert_eq!(
         snapshot.participants[id].state,
         ParticipantState::Degraded,
-        "losing a Webots-owned participant is observable, not terminal"
+        "losing presence is observable, not process failure authority"
+    );
+    assert!(
+        snapshot.participants[id]
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("process lifecycle is unchanged"))
     );
 
-    board.record_heartbeat(id, api::presence::Readiness::Ready);
+    board.record_presence(id, true);
+    let snapshot = board.snapshot();
+    assert_eq!(snapshot.participants[id].state, ParticipantState::Ready);
+    assert!(snapshot.participants[id].note.is_none());
+}
+
+#[test]
+fn first_presence_preserves_launch_context_note() {
+    let id = "simulator-webots-controller-robot-v1";
+    let board = BoardBackend::new();
+    let mut status =
+        ParticipantStatus::new(id, ParticipantKind::Simulator, ParticipantState::Starting);
+    status.note = Some("SimulationManaged: launched by Webots".to_string());
+    board.upsert(status);
+
+    board.record_presence(id, true);
+
     let snapshot = board.snapshot();
     assert_eq!(snapshot.participants[id].state, ParticipantState::Ready);
     assert_eq!(
         snapshot.participants[id].note.as_deref(),
-        Some("Webots-managed participant observed again")
-    );
-
-    board.record_heartbeat(id, api::presence::Readiness::Failed);
-    assert_eq!(
-        board.snapshot().participants[id].state,
-        ParticipantState::Failed
-    );
-    board.record_heartbeat(id, api::presence::Readiness::Ready);
-    assert_eq!(
-        board.snapshot().participants[id].state,
-        ParticipantState::Ready,
-        "an externally managed participant recreated after self-reporting Failed may recover"
+        Some("SimulationManaged: launched by Webots")
     );
 }
 
 #[test]
-fn webots_managed_degraded_heartbeat_keeps_the_degraded_context() {
-    let id = "simulator-webots-controller-robot-v1";
+fn lost_before_first_appearance_keeps_starting_state() {
+    let id = "slow-setup";
     let board = BoardBackend::new();
-    board.mark_presence_recoverable(id);
     board.upsert(ParticipantStatus::new(
         id,
-        ParticipantKind::Simulator,
-        ParticipantState::Degraded,
+        ParticipantKind::Service,
+        ParticipantState::Starting,
     ));
-    board.set_note(id, "Webots reports degraded operation");
-
-    board.record_heartbeat(id, api::presence::Readiness::Degraded);
+    board.record_presence(id, false);
 
     let snapshot = board.snapshot();
-    assert_eq!(snapshot.participants[id].state, ParticipantState::Degraded);
-    assert_eq!(
-        snapshot.participants[id].note.as_deref(),
-        Some("Webots reports degraded operation"),
-        "re-observation must not overwrite a self-reported degraded status with a recovery note"
-    );
+    assert_eq!(snapshot.participants[id].state, ParticipantState::Starting);
 }
 
 #[tokio::test]
-async fn respawn_clears_stale_pre_crash_heartbeat_and_ready_once() -> Result<()> {
-    // Bug 2: after a crash+restart, `spawn_child` resets board STATE to
-    // `Starting` but must also clear the `heartbeats`/`ready_once`
-    // bookkeeping - otherwise the stale pre-crash timestamp survives and
-    // can immediately re-`Fail` the freshly respawned process, and (per
-    // Bug 1) it must re-earn `Ready` before the sweep applies to it again.
+async fn respawn_preserves_continuous_stable_key_presence() -> Result<()> {
     let board = BoardBackend::new();
     board.upsert(ParticipantStatus::new(
         "mission",
@@ -895,46 +815,16 @@ async fn respawn_clears_stale_pre_crash_heartbeat_and_ready_once() -> Result<()>
         ParticipantState::Starting,
     ));
     let mut participant = RunningParticipant::spawn(sleep_spec("mission"), &board).await?;
-    // Simulate the pre-crash incarnation having reached Ready, then a long
-    // silence (as if it crashed and nobody observed a heartbeat since).
-    board.record_heartbeat("mission", api::presence::Readiness::Ready);
-    board
-        .heartbeats
-        .lock()
-        .expect("heartbeat mutex poisoned")
-        .insert(
-            "mission".to_string(),
-            Instant::now() - Duration::from_secs(60),
-        );
+    board.record_presence("mission", true);
 
     // Respawn (as `poll` does after a crash, and `swap`/`resume` do too).
     participant.spawn_child(&board).await?;
 
-    assert!(
-        !board
-            .heartbeats
-            .lock()
-            .expect("heartbeat mutex poisoned")
-            .contains_key("mission"),
-        "respawn must clear the stale pre-crash heartbeat timestamp"
-    );
-    assert!(
-        !board
-            .ready_once
-            .lock()
-            .expect("ready-once mutex poisoned")
-            .contains("mission"),
-        "respawn must clear the has-been-Ready bit so Ready must be earned again"
-    );
-
-    // And the stale timestamp being gone means the sweep must not
-    // immediately re-fail the fresh incarnation.
-    board.mark_stale_heartbeats(Duration::from_secs(5));
     let snapshot = board.snapshot();
     assert_eq!(
         snapshot.participants["mission"].state,
-        ParticipantState::Starting,
-        "a freshly respawned participant must not be immediately re-failed"
+        ParticipantState::Ready,
+        "continuous stable-key presence must not wait for a duplicate Alive event"
     );
 
     participant.stop_current(&board).await?;
@@ -942,16 +832,16 @@ async fn respawn_clears_stale_pre_crash_heartbeat_and_ready_once() -> Result<()>
 }
 
 #[test]
-fn heartbeat_cannot_resurrect_a_terminal_participant() {
+fn liveliness_cannot_resurrect_a_terminal_participant() {
     let board = BoardBackend::new();
     board.upsert(ParticipantStatus::new(
         "mission",
         ParticipantKind::Service,
         ParticipantState::Failed,
     ));
-    // A heartbeat that was in flight when the process independently died
+    // An Alive event that was in flight when the process independently died
     // must not undo the failure the process supervisor already recorded.
-    board.record_heartbeat("mission", api::presence::Readiness::Ready);
+    board.record_presence("mission", true);
     let snapshot = board.snapshot();
     assert_eq!(
         snapshot.participants["mission"].state,
@@ -961,7 +851,7 @@ fn heartbeat_cannot_resurrect_a_terminal_participant() {
 
 /// A simulation-managed participant (the Webots supervisor/controller: no
 /// `ParticipantSpec`, no supervised process, launched by Webots itself) that
-/// never heartbeats must both (a) make participant readiness fail with a
+/// never appears in Liveliness must both (a) make participant readiness fail with a
 /// clear, bounded-time error instead of hanging, and (b) be counted as
 /// failed afterward so `SupervisorOutcome::graph_healthy` reflects it even
 /// though no process crash was ever observed.
@@ -979,10 +869,7 @@ async fn participant_wait_times_out_on_a_simulation_managed_participant_that_nev
         ParticipantState::Starting,
     ));
     // The supervisor checks in...
-    board.record_heartbeat(
-        "simulator-webots-supervisor",
-        api::presence::Readiness::Ready,
-    );
+    board.record_presence("simulator-webots-supervisor", true);
     // ...but the controller never does.
 
     let expected = vec![
@@ -1020,7 +907,7 @@ async fn participant_wait_times_out_on_a_simulation_managed_participant_that_nev
     assert_eq!(
         snapshot.participants["simulator-webots-supervisor"].state,
         ParticipantState::Ready,
-        "the participant that DID heartbeat must not be dragged down by the other's timeout"
+        "the participant that DID appear must not be dragged down by the other's timeout"
     );
     let outcome = SupervisorOutcome {
         failed_participants: snapshot.failed_participants(),
@@ -1033,39 +920,6 @@ async fn participant_wait_times_out_on_a_simulation_managed_participant_that_nev
 }
 
 #[tokio::test]
-async fn participant_wait_fails_immediately_on_explicit_terminal_readiness_failure() {
-    let board = BoardBackend::new();
-    board.upsert(ParticipantStatus::new(
-        "simulator-webots-controller-robot",
-        ParticipantKind::Service,
-        ParticipantState::Starting,
-    ));
-    board.record_heartbeat(
-        "simulator-webots-controller-robot",
-        api::presence::Readiness::Failed,
-    );
-    let expected = vec!["simulator-webots-controller-robot".to_string()];
-
-    let error = tokio::time::timeout(
-        Duration::from_millis(200),
-        await_participants_ready(
-            &board,
-            &expected,
-            WaitBudget::Bounded(Duration::from_secs(60)),
-            Duration::from_millis(10),
-        ),
-    )
-    .await
-    .expect("explicit Failed readiness must bypass the startup timeout")
-    .expect_err("explicit Failed readiness must fail the barrier");
-
-    assert_eq!(
-        error.to_string(),
-        "stage ended unhealthy; failed participants: simulator-webots-controller-robot"
-    );
-}
-
-#[tokio::test]
 async fn await_participants_ready_succeeds_once_everything_is_observed() {
     let board = BoardBackend::new();
     board.upsert(ParticipantStatus::new(
@@ -1073,7 +927,7 @@ async fn await_participants_ready_succeeds_once_everything_is_observed() {
         ParticipantKind::Service,
         ParticipantState::Starting,
     ));
-    board.record_heartbeat("mission", api::presence::Readiness::Ready);
+    board.record_presence("mission", true);
 
     await_participants_ready(
         &board,
@@ -1125,7 +979,11 @@ async fn await_participants_ready_fails_immediately_on_explicit_terminal_failure
         ParticipantKind::Service,
         ParticipantState::Starting,
     ));
-    board.record_heartbeat("mission", api::presence::Readiness::Failed);
+    board.set_state(
+        "mission",
+        ParticipantState::Failed,
+        Some("process exited before readiness".to_string()),
+    );
 
     let error = tokio::time::timeout(
         Duration::from_millis(200),
@@ -1137,8 +995,8 @@ async fn await_participants_ready_fails_immediately_on_explicit_terminal_failure
         ),
     )
     .await
-    .expect("explicit Failed readiness must bypass the stage timeout")
-    .expect_err("explicit Failed readiness must fail the wait");
+    .expect("direct process failure must bypass the stage timeout")
+    .expect_err("direct process failure must fail the wait");
 
     assert_eq!(
         error.to_string(),
@@ -1148,7 +1006,7 @@ async fn await_participants_ready_fails_immediately_on_explicit_terminal_failure
 
 /// The core staged-startup acceptance: nothing in a later stage spawns
 /// until the previous stage is OBSERVED ready (not merely spawned).
-/// "two" (`sleep_spec`, `bus_participant: true`) never gets a heartbeat
+/// "two" (`sleep_spec`, `bus_participant: true`) never appears in Liveliness
 /// from this test until it manually sends one, so its absence from the
 /// board proves stage two has not spawned yet.
 #[tokio::test]
@@ -1192,7 +1050,7 @@ async fn staged_startup_gates_the_next_stage_on_observed_readiness() -> Result<(
         "stage two must not spawn until stage one is observed ready"
     );
 
-    board.record_heartbeat("one", api::presence::Readiness::Ready);
+    board.record_presence("one", true);
     tokio::time::timeout(Duration::from_secs(3), async {
         while !board.snapshot().participants.contains_key("two") {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1231,7 +1089,7 @@ async fn restart_still_happens_while_a_stage_readiness_wait_is_pending() -> Resu
         shutdown_grace: Duration::from_millis(10),
         process_group: false,
         note: None,
-        // Never heartbeats, so this stage's own wait never completes -
+        // Never appears in Liveliness, so this stage's own wait never completes -
         // the whole observation window below runs with `pending_stage`
         // `Some`, proving restart still happens during that wait.
         bus_participant: true,
@@ -1269,13 +1127,13 @@ async fn restart_still_happens_while_a_stage_readiness_wait_is_pending() -> Resu
     );
     // "flap" is mid crash-loop, so its state at this exact instant is
     // either `Starting` (just respawned) or `Restarting` (waiting out
-    // `restart_delay`) - never `Ready`, since it never heartbeats.
+    // `restart_delay`) - never `Ready`, since it never appears.
     assert!(
         matches!(
             board.snapshot().participants["flap"].state,
             ParticipantState::Starting | ParticipantState::Restarting
         ),
-        "flap never heartbeats, so stage one's own wait must still be pending: {:?}",
+        "flap never appears, so stage one's own wait must still be pending: {:?}",
         board.snapshot().participants["flap"].state
     );
 

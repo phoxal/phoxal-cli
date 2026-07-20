@@ -104,18 +104,16 @@ pub(crate) fn prepare_robot_participants(
                 // lifecycle - the CLI never spawns or restarts it, and has no
                 // process to poll for readiness. It still satisfies the graph
                 // proof and appears on the board, starting `Starting`, not
-                // `Ready`: OBSERVED readiness comes from its own bus
-                // heartbeats (D23), same as any participant, driven by
-                // `BoardBackend::record_heartbeat` once the presence
-                // heartbeat subscriber is running. A controller/supervisor
-                // Webots never actually launches (or that silently crashes
-                // before its own `#[setup]` completes) therefore never
-                // reaches `Ready` here, and its staged participant wait (or,
-                // failing that, the heartbeat staleness sweep) turns that into a
-                // detected failure instead of a permanently green board.
+                // `Ready`: OBSERVED readiness comes from its own stable bus
+                // Liveliness token, driven by `BoardBackend::record_presence`
+                // once the history-enabled observer is running. A
+                // controller/supervisor Webots never launches, or that fails
+                // before its own `#[setup]` completes, therefore never reaches
+                // `Ready`; the staged startup wait detects that omission.
+                // Disappearance after startup remains observational
+                // `Degraded`, not synthesized process failure authority.
                 // `crate::simulation` renders its controllerArgs into the
                 // staged world instead of a `ParticipantSpec` (Part 5).
-                board.mark_presence_recoverable(&id);
                 let mut status =
                     ParticipantStatus::new(&id, kind, ParticipantState::Starting).with_local(local);
                 status.note = Some(

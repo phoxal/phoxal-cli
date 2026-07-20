@@ -608,10 +608,7 @@ fn motion_panel_stays_compact_when_input_state_is_stale() {
         ),
     );
     let mut runtime = RuntimeStore::new();
-    runtime.observe_board(
-        &board,
-        &BTreeMap::from([(SITE_TOOL_JOYPAD.to_string(), now)]),
-    );
+    runtime.observe_board(&board);
     let logs = LogStore::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
     let mut state = AppState::default();
@@ -667,10 +664,7 @@ fn simulation_pause_does_not_age_joypad_from_logical_clock() {
         ),
     );
     let mut runtime = RuntimeStore::new();
-    runtime.observe_board(
-        &board,
-        &BTreeMap::from([(SITE_TOOL_JOYPAD.to_string(), now)]),
-    );
+    runtime.observe_board(&board);
     let logs = LogStore::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
     let mut state = AppState::for_mode(SessionMode::Simulation);
