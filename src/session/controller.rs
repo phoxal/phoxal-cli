@@ -1,5 +1,5 @@
-//! [`SessionController`]: the one lifecycle owner for `run`/`simulation run`
-//! (Target design part 1). It owns terminal acquisition/restoration, the
+//! [`SessionController`]: the one lifecycle owner for `run`/`simulation run`.
+//! It owns terminal acquisition/restoration, the
 //! root [`CancellationToken`], the current [`SessionState`], the bounded
 //! [`SessionEvent`] receiver, and owns the TUI selected by the command's hard
 //! TTY gate - replacing the old `Stepper` + display-activation
@@ -72,49 +72,38 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use crate::display::DisplayAction;
+use phoxal_cli_ui::tui::{
+    DisplayAction, TerminalGuard, TuiDisplay, install_panic_hook, render::TitleInfo,
+};
 
 const FORCED_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 const OWNED_TASK_CANCEL_TIMEOUT: Duration = Duration::from_secs(1);
 use crate::supervisor::{BoardBackend, BoardSnapshot, SupervisorAction, SupervisorOutcome};
-use crate::telemetry::{JoypadCommand, TelemetryBackend};
-use crate::tui::render::TitleInfo;
-use crate::tui::{TerminalGuard, TuiDisplay, install_panic_hook};
+use crate::telemetry::TelemetryBackend;
+use phoxal_cli_core::session::JoypadCommand;
 
 use super::diagnostics;
-use super::event::{DiagnosticLevel, DiagnosticSource, PhaseId, PhaseOutcome, SessionEvent};
 use super::output::OutputContext;
-use super::state::{FailReason, SessionState};
+use phoxal_cli_core::session::SessionMode;
+use phoxal_cli_core::session::event::{
+    DiagnosticLevel, DiagnosticSource, PhaseId, PhaseOutcome, SessionEvent,
+};
+use phoxal_cli_core::session::state::{FailReason, SessionState};
 
 /// Bound on the [`SessionEvent`] channel: the only source of startup and
-/// runtime transitions the renderer sees (Target design part 2). Generous
+/// runtime transitions the renderer sees. Generous
 /// enough that ordinary bursts (several stages finishing close together)
 /// never drop an event; a slow/stuck consumer is a bug to fix, not a queue to
 /// grow unboundedly for.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionMode {
-    Run,
-    Simulation,
-}
-
-impl SessionMode {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Run => "run",
-            Self::Simulation => "simulation",
-        }
-    }
-}
-
 fn session_title(project_root: &Path, mode: SessionMode) -> TitleInfo {
     let mut title = unknown_session_title(mode);
-    let Ok(manifest_path) = crate::resolver::discover_robot_yaml(project_root) else {
+    let Ok(manifest_path) = phoxal_cli_core::project::resolver::discover_robot_yaml(project_root)
+    else {
         return title;
     };
-    let Ok(robot) = crate::resolver::load_robot(&manifest_path) else {
+    let Ok(robot) = phoxal_cli_core::project::resolver::load_robot(&manifest_path) else {
         return title;
     };
     title.robot = robot.robot.id;
@@ -150,12 +139,6 @@ fn unknown_session_title(mode: SessionMode) -> TitleInfo {
         bus_endpoint: crate::supervisor::default_connect_endpoint(),
         started_at: std::time::SystemTime::now(),
         started_instant: std::time::Instant::now(),
-    }
-}
-
-impl std::fmt::Display for SessionMode {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.label())
     }
 }
 
@@ -270,7 +253,7 @@ impl SessionController {
     }
 
     /// The current output context, e.g. for a caller deciding whether an
-    /// interactive wait may run unbounded (see `commands::run`/`simulate`'s
+    /// interactive wait may run unbounded (see `crate::run`/`simulate`'s
     /// `interactive_wait_budget`).
     #[must_use]
     pub const fn output(&self) -> OutputContext {
@@ -397,7 +380,7 @@ impl SessionController {
                             // startup UI immediately. Quit is the only action
                             // with an external effect before supervision;
                             // restart/joypad actions have no target yet.
-                            let action = handle_input(&mut self.tui, event, &empty_board, &empty_telemetry);
+                            let action = handle_input(&mut self.tui, event, &empty_board);
                             if matches!(action, DisplayAction::Quit) {
                                 self.cancel_owned_task(&mut task).await;
                                 self.teardown();
@@ -474,7 +457,7 @@ impl SessionController {
         mut self,
         board: BoardBackend,
         telemetry: TelemetryBackend,
-        runtime_store: crate::stores::runtime_store::RuntimeStore,
+        runtime_store: phoxal_cli_core::session::stores::runtime::RuntimeStore,
         orderly_shutdown_timeout: Duration,
         mut supervise: JoinHandle<Result<SupervisorOutcome>>,
     ) -> Result<SupervisorOutcome> {
@@ -510,7 +493,7 @@ impl SessionController {
                     match input {
                         Ok(event) => {
                             let board_snapshot = board.snapshot();
-                            let action = handle_input(&mut self.tui, event, &board_snapshot, &telemetry);
+                            let action = handle_input(&mut self.tui, event, &board_snapshot);
                             if action == DisplayAction::Quit
                                 && register_cancel_request(&mut cancel_requested)
                             {
@@ -725,7 +708,7 @@ impl SessionController {
     fn redraw(&mut self, board: &BoardSnapshot, telemetry: &TelemetryBackend) -> Result<()> {
         match &mut self.tui {
             Some(tui) => tui
-                .redraw(board, telemetry)
+                .redraw(board, telemetry.snapshot())
                 .context("failed to draw the interactive session frame"),
             None => Ok(()),
         }
@@ -858,10 +841,9 @@ fn handle_input(
     tui: &mut Option<Box<TuiDisplay>>,
     event: Event,
     board: &BoardSnapshot,
-    telemetry: &TelemetryBackend,
 ) -> DisplayAction {
     match tui {
-        Some(tui) => tui.handle_input(event, board, telemetry),
+        Some(tui) => tui.handle_input(event, board),
         None => DisplayAction::None,
     }
 }
@@ -891,7 +873,8 @@ fn reduce_staged_startup_complete(current: SessionState) -> SessionState {
 
 #[cfg(test)]
 mod tests {
-    use super::super::event::DiagnosticSource;
+    use phoxal_cli_core::session::event::DiagnosticSource;
+
     use super::*;
 
     fn changed(state: SessionState) -> SessionEvent {
@@ -1152,7 +1135,7 @@ mod tests {
             .drive_supervision(
                 BoardBackend::new(),
                 TelemetryBackend::new(),
-                crate::stores::runtime_store::RuntimeStore::new(),
+                phoxal_cli_core::session::stores::runtime::RuntimeStore::new(),
                 Duration::from_secs(1),
                 supervise,
             )

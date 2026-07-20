@@ -1,0 +1,183 @@
+//! Participant process specifications and supervision policy.
+
+use super::{ParticipantLaunchCommand, RESTART_SEC, START_LIMIT_BURST, START_LIMIT_INTERVAL};
+use phoxal_cli_core::session::ParticipantKind;
+use phoxal_cli_core::session::launch_env;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::sync::mpsc;
+
+#[derive(Debug, Clone)]
+pub struct ParticipantSpec {
+    pub id: String,
+    pub kind: ParticipantKind,
+    pub executable: PathBuf,
+    pub args: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub env: Vec<(String, String)>,
+    pub shutdown_grace: Duration,
+    pub process_group: bool,
+    pub note: Option<String>,
+    /// Whether this participant is a checked phoxal bus participant that
+    /// publishes its own `presence/heartbeat` (true for essentially every
+    /// spec - services, drivers, and site tools built on the shared runner).
+    /// `false` only for a process with no participant heartbeat of its own:
+    /// the router (readiness is a separate CLI-owned bus probe) and the Webots
+    /// application (process-lifecycle readiness). Drives whether the
+    /// supervisor waits for an observed heartbeat before marking the process
+    /// `Ready`.
+    pub bus_participant: bool,
+}
+
+impl ParticipantSpec {
+    #[must_use]
+    pub fn command_line(&self) -> String {
+        let mut parts = vec![self.executable.display().to_string()];
+        parts.extend(self.args.clone());
+        parts.join(" ")
+    }
+
+    #[must_use]
+    pub fn launch_command(&self) -> ParticipantLaunchCommand {
+        ParticipantLaunchCommand {
+            command_line: render_manual_command_line(self),
+            env: self.env.iter().cloned().collect(),
+        }
+    }
+}
+
+pub(crate) fn render_manual_command_line(spec: &ParticipantSpec) -> String {
+    let env = spec.env.iter().cloned().collect::<BTreeMap<_, _>>();
+    let mut parts = vec![shell_quote(&spec.executable.display().to_string())];
+    parts.extend(spec.args.iter().map(|arg| shell_quote(arg)));
+    for (env_key, flag) in launch_env::ENV_TO_FLAG {
+        if let Some(value) = env.get(*env_key) {
+            parts.push((*flag).to_string());
+            parts.push(shell_quote(value));
+        }
+    }
+    parts.join(" ")
+}
+
+pub(crate) fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'/' | b'.' | b'-' | b'_' | b':' | b',' | b'=' | b'@')
+        })
+    {
+        return value.to_string();
+    }
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
+
+#[derive(Debug, Clone)]
+pub struct RestartPolicy {
+    pub restart_delay: Duration,
+    pub start_limit_interval: Duration,
+    pub start_limit_burst: usize,
+}
+
+impl Default for RestartPolicy {
+    fn default() -> Self {
+        Self {
+            restart_delay: RESTART_SEC,
+            start_limit_interval: START_LIMIT_INTERVAL,
+            start_limit_burst: START_LIMIT_BURST,
+        }
+    }
+}
+
+/// Finding A7/C2: this struct deliberately carries no UI/telemetry handle.
+/// Live telemetry (host/process/router/joypad feeds) is owned by the caller
+/// and passed directly to
+/// `session::controller::SessionController::drive_supervision`, and this
+/// loop never reads it - so an earlier `telemetry: TelemetryBackend` field
+/// here was dead weight, not a real dependency.
+#[derive(Debug)]
+pub struct SupervisorOptions {
+    pub restart_policy: RestartPolicy,
+    pub action_rx: Option<mpsc::Receiver<SupervisorAction>>,
+    pub requested_stop: Option<RequestedStop>,
+    /// The session's root cancellation signal (`session::SessionController`
+    /// owns the sender half): a Ctrl-C observed by the controller cancels
+    /// this, and this loop selects on it directly instead of its own private
+    /// `tokio::signal::ctrl_c()` - the controller is the ONE place that
+    /// decides what Ctrl-C means (first = cancel + orderly teardown, second =
+    /// force exit), never this loop. Defaults to a fresh, never-cancelled
+    /// token so a caller that does not care about cancellation (every test in
+    /// this module) does not have to construct one.
+    pub token: tokio_util::sync::CancellationToken,
+    /// Where this loop emits `SessionEvent`s (stage started/finished) for a
+    /// live `SessionController` to render - see `phoxal_cli_core::session::event`.
+    /// `None` for a caller with no renderer to feed (every test in this
+    /// module).
+    pub events: Option<mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>>,
+    /// Whether staged startup completion should transition the session to
+    /// `SessionState::Running`. When `true`, once
+    /// every stage has spawned and been observed ready with nothing left
+    /// pending, this loop emits `SessionEvent::StagedStartupComplete` itself
+    /// instead of the caller claiming `Running` before the supervisor even
+    /// exists. Both host and simulation sessions enable this; simulation
+    /// clock telemetry is not a lifecycle authority.
+    pub emits_running_on_startup_complete: bool,
+}
+
+impl Default for SupervisorOptions {
+    fn default() -> Self {
+        Self {
+            restart_policy: RestartPolicy::default(),
+            action_rx: None,
+            requested_stop: None,
+            token: tokio_util::sync::CancellationToken::new(),
+            events: None,
+            emits_running_on_startup_complete: false,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RequestedStop {
+    pub(crate) participant_id: String,
+    pub(crate) grace: Duration,
+}
+
+impl RequestedStop {
+    pub fn new(participant_id: impl Into<String>, grace: Duration) -> Self {
+        Self {
+            participant_id: participant_id.into(),
+            grace,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum SupervisorAction {
+    Swap {
+        id: String,
+        spec: ParticipantSpec,
+        note: String,
+    },
+    /// Stop and respawn a participant from its own current spec, unchanged -
+    /// the TUI's `r restart` (see `crate::display::DisplayAction::Restart`).
+    /// Handled the same way as `Swap` with the participant's own spec cloned
+    /// back in, rather than a new field on `RunningParticipant`, so it reuses
+    /// the exact same stop/spawn/board-note sequence a hot-reload swap
+    /// already goes through.
+    Restart { id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupervisorOutcome {
+    pub failed_participants: Vec<String>,
+}
+
+impl SupervisorOutcome {
+    #[must_use]
+    #[cfg(test)]
+    pub fn graph_healthy(&self) -> bool {
+        self.failed_participants.is_empty()
+    }
+}

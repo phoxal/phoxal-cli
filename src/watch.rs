@@ -7,25 +7,27 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-use crate::commands::check::{
-    CheckGraphContext, SourceParticipant, SourceParticipantKind, build_emit_apis_from_source,
-    check_artifact_refs_from_resolved, extract_emit_apis_from_staged_runtime,
-    extract_emit_apis_from_staged_tool, fetch_emit_apis_from_tool, run_check_with_context,
-    source_participants_from_resolved, tool_participants_from_resolved,
-};
-use crate::commands::run::{DriverPolicy, RunOptions, source_spec_from_launch_record};
-use crate::commands::simulate::{
-    SimulateMode, SimulateOptions, build_checked_sim_launch_plan, resolve_project,
+use crate::check::{
+    CheckGraphContext, build_emit_apis_from_source, check_artifact_refs_from_resolved,
+    extract_emit_apis_from_staged_runtime, extract_emit_apis_from_staged_tool,
+    fetch_emit_apis_from_tool, run_check_with_context, source_participants_from_resolved,
+    tool_participants_from_resolved,
 };
 use crate::component_driver::component_driver_crate_dir;
-use crate::launch_plan::{
-    CheckedRobotLaunchInput, LaunchMode, LaunchPlan, PlanContext, build_launch_plan,
-};
-use crate::resolver::{
-    ResolveOptions, ResolvedRobot, discover_robot_yaml, load_robot_with_extras,
-    load_robot_with_extras_and_overlays, resolve,
+use crate::resolver::resolve;
+use crate::run::{DriverPolicy, RunOptions, source_spec_from_launch_record};
+use crate::simulation::{
+    SimulateMode, SimulateOptions, build_checked_sim_launch_plan, resolve_project,
 };
 use crate::supervisor::{BoardBackend, ParticipantSpec, SupervisorAction};
+use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind};
+use phoxal_cli_core::project::launch_plan::{
+    CheckedRobotLaunchInput, LaunchMode, LaunchPlan, PlanContext, build_launch_plan,
+};
+use phoxal_cli_core::project::resolver::{
+    ResolveOptions, ResolvedRobot, discover_robot_yaml, load_robot_with_extras,
+    load_robot_with_extras_and_overlays,
+};
 use phoxal_cli_core::project::tooling::hash_tree;
 use phoxal_cli_core::session::{ParticipantKind, human};
 
@@ -394,9 +396,7 @@ fn recheck_run_target(
         .iter()
         .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
         .collect::<BTreeMap<_, _>>();
-    official_by_ref.extend(crate::commands::check::component_driver_runtimes_by_ref(
-        &resolved,
-    ));
+    official_by_ref.extend(crate::check::component_driver_runtimes_by_ref(&resolved));
     let tools_by_ref = resolved
         .tools
         .iter()
@@ -423,7 +423,7 @@ fn recheck_run_target(
         fetch_emit_apis_from_tool,
         build_emit_apis_from_source,
     )?;
-    crate::commands::check::ensure_check_outcome_ok(&resolved.channel.to_string(), &outcome)?;
+    crate::check::ensure_check_outcome_ok(&resolved.channel.to_string(), &outcome)?;
     let plan = build_launch_plan(
         LaunchMode::Run,
         &[CheckedRobotLaunchInput {
@@ -442,16 +442,10 @@ fn recheck_run_target(
             .participants
             .retain(|participant| driver_policy.launches(participant));
     }
-    let coherence_graph = crate::commands::check::robot_contract_surfaces(
-        &resolved.robot.robot.id,
-        &outcome.contract_surfaces,
-    );
-    let coherence =
-        crate::commands::check::coherence_for_launch_plan(&coherence_plan, &[coherence_graph])?;
-    crate::commands::check::enforce_coherence(
-        crate::commands::check::CoherenceVerb::Run,
-        &coherence,
-    )?;
+    let coherence_graph =
+        crate::check::robot_contract_surfaces(&resolved.robot.robot.id, &outcome.contract_surfaces);
+    let coherence = crate::check::coherence_for_launch_plan(&coherence_plan, &[coherence_graph])?;
+    crate::check::enforce_coherence(crate::check::CoherenceVerb::Run, &coherence)?;
     Ok(WatchOutcome::Swaps(specs_for_target(&plan, target)?))
 }
 
@@ -736,7 +730,7 @@ robot:
         .unwrap();
         ResolvedRobot {
             robot,
-            channel: crate::catalog::SelectionChannel::Stable,
+            channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
             target: "host".to_string(),
             catalog_snapshot: None,
             platform_runtimes: Vec::new(),

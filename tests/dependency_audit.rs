@@ -8,9 +8,9 @@ const ALLOWED_BASELINE: &[&str] = &["phoxal", "phoxal-api", "phoxal-cli-core", "
 const ALLOWED_RAW_MODULE_IMPORTS: &[&str] = &[
     "src/commands/behavior.rs",
     "src/commands/logs.rs",
-    "src/commands/simulate.rs",
     "src/commands/status.rs",
-    "src/supervisor.rs",
+    "src/simulation/webots.rs",
+    "src/supervisor/bus.rs",
     "src/telemetry.rs",
 ];
 
@@ -78,12 +78,15 @@ fn phoxal_cli_path_dependencies_do_not_grow_past_the_snapshot() {
 }
 
 #[test]
-fn extracted_crates_have_no_workspace_back_edges() {
+fn extracted_crates_follow_the_one_way_dependency_rule() {
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
         .as_array()
         .expect("cargo metadata packages field was not an array");
-    for package_name in ["phoxal-cli-core", "phoxal-cli-ui"] {
+    for (package_name, expected_path_dependencies) in [
+        ("phoxal-cli-core", &[][..]),
+        ("phoxal-cli-ui", &["phoxal-cli-core"][..]),
+    ] {
         let package = packages
             .iter()
             .find(|package| package["name"].as_str() == Some(package_name))
@@ -95,9 +98,9 @@ fn extracted_crates_have_no_workspace_back_edges() {
             .filter(|dependency| dependency["source"].is_null())
             .filter_map(|dependency| dependency["name"].as_str())
             .collect::<Vec<_>>();
-        assert!(
-            path_dependencies.is_empty(),
-            "{package_name} has forbidden workspace dependency edges: {path_dependencies:?}; keep the one-way dependency rule in ARCHITECTURE.md"
+        assert_eq!(
+            path_dependencies, expected_path_dependencies,
+            "{package_name} has forbidden workspace dependency edges; keep UI -> core -> external libraries and root -> UI/core as documented in ARCHITECTURE.md"
         );
     }
 }
@@ -108,6 +111,8 @@ fn privileged_raw_bus_imports_do_not_spread_silently() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut rust_files = Vec::new();
     collect_rust_files(&root.join("src"), &mut rust_files);
+    collect_rust_files(&root.join("crates/core/src"), &mut rust_files);
+    collect_rust_files(&root.join("crates/ui/src"), &mut rust_files);
     // Production source is the trust boundary. Test fixtures are excluded
     // intentionally because this audit itself contains bypass probes and
     // tests may construct raw bus fixtures without shipping that authority.

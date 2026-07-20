@@ -28,26 +28,25 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-pub mod catalog;
+pub mod check;
 pub mod commands;
 pub(crate) mod component_driver;
 pub(crate) mod context;
-pub(crate) mod display;
+pub mod deploy;
 pub(crate) mod git_artifact;
 pub(crate) mod host_doctor;
 pub mod host_paths;
-pub mod launch_plan;
 pub(crate) mod native_artifacts;
 pub(crate) mod progress;
 pub mod resolver;
+pub mod run;
 pub(crate) mod runtime_root;
 pub(crate) mod session;
 pub(crate) mod shell;
 pub(crate) mod simulate_staging;
-pub(crate) mod stores;
+pub mod simulation;
 pub(crate) mod supervisor;
 pub(crate) mod telemetry;
-pub(crate) mod tui;
 pub(crate) mod ui;
 pub(crate) mod watch;
 pub(crate) mod webots_stage_root;

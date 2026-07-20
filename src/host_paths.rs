@@ -10,7 +10,7 @@ pub fn project_root() -> Result<PathBuf> {
     }
     let cwd =
         std::env::current_dir().context("failed to determine the current project directory")?;
-    let discovered = crate::resolver::discover_robot_yaml(&cwd)
+    let discovered = phoxal_cli_core::project::resolver::discover_robot_yaml(&cwd)
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .ok_or_else(|| anyhow::anyhow!("cannot locate a robot project from {}", cwd.display()));

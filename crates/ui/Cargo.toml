@@ -7,8 +7,16 @@ license.workspace = true
 publish = false
 
 [dependencies]
+anyhow = { workspace = true }
 console = { workspace = true }
+phoxal = { workspace = true }
+phoxal-api = { workspace = true }
+phoxal-cli-core = { workspace = true }
 ratatui = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+crossterm = { workspace = true }
+unicode-width = { workspace = true }
 
 [lints]
 workspace = true

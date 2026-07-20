@@ -1,11 +1,11 @@
 use std::fs;
 
 use anyhow::Context;
-use phoxal_cli::catalog::{
+use phoxal_cli::resolver::host_target_triple;
+use phoxal_cli::simulation::{SimulateOptions, prepare};
+use phoxal_cli_core::project::catalog::{
     SelectionChannel as CatalogChannel, fixture_catalog_for_tests, fixture_tool_entry_for_tests,
 };
-use phoxal_cli::commands::simulate::{SimulateOptions, prepare};
-use phoxal_cli::resolver::host_target_triple;
 
 #[test]
 fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyhow::Result<()> {
@@ -29,7 +29,7 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
     // `LaunchMode::Webots` carries the resolved world path directly now
     // (there is no separate `world_path` field to check against).
     match &plan.plan.mode {
-        phoxal_cli::launch_plan::LaunchMode::Webots { world } => {
+        phoxal_cli_core::project::launch_plan::LaunchMode::Webots { world } => {
             assert_eq!(*world, temp.path().join("worlds/test.wbt"));
         }
         other => panic!("expected LaunchMode::Webots, got {other:?}"),
@@ -49,14 +49,14 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
     assert_eq!(
         site_ids,
         vec![
-            phoxal_cli::launch_plan::SITE_TOOL_BUS,
-            phoxal_cli::launch_plan::SITE_TOOL_JOYPAD,
-            phoxal_cli::launch_plan::SITE_TOOL_TELEMETRY,
+            phoxal_cli_core::project::launch_plan::SITE_TOOL_BUS,
+            phoxal_cli_core::project::launch_plan::SITE_TOOL_JOYPAD,
+            phoxal_cli_core::project::launch_plan::SITE_TOOL_TELEMETRY,
         ]
     );
     assert_eq!(
         plan.ctx.resolved.platform_runtimes.len(),
-        phoxal_cli::catalog::OFFICIAL_SERVICES.len()
+        phoxal_cli_core::project::catalog::OFFICIAL_SERVICES.len()
     );
 
     Ok(())
@@ -68,16 +68,16 @@ fn write_vendored_fixture_binaries(root: &std::path::Path) -> anyhow::Result<()>
     unsafe { std::env::set_var(phoxal_cli::host_paths::PROJECT_ROOT_ENV, root) };
     let source = std::env::current_exe()?;
     let target = host_target_triple();
-    for (name, package, binary) in phoxal_cli::catalog::OFFICIAL_SERVICES
+    for (name, package, binary) in phoxal_cli_core::project::catalog::OFFICIAL_SERVICES
         .iter()
         .map(|(name, package)| (*name, *package, format!("phoxal-service-{name}")))
         .chain(
-            phoxal_cli::catalog::OFFICIAL_TOOLS
+            phoxal_cli_core::project::catalog::OFFICIAL_TOOLS
                 .iter()
                 .map(|(name, package)| (*name, *package, format!("phoxal-tool-{name}"))),
         )
         .chain(
-            phoxal_cli::catalog::OFFICIAL_SIMULATORS
+            phoxal_cli_core::project::catalog::OFFICIAL_SIMULATORS
                 .iter()
                 .map(|(name, package)| (*name, *package, format!("phoxal-simulator-{name}"))),
         )

@@ -22,242 +22,160 @@ use phoxal_api::{v1 as state_api, v2 as api};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::stores::log_store::sanitize_terminal_text;
-use crate::stores::telemetry_store::{TelemetryStore, Timestamped};
-use crate::supervisor::{ClockObservation, wait_for_endpoint};
+use crate::supervisor::wait_for_endpoint;
+use phoxal_cli_core::session::stores::log::sanitize_terminal_text;
+use phoxal_cli_core::session::stores::telemetry::{TelemetryStore, Timestamped};
+use phoxal_cli_core::session::telemetry::{
+    ClockObservation, DiskSample, HostSample, JoypadCommand, JoypadDevice, JoypadDeviceStatus,
+    JoypadDevicesSample, RouterMetricsSample, TelemetrySnapshot, TopicMetric,
+};
 
 const MAX_HOST_DISKS: usize = 32;
 const MAX_ROUTER_TOPICS: usize = 256;
 const MAX_JOYPAD_DEVICES: usize = 64;
 const MAX_REMOTE_TEXT_CHARS: usize = 256;
 
-/// One `telemetry::Host` sample (the host resource meter).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct HostSample {
-    pub cpu_pct: f32,
-    pub ram_used_bytes: u64,
-    pub ram_total_bytes: u64,
-    pub swap_used_bytes: u64,
-    pub swap_total_bytes: u64,
-    pub load_1m: f32,
-    pub load_5m: f32,
-    pub load_15m: f32,
-    pub uptime_s: Option<u64>,
-    pub disks: Arc<Vec<DiskSample>>,
-    pub disks_truncated: u32,
-    pub window_ns: u64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DiskSample {
-    pub mount_point: String,
-    pub file_system: String,
-    pub used_bytes: u64,
-    pub total_bytes: u64,
-}
-
-impl From<api::telemetry::Host> for HostSample {
-    fn from(body: api::telemetry::Host) -> Self {
-        let wire_truncated = body
-            .disks
-            .iter()
-            .filter(|disk| disk.mount_point.is_empty())
-            .filter_map(|disk| {
-                disk.file_system
-                    .strip_prefix('+')
-                    .and_then(|value| value.strip_suffix(" omitted"))
-                    .and_then(|value| value.parse::<u32>().ok())
-            })
-            .fold(0_u32, u32::saturating_add);
-        let received_disks = body
-            .disks
-            .iter()
-            .filter(|disk| !disk.mount_point.is_empty())
-            .count();
-        let disks = body
-            .disks
-            .into_iter()
-            .filter(|disk| !disk.mount_point.is_empty())
-            .take(MAX_HOST_DISKS)
-            .map(|disk| DiskSample {
-                mount_point: bounded_remote_text(&disk.mount_point),
-                file_system: bounded_remote_text(&disk.file_system),
-                used_bytes: disk.used_bytes,
-                total_bytes: disk.total_bytes,
-            })
-            .collect::<Vec<_>>();
-        let locally_truncated = received_disks.saturating_sub(disks.len());
-        Self {
-            cpu_pct: body.cpu_pct,
-            ram_used_bytes: body.ram_used_bytes,
-            ram_total_bytes: body.ram_total_bytes,
-            swap_used_bytes: body.swap_used_bytes,
-            swap_total_bytes: body.swap_total_bytes,
-            load_1m: body.load_1m,
-            load_5m: body.load_5m,
-            load_15m: body.load_15m,
-            uptime_s: body.uptime_s,
-            disks: Arc::new(disks),
-            disks_truncated: wire_truncated
-                .saturating_add(u32::try_from(locally_truncated).unwrap_or(u32::MAX)),
-            window_ns: body.window_ns,
-        }
+fn host_sample_from(body: api::telemetry::Host) -> HostSample {
+    let wire_truncated = body
+        .disks
+        .iter()
+        .filter(|disk| disk.mount_point.is_empty())
+        .filter_map(|disk| {
+            disk.file_system
+                .strip_prefix('+')
+                .and_then(|value| value.strip_suffix(" omitted"))
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+        .fold(0_u32, u32::saturating_add);
+    let received_disks = body
+        .disks
+        .iter()
+        .filter(|disk| !disk.mount_point.is_empty())
+        .count();
+    let disks = body
+        .disks
+        .into_iter()
+        .filter(|disk| !disk.mount_point.is_empty())
+        .take(MAX_HOST_DISKS)
+        .map(|disk| DiskSample {
+            mount_point: bounded_remote_text(&disk.mount_point),
+            file_system: bounded_remote_text(&disk.file_system),
+            used_bytes: disk.used_bytes,
+            total_bytes: disk.total_bytes,
+        })
+        .collect::<Vec<_>>();
+    let locally_truncated = received_disks.saturating_sub(disks.len());
+    HostSample {
+        cpu_pct: body.cpu_pct,
+        ram_used_bytes: body.ram_used_bytes,
+        ram_total_bytes: body.ram_total_bytes,
+        swap_used_bytes: body.swap_used_bytes,
+        swap_total_bytes: body.swap_total_bytes,
+        load_1m: body.load_1m,
+        load_5m: body.load_5m,
+        load_15m: body.load_15m,
+        uptime_s: body.uptime_s,
+        disks: Arc::new(disks),
+        disks_truncated: wire_truncated
+            .saturating_add(u32::try_from(locally_truncated).unwrap_or(u32::MAX)),
+        window_ns: body.window_ns,
     }
 }
 
-/// One row of the global Bus page.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TopicMetric {
-    pub topic: String,
-    pub from_participant: String,
-    pub ingress_rate_hz: f32,
-    pub count: u64,
-    /// The framework could not attribute every observed message to a detailed
-    /// row, either because the table was capped or its non-blocking mirror
-    /// queue dropped a burst. It may combine robot and internal traffic and
-    /// must not be presented as a real producer.
-    pub aggregate_overflow: bool,
-}
-
-impl From<api::router::TopicMetric> for TopicMetric {
-    fn from(body: api::router::TopicMetric) -> Self {
-        let aggregate_overflow = body.topic.is_empty() && body.from_participant.is_empty();
-        Self {
-            topic: if aggregate_overflow {
-                "Other/unobserved traffic".to_string()
-            } else {
-                bounded_remote_text(&body.topic)
-            },
-            from_participant: if aggregate_overflow {
-                "multiple".to_string()
-            } else {
-                bounded_remote_text(&body.from_participant)
-            },
-            ingress_rate_hz: body.ingress_rate_hz,
-            count: body.count,
-            aggregate_overflow,
-        }
-    }
-}
-
-/// The router's latest `router::Metrics` sample.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct RouterMetricsSample {
-    pub topics: Arc<Vec<TopicMetric>>,
-    pub topics_truncated: u32,
-    pub throughput_msg_s: f32,
-    pub window_ns: u64,
-}
-
-impl From<api::router::Metrics> for RouterMetricsSample {
-    fn from(body: api::router::Metrics) -> Self {
-        let received_topics = body.topics.len();
-        let keep = if received_topics > MAX_ROUTER_TOPICS {
-            MAX_ROUTER_TOPICS.saturating_sub(1)
+fn topic_metric_from(body: api::router::TopicMetric) -> TopicMetric {
+    let aggregate_overflow = body.topic.is_empty() && body.from_participant.is_empty();
+    TopicMetric {
+        topic: if aggregate_overflow {
+            "Other/unobserved traffic".to_string()
         } else {
-            MAX_ROUTER_TOPICS
-        };
-        let mut wire_topics = body.topics;
-        let dropped = if wire_topics.len() > keep {
-            wire_topics.split_off(keep)
+            bounded_remote_text(&body.topic)
+        },
+        from_participant: if aggregate_overflow {
+            "multiple".to_string()
         } else {
-            Vec::new()
-        };
-        let dropped_rate = dropped.iter().map(|metric| metric.ingress_rate_hz).sum();
-        let dropped_count = dropped
-            .iter()
-            .fold(0_u64, |total, metric| total.saturating_add(metric.count));
-        let mut topics = wire_topics
-            .into_iter()
-            .map(TopicMetric::from)
-            .collect::<Vec<_>>();
-        if received_topics > keep {
-            if let Some(overflow) = topics.iter_mut().find(|metric| metric.aggregate_overflow) {
-                overflow.ingress_rate_hz += dropped_rate;
-                overflow.count = overflow.count.saturating_add(dropped_count);
-            } else {
-                topics.push(TopicMetric {
-                    topic: "Other/unobserved traffic".to_string(),
-                    from_participant: "multiple".to_string(),
-                    ingress_rate_hz: dropped_rate,
-                    count: dropped_count,
-                    aggregate_overflow: true,
-                });
-            }
-        }
-        Self {
-            topics: Arc::new(topics),
-            topics_truncated: u32::try_from(received_topics.saturating_sub(keep))
-                .unwrap_or(u32::MAX),
-            throughput_msg_s: body.throughput_msg_s,
-            window_ns: body.window_ns,
-        }
+            bounded_remote_text(&body.from_participant)
+        },
+        ingress_rate_hz: body.ingress_rate_hz,
+        count: body.count,
+        aggregate_overflow,
     }
 }
 
-/// One gamepad the joypad tool can see.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct JoypadDevice {
-    pub id: String,
-    pub name: String,
-    pub status: JoypadDeviceStatus,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum JoypadDeviceStatus {
-    Ready,
-    Disconnected,
-    Unsupported,
-    #[default]
-    Unknown,
-}
-
-impl From<api::joypad::Device> for JoypadDevice {
-    fn from(body: api::joypad::Device) -> Self {
-        Self {
-            id: bounded_remote_text(&body.id),
-            name: bounded_remote_text(&body.name),
-            status: match body.status {
-                api::joypad::DeviceStatus::Ready => JoypadDeviceStatus::Ready,
-                api::joypad::DeviceStatus::Disconnected => JoypadDeviceStatus::Disconnected,
-                api::joypad::DeviceStatus::Unsupported => JoypadDeviceStatus::Unsupported,
-            },
+fn router_metrics_sample_from(body: api::router::Metrics) -> RouterMetricsSample {
+    let received_topics = body.topics.len();
+    let keep = if received_topics > MAX_ROUTER_TOPICS {
+        MAX_ROUTER_TOPICS.saturating_sub(1)
+    } else {
+        MAX_ROUTER_TOPICS
+    };
+    let mut wire_topics = body.topics;
+    let dropped = if wire_topics.len() > keep {
+        wire_topics.split_off(keep)
+    } else {
+        Vec::new()
+    };
+    let dropped_rate = dropped.iter().map(|metric| metric.ingress_rate_hz).sum();
+    let dropped_count = dropped
+        .iter()
+        .fold(0_u64, |total, metric| total.saturating_add(metric.count));
+    let mut topics = wire_topics
+        .into_iter()
+        .map(topic_metric_from)
+        .collect::<Vec<_>>();
+    if received_topics > keep {
+        if let Some(overflow) = topics.iter_mut().find(|metric| metric.aggregate_overflow) {
+            overflow.ingress_rate_hz += dropped_rate;
+            overflow.count = overflow.count.saturating_add(dropped_count);
+        } else {
+            topics.push(TopicMetric {
+                topic: "Other/unobserved traffic".to_string(),
+                from_participant: "multiple".to_string(),
+                ingress_rate_hz: dropped_rate,
+                count: dropped_count,
+                aggregate_overflow: true,
+            });
         }
+    }
+    RouterMetricsSample {
+        topics: Arc::new(topics),
+        topics_truncated: u32::try_from(received_topics.saturating_sub(keep)).unwrap_or(u32::MAX),
+        throughput_msg_s: body.throughput_msg_s,
+        window_ns: body.window_ns,
+    }
+}
+
+fn joypad_device_from(body: api::joypad::Device) -> JoypadDevice {
+    JoypadDevice {
+        id: bounded_remote_text(&body.id),
+        name: bounded_remote_text(&body.name),
+        status: match body.status {
+            api::joypad::DeviceStatus::Ready => JoypadDeviceStatus::Ready,
+            api::joypad::DeviceStatus::Disconnected => JoypadDeviceStatus::Disconnected,
+            api::joypad::DeviceStatus::Unsupported => JoypadDeviceStatus::Unsupported,
+        },
     }
 }
 
 /// The joypad tool's latest published device state - `selected` is the
 /// AUTHORITATIVE selection (the tool's own ack), never a local UI guess; see
 /// `tui::state::AppState::input_cursor` for the separate, purely local list cursor.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct JoypadDevicesSample {
-    pub available: Arc<Vec<JoypadDevice>>,
-    pub devices_truncated: usize,
-    pub selected: Option<String>,
-    pub enabled: bool,
-    pub unavailable_reason: Option<String>,
-    pub last_error: Option<String>,
-}
-
-impl From<api::joypad::Devices> for JoypadDevicesSample {
-    fn from(body: api::joypad::Devices) -> Self {
-        let received_devices = body.available.len();
-        let available = body
-            .available
-            .into_iter()
-            .take(MAX_JOYPAD_DEVICES)
-            .map(JoypadDevice::from)
-            .collect::<Vec<_>>();
-        Self {
-            devices_truncated: received_devices.saturating_sub(available.len()),
-            available: Arc::new(available),
-            selected: body.selected.map(|id| bounded_remote_text(&id)),
-            enabled: body.enabled,
-            unavailable_reason: body
-                .unavailable_reason
-                .map(|reason| bounded_remote_text(&reason)),
-            last_error: body.last_error.map(|error| bounded_remote_text(&error)),
-        }
+fn joypad_devices_sample_from(body: api::joypad::Devices) -> JoypadDevicesSample {
+    let received_devices = body.available.len();
+    let available = body
+        .available
+        .into_iter()
+        .take(MAX_JOYPAD_DEVICES)
+        .map(joypad_device_from)
+        .collect::<Vec<_>>();
+    JoypadDevicesSample {
+        devices_truncated: received_devices.saturating_sub(available.len()),
+        available: Arc::new(available),
+        selected: body.selected.map(|id| bounded_remote_text(&id)),
+        enabled: body.enabled,
+        unavailable_reason: body
+            .unavailable_reason
+            .map(|reason| bounded_remote_text(&reason)),
+        last_error: body.last_error.map(|error| bounded_remote_text(&error)),
     }
 }
 
@@ -276,32 +194,6 @@ fn bounded_remote_text(text: &str) -> String {
 /// redraws), so a renderer can ask [`Timestamped::is_stale`] instead of
 /// trusting a long-cached value as if it were still live. See the
 /// `stores::telemetry_store` module documentation for the store contract.
-#[derive(Debug, Clone, Default)]
-pub struct TelemetrySnapshot {
-    /// The simulation clock's latest observed sample - `None` in `run` mode
-    /// (no clock feed is ever started there) or before the first sample
-    /// arrives in `simulation` mode.
-    pub clock: Option<Timestamped<crate::supervisor::ClockSample>>,
-    /// `None` until `tool-telemetry`'s first `Host` sample arrives - this is
-    /// the graceful-absence case (the tool may not be in the catalog yet),
-    /// rendered as `cpu n/a` rather than a failure.
-    pub host: Option<Timestamped<HostSample>>,
-    pub router: Option<Timestamped<RouterMetricsSample>>,
-    /// Receive-time history of the 60 most recent total-throughput samples,
-    /// bounded by `TelemetryStore` for the live Bus sparkline.
-    pub router_throughput_history: Vec<Timestamped<f32>>,
-    pub joypad: Option<Timestamped<JoypadDevicesSample>>,
-    pub motion: Option<Timestamped<state_api::motion::State>>,
-}
-
-/// A joypad action the global Input page asked to publish.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum JoypadCommand {
-    Select(String),
-    SetEnabled(bool),
-    Rescan,
-}
-
 /// Live-telemetry state shared between the background feed tasks
 /// (`start_host_feed` etc.) and the TUI's redraw path
 /// (`TuiDisplay::redraw`/`render::draw`). Cheap to clone (an `Arc` handle);
@@ -529,7 +421,7 @@ async fn host_feed_loop(
         let subscriber = Subscriber::<api::telemetry::Host>::new(&bus, &topic, 32).await?;
         loop {
             let received = subscriber.recv().await?;
-            telemetry.record_host(received.body.into());
+            telemetry.record_host(host_sample_from(received.body));
         }
     }
     .await;
@@ -587,7 +479,7 @@ async fn router_metrics_feed_loop(
         let subscriber = Subscriber::<api::router::Metrics>::new(&bus, &topic, 32).await?;
         loop {
             let received = subscriber.recv().await?;
-            telemetry.record_router(received.body.into());
+            telemetry.record_router(router_metrics_sample_from(received.body));
         }
     }
     .await;
@@ -670,7 +562,7 @@ async fn joypad_devices_feed_loop(
             tokio::select! {
                 received = devices_subscriber.recv() => {
                     let received = received?;
-                    telemetry.record_joypad(received.body.into());
+                    telemetry.record_joypad(joypad_devices_sample_from(received.body));
                 }
                 command = command_rx.recv() => {
                     match command {
@@ -743,7 +635,7 @@ mod tests {
 
     #[test]
     fn router_overflow_sentinel_is_presented_as_an_aggregate_row() {
-        let metric = TopicMetric::from(api::router::TopicMetric {
+        let metric = topic_metric_from(api::router::TopicMetric {
             topic: String::new(),
             from_participant: String::new(),
             ingress_rate_hz: 7.0,
@@ -758,7 +650,7 @@ mod tests {
 
     #[test]
     fn remote_router_and_joypad_labels_are_sanitized_at_ingress() {
-        let metric = TopicMetric::from(api::router::TopicMetric {
+        let metric = topic_metric_from(api::router::TopicMetric {
             topic: "v1/drive\u{1b}[31m/state".to_string(),
             from_participant: "drive\nspoof".to_string(),
             ingress_rate_hz: 1.0,
@@ -767,7 +659,7 @@ mod tests {
         assert_eq!(metric.topic, "v1/drive/state");
         assert_eq!(metric.from_participant, "drive spoof");
 
-        let devices = JoypadDevicesSample::from(api::joypad::Devices {
+        let devices = joypad_devices_sample_from(api::joypad::Devices {
             available: vec![api::joypad::Device {
                 id: "pad\u{1b}[2J".to_string(),
                 name: "Pad\nname".to_string(),
@@ -787,7 +679,7 @@ mod tests {
 
     #[test]
     fn oversized_remote_telemetry_is_bounded_and_disclosed() {
-        let router = RouterMetricsSample::from(api::router::Metrics {
+        let router = router_metrics_sample_from(api::router::Metrics {
             topics: (0..(MAX_ROUTER_TOPICS + 20))
                 .map(|index| api::router::TopicMetric {
                     topic: format!("{}-{index}", "t".repeat(MAX_REMOTE_TEXT_CHARS * 2)),
@@ -814,7 +706,7 @@ mod tests {
                 && metric.from_participant.chars().count() <= MAX_REMOTE_TEXT_CHARS
         }));
 
-        let joypad = JoypadDevicesSample::from(api::joypad::Devices {
+        let joypad = joypad_devices_sample_from(api::joypad::Devices {
             available: (0..(MAX_JOYPAD_DEVICES + 7))
                 .map(|index| api::joypad::Device {
                     id: format!("{}-{index}", "i".repeat(MAX_REMOTE_TEXT_CHARS * 2)),
@@ -830,7 +722,7 @@ mod tests {
         assert_eq!(joypad.available.len(), MAX_JOYPAD_DEVICES);
         assert_eq!(joypad.devices_truncated, 7);
 
-        let host = HostSample::from(api::telemetry::Host {
+        let host = host_sample_from(api::telemetry::Host {
             cpu_pct: 0.0,
             ram_used_bytes: 0,
             ram_total_bytes: 0,
@@ -877,7 +769,7 @@ mod tests {
             }),
         );
 
-        let router = RouterMetricsSample::from(api::router::Metrics {
+        let router = router_metrics_sample_from(api::router::Metrics {
             topics,
             throughput_msg_s: 0.0,
             window_ns: 1,
@@ -917,7 +809,8 @@ mod tests {
         telemetry.set_clock_feed(rx);
         assert!(telemetry.snapshot().clock.is_none());
         tx.send_modify(|observation| {
-            observation.latest = Some(crate::supervisor::ClockSample { now_ns: 5, step: 3 });
+            observation.latest =
+                Some(phoxal_cli_core::session::telemetry::ClockSample { now_ns: 5, step: 3 });
             observation.received_at = Some(Instant::now());
         });
         let sample = telemetry.snapshot().clock.expect("clock sample");

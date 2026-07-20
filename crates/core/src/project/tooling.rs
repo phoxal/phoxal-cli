@@ -1,3 +1,5 @@
+//! Project-local Cargo metadata, path resolution, and content hashing.
+
 use std::{
     fs,
     path::{Path, PathBuf},

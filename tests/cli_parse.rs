@@ -140,7 +140,7 @@ fn parses_watch_overlay_and_simulation_join() {
     let RootCommand::Simulation(simulation) = cli.command else {
         panic!("expected simulation command");
     };
-    let phoxal_cli::commands::simulate::SimulationSubcommand::Run(run) = simulation.command else {
+    let phoxal_cli::simulation::SimulationSubcommand::Run(run) = simulation.command else {
         panic!("expected simulation run subcommand");
     };
     assert!(run.watch);
@@ -153,7 +153,7 @@ fn parses_watch_overlay_and_simulation_join() {
     };
     assert!(matches!(
         simulation.command,
-        phoxal_cli::commands::simulate::SimulationSubcommand::Join(_)
+        phoxal_cli::simulation::SimulationSubcommand::Join(_)
     ));
 }
 

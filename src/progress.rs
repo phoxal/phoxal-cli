@@ -7,7 +7,7 @@
 //! because the update command emits its own deterministic final summary.
 
 use crate::session::diagnostics::{RouteResult, try_route};
-use crate::session::event::{DiagnosticLevel, DiagnosticSource};
+use phoxal_cli_core::session::event::{DiagnosticLevel, DiagnosticSource};
 use phoxal_cli_ui::{Role, Theme};
 
 /// Status handle used to keep failure reporting on the same output route as
@@ -156,8 +156,9 @@ mod tests {
         crate::session::diagnostics::uninstall();
 
         let mut messages = Vec::new();
-        while let Ok(crate::session::event::SessionEvent::Diagnostic { message, .. }) =
-            rx.try_recv()
+        while let Ok(phoxal_cli_core::session::event::SessionEvent::Diagnostic {
+            message, ..
+        }) = rx.try_recv()
         {
             messages.push(message);
         }

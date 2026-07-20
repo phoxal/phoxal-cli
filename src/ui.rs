@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::session::diagnostics::{RouteResult, register_child, try_route, unregister_child};
-use crate::session::event::{DiagnosticLevel, DiagnosticSource};
+use phoxal_cli_core::session::event::{DiagnosticLevel, DiagnosticSource};
 use phoxal_cli_ui::Theme;
 
 #[derive(Debug, Clone, Copy)]

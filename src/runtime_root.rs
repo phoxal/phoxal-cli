@@ -3,16 +3,16 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
-use crate::resolver::ResolvedRobot;
+use phoxal_cli_core::project::launch_plan::RUNTIME_ROBOT_ROOT_RELATIVE;
+use phoxal_cli_core::project::resolver::ResolvedRobot;
 
-const ROBOT_DIR: &str = "robot";
 const PREVIOUS_ROBOT_DIR: &str = ".robot.previous";
 const BEHAVIORS_DIR: &str = "behaviors";
 const MESHES_DIR: &str = "meshes";
 
 #[must_use]
 pub fn path(project_root: &Path) -> PathBuf {
-    project_root.join(".phoxal/run").join(ROBOT_DIR)
+    project_root.join(RUNTIME_ROBOT_ROOT_RELATIVE)
 }
 
 /// Build and publish the complete robot root consumed by a live `run` or
@@ -214,10 +214,12 @@ fn remove_if_present(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::ArtifactKind;
     use crate::host_paths::test_support::ScratchPhoxalHome;
     use crate::resolver::host_target_triple;
-    use crate::resolver::{ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource};
+    use phoxal_cli_core::project::catalog::ArtifactKind;
+    use phoxal_cli_core::project::resolver::{
+        ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
+    };
 
     fn resolved_robot() -> Result<ResolvedRobot> {
         let yaml = r#"schema: robot/v0
@@ -236,7 +238,7 @@ robot:
 "#;
         Ok(ResolvedRobot {
             robot: phoxal::model::robot::v0::Robot::parse_from_string(yaml)?,
-            channel: crate::catalog::SelectionChannel::Stable,
+            channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
             target: host_target_triple(),
             catalog_snapshot: None,
             platform_runtimes: Vec::new(),

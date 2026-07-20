@@ -9,9 +9,9 @@ use phoxal_api::v1 as api;
 use tokio::time::timeout;
 
 use crate::AppContext;
-use crate::launch_plan::DEFAULT_ROUTER_CONNECT;
-use crate::resolver::{discover_robot_yaml, load_robot_with_extras};
 use crate::supervisor::{logs_wildcard_topic_key, render_log_event};
+use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
+use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot_with_extras};
 
 #[derive(Debug, Args)]
 pub struct Logs {

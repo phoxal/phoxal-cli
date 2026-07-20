@@ -1,0 +1,404 @@
+//! Participants responsibilities for run.
+
+use super::{
+    DriverPolicy, build_source_binary, device_missing_note, env_path_override,
+    native_pending_official_note, native_pending_tool_note,
+};
+use crate::supervisor::BoardBackend;
+use crate::supervisor::ParticipantSpec;
+use crate::supervisor::ParticipantState;
+use crate::supervisor::ParticipantStatus;
+use crate::supervisor::default_connect_endpoint;
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::anyhow;
+use phoxal::participant::launch::env;
+use phoxal_cli_core::project::launch_plan::LaunchOwnership;
+use phoxal_cli_core::project::launch_plan::LaunchPlan;
+use phoxal_cli_core::project::launch_plan::ParticipantExecution;
+use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
+use phoxal_cli_core::project::launch_plan::SITE_TOOL_JOYPAD;
+use phoxal_cli_core::project::launch_plan::SiteLaunch;
+use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
+use phoxal_cli_core::project::resolver::ResolvedRobot;
+use phoxal_cli_core::session::ParticipantKind;
+use phoxal_cli_core::session::launch_env::encode_participant_env;
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::path::PathBuf;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DriverDecision {
+    Launch,
+    Degraded(String),
+}
+
+pub(crate) fn prepare_site_tools(
+    plan: &LaunchPlan,
+    resolved: &ResolvedRobot,
+    robot_root: &Path,
+    board: &BoardBackend,
+    specs: &mut Vec<ParticipantSpec>,
+    ui: &crate::Ui,
+) -> Result<()> {
+    let namespace = plan
+        .robots
+        .first()
+        .map(|robot| robot.namespace.as_str())
+        .unwrap_or("site");
+    let robot_id = plan
+        .robots
+        .first()
+        .map(|robot| robot.id.as_str())
+        .unwrap_or("site");
+
+    for site in &plan.site {
+        let status =
+            ParticipantStatus::new(&site.id, ParticipantKind::Tool, ParticipantState::Starting)
+                .with_local(site_tool_is_local(resolved, &site.id));
+        board.upsert(status);
+        match locate_tool_binary(resolved, &site.id, ui)? {
+            Some(path) => specs.push(ParticipantSpec {
+                id: site.id.clone(),
+                kind: ParticipantKind::Tool,
+                executable: path,
+                args: Vec::new(),
+                cwd: None,
+                env: site_env(site, namespace, robot_id, robot_root)?,
+                shutdown_grace: Duration::from_secs(5),
+                process_group: true,
+                note: None,
+                bus_participant: true,
+            }),
+            None => board.set_state(
+                &site.id,
+                ParticipantState::Failed,
+                Some(native_pending_tool_note(&site.id)),
+            ),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare_robot_participants(
+    plan: &LaunchPlan,
+    resolved: &ResolvedRobot,
+    _project_root: &Path,
+    driver_policy: &DriverPolicy,
+    board: &BoardBackend,
+    specs: &mut Vec<ParticipantSpec>,
+    ui: &crate::Ui,
+) -> Result<()> {
+    let official_by_name = resolved
+        .platform_runtimes
+        .iter()
+        .map(|runtime| (runtime.name.as_str(), runtime))
+        .collect::<BTreeMap<_, _>>();
+    for robot in &plan.robots {
+        for participant in &robot.participants {
+            let id = participant.launch.participant_id.clone();
+            let (kind, local) = participant_kind(&participant.execution);
+            if participant.launch_ownership == LaunchOwnership::SimulationManaged {
+                // Webots (via the supervisor) owns this participant's
+                // lifecycle - the CLI never spawns or restarts it, and has no
+                // process to poll for readiness. It still satisfies the graph
+                // proof and appears on the board, starting `Starting`, not
+                // `Ready`: OBSERVED readiness comes from its own bus
+                // heartbeats (D23), same as any participant, driven by
+                // `BoardBackend::record_heartbeat` once the presence
+                // heartbeat subscriber is running. A controller/supervisor
+                // Webots never actually launches (or that silently crashes
+                // before its own `#[setup]` completes) therefore never
+                // reaches `Ready` here, and its staged participant wait (or,
+                // failing that, the heartbeat staleness sweep) turns that into a
+                // detected failure instead of a permanently green board.
+                // `crate::simulation` renders its controllerArgs into the
+                // staged world instead of a `ParticipantSpec` (Part 5).
+                board.mark_presence_recoverable(&id);
+                let mut status =
+                    ParticipantStatus::new(&id, kind, ParticipantState::Starting).with_local(local);
+                status.note = Some(
+                    "SimulationManaged: launched by Webots via the supervisor, not the CLI supervisor"
+                        .to_string(),
+                );
+                board.upsert(status);
+                continue;
+            }
+            board.upsert(
+                ParticipantStatus::new(&id, kind, ParticipantState::Starting).with_local(local),
+            );
+            match &participant.execution {
+                ParticipantExecution::OfficialArtifact { .. } => {
+                    let runtime = official_by_name
+                        .get(participant.artifact_id.as_str())
+                        .copied();
+                    match locate_official_binary(runtime, &participant.artifact_id)? {
+                        Some(path) => specs.push(ParticipantSpec {
+                            id,
+                            kind,
+                            executable: path,
+                            args: Vec::new(),
+                            cwd: None,
+                            env: encode_participant_env(&participant.launch)?.spawn_env(),
+                            shutdown_grace: Duration::from_millis(
+                                participant.launch.shutdown_grace_ms,
+                            ),
+                            process_group: true,
+                            note: None,
+                            bus_participant: true,
+                        }),
+                        None => board.set_state(
+                            &participant.launch.participant_id,
+                            ParticipantState::Failed,
+                            Some(native_pending_official_note(
+                                runtime,
+                                &participant.artifact_id,
+                            )),
+                        ),
+                    }
+                }
+                ParticipantExecution::UserService { crate_dir } => {
+                    let binary = build_source_binary(crate_dir, &id, ui)?;
+                    specs.push(ParticipantSpec {
+                        id,
+                        kind,
+                        executable: binary,
+                        args: Vec::new(),
+                        cwd: Some(crate_dir.clone()),
+                        env: encode_participant_env(&participant.launch)?.spawn_env(),
+                        shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
+                        process_group: true,
+                        note: None,
+                        bus_participant: true,
+                    });
+                }
+                ParticipantExecution::SourceArtifact { crate_dir, .. } => {
+                    let binary = build_source_binary(crate_dir, &id, ui)?;
+                    specs.push(ParticipantSpec {
+                        id,
+                        kind,
+                        executable: binary,
+                        args: Vec::new(),
+                        cwd: Some(crate_dir.clone()),
+                        env: encode_participant_env(&participant.launch)?.spawn_env(),
+                        shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
+                        process_group: true,
+                        note: None,
+                        bus_participant: true,
+                    });
+                }
+                ParticipantExecution::ComponentDriver { crate_dir } => {
+                    match driver_policy.decision(&id) {
+                        DriverDecision::Degraded(note) => {
+                            board.set_state(&id, ParticipantState::Degraded, Some(note));
+                            continue;
+                        }
+                        DriverDecision::Launch => {}
+                    }
+                    if cfg!(target_os = "macos") {
+                        board.set_state(
+                            &id,
+                            ParticipantState::Failed,
+                            Some("DriverUnsupported: component driver binaries are Linux-only on macOS (D21)".to_string()),
+                        );
+                        continue;
+                    }
+                    if let Some(note) = device_missing_note(resolved, &id) {
+                        board.set_state(&id, ParticipantState::Failed, Some(note));
+                        continue;
+                    }
+                    let binary = build_source_binary(crate_dir, &id, ui)?;
+                    specs.push(ParticipantSpec {
+                        id,
+                        kind,
+                        executable: binary,
+                        args: Vec::new(),
+                        cwd: Some(crate_dir.clone()),
+                        env: encode_participant_env(&participant.launch)?.spawn_env(),
+                        shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
+                        process_group: true,
+                        note: None,
+                        bus_participant: true,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The board `ParticipantKind` plus whether the participant runs from a
+/// locally resolved directory, for a checked participant's `execution`.
+/// `SourceArtifact`'s own `kind: String` (`"tool"`/`"simulator"`/`"service"`,
+/// set by `launch_plan::participant_execution` from
+/// `check::SourceParticipantKind::shared_kind`) recovers the real role for a
+/// locally source-overridden official artifact - a Run-mode launch plan only
+/// ever contains Service and Driver participants (`Tool` and `Simulator`
+/// checked participants are excluded upstream by
+/// `launch_plan::is_robot_launch_participant`), so `"service"` is the only
+/// value seen here in practice, but Sim-mode plans reuse this same helper via
+/// `source_spec_from_launch_record` (through `watch`), where a
+/// source-overridden simulator is possible.
+pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (ParticipantKind, bool) {
+    match execution {
+        ParticipantExecution::OfficialArtifact { .. } => (ParticipantKind::Service, false),
+        ParticipantExecution::UserService { .. } => (ParticipantKind::Service, true),
+        ParticipantExecution::SourceArtifact { kind, .. } => {
+            let kind = match kind.as_str() {
+                "tool" => ParticipantKind::Tool,
+                "simulator" => ParticipantKind::Simulator,
+                _ => ParticipantKind::Service,
+            };
+            (kind, true)
+        }
+        ParticipantExecution::ComponentDriver { .. } => (ParticipantKind::Driver, true),
+    }
+}
+
+pub(crate) fn source_spec_from_launch_record(
+    participant: &ParticipantLaunchRecord,
+    ui: &crate::Ui,
+) -> Result<Option<ParticipantSpec>> {
+    let id = participant.launch.participant_id.clone();
+    // `_local`: this function only builds a `ParticipantSpec` (no
+    // `ParticipantStatus` to mark `.with_local` on) - see the other
+    // `participant_kind` call sites for where the bool is actually consumed.
+    let (kind, _local) = participant_kind(&participant.execution);
+    let crate_dir = match &participant.execution {
+        ParticipantExecution::UserService { crate_dir }
+        | ParticipantExecution::SourceArtifact { crate_dir, .. }
+        | ParticipantExecution::ComponentDriver { crate_dir } => crate_dir,
+        ParticipantExecution::OfficialArtifact { .. } => return Ok(None),
+    };
+    let binary = build_source_binary(crate_dir, &id, ui)?;
+    Ok(Some(ParticipantSpec {
+        id,
+        kind,
+        executable: binary,
+        args: Vec::new(),
+        cwd: Some(crate_dir.clone()),
+        env: encode_participant_env(&participant.launch)?.spawn_env(),
+        shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
+        process_group: true,
+        note: None,
+        bus_participant: true,
+    }))
+}
+
+pub(crate) fn site_env(
+    site: &SiteLaunch,
+    namespace: &str,
+    robot_id: &str,
+    robot_root: &Path,
+) -> Result<Vec<(String, String)>> {
+    let mut envs = vec![
+        (env::PARTICIPANT_ID.to_string(), site.id.clone()),
+        (env::NAMESPACE.to_string(), namespace.to_string()),
+        (env::ROBOT_ID.to_string(), robot_id.to_string()),
+    ];
+    if site.id == SITE_TOOL_JOYPAD {
+        envs.push((
+            env::ROBOT_ROOT.to_string(),
+            robot_root.display().to_string(),
+        ));
+    }
+    // A configless tool (`phoxal_config == Value::Null`)
+    // must run with `PHOXAL_CONFIG` ABSENT: a unit config (`type Config = ()`)
+    // fails to deserialize `{}` ("invalid type: map, expected unit"), and an
+    // absent var uses the runner's null/unit fallback.
+    if !site.phoxal_config.is_null() {
+        envs.push((
+            env::CONFIG.to_string(),
+            serde_json::to_string(&site.phoxal_config)
+                .with_context(|| format!("failed to encode PHOXAL_CONFIG for {}", site.id))?,
+        ));
+    }
+    envs.push((env::CONNECT.to_string(), default_connect_endpoint()));
+    Ok(envs)
+}
+
+/// Whether a site tool (`tool-router`/`tool-joypad`) is resolved from a local
+/// path-pin override rather than a fetched catalog artifact. Best-effort:
+/// `false` if the tool is missing from `resolved.tools` (surfaced properly by
+/// `locate_tool_binary`'s own lookup instead).
+pub(crate) fn site_tool_is_local(resolved: &ResolvedRobot, name: &str) -> bool {
+    resolved
+        .tools
+        .iter()
+        .find(|tool| tool.name == name)
+        .is_some_and(|tool| tool.path_override.is_some())
+}
+
+pub(crate) fn locate_tool_binary(
+    resolved: &ResolvedRobot,
+    name: &str,
+    ui: &crate::Ui,
+) -> Result<Option<PathBuf>> {
+    let tool = resolved
+        .tools
+        .iter()
+        .find(|tool| tool.name == name)
+        .ok_or_else(|| anyhow!("resolved graph is missing site tool {name}"))?;
+    if let Some(path) = &tool.path_override {
+        return Ok(Some(build_source_binary(path, name, ui)?));
+    }
+    if let Some(path) = env_path_override("PHOXAL_ARTIFACT", name) {
+        return Ok(Some(path));
+    }
+    if let Some(path) = env_path_override("PHOXAL_TOOL", name) {
+        return Ok(Some(path));
+    }
+    if let Ok(dir) = std::env::var("PHOXAL_ARTIFACT_DIR") {
+        let path = PathBuf::from(dir).join(&tool.binary_name);
+        if path.is_file() {
+            return Ok(Some(path));
+        }
+    }
+    if let Ok(dir) = std::env::var("PHOXAL_TOOL_DIR") {
+        for name in [&tool.name, &tool.binary_name] {
+            let path = PathBuf::from(&dir).join(name);
+            if path.is_file() {
+                return Ok(Some(path));
+            }
+        }
+    }
+    let Some(descriptor) = phoxal_cli_core::artifacts::NativeArtifactDescriptor::from_tool(tool)?
+    else {
+        return Ok(None);
+    };
+    let cache = crate::native_artifacts::artifact_binary_path(&descriptor)?;
+    Ok(cache.is_file().then_some(cache))
+}
+
+pub(crate) fn locate_official_binary(
+    runtime: Option<&ResolvedPlatformRuntime>,
+    participant_id: &str,
+) -> Result<Option<PathBuf>> {
+    if let Some(path) = env_path_override("PHOXAL_ARTIFACT", participant_id) {
+        return Ok(Some(path));
+    }
+    let binary_name = runtime
+        .map(|runtime| {
+            phoxal_cli_core::project::resolver::official_binary_name(runtime.kind, &runtime.name)
+        })
+        .unwrap_or_else(|| participant_id.to_string());
+    if let Ok(dir) = std::env::var("PHOXAL_ARTIFACT_DIR") {
+        let path = PathBuf::from(dir).join(&binary_name);
+        if path.is_file() {
+            return Ok(Some(path));
+        }
+    }
+    if let Some(runtime) = runtime
+        && let Some(descriptor) =
+            phoxal_cli_core::artifacts::NativeArtifactDescriptor::from_runtime(runtime)?
+    {
+        let binary = crate::native_artifacts::artifact_binary_path(&descriptor)?;
+        return Ok(binary.is_file().then_some(binary));
+    }
+    // No env override, and no resolved runtime to derive a native-artifact
+    // descriptor from (a path-overridden or otherwise non-catalog runtime) -
+    // the project-local store has no other identity from which to find this
+    // participant's binary.
+    Ok(None)
+}

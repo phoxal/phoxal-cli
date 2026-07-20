@@ -10,7 +10,7 @@
 //! never enters the official binary store. Its contracts are recomputed live
 //! every run by building it and reading its compiled-in
 //! `#[derive(phoxal::Api)]` metadata section, never by executing it (see
-//! `commands::check::build_emit_apis_from_source`).
+//! `crate::check::build_emit_apis_from_source`).
 
 use std::path::{Path, PathBuf};
 

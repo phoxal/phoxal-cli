@@ -3,45 +3,67 @@
 The workspace has three product crates with one-way dependencies:
 
 ```text
-phoxal-cli (commands and operating-system adapters)
-├── phoxal-cli-core (terminal-independent domain behavior)
-└── phoxal-cli-ui   (terminal presentation primitives)
+phoxal-cli (command dispatch and operating-system adapters)
+├── phoxal-cli-ui (terminal interaction and ratatui presentation)
+│   └── phoxal-cli-core (terminal-independent records and behavior)
+└── phoxal-cli-core
 ```
 
-`phoxal-cli-core` and `phoxal-cli-ui` do not depend on the root crate or on
-each other. The root crate composes them and owns process, network, terminal,
-and deployment adapters.
+The root crate composes the product. UI may consume neutral core records; core
+never imports UI, command parsing, terminal libraries, or root-crate modules.
+Neither extracted crate may depend back on the root crate.
 
 ## Root crate
 
-The root package owns clap command parsing, command dispatch, process
-supervision, artifact I/O, remote deployment transport, Webots staging, and
-the live-session adapter. A command module should parse arguments and
-coordinate domain operations; reusable domain rules belong in `core`, while
-terminal styling and ratatui adaptation belong in `ui`.
+The root package is the adapter shell. It owns clap dispatch, child processes,
+raw bus sessions, SSH and sudo, filesystem mutation, artifact downloads,
+Webots process integration, terminal selection, and session-controller
+composition.
+
+The four orchestration commands are thin façades:
+
+- `check`: command flow plus coherence, participant, graph, metadata, and build
+  steps.
+- `deploy`: command flow plus target, preparation, payload, source-build,
+  official-artifact, unit, metadata, release, bootstrap, and SSH/sync steps.
+- `run`: command flow plus preparation, participants, stages, router,
+  telemetry, reporting, environment, and build steps.
+- `simulation`: command flow plus preparation, resolution, participants,
+  reporting, stages, Webots, controller, and filesystem-staging steps.
+
+Supervision and native-artifact provisioning use the same named-step layout.
+Raw bus authority stays in explicit root adapter modules and is enforced by the
+dependency audit.
 
 ## Core crate
 
-- `project`: normalized project paths and project-local tooling.
-- `simulation`: project-local simulation and world resolution.
-- `session`: participant roles, launch-contract encoding, and human-readable
-  domain formatting.
-- `check`: compiled participant-metadata extraction.
+`phoxal-cli-core` owns reusable facts and behavior:
 
-Core modules must not import clap command types, root-crate modules, crossterm,
-ratatui, or presentation policy.
+- `project`: catalog fetch/validation, resolver records, checked launch plans,
+  and tooling. The catalog client is the one intentional core network edge;
+  artifact downloads and all runtime bus traffic remain root adapters.
+- `deploy`: transport-independent delivery records and target planning.
+- `simulation`: world resolution and simulation-domain records.
+- `session`: events, state, board/log/telemetry records, launch environment,
+  modes, participant roles, and bounded stores.
+- `check`: source and compiled participant metadata.
+- `artifacts`: neutral native-artifact descriptors.
+
+Core has no clap command types, crossterm, ratatui, terminal output policy, raw
+bus authority, SSH, or process execution.
 
 ## UI crate
 
-- `theme`: the terminal palette and color-capability degradation.
-- `ratatui`: conversion from semantic theme roles to ratatui styles.
-
-UI modules must not resolve projects, artifacts, deployments, or participant
-graphs. They receive already-computed values from the root session adapter.
+`phoxal-cli-ui` owns the complete terminal surface: terminal guards and input,
+startup and runtime state, view models, visibility, ratatui rendering, and
+semantic theme roles. Its TUI consumes core session records and emits UI
+actions; it never imports root command modules or owns project resolution,
+artifact provisioning, deployment, process supervision, or raw bus sessions.
 
 ## Dependency rule
 
-Move behavior toward the crate that owns it; do not add root re-export shims
-to preserve old internal paths. When extraction reveals a dependency pointing
-from `core` or `ui` back into the root crate, move the data contract down or
-keep the operating-system adapter in the root until the dependency is removed.
+Move reusable behavior toward core and terminal behavior toward UI. Keep
+operating-system and network adapters in the root, except the catalog client
+noted above. Do not add compatibility re-exports for old internal paths: update
+consumers to the owning crate. The audited dependency direction is
+`root -> UI -> core` and `root -> core`, with no reverse edge.
