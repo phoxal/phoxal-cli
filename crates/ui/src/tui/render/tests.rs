@@ -7,10 +7,15 @@ use super::*;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::stores::log::LogStore;
 use phoxal_cli_core::session::stores::runtime::RuntimeStore;
+use phoxal_cli_core::session::stores::telemetry::RobotScope;
 use phoxal_cli_core::session::{
     BoardSnapshot, LogSource, ParticipantState, ParticipantStatus, RoutedLogLine,
 };
-use phoxal_cli_core::session::{DiskSample, JoypadDevice};
+use phoxal_cli_core::session::{DeviceDiskSample, JoypadDevice};
+use phoxal_cli_core::session::{
+    RuntimeBufferKind, RuntimeDirection, RuntimePerformanceSample, RuntimeStepSample,
+    RuntimeTopicSample,
+};
 
 fn title() -> TitleInfo {
     TitleInfo {
@@ -72,6 +77,16 @@ fn render_model(
     width: u16,
     height: u16,
 ) -> String {
+    render_model_with_state(title, state, model, width, height).0
+}
+
+fn render_model_with_state(
+    title: &TitleInfo,
+    state: &AppState,
+    model: &SessionViewModel<'_>,
+    width: u16,
+    height: u16,
+) -> (String, AppState) {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     let mut render_state = state.clone();
@@ -87,14 +102,15 @@ fn render_model(
         })
         .unwrap();
     let buffer = terminal.backend().buffer();
-    (0..buffer.area.height)
+    let rendered = (0..buffer.area.height)
         .map(|y| {
             (0..buffer.area.width)
                 .map(|x| buffer[(x, y)].symbol())
                 .collect::<String>()
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    (rendered, render_state)
 }
 
 fn render_startup_at(width: u16, height: u16) -> String {
@@ -156,23 +172,25 @@ fn every_fixed_page_renders_with_empty_data() {
 fn responsive_header_and_tabs_cover_compact_expanded_and_too_small_sizes() {
     let now = Instant::now();
     let telemetry = TelemetrySnapshot {
-        host: Some(Timestamped {
+        device: Some(Timestamped {
             received_at: now,
-            value: HostSample {
-                cpu_pct: 10.0,
-                ram_used_bytes: 2,
-                ram_total_bytes: 4,
-                load_1m: 0.1,
-                load_5m: 0.2,
-                load_15m: 0.3,
-                disks: vec![DiskSample {
-                    mount_point: "/".to_string(),
-                    used_bytes: 10,
-                    total_bytes: 100,
-                    ..DiskSample::default()
-                }]
-                .into(),
-                ..HostSample::default()
+            value: DeviceSample {
+                cpu_pct: Some(10.0),
+                ram_used_bytes: Some(2),
+                ram_total_bytes: Some(4),
+                load_1m: Some(0.1),
+                load_5m: Some(0.2),
+                load_15m: Some(0.3),
+                disks: Some(
+                    vec![DeviceDiskSample {
+                        mount_point: "/".to_string(),
+                        used_bytes: 10,
+                        total_bytes: 100,
+                        ..DeviceDiskSample::default()
+                    }]
+                    .into(),
+                ),
+                ..DeviceSample::default()
             },
         }),
         clock: Some(Timestamped {
@@ -197,7 +215,7 @@ fn responsive_header_and_tabs_cover_compact_expanded_and_too_small_sizes() {
     assert!(compact.contains("Input"), "{compact}");
 
     let expanded = render_model(&simulation_title, &AppState::default(), &model, 80, 24);
-    assert!(expanded.contains("Host"), "{expanded}");
+    assert!(expanded.contains("Device · main"), "{expanded}");
     assert!(expanded.contains("Simulation"), "{expanded}");
     assert!(expanded.contains("DISK (root)"), "{expanded}");
 
@@ -271,12 +289,16 @@ fn tools_source_filter_renders_tool_logs() {
         source: LogSource::Bus,
         severity: LogSeverity::Info,
         text: "joypad ready".to_string(),
+        event_time: std::time::SystemTime::UNIX_EPOCH,
+        scope: None,
     });
     logs.record(RoutedLogLine {
         participant: "phoxal-cli/Cli".to_string(),
         source: LogSource::Raw,
         severity: LogSeverity::Info,
         text: "cli diagnostic".to_string(),
+        event_time: std::time::SystemTime::UNIX_EPOCH,
+        scope: None,
     });
     let runtime = RuntimeStore::new();
     let telemetry = TelemetrySnapshot::default();
@@ -299,6 +321,342 @@ fn runtime_page_keeps_the_three_group_boxes_when_empty() {
     assert!(rendered.contains("No user runtimes"));
 }
 
+fn runtime_scope() -> RobotScope {
+    RobotScope {
+        namespace: "dev".to_string(),
+        robot_id: "rover".to_string(),
+    }
+}
+
+fn performance_sample(
+    participant_id: &str,
+    received_at: Instant,
+) -> Timestamped<RuntimePerformanceSample> {
+    Timestamped::new(
+        RuntimePerformanceSample {
+            sequence: 1,
+            participant_id: participant_id.to_string(),
+            truncated: 2,
+            window_ns: 1_000_000_000,
+            step: Some(RuntimeStepSample {
+                target_period_ns: 20_000_000,
+                completed: 50,
+                errors: 1,
+                mean_duration_ns: 8_000_000,
+                max_duration_ns: 10_000_000,
+                mean_lateness_ns: 1_000_000,
+                max_lateness_ns: 3_000_000,
+                missed_ticks: 2,
+                overruns: 3,
+            }),
+            topics: vec![RuntimeTopicSample {
+                topic: "v1/drive/target".to_string(),
+                direction: RuntimeDirection::Subscribe,
+                buffer_kind: RuntimeBufferKind::Subscriber,
+                count: 10,
+                rate_hz: 10.0,
+                drops: 1,
+                latest_overwrites: 0,
+                bounded_evictions: 0,
+                capacity: 8,
+                current_depth: 2,
+                high_water_depth: 4,
+                decode_errors: 0,
+                overflowed_rows: 0,
+            }]
+            .into(),
+            overflow: Some(RuntimeTopicSample {
+                topic: "Other/unobserved topics".to_string(),
+                direction: RuntimeDirection::Mixed,
+                buffer_kind: RuntimeBufferKind::Mixed,
+                count: 0,
+                rate_hz: 0.0,
+                drops: 0,
+                latest_overwrites: 0,
+                bounded_evictions: 0,
+                capacity: 0,
+                current_depth: 0,
+                high_water_depth: 0,
+                decode_errors: 0,
+                overflowed_rows: 3,
+            }),
+        },
+        received_at,
+    )
+}
+
+#[test]
+fn runtime_rows_distinguish_fresh_stalled_and_missing_portable_progress() {
+    let now = Instant::now();
+    let mut board = BoardSnapshot::default();
+    let mut fresh =
+        ParticipantStatus::new("fresh", ParticipantKind::Service, ParticipantState::Ready)
+            .with_scope(runtime_scope());
+    fresh.present = Some(true);
+    let mut stalled =
+        ParticipantStatus::new("stalled", ParticipantKind::Service, ParticipantState::Ready)
+            .with_scope(runtime_scope());
+    stalled.present = Some(true);
+    let mut missing = ParticipantStatus::new(
+        "missing",
+        ParticipantKind::Service,
+        ParticipantState::Degraded,
+    )
+    .with_scope(runtime_scope());
+    missing.present = Some(false);
+    let unknown_presence = ParticipantStatus::new(
+        "unknown-presence",
+        ParticipantKind::Service,
+        ParticipantState::Ready,
+    )
+    .with_scope(runtime_scope());
+    for status in [fresh, stalled, missing, unknown_presence] {
+        board.participants.insert(status.id.clone(), status);
+    }
+    let telemetry = TelemetrySnapshot {
+        scope: Some(runtime_scope()),
+        runtimes: BTreeMap::from([
+            ("fresh".to_string(), performance_sample("fresh", now)),
+            (
+                "stalled".to_string(),
+                performance_sample("stalled", now - Duration::from_secs(4)),
+            ),
+            ("missing".to_string(), performance_sample("missing", now)),
+            (
+                "unknown-presence".to_string(),
+                performance_sample("unknown-presence", now - Duration::from_secs(4)),
+            ),
+        ]),
+        ..TelemetrySnapshot::default()
+    };
+    let logs = LogStore::new();
+    let runtime = RuntimeStore::new();
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
+    let wide = runtime_columns(100);
+
+    assert!(runtime_row(board.participants.get("fresh").unwrap(), &model, wide).contains("10.0/s"));
+    assert!(
+        runtime_row(board.participants.get("stalled").unwrap(), &model, wide).contains("stalled")
+    );
+    assert!(
+        runtime_row(board.participants.get("missing").unwrap(), &model, wide).contains("missing")
+    );
+    assert!(
+        runtime_row(
+            board.participants.get("unknown-presence").unwrap(),
+            &model,
+            wide,
+        )
+        .contains("stalled")
+    );
+}
+
+#[test]
+fn runtime_row_never_uses_same_id_telemetry_from_another_robot() {
+    let now = Instant::now();
+    let other_scope = RobotScope {
+        namespace: "dev".to_string(),
+        robot_id: "other".to_string(),
+    };
+    let status = ParticipantStatus::new("drive", ParticipantKind::Service, ParticipantState::Ready)
+        .with_scope(other_scope);
+    let mut board = BoardSnapshot::default();
+    board.participants.insert(status.id.clone(), status);
+    let telemetry = TelemetrySnapshot {
+        scope: Some(runtime_scope()),
+        runtimes: BTreeMap::from([("drive".to_string(), performance_sample("drive", now))]),
+        ..TelemetrySnapshot::default()
+    };
+    let logs = LogStore::new();
+    let runtime = RuntimeStore::new();
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
+
+    let row = runtime_row(
+        board.participants.get("drive").unwrap(),
+        &model,
+        runtime_columns(100),
+    );
+    assert!(row.contains("not shown"), "{row}");
+    assert!(!row.contains("10.0/s"), "{row}");
+
+    let mut state = AppState::default();
+    state.page = Page::Runtimes;
+    state.runtime_detail_id = Some("drive".to_string());
+    let detail = render_model(&title(), &state, &model, 100, 30);
+    assert!(detail.contains("telemetry not shown"), "{detail}");
+    assert!(!detail.contains("10.0/s"), "{detail}");
+    assert!(!detail.contains("v1/drive/target"), "{detail}");
+}
+
+#[test]
+fn runtime_detail_renders_portable_summary_and_topic_pressure() {
+    let now = Instant::now();
+    let mut board = BoardSnapshot::default();
+    let mut status =
+        ParticipantStatus::new("drive", ParticipantKind::Service, ParticipantState::Ready)
+            .with_scope(runtime_scope());
+    status.present = Some(true);
+    board.participants.insert(status.id.clone(), status);
+    let telemetry = TelemetrySnapshot {
+        scope: Some(runtime_scope()),
+        runtimes: BTreeMap::from([("drive".to_string(), performance_sample("drive", now))]),
+        ..TelemetrySnapshot::default()
+    };
+    let logs = LogStore::new();
+    let mut runtime = RuntimeStore::new();
+    runtime.set_test_contracts(
+        "drive",
+        vec!["v1::drive/target".to_string()],
+        vec!["v1::drive/state".to_string()],
+    );
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
+    let mut state = AppState::default();
+    state.page = Page::Runtimes;
+    state.navigation = NavigationLevel::Page;
+    state.runtime_detail_id = Some("drive".to_string());
+
+    let rendered = render_model(&title(), &state, &model, 120, 36);
+    assert!(rendered.contains("Portable performance"), "{rendered}");
+    assert!(rendered.contains("budget"), "{rendered}");
+    assert!(rendered.contains("v1/drive/target"), "{rendered}");
+    assert!(rendered.contains("DEPTH"), "{rendered}");
+    assert!(rendered.contains("Inputs"), "{rendered}");
+    assert!(rendered.contains("Outputs"), "{rendered}");
+    assert!(rendered.contains("peak budget"), "{rendered}");
+    assert!(rendered.contains("duration mean 8.0ms"), "{rendered}");
+    assert!(rendered.contains("lateness mean 1.0ms"), "{rendered}");
+    assert!(rendered.contains("missed 2"), "{rendered}");
+    assert!(rendered.contains("trunc 2"), "{rendered}");
+    assert!(rendered.contains("3 rows aggregated"), "{rendered}");
+
+    let compact = render_model(&title(), &state, &model, 80, 30);
+    assert!(compact.contains("Contracts"), "{compact}");
+    assert!(compact.contains("v1::drive/target"), "{compact}");
+    assert!(compact.contains("v1::drive/state"), "{compact}");
+    assert!(compact.contains("COUNT"), "{compact}");
+    assert!(compact.contains("10"), "{compact}");
+
+    let minimum = render_model(&title(), &state, &model, 44, 18);
+    assert!(minimum.contains("performance"), "{minimum}");
+    assert!(minimum.contains("Topics"), "{minimum}");
+    assert!(minimum.contains("Contracts"), "{minimum}");
+    assert!(minimum.contains("v1/dri"), "{minimum}");
+}
+
+#[test]
+fn runtime_detail_compacts_extreme_counters_without_clipping_them() {
+    let now = Instant::now();
+    let mut board = BoardSnapshot::default();
+    let mut status =
+        ParticipantStatus::new("drive", ParticipantKind::Service, ParticipantState::Ready)
+            .with_scope(runtime_scope());
+    status.present = Some(true);
+    board.participants.insert(status.id.clone(), status);
+    let mut sample = performance_sample("drive", now);
+    let value = &mut sample.value;
+    let step = value.step.as_mut().unwrap();
+    step.errors = u64::MAX;
+    step.missed_ticks = u64::MAX;
+    step.overruns = u64::MAX;
+    value.topics = vec![RuntimeTopicSample {
+        count: u64::MAX,
+        drops: u64::MAX,
+        ..value.topics[0].clone()
+    }]
+    .into();
+    let telemetry = TelemetrySnapshot {
+        scope: Some(runtime_scope()),
+        runtimes: BTreeMap::from([("drive".to_string(), sample)]),
+        ..TelemetrySnapshot::default()
+    };
+    let logs = LogStore::new();
+    let runtime = RuntimeStore::new();
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
+    let mut state = AppState::default();
+    state.page = Page::Runtimes;
+    state.navigation = NavigationLevel::Page;
+    state.runtime_detail_id = Some("drive".to_string());
+
+    let rendered = render_model(&title(), &state, &model, 120, 30);
+    assert!(rendered.matches("18.4E").count() >= 4, "{rendered}");
+    assert!(rendered.contains("COUNT"), "{rendered}");
+}
+
+#[test]
+fn runtime_topic_renderer_clamps_to_the_viewport_before_up_moves() {
+    let now = Instant::now();
+    let mut board = BoardSnapshot::default();
+    let mut status =
+        ParticipantStatus::new("drive", ParticipantKind::Service, ParticipantState::Ready)
+            .with_scope(runtime_scope());
+    status.present = Some(true);
+    board.participants.insert(status.id.clone(), status);
+    let mut sample = performance_sample("drive", now);
+    let template = sample.value.topics[0].clone();
+    sample.value.topics = (0..5)
+        .map(|index| RuntimeTopicSample {
+            topic: format!("topic-{index}"),
+            ..template.clone()
+        })
+        .collect::<Vec<_>>()
+        .into();
+    sample.value.overflow = None;
+    let telemetry = TelemetrySnapshot {
+        scope: Some(runtime_scope()),
+        runtimes: BTreeMap::from([("drive".to_string(), sample)]),
+        ..TelemetrySnapshot::default()
+    };
+    let logs = LogStore::new();
+    let runtime = RuntimeStore::new();
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
+    let mut state = AppState::default();
+    state.page = Page::Runtimes;
+    state.navigation = NavigationLevel::Page;
+    state.runtime_detail_id = Some("drive".to_string());
+    state.runtime_topic_offset = usize::MAX;
+
+    let (_, mut rendered_state) = render_model_with_state(&title(), &state, &model, 80, 30);
+    assert_eq!(rendered_state.runtime_topic_offset, 3);
+    rendered_state.handle_key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        &model,
+    );
+    assert_eq!(rendered_state.runtime_topic_offset, 2);
+}
+
+#[test]
+fn missing_runtime_detail_hides_cached_metrics_and_topics() {
+    let now = Instant::now();
+    let mut status = ParticipantStatus::new(
+        "drive",
+        ParticipantKind::Service,
+        ParticipantState::Degraded,
+    )
+    .with_scope(runtime_scope());
+    status.present = Some(false);
+    let mut board = BoardSnapshot::default();
+    board.participants.insert(status.id.clone(), status);
+    let telemetry = TelemetrySnapshot {
+        scope: Some(runtime_scope()),
+        runtimes: BTreeMap::from([("drive".to_string(), performance_sample("drive", now))]),
+        ..TelemetrySnapshot::default()
+    };
+    let logs = LogStore::new();
+    let runtime = RuntimeStore::new();
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
+    let mut state = AppState::default();
+    state.page = Page::Runtimes;
+    state.runtime_detail_id = Some("drive".to_string());
+
+    let rendered = render_model(&title(), &state, &model, 120, 36);
+    assert!(rendered.contains("telemetry missing"), "{rendered}");
+    assert!(!rendered.contains("10.0/s"), "{rendered}");
+    assert!(!rendered.contains("v1/drive/target"), "{rendered}");
+}
+
 #[test]
 fn runtime_group_layout_preserves_every_box_and_distributes_extra_rows() {
     assert_eq!(runtime_section_heights([0, 0, 0], 12), [4, 4, 4]);
@@ -308,6 +666,17 @@ fn runtime_group_layout_preserves_every_box_and_distributes_extra_rows() {
     assert!(distributed.into_iter().all(|height| height >= 4));
     assert!(distributed[1] > distributed[0]);
     assert!(distributed[2] > distributed[0]);
+}
+
+#[test]
+fn wide_runtime_columns_give_surplus_width_to_identity() {
+    let RuntimeColumns::Wide { id: base, .. } = runtime_columns(92) else {
+        panic!("92 columns should use the wide layout");
+    };
+    let RuntimeColumns::Wide { id: expanded, .. } = runtime_columns(120) else {
+        panic!("120 columns should use the wide layout");
+    };
+    assert_eq!(expanded - base, 28);
 }
 
 #[test]
@@ -705,27 +1074,29 @@ fn stale_simulation_clock_is_presented_as_paused() {
 #[test]
 fn header_renders_root_disk_and_staleness() {
     let old = Instant::now() - DEFAULT_FRESHNESS_TTL - Duration::from_secs(1);
-    let host = Timestamped {
+    let device = Timestamped {
         received_at: old,
-        value: HostSample {
-            cpu_pct: 10.0,
-            ram_used_bytes: 2,
-            ram_total_bytes: 4,
-            load_1m: 0.1,
-            load_5m: 0.2,
-            load_15m: 0.3,
+        value: DeviceSample {
+            cpu_pct: Some(10.0),
+            ram_used_bytes: Some(2),
+            ram_total_bytes: Some(4),
+            load_1m: Some(0.1),
+            load_5m: Some(0.2),
+            load_15m: Some(0.3),
             uptime_s: Some(65),
-            disks: vec![DiskSample {
-                mount_point: "/".to_string(),
-                file_system: "apfs".to_string(),
-                used_bytes: 10,
-                total_bytes: 100,
-            }]
-            .into(),
-            ..HostSample::default()
+            disks: Some(
+                vec![DeviceDiskSample {
+                    mount_point: "/".to_string(),
+                    file_system: "apfs".to_string(),
+                    used_bytes: 10,
+                    total_bytes: 100,
+                }]
+                .into(),
+            ),
+            ..DeviceSample::default()
         },
     };
-    let lines = header_host_lines(Some(&host), Instant::now(), 40)
+    let lines = header_device_lines(Some(&device), Instant::now(), 40)
         .into_iter()
         .map(|line| line.to_string())
         .collect::<Vec<_>>()
@@ -734,11 +1105,26 @@ fn header_renders_root_disk_and_staleness() {
     assert!(lines.contains("stale"));
 
     let telemetry = TelemetrySnapshot {
-        host: Some(host),
+        device: Some(device),
         ..TelemetrySnapshot::default()
     };
     let rendered = render_page_at(Page::Overview, &telemetry, 80, 24);
     assert!(rendered.contains("0.1/0.2/0.3"), "{rendered}");
+
+    let unavailable = Timestamped {
+        received_at: Instant::now(),
+        value: DeviceSample {
+            device_id: "main".to_string(),
+            ..DeviceSample::default()
+        },
+    };
+    let unavailable_lines = header_device_lines(Some(&unavailable), Instant::now(), 40)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(unavailable_lines.contains("CPU         n/a"));
+    assert!(unavailable_lines.contains("RAM         n/a"));
 }
 
 #[test]

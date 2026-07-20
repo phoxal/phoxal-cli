@@ -1,5 +1,7 @@
 //! Bounded log-routing records shared by session adapters and presentation.
 
+use std::time::SystemTime;
+
 /// Where a routed log line came from; consumers deduplicate on this routing
 /// identity rather than comparing rendered text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,12 +27,37 @@ pub enum LogSeverity {
     Error,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LogScope {
+    pub namespace: String,
+    pub robot_id: String,
+}
+
 /// One routed log line, separate from the persisted board's short history so
 /// presentation can maintain its own bounded scrollback.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutedLogLine {
     pub participant: String,
     pub source: LogSource,
     pub severity: LogSeverity,
     pub text: String,
+    /// Producer event time for retained records, receive time for local raw
+    /// and diagnostic records. Presentation merges both bounded sources by
+    /// this timestamp without rewriting retained history during a snapshot.
+    pub event_time: SystemTime,
+    /// Present for robot-owned retained records; local raw/diagnostic lines
+    /// remain unscoped.
+    pub scope: Option<LogScope>,
+}
+
+/// One update from the robot-owned retention tool to the presentation store.
+/// A snapshot replaces only bus-derived lines; raw process and diagnostic
+/// lines remain local presentation events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoutedLogUpdate {
+    Replace {
+        scope: LogScope,
+        lines: Vec<RoutedLogLine>,
+    },
+    Append(RoutedLogLine),
 }

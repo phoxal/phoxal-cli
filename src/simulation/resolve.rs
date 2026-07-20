@@ -124,9 +124,9 @@ pub(crate) fn build_checked_sim_launch_plan(
     let source_participants = sim_source_participants(project_root, resolved, catalog)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
     // Finding A6: all three filters below admit exactly the standard site-
-    // tool set (`STANDARD_SITE_TOOLS` - router/joypad/telemetry), derived
+    // tool set (`STANDARD_SITE_TOOLS`), derived
     // once in `launch_plan` and shared with `build_site_launches` there.
-    // This used to hardcode only router+joypad, silently excluding
+    // This used to hardcode only joypad, silently excluding
     // telemetry's declared graph contracts from validation even though
     // telemetry is started and readiness-waited exactly like the other two.
     let metadata_source_participants = source_participants

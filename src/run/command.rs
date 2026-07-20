@@ -1,5 +1,6 @@
 //! Command responsibilities for run.
 
+use super::RobotFeedTarget;
 use super::{
     InfrastructureRouter, apply_session_connect, prepare_run, report_launch_commands,
     stages_for_run, start_infrastructure_router, start_telemetry_feeds_at,
@@ -72,7 +73,7 @@ pub(crate) struct PreparedRun {
     pub(crate) plan: LaunchPlan,
     pub(crate) board: BoardBackend,
     pub(crate) specs: Vec<ParticipantSpec>,
-    pub(crate) robot_log_targets: Vec<(String, String)>,
+    pub(crate) robot_targets: Vec<RobotFeedTarget>,
     /// Finding A5: this session's launch-time participant metadata, resolved
     /// once here from `plan` and the contract-check `outcome` - see
     /// `phoxal_cli_core::session::stores::runtime::RuntimeStore`'s own docs.
@@ -241,31 +242,26 @@ async fn live_run_setup(
     let mut background_tasks = AbortTasks::default();
     background_tasks.extend(
         prepared
-            .robot_log_targets
+            .robot_targets
             .iter()
-            .map(|(namespace, robot_id)| {
+            .map(|target| {
                 start_bus_log_subscriber(
-                    namespace.clone(),
-                    robot_id.clone(),
+                    target.scope.namespace.clone(),
+                    target.scope.robot_id.clone(),
                     connect.clone(),
                     prepared.board.clone(),
                 )
             })
             .collect::<Vec<_>>(),
     );
-    background_tasks.extend(
-        prepared
-            .robot_log_targets
-            .iter()
-            .map(|(namespace, robot_id)| {
-                start_liveliness_observer(
-                    namespace.clone(),
-                    robot_id.clone(),
-                    connect.clone(),
-                    prepared.board.clone(),
-                )
-            }),
-    );
+    background_tasks.extend(prepared.robot_targets.iter().map(|target| {
+        start_liveliness_observer(
+            target.scope.namespace.clone(),
+            target.scope.robot_id.clone(),
+            connect.clone(),
+            prepared.board.clone(),
+        )
+    }));
 
     let (action_tx, action_rx) = mpsc::channel(16);
     if watch_enabled {
@@ -294,15 +290,15 @@ async fn live_run_setup(
         .await;
 
     let telemetry = crate::telemetry::TelemetryBackend::new();
+    let board = prepared.board;
     if renders_tui {
         background_tasks.extend(start_telemetry_feeds_at(
-            &prepared.robot_log_targets,
+            &prepared.robot_targets,
             &telemetry,
             &connect,
+            board.recovery_epoch_receiver(),
         ));
     }
-
-    let board = prepared.board;
     let supervisor_options = SupervisorOptions {
         action_rx: Some(crate::supervisor::SupervisorActionReceiver::new(action_rx)),
         token,

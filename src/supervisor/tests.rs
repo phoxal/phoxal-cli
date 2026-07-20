@@ -152,9 +152,11 @@ async fn closed_action_receiver_is_consumed_once_then_stays_pending() {
     );
 }
 
-#[test]
-fn recovery_epoch_clears_presence_and_preserves_webots_ownership() {
+#[tokio::test]
+async fn recovery_epoch_resets_reconcilers_and_preserves_webots_ownership() {
     let board = BoardBackend::new();
+    let mut log_reconciler = board.recovery_epoch_receiver();
+    let mut bus_reconciler = board.recovery_epoch_receiver();
     let mut webots =
         ParticipantStatus::new("webots", ParticipantKind::Tool, ParticipantState::Ready);
     webots.note = Some("CLI-managed Webots application".to_string());
@@ -181,6 +183,16 @@ fn recovery_epoch_clears_presence_and_preserves_webots_ownership() {
 
     assert_eq!(epoch, 1);
     assert_eq!(board.recovery_epoch(), 1);
+    tokio::time::timeout(Duration::from_millis(20), log_reconciler.changed())
+        .await
+        .expect("log reconciler reset must be prompt")
+        .expect("board retains the reset sender");
+    tokio::time::timeout(Duration::from_millis(20), bus_reconciler.changed())
+        .await
+        .expect("bus reconciler reset must be prompt")
+        .expect("board retains the reset sender");
+    assert_eq!(*log_reconciler.borrow_and_update(), epoch);
+    assert_eq!(*bus_reconciler.borrow_and_update(), epoch);
     assert!(!board.is_present("webots"));
     assert!(!board.is_present("simulator-webots-controller-robot"));
     let snapshot = board.snapshot();
@@ -744,12 +756,17 @@ fn bus_log_from_an_unplanned_participant_is_ignored() {
     let (sender, mut receiver) = mpsc::channel(1);
     board.set_log_sink(sender);
 
-    board.route_log_with_severity(
-        "\u{1b}[2Junplanned",
-        LogSource::Bus,
-        LogSeverity::Warn,
-        "forged runtime row",
-    );
+    board.route_log_line(RoutedLogLine {
+        participant: "\u{1b}[2Junplanned".to_string(),
+        source: LogSource::Bus,
+        severity: LogSeverity::Warn,
+        text: "forged runtime row".to_string(),
+        event_time: std::time::SystemTime::UNIX_EPOCH,
+        scope: Some(LogScope {
+            namespace: "acme".to_string(),
+            robot_id: "r1".to_string(),
+        }),
+    });
 
     assert!(board.snapshot().participants.is_empty());
     assert!(receiver.try_recv().is_err());
@@ -763,7 +780,17 @@ fn routed_log_text_is_bounded_before_board_retention() {
         ParticipantKind::Service,
         ParticipantState::Ready,
     ));
-    board.route_log("motion", LogSource::Bus, "x".repeat(MAX_LOG_TEXT_CHARS * 2));
+    board.route_log_line(RoutedLogLine {
+        participant: "motion".to_string(),
+        source: LogSource::Bus,
+        severity: LogSeverity::Info,
+        text: "x".repeat(MAX_LOG_TEXT_CHARS * 2),
+        event_time: std::time::SystemTime::UNIX_EPOCH,
+        scope: Some(LogScope {
+            namespace: "acme".to_string(),
+            robot_id: "r1".to_string(),
+        }),
+    });
     let retained = board.snapshot().participants["motion"]
         .last_log_line
         .clone()

@@ -22,7 +22,8 @@ use phoxal_cli_core::project::launch_plan::SiteLaunch;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::session::ParticipantKind;
-use phoxal_cli_core::session::launch_env::encode_participant_env;
+use phoxal_cli_core::session::launch_env::{encode_participant_env, encode_tool_env};
+use phoxal_cli_core::session::stores::telemetry::RobotScope;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -56,7 +57,11 @@ pub(crate) fn prepare_site_tools(
     for site in &plan.site {
         let status =
             ParticipantStatus::new(&site.id, ParticipantKind::Tool, ParticipantState::Starting)
-                .with_local(site_tool_is_local(resolved, &site.id));
+                .with_local(site_tool_is_local(resolved, &site.id))
+                .with_scope(RobotScope {
+                    namespace: namespace.to_string(),
+                    robot_id: robot_id.to_string(),
+                });
         board.upsert(status);
         match locate_tool_binary(resolved, &site.id, ui)? {
             Some(path) => specs.push(ParticipantSpec {
@@ -96,6 +101,10 @@ pub(crate) fn prepare_robot_participants(
         .map(|runtime| (runtime.name.as_str(), runtime))
         .collect::<BTreeMap<_, _>>();
     for robot in &plan.robots {
+        let scope = RobotScope {
+            namespace: robot.namespace.clone(),
+            robot_id: robot.id.clone(),
+        };
         for participant in &robot.participants {
             let id = participant.launch.participant_id.clone();
             let (kind, local) = participant_kind(&participant.execution);
@@ -114,8 +123,9 @@ pub(crate) fn prepare_robot_participants(
                 // `Degraded`, not synthesized process failure authority.
                 // `crate::simulation` renders its controllerArgs into the
                 // staged world instead of a `ParticipantSpec` (Part 5).
-                let mut status =
-                    ParticipantStatus::new(&id, kind, ParticipantState::Starting).with_local(local);
+                let mut status = ParticipantStatus::new(&id, kind, ParticipantState::Starting)
+                    .with_local(local)
+                    .with_scope(scope.clone());
                 status.note = Some(
                     "SimulationManaged: launched by Webots via the supervisor, not the CLI supervisor"
                         .to_string(),
@@ -124,9 +134,34 @@ pub(crate) fn prepare_robot_participants(
                 continue;
             }
             board.upsert(
-                ParticipantStatus::new(&id, kind, ParticipantState::Starting).with_local(local),
+                ParticipantStatus::new(&id, kind, ParticipantState::Starting)
+                    .with_local(local)
+                    .with_scope(scope.clone()),
             );
             match &participant.execution {
+                ParticipantExecution::OfficialTool { .. } => {
+                    match locate_tool_binary(resolved, &participant.artifact_id, ui)? {
+                        Some(path) => specs.push(ParticipantSpec {
+                            id,
+                            kind,
+                            executable: path,
+                            args: Vec::new(),
+                            cwd: None,
+                            env: encode_tool_env(&participant.launch)?.spawn_env(),
+                            shutdown_grace: Duration::from_millis(
+                                participant.launch.shutdown_grace_ms,
+                            ),
+                            process_group: true,
+                            note: None,
+                            bus_participant: true,
+                        }),
+                        None => board.set_state(
+                            &participant.launch.participant_id,
+                            ParticipantState::Failed,
+                            Some(native_pending_tool_note(&participant.artifact_id)),
+                        ),
+                    }
+                }
                 ParticipantExecution::OfficialArtifact { .. } => {
                     let runtime = official_by_name
                         .get(participant.artifact_id.as_str())
@@ -171,15 +206,23 @@ pub(crate) fn prepare_robot_participants(
                         bus_participant: true,
                     });
                 }
-                ParticipantExecution::SourceArtifact { crate_dir, .. } => {
+                ParticipantExecution::SourceArtifact {
+                    kind: artifact_kind,
+                    crate_dir,
+                } => {
                     let binary = build_source_binary(crate_dir, &id, ui)?;
+                    let env = if artifact_kind == "tool" {
+                        encode_tool_env(&participant.launch)?
+                    } else {
+                        encode_participant_env(&participant.launch)?
+                    };
                     specs.push(ParticipantSpec {
                         id,
                         kind,
                         executable: binary,
                         args: Vec::new(),
                         cwd: Some(crate_dir.clone()),
-                        env: encode_participant_env(&participant.launch)?.spawn_env(),
+                        env: env.spawn_env(),
                         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
                         process_group: true,
                         note: None,
@@ -241,6 +284,7 @@ pub(crate) fn prepare_robot_participants(
 pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (ParticipantKind, bool) {
     match execution {
         ParticipantExecution::OfficialArtifact { .. } => (ParticipantKind::Service, false),
+        ParticipantExecution::OfficialTool { .. } => (ParticipantKind::Tool, false),
         ParticipantExecution::UserService { .. } => (ParticipantKind::Service, true),
         ParticipantExecution::SourceArtifact { kind, .. } => {
             let kind = match kind.as_str() {
@@ -263,20 +307,30 @@ pub(crate) fn source_spec_from_launch_record(
     // `ParticipantStatus` to mark `.with_local` on) - see the other
     // `participant_kind` call sites for where the bool is actually consumed.
     let (kind, _local) = participant_kind(&participant.execution);
+    let is_tool = matches!(
+        &participant.execution,
+        ParticipantExecution::SourceArtifact { kind, .. } if kind == "tool"
+    );
     let crate_dir = match &participant.execution {
         ParticipantExecution::UserService { crate_dir }
         | ParticipantExecution::SourceArtifact { crate_dir, .. }
         | ParticipantExecution::ComponentDriver { crate_dir } => crate_dir,
-        ParticipantExecution::OfficialArtifact { .. } => return Ok(None),
+        ParticipantExecution::OfficialArtifact { .. }
+        | ParticipantExecution::OfficialTool { .. } => return Ok(None),
     };
     let binary = build_source_binary(crate_dir, &id, ui)?;
+    let env = if is_tool {
+        encode_tool_env(&participant.launch)?
+    } else {
+        encode_participant_env(&participant.launch)?
+    };
     Ok(Some(ParticipantSpec {
         id,
         kind,
         executable: binary,
         args: Vec::new(),
         cwd: Some(crate_dir.clone()),
-        env: encode_participant_env(&participant.launch)?.spawn_env(),
+        env: env.spawn_env(),
         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
         process_group: true,
         note: None,
@@ -316,7 +370,7 @@ pub(crate) fn site_env(
     Ok(envs)
 }
 
-/// Whether a site tool (`tool-router`/`tool-joypad`) is resolved from a local
+/// Whether a tool is resolved from a local
 /// path-pin override rather than a fetched catalog artifact. Best-effort:
 /// `false` if the tool is missing from `resolved.tools` (surfaced properly by
 /// `locate_tool_binary`'s own lookup instead).
@@ -337,7 +391,7 @@ pub(crate) fn locate_tool_binary(
         .tools
         .iter()
         .find(|tool| tool.name == name)
-        .ok_or_else(|| anyhow!("resolved graph is missing site tool {name}"))?;
+        .ok_or_else(|| anyhow!("resolved graph is missing tool {name}"))?;
     if let Some(path) = &tool.path_override {
         return Ok(Some(build_source_binary(path, name, ui)?));
     }

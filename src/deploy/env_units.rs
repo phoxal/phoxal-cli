@@ -12,12 +12,13 @@ use anyhow::Result;
 use phoxal::participant::launch::env;
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
+use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 use phoxal_cli_core::project::launch_plan::SITE_INFRASTRUCTURE_ROUTER;
 use phoxal_cli_core::project::launch_plan::SITE_TOOL_JOYPAD;
 use phoxal_cli_core::project::launch_plan::SiteLaunch;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::session::launch_env::EncodedParticipantEnv;
-use phoxal_cli_core::session::launch_env::encode_participant_env;
+use phoxal_cli_core::session::launch_env::{encode_participant_env, encode_tool_env};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -34,7 +35,7 @@ pub(crate) fn render_env_files(
         if site.id == SITE_INFRASTRUCTURE_ROUTER {
             continue;
         }
-        // Every OTHER standard site tool (`tool-joypad`, `tool-telemetry`) -
+        // Every OTHER standard site tool (`tool-joypad`) -
         // a real bus client, so unlike the router (transport-only, no
         // `PHOXAL_CONNECT` of its own) it needs the same connect endpoint
         // every regular participant gets from `launch_plan::participant_launch`.
@@ -43,7 +44,16 @@ pub(crate) fn render_env_files(
     }
 
     for participant in &robot.participants {
-        let encoded = encode_participant_env(&participant.launch)?;
+        let tool_execution = match &participant.execution {
+            ParticipantExecution::OfficialTool { .. } => true,
+            ParticipantExecution::SourceArtifact { kind, .. } => kind == "tool",
+            _ => false,
+        };
+        let encoded = if tool_execution {
+            encode_tool_env(&participant.launch)?
+        } else {
+            encode_participant_env(&participant.launch)?
+        };
         write_env_file(
             root,
             &format!("{}.env", participant.launch.participant_id),
@@ -54,8 +64,8 @@ pub(crate) fn render_env_files(
     Ok(())
 }
 
-/// The env for every standard site tool OTHER than the router (`tool-joypad`,
-/// `tool-telemetry`) - a real bus client, unlike the router itself, so it
+/// The env for every standard site tool OTHER than the router (`tool-joypad`).
+/// It is a real bus client, unlike the router itself, so it
 /// needs `PHOXAL_CONNECT` set to the same `DEFAULT_ROUTER_CONNECT` every
 /// regular participant's `ParticipantLaunch.bus.connect_endpoints` carries
 /// (`launch_plan::participant_launch`).
@@ -69,7 +79,7 @@ pub(crate) fn site_tool_env(
     variables.insert(env::NAMESPACE.to_string(), namespace.to_string());
     variables.insert(env::ROBOT_ID.to_string(), robot_id.to_string());
     variables.insert(env::ROBOT_ROOT.to_string(), ACTIVE_ROOT.to_string());
-    // Configless tools (`phoxal_config == Value::Null`, e.g. joypad/telemetry)
+    // Configless tools (`phoxal_config == Value::Null`, e.g. joypad)
     // must run with `PHOXAL_CONFIG` ABSENT - a unit config (`type Config = ()`)
     // rejects `{}`. Only a tool carrying real config emits the variable.
     if !site.phoxal_config.is_null() {
@@ -119,12 +129,12 @@ pub(crate) fn render_units(
     )?;
     unit_names.push("phoxal-router.service".to_string());
 
-    // Every OTHER standard site tool (`tool-joypad`, `tool-telemetry` -
+    // Every OTHER standard site tool (`tool-joypad` -
     // CLI-UX Phase 4) gets its own unit too, ordered AFTER the router
     // (`site_tool_unit`'s `After=`/`Wants=`) and matching the staged
     // readiness the CLI supervisor itself uses (router before the other
     // tools - `crate::run::stages_for_run`). `plan.site` already omits
-    // `tool-telemetry` entirely when the catalog snapshot in use predates it
+    // a standard tool entirely when the catalog snapshot in use predates it
     // (`launch_plan::build_site_launches`), so this loop never renders a unit
     // for a tool that was never resolved.
     for site in &plan.site {
@@ -191,8 +201,8 @@ pub(crate) fn router_unit(binary: &str) -> String {
     )
 }
 
-/// The unit for a standard site tool OTHER than the router (`tool-joypad`,
-/// `tool-telemetry`) - shaped exactly like `participant_unit` (same
+/// The unit for a standard site tool OTHER than the router (`tool-joypad`) -
+/// shaped exactly like `participant_unit` (same
 /// `Type=notify` readiness contract, same restart/watchdog/hardening
 /// defaults: no `MemoryMax`/`CPUQuota` here either, consistent with every
 /// other unit this deploy renders) but ordered after the router by unit
@@ -247,7 +257,7 @@ pub(crate) fn site_tool_unit_name(id: &str) -> String {
 /// unconditionally (the `input` supplementary group plus
 /// `DeviceAllow=/dev/input/* rw`) for the current development-grade robots,
 /// with no manifest/config switch to gate it (design doc). Every other site
-/// tool (`tool-telemetry`; the router has its own always-privilege-free unit)
+/// tool (the router has its own always-privilege-free unit)
 /// needs no extra grant.
 pub(crate) fn unit_privileges_for_tool(tool_id: &str) -> UnitPrivileges {
     if tool_id == SITE_TOOL_JOYPAD {

@@ -26,7 +26,7 @@ use phoxal_cli_core::session::TelemetrySnapshot;
 use phoxal_cli_core::session::event::{DiagnosticLevel, SessionEvent};
 use phoxal_cli_core::session::stores::log::{LogStore, sanitize_terminal_text};
 use phoxal_cli_core::session::stores::runtime::RuntimeStore;
-use phoxal_cli_core::session::{BoardSnapshot, RoutedLogLine};
+use phoxal_cli_core::session::{BoardSnapshot, RoutedLogUpdate};
 
 pub struct TuiDisplay {
     theme: Theme,
@@ -34,8 +34,8 @@ pub struct TuiDisplay {
     startup: startup::StartupState,
     state: AppState,
     logs: LogStore,
-    log_tx: mpsc::Sender<RoutedLogLine>,
-    log_rx: mpsc::Receiver<RoutedLogLine>,
+    log_tx: mpsc::Sender<RoutedLogUpdate>,
+    log_rx: mpsc::Receiver<RoutedLogUpdate>,
     runtime: RuntimeStore,
     telemetry: phoxal_cli_core::session::TelemetrySnapshot,
     activated: Option<Activated>,
@@ -121,7 +121,7 @@ impl TuiDisplay {
     }
 
     #[must_use]
-    pub fn log_sender(&self) -> mpsc::Sender<RoutedLogLine> {
+    pub fn log_sender(&self) -> mpsc::Sender<RoutedLogUpdate> {
         self.log_tx.clone()
     }
 
@@ -154,8 +154,11 @@ impl TuiDisplay {
         board: &BoardSnapshot,
         telemetry: TelemetrySnapshot,
     ) -> io::Result<()> {
-        while let Ok(line) = self.log_rx.try_recv() {
-            self.logs.record(line);
+        while let Ok(update) = self.log_rx.try_recv() {
+            match update {
+                RoutedLogUpdate::Replace { scope, lines } => self.logs.replace_bus(scope, lines),
+                RoutedLogUpdate::Append(line) => self.logs.record(line),
+            }
         }
         self.runtime.observe_board(board);
         self.telemetry = telemetry;
@@ -256,7 +259,7 @@ mod tests {
 
     use super::*;
     use crate::ColorCapability;
-    use phoxal_cli_core::session::{LogSeverity, LogSource};
+    use phoxal_cli_core::session::{LogSeverity, LogSource, RoutedLogLine};
 
     fn title() -> TitleInfo {
         TitleInfo {
@@ -288,12 +291,14 @@ mod tests {
         assert!(
             display
                 .log_sender()
-                .try_send(RoutedLogLine {
+                .try_send(RoutedLogUpdate::Append(RoutedLogLine {
                     participant: "drive".to_string(),
                     source: LogSource::Bus,
                     severity: LogSeverity::Info,
                     text: "hello".to_string(),
-                })
+                    event_time: SystemTime::UNIX_EPOCH,
+                    scope: None,
+                }))
                 .is_ok()
         );
     }

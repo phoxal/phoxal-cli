@@ -81,6 +81,7 @@ const OWNED_TASK_CANCEL_TIMEOUT: Duration = Duration::from_secs(1);
 use crate::supervisor::{BoardBackend, BoardSnapshot, SupervisorAction, SupervisorOutcome};
 use crate::telemetry::TelemetryBackend;
 use phoxal_cli_core::session::JoypadCommand;
+use phoxal_cli_core::session::stores::telemetry::RobotScope;
 
 use super::diagnostics;
 use super::output::OutputContext;
@@ -150,6 +151,7 @@ pub struct SessionController {
     state: SessionState,
     events_tx: mpsc::Sender<SessionEvent>,
     events_rx: mpsc::Receiver<SessionEvent>,
+    telemetry_scope: RobotScope,
     tui: Option<Box<TuiDisplay>>,
     interrupts: tokio::signal::unix::Signal,
     terminates: tokio::signal::unix::Signal,
@@ -173,6 +175,10 @@ impl SessionController {
     fn build(output: OutputContext, title: TitleInfo, activate_tui: bool) -> io::Result<Self> {
         install_panic_hook();
         let (events_tx, events_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let telemetry_scope = RobotScope {
+            namespace: title.namespace.clone(),
+            robot_id: title.robot.clone(),
+        };
         // Install every process-level terminal shutdown signal once and keep
         // the receivers for the controller lifetime. Tokio keeps the global
         // handler installed after a receiver is dropped, so recreating these
@@ -205,6 +211,7 @@ impl SessionController {
             state: SessionState::Preparing,
             events_tx,
             events_rx,
+            telemetry_scope,
             tui,
             interrupts,
             terminates,
@@ -708,7 +715,7 @@ impl SessionController {
     fn redraw(&mut self, board: &BoardSnapshot, telemetry: &TelemetryBackend) -> Result<()> {
         match &mut self.tui {
             Some(tui) => tui
-                .redraw(board, telemetry.snapshot())
+                .redraw(board, telemetry.snapshot(&self.telemetry_scope))
                 .context("failed to draw the interactive session frame"),
             None => Ok(()),
         }

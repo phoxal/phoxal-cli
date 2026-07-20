@@ -462,6 +462,7 @@ fn tools_resolve_from_catalog_entries() -> anyhow::Result<()> {
     for (tool_name, package) in [
         ("tool-bus", "phoxal/tool-bus"),
         ("tool-joypad", "phoxal/tool-joypad"),
+        ("tool-log", "phoxal/tool-log"),
         ("tool-telemetry", "phoxal/tool-telemetry"),
         ("infrastructure-router", "phoxal/infrastructure-router"),
     ] {

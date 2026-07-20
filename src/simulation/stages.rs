@@ -51,12 +51,17 @@ pub(crate) fn stages_for_simulate(
 
 pub(crate) fn prepare_substitution_notes(plan: &LaunchPlan, board: &BoardBackend) {
     for robot in &plan.robots {
+        let scope = phoxal_cli_core::session::stores::telemetry::RobotScope {
+            namespace: robot.namespace.clone(),
+            robot_id: robot.id.clone(),
+        };
         for substitution in &robot.substitutions {
             let mut status = ParticipantStatus::new(
                 &substitution.component_instance,
                 ParticipantKind::Driver,
                 ParticipantState::Ready,
-            );
+            )
+            .with_scope(scope.clone());
             status.note = Some(substitution_note(substitution));
             board.upsert(status);
         }
@@ -95,8 +100,8 @@ pub(crate) fn substitution_topic_summary(substitution: &SubstitutionRecord) -> S
 }
 
 /// Site tool labels are derived straight from the resolved `LaunchPlan` (Part
-/// 3/6): router, `tool-joypad`, and `tool-telemetry` are standard, hard-
-/// required site tools in every mode including Webots (product decision 9),
+/// 3/6): `tool-joypad` is the standard, hard-required site tool in every mode
+/// including Webots (product decision 9),
 /// so they always appear here alongside the Webots app itself. This function
 /// never needs `options` - it replaces the old `SimulatePlan::native_tools`
 /// stored field.

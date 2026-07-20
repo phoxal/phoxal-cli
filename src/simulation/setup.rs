@@ -209,20 +209,16 @@ pub(crate) async fn live_simulate_setup(
     // a real TUI is up to read it, same gate as `crate::run`. The
     // sim clock feed (`telemetry.set_clock_feed` above) is wired
     // unconditionally since it costs nothing extra - the SAME task
-    // already exists for the title telemetry - but host/process/
+    // already exists for the title telemetry - but device/runtime/
     // router/joypad each open their own bus connection, so those
     // stay Tui-gated.
-    let site_targets: Vec<(String, String)> = sim
-        .plan
-        .robots
-        .iter()
-        .map(|robot| (robot.namespace.clone(), robot.id.clone()))
-        .collect();
+    let site_targets = crate::run::RobotFeedTarget::from_plan(&sim.plan);
     if renders_tui {
         background_tasks.extend(crate::run::start_telemetry_feeds_at(
             &site_targets,
             &telemetry,
             &connect,
+            board.recovery_epoch_receiver(),
         ));
     }
 

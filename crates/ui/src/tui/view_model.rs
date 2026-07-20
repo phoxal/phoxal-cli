@@ -6,9 +6,11 @@ use std::time::Instant;
 
 use crate::tui::visibility::is_visible_runtime;
 use phoxal_cli_core::session::ParticipantKind;
+use phoxal_cli_core::session::RuntimePerformanceSample;
 use phoxal_cli_core::session::TelemetrySnapshot;
 use phoxal_cli_core::session::stores::log::LogStore;
 use phoxal_cli_core::session::stores::runtime::{RuntimeOrigin, RuntimeStore};
+use phoxal_cli_core::session::stores::telemetry::Timestamped;
 use phoxal_cli_core::session::{BoardSnapshot, ParticipantState, ParticipantStatus};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -51,6 +53,35 @@ pub struct SessionViewModel<'a> {
 }
 
 impl<'a> SessionViewModel<'a> {
+    #[must_use]
+    pub fn runtime_performance(
+        &self,
+        status: &ParticipantStatus,
+    ) -> Option<&Timestamped<RuntimePerformanceSample>> {
+        status
+            .scope
+            .as_ref()
+            .and_then(|scope| self.telemetry.runtime(scope, &status.id))
+    }
+
+    #[must_use]
+    pub fn runtime_topic_count(&self, participant_id: &str) -> usize {
+        self.runtimes
+            .iter()
+            .find(|status| status.id == participant_id)
+            .filter(|status| status.present != Some(false))
+            .and_then(|status| self.runtime_performance(status))
+            .filter(|sample| {
+                !sample.is_stale(
+                    self.now,
+                    phoxal_cli_core::session::stores::telemetry::DEFAULT_FRESHNESS_TTL,
+                )
+            })
+            .map_or(0, |sample| {
+                sample.value.topics.len() + usize::from(sample.value.overflow.is_some())
+            })
+    }
+
     #[must_use]
     pub fn new(
         board: &'a BoardSnapshot,

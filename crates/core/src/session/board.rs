@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::ParticipantKind;
+use super::stores::telemetry::RobotScope;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +61,14 @@ pub struct ParticipantStatus {
     pub pid: Option<u32>,
     #[serde(skip)]
     pub artifact_size_bytes: Option<u64>,
+    /// Current robot-bus Liveliness observation for presentation only. `None`
+    /// means the observer has not established graph state in this epoch.
+    #[serde(skip)]
+    pub present: Option<bool>,
+    /// Robot identity for scoped live telemetry lookup. Session-only because
+    /// persisted board rows predate and must not become a telemetry index.
+    #[serde(skip)]
+    pub scope: Option<RobotScope>,
 }
 
 impl ParticipantStatus {
@@ -77,12 +86,20 @@ impl ParticipantStatus {
             launch_command: None,
             pid: None,
             artifact_size_bytes: None,
+            present: None,
+            scope: None,
         }
     }
 
     #[must_use]
     pub fn with_local(mut self, local: bool) -> Self {
         self.local = local;
+        self
+    }
+
+    #[must_use]
+    pub fn with_scope(mut self, scope: RobotScope) -> Self {
+        self.scope = Some(scope);
         self
     }
 }

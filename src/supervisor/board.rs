@@ -1,15 +1,16 @@
 //! Concurrent session-board state derived from process and bus observations.
 
 use super::{
-    BoardSnapshot, LogSeverity, LogSource, ParticipantLaunchCommand, ParticipantState,
-    ParticipantStatus, RoutedLogLine, bounded_chars, bounded_log_text,
+    BoardSnapshot, LogScope, LogSeverity, LogSource, ParticipantLaunchCommand, ParticipantState,
+    ParticipantStatus, RoutedLogLine, RoutedLogUpdate, bounded_chars, bounded_log_text,
 };
 use phoxal_cli_core::session::ParticipantKind;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::mpsc;
+use std::time::SystemTime;
+use tokio::sync::{mpsc, watch};
 
 const NOT_PRESENT_NOTE: &str =
     "participant not present on the robot bus; process lifecycle is unchanged";
@@ -23,6 +24,7 @@ pub struct BoardBackend {
     /// key, producing continuous presence rather than another `Alive` event.
     presence: Arc<Mutex<PresenceState>>,
     recovery_epoch: Arc<AtomicU64>,
+    recovery_epoch_tx: watch::Sender<u64>,
     /// Optional live sink for [`RoutedLogLine`]s - set by
     /// `session::controller::SessionController::drive_supervision` once its
     /// `TuiDisplay` renderer exists, so it can maintain its own bounded
@@ -34,7 +36,7 @@ pub struct BoardBackend {
     /// full channel here just means a redraw is overdue - `route_log` drops
     /// the newest line rather than blocking the log-subscriber task that
     /// calls it.
-    log_sink: Arc<Mutex<Option<mpsc::Sender<RoutedLogLine>>>>,
+    log_sink: Arc<Mutex<Option<mpsc::Sender<RoutedLogUpdate>>>>,
     /// First-seen unknown bus ids already disclosed to the operator. The set
     /// is deliberately small: an untrusted publisher cannot turn diagnostics
     /// about rejected ids into another unbounded allocation vector.
@@ -49,6 +51,7 @@ struct PresenceState {
 
 impl Default for BoardBackend {
     fn default() -> Self {
+        let (recovery_epoch_tx, _) = watch::channel(0);
         Self {
             inner: Arc::default(),
             presence: Arc::new(Mutex::new(PresenceState {
@@ -56,6 +59,7 @@ impl Default for BoardBackend {
                 ids: BTreeSet::new(),
             })),
             recovery_epoch: Arc::default(),
+            recovery_epoch_tx,
             log_sink: Arc::default(),
             unknown_bus_ids: Arc::default(),
         }
@@ -95,6 +99,7 @@ impl BoardBackend {
         } else {
             presence.ids.remove(id);
         }
+        status.present = Some(present);
         if matches!(
             status.state,
             ParticipantState::Failed | ParticipantState::Stopped
@@ -142,6 +147,7 @@ impl BoardBackend {
                 status.pid = None;
                 status.artifact_size_bytes = None;
                 status.restart_count = 0;
+                status.present = None;
             }
         }
         for id in wait_only {
@@ -150,9 +156,12 @@ impl BoardBackend {
                 status.pid = None;
                 status.artifact_size_bytes = None;
                 status.restart_count = 0;
+                status.present = None;
             }
         }
-        self.recovery_epoch.fetch_add(1, Ordering::SeqCst) + 1
+        let epoch = self.recovery_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        self.recovery_epoch_tx.send_replace(epoch);
+        epoch
     }
 
     pub(crate) fn enable_presence_for_recovery(&self) {
@@ -160,6 +169,13 @@ impl BoardBackend {
             .lock()
             .expect("presence mutex poisoned")
             .enabled = true;
+    }
+
+    /// Subscribe to full-graph recovery resets. Consumers recreate transport
+    /// handles after every epoch so stale router sessions cannot strand a
+    /// snapshot/follow reconciler waiting on the dead graph.
+    pub(crate) fn recovery_epoch_receiver(&self) -> watch::Receiver<u64> {
+        self.recovery_epoch_tx.subscribe()
     }
 
     #[cfg(test)]
@@ -240,34 +256,36 @@ impl BoardBackend {
     /// Register the live [`RoutedLogLine`] sink for this session's display
     /// (a TUI). Replaces any previous sink - only one live display exists per
     /// session.
-    pub fn set_log_sink(&self, sender: mpsc::Sender<RoutedLogLine>) {
+    pub fn set_log_sink(&self, sender: mpsc::Sender<RoutedLogUpdate>) {
         *self.log_sink.lock().expect("log sink mutex poisoned") = Some(sender);
     }
 
-    /// Record a log line from a known routing source: updates the board's own
-    /// bounded 8-line history exactly like [`Self::append_log`], then
-    /// additionally forwards it to the live sink
-    /// registered by [`Self::set_log_sink`], if any. This is the single
-    /// funnel both [`bus_log_subscriber_loop`] and [`spawn_output_reader`]
-    /// use, so a live TUI dedups by ROUTING (which of the two called this)
-    /// rather than by comparing rendered text - see [`LogSource`].
-    pub fn route_log(&self, id: &str, source: LogSource, text: impl Into<String>) {
-        self.route_log_with_severity(id, source, LogSeverity::Info, text);
+    /// Record one unscoped captured stdout/stderr line. Robot bus records must
+    /// use [`Self::route_log_line`] so their typed severity, producer event
+    /// time, and robot scope cannot be omitted.
+    pub fn route_log(&self, id: &str, text: impl Into<String>) -> bool {
+        self.route_log_line(RoutedLogLine {
+            participant: id.to_string(),
+            source: LogSource::Raw,
+            severity: LogSeverity::Info,
+            text: text.into(),
+            event_time: SystemTime::now(),
+            scope: None,
+        })
     }
 
-    pub fn route_log_with_severity(
-        &self,
-        id: &str,
-        source: LogSource,
-        severity: LogSeverity,
-        text: impl Into<String>,
-    ) {
-        let text = bounded_log_text(&text.into());
-        if !self.try_append_log(id, text.clone()) {
+    /// Route a complete robot-scoped bus record when the producer supplied its
+    /// own event time. Retained tool-log replay uses this exclusive bus path so
+    /// snapshot replacement does not rewrite chronology or lose robot scope.
+    pub fn route_log_line(&self, mut line: RoutedLogLine) -> bool {
+        line.text = bounded_log_text(&line.text);
+        let id = &line.participant;
+        let source = line.source;
+        if !self.try_append_log(id, line.text.clone()) {
             if source == LogSource::Bus {
                 self.disclose_unknown_bus_id(id, "log");
             }
-            return;
+            return false;
         }
         let sink = self.log_sink.lock().expect("log sink mutex poisoned");
         if let Some(sender) = sink.as_ref() {
@@ -275,13 +293,32 @@ impl BoardBackend {
             // (no live TUI) both just mean this line never reaches the
             // scrollback - never worth blocking the caller (a bus-log
             // subscriber or output-reader task) over.
-            let _ = sender.try_send(RoutedLogLine {
-                participant: id.to_string(),
-                source,
-                severity,
-                text,
-            });
+            return sender.try_send(RoutedLogUpdate::Append(line)).is_ok();
         }
+        true
+    }
+
+    /// Install one complete tool-log snapshot as the bus-derived presentation
+    /// state. Returns false when the bounded display channel dropped the
+    /// replacement so the adapter can query again.
+    pub fn replace_bus_logs(&self, scope: LogScope, lines: Vec<RoutedLogLine>) -> bool {
+        let mut accepted = Vec::with_capacity(lines.len());
+        for line in lines {
+            if self.try_append_log(&line.participant, line.text.clone()) {
+                accepted.push(line);
+            } else {
+                self.disclose_unknown_bus_id(&line.participant, "log");
+            }
+        }
+        let sink = self.log_sink.lock().expect("log sink mutex poisoned");
+        sink.as_ref().is_none_or(|sender| {
+            sender
+                .try_send(RoutedLogUpdate::Replace {
+                    scope,
+                    lines: accepted,
+                })
+                .is_ok()
+        })
     }
 
     fn disclose_unknown_bus_id(&self, id: &str, signal: &'static str) {
@@ -323,5 +360,24 @@ impl BoardBackend {
     #[must_use]
     pub fn snapshot(&self) -> BoardSnapshot {
         self.inner.lock().expect("board mutex poisoned").clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn liveliness_presence_is_explicit_and_recovery_resets_it_to_unknown() {
+        let board = BoardBackend::new();
+        board.register_planned("drive", ParticipantKind::Service);
+
+        board.record_presence("drive", true);
+        assert_eq!(board.snapshot().participants["drive"].present, Some(true));
+        board.record_presence("drive", false);
+        assert_eq!(board.snapshot().participants["drive"].present, Some(false));
+
+        board.begin_recovery_epoch(&[("drive".to_string(), None)], &[]);
+        assert_eq!(board.snapshot().participants["drive"].present, None);
     }
 }

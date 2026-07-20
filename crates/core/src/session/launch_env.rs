@@ -107,6 +107,12 @@ pub fn encode_participant_env(launch: &ParticipantLaunch) -> Result<EncodedParti
     Ok(EncodedParticipantEnv { variables })
 }
 
+pub fn encode_tool_env(launch: &ParticipantLaunch) -> Result<EncodedParticipantEnv> {
+    Ok(EncodedParticipantEnv {
+        variables: encode_common_participant_variables(launch)?,
+    })
+}
+
 fn encode_common_participant_variables(
     launch: &ParticipantLaunch,
 ) -> Result<BTreeMap<String, String>> {
@@ -266,6 +272,38 @@ mod tests {
             Some(
                 r#"{"message":"quoted \"value\" and backslash \\ with newline\nvisible","path":"/tmp/phoxal/robot's model"}"#
             )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tool_environment_is_clockless() -> anyhow::Result<()> {
+        let launch = ParticipantLaunch {
+            participant_id: "tool-log".to_string(),
+            namespace: "dev".to_string(),
+            robot_id: "robot_v1".to_string(),
+            bus: BusProfile {
+                connect_endpoints: vec!["tcp/localhost:7447".to_string()],
+            },
+            clock: ClockMode::Real,
+            config: None,
+            robot_root: Some(PathBuf::from("/tmp/phoxal/robot")),
+            component_instance: None,
+            shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
+        };
+
+        let encoded = encode_tool_env(&launch)?;
+        assert!(!encoded.variables().contains_key(env::CLOCK));
+        assert_eq!(
+            encoded
+                .variables()
+                .get(env::PARTICIPANT_ID)
+                .map(String::as_str),
+            Some("tool-log")
+        );
+        assert_eq!(
+            encoded.variables().get(env::CONNECT).map(String::as_str),
+            Some("tcp/localhost:7447")
         );
         Ok(())
     }

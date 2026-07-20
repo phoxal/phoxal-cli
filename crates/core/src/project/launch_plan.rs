@@ -16,15 +16,11 @@ use crate::check::source::{SourceParticipant, SourceParticipantKind};
 
 pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
 pub const SITE_INFRASTRUCTURE_ROUTER: &str = "infrastructure-router";
-pub const SITE_TOOL_BUS: &str = "tool-bus";
+pub const ROBOT_TOOL_BUS: &str = "tool-bus";
 pub const SITE_TOOL_JOYPAD: &str = "tool-joypad";
-/// The host-resource-meter tool (CLI-UX Phase 3/4): a standard, hard-required
-/// bus participant exactly like `tool-joypad`, published in every mode (Run,
-/// Deploy, Webots) - a host meter is useful everywhere, including a deployed
-/// robot, unlike the joypad peripheral. A catalog snapshot that cannot
-/// resolve it is outdated and fails resolution (product decision 9); there
-/// is no graceful-degrade path.
-pub const SITE_TOOL_TELEMETRY: &str = "tool-telemetry";
+pub const ROBOT_TOOL_LOG: &str = "tool-log";
+pub const ROBOT_TOOL_TELEMETRY: &str = "tool-telemetry";
+pub const ROBOT_TOOL_DEVICE: &str = "tool-device";
 pub const RUNTIME_ROBOT_ROOT_RELATIVE: &str = ".phoxal/run/robot";
 pub const SIMULATOR_SUPERVISOR_PROVIDER_ID: &str = "simulator-webots-supervisor";
 pub const SIMULATOR_SUPERVISOR_ARTIFACT_NAME: &str = "webots-supervisor";
@@ -42,15 +38,20 @@ pub fn simulator_controller_provider_id(robot_id: &str) -> String {
 /// filtering (resolution/validation). Resolution itself
 /// (`catalog::OFFICIAL_TOOLS`) and readiness (`supervisor`'s per-`Tool`-kind
 /// handling) already treat every standard tool uniformly by kind rather than
-/// naming router/joypad/telemetry individually, so this is the one list the
+/// naming site tools individually, so this is the one list the
 /// id-based call sites needed to share (finding A6).
 ///
 /// Finding A6's regression: `simulate`'s metadata/contract filter used to
 /// hardcode only `SITE_INFRASTRUCTURE_ROUTER`/`SITE_TOOL_JOYPAD` at three separate call
-/// sites, silently excluding telemetry's declared graph contracts from
-/// validation even though telemetry is started and readiness-waited exactly
-/// like the other two standard tools.
-pub const STANDARD_SITE_TOOLS: &[&str] = &[SITE_TOOL_BUS, SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY];
+/// sites, silently excluding a standard site tool's declared graph contracts
+/// from validation.
+pub const STANDARD_SITE_TOOLS: &[&str] = &[SITE_TOOL_JOYPAD];
+pub const STANDARD_ROBOT_TOOLS: &[&str] = &[
+    ROBOT_TOOL_BUS,
+    ROBOT_TOOL_LOG,
+    ROBOT_TOOL_TELEMETRY,
+    ROBOT_TOOL_DEVICE,
+];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -134,6 +135,7 @@ pub enum LaunchOwnership {
 #[serde(tag = "execution", rename_all = "snake_case")]
 pub enum ParticipantExecution {
     OfficialArtifact { artifact_ref: String },
+    OfficialTool { artifact_ref: String },
     UserService { crate_dir: PathBuf },
     SourceArtifact { kind: String, crate_dir: PathBuf },
     ComponentDriver { crate_dir: PathBuf },
@@ -251,7 +253,7 @@ fn merge_site_tool_artifact(
 fn resolved_tool<'a>(resolved: &'a ResolvedRobot, tool_name: &str) -> Result<&'a ResolvedTool> {
     resolved.tools.iter().find(|tool| tool.name == tool_name).ok_or_else(|| {
         anyhow!(
-            "resolved robot {} is missing standard site tool {tool_name}; the active catalog snapshot is outdated for this standard set - run `phoxal update`",
+            "resolved robot {} is missing standard tool {tool_name}; the active catalog snapshot is outdated for this standard set - run `phoxal update`",
             resolved.robot.robot.id
         )
     })
@@ -307,6 +309,35 @@ fn build_robot_launch(
             execution,
             launch,
             launch_ownership,
+        });
+    }
+    for &tool_name in STANDARD_ROBOT_TOOLS {
+        let tool = resolved_tool(input.resolved, tool_name)?;
+        participants.push(ParticipantLaunchRecord {
+            artifact_id: tool.name.clone(),
+            execution: tool.path_override.as_ref().map_or_else(
+                || ParticipantExecution::OfficialTool {
+                    artifact_ref: tool_artifact_ref(tool),
+                },
+                |crate_dir| ParticipantExecution::SourceArtifact {
+                    kind: "tool".to_string(),
+                    crate_dir: crate_dir.clone(),
+                },
+            ),
+            launch: ParticipantLaunch {
+                participant_id: format!("{}-{}", tool.name, input.resolved.robot.robot.id),
+                namespace: input.resolved.robot.robot.namespace.clone(),
+                robot_id: input.resolved.robot.robot.id.clone(),
+                bus: BusProfile {
+                    connect_endpoints: vec![DEFAULT_ROUTER_CONNECT.to_string()],
+                },
+                clock: ClockMode::Real,
+                config: None,
+                robot_root: Some(robot_root_for_mode(mode, input.project_root)),
+                component_instance: None,
+                shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
+            },
+            launch_ownership: LaunchOwnership::CliManaged,
         });
     }
     participants.sort_by(|left, right| {
@@ -604,7 +635,25 @@ mod tests {
                 .iter()
                 .map(|site| site.id.as_str())
                 .collect::<Vec<_>>(),
-            vec![SITE_TOOL_BUS, SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY]
+            vec![SITE_TOOL_JOYPAD]
+        );
+        assert_eq!(
+            plan.robots[0]
+                .participants
+                .iter()
+                .filter_map(|participant| match participant.execution {
+                    ParticipantExecution::OfficialTool { .. } => {
+                        Some(participant.launch.participant_id.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                "tool-bus-robot_v1",
+                "tool-device-robot_v1",
+                "tool-log-robot_v1",
+                "tool-telemetry-robot_v1",
+            ]
         );
         let mission = plan.robots[0]
             .participants
@@ -633,6 +682,36 @@ mod tests {
         let error =
             build_launch_plan(LaunchMode::Deploy, &inputs).expect_err("deploy is one robot");
         assert!(error.to_string().contains("exactly one robot"), "{error:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn run_robot_tools_have_unique_participant_ids_per_robot() -> anyhow::Result<()> {
+        let mut robot_a = empty_resolved_robot("robot_a")?;
+        let mut robot_b = empty_resolved_robot("robot_b")?;
+        add_site_tools(&mut robot_a);
+        add_site_tools(&mut robot_b);
+        let extras = RobotManifestExtras::default();
+        let inputs = [
+            empty_checked_input(Path::new("/tmp/a"), &robot_a, &extras),
+            empty_checked_input(Path::new("/tmp/b"), &robot_b, &extras),
+        ];
+
+        let plan = build_launch_plan(LaunchMode::Run, &inputs)?;
+        let ids = plan
+            .robots
+            .iter()
+            .flat_map(|robot| {
+                robot
+                    .participants
+                    .iter()
+                    .map(|participant| participant.launch.participant_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"tool-bus-robot_a"));
+        assert!(ids.contains(&"tool-log-robot_a"));
+        assert!(ids.contains(&"tool-bus-robot_b"));
+        assert!(ids.contains(&"tool-log-robot_b"));
         Ok(())
     }
 
@@ -728,19 +807,21 @@ mod tests {
         Ok(())
     }
 
-    /// Product decision 9: router, joypad, and telemetry are STANDARD site
-    /// tools, so a resolved robot missing any of them means the active
+    /// Standard robot tools are hard requirements, so a resolved robot
+    /// missing any of them means the active
     /// catalog snapshot is outdated for the current standard set - this
     /// fails the whole launch plan with a direct remediation message rather
     /// than silently degrading (the old optional-tool behavior telemetry
     /// used to have).
     #[test]
-    fn a_catalog_missing_a_standard_site_tool_fails_with_a_remediation_message()
+    fn a_catalog_missing_a_standard_robot_tool_fails_with_a_remediation_message()
     -> anyhow::Result<()> {
         let mut resolved = empty_resolved_robot("robot_v1")?;
-        resolved.tools.push(tool(SITE_TOOL_BUS));
+        resolved.tools.push(tool(ROBOT_TOOL_BUS));
         resolved.tools.push(tool(SITE_TOOL_JOYPAD));
-        // Telemetry deliberately left unresolved, as if the pinned catalog
+        resolved.tools.push(tool(ROBOT_TOOL_LOG));
+        resolved.tools.push(tool(ROBOT_TOOL_DEVICE));
+        // Telemetry is deliberately left unresolved, as if the pinned catalog
         // snapshot predates it.
         let extras = RobotManifestExtras::default();
         let error = build_launch_plan(
@@ -751,9 +832,9 @@ mod tests {
                 &extras,
             )],
         )
-        .expect_err("a missing standard site tool must fail the launch plan");
+        .expect_err("a missing standard robot tool must fail the launch plan");
         let message = error.to_string();
-        assert!(message.contains(SITE_TOOL_TELEMETRY), "{message}");
+        assert!(message.contains(ROBOT_TOOL_TELEMETRY), "{message}");
         assert!(message.contains("phoxal update"), "{message}");
         Ok(())
     }
@@ -822,9 +903,11 @@ robot:
     }
 
     fn add_site_tools(resolved: &mut ResolvedRobot) {
-        resolved.tools.push(tool(SITE_TOOL_BUS));
+        resolved.tools.push(tool(ROBOT_TOOL_BUS));
         resolved.tools.push(tool(SITE_TOOL_JOYPAD));
-        resolved.tools.push(tool(SITE_TOOL_TELEMETRY));
+        resolved.tools.push(tool(ROBOT_TOOL_LOG));
+        resolved.tools.push(tool(ROBOT_TOOL_TELEMETRY));
+        resolved.tools.push(tool(ROBOT_TOOL_DEVICE));
     }
 
     fn tool(name: &str) -> ResolvedTool {

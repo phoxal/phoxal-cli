@@ -16,7 +16,7 @@ use phoxal::participant::launch::{
 };
 use phoxal_cli_core::project::launch_plan::{
     LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
-    SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY, STANDARD_SITE_TOOLS, SiteLaunch,
+    SITE_TOOL_JOYPAD, STANDARD_SITE_TOOLS, SiteLaunch,
 };
 use phoxal_cli_core::session::ParticipantKind;
 use std::path::{Path, PathBuf};
@@ -57,12 +57,12 @@ fn human_launch_report_enters_the_active_session_diagnostics() -> Result<()> {
 
 #[test]
 fn configless_site_tool_omits_config_and_gets_connect() {
-    // A configless tool (phoxal_config == Value::Null, e.g. joypad/telemetry)
+    // A configless site tool (phoxal_config == Value::Null, e.g. joypad)
     // must NOT receive PHOXAL_CONFIG - a unit config rejects `{}` - and, being
     // a real bus client, MUST receive PHOXAL_CONNECT to reach the router bus.
     let tool = SiteLaunch {
-        id: SITE_TOOL_TELEMETRY.to_string(),
-        artifact_ref: "phoxal/tool-telemetry@0.1.0".to_string(),
+        id: "tool-example".to_string(),
+        artifact_ref: "phoxal/tool-example@0.1.0".to_string(),
         phoxal_config: serde_json::Value::Null,
     };
     let env = site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
@@ -76,7 +76,7 @@ fn configless_site_tool_omits_config_and_gets_connect() {
     );
     assert!(
         !env.iter().any(|(k, _)| k == env::ROBOT_ROOT),
-        "telemetry does not need the compiled robot root: {env:?}"
+        "the generic configless path must not add an unrelated robot root: {env:?}"
     );
     assert!(
         !env.iter().any(|(key, _)| key == env::CLOCK),

@@ -148,11 +148,7 @@ pub(crate) fn prepare_run(
         ui,
     )?;
 
-    let robot_log_targets = plan
-        .robots
-        .iter()
-        .map(|robot| (robot.namespace.clone(), robot.id.clone()))
-        .collect();
+    let robot_targets = super::RobotFeedTarget::from_plan(&plan);
     let project_root = project_root.to_path_buf();
     let ctx = PlanContext {
         robot_path,
@@ -163,7 +159,7 @@ pub(crate) fn prepare_run(
 
     Ok(PreparedRun {
         ctx,
-        robot_log_targets,
+        robot_targets,
         plan,
         board,
         specs,

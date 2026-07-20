@@ -32,7 +32,10 @@ use phoxal_cli_core::session::event::PhaseOutcome;
 use phoxal_cli_core::session::stores::log::sanitize_terminal_text;
 use phoxal_cli_core::session::stores::telemetry::{DEFAULT_FRESHNESS_TTL, Timestamped};
 use phoxal_cli_core::session::{ClockSample, LogSeverity, ParticipantState, ParticipantStatus};
-use phoxal_cli_core::session::{HostSample, JoypadDeviceStatus, TelemetrySnapshot, TopicMetric};
+use phoxal_cli_core::session::{
+    DeviceSample, JoypadDeviceStatus, RuntimeBufferKind, RuntimeDirection,
+    RuntimePerformanceSample, TelemetrySnapshot, TopicMetric,
+};
 
 #[derive(Debug, Clone)]
 pub struct TitleInfo {
@@ -102,21 +105,34 @@ pub fn simulation_clock_slot(
 }
 
 #[must_use]
-pub fn host_resource_slot(host: Option<&Timestamped<HostSample>>, now: Instant) -> String {
-    let Some(host) = host else {
+pub fn device_resource_slot(device: Option<&Timestamped<DeviceSample>>, now: Instant) -> String {
+    let Some(device) = device else {
         return "cpu n/a · ram n/a".to_string();
     };
-    let stale = if host.is_stale(now, DEFAULT_FRESHNESS_TTL) {
+    let stale = if device.is_stale(now, DEFAULT_FRESHNESS_TTL) {
         " · stale"
     } else {
         ""
     };
-    format!(
-        "cpu {:.0}% · ram {}/{}{stale}",
-        host.value.cpu_pct,
-        human::bytes_compact(host.value.ram_used_bytes),
-        human::bytes_compact(host.value.ram_total_bytes),
-    )
+    let cpu = device
+        .value
+        .cpu_pct
+        .map_or_else(|| "n/a".to_string(), |value| format!("{value:.0}%"));
+    let ram = device
+        .value
+        .ram_used_bytes
+        .zip(device.value.ram_total_bytes)
+        .map_or_else(
+            || "n/a".to_string(),
+            |(used, total)| {
+                format!(
+                    "{}/{}",
+                    human::bytes_compact(used),
+                    human::bytes_compact(total)
+                )
+            },
+        );
+    format!("cpu {cpu} · ram {ram}{stale}",)
 }
 
 pub fn draw(

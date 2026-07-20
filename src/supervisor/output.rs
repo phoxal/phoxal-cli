@@ -1,6 +1,6 @@
 //! Captured child-output routing and reader task cleanup.
 
-use super::{BoardBackend, LogSource, MAX_CAPTURED_LINE_BYTES};
+use super::{BoardBackend, MAX_CAPTURED_LINE_BYTES};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::task::JoinHandle;
@@ -85,7 +85,7 @@ pub(crate) fn route_captured_line(
     if truncated {
         text.push('…');
     }
-    board.route_log(id, LogSource::Raw, format!("{stream}: {text}"));
+    board.route_log(id, format!("{stream}: {text}"));
 }
 
 pub(crate) const READER_JOIN_BUDGET: Duration = Duration::from_millis(250);

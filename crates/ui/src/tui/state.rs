@@ -176,6 +176,8 @@ pub struct AppState {
     pub runtime_cursor: usize,
     runtime_cursor_id: Option<String>,
     pub runtime_detail_id: Option<String>,
+    pub runtime_topic_offset: usize,
+    runtime_topic_visible_rows: usize,
     pub simulation: bool,
     pub log_source_filter: LogSourceFilter,
     pub log_filter_cursor: usize,
@@ -184,7 +186,7 @@ pub struct AppState {
     pub log_severity: SeverityFilter,
     pub log_scroll: usize,
     pub log_follow: bool,
-    pub log_pause_anchor: Option<std::time::Instant>,
+    pub log_pause_anchor: Option<std::time::SystemTime>,
     pub bus_filter: String,
     pub bus_sort: BusSort,
     pub bus_scroll: usize,
@@ -207,6 +209,8 @@ impl Default for AppState {
             runtime_cursor: 0,
             runtime_cursor_id: None,
             runtime_detail_id: None,
+            runtime_topic_offset: 0,
+            runtime_topic_visible_rows: 1,
             simulation: false,
             log_source_filter: LogSourceFilter::All,
             log_filter_cursor: 0,
@@ -250,8 +254,13 @@ impl AppState {
             if let Some(index) = detail_index {
                 self.runtime_cursor = index;
                 self.runtime_cursor_id = Some(detail_id.to_string());
+                self.runtime_topic_offset = self
+                    .runtime_topic_offset
+                    .min(self.runtime_topic_max_offset(model.runtime_topic_count(detail_id)));
             } else {
                 self.runtime_detail_id = None;
+                self.runtime_topic_offset = 0;
+                self.runtime_topic_visible_rows = 1;
             }
         }
         let mut missing_selected_runtime = false;
@@ -308,6 +317,17 @@ impl AppState {
         }
     }
 
+    pub(super) fn set_runtime_topic_viewport(&mut self, row_count: usize, visible_rows: usize) {
+        self.runtime_topic_visible_rows = visible_rows.max(1);
+        self.runtime_topic_offset = self
+            .runtime_topic_offset
+            .min(self.runtime_topic_max_offset(row_count));
+    }
+
+    fn runtime_topic_max_offset(&self, row_count: usize) -> usize {
+        row_count.saturating_sub(self.runtime_topic_visible_rows)
+    }
+
     #[must_use]
     pub fn editing_label(&self) -> Option<&'static str> {
         self.editing.map(|editing| match editing {
@@ -324,6 +344,7 @@ impl AppState {
         self.error_log_opened = true;
         self.editing = None;
         self.runtime_detail_id = None;
+        self.runtime_topic_offset = 0;
         self.show_help = false;
         self.show_info = false;
         self.page = Page::Logs;
@@ -385,6 +406,8 @@ impl AppState {
 
         if key.code == KeyCode::Esc {
             if self.page == Page::Runtimes && self.runtime_detail_id.take().is_some() {
+                self.runtime_topic_offset = 0;
+                self.runtime_topic_visible_rows = 1;
                 return DisplayAction::None;
             }
             if self.navigation == NavigationLevel::Page {
@@ -427,6 +450,8 @@ impl AppState {
         self.tab_cursor = page.index();
         self.navigation = NavigationLevel::Page;
         self.runtime_detail_id = None;
+        self.runtime_topic_offset = 0;
+        self.runtime_topic_visible_rows = 1;
         if changed && page == Page::Input {
             DisplayAction::JoypadRescan
         } else {
@@ -465,16 +490,27 @@ impl AppState {
 
     fn handle_runtimes(&mut self, key: KeyEvent, model: &SessionViewModel<'_>) -> DisplayAction {
         match key.code {
-            KeyCode::Enter => {
+            KeyCode::Enter if self.runtime_detail_id.is_none() => {
                 self.runtime_detail_id =
                     self.selected_runtime(model).map(|status| status.id.clone());
                 self.runtime_cursor_id.clone_from(&self.runtime_detail_id);
+                self.runtime_topic_offset = 0;
             }
-            KeyCode::Up if self.runtime_detail_id.is_none() => {
-                self.move_runtime_cursor(model, -1);
+            KeyCode::Up => {
+                if self.runtime_detail_id.is_some() {
+                    self.runtime_topic_offset = self.runtime_topic_offset.saturating_sub(1);
+                } else {
+                    self.move_runtime_cursor(model, -1);
+                }
             }
             KeyCode::Down => {
-                if self.runtime_detail_id.is_none() {
+                if self.runtime_detail_id.is_some() {
+                    let max_offset = self.runtime_detail_id.as_deref().map_or(0, |id| {
+                        self.runtime_topic_max_offset(model.runtime_topic_count(id))
+                    });
+                    self.runtime_topic_offset =
+                        self.runtime_topic_offset.saturating_add(1).min(max_offset);
+                } else {
                     self.move_runtime_cursor(model, 1);
                 }
             }
@@ -615,7 +651,17 @@ impl AppState {
 
     fn pause_logs(&mut self, model: &SessionViewModel<'_>) {
         if self.log_follow {
-            self.log_pause_anchor = Some(model.now);
+            let participant = CaseInsensitiveNeedle::new(&self.log_runtime_filter);
+            let text = CaseInsensitiveNeedle::new(&self.log_text_filter);
+            self.log_pause_anchor = Some(
+                model
+                    .logs
+                    .lines()
+                    .filter(|line| self.log_line_matches(line, model, &participant, &text))
+                    .map(|line| line.event_time)
+                    .max()
+                    .unwrap_or_else(std::time::SystemTime::now),
+            );
         }
         self.log_follow = false;
     }
@@ -709,7 +755,7 @@ impl AppState {
                 self.log_follow
                     || self
                         .log_pause_anchor
-                        .is_none_or(|anchor| line.received_at <= anchor)
+                        .is_none_or(|anchor| line.event_time <= anchor)
             })
             .count()
     }

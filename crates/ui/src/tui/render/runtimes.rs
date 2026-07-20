@@ -5,7 +5,7 @@ use super::*;
 pub(super) fn draw_runtimes(
     frame: &mut Frame,
     theme: Theme,
-    state: &AppState,
+    state: &mut AppState,
     model: &SessionViewModel<'_>,
     area: Rect,
 ) {
@@ -106,19 +106,51 @@ pub(super) fn draw_runtime_group(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
     let columns = runtime_columns(inner.width);
+    let header = match columns {
+        RuntimeColumns::Compact {
+            id,
+            state,
+            performance,
+            restarts,
+        } => format!(
+            "    {:<id_width$} {:<state_width$} {:<perf_width$} {:>restart_width$}",
+            "ID",
+            "STATE",
+            "PERF",
+            "RST",
+            id_width = id,
+            state_width = state,
+            perf_width = performance,
+            restart_width = restarts,
+        ),
+        RuntimeColumns::Wide {
+            id,
+            state,
+            rate,
+            budget,
+            headroom,
+            pressure,
+            restarts,
+        } => format!(
+            "    {:<id_width$} {:<state_width$} {:>rate_width$} {:>budget_width$} {:>headroom_width$} {:>pressure_width$} {:>restart_width$}",
+            "ID",
+            "STATE",
+            "RATE",
+            "PEAK BGT",
+            "PEAK HEAD",
+            "PRESS",
+            "RST",
+            id_width = id,
+            state_width = state,
+            rate_width = rate,
+            budget_width = budget,
+            headroom_width = headroom,
+            pressure_width = pressure,
+            restart_width = restarts,
+        ),
+    };
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            format!(
-                "    {:<id_width$} {:<state_width$} {:>restart_width$}",
-                "ID",
-                "STATE",
-                if columns.compact { "RST" } else { "RESTARTS" },
-                id_width = columns.id,
-                state_width = columns.state,
-                restart_width = columns.restarts,
-            ),
-            color::muted(theme),
-        )),
+        Paragraph::new(Line::styled(header, color::muted(theme))),
         rows[0],
     );
     if runtimes.is_empty() {
@@ -142,30 +174,54 @@ pub(super) fn draw_runtime_group(
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct RuntimeColumns {
-    id: usize,
-    state: usize,
-    restarts: usize,
-    compact: bool,
+pub(super) enum RuntimeColumns {
+    Compact {
+        id: usize,
+        state: usize,
+        performance: usize,
+        restarts: usize,
+    },
+    Wide {
+        id: usize,
+        state: usize,
+        rate: usize,
+        budget: usize,
+        headroom: usize,
+        pressure: usize,
+        restarts: usize,
+    },
 }
 
 pub(super) fn runtime_columns(inner_width: u16) -> RuntimeColumns {
-    if inner_width >= 68 {
-        return RuntimeColumns {
-            id: 26,
-            state: 11,
-            restarts: 8,
-            compact: false,
+    if inner_width >= 92 {
+        let state = 10;
+        let rate = 9;
+        let budget = 8;
+        let headroom = 9;
+        let pressure = 8;
+        let restarts = 4;
+        let fixed = 4 + 6 + state + rate + budget + headroom + pressure + restarts;
+        return RuntimeColumns::Wide {
+            id: usize::from(inner_width).saturating_sub(fixed),
+            state,
+            rate,
+            budget,
+            headroom,
+            pressure,
+            restarts,
         };
     }
     let state = 7;
     let restarts = 5;
-    let fixed = 4 + 2 + state + restarts;
-    RuntimeColumns {
+    let perf = usize::from(inner_width)
+        .saturating_sub(4 + 3 + state + restarts + 6)
+        .clamp(8, 20);
+    let fixed = 4 + 3 + state + perf + restarts;
+    RuntimeColumns::Compact {
         id: usize::from(inner_width).saturating_sub(fixed).max(6),
         state,
         restarts,
-        compact: true,
+        performance: perf,
     }
 }
 
@@ -178,19 +234,184 @@ pub(super) fn runtime_row(
     let restarts = observation.map_or(status.restart_count, |observation| {
         observation.displayed_restarts()
     });
-    let id = sanitize_and_fit_cell(&status.id, columns.id);
-    let state = fit_cell(status.state.label(), columns.state);
-    format!(
-        "{} {id} {state} {restarts:>restart_width$}",
-        state_symbol(status.state),
-        restart_width = columns.restarts,
-    )
+    let performance = runtime_telemetry_state(status, model);
+    let cells = runtime_performance_cells(performance);
+    match columns {
+        RuntimeColumns::Compact {
+            id,
+            state,
+            performance,
+            restarts: restart_width,
+        } => {
+            let id = sanitize_and_fit_cell(&status.id, id);
+            let state = fit_cell(status.state.label(), state);
+            let perf = fit_cell(&cells.compact, performance);
+            format!(
+                "{} {id} {state} {perf} {restarts:>restart_width$}",
+                state_symbol(status.state),
+            )
+        }
+        RuntimeColumns::Wide {
+            id,
+            state,
+            rate,
+            budget,
+            headroom,
+            pressure,
+            restarts: restart_width,
+        } => {
+            let id = sanitize_and_fit_cell(&status.id, id);
+            let state = fit_cell(status.state.label(), state);
+            let rate_value = fit_cell(&cells.rate, rate);
+            let budget_value = fit_cell(&cells.budget, budget);
+            let headroom_value = fit_cell(&cells.headroom, headroom);
+            let pressure_value = fit_cell(&cells.pressure, pressure);
+            format!(
+                "{} {id} {state} {rate_value:>rate_width$} {budget_value:>budget_width$} {headroom_value:>headroom_width$} {pressure_value:>pressure_width$} {restarts:>restart_width$}",
+                state_symbol(status.state),
+                rate_width = rate,
+                budget_width = budget,
+                headroom_width = headroom,
+                pressure_width = pressure,
+            )
+        }
+    }
+}
+
+struct RuntimePerformanceCells {
+    compact: String,
+    rate: String,
+    budget: String,
+    headroom: String,
+    pressure: String,
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeTelemetryState<'a> {
+    Live(&'a Timestamped<RuntimePerformanceSample>),
+    Missing,
+    Stalled,
+    Waiting,
+    NotSelected,
+}
+
+fn runtime_telemetry_state<'a>(
+    status: &ParticipantStatus,
+    model: &'a SessionViewModel<'_>,
+) -> RuntimeTelemetryState<'a> {
+    if status.scope.is_some()
+        && model.telemetry.scope.is_some()
+        && status.scope.as_ref() != model.telemetry.scope.as_ref()
+    {
+        return RuntimeTelemetryState::NotSelected;
+    }
+    let sample = model.runtime_performance(status);
+    if status.present == Some(false) {
+        RuntimeTelemetryState::Missing
+    } else if sample.is_some_and(|sample| sample.is_stale(model.now, DEFAULT_FRESHNESS_TTL)) {
+        RuntimeTelemetryState::Stalled
+    } else {
+        sample.map_or(RuntimeTelemetryState::Waiting, RuntimeTelemetryState::Live)
+    }
+}
+
+fn runtime_performance_cells(state: RuntimeTelemetryState<'_>) -> RuntimePerformanceCells {
+    let RuntimeTelemetryState::Live(sample) = state else {
+        let label = match state {
+            RuntimeTelemetryState::Missing => "missing",
+            RuntimeTelemetryState::Stalled => "stalled",
+            RuntimeTelemetryState::Waiting => "waiting",
+            RuntimeTelemetryState::NotSelected => "not shown",
+            RuntimeTelemetryState::Live(_) => unreachable!(),
+        }
+        .to_string();
+        return RuntimePerformanceCells {
+            compact: label.clone(),
+            rate: label,
+            budget: "-".to_string(),
+            headroom: "-".to_string(),
+            pressure: "-".to_string(),
+        };
+    };
+    let summary = sample.value.summary();
+    let rate = format_rate(summary.message_rate_hz);
+    let budget = summary
+        .budget_utilization_pct
+        .map_or_else(|| "n/a".to_string(), |value| format!("{value:.0}%"));
+    let headroom = summary
+        .headroom_ns
+        .map_or_else(|| "n/a".to_string(), format_signed_duration_ns);
+    let pressure = summary
+        .current_pressure_pct
+        .map_or_else(|| "n/a".to_string(), |value| format!("{value:.0}%"));
+    RuntimePerformanceCells {
+        compact: format!("{rate} · {budget} · {pressure}"),
+        rate,
+        budget,
+        headroom,
+        pressure,
+    }
+}
+
+fn format_signed_duration_ns(value: i64) -> String {
+    let sign = if value < 0 { "-" } else { "+" };
+    let magnitude = value.unsigned_abs();
+    if magnitude >= 1_000_000_000_000 {
+        format!("{sign}{:.1e}s", magnitude as f64 / 1_000_000_000.0)
+    } else if magnitude >= 1_000_000 {
+        format!("{sign}{:.1}ms", magnitude as f64 / 1_000_000.0)
+    } else if magnitude >= 1_000 {
+        format!("{sign}{:.1}us", magnitude as f64 / 1_000.0)
+    } else {
+        format!("{sign}{magnitude}ns")
+    }
+}
+
+fn format_duration_ns(value: u64) -> String {
+    if value >= 1_000_000_000_000 {
+        format!("{:.1e}s", value as f64 / 1_000_000_000.0)
+    } else if value >= 1_000_000_000 {
+        format!("{:.1}s", value as f64 / 1_000_000_000.0)
+    } else if value >= 1_000_000 {
+        format!("{:.1}ms", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}us", value as f64 / 1_000.0)
+    } else {
+        format!("{value}ns")
+    }
+}
+
+fn compact_count(value: u64) -> String {
+    const UNITS: [(u64, &str); 6] = [
+        (1_000_000_000_000_000_000, "E"),
+        (1_000_000_000_000_000, "P"),
+        (1_000_000_000_000, "T"),
+        (1_000_000_000, "G"),
+        (1_000_000, "M"),
+        (1_000, "K"),
+    ];
+    for (scale, suffix) in UNITS {
+        if value >= scale {
+            return format!("{:.1}{suffix}", value as f64 / scale as f64);
+        }
+    }
+    value.to_string()
+}
+
+fn format_rate(value: f32) -> String {
+    if !value.is_finite() {
+        "n/a".to_string()
+    } else if value.abs() >= 100_000.0 {
+        format!("{value:.1e}/s")
+    } else {
+        format!("{value:.1}/s")
+    }
 }
 
 pub(super) fn draw_runtime_detail(
     frame: &mut Frame,
     theme: Theme,
-    state: &AppState,
+    state: &mut AppState,
     model: &SessionViewModel<'_>,
     area: Rect,
 ) {
@@ -251,9 +472,45 @@ pub(super) fn draw_runtime_detail(
         Line::from(format!("uptime        {uptime}")),
         Line::from(format!("restarts      {restarts}")),
     ];
+    let telemetry_state = runtime_telemetry_state(status, model);
+    if area.height < 18 {
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(6),
+                Constraint::Min(3),
+            ])
+            .split(area);
+        let id = sanitize_and_ellipsize(
+            &status.id,
+            usize::from(vertical[0].width).saturating_sub(24).max(1),
+        );
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{} · {} · PID {pid} · RST {restarts}",
+                status.kind.label(),
+                status.state.label()
+            ))
+            .block(shell_block(theme, &format!("Runtime · {id} · Esc back"))),
+            vertical[0],
+        );
+        draw_runtime_performance(frame, theme, telemetry_state, model, vertical[1]);
+        let bottom = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+            .split(vertical[2]);
+        draw_runtime_topics(frame, theme, state, telemetry_state, bottom[0]);
+        draw_runtime_contracts_compact(frame, theme, metadata, bottom[1]);
+        return;
+    }
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(5)])
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Length(6),
+            Constraint::Min(5),
+        ])
         .split(area);
     let top = Layout::default()
         .direction(Direction::Horizontal)
@@ -278,27 +535,317 @@ pub(super) fn draw_runtime_detail(
             .wrap(Wrap { trim: false }),
         top[1],
     );
-    let io = Layout::default()
-        .direction(Direction::Horizontal)
+    draw_runtime_performance(frame, theme, telemetry_state, model, vertical[1]);
+    if area.width >= 100 {
+        let bottom = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .split(vertical[2]);
+        draw_runtime_topics(frame, theme, state, telemetry_state, bottom[0]);
+        draw_runtime_contracts_wide(frame, theme, metadata, bottom[1]);
+    } else {
+        let bottom = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(5), Constraint::Length(4)])
+            .split(vertical[2]);
+        draw_runtime_topics(frame, theme, state, telemetry_state, bottom[0]);
+        draw_runtime_contracts_compact(frame, theme, metadata, bottom[1]);
+    }
+}
+
+fn draw_runtime_performance(
+    frame: &mut Frame,
+    theme: Theme,
+    telemetry_state: RuntimeTelemetryState<'_>,
+    model: &SessionViewModel<'_>,
+    area: Rect,
+) {
+    let RuntimeTelemetryState::Live(sample) = telemetry_state else {
+        let cells = runtime_performance_cells(telemetry_state);
+        frame.render_widget(
+            Paragraph::new(format!("Portable runtime telemetry {}", cells.rate))
+                .block(shell_block(theme, "Performance")),
+            area,
+        );
+        return;
+    };
+    let summary = sample.value.summary();
+    let step_rate = summary
+        .step_rate_hz
+        .map_or_else(|| "event-driven".to_string(), format_rate);
+    let cells = runtime_performance_cells(telemetry_state);
+    let step = sample.value.step.as_ref();
+    let overflowed_rows = sample
+        .value
+        .overflow
+        .as_ref()
+        .map_or(0, |overflow| overflow.overflowed_rows);
+    let history = model.telemetry.runtime_status;
+    let title = if history.capacity_evictions == 0 {
+        "Portable performance".to_string()
+    } else {
+        format!(
+            "Portable performance · {} history evictions",
+            compact_count(history.capacity_evictions)
+        )
+    };
+    let inner_width = usize::from(area.width.saturating_sub(2));
+    let duration_mean = step.map_or_else(
+        || "n/a".to_string(),
+        |step| format_duration_ns(step.mean_duration_ns),
+    );
+    let duration_max = step.map_or_else(
+        || "n/a".to_string(),
+        |step| format_duration_ns(step.max_duration_ns),
+    );
+    let lateness_mean = step.map_or_else(
+        || "n/a".to_string(),
+        |step| format_duration_ns(step.mean_lateness_ns),
+    );
+    let lateness_max = step.map_or_else(
+        || "n/a".to_string(),
+        |step| format_duration_ns(step.max_lateness_ns),
+    );
+    let errors = compact_count(step.map_or(0, |step| step.errors));
+    let missed = compact_count(step.map_or(0, |step| step.missed_ticks));
+    let overruns = compact_count(step.map_or(0, |step| step.overruns));
+    let drops = compact_count(summary.drops);
+    let decode = compact_count(summary.decode_errors);
+    let truncated = compact_count(u64::from(sample.value.truncated));
+    let overflowed = compact_count(u64::from(overflowed_rows));
+    let high_pressure = summary
+        .high_water_pressure_pct
+        .map_or_else(|| "n/a".to_string(), |value| format!("{value:.0}%"));
+    let lines = if inner_width >= 86 {
+        vec![
+            Line::from(format!(
+                "rate step {step_rate} · message {} · duration mean {duration_mean} · max {duration_max}",
+                cells.rate
+            )),
+            Line::from(format!(
+                "peak budget {} · peak headroom {} · lateness mean {lateness_mean} · max {lateness_max}",
+                cells.budget, cells.headroom
+            )),
+            Line::from(format!(
+                "schedule errors {errors} · missed {missed} · overruns {overruns}"
+            )),
+            Line::from(format!(
+                "pressure {} · high {high_pressure} · loss {drops} · decode {decode} · trunc {truncated} · rows {overflowed}",
+                cells.pressure
+            )),
+        ]
+    } else {
+        vec![
+            Line::from(format!("step {step_rate} · msg {}", cells.rate)),
+            Line::from(format!(
+                "dur {duration_mean}/{duration_max} · late {lateness_mean}/{lateness_max}"
+            )),
+            Line::from(format!("err {errors} · miss {missed} · over {overruns}")),
+            Line::from(format!(
+                "p{}/{} l{drops} d{decode} t{truncated} r{overflowed}",
+                cells.pressure, high_pressure
+            )),
+        ]
+    };
+    frame.render_widget(
+        Paragraph::new(lines).block(shell_block(theme, &title)),
+        area,
+    );
+}
+
+fn draw_runtime_topics(
+    frame: &mut Frame,
+    theme: Theme,
+    state: &mut AppState,
+    telemetry_state: RuntimeTelemetryState<'_>,
+    area: Rect,
+) {
+    let RuntimeTelemetryState::Live(sample) = telemetry_state else {
+        state.set_runtime_topic_viewport(0, 1);
+        let cells = runtime_performance_cells(telemetry_state);
+        frame.render_widget(
+            Paragraph::new(format!("Topic telemetry {}", cells.rate))
+                .block(shell_block(theme, "Topics")),
+            area,
+        );
+        return;
+    };
+    let all_rows = sample
+        .value
+        .topics
+        .iter()
+        .chain(sample.value.overflow.iter())
+        .collect::<Vec<_>>();
+    let wide = area.width.saturating_sub(2) >= 70;
+    let header_height = usize::from(wide);
+    let visible = usize::from(area.height.saturating_sub(2))
+        .saturating_sub(header_height)
+        .max(1);
+    state.set_runtime_topic_viewport(all_rows.len(), visible);
+    let start = state.runtime_topic_offset;
+    let end = start.saturating_add(visible).min(all_rows.len());
+    let title = if all_rows.len() > visible {
+        format!(
+            "Topics · {}-{} of {} · Up/Down scroll",
+            start + 1,
+            end,
+            all_rows.len()
+        )
+    } else {
+        let overflowed = sample
+            .value
+            .overflow
+            .as_ref()
+            .map_or(0, |overflow| overflow.overflowed_rows);
+        if overflowed == 0 {
+            format!("Topics · {}", all_rows.len())
+        } else {
+            format!("Topics · {} · {overflowed} rows aggregated", all_rows.len())
+        }
+    };
+    let block = shell_block(theme, &title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rows = wide.then(|| {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner)
+    });
+    let body = rows.as_ref().map_or(inner, |rows| rows[1]);
+    let topic_width = usize::from(inner.width)
+        .saturating_sub(if wide { 57 } else { 18 })
+        .max(1);
+    if let Some(rows) = &rows {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                format!(
+                    "{:<topic_width$} {:<3} {:<4} {:>9} {:>6} {:>11} {:>11} {:>6}",
+                    "TOPIC", "DIR", "BUF", "RATE", "COUNT", "DEPTH", "HIGH", "LOSS"
+                ),
+                color::muted(theme),
+            )),
+            rows[0],
+        );
+    }
+    let lines = all_rows[start..end]
+        .iter()
+        .map(|row| {
+            let topic = sanitize_and_fit_cell(&row.topic, topic_width);
+            let direction = match row.direction {
+                RuntimeDirection::Publish => "pub",
+                RuntimeDirection::Subscribe => "sub",
+                RuntimeDirection::Mixed => "mix",
+            };
+            let buffer = match row.buffer_kind {
+                RuntimeBufferKind::Outbound => "out",
+                RuntimeBufferKind::Latest => "last",
+                RuntimeBufferKind::Subscriber => "sub",
+                RuntimeBufferKind::Mixed => "mix",
+            };
+            let loss = row
+                .drops
+                .saturating_add(row.latest_overwrites)
+                .saturating_add(row.bounded_evictions)
+                .saturating_add(row.decode_errors);
+            if wide {
+                Line::from(format!(
+                    "{topic} {direction:<3} {buffer:<4} {:>9} {:>6} {:>11} {:>11} {:>6}",
+                    format_rate(row.rate_hz),
+                    compact_count(row.count),
+                    format!(
+                        "{}/{}",
+                        compact_count(row.current_depth),
+                        compact_count(row.capacity)
+                    ),
+                    format!(
+                        "{}/{}",
+                        compact_count(row.high_water_depth),
+                        compact_count(row.capacity)
+                    ),
+                    compact_count(loss),
+                ))
+            } else {
+                Line::from(format!(
+                    "{topic} {:>8} n {:>6}",
+                    format_rate(row.rate_hz),
+                    compact_count(row.count),
+                ))
+            }
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), body);
+}
+
+fn draw_runtime_contracts_wide(
+    frame: &mut Frame,
+    theme: Theme,
+    metadata: Option<&phoxal_cli_core::session::stores::runtime::RuntimeParticipantMetadata>,
+    area: Rect,
+) {
+    let panels = Layout::default()
+        .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(vertical[1]);
+        .split(area);
     draw_contracts(
         frame,
         theme,
         "Inputs",
         metadata.map(|metadata| metadata.input_contracts.as_slice()),
-        io[0],
+        panels[0],
     );
     draw_contracts(
         frame,
         theme,
         "Outputs",
         metadata.map(|metadata| metadata.output_contracts.as_slice()),
-        io[1],
+        panels[1],
     );
 }
 
-pub(super) fn draw_contracts(
+fn draw_runtime_contracts_compact(
+    frame: &mut Frame,
+    theme: Theme,
+    metadata: Option<&phoxal_cli_core::session::stores::runtime::RuntimeParticipantMetadata>,
+    area: Rect,
+) {
+    let inputs = metadata
+        .map(|metadata| metadata.input_contracts.as_slice())
+        .unwrap_or_default();
+    let outputs = metadata
+        .map(|metadata| metadata.output_contracts.as_slice())
+        .unwrap_or_default();
+    let value_width = usize::from(area.width).saturating_sub(7).max(1);
+    let identity = |contracts: &[String]| {
+        if contracts.is_empty() {
+            "none".to_string()
+        } else {
+            sanitize_and_ellipsize(&contracts.join(" · "), value_width)
+        }
+    };
+    let input_identity = identity(inputs);
+    let output_identity = identity(outputs);
+    let inner_height = area.height.saturating_sub(2);
+    let lines = if inner_height >= 2 {
+        vec![
+            Line::from(format!("in  {input_identity}")),
+            Line::from(format!("out {output_identity}")),
+        ]
+    } else {
+        vec![Line::from(format!(
+            "I {input_identity} · O {output_identity}"
+        ))]
+    };
+    frame.render_widget(
+        Paragraph::new(lines).block(shell_block(
+            theme,
+            &format!("Contracts · {} in · {} out", inputs.len(), outputs.len()),
+        )),
+        area,
+    );
+}
+
+fn draw_contracts(
     frame: &mut Frame,
     theme: Theme,
     title: &str,
@@ -317,7 +864,7 @@ pub(super) fn draw_contracts(
                             "• {}",
                             sanitize_and_ellipsize(
                                 contract,
-                                usize::from(area.width).saturating_sub(4).max(1)
+                                usize::from(area.width).saturating_sub(4).max(1),
                             )
                         ))
                     })

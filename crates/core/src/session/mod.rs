@@ -7,15 +7,18 @@ pub mod launch_env;
 pub mod log;
 pub mod mode;
 pub mod participant_kind;
+pub mod reconcile;
 pub mod state;
 pub mod stores;
 pub mod telemetry;
 
 pub use board::{BoardSnapshot, ParticipantLaunchCommand, ParticipantState, ParticipantStatus};
-pub use log::{LogSeverity, LogSource, RoutedLogLine};
+pub use log::{LogScope, LogSeverity, LogSource, RoutedLogLine, RoutedLogUpdate};
 pub use mode::SessionMode;
 pub use participant_kind::ParticipantKind;
 pub use telemetry::{
-    ClockObservation, ClockSample, DiskSample, HostSample, JoypadCommand, JoypadDevice,
-    JoypadDeviceStatus, JoypadDevicesSample, RouterMetricsSample, TelemetrySnapshot, TopicMetric,
+    ClockObservation, ClockSample, DeviceDiskSample, DeviceSample, JoypadCommand, JoypadDevice,
+    JoypadDeviceStatus, JoypadDevicesSample, RouterMetricsSample, RuntimeBufferKind,
+    RuntimeDirection, RuntimeFeedStatus, RuntimePerformanceSample, RuntimePerformanceSummary,
+    RuntimeStepSample, RuntimeTopicSample, TelemetrySnapshot, TopicMetric,
 };

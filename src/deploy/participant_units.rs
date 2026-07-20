@@ -21,8 +21,16 @@ pub(crate) fn participant_unit(
     privileges: &UnitPrivileges,
 ) -> String {
     let id = &participant.launch.participant_id;
+    let retention_order = if is_tool_execution(&participant.execution) {
+        String::new()
+    } else {
+        format!(
+            " phoxal-participant-tool-bus-{robot}.service phoxal-participant-tool-log-{robot}.service",
+            robot = participant.launch.robot_id
+        )
+    };
     let mut unit = format!(
-        "[Unit]\nDescription=Phoxal participant {id}\nAfter=network-online.target phoxal-router.service\nWants=network-online.target\nPartOf=phoxal.target\nStartLimitIntervalSec={}\nStartLimitBurst={START_LIMIT_BURST}\n\n[Service]\nType=notify\nEnvironmentFile={OPT_ENV}/{id}.env\nExecStart={OPT_BIN}/{binary}\n\nRestart=on-failure\nRestartSec=2s\nTimeoutStopSec=5s\nStateDirectory=phoxal\nWatchdogSec={WATCHDOG_SEC}s\n\nUser=phoxal\nGroup=phoxal\nNoNewPrivileges=true\n",
+        "[Unit]\nDescription=Phoxal participant {id}\nAfter=network-online.target phoxal-router.service{retention_order}\nWants=network-online.target{retention_order}\nPartOf=phoxal.target\nStartLimitIntervalSec={}\nStartLimitBurst={START_LIMIT_BURST}\n\n[Service]\nType=notify\nEnvironmentFile={OPT_ENV}/{id}.env\nExecStart={OPT_BIN}/{binary}\n\nRestart=on-failure\nRestartSec=2s\nTimeoutStopSec=5s\nStateDirectory=phoxal\nWatchdogSec={WATCHDOG_SEC}s\n\nUser=phoxal\nGroup=phoxal\nNoNewPrivileges=true\n",
         START_LIMIT_INTERVAL.as_secs()
     );
     if !privileges.supplementary_groups.is_empty() {
@@ -51,6 +59,14 @@ pub(crate) fn participant_unit(
     unit
 }
 
+fn is_tool_execution(execution: &ParticipantExecution) -> bool {
+    match execution {
+        ParticipantExecution::OfficialTool { .. } => true,
+        ParticipantExecution::SourceArtifact { kind, .. } => kind == "tool",
+        _ => false,
+    }
+}
+
 pub(crate) fn participant_unit_name(participant_id: &str) -> String {
     format!("phoxal-participant-{participant_id}.service")
 }
@@ -65,6 +81,9 @@ pub(crate) fn participant_binary_name(
         ParticipantExecution::UserService { .. } => Ok(participant.artifact_id.clone()),
         ParticipantExecution::SourceArtifact { kind, .. } if kind == "service" => {
             Ok(format!("service-{}", participant.artifact_id))
+        }
+        ParticipantExecution::SourceArtifact { kind, .. } if kind == "tool" => {
+            Ok(participant.artifact_id.clone())
         }
         ParticipantExecution::SourceArtifact { kind, .. } => {
             Ok(format!("{kind}-{}", participant.artifact_id))
@@ -90,6 +109,15 @@ pub(crate) fn participant_binary_name(
                     )
                 })
         }
+        ParticipantExecution::OfficialTool { .. } => official_plans
+            .get(&participant.artifact_id)
+            .map(|artifact| artifact.install_binary_name.clone())
+            .ok_or_else(|| {
+                anyhow!(
+                    "official tool participant {} has no staged artifact plan",
+                    participant.artifact_id
+                )
+            }),
     }
     .and_then(|binary| {
         if source_builds.contains_key(&binary)

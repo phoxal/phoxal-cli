@@ -173,6 +173,13 @@ impl RuntimeStore {
         self.metadata.entry(id.to_string()).or_default().origin = origin;
     }
 
+    #[doc(hidden)]
+    pub fn set_test_contracts(&mut self, id: &str, inputs: Vec<String>, outputs: Vec<String>) {
+        let metadata = self.metadata.entry(id.to_string()).or_default();
+        metadata.input_contracts = inputs;
+        metadata.output_contracts = outputs;
+    }
+
     pub fn observe_board(&mut self, board: &BoardSnapshot) {
         self.observe_board_at(board, Instant::now());
     }
@@ -227,7 +234,8 @@ impl RuntimeStore {
 
 fn artifact_ref_for_execution(execution: &ParticipantExecution) -> Option<String> {
     match execution {
-        ParticipantExecution::OfficialArtifact { artifact_ref } => Some(artifact_ref.clone()),
+        ParticipantExecution::OfficialArtifact { artifact_ref }
+        | ParticipantExecution::OfficialTool { artifact_ref } => Some(artifact_ref.clone()),
         ParticipantExecution::UserService { crate_dir } => {
             Some(format!("local user service: {}", crate_dir.display()))
         }
@@ -244,6 +252,7 @@ fn origin_for_execution(execution: &ParticipantExecution) -> RuntimeOrigin {
     match execution {
         ParticipantExecution::UserService { .. } => RuntimeOrigin::UserService,
         ParticipantExecution::OfficialArtifact { .. }
+        | ParticipantExecution::OfficialTool { .. }
         | ParticipantExecution::SourceArtifact { .. }
         | ParticipantExecution::ComponentDriver { .. } => RuntimeOrigin::Framework,
     }
