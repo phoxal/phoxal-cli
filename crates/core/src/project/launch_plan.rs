@@ -18,6 +18,7 @@ pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
 pub const SITE_INFRASTRUCTURE_ROUTER: &str = "infrastructure-router";
 pub const SITE_TOOL_BUS: &str = "tool-bus";
 pub const SITE_TOOL_JOYPAD: &str = "tool-joypad";
+pub const ROBOT_TOOL_LOG: &str = "tool-log";
 /// The host-resource-meter tool (CLI-UX Phase 3/4): a standard, hard-required
 /// bus participant exactly like `tool-joypad`, published in every mode (Run,
 /// Deploy, Webots) - a host meter is useful everywhere, including a deployed
@@ -50,7 +51,8 @@ pub fn simulator_controller_provider_id(robot_id: &str) -> String {
 /// sites, silently excluding telemetry's declared graph contracts from
 /// validation even though telemetry is started and readiness-waited exactly
 /// like the other two standard tools.
-pub const STANDARD_SITE_TOOLS: &[&str] = &[SITE_TOOL_BUS, SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY];
+pub const STANDARD_SITE_TOOLS: &[&str] = &[SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY];
+pub const STANDARD_ROBOT_TOOLS: &[&str] = &[SITE_TOOL_BUS, ROBOT_TOOL_LOG];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -134,6 +136,7 @@ pub enum LaunchOwnership {
 #[serde(tag = "execution", rename_all = "snake_case")]
 pub enum ParticipantExecution {
     OfficialArtifact { artifact_ref: String },
+    OfficialTool { artifact_ref: String },
     UserService { crate_dir: PathBuf },
     SourceArtifact { kind: String, crate_dir: PathBuf },
     ComponentDriver { crate_dir: PathBuf },
@@ -307,6 +310,35 @@ fn build_robot_launch(
             execution,
             launch,
             launch_ownership,
+        });
+    }
+    for &tool_name in STANDARD_ROBOT_TOOLS {
+        let tool = resolved_tool(input.resolved, tool_name)?;
+        participants.push(ParticipantLaunchRecord {
+            artifact_id: tool.name.clone(),
+            execution: tool.path_override.as_ref().map_or_else(
+                || ParticipantExecution::OfficialTool {
+                    artifact_ref: tool_artifact_ref(tool),
+                },
+                |crate_dir| ParticipantExecution::SourceArtifact {
+                    kind: "tool".to_string(),
+                    crate_dir: crate_dir.clone(),
+                },
+            ),
+            launch: ParticipantLaunch {
+                participant_id: tool.name.clone(),
+                namespace: input.resolved.robot.robot.namespace.clone(),
+                robot_id: input.resolved.robot.robot.id.clone(),
+                bus: BusProfile {
+                    connect_endpoints: vec![DEFAULT_ROUTER_CONNECT.to_string()],
+                },
+                clock: ClockMode::Real,
+                config: None,
+                robot_root: Some(robot_root_for_mode(mode, input.project_root)),
+                component_instance: None,
+                shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
+            },
+            launch_ownership: LaunchOwnership::CliManaged,
         });
     }
     participants.sort_by(|left, right| {
@@ -604,7 +636,20 @@ mod tests {
                 .iter()
                 .map(|site| site.id.as_str())
                 .collect::<Vec<_>>(),
-            vec![SITE_TOOL_BUS, SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY]
+            vec![SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY]
+        );
+        assert_eq!(
+            plan.robots[0]
+                .participants
+                .iter()
+                .filter_map(|participant| match participant.execution {
+                    ParticipantExecution::OfficialTool { .. } => {
+                        Some(participant.launch.participant_id.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![SITE_TOOL_BUS, ROBOT_TOOL_LOG]
         );
         let mission = plan.robots[0]
             .participants
@@ -824,6 +869,7 @@ robot:
     fn add_site_tools(resolved: &mut ResolvedRobot) {
         resolved.tools.push(tool(SITE_TOOL_BUS));
         resolved.tools.push(tool(SITE_TOOL_JOYPAD));
+        resolved.tools.push(tool(ROBOT_TOOL_LOG));
         resolved.tools.push(tool(SITE_TOOL_TELEMETRY));
     }
 

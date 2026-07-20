@@ -39,6 +39,13 @@ impl LogStore {
         self.record_at(line, Instant::now());
     }
 
+    pub fn replace_bus(&mut self, lines: Vec<RoutedLogLine>) {
+        self.all.retain(|line| line.source != LogSource::Bus);
+        for line in lines {
+            self.record(line);
+        }
+    }
+
     #[doc(hidden)]
     pub fn record_at(&mut self, line: RoutedLogLine, received_at: Instant) {
         let participant = sanitize_terminal_text(&line.participant);
@@ -216,6 +223,22 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn snapshot_replaces_only_bus_owned_lines() {
+        let mut store = LogStore::new();
+        store.record(line("drive", LogSource::Raw, "booting"));
+        store.record(line("drive", LogSource::Bus, "old retained"));
+
+        store.replace_bus(vec![line("drive", LogSource::Bus, "snapshot")]);
+
+        let lines = store.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "booting");
+        assert_eq!(lines[0].source, LogSource::Raw);
+        assert_eq!(lines[1].text, "snapshot");
+        assert_eq!(lines[1].source, LogSource::Bus);
     }
 
     #[test]

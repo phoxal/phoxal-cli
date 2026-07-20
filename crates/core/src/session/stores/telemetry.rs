@@ -50,6 +50,23 @@ impl TelemetryStore {
         self.router = Some(Timestamped::new(sample, now));
     }
 
+    pub fn install_router_history(
+        &mut self,
+        now: Instant,
+        samples: Vec<RouterMetricsSample>,
+        current: Option<RouterMetricsSample>,
+    ) {
+        self.router_throughput_history.clear();
+        let keep_from = samples.len().saturating_sub(ROUTER_HISTORY_CAPACITY);
+        for sample in &samples[keep_from..] {
+            self.router_throughput_history
+                .push_back(Timestamped::new(sample.throughput_msg_s, now));
+        }
+        self.router = current
+            .or_else(|| samples.last().cloned())
+            .map(|sample| Timestamped::new(sample, now));
+    }
+
     pub fn record_joypad(&mut self, now: Instant, sample: JoypadDevicesSample) {
         self.joypad = Some(Timestamped::new(sample, now));
     }
@@ -117,5 +134,40 @@ mod tests {
             store.router_throughput_history().front().unwrap().value,
             3.0
         );
+    }
+
+    #[test]
+    fn snapshot_replaces_and_bounds_router_history() {
+        let mut store = TelemetryStore::default();
+        let now = Instant::now();
+        store.record_router(
+            now,
+            RouterMetricsSample {
+                throughput_msg_s: -1.0,
+                ..RouterMetricsSample::default()
+            },
+        );
+        let samples = (0..(ROUTER_HISTORY_CAPACITY + 3))
+            .map(|index| RouterMetricsSample {
+                throughput_msg_s: index as f32,
+                ..RouterMetricsSample::default()
+            })
+            .collect();
+        let current = RouterMetricsSample {
+            throughput_msg_s: 99.0,
+            ..RouterMetricsSample::default()
+        };
+
+        store.install_router_history(now, samples, Some(current));
+
+        assert_eq!(
+            store.router_throughput_history().len(),
+            ROUTER_HISTORY_CAPACITY
+        );
+        assert_eq!(
+            store.router_throughput_history().front().unwrap().value,
+            3.0
+        );
+        assert_eq!(store.router().unwrap().value.throughput_msg_s, 99.0);
     }
 }

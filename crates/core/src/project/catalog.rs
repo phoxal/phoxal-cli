@@ -295,6 +295,7 @@ impl std::fmt::Display for ArtifactKind {
 pub const OFFICIAL_TOOLS: &[(&str, &str)] = &[
     ("bus", "phoxal/tool-bus"),
     ("joypad", "phoxal/tool-joypad"),
+    ("log", "phoxal/tool-log"),
     ("telemetry", "phoxal/tool-telemetry"),
 ];
 

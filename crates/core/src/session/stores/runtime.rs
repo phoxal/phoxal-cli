@@ -227,7 +227,8 @@ impl RuntimeStore {
 
 fn artifact_ref_for_execution(execution: &ParticipantExecution) -> Option<String> {
     match execution {
-        ParticipantExecution::OfficialArtifact { artifact_ref } => Some(artifact_ref.clone()),
+        ParticipantExecution::OfficialArtifact { artifact_ref }
+        | ParticipantExecution::OfficialTool { artifact_ref } => Some(artifact_ref.clone()),
         ParticipantExecution::UserService { crate_dir } => {
             Some(format!("local user service: {}", crate_dir.display()))
         }
@@ -244,6 +245,7 @@ fn origin_for_execution(execution: &ParticipantExecution) -> RuntimeOrigin {
     match execution {
         ParticipantExecution::UserService { .. } => RuntimeOrigin::UserService,
         ParticipantExecution::OfficialArtifact { .. }
+        | ParticipantExecution::OfficialTool { .. }
         | ParticipantExecution::SourceArtifact { .. }
         | ParticipantExecution::ComponentDriver { .. } => RuntimeOrigin::Framework,
     }

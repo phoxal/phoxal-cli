@@ -34,8 +34,9 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
         }
         other => panic!("expected LaunchMode::Webots, got {other:?}"),
     }
-    // Router, joypad, and telemetry are all standard, hard-required site
-    // tools in every mode including `simulate` (product decision 9) - no
+    // Joypad and telemetry are standard, hard-required site tools, while
+    // bus and log retention are robot-scoped launch participants in every
+    // mode including `simulate` - no
     // opt-in flag, no graceful-degrade path. `fixture_catalog_for_tests`
     // auto-fills every `catalog::OFFICIAL_TOOLS` entry not explicitly listed
     // in `write_catalog` above, which is why joypad and telemetry resolve
@@ -49,9 +50,24 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
     assert_eq!(
         site_ids,
         vec![
-            phoxal_cli_core::project::launch_plan::SITE_TOOL_BUS,
             phoxal_cli_core::project::launch_plan::SITE_TOOL_JOYPAD,
             phoxal_cli_core::project::launch_plan::SITE_TOOL_TELEMETRY,
+        ]
+    );
+    assert_eq!(
+        plan.plan.robots[0]
+            .participants
+            .iter()
+            .filter_map(|participant| match participant.execution {
+                phoxal_cli_core::project::launch_plan::ParticipantExecution::OfficialTool {
+                    ..
+                } => Some(participant.launch.participant_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            phoxal_cli_core::project::launch_plan::SITE_TOOL_BUS,
+            phoxal_cli_core::project::launch_plan::ROBOT_TOOL_LOG,
         ]
     );
     assert_eq!(

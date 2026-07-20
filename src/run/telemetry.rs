@@ -9,14 +9,8 @@ pub(crate) fn start_telemetry_feeds_at(
     let Some((namespace, robot_id)) = robot_log_targets.first() else {
         return Vec::new();
     };
-    vec![
+    let mut feeds = vec![
         crate::telemetry::start_host_feed(
-            namespace.clone(),
-            robot_id.clone(),
-            connect.to_string(),
-            telemetry.clone(),
-        ),
-        crate::telemetry::start_router_metrics_feed(
             namespace.clone(),
             robot_id.clone(),
             connect.to_string(),
@@ -34,5 +28,14 @@ pub(crate) fn start_telemetry_feeds_at(
             connect.to_string(),
             telemetry.clone(),
         ),
-    ]
+    ];
+    feeds.extend(robot_log_targets.iter().map(|(namespace, robot_id)| {
+        crate::telemetry::start_router_metrics_feed(
+            namespace.clone(),
+            robot_id.clone(),
+            connect.to_string(),
+            telemetry.clone(),
+        )
+    }));
+    feeds
 }

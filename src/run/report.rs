@@ -35,6 +35,7 @@ pub(crate) fn launch_kind_label(execution: Option<&ParticipantExecution>) -> &'s
         None => "site-tool",
         Some(
             ParticipantExecution::OfficialArtifact { .. }
+            | ParticipantExecution::OfficialTool { .. }
             | ParticipantExecution::SourceArtifact { .. },
         ) => "official",
         Some(ParticipantExecution::UserService { .. }) => "user-service",

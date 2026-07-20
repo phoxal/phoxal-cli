@@ -248,7 +248,7 @@ pub enum ResolvedComponentSource {
     Catalog,
 }
 
-/// A resolved native site artifact (`tool-bus`, `tool-joypad`, or
+/// A resolved native artifact (`tool-bus`, `tool-log`, `tool-joypad`, or
 /// `infrastructure-router`). `name` is the short,
 /// launch-safe kind-qualified id used for participant/site ids, systemd unit
 /// names, and env var keys (`SITE_TOOL_BUS` etc.); `package` is the

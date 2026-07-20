@@ -7,12 +7,13 @@ pub mod launch_env;
 pub mod log;
 pub mod mode;
 pub mod participant_kind;
+pub mod reconcile;
 pub mod state;
 pub mod stores;
 pub mod telemetry;
 
 pub use board::{BoardSnapshot, ParticipantLaunchCommand, ParticipantState, ParticipantStatus};
-pub use log::{LogSeverity, LogSource, RoutedLogLine};
+pub use log::{LogSeverity, LogSource, RoutedLogLine, RoutedLogUpdate};
 pub use mode::SessionMode;
 pub use participant_kind::ParticipantKind;
 pub use telemetry::{

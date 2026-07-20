@@ -95,7 +95,7 @@ pub(crate) fn substitution_topic_summary(substitution: &SubstitutionRecord) -> S
 }
 
 /// Site tool labels are derived straight from the resolved `LaunchPlan` (Part
-/// 3/6): router, `tool-joypad`, and `tool-telemetry` are standard, hard-
+/// 3/6): `tool-joypad` and `tool-telemetry` are standard, hard-
 /// required site tools in every mode including Webots (product decision 9),
 /// so they always appear here alongside the Webots app itself. This function
 /// never needs `options` - it replaces the old `SimulatePlan::native_tools`

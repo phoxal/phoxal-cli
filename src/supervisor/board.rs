@@ -2,7 +2,7 @@
 
 use super::{
     BoardSnapshot, LogSeverity, LogSource, ParticipantLaunchCommand, ParticipantState,
-    ParticipantStatus, RoutedLogLine, bounded_chars, bounded_log_text,
+    ParticipantStatus, RoutedLogLine, RoutedLogUpdate, bounded_chars, bounded_log_text,
 };
 use phoxal_cli_core::session::ParticipantKind;
 use std::collections::BTreeSet;
@@ -34,7 +34,7 @@ pub struct BoardBackend {
     /// full channel here just means a redraw is overdue - `route_log` drops
     /// the newest line rather than blocking the log-subscriber task that
     /// calls it.
-    log_sink: Arc<Mutex<Option<mpsc::Sender<RoutedLogLine>>>>,
+    log_sink: Arc<Mutex<Option<mpsc::Sender<RoutedLogUpdate>>>>,
     /// First-seen unknown bus ids already disclosed to the operator. The set
     /// is deliberately small: an untrusted publisher cannot turn diagnostics
     /// about rejected ids into another unbounded allocation vector.
@@ -240,7 +240,7 @@ impl BoardBackend {
     /// Register the live [`RoutedLogLine`] sink for this session's display
     /// (a TUI). Replaces any previous sink - only one live display exists per
     /// session.
-    pub fn set_log_sink(&self, sender: mpsc::Sender<RoutedLogLine>) {
+    pub fn set_log_sink(&self, sender: mpsc::Sender<RoutedLogUpdate>) {
         *self.log_sink.lock().expect("log sink mutex poisoned") = Some(sender);
     }
 
@@ -261,13 +261,13 @@ impl BoardBackend {
         source: LogSource,
         severity: LogSeverity,
         text: impl Into<String>,
-    ) {
+    ) -> bool {
         let text = bounded_log_text(&text.into());
         if !self.try_append_log(id, text.clone()) {
             if source == LogSource::Bus {
                 self.disclose_unknown_bus_id(id, "log");
             }
-            return;
+            return false;
         }
         let sink = self.log_sink.lock().expect("log sink mutex poisoned");
         if let Some(sender) = sink.as_ref() {
@@ -275,13 +275,33 @@ impl BoardBackend {
             // (no live TUI) both just mean this line never reaches the
             // scrollback - never worth blocking the caller (a bus-log
             // subscriber or output-reader task) over.
-            let _ = sender.try_send(RoutedLogLine {
-                participant: id.to_string(),
-                source,
-                severity,
-                text,
-            });
+            return sender
+                .try_send(RoutedLogUpdate::Append(RoutedLogLine {
+                    participant: id.to_string(),
+                    source,
+                    severity,
+                    text,
+                }))
+                .is_ok();
         }
+        true
+    }
+
+    /// Install one complete tool-log snapshot as the bus-derived presentation
+    /// state. Returns false when the bounded display channel dropped the
+    /// replacement so the adapter can query again.
+    pub fn replace_bus_logs(&self, lines: Vec<RoutedLogLine>) -> bool {
+        let mut accepted = Vec::with_capacity(lines.len());
+        for line in lines {
+            if self.try_append_log(&line.participant, line.text.clone()) {
+                accepted.push(line);
+            } else {
+                self.disclose_unknown_bus_id(&line.participant, "log");
+            }
+        }
+        let sink = self.log_sink.lock().expect("log sink mutex poisoned");
+        sink.as_ref()
+            .is_none_or(|sender| sender.try_send(RoutedLogUpdate::Replace(accepted)).is_ok())
     }
 
     fn disclose_unknown_bus_id(&self, id: &str, signal: &'static str) {

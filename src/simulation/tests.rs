@@ -236,7 +236,7 @@ fn one_instance_substitution_is_checked_and_rendered() -> Result<()> {
     // never gets a CLI-spawned process (Part 5).
     assert_eq!(
         participant_ids(&plan),
-        vec!["drive", controller_id.as_str()]
+        vec!["drive", controller_id.as_str(), "tool-bus", "tool-log"]
     );
     Ok(())
 }
@@ -369,7 +369,13 @@ fn path_overridden_simulators_use_the_same_provider_ids_as_official() -> Result<
 
     assert_eq!(
         participant_ids(&plan),
-        vec!["drive", controller_id.as_str(), supervisor_id.as_str()]
+        vec![
+            "drive",
+            controller_id.as_str(),
+            supervisor_id.as_str(),
+            "tool-bus",
+            "tool-log"
+        ]
     );
     for id in [&controller_id, &supervisor_id] {
         let participant = plan.robots[0]
@@ -435,7 +441,13 @@ fn sim_launch_set_matches_checked_robot_participants_without_drivers() -> Result
 
     assert_eq!(
         participant_ids(&plan),
-        vec!["drive", "mission", controller_id.as_str()]
+        vec![
+            "drive",
+            "mission",
+            controller_id.as_str(),
+            "tool-bus",
+            "tool-log"
+        ]
     );
     assert_eq!(
         plan.robots[0]
@@ -1229,6 +1241,9 @@ fn add_site_tools(resolved: &mut ResolvedRobot) {
         .tools
         .push(tool(phoxal_cli_core::project::launch_plan::SITE_TOOL_BUS));
     resolved.tools.push(tool(SITE_TOOL_JOYPAD));
+    resolved
+        .tools
+        .push(tool(phoxal_cli_core::project::launch_plan::ROBOT_TOOL_LOG));
     resolved.tools.push(tool(SITE_TOOL_TELEMETRY));
 }
 

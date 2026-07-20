@@ -1422,15 +1422,15 @@ fn dry_run_stays_offline_for_catalog_resolved_component_driver() -> Result<()> {
     Ok(())
 }
 
-/// CLI-UX Phase 4: deploy now ships EVERY standard site tool
-/// (`tool-router`, `tool-joypad`, `tool-telemetry`), not just the
-/// router - each gets its own unit ordered after the router, and
+/// Deploy ships the site tools (`tool-joypad`, `tool-telemetry`) and the
+/// per-robot retention tools (`tool-bus`, `tool-log`) alongside the router.
+/// Each gets its own unit ordered after the router, and
 /// `tool-joypad` carries the `/dev/input` tool-privilege grant
 /// (`unit_privileges_for_tool`). `write_basic_project`'s fixture catalog
 /// auto-fills every `OFFICIAL_TOOLS`/`OFFICIAL_OPTIONAL_TOOLS` entry
 /// (`catalog::fixture_catalog_for_tests`), so all three resolve here.
 #[test]
-fn privileged_tool_graph_renders_router_joypad_and_telemetry_units() -> Result<()> {
+fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;
     let temp = tempfile::tempdir()?;
     write_basic_project(temp.path())?;
@@ -1466,7 +1466,12 @@ fn privileged_tool_graph_renders_router_joypad_and_telemetry_units() -> Result<(
             .env_files
             .contains_key("/opt/phoxal/active/env/router.env")
     );
-    for env_name in ["tool-joypad.env", "tool-telemetry.env"] {
+    for env_name in [
+        "tool-joypad.env",
+        "tool-telemetry.env",
+        "tool-bus.env",
+        "tool-log.env",
+    ] {
         let contents = payload
             .env_files
             .get(&format!("/opt/phoxal/active/env/{env_name}"))
@@ -1490,6 +1495,21 @@ fn privileged_tool_graph_renders_router_joypad_and_telemetry_units() -> Result<(
             .unit_names
             .contains(&"phoxal-tool-telemetry.service".to_string())
     );
+    for tool in ["tool-bus", "tool-log"] {
+        let unit_name = format!("phoxal-participant-{tool}.service");
+        let unit = payload
+            .rendered_units
+            .get(&format!("/etc/systemd/system/{unit_name}"))
+            .unwrap_or_else(|| panic!("{tool} participant unit must render"));
+        assert!(unit.contains("After=network-online.target phoxal-router.service"));
+        assert!(
+            !unit.contains(
+                "phoxal-participant-tool-bus.service phoxal-participant-tool-log.service"
+            ),
+            "retention tools must not order after themselves: {unit}"
+        );
+        assert!(payload.unit_names.contains(&unit_name));
+    }
     Ok(())
 }
 

@@ -16,13 +16,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
-use phoxal::bus::{ContractBody, Publish, Publisher, Subscribe, Subscriber, Topic};
+use phoxal::bus::{
+    ContractBody, DEFAULT_QUERY_TIMEOUT, Publish, Publisher, Querier, Subscribe, Subscriber, Topic,
+};
 use phoxal::raw::{Bus, BusConfig, host_time};
 use phoxal_api::{v1 as state_api, v2 as api};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::supervisor::wait_for_endpoint;
+use phoxal_cli_core::session::reconcile::{Cursor, ReconcileOutcome, Reconciler, Sequenced};
 use phoxal_cli_core::session::stores::log::sanitize_terminal_text;
 use phoxal_cli_core::session::stores::telemetry::{TelemetryStore, Timestamped};
 use phoxal_cli_core::session::telemetry::{
@@ -82,7 +85,7 @@ fn host_sample_from(body: api::telemetry::Host) -> HostSample {
     }
 }
 
-fn topic_metric_from(body: api::router::TopicMetric) -> TopicMetric {
+fn topic_metric_from(body: state_api::tool::bus::TopicMetric) -> TopicMetric {
     let aggregate_overflow = body.topic.is_empty() && body.from_participant.is_empty();
     TopicMetric {
         topic: if aggregate_overflow {
@@ -101,7 +104,7 @@ fn topic_metric_from(body: api::router::TopicMetric) -> TopicMetric {
     }
 }
 
-fn router_metrics_sample_from(body: api::router::Metrics) -> RouterMetricsSample {
+fn router_metrics_sample_from(body: state_api::tool::bus::Window) -> RouterMetricsSample {
     let received_topics = body.topics.len();
     let keep = if received_topics > MAX_ROUTER_TOPICS {
         MAX_ROUTER_TOPICS.saturating_sub(1)
@@ -298,6 +301,17 @@ impl TelemetryBackend {
             .record_router(Instant::now(), sample);
     }
 
+    fn install_router(
+        &self,
+        samples: Vec<RouterMetricsSample>,
+        current: Option<RouterMetricsSample>,
+    ) {
+        self.inner
+            .lock()
+            .expect("telemetry mutex poisoned")
+            .install_router_history(Instant::now(), samples, current);
+    }
+
     fn record_joypad(&self, sample: JoypadDevicesSample) {
         self.inner
             .lock()
@@ -429,7 +443,7 @@ async fn host_feed_loop(
     result
 }
 
-/// Subscribe v2::router::Metrics for the global Bus page.
+/// Reconcile tool-bus's complete bounded snapshot with its live follow feed.
 pub fn start_router_metrics_feed(
     namespace: String,
     robot_id: String,
@@ -466,25 +480,138 @@ async fn router_metrics_feed_loop(
     let bus = Bus::open(BusConfig {
         namespace,
         robot_id,
-        participant: "phoxal-cli-telemetry-router".to_string(),
+        participant: "phoxal-cli-tool-bus-consumer".to_string(),
         incarnation: 0,
         connect_endpoints: vec![connect],
     })
     .await
-    .map_err(|error| anyhow!("failed to open bus router/metrics subscription: {error}"))?;
+    .map_err(|error| anyhow!("failed to open tool-bus consumer: {error}"))?;
     let result = async {
-        let topic = Topic::<Subscribe<api::router::Metrics>>::new_static(
-            <api::router::Metrics as ContractBody>::TOPIC,
-        );
-        let subscriber = Subscriber::<api::router::Metrics>::new(&bus, &topic, 32).await?;
-        loop {
-            let received = subscriber.recv().await?;
-            telemetry.record_router(router_metrics_sample_from(received.body));
+        let follow_topic = state_api::topic::new().tool().bus().follow();
+        let subscriber =
+            Subscriber::<state_api::tool::bus::Follow>::new(&bus, &follow_topic, 128).await?;
+        let snapshot_topic = state_api::topic::new().tool().bus().snapshot();
+        let querier = Querier::<
+            state_api::tool::bus::SnapshotRequest,
+            state_api::tool::bus::Snapshot,
+        >::new(bus.clone(), &snapshot_topic, DEFAULT_QUERY_TIMEOUT)?;
+        let mut reconciler = Reconciler::new(256);
+        let mut local_drops = subscriber.dropped();
+
+        'query: loop {
+            reconciler.begin_query();
+            let query = querier.query(state_api::tool::bus::SnapshotRequest {});
+            tokio::pin!(query);
+            loop {
+                tokio::select! {
+                    response = &mut query => {
+                        let snapshot = response.map_err(|error| anyhow!("tool-bus snapshot query failed: {error}"))?;
+                        let generation = snapshot.cursor.generation.clone();
+                        let windows = snapshot.windows.into_iter().map(|window| BusWindowFollow {
+                            cursor: Cursor { generation: generation.clone(), sequence: window.sequence },
+                            window,
+                        }).collect();
+                        let outcome = reconciler.install(
+                            Cursor { generation: snapshot.cursor.generation, sequence: snapshot.cursor.sequence },
+                            windows,
+                        );
+                        if !apply_bus_outcome(
+                            telemetry,
+                            outcome,
+                            snapshot.current.map(router_metrics_sample_from),
+                        ) {
+                            let _ = reconciler.local_drop();
+                            continue 'query;
+                        }
+                        break;
+                    }
+                    received = subscriber.recv() => {
+                        let received = received?;
+                        let observed = subscriber.dropped();
+                        if observed != local_drops {
+                            local_drops = observed;
+                            let _ = reconciler.local_drop();
+                            continue 'query;
+                        }
+                        if matches!(reconciler.follow(BusWindowFollow::from(received.body)), ReconcileOutcome::Requery) {
+                            continue 'query;
+                        }
+                    }
+                }
+            }
+
+            loop {
+                let received = subscriber.recv().await?;
+                let observed = subscriber.dropped();
+                if observed != local_drops {
+                    local_drops = observed;
+                    let _ = reconciler.local_drop();
+                    continue 'query;
+                }
+                let outcome = reconciler.follow(BusWindowFollow::from(received.body));
+                if matches!(outcome, ReconcileOutcome::Requery)
+                    || !apply_bus_outcome(telemetry, outcome, None)
+                {
+                    continue 'query;
+                }
+            }
         }
     }
     .await;
-    close_feed_bus(&bus, "router/metrics").await;
+    close_feed_bus(&bus, "tool-bus").await;
     result
+}
+
+#[derive(Debug, Clone)]
+struct BusWindowFollow {
+    cursor: Cursor,
+    window: state_api::tool::bus::Window,
+}
+
+impl From<state_api::tool::bus::Follow> for BusWindowFollow {
+    fn from(follow: state_api::tool::bus::Follow) -> Self {
+        Self {
+            cursor: Cursor {
+                generation: follow.cursor.generation,
+                sequence: follow.cursor.sequence,
+            },
+            window: follow.window,
+        }
+    }
+}
+
+impl Sequenced for BusWindowFollow {
+    fn cursor(&self) -> Cursor {
+        self.cursor.clone()
+    }
+}
+
+fn apply_bus_outcome(
+    telemetry: &TelemetryBackend,
+    outcome: ReconcileOutcome<BusWindowFollow>,
+    current: Option<RouterMetricsSample>,
+) -> bool {
+    match outcome {
+        ReconcileOutcome::Installed { snapshot, replay } => {
+            telemetry.install_router(
+                snapshot
+                    .into_iter()
+                    .map(|item| router_metrics_sample_from(item.window))
+                    .collect(),
+                current,
+            );
+            for item in replay {
+                telemetry.record_router(router_metrics_sample_from(item.window));
+            }
+            true
+        }
+        ReconcileOutcome::Append(item) => {
+            telemetry.record_router(router_metrics_sample_from(item.window));
+            true
+        }
+        ReconcileOutcome::Buffered => true,
+        ReconcileOutcome::Requery => false,
+    }
 }
 
 /// Subscribe v2::joypad::Devices and own the Select, SetEnabled, and Rescan
@@ -635,7 +762,7 @@ mod tests {
 
     #[test]
     fn router_overflow_sentinel_is_presented_as_an_aggregate_row() {
-        let metric = topic_metric_from(api::router::TopicMetric {
+        let metric = topic_metric_from(state_api::tool::bus::TopicMetric {
             topic: String::new(),
             from_participant: String::new(),
             ingress_rate_hz: 7.0,
@@ -650,7 +777,7 @@ mod tests {
 
     #[test]
     fn remote_router_and_joypad_labels_are_sanitized_at_ingress() {
-        let metric = topic_metric_from(api::router::TopicMetric {
+        let metric = topic_metric_from(state_api::tool::bus::TopicMetric {
             topic: "v1/drive\u{1b}[31m/state".to_string(),
             from_participant: "drive\nspoof".to_string(),
             ingress_rate_hz: 1.0,
@@ -679,9 +806,10 @@ mod tests {
 
     #[test]
     fn oversized_remote_telemetry_is_bounded_and_disclosed() {
-        let router = router_metrics_sample_from(api::router::Metrics {
+        let router = router_metrics_sample_from(state_api::tool::bus::Window {
+            sequence: 1,
             topics: (0..(MAX_ROUTER_TOPICS + 20))
-                .map(|index| api::router::TopicMetric {
+                .map(|index| state_api::tool::bus::TopicMetric {
                     topic: format!("{}-{index}", "t".repeat(MAX_REMOTE_TEXT_CHARS * 2)),
                     from_participant: "p".repeat(MAX_REMOTE_TEXT_CHARS * 2),
                     ingress_rate_hz: 1.0,
@@ -754,22 +882,23 @@ mod tests {
 
     #[test]
     fn local_router_truncation_folds_into_an_existing_overflow_sentinel() {
-        let mut topics = vec![api::router::TopicMetric {
+        let mut topics = vec![state_api::tool::bus::TopicMetric {
             topic: String::new(),
             from_participant: String::new(),
             ingress_rate_hz: 100.0,
             count: 100,
         }];
-        topics.extend(
-            (0..(MAX_ROUTER_TOPICS + 20)).map(|index| api::router::TopicMetric {
+        topics.extend((0..(MAX_ROUTER_TOPICS + 20)).map(|index| {
+            state_api::tool::bus::TopicMetric {
                 topic: format!("v1/topic/{index}"),
                 from_participant: format!("producer-{index}"),
                 ingress_rate_hz: 1.0,
                 count: 1,
-            }),
-        );
+            }
+        }));
 
-        let router = router_metrics_sample_from(api::router::Metrics {
+        let router = router_metrics_sample_from(state_api::tool::bus::Window {
+            sequence: 1,
             topics,
             throughput_msg_s: 0.0,
             window_ns: 1,

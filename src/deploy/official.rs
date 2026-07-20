@@ -81,17 +81,31 @@ pub(crate) fn stage_official_artifacts(
         }
         artifacts.insert(runtime.package.clone(), plan);
     }
-    // Every standard site tool (`tool-router`, and - CLI-UX Phase 4 -
-    // `tool-joypad`/`tool-telemetry`) stages the same way: locate its
+    // Every standard tool (`infrastructure-router`, `tool-joypad`,
+    // `tool-telemetry`, `tool-bus`, and `tool-log`) stages the same way: locate its
     // resolved tool entry and, unless it is a local path-pin override, plan
     // its official binary. Generalized from a router-only block now that
-    // deploy ships every standard site tool, not just the router.
-    for site in &plan.site {
+    // deploy ships every standard tool, not just the router.
+    let requested_tools = plan
+        .site
+        .iter()
+        .map(|site| site.id.as_str())
+        .chain(plan.robots.iter().flat_map(|robot| {
+            robot.participants.iter().filter_map(|participant| {
+                matches!(
+                    participant.execution,
+                    ParticipantExecution::OfficialTool { .. }
+                )
+                .then_some(participant.artifact_id.as_str())
+            })
+        }))
+        .collect::<BTreeSet<_>>();
+    for tool_name in requested_tools {
         let tool = resolved
             .tools
             .iter()
-            .find(|tool| tool.name == site.id)
-            .with_context(|| format!("resolved deploy graph is missing site tool {}", site.id))?;
+            .find(|tool| tool.name == tool_name)
+            .with_context(|| format!("resolved deploy graph is missing tool {tool_name}"))?;
         if tool.path_override.is_some() {
             continue;
         }

@@ -27,10 +27,19 @@ pub enum LogSeverity {
 
 /// One routed log line, separate from the persisted board's short history so
 /// presentation can maintain its own bounded scrollback.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutedLogLine {
     pub participant: String,
     pub source: LogSource,
     pub severity: LogSeverity,
     pub text: String,
+}
+
+/// One update from the robot-owned retention tool to the presentation store.
+/// A snapshot replaces only bus-derived lines; raw process and diagnostic
+/// lines remain local presentation events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoutedLogUpdate {
+    Replace(Vec<RoutedLogLine>),
+    Append(RoutedLogLine),
 }

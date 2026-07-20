@@ -12,12 +12,13 @@ use anyhow::Result;
 use phoxal::participant::launch::env;
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
+use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 use phoxal_cli_core::project::launch_plan::SITE_INFRASTRUCTURE_ROUTER;
 use phoxal_cli_core::project::launch_plan::SITE_TOOL_JOYPAD;
 use phoxal_cli_core::project::launch_plan::SiteLaunch;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::session::launch_env::EncodedParticipantEnv;
-use phoxal_cli_core::session::launch_env::encode_participant_env;
+use phoxal_cli_core::session::launch_env::{encode_participant_env, encode_tool_env};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -43,7 +44,16 @@ pub(crate) fn render_env_files(
     }
 
     for participant in &robot.participants {
-        let encoded = encode_participant_env(&participant.launch)?;
+        let tool_execution = match &participant.execution {
+            ParticipantExecution::OfficialTool { .. } => true,
+            ParticipantExecution::SourceArtifact { kind, .. } => kind == "tool",
+            _ => false,
+        };
+        let encoded = if tool_execution {
+            encode_tool_env(&participant.launch)?
+        } else {
+            encode_participant_env(&participant.launch)?
+        };
         write_env_file(
             root,
             &format!("{}.env", participant.launch.participant_id),

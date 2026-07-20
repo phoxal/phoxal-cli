@@ -47,6 +47,13 @@ pub(crate) fn release_record(
                         .or_insert_with(|| release_official_artifact(artifact));
                 }
             }
+            ParticipantExecution::OfficialTool { .. } => {
+                if let Some(artifact) = official_plans.get(&participant.artifact_id) {
+                    artifacts
+                        .entry(artifact.artifact_id.clone())
+                        .or_insert_with(|| release_official_artifact(artifact));
+                }
+            }
             ParticipantExecution::UserService { .. } => {
                 if let Some(artifact) = source_builds.get(&participant.artifact_id) {
                     artifacts
@@ -57,6 +64,13 @@ pub(crate) fn release_record(
             ParticipantExecution::SourceArtifact { kind, .. } if kind == "service" => {
                 let id = format!("service-{}", participant.artifact_id);
                 if let Some(artifact) = source_builds.get(&id) {
+                    artifacts
+                        .entry(artifact.artifact_id.clone())
+                        .or_insert_with(|| release_source_artifact(artifact));
+                }
+            }
+            ParticipantExecution::SourceArtifact { kind, .. } if kind == "tool" => {
+                if let Some(artifact) = source_builds.get(&participant.artifact_id) {
                     artifacts
                         .entry(artifact.artifact_id.clone())
                         .or_insert_with(|| release_source_artifact(artifact));

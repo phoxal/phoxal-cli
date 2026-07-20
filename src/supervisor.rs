@@ -1,9 +1,5 @@
 use std::time::Duration;
 
-use phoxal_api::v1 as api;
-// The simulation clock lives in preview `v2`; log contracts use production
-// `v1`, while participant presence is Zenoh Liveliness rather than an API body.
-
 pub const RESTART_SEC: Duration = Duration::from_secs(2);
 pub const START_LIMIT_INTERVAL: Duration = Duration::from_secs(60);
 pub const START_LIMIT_BURST: usize = 5;
@@ -30,17 +26,7 @@ fn bounded_log_text(text: &str) -> String {
 pub use phoxal_cli_core::session::board::{
     BoardSnapshot, ParticipantLaunchCommand, ParticipantState, ParticipantStatus,
 };
-pub use phoxal_cli_core::session::log::{LogSeverity, LogSource, RoutedLogLine};
-
-fn log_severity(level: api::logs::Level) -> LogSeverity {
-    match level {
-        api::logs::Level::Trace => LogSeverity::Trace,
-        api::logs::Level::Debug => LogSeverity::Debug,
-        api::logs::Level::Info => LogSeverity::Info,
-        api::logs::Level::Warn => LogSeverity::Warn,
-        api::logs::Level::Error => LogSeverity::Error,
-    }
-}
+pub use phoxal_cli_core::session::log::{LogSeverity, LogSource, RoutedLogLine, RoutedLogUpdate};
 
 mod board;
 pub(crate) use board::BoardBackend;
@@ -74,9 +60,8 @@ mod lock;
 pub(crate) use lock::{SupervisorIdentity, SupervisorLock};
 mod bus;
 pub(crate) use bus::{
-    default_connect_endpoint, failed_expected_participants, logs_wildcard_topic_key,
-    missing_ready_participants, render_log_event, start_bus_log_subscriber, start_clock_feed,
-    start_liveliness_observer, wait_for_endpoint,
+    default_connect_endpoint, failed_expected_participants, missing_ready_participants,
+    start_bus_log_subscriber, start_clock_feed, start_liveliness_observer, wait_for_endpoint,
 };
 
 #[cfg(test)]
