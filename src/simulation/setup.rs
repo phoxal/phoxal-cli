@@ -223,6 +223,7 @@ pub(crate) async fn live_simulate_setup(
             &site_targets,
             &telemetry,
             &connect,
+            board.recovery_epoch_receiver(),
         ));
     }
 

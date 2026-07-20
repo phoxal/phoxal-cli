@@ -294,15 +294,15 @@ async fn live_run_setup(
         .await;
 
     let telemetry = crate::telemetry::TelemetryBackend::new();
+    let board = prepared.board;
     if renders_tui {
         background_tasks.extend(start_telemetry_feeds_at(
             &prepared.robot_log_targets,
             &telemetry,
             &connect,
+            board.recovery_epoch_receiver(),
         ));
     }
-
-    let board = prepared.board;
     let supervisor_options = SupervisorOptions {
         action_rx: Some(crate::supervisor::SupervisorActionReceiver::new(action_rx)),
         token,

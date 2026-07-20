@@ -5,6 +5,7 @@ pub(crate) fn start_telemetry_feeds_at(
     robot_log_targets: &[(String, String)],
     telemetry: &crate::telemetry::TelemetryBackend,
     connect: &str,
+    recovery_epochs: tokio::sync::watch::Receiver<u64>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let Some((namespace, robot_id)) = robot_log_targets.first() else {
         return Vec::new();
@@ -35,6 +36,7 @@ pub(crate) fn start_telemetry_feeds_at(
             robot_id.clone(),
             connect.to_string(),
             telemetry.clone(),
+            recovery_epochs.clone(),
         )
     }));
     feeds

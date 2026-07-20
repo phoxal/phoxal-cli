@@ -152,9 +152,11 @@ async fn closed_action_receiver_is_consumed_once_then_stays_pending() {
     );
 }
 
-#[test]
-fn recovery_epoch_clears_presence_and_preserves_webots_ownership() {
+#[tokio::test]
+async fn recovery_epoch_resets_reconcilers_and_preserves_webots_ownership() {
     let board = BoardBackend::new();
+    let mut log_reconciler = board.recovery_epoch_receiver();
+    let mut bus_reconciler = board.recovery_epoch_receiver();
     let mut webots =
         ParticipantStatus::new("webots", ParticipantKind::Tool, ParticipantState::Ready);
     webots.note = Some("CLI-managed Webots application".to_string());
@@ -181,6 +183,16 @@ fn recovery_epoch_clears_presence_and_preserves_webots_ownership() {
 
     assert_eq!(epoch, 1);
     assert_eq!(board.recovery_epoch(), 1);
+    tokio::time::timeout(Duration::from_millis(20), log_reconciler.changed())
+        .await
+        .expect("log reconciler reset must be prompt")
+        .expect("board retains the reset sender");
+    tokio::time::timeout(Duration::from_millis(20), bus_reconciler.changed())
+        .await
+        .expect("bus reconciler reset must be prompt")
+        .expect("board retains the reset sender");
+    assert_eq!(*log_reconciler.borrow_and_update(), epoch);
+    assert_eq!(*bus_reconciler.borrow_and_update(), epoch);
     assert!(!board.is_present("webots"));
     assert!(!board.is_present("simulator-webots-controller-robot"));
     let snapshot = board.snapshot();

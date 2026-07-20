@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 const NOT_PRESENT_NOTE: &str =
     "participant not present on the robot bus; process lifecycle is unchanged";
@@ -23,6 +23,7 @@ pub struct BoardBackend {
     /// key, producing continuous presence rather than another `Alive` event.
     presence: Arc<Mutex<PresenceState>>,
     recovery_epoch: Arc<AtomicU64>,
+    recovery_epoch_tx: watch::Sender<u64>,
     /// Optional live sink for [`RoutedLogLine`]s - set by
     /// `session::controller::SessionController::drive_supervision` once its
     /// `TuiDisplay` renderer exists, so it can maintain its own bounded
@@ -49,6 +50,7 @@ struct PresenceState {
 
 impl Default for BoardBackend {
     fn default() -> Self {
+        let (recovery_epoch_tx, _) = watch::channel(0);
         Self {
             inner: Arc::default(),
             presence: Arc::new(Mutex::new(PresenceState {
@@ -56,6 +58,7 @@ impl Default for BoardBackend {
                 ids: BTreeSet::new(),
             })),
             recovery_epoch: Arc::default(),
+            recovery_epoch_tx,
             log_sink: Arc::default(),
             unknown_bus_ids: Arc::default(),
         }
@@ -152,7 +155,9 @@ impl BoardBackend {
                 status.restart_count = 0;
             }
         }
-        self.recovery_epoch.fetch_add(1, Ordering::SeqCst) + 1
+        let epoch = self.recovery_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        self.recovery_epoch_tx.send_replace(epoch);
+        epoch
     }
 
     pub(crate) fn enable_presence_for_recovery(&self) {
@@ -160,6 +165,13 @@ impl BoardBackend {
             .lock()
             .expect("presence mutex poisoned")
             .enabled = true;
+    }
+
+    /// Subscribe to full-graph recovery resets. Consumers recreate transport
+    /// handles after every epoch so stale router sessions cannot strand a
+    /// snapshot/follow reconciler waiting on the dead graph.
+    pub(crate) fn recovery_epoch_receiver(&self) -> watch::Receiver<u64> {
+        self.recovery_epoch_tx.subscribe()
     }
 
     #[cfg(test)]

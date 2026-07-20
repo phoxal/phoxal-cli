@@ -449,20 +449,35 @@ pub fn start_router_metrics_feed(
     robot_id: String,
     connect: String,
     telemetry: TelemetryBackend,
+    mut recovery_epochs: watch::Receiver<u64>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             wait_for_endpoint(&connect).await;
-            match router_metrics_feed_loop(
+            let feed = router_metrics_feed_loop(
                 namespace.clone(),
                 robot_id.clone(),
                 connect.clone(),
                 &telemetry,
-            )
-            .await
-            {
-                Ok(()) => break,
-                Err(error) => {
+            );
+            tokio::pin!(feed);
+            let result = tokio::select! {
+                result = &mut feed => Some(result),
+                changed = recovery_epochs.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    tracing::debug!(
+                        recovery_epoch = *recovery_epochs.borrow_and_update(),
+                        "recreating tool-bus snapshot/follow transport after graph recovery"
+                    );
+                    None
+                }
+            };
+            match result {
+                None => continue,
+                Some(Ok(())) => break,
+                Some(Err(error)) => {
                     tracing::debug!("router metrics feed waiting for router: {error:#}");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }

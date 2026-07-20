@@ -51,18 +51,33 @@ pub fn start_bus_log_subscriber(
     board: BoardBackend,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut recovery_epochs = board.recovery_epoch_receiver();
         loop {
             wait_for_endpoint(&connect).await;
-            match bus_log_subscriber_loop(
+            let subscriber = bus_log_subscriber_loop(
                 namespace.clone(),
                 robot_id.clone(),
                 connect.clone(),
                 board.clone(),
-            )
-            .await
-            {
-                Ok(()) => break,
-                Err(error) => {
+            );
+            tokio::pin!(subscriber);
+            let result = tokio::select! {
+                result = &mut subscriber => Some(result),
+                changed = recovery_epochs.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    tracing::debug!(
+                        recovery_epoch = *recovery_epochs.borrow_and_update(),
+                        "recreating tool-log snapshot/follow transport after graph recovery"
+                    );
+                    None
+                }
+            };
+            match result {
+                None => continue,
+                Some(Ok(())) => break,
+                Some(Err(error)) => {
                     tracing::debug!("bus log subscriber waiting for router: {error:#}");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
