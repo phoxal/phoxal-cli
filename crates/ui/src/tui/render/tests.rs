@@ -77,6 +77,16 @@ fn render_model(
     width: u16,
     height: u16,
 ) -> String {
+    render_model_with_state(title, state, model, width, height).0
+}
+
+fn render_model_with_state(
+    title: &TitleInfo,
+    state: &AppState,
+    model: &SessionViewModel<'_>,
+    width: u16,
+    height: u16,
+) -> (String, AppState) {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     let mut render_state = state.clone();
@@ -92,14 +102,15 @@ fn render_model(
         })
         .unwrap();
     let buffer = terminal.backend().buffer();
-    (0..buffer.area.height)
+    let rendered = (0..buffer.area.height)
         .map(|y| {
             (0..buffer.area.width)
                 .map(|x| buffer[(x, y)].symbol())
                 .collect::<String>()
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    (rendered, render_state)
 }
 
 fn render_startup_at(width: u16, height: u16) -> String {
@@ -329,11 +340,12 @@ fn performance_sample(
                 target_period_ns: 20_000_000,
                 completed: 50,
                 errors: 1,
+                mean_duration_ns: 8_000_000,
                 max_duration_ns: 10_000_000,
+                mean_lateness_ns: 1_000_000,
                 max_lateness_ns: 3_000_000,
                 missed_ticks: 2,
                 overruns: 3,
-                ..RuntimeStepSample::default()
             }),
             topics: vec![RuntimeTopicSample {
                 topic: "v1/drive/target".to_string(),
@@ -462,8 +474,16 @@ fn runtime_row_never_uses_same_id_telemetry_from_another_robot() {
         &model,
         runtime_columns(100),
     );
-    assert!(row.contains("waiting"), "{row}");
+    assert!(row.contains("not shown"), "{row}");
     assert!(!row.contains("10.0/s"), "{row}");
+
+    let mut state = AppState::default();
+    state.page = Page::Runtimes;
+    state.runtime_detail_id = Some("drive".to_string());
+    let detail = render_model(&title(), &state, &model, 100, 30);
+    assert!(detail.contains("telemetry not shown"), "{detail}");
+    assert!(!detail.contains("10.0/s"), "{detail}");
+    assert!(!detail.contains("v1/drive/target"), "{detail}");
 }
 
 #[test]
@@ -481,7 +501,12 @@ fn runtime_detail_renders_portable_summary_and_topic_pressure() {
         ..TelemetrySnapshot::default()
     };
     let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let mut runtime = RuntimeStore::new();
+    runtime.set_test_contracts(
+        "drive",
+        vec!["v1::drive/target".to_string()],
+        vec!["v1::drive/state".to_string()],
+    );
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
     let mut state = AppState::default();
     state.page = Page::Runtimes;
@@ -496,13 +521,108 @@ fn runtime_detail_renders_portable_summary_and_topic_pressure() {
     assert!(rendered.contains("Inputs"), "{rendered}");
     assert!(rendered.contains("Outputs"), "{rendered}");
     assert!(rendered.contains("peak budget"), "{rendered}");
+    assert!(rendered.contains("duration mean 8.0ms"), "{rendered}");
+    assert!(rendered.contains("lateness mean 1.0ms"), "{rendered}");
     assert!(rendered.contains("missed 2"), "{rendered}");
     assert!(rendered.contains("trunc 2"), "{rendered}");
     assert!(rendered.contains("3 rows aggregated"), "{rendered}");
 
     let compact = render_model(&title(), &state, &model, 80, 30);
     assert!(compact.contains("Contracts"), "{compact}");
-    assert!(compact.contains("Inputs 0 · Outputs 0"), "{compact}");
+    assert!(compact.contains("v1::drive/target"), "{compact}");
+    assert!(compact.contains("v1::drive/state"), "{compact}");
+    assert!(compact.contains("COUNT"), "{compact}");
+    assert!(compact.contains("10"), "{compact}");
+
+    let minimum = render_model(&title(), &state, &model, 44, 18);
+    assert!(minimum.contains("performance"), "{minimum}");
+    assert!(minimum.contains("Topics"), "{minimum}");
+    assert!(minimum.contains("Contracts"), "{minimum}");
+    assert!(minimum.contains("v1/dri"), "{minimum}");
+}
+
+#[test]
+fn runtime_detail_compacts_extreme_counters_without_clipping_them() {
+    let now = Instant::now();
+    let mut board = BoardSnapshot::default();
+    let mut status =
+        ParticipantStatus::new("drive", ParticipantKind::Service, ParticipantState::Ready)
+            .with_scope(runtime_scope());
+    status.present = Some(true);
+    board.participants.insert(status.id.clone(), status);
+    let mut sample = performance_sample("drive", now);
+    let value = &mut sample.value;
+    let step = value.step.as_mut().unwrap();
+    step.errors = u64::MAX;
+    step.missed_ticks = u64::MAX;
+    step.overruns = u64::MAX;
+    value.topics = vec![RuntimeTopicSample {
+        count: u64::MAX,
+        drops: u64::MAX,
+        ..value.topics[0].clone()
+    }]
+    .into();
+    let telemetry = TelemetrySnapshot {
+        scope: Some(runtime_scope()),
+        runtimes: BTreeMap::from([("drive".to_string(), sample)]),
+        ..TelemetrySnapshot::default()
+    };
+    let logs = LogStore::new();
+    let runtime = RuntimeStore::new();
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
+    let mut state = AppState::default();
+    state.page = Page::Runtimes;
+    state.navigation = NavigationLevel::Page;
+    state.runtime_detail_id = Some("drive".to_string());
+
+    let rendered = render_model(&title(), &state, &model, 120, 30);
+    assert!(rendered.matches("18.4E").count() >= 4, "{rendered}");
+    assert!(rendered.contains("COUNT"), "{rendered}");
+}
+
+#[test]
+fn runtime_topic_renderer_clamps_to_the_viewport_before_up_moves() {
+    let now = Instant::now();
+    let mut board = BoardSnapshot::default();
+    let mut status =
+        ParticipantStatus::new("drive", ParticipantKind::Service, ParticipantState::Ready)
+            .with_scope(runtime_scope());
+    status.present = Some(true);
+    board.participants.insert(status.id.clone(), status);
+    let mut sample = performance_sample("drive", now);
+    let template = sample.value.topics[0].clone();
+    sample.value.topics = (0..5)
+        .map(|index| RuntimeTopicSample {
+            topic: format!("topic-{index}"),
+            ..template.clone()
+        })
+        .collect::<Vec<_>>()
+        .into();
+    sample.value.overflow = None;
+    let telemetry = TelemetrySnapshot {
+        scope: Some(runtime_scope()),
+        runtimes: BTreeMap::from([("drive".to_string(), sample)]),
+        ..TelemetrySnapshot::default()
+    };
+    let logs = LogStore::new();
+    let runtime = RuntimeStore::new();
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
+    let mut state = AppState::default();
+    state.page = Page::Runtimes;
+    state.navigation = NavigationLevel::Page;
+    state.runtime_detail_id = Some("drive".to_string());
+    state.runtime_topic_offset = usize::MAX;
+
+    let (_, mut rendered_state) = render_model_with_state(&title(), &state, &model, 80, 30);
+    assert_eq!(rendered_state.runtime_topic_offset, 3);
+    rendered_state.handle_key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        &model,
+    );
+    assert_eq!(rendered_state.runtime_topic_offset, 2);
 }
 
 #[test]

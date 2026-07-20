@@ -173,6 +173,13 @@ impl RuntimeStore {
         self.metadata.entry(id.to_string()).or_default().origin = origin;
     }
 
+    #[doc(hidden)]
+    pub fn set_test_contracts(&mut self, id: &str, inputs: Vec<String>, outputs: Vec<String>) {
+        let metadata = self.metadata.entry(id.to_string()).or_default();
+        metadata.input_contracts = inputs;
+        metadata.output_contracts = outputs;
+    }
+
     pub fn observe_board(&mut self, board: &BoardSnapshot) {
         self.observe_board_at(board, Instant::now());
     }

@@ -69,7 +69,14 @@ impl<'a> SessionViewModel<'a> {
         self.runtimes
             .iter()
             .find(|status| status.id == participant_id)
+            .filter(|status| status.present != Some(false))
             .and_then(|status| self.runtime_performance(status))
+            .filter(|sample| {
+                !sample.is_stale(
+                    self.now,
+                    phoxal_cli_core::session::stores::telemetry::DEFAULT_FRESHNESS_TTL,
+                )
+            })
             .map_or(0, |sample| {
                 sample.value.topics.len() + usize::from(sample.value.overflow.is_some())
             })

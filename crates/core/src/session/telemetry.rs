@@ -187,7 +187,6 @@ impl RuntimePerformanceSample {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeFeedStatus {
-    pub snapshot_incomplete: bool,
     pub capacity_evictions: u64,
 }
 

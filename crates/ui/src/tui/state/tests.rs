@@ -775,7 +775,13 @@ fn runtime_detail_arrows_scroll_topics_and_escape_resets_offset() {
                     truncated: 0,
                     window_ns: 1,
                     step: None,
-                    topics: Arc::new(vec![topic("one"), topic("two")]),
+                    topics: Arc::new(vec![
+                        topic("one"),
+                        topic("two"),
+                        topic("three"),
+                        topic("four"),
+                        topic("five"),
+                    ]),
                     overflow: None,
                 },
                 Instant::now(),
@@ -791,12 +797,13 @@ fn runtime_detail_arrows_scroll_topics_and_escape_resets_offset() {
     };
 
     state.handle_key(key(KeyCode::Enter), &model);
-    state.handle_key(key(KeyCode::Down), &model);
-    state.handle_key(key(KeyCode::Down), &model);
-    state.handle_key(key(KeyCode::Down), &model);
-    assert_eq!(state.runtime_topic_offset, 1);
+    state.set_runtime_topic_viewport(5, 2);
+    for _ in 0..8 {
+        state.handle_key(key(KeyCode::Down), &model);
+    }
+    assert_eq!(state.runtime_topic_offset, 3);
     state.handle_key(key(KeyCode::Up), &model);
-    assert_eq!(state.runtime_topic_offset, 0);
+    assert_eq!(state.runtime_topic_offset, 2);
     state.handle_key(key(KeyCode::Esc), &model);
     assert!(state.runtime_detail_id.is_none());
     assert_eq!(state.runtime_topic_offset, 0);

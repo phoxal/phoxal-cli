@@ -177,6 +177,7 @@ pub struct AppState {
     runtime_cursor_id: Option<String>,
     pub runtime_detail_id: Option<String>,
     pub runtime_topic_offset: usize,
+    runtime_topic_visible_rows: usize,
     pub simulation: bool,
     pub log_source_filter: LogSourceFilter,
     pub log_filter_cursor: usize,
@@ -209,6 +210,7 @@ impl Default for AppState {
             runtime_cursor_id: None,
             runtime_detail_id: None,
             runtime_topic_offset: 0,
+            runtime_topic_visible_rows: 1,
             simulation: false,
             log_source_filter: LogSourceFilter::All,
             log_filter_cursor: 0,
@@ -254,10 +256,11 @@ impl AppState {
                 self.runtime_cursor_id = Some(detail_id.to_string());
                 self.runtime_topic_offset = self
                     .runtime_topic_offset
-                    .min(model.runtime_topic_count(detail_id).saturating_sub(1));
+                    .min(self.runtime_topic_max_offset(model.runtime_topic_count(detail_id)));
             } else {
                 self.runtime_detail_id = None;
                 self.runtime_topic_offset = 0;
+                self.runtime_topic_visible_rows = 1;
             }
         }
         let mut missing_selected_runtime = false;
@@ -312,6 +315,17 @@ impl AppState {
         if self.log_follow {
             self.log_scroll = 0;
         }
+    }
+
+    pub(super) fn set_runtime_topic_viewport(&mut self, row_count: usize, visible_rows: usize) {
+        self.runtime_topic_visible_rows = visible_rows.max(1);
+        self.runtime_topic_offset = self
+            .runtime_topic_offset
+            .min(self.runtime_topic_max_offset(row_count));
+    }
+
+    fn runtime_topic_max_offset(&self, row_count: usize) -> usize {
+        row_count.saturating_sub(self.runtime_topic_visible_rows)
     }
 
     #[must_use]
@@ -393,6 +407,7 @@ impl AppState {
         if key.code == KeyCode::Esc {
             if self.page == Page::Runtimes && self.runtime_detail_id.take().is_some() {
                 self.runtime_topic_offset = 0;
+                self.runtime_topic_visible_rows = 1;
                 return DisplayAction::None;
             }
             if self.navigation == NavigationLevel::Page {
@@ -436,6 +451,7 @@ impl AppState {
         self.navigation = NavigationLevel::Page;
         self.runtime_detail_id = None;
         self.runtime_topic_offset = 0;
+        self.runtime_topic_visible_rows = 1;
         if changed && page == Page::Input {
             DisplayAction::JoypadRescan
         } else {
@@ -489,10 +505,9 @@ impl AppState {
             }
             KeyCode::Down => {
                 if self.runtime_detail_id.is_some() {
-                    let max_offset = self
-                        .runtime_detail_id
-                        .as_deref()
-                        .map_or(0, |id| model.runtime_topic_count(id).saturating_sub(1));
+                    let max_offset = self.runtime_detail_id.as_deref().map_or(0, |id| {
+                        self.runtime_topic_max_offset(model.runtime_topic_count(id))
+                    });
                     self.runtime_topic_offset =
                         self.runtime_topic_offset.saturating_add(1).min(max_offset);
                 } else {

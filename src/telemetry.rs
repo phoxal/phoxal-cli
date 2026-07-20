@@ -43,6 +43,7 @@ const MAX_HOST_DISKS: usize = 32;
 const MAX_ROUTER_TOPICS: usize = 256;
 const MAX_JOYPAD_DEVICES: usize = 64;
 const MAX_REMOTE_TEXT_CHARS: usize = 256;
+const MAX_EXPECTED_RUNTIME_PARTICIPANTS: usize = 1024;
 
 fn host_sample_from(body: api::telemetry::Host) -> HostSample {
     let wire_truncated = body
@@ -779,6 +780,15 @@ pub fn start_runtime_performance_feed(
     mut recovery_epochs: watch::Receiver<u64>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let expected_count = expected_runtime_participant_count(&expected_participant_ids);
+        if expected_count > MAX_EXPECTED_RUNTIME_PARTICIPANTS {
+            tracing::error!(
+                expected_count,
+                limit = MAX_EXPECTED_RUNTIME_PARTICIPANTS,
+                "runtime telemetry disabled: configured participant set exceeds the static limit"
+            );
+            return;
+        }
         let scope = RobotScope {
             namespace: namespace.clone(),
             robot_id: robot_id.clone(),
@@ -835,6 +845,10 @@ pub fn start_runtime_performance_feed(
     })
 }
 
+fn expected_runtime_participant_count(participant_ids: &[String]) -> usize {
+    participant_ids.iter().collect::<BTreeSet<_>>().len()
+}
+
 async fn runtime_performance_feed_loop(
     bus: &Bus,
     scope: &RobotScope,
@@ -842,16 +856,10 @@ async fn runtime_performance_feed_loop(
     telemetry: &TelemetryBackend,
     last_capacity_evictions: &mut Option<u64>,
 ) -> Result<Infallible> {
-    const MAX_EXPECTED_PARTICIPANTS: usize = 1024;
     let expected = expected_participant_ids
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    if expected.len() > MAX_EXPECTED_PARTICIPANTS {
-        return Err(anyhow!(
-            "runtime telemetry expected participant set exceeds {MAX_EXPECTED_PARTICIPANTS}"
-        ));
-    }
     let follow_topic = state_api::topic::new().tool().runtime().follow();
     let subscriber =
         Subscriber::<state_api::tool::runtime::Follow>::new(bus, &follow_topic, 512).await?;
@@ -937,10 +945,7 @@ async fn runtime_performance_feed_loop(
                 record,
             })
             .collect();
-        let status = RuntimeFeedStatus {
-            snapshot_incomplete: false,
-            capacity_evictions,
-        };
+        let status = RuntimeFeedStatus { capacity_evictions };
         let outcome = reconciler.install(anchor, snapshot);
         if !apply_runtime_outcome(telemetry, scope, &expected, outcome, status) {
             let _ = reconciler.local_drop();
@@ -966,10 +971,7 @@ async fn runtime_performance_feed_loop(
                     scope,
                     &expected,
                     outcome,
-                    RuntimeFeedStatus {
-                        snapshot_incomplete: false,
-                        capacity_evictions,
-                    },
+                    RuntimeFeedStatus { capacity_evictions },
                 )
             {
                 prepare_runtime_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
@@ -1337,6 +1339,28 @@ mod tests {
         assert_eq!(capacity_eviction_delta(Some(4), 4), 0);
         assert_eq!(capacity_eviction_delta(Some(4), 7), 3);
         assert_eq!(capacity_eviction_delta(Some(7), 2), 0);
+    }
+
+    #[test]
+    fn runtime_participant_limit_counts_unique_static_configuration() {
+        let within_limit = (0..MAX_EXPECTED_RUNTIME_PARTICIPANTS)
+            .map(|index| format!("participant-{index}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected_runtime_participant_count(&within_limit),
+            MAX_EXPECTED_RUNTIME_PARTICIPANTS
+        );
+        let mut over_limit = within_limit;
+        over_limit.push("one-too-many".to_string());
+        assert_eq!(
+            expected_runtime_participant_count(&over_limit),
+            MAX_EXPECTED_RUNTIME_PARTICIPANTS + 1
+        );
+        over_limit.push("one-too-many".to_string());
+        assert_eq!(
+            expected_runtime_participant_count(&over_limit),
+            MAX_EXPECTED_RUNTIME_PARTICIPANTS + 1
+        );
     }
 
     #[test]
