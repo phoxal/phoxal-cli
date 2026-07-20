@@ -1,6 +1,5 @@
 //! Full-screen robot-developer session surface.
 
-mod color;
 mod input;
 pub(crate) mod render;
 mod startup;
@@ -16,18 +15,17 @@ use std::io::{self, Stderr};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyEventKind};
+use phoxal_cli_ui::Theme;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use crate::display::DisplayAction;
-use crate::identity::IdentitySummary;
 use crate::session::event::{DiagnosticLevel, SessionEvent};
 use crate::stores::log_store::{LogStore, sanitize_terminal_text};
 use crate::stores::runtime_store::RuntimeStore;
 use crate::supervisor::{BoardSnapshot, RoutedLogLine};
 use crate::telemetry::TelemetryBackend;
-use crate::theme::Theme;
 use crate::tui::render::TitleInfo;
 use crate::tui::state::AppState;
 use crate::tui::view_model::SessionViewModel;
@@ -35,7 +33,6 @@ use crate::tui::view_model::SessionViewModel;
 pub struct TuiDisplay {
     theme: Theme,
     title: TitleInfo,
-    identity: Option<IdentitySummary>,
     startup: startup::StartupState,
     state: AppState,
     logs: LogStore,
@@ -75,13 +72,12 @@ impl std::fmt::Debug for TuiDisplay {
 
 impl TuiDisplay {
     #[must_use]
-    pub fn new(theme: Theme, title: TitleInfo, identity: Option<IdentitySummary>) -> Self {
+    pub fn new(theme: Theme, title: TitleInfo) -> Self {
         let (log_tx, log_rx) = mpsc::channel(LOG_CHANNEL_CAPACITY);
         Self {
             theme,
             state: AppState::for_mode(title.mode),
             title,
-            identity,
             startup: startup::StartupState::new(),
             logs: LogStore::new(),
             log_tx,
@@ -177,7 +173,6 @@ impl TuiDisplay {
                     self.theme,
                     &render::StartupView {
                         title: &self.title,
-                        identity: self.identity.as_ref(),
                         startup: &self.startup,
                         state: &self.state,
                         telemetry: &self.telemetry,
@@ -185,14 +180,7 @@ impl TuiDisplay {
                     },
                 );
             } else {
-                render::draw(
-                    frame,
-                    self.theme,
-                    &self.title,
-                    self.identity.as_ref(),
-                    &mut self.state,
-                    &model,
-                );
+                render::draw(frame, self.theme, &self.title, &mut self.state, &model);
             }
         })?;
         if activated.title_refreshes_remaining > 0
@@ -270,13 +258,14 @@ mod tests {
 
     use super::*;
     use crate::supervisor::{LogSeverity, LogSource};
-    use crate::theme::ColorCapability;
+    use phoxal_cli_ui::ColorCapability;
 
     fn title() -> TitleInfo {
         TitleInfo {
             robot: "rover-01".to_string(),
             namespace: "dev".to_string(),
             channel: "stable".to_string(),
+            manifest: "./robot.yaml".to_string(),
             mode: crate::session::controller::SessionMode::Run,
             bus_endpoint: "tcp/localhost:7447".to_string(),
             started_at: SystemTime::UNIX_EPOCH,
@@ -286,7 +275,7 @@ mod tests {
 
     #[test]
     fn dormant_display_syncs_without_touching_terminal() {
-        let mut display = TuiDisplay::new(Theme::new(ColorCapability::None), title(), None);
+        let mut display = TuiDisplay::new(Theme::new(ColorCapability::None), title());
         assert!(
             display
                 .redraw(&BoardSnapshot::default(), &TelemetryBackend::default())
@@ -297,7 +286,7 @@ mod tests {
 
     #[test]
     fn routed_logs_are_available_before_activation() {
-        let display = TuiDisplay::new(Theme::new(ColorCapability::None), title(), None);
+        let display = TuiDisplay::new(Theme::new(ColorCapability::None), title());
         assert!(
             display
                 .log_sender()
@@ -313,7 +302,7 @@ mod tests {
 
     #[test]
     fn errors_open_global_logs_instead_of_a_diagnostics_page() {
-        let mut display = TuiDisplay::new(Theme::new(ColorCapability::None), title(), None);
+        let mut display = TuiDisplay::new(Theme::new(ColorCapability::None), title());
         display.apply_session_event(&SessionEvent::Diagnostic {
             source: crate::session::event::DiagnosticSource::Dependency,
             level: DiagnosticLevel::Error,

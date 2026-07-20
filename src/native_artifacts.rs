@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -12,7 +12,8 @@ use tar::Archive;
 use crate::catalog::ArtifactKind;
 use crate::resolver::{ResolvedPlatformRuntime, ResolvedTool, official_binary_name};
 use crate::ui::Ui;
-use crate::utils::make_executable;
+use phoxal_cli_core::project::tooling::make_executable;
+use phoxal_cli_core::session::human;
 
 const SCOPE_DIGEST_FILE: &str = ".phoxal-sha256";
 
@@ -205,11 +206,11 @@ pub fn prepare_descriptors_with_preflight(
             ui.info(format!(
                 "artifact preflight: {} package target(s), {}, destination {}",
                 stale.len(),
-                crate::human::bytes(total_bytes),
+                human::bytes(total_bytes),
                 destination.display()
             ));
             if let Some(free) = free {
-                ui.info(format!("free disk: {}", crate::human::bytes(free)));
+                ui.info(format!("free disk: {}", human::bytes(free)));
             }
         }
         if let Some(free) = free
@@ -217,8 +218,8 @@ pub fn prepare_descriptors_with_preflight(
         {
             bail!(
                 "artifact download needs {} but only {} are free at {}; stop active Phoxal commands and remove the project-local `.phoxal/` directory, or free disk space",
-                crate::human::bytes(total_bytes),
-                crate::human::bytes(free),
+                human::bytes(total_bytes),
+                human::bytes(free),
                 destination.display()
             );
         }
@@ -611,13 +612,12 @@ fn prepare_descriptor_inner(
             descriptor.kind, descriptor.name, descriptor.url
         ));
     }
-    let interactive = ui.map_or_else(|| std::io::stderr().is_terminal(), Ui::interactive);
     let row = reporter.map(|reporter| reporter.begin(descriptor));
     let result = (|| {
-        let tarball_path = if let Some(row) = &row {
-            download_blob_inner(descriptor, |delta| row.inc(delta))?
+        let tarball_path = if row.is_some() {
+            download_blob_inner(descriptor)?
         } else {
-            download_blob(descriptor, interactive)?
+            download_blob(descriptor)?
         };
         unpack_asset(&tarball_path, &version_dir, &descriptor.sha256)?;
         fs::remove_file(&tarball_path).ok();
@@ -682,13 +682,12 @@ fn prepare_scope_candidate(
             descriptor.kind, descriptor.name, descriptor.url
         ));
     }
-    let interactive = ui.map_or_else(|| std::io::stderr().is_terminal(), Ui::interactive);
     let row = reporter.map(|reporter| reporter.begin(descriptor));
     let result = (|| {
-        let tarball_path = if let Some(row) = &row {
-            download_blob_inner(descriptor, |delta| row.inc(delta))?
+        let tarball_path = if row.is_some() {
+            download_blob_inner(descriptor)?
         } else {
-            download_blob(descriptor, interactive)?
+            download_blob(descriptor)?
         };
         let final_root = artifact_exec_dir(descriptor)?;
         let parent = final_root
@@ -806,7 +805,7 @@ fn prepare_and_activate_descriptors_inner(
                     descriptor.package_id,
                     descriptor.version,
                     descriptor_scope_label(descriptor),
-                    crate::human::bytes(descriptor.size)
+                    human::bytes(descriptor.size)
                 ));
             }
         }
@@ -937,23 +936,17 @@ pub fn existing_target_scopes(package: &str) -> Result<Vec<String>> {
     Ok(targets)
 }
 
-fn download_blob(descriptor: &NativeArtifactDescriptor, interactive: bool) -> Result<PathBuf> {
+fn download_blob(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
     let label = format!(
         "downloading {} {} [{}] ({})",
         descriptor.package_id,
         descriptor.version,
         descriptor_scope_label(descriptor),
-        crate::human::bytes(descriptor.size)
+        human::bytes(descriptor.size)
     );
-    // `descriptor.size` is the catalog-declared blob size (always known
-    // ahead of the request - it is what `verify_blob_bytes` checks the
-    // download against), so the byte bar is always determinate here.
-    let progress = crate::progress::bytes_bar(label, descriptor.size, interactive);
-    match download_blob_inner(descriptor, |delta| progress.inc(delta)) {
-        Ok(path) => {
-            progress.finish_and_clear();
-            Ok(path)
-        }
+    let progress = crate::progress::status(label);
+    match download_blob_inner(descriptor) {
+        Ok(path) => Ok(path),
         Err(error) => {
             progress.abandon_with_message(format!(
                 "failed to download {} {}: {error:#}",
@@ -964,10 +957,7 @@ fn download_blob(descriptor: &NativeArtifactDescriptor, interactive: bool) -> Re
     }
 }
 
-fn download_blob_inner(
-    descriptor: &NativeArtifactDescriptor,
-    mut advance: impl FnMut(u64),
-) -> Result<PathBuf> {
+fn download_blob_inner(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
     use std::io::Read;
 
     let url = &descriptor.url;
@@ -992,7 +982,6 @@ fn download_blob_inner(
             break;
         }
         bytes.extend_from_slice(&chunk[..read]);
-        advance(read as u64);
     }
     verify_blob_bytes(descriptor, &bytes)?;
     let path = artifact_tarball_path(descriptor)?;
@@ -1006,8 +995,8 @@ fn verify_blob_bytes(descriptor: &NativeArtifactDescriptor, bytes: &[u8]) -> Res
             "size mismatch for {} {}: expected {}, got {}",
             descriptor.package_id,
             descriptor.version,
-            crate::human::bytes(descriptor.size),
-            crate::human::bytes(bytes.len() as u64)
+            human::bytes(descriptor.size),
+            human::bytes(bytes.len() as u64)
         );
     }
     let actual = hex::encode(Sha256::digest(bytes));

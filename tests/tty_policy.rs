@@ -42,7 +42,7 @@ fn finite_commands_remain_pipe_friendly() {
 }
 
 #[test]
-fn piped_finite_command_is_plain_without_an_explicit_flag() {
+fn piped_finite_command_emits_no_terminal_decoration() {
     let temp = tempfile::tempdir().expect("tempdir");
     let output = bin()
         .args(["--project-path", temp.path().to_str().unwrap(), "doctor"])
@@ -51,33 +51,4 @@ fn piped_finite_command_is_plain_without_an_explicit_flag() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(!stderr.contains('\x1b'));
     assert!(!stderr.contains("phoxal ·"));
-}
-
-#[test]
-fn plain_is_rejected_for_interactive_sessions() {
-    let output = bin()
-        .args(["--plain", "run"])
-        .output()
-        .expect("plain run should execute the policy gate");
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("remove `--plain`"),
-        "unexpected error: {stderr}"
-    );
-}
-
-#[test]
-fn plain_finite_command_has_no_terminal_escape_sequences() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let output = bin()
-        .args([
-            "--project-path",
-            temp.path().to_str().unwrap(),
-            "--plain",
-            "doctor",
-        ])
-        .output()
-        .expect("phoxal-cli --plain doctor should run");
-    assert!(!String::from_utf8(output.stderr).unwrap().contains('\x1b'));
 }

@@ -1,7 +1,11 @@
+//! Project-root path conventions and tooling used by CLI domain operations.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+
+pub mod tooling;
 
 // Bundle-layout conventions. These were `pub` constants in `phoxal::runtime` up to
 // framework 0.10.0; the 0.11 rewrite made them private to the framework's model

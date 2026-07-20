@@ -3,6 +3,11 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use phoxal_cli_core::session::human;
+#[cfg(test)]
+use phoxal_cli_ui::ColorCapability;
+use phoxal_cli_ui::ratatui as color;
+use phoxal_cli_ui::{Role, Theme};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
@@ -13,19 +18,16 @@ use ratatui::widgets::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::identity::IdentitySummary;
 #[cfg(test)]
 use crate::launch_plan::SITE_TOOL_JOYPAD;
 use crate::session::controller::SessionMode;
 use crate::session::event::PhaseOutcome;
 use crate::stores::log_store::sanitize_terminal_text;
 use crate::stores::telemetry_store::{DEFAULT_FRESHNESS_TTL, Timestamped};
-use crate::supervisor::{ClockSample, LogSeverity, ParticipantStatus};
+use crate::supervisor::{ClockSample, LogSeverity, ParticipantState, ParticipantStatus};
 #[cfg(test)]
 use crate::telemetry::JoypadDevicesSample;
 use crate::telemetry::{HostSample, JoypadDeviceStatus, TelemetrySnapshot, TopicMetric};
-use crate::theme::{Role, Theme, state_role, state_symbol};
-use crate::tui::color;
 use crate::tui::startup::{PhaseRow, StartupState};
 #[cfg(test)]
 use crate::tui::state::LogSourceFilter;
@@ -37,15 +39,36 @@ pub struct TitleInfo {
     pub robot: String,
     pub namespace: String,
     pub channel: String,
+    pub manifest: String,
     pub mode: SessionMode,
     pub bus_endpoint: String,
     pub started_at: SystemTime,
     pub started_instant: Instant,
 }
 
+fn state_role(state: ParticipantState) -> Role {
+    match state {
+        ParticipantState::Ready => Role::Success,
+        ParticipantState::Starting | ParticipantState::Restarting => Role::Steel,
+        ParticipantState::Degraded => Role::Warn,
+        ParticipantState::Failed => Role::Error,
+        ParticipantState::Stopped => Role::Muted,
+    }
+}
+
+fn state_symbol(state: ParticipantState) -> &'static str {
+    match state {
+        ParticipantState::Starting => "…",
+        ParticipantState::Ready => "✓",
+        ParticipantState::Degraded => "!",
+        ParticipantState::Failed => "✗",
+        ParticipantState::Restarting => "↻",
+        ParticipantState::Stopped => "■",
+    }
+}
+
 pub struct StartupView<'a> {
     pub title: &'a TitleInfo,
-    pub identity: Option<&'a IdentitySummary>,
     pub startup: &'a StartupState,
     pub state: &'a AppState,
     pub telemetry: &'a TelemetrySnapshot,
@@ -71,7 +94,7 @@ pub fn simulation_clock_slot(
                 format!(
                     "step {} · {}{paused}",
                     sample.value.step,
-                    crate::human::duration(Duration::from_nanos(sample.value.now_ns))
+                    human::duration(Duration::from_nanos(sample.value.now_ns))
                 )
             },
         ),
@@ -91,8 +114,8 @@ pub fn host_resource_slot(host: Option<&Timestamped<HostSample>>, now: Instant) 
     format!(
         "cpu {:.0}% · ram {}/{}{stale}",
         host.value.cpu_pct,
-        crate::human::bytes_compact(host.value.ram_used_bytes),
-        crate::human::bytes_compact(host.value.ram_total_bytes),
+        human::bytes_compact(host.value.ram_used_bytes),
+        human::bytes_compact(host.value.ram_total_bytes),
     )
 }
 
@@ -100,7 +123,6 @@ pub fn draw(
     frame: &mut Frame,
     theme: Theme,
     title: &TitleInfo,
-    identity: Option<&IdentitySummary>,
     state: &mut AppState,
     model: &SessionViewModel<'_>,
 ) {
@@ -143,7 +165,7 @@ pub fn draw(
         draw_help(frame, theme, area);
     }
     if state.show_info {
-        draw_session_info(frame, theme, title, identity, model, area);
+        draw_session_info(frame, theme, title, model, area);
     }
 }
 
@@ -175,12 +197,10 @@ pub fn draw_startup(frame: &mut Frame, theme: Theme, view: &StartupView<'_>) {
     );
     draw_tabs(frame, theme, view.state, rows[1]);
     let mut lines = Vec::new();
-    if let Some(identity) = view.identity {
-        lines.push(Line::from(format!(
-            "manifest   {}",
-            sanitize_terminal_text(&identity.manifest)
-        )));
-    }
+    lines.push(Line::from(format!(
+        "manifest   {}",
+        sanitize_terminal_text(&view.title.manifest)
+    )));
     lines.push(Line::from(""));
     lines.push(Line::from(format!(
         "session    {}",
@@ -221,7 +241,7 @@ fn startup_phase_lines(phase: &PhaseRow) -> Vec<Line<'static>> {
     let status = match &phase.outcome {
         None => "in progress".to_string(),
         Some((PhaseOutcome::Succeeded, elapsed)) => {
-            format!("done in {}", crate::human::duration(*elapsed))
+            format!("done in {}", human::duration(*elapsed))
         }
         Some((PhaseOutcome::Skipped, _)) => "skipped".to_string(),
         Some((PhaseOutcome::Failed { error }, _)) => {
@@ -355,7 +375,7 @@ fn compact_header_status(
         ),
         SessionMode::Run => format!(
             "uptime {}",
-            crate::human::duration(title.started_instant.elapsed())
+            human::duration(title.started_instant.elapsed())
         ),
     };
     format!(" {} · {cpu} · {clock}", title.mode)
@@ -411,8 +431,8 @@ fn header_host_lines(
             |disk| {
                 format!(
                     "{}/{}",
-                    crate::human::bytes_compact(disk.used_bytes),
-                    crate::human::bytes_compact(disk.total_bytes)
+                    human::bytes_compact(disk.used_bytes),
+                    human::bytes_compact(disk.total_bytes)
                 )
             },
         );
@@ -422,8 +442,8 @@ fn header_host_lines(
             "RAM",
             format!(
                 "{}/{}",
-                crate::human::bytes_compact(host.value.ram_used_bytes),
-                crate::human::bytes_compact(host.value.ram_total_bytes)
+                human::bytes_compact(host.value.ram_used_bytes),
+                human::bytes_compact(host.value.ram_total_bytes)
             ),
         ),
         row("DISK (root)", disk),
@@ -479,7 +499,7 @@ fn header_clock_lines(
                     Line::from(format!("step    {}", clock.value.step)),
                     Line::from(format!(
                         "time    {}",
-                        crate::human::duration(Duration::from_nanos(clock.value.now_ns))
+                        human::duration(Duration::from_nanos(clock.value.now_ns))
                     )),
                     Line::from(format!("state   {state}")),
                 ]
@@ -489,7 +509,7 @@ fn header_clock_lines(
             let elapsed = started_instant.elapsed();
             vec![
                 Line::from("clock   realtime"),
-                Line::from(format!("uptime  {}", crate::human::duration(elapsed))),
+                Line::from(format!("uptime  {}", human::duration(elapsed))),
                 Line::from("state   live"),
             ]
         }
@@ -777,7 +797,7 @@ fn runtime_row(
         .and_then(|observation| observation.last_seen_age(model.now))
         .map_or_else(
             || "n/a".to_string(),
-            |age| format!("{} ago", crate::human::duration(age)),
+            |age| format!("{} ago", human::duration(age)),
         );
     let id = sanitize_and_fit_cell(&status.id, columns.id);
     let state = fit_cell(status.state.label(), columns.state);
@@ -818,7 +838,7 @@ fn draw_runtime_detail(
     );
     let artifact_size = status
         .artifact_size_bytes
-        .map_or_else(|| "n/a".to_string(), crate::human::bytes_compact);
+        .map_or_else(|| "n/a".to_string(), human::bytes_compact);
     let pid = status
         .pid
         .map_or_else(|| "n/a".to_string(), |pid| pid.to_string());
@@ -828,16 +848,16 @@ fn draw_runtime_detail(
     let ready_after = model
         .runtime
         .time_to_ready(&status.id)
-        .map_or_else(|| "n/a".to_string(), crate::human::duration);
+        .map_or_else(|| "n/a".to_string(), human::duration);
     let uptime = observation.map_or_else(
         || "n/a".to_string(),
-        |observation| crate::human::duration(observation.uptime(model.now)),
+        |observation| human::duration(observation.uptime(model.now)),
     );
     let last_seen = observation
         .and_then(|observation| observation.last_seen_age(model.now))
         .map_or_else(
             || "n/a".to_string(),
-            |age| format!("{} ago", crate::human::duration(age)),
+            |age| format!("{} ago", human::duration(age)),
         );
     let restarts = observation.map_or(status.restart_count, |observation| {
         observation.displayed_restarts()
@@ -1063,9 +1083,9 @@ fn draw_bus(
         |sample| {
             let age = model.now.saturating_duration_since(sample.received_at);
             if sample.is_stale(model.now, DEFAULT_FRESHNESS_TTL) {
-                format!("stale · {} ago", crate::human::duration(age))
+                format!("stale · {} ago", human::duration(age))
             } else {
-                format!("{} ago", crate::human::duration(age))
+                format!("{} ago", human::duration(age))
             }
         },
     );
@@ -1351,7 +1371,7 @@ fn history_span(history: &[Timestamped<f32>]) -> String {
         (Some(_), Some(_)) if history.len() == 1 => "1 sample".to_string(),
         (Some(first), Some(last)) => format!(
             "last {}",
-            crate::human::duration(
+            human::duration(
                 last.received_at
                     .saturating_duration_since(first.received_at)
             )
@@ -1408,7 +1428,7 @@ fn draw_input(
                 format!("{:.3} rad/s", motion.value.final_target.angular_z_radps),
                 format!(
                     "{} ago{}",
-                    crate::human::duration(model.now.saturating_duration_since(motion.received_at)),
+                    human::duration(model.now.saturating_duration_since(motion.received_at)),
                     if motion.is_stale(model.now, DEFAULT_FRESHNESS_TTL) {
                         " · stale"
                     } else {
@@ -1625,12 +1645,10 @@ fn draw_session_info(
     frame: &mut Frame,
     theme: Theme,
     title: &TitleInfo,
-    identity: Option<&IdentitySummary>,
     model: &SessionViewModel<'_>,
     area: Rect,
 ) {
-    let manifest =
-        sanitize_terminal_text(identity.map_or("n/a", |identity| identity.manifest.as_str()));
+    let manifest = sanitize_terminal_text(&title.manifest);
     let started = title.started_at.duration_since(UNIX_EPOCH).map_or_else(
         |_| "n/a".to_string(),
         |value| format!("unix {}", value.as_secs()),
@@ -1657,7 +1675,7 @@ fn draw_session_info(
         Line::from(format!("CLI              {}", env!("CARGO_PKG_VERSION"))),
         Line::from(format!(
             "start time       {started} · {} ago",
-            crate::human::duration(model.now.saturating_duration_since(title.started_instant))
+            human::duration(model.now.saturating_duration_since(title.started_instant))
         )),
     ];
     let info_height = if area.width < 70 { 15 } else { 13 };
@@ -1767,20 +1785,20 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::participant_kind::ParticipantKind;
     use crate::stores::log_store::LogStore;
     use crate::stores::runtime_store::RuntimeStore;
     use crate::supervisor::{
         BoardSnapshot, LogSource, ParticipantState, ParticipantStatus, RoutedLogLine,
     };
     use crate::telemetry::{DiskSample, JoypadDevice};
-    use crate::theme::ColorCapability;
+    use phoxal_cli_core::session::ParticipantKind;
 
     fn title() -> TitleInfo {
         TitleInfo {
             robot: "rover".to_string(),
             namespace: "dev".to_string(),
             channel: "stable".to_string(),
+            manifest: "./robot.yaml".to_string(),
             mode: SessionMode::Run,
             bus_endpoint: "tcp/localhost:7447".to_string(),
             started_at: UNIX_EPOCH,
@@ -1849,7 +1867,6 @@ mod tests {
                     frame,
                     Theme::new(ColorCapability::None),
                     title,
-                    None,
                     &mut render_state,
                     model,
                 );
@@ -1880,7 +1897,6 @@ mod tests {
                     Theme::new(ColorCapability::None),
                     &StartupView {
                         title: &title,
-                        identity: None,
                         startup: &startup,
                         state: &state,
                         telemetry: &telemetry,
@@ -2686,7 +2702,6 @@ mod tests {
                     frame,
                     Theme::new(ColorCapability::None),
                     &title(),
-                    None,
                     &mut state,
                     &model,
                 );

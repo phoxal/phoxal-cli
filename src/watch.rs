@@ -21,13 +21,13 @@ use crate::component_driver::component_driver_crate_dir;
 use crate::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchPlan, PlanContext, build_launch_plan,
 };
-use crate::participant_kind::ParticipantKind;
 use crate::resolver::{
     ResolveOptions, ResolvedRobot, discover_robot_yaml, load_robot_with_extras,
     load_robot_with_extras_and_overlays, resolve,
 };
 use crate::supervisor::{BoardBackend, ParticipantSpec, SupervisorAction};
-use crate::utils::hash_tree;
+use phoxal_cli_core::project::tooling::hash_tree;
+use phoxal_cli_core::session::{ParticipantKind, human};
 
 const WATCH_POLL: Duration = Duration::from_millis(500);
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(650);
@@ -334,7 +334,7 @@ async fn apply_watch_result(
 }
 
 fn elapsed_label(started: Instant) -> String {
-    crate::human::duration(started.elapsed())
+    human::duration(started.elapsed())
 }
 
 fn set_note_all(board: &BoardBackend, target: &WatchTarget, note: impl AsRef<str>) {
@@ -370,17 +370,14 @@ fn recheck_run_target(
         project_root,
         loaded.robot.artifacts.channel,
         &loaded.extras,
-        options.interactive,
     )?;
     let resolved = resolve(
         &loaded.robot,
         project_root,
         catalog.as_ref(),
         ResolveOptions {
-            emit_update_notice: false,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
-            interactive: options.interactive,
             ..ResolveOptions::default()
         },
     )?;
@@ -688,7 +685,7 @@ mod tests {
         };
         let spec = ParticipantSpec {
             id: "mission".to_string(),
-            kind: crate::supervisor::ParticipantKind::Service,
+            kind: phoxal_cli_core::session::ParticipantKind::Service,
             executable: PathBuf::from("/bin/echo"),
             args: Vec::new(),
             cwd: None,

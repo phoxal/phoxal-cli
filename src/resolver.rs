@@ -14,7 +14,7 @@ use crate::catalog::{
     OFFICIAL_TOOLS, SelectionChannel, select_artifact, selection_channel,
 };
 use crate::shell;
-use crate::utils::{hash_tree, resolve_project_path};
+use phoxal_cli_core::project::tooling::{hash_tree, resolve_project_path};
 
 /// The provider every official Phoxal package uses in its provider-qualified
 /// `artifacts.pins` / catalog `package` identity (`phoxal/service-drive`, ...).
@@ -27,9 +27,6 @@ pub struct ResolveOptions {
     /// Move unpinned channel selections to the supplied head snapshot. Only
     /// `phoxal update` sets this; normal commands prefer `active` symlinks.
     pub refresh_channel_head: bool,
-    /// Emit the once-per-invocation artifact update notice. Watch rebuilds
-    /// disable this so the top-level invocation never repeats it.
-    pub emit_update_notice: bool,
     /// Resolve git component `tag` → `commit`. A `tag` that is already a full
     /// commit SHA resolves with no network; a tag/branch ref is resolved live
     /// via `git ls-remote`. Flows that need to locate/stage component driver
@@ -49,21 +46,16 @@ pub struct ResolveOptions {
     /// Override native tool asset target triple. Host-native run/sim use the
     /// host triple; deploy ships robot-native tools.
     pub tool_target_triple: Option<String>,
-    /// Whether progress may draw interactively, threaded into git-ref
-    /// resolution without process-global state. Defaults to batch-safe false.
-    pub interactive: bool,
 }
 
 impl Default for ResolveOptions {
     fn default() -> Self {
         Self {
             refresh_channel_head: false,
-            emit_update_notice: true,
             resolve_source_commits: true,
             resolve_component_asset_commits: true,
             official_target_triple: None,
             tool_target_triple: None,
-            interactive: false,
         }
     }
 }
@@ -720,19 +712,6 @@ pub fn resolve(
     let _artifact_lock = prefer_vendored
         .then(crate::native_artifacts::ArtifactStoreLock::shared)
         .transpose()?;
-    if options.emit_update_notice
-        && prefer_vendored
-        && std::env::var_os("PHOXAL_QUIET").is_none()
-        && let Some(catalog) = catalog
-    {
-        offer_newer_versions_notice(warn_about_newer_versions(
-            robot,
-            catalog,
-            &target,
-            &tool_target,
-        ));
-    }
-
     let mut platform_runtimes = match catalog {
         Some(catalog) => {
             resolve_catalog_entries(robot, catalog, catalog_channel, &target, prefer_vendored)?
@@ -782,7 +761,6 @@ pub fn resolve(
         resolve_source_commits: options.resolve_source_commits,
         resolve_component_asset_commits: options.resolve_component_asset_commits,
         prefer_vendored,
-        interactive: options.interactive,
     })?;
     let mut tools = resolve_tools(
         robot,
@@ -805,7 +783,6 @@ pub fn resolve(
             robot,
             project_root,
             resolve_source_commits: options.resolve_source_commits,
-            interactive: options.interactive,
         },
         &mut platform_runtimes,
         &mut simulators,
@@ -846,7 +823,6 @@ struct PathPinContext<'a> {
     robot: &'a Robot,
     project_root: &'a Path,
     resolve_source_commits: bool,
-    interactive: bool,
 }
 
 fn apply_path_pins(
@@ -864,11 +840,8 @@ fn apply_path_pins(
                 if is_component_package_key(key, components) {
                     continue;
                 }
-                let Some(path) = resolve_git_artifact_pin_path(
-                    pin,
-                    context.resolve_source_commits,
-                    context.interactive,
-                )?
+                let Some(path) =
+                    resolve_git_artifact_pin_path(pin, context.resolve_source_commits)?
                 else {
                     continue;
                 };
@@ -920,12 +893,11 @@ fn is_component_package_key(key: &str, components: &[ResolvedComponent]) -> bool
 fn resolve_git_artifact_pin_path(
     pin: &phoxal::model::robot::v0::ArtifactGitPin,
     resolve_source_commits: bool,
-    interactive: bool,
 ) -> Result<Option<PathBuf>> {
     if !resolve_source_commits {
         return Ok(None);
     }
-    let commit = resolve_component_commit(&pin.git, &pin.rev, interactive)?;
+    let commit = resolve_component_commit(&pin.git, &pin.rev)?;
     let repo_dir = crate::git_artifact::ensure_git_artifact(&pin.git, &commit)?;
     Ok(Some(crate::git_artifact::subdir(
         repo_dir,
@@ -1003,7 +975,7 @@ fn apply_tool_path_pin(
     };
     tool.path_override = Some(path.to_path_buf());
     tool.asset = format!("path:{}", path.display());
-    tool.sha256 = crate::utils::hash_tree(path).unwrap_or_default();
+    tool.sha256 = hash_tree(path).unwrap_or_default();
     tool.url = None;
     tool.size = None;
     tool.published = true;
@@ -1247,69 +1219,6 @@ fn vendored_runtime(
     })
 }
 
-fn warn_about_newer_versions(
-    robot: &Robot,
-    catalog: &Catalog,
-    target: &str,
-    tool_target: &str,
-) -> Vec<String> {
-    let mut newer = Vec::new();
-    for (_, package) in OFFICIAL_SERVICES {
-        collect_newer(robot, catalog, package, target, &mut newer);
-    }
-    for (_, package) in OFFICIAL_SIMULATORS {
-        collect_newer(robot, catalog, package, tool_target, &mut newer);
-    }
-    for (_, package) in OFFICIAL_TOOLS {
-        collect_newer(robot, catalog, package, tool_target, &mut newer);
-    }
-    for (_, package) in OFFICIAL_INFRASTRUCTURE {
-        collect_newer(robot, catalog, package, tool_target, &mut newer);
-    }
-    for component in robot.robot.components.values() {
-        let package = format!("phoxal/component-{}", component.component);
-        collect_newer(robot, catalog, &package, target, &mut newer);
-    }
-    newer.sort();
-    newer.dedup();
-    newer
-}
-
-fn offer_newer_versions_notice(newer: Vec<String>) {
-    if newer.is_empty() {
-        return;
-    }
-    crate::update_notice::offer(crate::update_notice::UpdateNotice::Artifacts(newer));
-}
-
-fn collect_newer(
-    robot: &Robot,
-    catalog: &Catalog,
-    package: &str,
-    target: &str,
-    newer: &mut Vec<String>,
-) {
-    if robot.artifacts.pins.contains_key(package) {
-        return;
-    }
-    let Ok(selected) = select_artifact(catalog, package, None, target) else {
-        return;
-    };
-    let active = crate::native_artifacts::active_version_for(package)
-        .ok()
-        .flatten();
-    if active
-        .as_deref()
-        .is_some_and(|version| version != selected.version)
-    {
-        newer.push(format!(
-            "{package} {} -> {}",
-            active.as_deref().unwrap_or("missing"),
-            selected.version
-        ));
-    }
-}
-
 struct ExpectedArtifact<'a> {
     kind: ArtifactKind,
     name: &'a str,
@@ -1410,11 +1319,11 @@ fn resolved_runtime_from_expected_package(
 /// is returned as-is with no network access. Any other ref (a tag or branch
 /// name) is resolved live via `git ls-remote`; if the network is unavailable the
 /// failure is reported with an actionable fix.
-fn resolve_component_commit(url: &str, git_ref: &str, interactive: bool) -> Result<String> {
+fn resolve_component_commit(url: &str, git_ref: &str) -> Result<String> {
     if is_full_commit_sha(git_ref) {
         return Ok(git_ref.to_string());
     }
-    resolve_git_ref(url, git_ref, interactive).with_context(|| {
+    resolve_git_ref(url, git_ref).with_context(|| {
         format!(
             "could not resolve git ref '{git_ref}' from {url} without network access. \
              Pin artifacts.pins.<package>.rev to an explicit commit SHA in robot.yaml, \
@@ -1427,14 +1336,11 @@ pub(crate) fn is_full_commit_sha(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|byte| byte.is_ascii_hexdigit())
 }
 
-pub fn resolve_git_ref(url: &str, git_ref: &str, interactive: bool) -> Result<String> {
-    let progress = crate::progress::spinner(
-        format!("resolving git ref {git_ref} from {url}"),
-        interactive,
-    );
+pub fn resolve_git_ref(url: &str, git_ref: &str) -> Result<String> {
+    let progress = crate::progress::status(format!("resolving git ref {git_ref} from {url}"));
     let result = resolve_git_ref_inner(url, git_ref);
     match &result {
-        Ok(_) => progress.finish_and_clear(),
+        Ok(_) => {}
         Err(error) => progress.abandon_with_message(format!(
             "failed to resolve git ref {git_ref} from {url}: {error:#}"
         )),
@@ -1536,7 +1442,6 @@ struct ComponentResolveContext<'a> {
     resolve_source_commits: bool,
     resolve_component_asset_commits: bool,
     prefer_vendored: bool,
-    interactive: bool,
 }
 
 fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<ResolvedComponent>> {
@@ -1621,13 +1526,7 @@ fn resolve_component_package(
     if let Some(pin @ (ArtifactPin::Path(_) | ArtifactPin::Git(_))) =
         context.robot.artifacts.pins.get(package)
     {
-        return resolve_pinned_component_package(
-            package,
-            kind,
-            pin,
-            resolve_git_ref,
-            context.interactive,
-        );
+        return resolve_pinned_component_package(package, kind, pin, resolve_git_ref);
     }
 
     let (target, assets) = if kind == ArtifactKind::ComponentAssets {
@@ -1669,7 +1568,6 @@ fn resolve_pinned_component_package(
     kind: ArtifactKind,
     pin: &ArtifactPin,
     resolve_git_ref: bool,
-    interactive: bool,
 ) -> Result<ResolvedComponentPackage> {
     let source = match pin {
         ArtifactPin::Path(pin) => ResolvedComponentSource::Path {
@@ -1681,7 +1579,7 @@ fn resolve_pinned_component_package(
             // `git ls-remote`. Flows that never read this package's local
             // files leave `resolve_git_ref` off and skip this entirely.
             let commit = if resolve_git_ref {
-                resolve_component_commit(&pin.git, &pin.rev, interactive)?
+                resolve_component_commit(&pin.git, &pin.rev)?
             } else {
                 String::new()
             };

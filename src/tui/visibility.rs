@@ -1,8 +1,8 @@
 //! One visibility policy shared by Overview, Runtimes, Logs, and Bus.
 
-use crate::participant_kind::ParticipantKind;
 use crate::stores::runtime_store::{RuntimeOwnership, RuntimeStore};
 use crate::supervisor::{BoardSnapshot, ParticipantStatus};
+use phoxal_cli_core::session::ParticipantKind;
 
 #[must_use]
 pub fn is_visible_runtime(status: &ParticipantStatus, runtime: &RuntimeStore) -> bool {
@@ -50,8 +50,8 @@ fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::participant_kind::ParticipantKind;
     use crate::supervisor::{ParticipantState, ParticipantStatus};
+    use phoxal_cli_core::session::ParticipantKind;
 
     #[test]
     fn run_and_webots_share_robot_runtime_visibility() {

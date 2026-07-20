@@ -32,13 +32,14 @@ use crate::simulate_staging::{
     ComponentTypeToStage, RobotToStage, StagedSimulationWorld, stage_simulation_world,
 };
 use crate::supervisor::{
-    BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
-    RequestedStop, SupervisionStage, SupervisorAction, SupervisorLock, SupervisorOptions,
+    BoardBackend, ParticipantSpec, ParticipantState, ParticipantStatus, RequestedStop,
+    SupervisionStage, SupervisorAction, SupervisorLock, SupervisorOptions,
     start_bus_log_subscriber, start_clock_feed, start_presence_heartbeat_subscriber,
     wait_for_endpoint,
 };
 use crate::webots_stage_root;
-use crate::world;
+use phoxal_cli_core::session::ParticipantKind;
+use phoxal_cli_core::simulation::world;
 
 /// The world-scoped participant id for the Webots supervisor artifact
 /// (`phoxal-simulator-webots-supervisor`). One supervisor exists per
@@ -97,14 +98,6 @@ impl Simulation {
             SimulationSubcommand::Run(command) => command.run(app).await,
             SimulationSubcommand::Join(command) => command.run(app).await,
         }
-    }
-
-    /// Only `simulation run` consumes artifacts (catalog/resolver), so only
-    /// it participates in the update-notice check; `simulation join` is a
-    /// pure stub today and never touches a robot project.
-    #[must_use]
-    pub fn consumes_artifacts(&self) -> bool {
-        matches!(self.command, SimulationSubcommand::Run(_))
     }
 }
 
@@ -169,12 +162,6 @@ pub struct SimulateOptions {
     pub watch: bool,
     pub overlays: Vec<String>,
     pub target: Option<String>,
-    /// Whether progress may draw interactively, carried
-    /// alongside the other options so `resolve_project`/`prepare_with_mode`
-    /// (which run inside a `spawn_blocking` worker with no `AppContext` in
-    /// scope) can thread it into a catalog fetch's spinner without a
-    /// process-global mode cell.
-    pub interactive: bool,
 }
 
 /// Pairs the sim `LaunchPlan` with its `PlanContext` (Part 3/6): replaces the
@@ -212,7 +199,6 @@ impl SimulationRun {
             watch: self.watch,
             overlays: self.env.clone(),
             target: self.target.clone(),
-            interactive: app.output.decorated(),
         };
         let mode = if self.dry_run {
             SimulateMode::DryRun
@@ -241,14 +227,10 @@ pub async fn run(
             // One interactive surface for the whole session (Product
             // decision 1): the controller starts its renderer right now,
             // before preparation even begins - see `SessionController::new`.
-            let identity = crate::identity::IdentitySummary::discover(
-                app.project.root(),
-                crate::identity::TerminalMode::Full,
-            );
             let mut controller = crate::session::controller::SessionController::new(
                 app.output,
                 crate::session::controller::SessionMode::Simulation,
-                identity,
+                app.project.root(),
             )?;
             let events = controller.events();
 
@@ -637,7 +619,6 @@ pub(crate) fn resolve_project(
             offline: false,
         },
         crate::catalog::selection_channel(robot.artifacts.channel),
-        options.interactive,
     ))?;
 
     // Always resolve live git component driver commits so driver metadata can
@@ -657,11 +638,9 @@ pub(crate) fn resolve_project(
         &project_root,
         catalog.as_ref(),
         ResolveOptions {
-            emit_update_notice: true,
             resolve_source_commits: true,
             resolve_component_asset_commits: mode == SimulateMode::Live,
             official_target_triple: official_target,
-            interactive: options.interactive,
             ..ResolveOptions::default()
         },
     )?;

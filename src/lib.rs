@@ -36,15 +36,9 @@ pub(crate) mod display;
 pub(crate) mod git_artifact;
 pub(crate) mod host_doctor;
 pub mod host_paths;
-pub(crate) mod human;
-pub(crate) mod identity;
-pub(crate) mod launch_env;
 pub mod launch_plan;
 pub(crate) mod native_artifacts;
-pub(crate) mod participant_kind;
-pub(crate) mod participant_metadata;
 pub(crate) mod progress;
-pub(crate) mod project;
 pub mod resolver;
 pub(crate) mod runtime_root;
 pub(crate) mod session;
@@ -53,18 +47,13 @@ pub(crate) mod simulate_staging;
 pub(crate) mod stores;
 pub(crate) mod supervisor;
 pub(crate) mod telemetry;
-pub(crate) mod theme;
 pub(crate) mod tui;
 pub(crate) mod ui;
-pub(crate) mod update_notice;
-pub(crate) mod utils;
 pub(crate) mod watch;
 pub(crate) mod webots_stage_root;
 pub(crate) mod webots_staging;
-pub(crate) mod world;
 
 pub use context::AppContext;
-pub use project::Project;
 // Re-exported so `main`'s tracing-subscriber setup can install this as its
 // `MakeWriter` (finding C2/A2): `session` itself stays `pub(crate)` - nothing
 // outside this crate needs the rest of it - but `main` is a SEPARATE crate

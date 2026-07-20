@@ -1,4 +1,4 @@
-//! Shared human-readable formatting for user-facing sizes and elapsed time.
+//! Human-readable formatting shared by session and command output.
 
 use std::time::Duration;
 

@@ -21,7 +21,6 @@ use crate::commands::check::{
     tool_participants_from_resolved,
 };
 use crate::component_driver::component_driver_crate_dir;
-use crate::launch_env::encode_participant_env;
 use crate::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution,
     ParticipantLaunchRecord, PlanContext, SITE_INFRASTRUCTURE_ROUTER, SITE_TOOL_JOYPAD, SiteLaunch,
@@ -32,12 +31,13 @@ use crate::resolver::{
     host_target_triple, load_robot_with_extras, resolve,
 };
 use crate::supervisor::{
-    BoardBackend, ParticipantKind, ParticipantSpec, ParticipantState, ParticipantStatus,
-    SupervisionStage, SupervisorLock, SupervisorOptions, SupervisorOutcome,
-    default_connect_endpoint, start_bus_log_subscriber, start_presence_heartbeat_subscriber,
-    supervise_until_shutdown,
+    BoardBackend, ParticipantSpec, ParticipantState, ParticipantStatus, SupervisionStage,
+    SupervisorLock, SupervisorOptions, SupervisorOutcome, default_connect_endpoint,
+    start_bus_log_subscriber, start_presence_heartbeat_subscriber, supervise_until_shutdown,
 };
-use crate::utils::cargo_binary_name;
+use phoxal_cli_core::project::tooling::{cargo_binary_name, resolve_project_path};
+use phoxal_cli_core::session::ParticipantKind;
+use phoxal_cli_core::session::launch_env::encode_participant_env;
 
 /// How long a `run` staged-startup stage may wait for its members to be
 /// OBSERVED ready before the whole run fails naming the stalled stage - see
@@ -114,7 +114,7 @@ pub(crate) async fn start_infrastructure_router(
         .context("phoxal-infrastructure-router is not staged; run `phoxal update`")?;
     let mut command = tokio::process::Command::new(binary);
     if let Some(config) = &resolved.robot.router.config {
-        let config = crate::utils::resolve_project_path(project_root, config);
+        let config = resolve_project_path(project_root, config);
         anyhow::ensure!(
             config.is_file(),
             "router.config file {} does not exist",
@@ -281,10 +281,6 @@ pub struct RunOptions {
     pub catalog_source: Option<String>,
     pub overlays: Vec<String>,
     pub watch: bool,
-    /// Whether progress may draw interactively, threaded into catalog fetches
-    /// (`watch::recheck_run_target` runs `--watch` rechecks with no
-    /// `AppContext` in scope) - no process-global mode cell.
-    pub interactive: bool,
 }
 
 #[derive(Debug)]
@@ -350,7 +346,6 @@ impl Run {
             catalog_source: app.catalog_source.clone(),
             overlays: self.env.clone(),
             watch: self.watch,
-            interactive: app.output.decorated(),
         };
         if options.drivers == DriversMode::Off && !options.drivers_subset.is_empty() {
             bail!("--driver cannot be combined with --drivers off");
@@ -367,14 +362,10 @@ impl Run {
         // 1): the controller starts the TUI's alternate screen right now,
         // before preparation
         // even begins - see `SessionController::new`'s docs.
-        let identity = crate::identity::IdentitySummary::discover(
-            app.project.root(),
-            crate::identity::TerminalMode::Full,
-        );
         let mut controller = crate::session::controller::SessionController::new(
             app.output,
             crate::session::controller::SessionMode::Run,
-            identity,
+            app.project.root(),
         )?;
         let events = controller.events();
 
@@ -643,17 +634,14 @@ fn prepare_run(project_start: &Path, options: RunOptions, ui: &crate::Ui) -> Res
         project_root,
         loaded.robot.artifacts.channel,
         &loaded.extras,
-        ui.interactive(),
     )?;
     let resolved = resolve(
         &loaded.robot,
         project_root,
         catalog.as_ref(),
         ResolveOptions {
-            emit_update_notice: true,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
-            interactive: options.interactive,
             ..ResolveOptions::default()
         },
     )?;
@@ -789,7 +777,8 @@ struct LaunchCommandEntry {
 /// The pre-staged-startup launch-report `kind` string. The board's
 /// own `ParticipantKind` is the finer-grained shared
 /// `Tool`/`Service`/`Driver`/`Simulator` split plus a `local` bit (Part 1) -
-/// see `participant_kind`'s module docs. A site launch (the router, the
+/// see `phoxal_cli_core::session::participant_kind`'s module docs. A site
+/// launch (the router, the
 /// joypad, the Webots app in `simulate`) has no `ParticipantExecution` of
 /// its own and is always `"site-tool"`; everything else follows the
 /// compact operator-facing mapping.
@@ -1345,10 +1334,8 @@ fn native_pending_official_note(
 /// (`ui.command_status_captured`, below) instead of inherited straight
 /// through to this process's own stdout/stderr - a raw child write racing an
 /// active TUI redraw could corrupt the alternate-screen frame. This still
-/// reports progress with a single themed line rather than an animated
-/// spinner - `crate::progress`'s own session-routing (see its
-/// module docs) already keeps a spinner from colliding with captured build
-/// output, but a single line is simpler here and matches
+/// reports progress with a single themed line. Session routing keeps that
+/// line from colliding with captured build output and matches
 /// `check::build_and_locate_binary`'s equivalent build.
 pub(crate) fn build_source_binary(
     crate_dir: &Path,
@@ -1638,7 +1625,6 @@ mod tests {
                 catalog_source: None,
                 overlays: Vec::new(),
                 watch: false,
-                interactive: false,
             },
             &plan,
         )?;
@@ -1655,7 +1641,6 @@ mod tests {
                 catalog_source: None,
                 overlays: Vec::new(),
                 watch: false,
-                interactive: false,
             },
             &plan,
         )
@@ -1674,7 +1659,6 @@ mod tests {
                 catalog_source: None,
                 overlays: Vec::new(),
                 watch: false,
-                interactive: false,
             },
             &plan,
         )?;

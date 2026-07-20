@@ -5,7 +5,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::git_artifact;
 use crate::native_artifacts::{self, NativeArtifactDescriptor, ProvisioningMode};
 use crate::resolver::{ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource};
-use crate::utils::resolve_project_path;
+use phoxal_cli_core::project::tooling::resolve_project_path;
 
 /// Locate the on-disk source directory for a component instance's resolved
 /// `component_driver` package (the crate `check`/`run`/`watch` build). Errors

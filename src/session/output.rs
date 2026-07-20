@@ -1,6 +1,5 @@
-//! The explicit output contract for one invocation: whether terminal
-//! decoration is interactive, the theme it uses, and whether `--quiet` was
-//! requested.
+//! The explicit output contract for one invocation: whether stderr is an
+//! interactive terminal and the theme selected for it.
 //!
 //! Built once in [`crate::commands::dispatch`] and threaded explicitly into
 //! [`super::controller::SessionController`], `AppContext::ui`, and helpers
@@ -9,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::theme::Theme;
+use phoxal_cli_ui::Theme;
 
 /// A readiness/stage-wait budget for an interactive session (Product decision
 /// 6: "no unconditional 60-second teardown in an interactive session").
@@ -58,25 +57,18 @@ impl WaitBudget {
 pub struct OutputContext {
     pub interactive: bool,
     pub theme: Theme,
-    pub quiet: bool,
 }
 
 impl OutputContext {
     #[must_use]
-    pub const fn new(interactive: bool, theme: Theme, quiet: bool) -> Self {
-        Self {
-            interactive,
-            theme,
-            quiet,
-        }
+    pub const fn new(interactive: bool, theme: Theme) -> Self {
+        Self { interactive, theme }
     }
 
-    /// Whether finite-command presentation may use color and redraw progress.
-    /// A quiet live session still owns its TUI, while quiet finite commands
-    /// preserve their append-only, uncolored output.
+    /// Whether finite-command presentation may use terminal decoration.
     #[must_use]
     pub const fn decorated(self) -> bool {
-        self.interactive && !self.quiet
+        self.interactive
     }
 
     /// The wait budget for an interactive-session readiness/stage wait
@@ -99,39 +91,32 @@ impl OutputContext {
         }
     }
 
-    /// Build from the terminal and global presentation flags. Called once in
+    /// Build from stderr's terminal state. Called once in
     /// [`crate::commands::dispatch`]; other callers should prefer [`Self::new`]
     /// so tests stay deterministic.
     #[must_use]
-    pub fn compute(is_tty: bool, plain: bool, quiet: bool) -> Self {
-        let interactive = is_tty && !plain;
-        Self::new(interactive, Theme::detect_stderr(interactive), quiet)
+    pub fn compute(is_tty: bool) -> Self {
+        Self::new(is_tty, Theme::detect_stderr(is_tty))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::ColorCapability;
+    use phoxal_cli_ui::ColorCapability;
 
     #[test]
-    fn compute_respects_terminal_and_global_flags() {
-        let ctx = OutputContext::compute(true, false, false);
+    fn compute_tracks_the_terminal() {
+        let ctx = OutputContext::compute(true);
         assert!(ctx.interactive);
-        assert!(!ctx.quiet);
 
-        assert!(!OutputContext::compute(false, false, false).interactive);
-        assert!(!OutputContext::compute(true, true, false).interactive);
-        assert!(OutputContext::compute(true, false, true).interactive);
-        assert!(OutputContext::compute(true, false, true).quiet);
-        assert!(!OutputContext::compute(true, false, true).decorated());
+        assert!(!OutputContext::compute(false).interactive);
     }
 
     #[test]
-    fn new_is_a_plain_immutable_constructor() {
-        let ctx = OutputContext::new(false, Theme::new(ColorCapability::None), true);
+    fn new_is_an_immutable_constructor() {
+        let ctx = OutputContext::new(false, Theme::new(ColorCapability::None));
         assert!(!ctx.interactive);
-        assert!(ctx.quiet);
     }
 
     /// Product decision 6: only the interactive TTY console gets the
@@ -139,8 +124,8 @@ mod tests {
     #[test]
     fn wait_budget_is_bounded_unless_rich() {
         let bounded = Duration::from_secs(60);
-        let interactive = OutputContext::new(true, Theme::new(ColorCapability::None), false);
-        let batch = OutputContext::new(false, Theme::new(ColorCapability::None), false);
+        let interactive = OutputContext::new(true, Theme::new(ColorCapability::None));
+        let batch = OutputContext::new(false, Theme::new(ColorCapability::None));
 
         assert_eq!(interactive.wait_budget(bounded), WaitBudget::Unbounded);
         assert_eq!(batch.wait_budget(bounded), WaitBudget::Bounded(bounded));

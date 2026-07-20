@@ -4,7 +4,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const ALLOWED_BASELINE: &[&str] = &["phoxal", "phoxal-api"];
+const ALLOWED_BASELINE: &[&str] = &["phoxal", "phoxal-api", "phoxal-cli-core", "phoxal-cli-ui"];
 const ALLOWED_RAW_MODULE_IMPORTS: &[&str] = &[
     "src/commands/behavior.rs",
     "src/commands/logs.rs",
@@ -75,6 +75,31 @@ fn phoxal_cli_path_dependencies_do_not_grow_past_the_snapshot() {
     }
 
     panic!("{message}");
+}
+
+#[test]
+fn extracted_crates_have_no_workspace_back_edges() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata packages field was not an array");
+    for package_name in ["phoxal-cli-core", "phoxal-cli-ui"] {
+        let package = packages
+            .iter()
+            .find(|package| package["name"].as_str() == Some(package_name))
+            .unwrap_or_else(|| panic!("cargo metadata did not include {package_name}"));
+        let path_dependencies = package["dependencies"]
+            .as_array()
+            .expect("package dependencies field was not an array")
+            .iter()
+            .filter(|dependency| dependency["source"].is_null())
+            .filter_map(|dependency| dependency["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            path_dependencies.is_empty(),
+            "{package_name} has forbidden workspace dependency edges: {path_dependencies:?}; keep the one-way dependency rule in ARCHITECTURE.md"
+        );
+    }
 }
 
 #[test]

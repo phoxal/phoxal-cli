@@ -14,12 +14,11 @@ pub struct EncodedParticipantEnv {
 
 impl EncodedParticipantEnv {
     #[must_use]
-    pub(crate) fn from_variables(variables: BTreeMap<String, String>) -> Self {
+    pub fn from_variables(variables: BTreeMap<String, String>) -> Self {
         Self { variables }
     }
 
     #[must_use]
-    #[cfg(test)]
     pub fn variables(&self) -> &BTreeMap<String, String> {
         &self.variables
     }
@@ -159,8 +158,8 @@ fn compact_config_json(launch: &ParticipantLaunch) -> Result<Option<String>> {
         bail!(
             "participant {} PHOXAL_CONFIG is {} ({size} bytes), above the {} ({MAX_CONFIG_ENV_BYTES} byte limit)",
             launch.participant_id,
-            crate::human::bytes(size as u64),
-            crate::human::bytes(MAX_CONFIG_ENV_BYTES as u64)
+            super::human::bytes(size as u64),
+            super::human::bytes(MAX_CONFIG_ENV_BYTES as u64)
         );
     }
     Ok(Some(encoded))

@@ -97,11 +97,11 @@ mod tests {
     /// participant emits, not hand-rolled JSON.
     #[test]
     fn extracts_real_fixture_binary_metadata() -> Result<()> {
-        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let package_name = "phoxal-cli-test-api-fixture";
         let status = Command::new("cargo")
             .args(["build", "--quiet", "-p", package_name])
-            .current_dir(workspace_root)
+            .current_dir(&workspace_root)
             .status()
             .with_context(|| format!("failed to spawn cargo build for {package_name}"))?;
         assert!(status.success(), "cargo build -p {package_name} failed");
@@ -147,10 +147,10 @@ mod tests {
     /// binary, which has no participant attribute.
     #[test]
     fn a_real_binary_with_no_section_parses_as_zero_contracts() -> Result<()> {
-        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let status = Command::new("cargo")
             .args(["build", "--quiet", "--bin", "phoxal-cli"])
-            .current_dir(manifest_dir)
+            .current_dir(&manifest_dir)
             .status()
             .context("failed to spawn cargo build for phoxal-cli")?;
         assert!(status.success(), "cargo build --bin phoxal-cli failed");

@@ -46,12 +46,10 @@ impl Catalog {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let root = app.project.root().to_path_buf();
         let catalog_source = app.catalog_source.clone();
-        let interactive = app.output.decorated();
-        let summary = tokio::task::spawn_blocking(move || {
-            service_catalog_summary(&root, catalog_source, interactive)
-        })
-        .await
-        .context("service catalog worker failed")??;
+        let summary =
+            tokio::task::spawn_blocking(move || service_catalog_summary(&root, catalog_source))
+                .await
+                .context("service catalog worker failed")??;
         for entry in &summary.entries {
             println!(
                 "{} -> versions [{}] ({})",
@@ -67,7 +65,6 @@ impl Catalog {
 pub fn service_catalog_summary(
     project_start: &Path,
     catalog_source: Option<String>,
-    interactive: bool,
 ) -> Result<ServiceCatalogSummary> {
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
@@ -80,7 +77,6 @@ pub fn service_catalog_summary(
         project_root,
         loaded.robot.artifacts.channel,
         &loaded.extras,
-        interactive,
     )?
     .ok_or_else(|| anyhow::anyhow!("artifact catalog unavailable"))?;
     Ok(ServiceCatalogSummary {
@@ -117,7 +113,7 @@ mod tests {
         fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
         let catalog = write_catalog(temp.path())?;
 
-        let summary = service_catalog_summary(temp.path(), Some(catalog), false)?;
+        let summary = service_catalog_summary(temp.path(), Some(catalog))?;
 
         assert_eq!(
             summary.entries.len(),

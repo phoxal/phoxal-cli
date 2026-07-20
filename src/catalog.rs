@@ -81,13 +81,13 @@ impl CatalogLoadOptions {
 
 /// Load one catalog without following heads. Custom URLs and local paths are
 /// intentionally frozen single-catalog sources.
-pub fn load_catalog(options: CatalogLoadOptions, interactive: bool) -> Result<Option<Catalog>> {
+pub fn load_catalog(options: CatalogLoadOptions) -> Result<Option<Catalog>> {
     if options.offline || offline_from_env() {
         return Ok(None);
     }
     match options.explicit_source() {
-        Some(source) => read_source(&source, interactive).map(Some),
-        None => fetch_https(DEFAULT_CATALOG_URL, interactive)
+        Some(source) => read_source(&source).map(Some),
+        None => fetch_https(DEFAULT_CATALOG_URL)
             .map(Some)
             .map_err(|error| {
                 anyhow!(
@@ -109,10 +109,9 @@ fn offline_from_env() -> bool {
 pub fn load_pinned_catalog(
     options: CatalogLoadOptions,
     channel: SelectionChannel,
-    interactive: bool,
 ) -> Result<Option<Catalog>> {
     let is_default = options.is_default_source();
-    let Some(latest) = load_catalog(options, interactive)? else {
+    let Some(latest) = load_catalog(options)? else {
         return Ok(None);
     };
     if !is_default {
@@ -139,7 +138,7 @@ pub fn load_pinned_catalog(
         return Ok(Some(latest));
     }
     let url = snapshot_catalog_url(head)?;
-    fetch_https(&url, interactive)
+    fetch_https(&url)
         .with_context(|| format!("failed to fetch frozen {channel} snapshot {head} from {url}"))
         .map(Some)
 }
@@ -157,9 +156,9 @@ pub fn snapshot_catalog_url(tag: &str) -> Result<String> {
     ))
 }
 
-fn read_source(source: &str, interactive: bool) -> Result<Catalog> {
+fn read_source(source: &str) -> Result<Catalog> {
     if source.starts_with("https://") {
-        fetch_https(source, interactive)
+        fetch_https(source)
             .with_context(|| format!("failed to fetch artifact catalog from {source}"))
     } else if source.starts_with("http://") {
         bail!("artifact catalog source must use HTTPS or a local path: {source}");
@@ -229,14 +228,10 @@ fn validate_blob(blob: &Blob) -> Result<()> {
     Ok(())
 }
 
-fn fetch_https(url: &str, interactive: bool) -> Result<Catalog> {
-    let progress =
-        crate::progress::spinner(format!("fetching artifact catalog from {url}"), interactive);
+fn fetch_https(url: &str) -> Result<Catalog> {
+    let progress = crate::progress::status(format!("fetching artifact catalog from {url}"));
     match fetch_https_inner(url) {
-        Ok(catalog) => {
-            progress.finish_and_clear();
-            Ok(catalog)
-        }
+        Ok(catalog) => Ok(catalog),
         Err(error) => {
             progress.abandon_with_message(format!("failed to fetch artifact catalog: {error:#}"));
             Err(error)

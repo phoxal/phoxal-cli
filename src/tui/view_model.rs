@@ -4,12 +4,12 @@
 use std::cmp::Ordering;
 use std::time::Instant;
 
-use crate::participant_kind::ParticipantKind;
 use crate::stores::log_store::LogStore;
 use crate::stores::runtime_store::{RuntimeOrigin, RuntimeStore};
 use crate::supervisor::{BoardSnapshot, ParticipantState, ParticipantStatus};
 use crate::telemetry::TelemetrySnapshot;
 use crate::tui::visibility::is_visible_runtime;
+use phoxal_cli_core::session::ParticipantKind;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeSummary {
@@ -236,7 +236,7 @@ fn runtime_order(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::participant_kind::ParticipantKind;
+    use phoxal_cli_core::session::ParticipantKind;
 
     #[test]
     fn runtime_rows_share_the_locked_attention_order() {

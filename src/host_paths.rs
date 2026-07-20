@@ -50,12 +50,6 @@ pub fn simulator_lock_path() -> Result<PathBuf> {
         .map(|home| home.join(".phoxal").join("simulator.lock"))
 }
 
-pub fn cli_update_cache_path() -> Result<PathBuf> {
-    dirs::home_dir()
-        .context("$HOME is not set; cannot locate the CLI update cache")
-        .map(|home| home.join(".phoxal").join("cli-update.json"))
-}
-
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::ffi::OsString;

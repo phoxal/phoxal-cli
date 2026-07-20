@@ -41,7 +41,7 @@ phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build va
 | `version` | Print the CLI version, wire codec, and participant metadata section names. |
 | `self upgrade` | Update the CLI binary itself. |
 
-Finite commands print plain, pipe-friendly text. Live `run` and `simulation run`
+Finite commands print append-only, pipe-friendly text. Live `run` and `simulation run`
 sessions require a terminal and fail with an actionable error when redirected.
 
 ### Interactive sessions
@@ -180,7 +180,6 @@ diagnostics rather than as missing static catalog entries.
 
 ```text
 ~/.phoxal/simulator.lock            Host-global simulation lease.
-~/.phoxal/cli-update.json           Host-global CLI update-notice metadata.
 
 <project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/targets/<target>/  Unpacked target artifacts.
 <project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/assets/             Unpacked component assets.
@@ -194,8 +193,7 @@ diagnostics rather than as missing static catalog entries.
 To reset all generated project state while no Phoxal command is active, delete
 `<project>/.phoxal/`. Deleting it during `run`, simulation, deploy, or update is
 unsupported because that bypasses the CLI's active locks. Do not delete
-`~/.phoxal/`: it contains host-global state such as the simulator lock and CLI
-updater metadata.
+`~/.phoxal/`: it contains host-global state such as the simulator lock.
 
 ## License
 
@@ -208,6 +206,9 @@ comply with AGPL - see [COMMERCIAL.md](COMMERCIAL.md) and reach out via
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). DCO sign-off required on every
 commit.
+
+The crate ownership and dependency rules are documented in
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Phoxal
 
