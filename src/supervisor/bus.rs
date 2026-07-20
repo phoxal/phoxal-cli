@@ -9,14 +9,18 @@ use phoxal::raw::{ParticipantLivelinessEvent, ParticipantLivelinessStatus};
 use phoxal_api::v1 as api;
 use phoxal_api::v2 as preview_api;
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
-use phoxal_cli_core::session::reconcile::{Cursor, ReconcileOutcome, Reconciler, Sequenced};
+use phoxal_cli_core::session::reconcile::{
+    Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced,
+};
 use phoxal_cli_core::session::telemetry::ClockObservation;
 use phoxal_cli_core::session::telemetry::ClockSample;
-use phoxal_cli_core::session::{LogSeverity, RoutedLogLine};
+use phoxal_cli_core::session::{LogScope, LogSeverity, RoutedLogLine};
+use std::convert::Infallible;
 use std::net::TcpStream;
 use std::net::ToSocketAddrs;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -52,14 +56,29 @@ pub fn start_bus_log_subscriber(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut recovery_epochs = board.recovery_epoch_receiver();
+        let scope = LogScope {
+            namespace: namespace.clone(),
+            robot_id: robot_id.clone(),
+        };
         loop {
             wait_for_endpoint(&connect).await;
-            let subscriber = bus_log_subscriber_loop(
-                namespace.clone(),
-                robot_id.clone(),
-                connect.clone(),
-                board.clone(),
-            );
+            let bus = match Bus::open(BusConfig {
+                namespace: namespace.clone(),
+                robot_id: robot_id.clone(),
+                participant: "phoxal-cli-supervisor".to_string(),
+                incarnation: 0,
+                connect_endpoints: vec![connect.clone()],
+            })
+            .await
+            {
+                Ok(bus) => bus,
+                Err(error) => {
+                    tracing::debug!("bus log subscriber waiting for router: {error}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            let subscriber = bus_log_subscriber_loop(&bus, &scope, board.clone());
             tokio::pin!(subscriber);
             let result = tokio::select! {
                 result = &mut subscriber => Some(result),
@@ -74,10 +93,14 @@ pub fn start_bus_log_subscriber(
                     None
                 }
             };
+            if let Err(error) = bus.close().await {
+                tracing::debug!("bus log subscriber close failed: {error}");
+            }
             match result {
                 None => continue,
-                Some(Ok(())) => break,
-                Some(Err(error)) => {
+                Some(result) => {
+                    let error =
+                        result.expect_err("bus log subscriber loop is intentionally endless");
                     tracing::debug!("bus log subscriber waiting for router: {error:#}");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
@@ -87,22 +110,12 @@ pub fn start_bus_log_subscriber(
 }
 
 pub(crate) async fn bus_log_subscriber_loop(
-    namespace: String,
-    robot_id: String,
-    connect: String,
+    bus: &Bus,
+    scope: &LogScope,
     board: BoardBackend,
-) -> Result<()> {
-    let bus = Bus::open(BusConfig {
-        namespace,
-        robot_id,
-        participant: "phoxal-cli-supervisor".to_string(),
-        incarnation: 0,
-        connect_endpoints: vec![connect],
-    })
-    .await
-    .map_err(|error| anyhow!("failed to open bus log subscription: {error}"))?;
+) -> Result<Infallible> {
     let follow_topic = api::topic::new().tool().log().follow();
-    let subscriber = Subscriber::<api::tool::log::Follow>::new(&bus, &follow_topic, 256).await?;
+    let subscriber = Subscriber::<api::tool::log::Follow>::new(bus, &follow_topic, 256).await?;
     let snapshot_topic = api::topic::new().tool().log().snapshot();
     let querier = Querier::<api::tool::log::SnapshotRequest, api::tool::log::Snapshot>::new(
         bus.clone(),
@@ -112,6 +125,8 @@ pub(crate) async fn bus_log_subscriber_loop(
     let mut reconciler = Reconciler::new(512);
     let mut local_drops = subscriber.dropped();
     let mut tool_drops = 0_u64;
+    let mut retry_backoff =
+        RetryBackoff::new(Duration::from_millis(10), Duration::from_millis(250));
 
     'query: loop {
         reconciler.begin_query();
@@ -132,10 +147,12 @@ pub(crate) async fn bus_log_subscriber_loop(
                         Cursor { generation: snapshot.cursor.generation, sequence: snapshot.cursor.sequence },
                         records,
                     );
-                    if !apply_log_outcome(&board, outcome, &mut tool_drops) {
+                    if !apply_log_outcome(&board, scope, outcome, &mut tool_drops) {
                         let _ = reconciler.local_drop();
+                        prepare_log_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
                         continue 'query;
                     }
+                    retry_backoff.reset();
                     break;
                 }
                 received = subscriber.recv() => {
@@ -144,11 +161,13 @@ pub(crate) async fn bus_log_subscriber_loop(
                     if observed != local_drops {
                         local_drops = observed;
                         let _ = reconciler.local_drop();
+                        prepare_log_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
                         continue 'query;
                     }
-                    let follow = RetainedLogFollow::from(received.body);
-                    disclose_tool_log_loss(follow.ingest_dropped, &mut tool_drops);
-                    if matches!(reconciler.follow(follow), ReconcileOutcome::Requery) {
+                    let follow_item = RetainedLogFollow::from(received.body);
+                    disclose_tool_log_loss(follow_item.ingest_dropped, &mut tool_drops);
+                    if matches!(reconciler.follow(follow_item), ReconcileOutcome::Requery) {
+                        prepare_log_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
                         continue 'query;
                     }
                 }
@@ -161,18 +180,30 @@ pub(crate) async fn bus_log_subscriber_loop(
             if observed != local_drops {
                 local_drops = observed;
                 let _ = reconciler.local_drop();
+                prepare_log_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
                 continue 'query;
             }
-            let follow = RetainedLogFollow::from(received.body);
-            disclose_tool_log_loss(follow.ingest_dropped, &mut tool_drops);
-            let outcome = reconciler.follow(follow);
+            let follow_item = RetainedLogFollow::from(received.body);
+            disclose_tool_log_loss(follow_item.ingest_dropped, &mut tool_drops);
+            let outcome = reconciler.follow(follow_item);
             if matches!(outcome, ReconcileOutcome::Requery)
-                || !apply_log_outcome(&board, outcome, &mut tool_drops)
+                || !apply_log_outcome(&board, scope, outcome, &mut tool_drops)
             {
+                prepare_log_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
                 continue 'query;
             }
         }
     }
+}
+
+async fn prepare_log_requery(
+    subscriber: &Subscriber<api::tool::log::Follow>,
+    local_drops: &mut u64,
+    backoff: &mut RetryBackoff,
+) {
+    while subscriber.try_recv().is_some() {}
+    *local_drops = subscriber.dropped();
+    tokio::time::sleep(backoff.next_delay()).await;
 }
 
 #[derive(Debug, Clone)]
@@ -212,7 +243,7 @@ fn disclose_tool_log_loss(observed: u64, previous: &mut u64) {
     }
 }
 
-fn retained_log_line(record: api::tool::log::Record) -> RoutedLogLine {
+fn retained_log_line(scope: &LogScope, record: api::tool::log::Record) -> RoutedLogLine {
     let mut text = format!("{:?}: {}", record.level, record.message);
     if record.dropped > 0 {
         text.push_str(&format!(" (producer dropped {})", record.dropped));
@@ -220,6 +251,7 @@ fn retained_log_line(record: api::tool::log::Record) -> RoutedLogLine {
     if record.truncated > 0 {
         text.push_str(&format!(" (truncated {})", record.truncated));
     }
+    let event_time = retained_log_time(&record.time);
     RoutedLogLine {
         participant: record.participant_id,
         source: LogSource::Bus,
@@ -231,11 +263,43 @@ fn retained_log_line(record: api::tool::log::Record) -> RoutedLogLine {
             api::tool::log::Level::Trace => LogSeverity::Trace,
         },
         text,
+        event_time,
+        scope: Some(scope.clone()),
+    }
+}
+
+fn retained_log_time(time: &api::tool::log::Timestamp) -> SystemTime {
+    let nanos = Duration::from_nanos(u64::from(time.nanos.min(999_999_999)));
+    let seconds = if time.unix_seconds >= 0 {
+        UNIX_EPOCH.checked_add(Duration::from_secs(time.unix_seconds as u64))
+    } else {
+        UNIX_EPOCH.checked_sub(Duration::from_secs(time.unix_seconds.unsigned_abs()))
+    };
+    seconds
+        .and_then(|value| value.checked_add(nanos))
+        .unwrap_or(UNIX_EPOCH)
+}
+
+#[cfg(test)]
+mod retained_log_tests {
+    use super::*;
+
+    #[test]
+    fn retained_log_time_preserves_producer_timestamp() {
+        let timestamp = api::tool::log::Timestamp {
+            unix_seconds: 12,
+            nanos: 345,
+        };
+        assert_eq!(
+            retained_log_time(&timestamp),
+            UNIX_EPOCH + Duration::new(12, 345)
+        );
     }
 }
 
 fn apply_log_outcome(
     board: &BoardBackend,
+    scope: &LogScope,
     outcome: ReconcileOutcome<RetainedLogFollow>,
     tool_drops: &mut u64,
 ) -> bool {
@@ -245,23 +309,19 @@ fn apply_log_outcome(
                 disclose_tool_log_loss(item.ingest_dropped, tool_drops);
             }
             board.replace_bus_logs(
+                scope.clone(),
                 snapshot
                     .into_iter()
-                    .map(|item| retained_log_line(item.record))
+                    .map(|item| retained_log_line(scope, item.record))
                     .collect(),
             ) && replay.into_iter().all(|item| {
-                let line = retained_log_line(item.record);
-                board.route_log_with_severity(
-                    &line.participant,
-                    line.source,
-                    line.severity,
-                    line.text,
-                )
+                let line = retained_log_line(scope, item.record);
+                board.route_log_line(line)
             })
         }
         ReconcileOutcome::Append(item) => {
-            let line = retained_log_line(item.record);
-            board.route_log_with_severity(&line.participant, line.source, line.severity, line.text)
+            let line = retained_log_line(scope, item.record);
+            board.route_log_line(line)
         }
         ReconcileOutcome::Buffered => true,
         ReconcileOutcome::Requery => false,

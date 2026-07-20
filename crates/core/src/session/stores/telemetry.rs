@@ -1,6 +1,6 @@
 //! Receive-time stamped latest telemetry for the live session model.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use phoxal_api::v1 as state_api;
@@ -17,7 +17,7 @@ pub struct Timestamped<T> {
 }
 
 impl<T> Timestamped<T> {
-    fn new(value: T, received_at: Instant) -> Self {
+    pub fn new(value: T, received_at: Instant) -> Self {
         Self { value, received_at }
     }
 
@@ -27,11 +27,25 @@ impl<T> Timestamped<T> {
     }
 }
 
+/// Identity of one robot-scoped retained feed. Multiple robots may share the
+/// same TUI backend during multi-robot sessions, so snapshot replacement must
+/// never clear another robot's retained state.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RobotScope {
+    pub namespace: String,
+    pub robot_id: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RouterTelemetry {
+    latest: Option<Timestamped<RouterMetricsSample>>,
+    throughput_history: VecDeque<Timestamped<f32>>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TelemetryStore {
     host: Option<Timestamped<HostSample>>,
-    router: Option<Timestamped<RouterMetricsSample>>,
-    router_throughput_history: VecDeque<Timestamped<f32>>,
+    routers: BTreeMap<RobotScope, RouterTelemetry>,
     joypad: Option<Timestamped<JoypadDevicesSample>>,
     motion: Option<Timestamped<state_api::motion::State>>,
 }
@@ -41,30 +55,35 @@ impl TelemetryStore {
         self.host = Some(Timestamped::new(sample, now));
     }
 
-    pub fn record_router(&mut self, now: Instant, sample: RouterMetricsSample) {
-        self.router_throughput_history
+    pub fn record_router(&mut self, scope: RobotScope, now: Instant, sample: RouterMetricsSample) {
+        let router = self.routers.entry(scope).or_default();
+        router
+            .throughput_history
             .push_back(Timestamped::new(sample.throughput_msg_s, now));
-        if self.router_throughput_history.len() > ROUTER_HISTORY_CAPACITY {
-            self.router_throughput_history.pop_front();
+        if router.throughput_history.len() > ROUTER_HISTORY_CAPACITY {
+            router.throughput_history.pop_front();
         }
-        self.router = Some(Timestamped::new(sample, now));
+        router.latest = Some(Timestamped::new(sample, now));
     }
 
     pub fn install_router_history(
         &mut self,
-        now: Instant,
-        samples: Vec<RouterMetricsSample>,
-        current: Option<RouterMetricsSample>,
+        scope: RobotScope,
+        samples: Vec<Timestamped<RouterMetricsSample>>,
+        current: Option<Timestamped<RouterMetricsSample>>,
     ) {
-        self.router_throughput_history.clear();
+        let router = self.routers.entry(scope).or_default();
+        router.throughput_history.clear();
         let keep_from = samples.len().saturating_sub(ROUTER_HISTORY_CAPACITY);
         for sample in &samples[keep_from..] {
-            self.router_throughput_history
-                .push_back(Timestamped::new(sample.throughput_msg_s, now));
+            router.throughput_history.push_back(Timestamped::new(
+                sample.value.throughput_msg_s,
+                sample.received_at,
+            ));
         }
-        self.router = current
+        router.latest = current
             .or_else(|| samples.last().cloned())
-            .map(|sample| Timestamped::new(sample, now));
+            .map(|sample| Timestamped::new(sample.value, sample.received_at));
     }
 
     pub fn record_joypad(&mut self, now: Instant, sample: JoypadDevicesSample) {
@@ -82,12 +101,30 @@ impl TelemetryStore {
 
     #[must_use]
     pub fn router(&self) -> Option<&Timestamped<RouterMetricsSample>> {
-        self.router.as_ref()
+        self.routers
+            .values()
+            .filter_map(|router| router.latest.as_ref())
+            .max_by_key(|sample| sample.received_at)
     }
 
     #[must_use]
-    pub fn router_throughput_history(&self) -> &VecDeque<Timestamped<f32>> {
-        &self.router_throughput_history
+    pub fn router_throughput_history(&self) -> Vec<Timestamped<f32>> {
+        let mut history = self
+            .routers
+            .values()
+            .flat_map(|router| router.throughput_history.iter().copied())
+            .collect::<Vec<_>>();
+        history.sort_by_key(|sample| sample.received_at);
+        let keep_from = history.len().saturating_sub(ROUTER_HISTORY_CAPACITY);
+        history.drain(..keep_from);
+        history
+    }
+
+    #[cfg(test)]
+    fn router_for(&self, scope: &RobotScope) -> Option<&Timestamped<RouterMetricsSample>> {
+        self.routers
+            .get(scope)
+            .and_then(|router| router.latest.as_ref())
     }
 
     #[must_use]
@@ -105,6 +142,13 @@ impl TelemetryStore {
 mod tests {
     use super::*;
 
+    fn scope(robot_id: &str) -> RobotScope {
+        RobotScope {
+            namespace: "acme".to_string(),
+            robot_id: robot_id.to_string(),
+        }
+    }
+
     #[test]
     fn freshness_uses_receive_time() {
         let received = Instant::now();
@@ -119,6 +163,7 @@ mod tests {
         let now = Instant::now();
         for index in 0..(ROUTER_HISTORY_CAPACITY + 3) {
             store.record_router(
+                scope("r1"),
                 now + Duration::from_secs(index as u64),
                 RouterMetricsSample {
                     throughput_msg_s: index as f32,
@@ -131,7 +176,7 @@ mod tests {
             ROUTER_HISTORY_CAPACITY
         );
         assert_eq!(
-            store.router_throughput_history().front().unwrap().value,
+            store.router_throughput_history().first().unwrap().value,
             3.0
         );
     }
@@ -141,6 +186,7 @@ mod tests {
         let mut store = TelemetryStore::default();
         let now = Instant::now();
         store.record_router(
+            scope("r1"),
             now,
             RouterMetricsSample {
                 throughput_msg_s: -1.0,
@@ -148,26 +194,84 @@ mod tests {
             },
         );
         let samples = (0..(ROUTER_HISTORY_CAPACITY + 3))
-            .map(|index| RouterMetricsSample {
-                throughput_msg_s: index as f32,
-                ..RouterMetricsSample::default()
+            .map(|index| {
+                Timestamped::new(
+                    RouterMetricsSample {
+                        throughput_msg_s: index as f32,
+                        ..RouterMetricsSample::default()
+                    },
+                    now + Duration::from_secs(index as u64),
+                )
             })
             .collect();
-        let current = RouterMetricsSample {
-            throughput_msg_s: 99.0,
-            ..RouterMetricsSample::default()
-        };
+        let current = Timestamped::new(
+            RouterMetricsSample {
+                throughput_msg_s: 99.0,
+                ..RouterMetricsSample::default()
+            },
+            now + Duration::from_secs(99),
+        );
 
-        store.install_router_history(now, samples, Some(current));
+        store.install_router_history(scope("r1"), samples, Some(current));
 
         assert_eq!(
             store.router_throughput_history().len(),
             ROUTER_HISTORY_CAPACITY
         );
         assert_eq!(
-            store.router_throughput_history().front().unwrap().value,
+            store.router_throughput_history().first().unwrap().value,
             3.0
         );
         assert_eq!(store.router().unwrap().value.throughput_msg_s, 99.0);
+    }
+
+    #[test]
+    fn snapshot_replacement_is_scoped_per_robot() {
+        let mut store = TelemetryStore::default();
+        let now = Instant::now();
+        store.record_router(
+            scope("r1"),
+            now,
+            RouterMetricsSample {
+                throughput_msg_s: 1.0,
+                ..RouterMetricsSample::default()
+            },
+        );
+        store.record_router(
+            scope("r2"),
+            now + Duration::from_secs(1),
+            RouterMetricsSample {
+                throughput_msg_s: 2.0,
+                ..RouterMetricsSample::default()
+            },
+        );
+        store.install_router_history(
+            scope("r1"),
+            vec![Timestamped::new(
+                RouterMetricsSample {
+                    throughput_msg_s: 3.0,
+                    ..RouterMetricsSample::default()
+                },
+                now + Duration::from_secs(2),
+            )],
+            None,
+        );
+
+        assert_eq!(
+            store
+                .router_for(&scope("r1"))
+                .unwrap()
+                .value
+                .throughput_msg_s,
+            3.0
+        );
+        assert_eq!(
+            store
+                .router_for(&scope("r2"))
+                .unwrap()
+                .value
+                .throughput_msg_s,
+            2.0
+        );
     }
 }

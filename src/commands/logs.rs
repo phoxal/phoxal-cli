@@ -4,11 +4,14 @@ use phoxal::bus::{DEFAULT_QUERY_TIMEOUT, Querier, Subscriber};
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::v1 as api;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::AppContext;
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
 use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot_with_extras};
-use phoxal_cli_core::session::reconcile::{Cursor, ReconcileOutcome, Reconciler, Sequenced};
+use phoxal_cli_core::session::reconcile::{
+    Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced,
+};
 
 #[derive(Debug, Args)]
 pub struct Logs {
@@ -105,6 +108,8 @@ async fn stream_logs(
     let mut local_drops = subscriber.dropped();
     let mut tool_drops = 0_u64;
     let mut printed_cursor: Option<Cursor> = None;
+    let mut retry_backoff =
+        RetryBackoff::new(Duration::from_millis(10), Duration::from_millis(250));
 
     'query: loop {
         reconciler.begin_query();
@@ -125,21 +130,29 @@ async fn stream_logs(
                         records,
                     ) {
                         ReconcileOutcome::Installed { snapshot, replay } => {
-                            let printed = print_new_records(
+                            let print_result = print_new_records(
                                 snapshot.into_iter().chain(replay),
                                 participant.as_deref(),
                                 &mut printed_cursor,
                             );
                             if !follow {
-                                if printed == 0 {
-                                    eprintln!("no retained log events");
+                                if print_result.printed == 0 {
+                                    if print_result.seen == 0 {
+                                        eprintln!("no retained log events");
+                                    } else if let Some(participant) = participant.as_deref() {
+                                        eprintln!("no retained log events matched participant {participant}");
+                                    }
                                 }
                                 bus.close().await?;
                                 return Ok(());
                             }
+                            retry_backoff.reset();
                             break;
                         }
-                        ReconcileOutcome::Requery => continue 'query,
+                        ReconcileOutcome::Requery => {
+                            prepare_log_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+                            continue 'query;
+                        }
                         ReconcileOutcome::Buffered | ReconcileOutcome::Append(_) => {
                             unreachable!("snapshot installation has only installed/requery outcomes")
                         }
@@ -151,14 +164,16 @@ async fn stream_logs(
                     if observed != local_drops {
                         local_drops = observed;
                         let _ = reconciler.local_drop();
+                        prepare_log_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
                         continue 'query;
                     }
-                    let follow = received.body;
-                    disclose_tool_log_loss(follow.ingest_dropped, &mut tool_drops);
+                    let follow_item = received.body;
+                    disclose_tool_log_loss(follow_item.ingest_dropped, &mut tool_drops);
                     if matches!(
-                        reconciler.follow(RetainedLog::from(follow)),
+                        reconciler.follow(RetainedLog::from(follow_item)),
                         ReconcileOutcome::Requery
                     ) {
+                        prepare_log_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
                         continue 'query;
                     }
                 }
@@ -171,11 +186,12 @@ async fn stream_logs(
             if observed != local_drops {
                 local_drops = observed;
                 let _ = reconciler.local_drop();
+                prepare_log_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
                 continue 'query;
             }
-            let follow = received.body;
-            disclose_tool_log_loss(follow.ingest_dropped, &mut tool_drops);
-            match reconciler.follow(RetainedLog::from(follow)) {
+            let follow_item = received.body;
+            disclose_tool_log_loss(follow_item.ingest_dropped, &mut tool_drops);
+            match reconciler.follow(RetainedLog::from(follow_item)) {
                 ReconcileOutcome::Append(record) => {
                     print_new_records(
                         std::iter::once(record),
@@ -183,11 +199,24 @@ async fn stream_logs(
                         &mut printed_cursor,
                     );
                 }
-                ReconcileOutcome::Requery => continue 'query,
+                ReconcileOutcome::Requery => {
+                    prepare_log_requery(&subscriber, &mut local_drops, &mut retry_backoff).await;
+                    continue 'query;
+                }
                 ReconcileOutcome::Buffered | ReconcileOutcome::Installed { .. } => {}
             }
         }
     }
+}
+
+async fn prepare_log_requery(
+    subscriber: &Subscriber<api::tool::log::Follow>,
+    local_drops: &mut u64,
+    backoff: &mut RetryBackoff,
+) {
+    while subscriber.try_recv().is_some() {}
+    *local_drops = subscriber.dropped();
+    tokio::time::sleep(backoff.next_delay()).await;
 }
 
 #[derive(Debug)]
@@ -218,8 +247,8 @@ fn print_new_records(
     records: impl IntoIterator<Item = RetainedLog>,
     participant: Option<&str>,
     printed_cursor: &mut Option<Cursor>,
-) -> usize {
-    let mut printed = 0;
+) -> PrintResult {
+    let mut result = PrintResult::default();
     for item in records {
         let already_printed = printed_cursor.as_ref().is_some_and(|cursor| {
             cursor.generation == item.cursor.generation && cursor.sequence >= item.cursor.sequence
@@ -227,14 +256,21 @@ fn print_new_records(
         if already_printed {
             continue;
         }
+        result.seen += 1;
         *printed_cursor = Some(item.cursor);
         if participant.is_some_and(|participant| participant != item.record.participant_id) {
             continue;
         }
         print_record(&item.record);
-        printed += 1;
+        result.printed += 1;
     }
-    printed
+    result
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PrintResult {
+    seen: usize,
+    printed: usize,
 }
 
 fn print_record(record: &api::tool::log::Record) {
@@ -256,5 +292,44 @@ fn disclose_tool_log_loss(observed: u64, previous: &mut u64) {
             observed
         );
         *previous = observed;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn filtered_snapshot_distinguishes_events_from_matches() {
+        let item = RetainedLog {
+            cursor: Cursor {
+                generation: "g".to_string(),
+                sequence: 1,
+            },
+            record: api::tool::log::Record {
+                sequence: 1,
+                participant_id: "drive".to_string(),
+                source_sequence: 1,
+                time: api::tool::log::Timestamp {
+                    unix_seconds: 0,
+                    nanos: 0,
+                },
+                level: api::tool::log::Level::Info,
+                target: "drive".to_string(),
+                message: "ready".to_string(),
+                fields: BTreeMap::new(),
+                dropped: 0,
+                truncated: 0,
+            },
+        };
+        let mut cursor = None;
+        assert_eq!(
+            print_new_records([item], Some("mission"), &mut cursor),
+            PrintResult {
+                seen: 1,
+                printed: 0
+            }
+        );
     }
 }

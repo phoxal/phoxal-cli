@@ -26,7 +26,9 @@ fn bounded_log_text(text: &str) -> String {
 pub use phoxal_cli_core::session::board::{
     BoardSnapshot, ParticipantLaunchCommand, ParticipantState, ParticipantStatus,
 };
-pub use phoxal_cli_core::session::log::{LogSeverity, LogSource, RoutedLogLine, RoutedLogUpdate};
+pub use phoxal_cli_core::session::log::{
+    LogScope, LogSeverity, LogSource, RoutedLogLine, RoutedLogUpdate,
+};
 
 mod board;
 pub(crate) use board::BoardBackend;

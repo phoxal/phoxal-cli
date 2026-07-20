@@ -156,7 +156,7 @@ impl TuiDisplay {
     ) -> io::Result<()> {
         while let Ok(update) = self.log_rx.try_recv() {
             match update {
-                RoutedLogUpdate::Replace(lines) => self.logs.replace_bus(lines),
+                RoutedLogUpdate::Replace { scope, lines } => self.logs.replace_bus(scope, lines),
                 RoutedLogUpdate::Append(line) => self.logs.record(line),
             }
         }
@@ -296,6 +296,8 @@ mod tests {
                     source: LogSource::Bus,
                     severity: LogSeverity::Info,
                     text: "hello".to_string(),
+                    event_time: SystemTime::UNIX_EPOCH,
+                    scope: None,
                 }))
                 .is_ok()
         );

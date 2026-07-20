@@ -65,10 +65,7 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
                 _ => None,
             })
             .collect::<Vec<_>>(),
-        vec![
-            phoxal_cli_core::project::launch_plan::SITE_TOOL_BUS,
-            phoxal_cli_core::project::launch_plan::ROBOT_TOOL_LOG,
-        ]
+        vec!["tool-bus-testbot", "tool-log-testbot"]
     );
     assert_eq!(
         plan.ctx.resolved.platform_runtimes.len(),

@@ -1469,8 +1469,8 @@ fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {
     for env_name in [
         "tool-joypad.env",
         "tool-telemetry.env",
-        "tool-bus.env",
-        "tool-log.env",
+        "tool-bus-testbot.env",
+        "tool-log-testbot.env",
     ] {
         let contents = payload
             .env_files
@@ -1495,7 +1495,7 @@ fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {
             .unit_names
             .contains(&"phoxal-tool-telemetry.service".to_string())
     );
-    for tool in ["tool-bus", "tool-log"] {
+    for tool in ["tool-bus-testbot", "tool-log-testbot"] {
         let unit_name = format!("phoxal-participant-{tool}.service");
         let unit = payload
             .rendered_units
@@ -1504,7 +1504,7 @@ fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {
         assert!(unit.contains("After=network-online.target phoxal-router.service"));
         assert!(
             !unit.contains(
-                "phoxal-participant-tool-bus.service phoxal-participant-tool-log.service"
+                "phoxal-participant-tool-bus-testbot.service phoxal-participant-tool-log-testbot.service"
             ),
             "retention tools must not order after themselves: {unit}"
         );

@@ -271,12 +271,16 @@ fn tools_source_filter_renders_tool_logs() {
         source: LogSource::Bus,
         severity: LogSeverity::Info,
         text: "joypad ready".to_string(),
+        event_time: std::time::SystemTime::UNIX_EPOCH,
+        scope: None,
     });
     logs.record(RoutedLogLine {
         participant: "phoxal-cli/Cli".to_string(),
         source: LogSource::Raw,
         severity: LogSeverity::Info,
         text: "cli diagnostic".to_string(),
+        event_time: std::time::SystemTime::UNIX_EPOCH,
+        scope: None,
     });
     let runtime = RuntimeStore::new();
     let telemetry = TelemetrySnapshot::default();

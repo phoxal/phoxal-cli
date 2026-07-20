@@ -234,6 +234,8 @@ fn paused_logs_exclude_lines_received_after_the_pause_anchor() {
             source: LogSource::Bus,
             severity: LogSeverity::Info,
             text: "before pause".to_string(),
+            event_time: std::time::SystemTime::UNIX_EPOCH,
+            scope: None,
         },
         started,
     );
@@ -258,6 +260,8 @@ fn paused_logs_exclude_lines_received_after_the_pause_anchor() {
             source: LogSource::Bus,
             severity: LogSeverity::Info,
             text: "after pause".to_string(),
+            event_time: std::time::SystemTime::UNIX_EPOCH,
+            scope: None,
         },
         started + std::time::Duration::from_secs(1),
     );
@@ -290,6 +294,8 @@ fn pausing_an_empty_log_view_freezes_before_the_first_matching_line() {
             source: LogSource::Bus,
             severity: LogSeverity::Info,
             text: "first line after pause".to_string(),
+            event_time: std::time::SystemTime::UNIX_EPOCH,
+            scope: None,
         },
         anchor + std::time::Duration::from_secs(1),
     );
@@ -485,6 +491,8 @@ fn sync_leaves_page_window_clamping_to_the_renderer() {
         source: phoxal_cli_core::session::LogSource::Bus,
         severity: LogSeverity::Info,
         text: "ready".to_string(),
+        event_time: std::time::SystemTime::UNIX_EPOCH,
+        scope: None,
     });
     let board = BoardSnapshot::default();
     let runtime = RuntimeStore::new();

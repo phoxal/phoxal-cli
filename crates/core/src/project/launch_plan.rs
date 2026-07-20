@@ -16,7 +16,7 @@ use crate::check::source::{SourceParticipant, SourceParticipantKind};
 
 pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
 pub const SITE_INFRASTRUCTURE_ROUTER: &str = "infrastructure-router";
-pub const SITE_TOOL_BUS: &str = "tool-bus";
+pub const ROBOT_TOOL_BUS: &str = "tool-bus";
 pub const SITE_TOOL_JOYPAD: &str = "tool-joypad";
 pub const ROBOT_TOOL_LOG: &str = "tool-log";
 /// The host-resource-meter tool (CLI-UX Phase 3/4): a standard, hard-required
@@ -52,7 +52,7 @@ pub fn simulator_controller_provider_id(robot_id: &str) -> String {
 /// validation even though telemetry is started and readiness-waited exactly
 /// like the other two standard tools.
 pub const STANDARD_SITE_TOOLS: &[&str] = &[SITE_TOOL_JOYPAD, SITE_TOOL_TELEMETRY];
-pub const STANDARD_ROBOT_TOOLS: &[&str] = &[SITE_TOOL_BUS, ROBOT_TOOL_LOG];
+pub const STANDARD_ROBOT_TOOLS: &[&str] = &[ROBOT_TOOL_BUS, ROBOT_TOOL_LOG];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -326,7 +326,7 @@ fn build_robot_launch(
                 },
             ),
             launch: ParticipantLaunch {
-                participant_id: tool.name.clone(),
+                participant_id: format!("{}-{}", tool.name, input.resolved.robot.robot.id),
                 namespace: input.resolved.robot.robot.namespace.clone(),
                 robot_id: input.resolved.robot.robot.id.clone(),
                 bus: BusProfile {
@@ -649,7 +649,7 @@ mod tests {
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
-            vec![SITE_TOOL_BUS, ROBOT_TOOL_LOG]
+            vec!["tool-bus-robot_v1", "tool-log-robot_v1"]
         );
         let mission = plan.robots[0]
             .participants
@@ -678,6 +678,36 @@ mod tests {
         let error =
             build_launch_plan(LaunchMode::Deploy, &inputs).expect_err("deploy is one robot");
         assert!(error.to_string().contains("exactly one robot"), "{error:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn run_robot_tools_have_unique_participant_ids_per_robot() -> anyhow::Result<()> {
+        let mut robot_a = empty_resolved_robot("robot_a")?;
+        let mut robot_b = empty_resolved_robot("robot_b")?;
+        add_site_tools(&mut robot_a);
+        add_site_tools(&mut robot_b);
+        let extras = RobotManifestExtras::default();
+        let inputs = [
+            empty_checked_input(Path::new("/tmp/a"), &robot_a, &extras),
+            empty_checked_input(Path::new("/tmp/b"), &robot_b, &extras),
+        ];
+
+        let plan = build_launch_plan(LaunchMode::Run, &inputs)?;
+        let ids = plan
+            .robots
+            .iter()
+            .flat_map(|robot| {
+                robot
+                    .participants
+                    .iter()
+                    .map(|participant| participant.launch.participant_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"tool-bus-robot_a"));
+        assert!(ids.contains(&"tool-log-robot_a"));
+        assert!(ids.contains(&"tool-bus-robot_b"));
+        assert!(ids.contains(&"tool-log-robot_b"));
         Ok(())
     }
 
@@ -783,7 +813,7 @@ mod tests {
     fn a_catalog_missing_a_standard_site_tool_fails_with_a_remediation_message()
     -> anyhow::Result<()> {
         let mut resolved = empty_resolved_robot("robot_v1")?;
-        resolved.tools.push(tool(SITE_TOOL_BUS));
+        resolved.tools.push(tool(ROBOT_TOOL_BUS));
         resolved.tools.push(tool(SITE_TOOL_JOYPAD));
         // Telemetry deliberately left unresolved, as if the pinned catalog
         // snapshot predates it.
@@ -867,7 +897,7 @@ robot:
     }
 
     fn add_site_tools(resolved: &mut ResolvedRobot) {
-        resolved.tools.push(tool(SITE_TOOL_BUS));
+        resolved.tools.push(tool(ROBOT_TOOL_BUS));
         resolved.tools.push(tool(SITE_TOOL_JOYPAD));
         resolved.tools.push(tool(ROBOT_TOOL_LOG));
         resolved.tools.push(tool(SITE_TOOL_TELEMETRY));

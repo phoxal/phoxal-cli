@@ -236,7 +236,12 @@ fn one_instance_substitution_is_checked_and_rendered() -> Result<()> {
     // never gets a CLI-spawned process (Part 5).
     assert_eq!(
         participant_ids(&plan),
-        vec!["drive", controller_id.as_str(), "tool-bus", "tool-log"]
+        vec![
+            "drive",
+            controller_id.as_str(),
+            "tool-bus-robot_v1",
+            "tool-log-robot_v1"
+        ]
     );
     Ok(())
 }
@@ -373,8 +378,8 @@ fn path_overridden_simulators_use_the_same_provider_ids_as_official() -> Result<
             "drive",
             controller_id.as_str(),
             supervisor_id.as_str(),
-            "tool-bus",
-            "tool-log"
+            "tool-bus-robot_v1",
+            "tool-log-robot_v1"
         ]
     );
     for id in [&controller_id, &supervisor_id] {
@@ -445,8 +450,8 @@ fn sim_launch_set_matches_checked_robot_participants_without_drivers() -> Result
             "drive",
             "mission",
             controller_id.as_str(),
-            "tool-bus",
-            "tool-log"
+            "tool-bus-robot_v1",
+            "tool-log-robot_v1"
         ]
     );
     assert_eq!(
@@ -1239,7 +1244,7 @@ fn simulator_runtime(name: &str) -> ResolvedPlatformRuntime {
 fn add_site_tools(resolved: &mut ResolvedRobot) {
     resolved
         .tools
-        .push(tool(phoxal_cli_core::project::launch_plan::SITE_TOOL_BUS));
+        .push(tool(phoxal_cli_core::project::launch_plan::ROBOT_TOOL_BUS));
     resolved.tools.push(tool(SITE_TOOL_JOYPAD));
     resolved
         .tools

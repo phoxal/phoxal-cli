@@ -3,13 +3,14 @@
 //! runtime has emitted over the bus, later raw mirrors are dropped by routing
 //! identity rather than fragile text comparison.
 
-use std::collections::{BTreeSet, VecDeque};
-use std::time::Instant;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::time::{Instant, SystemTime};
 
 use crate::session::event::DiagnosticLevel;
-use crate::session::log::{LogSeverity, LogSource, RoutedLogLine};
+use crate::session::log::{LogScope, LogSeverity, LogSource, RoutedLogLine};
 
-pub const LOG_CAPACITY: usize = 2000;
+pub const RAW_LOG_CAPACITY: usize = 2000;
+pub const BUS_LOG_CAPACITY: usize = 2000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayedLine {
@@ -18,6 +19,8 @@ pub struct DisplayedLine {
     pub severity: LogSeverity,
     pub text: String,
     pub received_at: Instant,
+    pub event_time: SystemTime,
+    order: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -26,7 +29,9 @@ pub struct LogStore {
     /// finite launch plan before it reaches this store, so this set is bounded
     /// by the session graph and remains correct after both LRU and ring eviction.
     bus_participants: BTreeSet<String>,
-    all: VecDeque<DisplayedLine>,
+    raw: VecDeque<DisplayedLine>,
+    bus: BTreeMap<Option<LogScope>, VecDeque<DisplayedLine>>,
+    next_order: u64,
 }
 
 impl LogStore {
@@ -39,9 +44,10 @@ impl LogStore {
         self.record_at(line, Instant::now());
     }
 
-    pub fn replace_bus(&mut self, lines: Vec<RoutedLogLine>) {
-        self.all.retain(|line| line.source != LogSource::Bus);
-        for line in lines {
+    pub fn replace_bus(&mut self, scope: LogScope, lines: Vec<RoutedLogLine>) {
+        self.bus.remove(&Some(scope.clone()));
+        for mut line in lines {
+            line.scope = Some(scope.clone());
             self.record(line);
         }
     }
@@ -55,14 +61,25 @@ impl LogStore {
         if line.source == LogSource::Raw && self.bus_participants.contains(&participant) {
             return;
         }
+        let scope = line.scope.clone();
         let displayed = DisplayedLine {
             participant,
             source: line.source,
             severity: line.severity,
             text: sanitize_terminal_text(&line.text),
             received_at,
+            event_time: line.event_time,
+            order: self.next_order,
         };
-        push_bounded(&mut self.all, displayed);
+        self.next_order = self.next_order.wrapping_add(1);
+        match displayed.source {
+            LogSource::Raw => push_bounded(&mut self.raw, displayed, RAW_LOG_CAPACITY),
+            LogSource::Bus => push_bounded(
+                self.bus.entry(scope).or_default(),
+                displayed,
+                BUS_LOG_CAPACITY,
+            ),
+        }
     }
 
     pub fn record_diagnostic(
@@ -85,19 +102,28 @@ impl LogStore {
             severity,
             text: sanitize_terminal_text(&text),
             received_at,
+            event_time: SystemTime::now(),
+            order: self.next_order,
         };
-        push_bounded(&mut self.all, displayed);
+        self.next_order = self.next_order.wrapping_add(1);
+        push_bounded(&mut self.raw, displayed, RAW_LOG_CAPACITY);
     }
 
     #[must_use]
     pub fn lines(&self) -> impl DoubleEndedIterator<Item = &DisplayedLine> {
-        self.all.iter()
+        let mut lines = self
+            .raw
+            .iter()
+            .chain(self.bus.values().flat_map(|lines| lines.iter()))
+            .collect::<Vec<_>>();
+        lines.sort_by_key(|line| (line.event_time, line.order));
+        lines.into_iter()
     }
 }
 
-fn push_bounded(lines: &mut VecDeque<DisplayedLine>, line: DisplayedLine) {
+fn push_bounded(lines: &mut VecDeque<DisplayedLine>, line: DisplayedLine, capacity: usize) {
     lines.push_back(line);
-    if lines.len() > LOG_CAPACITY {
+    if lines.len() > capacity {
         lines.pop_front();
     }
 }
@@ -188,6 +214,7 @@ fn is_terminal_format_control(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn line(id: &str, source: LogSource, text: &str) -> RoutedLogLine {
         RoutedLogLine {
@@ -195,6 +222,11 @@ mod tests {
             source,
             severity: LogSeverity::Info,
             text: text.to_string(),
+            event_time: UNIX_EPOCH,
+            scope: (source == LogSource::Bus).then(|| LogScope {
+                namespace: "acme".to_string(),
+                robot_id: "r1".to_string(),
+            }),
         }
     }
 
@@ -231,7 +263,13 @@ mod tests {
         store.record(line("drive", LogSource::Raw, "booting"));
         store.record(line("drive", LogSource::Bus, "old retained"));
 
-        store.replace_bus(vec![line("drive", LogSource::Bus, "snapshot")]);
+        store.replace_bus(
+            LogScope {
+                namespace: "acme".to_string(),
+                robot_id: "r1".to_string(),
+            },
+            vec![line("drive", LogSource::Bus, "snapshot")],
+        );
 
         let lines = store.lines().collect::<Vec<_>>();
         assert_eq!(lines.len(), 2);
@@ -244,10 +282,57 @@ mod tests {
     #[test]
     fn global_ring_is_bounded() {
         let mut store = LogStore::new();
-        for index in 0..(LOG_CAPACITY + 5) {
+        for index in 0..(BUS_LOG_CAPACITY + 5) {
             store.record(line("drive", LogSource::Bus, &format!("line {index}")));
         }
-        assert_eq!(store.lines().count(), LOG_CAPACITY);
+        assert_eq!(store.lines().count(), BUS_LOG_CAPACITY);
+    }
+
+    #[test]
+    fn bus_replacement_keeps_raw_capacity_and_merges_by_event_time() {
+        let mut store = LogStore::new();
+        for index in 0..RAW_LOG_CAPACITY {
+            let mut raw = line("drive", LogSource::Raw, &format!("raw {index}"));
+            raw.event_time = UNIX_EPOCH + Duration::from_secs((index * 2 + 1) as u64);
+            store.record(raw);
+        }
+        let mut bus = line("mission", LogSource::Bus, "retained");
+        bus.event_time = UNIX_EPOCH + Duration::from_secs(2);
+        store.replace_bus(
+            LogScope {
+                namespace: "acme".to_string(),
+                robot_id: "r1".to_string(),
+            },
+            vec![bus],
+        );
+
+        let lines = store.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), RAW_LOG_CAPACITY + 1);
+        assert_eq!(lines[0].text, "raw 0");
+        assert_eq!(lines[1].text, "retained");
+        assert_eq!(lines[2].text, "raw 1");
+    }
+
+    #[test]
+    fn bus_replacement_is_scoped_per_robot() {
+        let mut store = LogStore::new();
+        let r1 = LogScope {
+            namespace: "acme".to_string(),
+            robot_id: "r1".to_string(),
+        };
+        let r2 = LogScope {
+            namespace: "acme".to_string(),
+            robot_id: "r2".to_string(),
+        };
+        store.replace_bus(r1.clone(), vec![line("drive-r1", LogSource::Bus, "one")]);
+        store.replace_bus(r2, vec![line("drive-r2", LogSource::Bus, "two")]);
+        store.replace_bus(r1, vec![line("drive-r1", LogSource::Bus, "new")]);
+
+        let text = store
+            .lines()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(text, vec!["two", "new"]);
     }
 
     #[test]
@@ -270,17 +355,21 @@ mod tests {
     }
 
     #[test]
-    fn bus_cutover_survives_lru_and_global_ring_eviction() {
+    fn bus_cutover_survives_raw_ring_eviction_without_cross_source_eviction() {
         let mut store = LogStore::new();
         let started = Instant::now();
         store.record_at(line("drive", LogSource::Bus, "bus line"), started);
-        for index in 0..LOG_CAPACITY {
+        for index in 0..RAW_LOG_CAPACITY {
             store.record_at(
                 line("filler", LogSource::Raw, &format!("line {index}")),
                 started + std::time::Duration::from_nanos(index as u64 + 1),
             );
         }
-        assert!(store.lines().all(|line| line.participant != "drive"));
+        assert!(
+            store
+                .lines()
+                .any(|line| line.participant == "drive" && line.source == LogSource::Bus)
+        );
         store.record_at(
             line("drive", LogSource::Raw, "mirrored bus line"),
             started + std::time::Duration::from_secs(1_000),

@@ -22,9 +22,12 @@ pub(crate) fn participant_unit(
 ) -> String {
     let id = &participant.launch.participant_id;
     let retention_order = if is_tool_execution(&participant.execution) {
-        ""
+        String::new()
     } else {
-        " phoxal-participant-tool-bus.service phoxal-participant-tool-log.service"
+        format!(
+            " phoxal-participant-tool-bus-{robot}.service phoxal-participant-tool-log-{robot}.service",
+            robot = participant.launch.robot_id
+        )
     };
     let mut unit = format!(
         "[Unit]\nDescription=Phoxal participant {id}\nAfter=network-online.target phoxal-router.service{retention_order}\nWants=network-online.target{retention_order}\nPartOf=phoxal.target\nStartLimitIntervalSec={}\nStartLimitBurst={START_LIMIT_BURST}\n\n[Service]\nType=notify\nEnvironmentFile={OPT_ENV}/{id}.env\nExecStart={OPT_BIN}/{binary}\n\nRestart=on-failure\nRestartSec=2s\nTimeoutStopSec=5s\nStateDirectory=phoxal\nWatchdogSec={WATCHDOG_SEC}s\n\nUser=phoxal\nGroup=phoxal\nNoNewPrivileges=true\n",

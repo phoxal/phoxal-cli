@@ -1,7 +1,7 @@
 //! Concurrent session-board state derived from process and bus observations.
 
 use super::{
-    BoardSnapshot, LogSeverity, LogSource, ParticipantLaunchCommand, ParticipantState,
+    BoardSnapshot, LogScope, LogSeverity, LogSource, ParticipantLaunchCommand, ParticipantState,
     ParticipantStatus, RoutedLogLine, RoutedLogUpdate, bounded_chars, bounded_log_text,
 };
 use phoxal_cli_core::session::ParticipantKind;
@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 use tokio::sync::{mpsc, watch};
 
 const NOT_PRESENT_NOTE: &str =
@@ -274,8 +275,24 @@ impl BoardBackend {
         severity: LogSeverity,
         text: impl Into<String>,
     ) -> bool {
-        let text = bounded_log_text(&text.into());
-        if !self.try_append_log(id, text.clone()) {
+        self.route_log_line(RoutedLogLine {
+            participant: id.to_string(),
+            source,
+            severity,
+            text: text.into(),
+            event_time: SystemTime::now(),
+            scope: None,
+        })
+    }
+
+    /// Route a complete record when the producer supplied its own event time.
+    /// Retained tool-log replay uses this path so snapshot replacement does
+    /// not rewrite chronology to receive time.
+    pub fn route_log_line(&self, mut line: RoutedLogLine) -> bool {
+        line.text = bounded_log_text(&line.text);
+        let id = &line.participant;
+        let source = line.source;
+        if !self.try_append_log(id, line.text.clone()) {
             if source == LogSource::Bus {
                 self.disclose_unknown_bus_id(id, "log");
             }
@@ -287,14 +304,7 @@ impl BoardBackend {
             // (no live TUI) both just mean this line never reaches the
             // scrollback - never worth blocking the caller (a bus-log
             // subscriber or output-reader task) over.
-            return sender
-                .try_send(RoutedLogUpdate::Append(RoutedLogLine {
-                    participant: id.to_string(),
-                    source,
-                    severity,
-                    text,
-                }))
-                .is_ok();
+            return sender.try_send(RoutedLogUpdate::Append(line)).is_ok();
         }
         true
     }
@@ -302,7 +312,7 @@ impl BoardBackend {
     /// Install one complete tool-log snapshot as the bus-derived presentation
     /// state. Returns false when the bounded display channel dropped the
     /// replacement so the adapter can query again.
-    pub fn replace_bus_logs(&self, lines: Vec<RoutedLogLine>) -> bool {
+    pub fn replace_bus_logs(&self, scope: LogScope, lines: Vec<RoutedLogLine>) -> bool {
         let mut accepted = Vec::with_capacity(lines.len());
         for line in lines {
             if self.try_append_log(&line.participant, line.text.clone()) {
@@ -312,8 +322,14 @@ impl BoardBackend {
             }
         }
         let sink = self.log_sink.lock().expect("log sink mutex poisoned");
-        sink.as_ref()
-            .is_none_or(|sender| sender.try_send(RoutedLogUpdate::Replace(accepted)).is_ok())
+        sink.as_ref().is_none_or(|sender| {
+            sender
+                .try_send(RoutedLogUpdate::Replace {
+                    scope,
+                    lines: accepted,
+                })
+                .is_ok()
+        })
     }
 
     fn disclose_unknown_bus_id(&self, id: &str, signal: &'static str) {
