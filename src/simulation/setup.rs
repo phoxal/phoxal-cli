@@ -91,7 +91,7 @@ pub(crate) async fn live_simulate_setup(
     let identity = SupervisorIdentity::resolve(
         &sim.ctx.project_root,
         phoxal_cli_core::session::SessionMode::Simulation,
-    )?;
+    );
     let locks = LiveSimulationLocks::acquire(&crate::host_paths::simulator_lock_path()?, identity)?;
     let runtime_root = crate::runtime_root::publish(&sim.ctx.project_root, &sim.ctx.resolved)
         .context("failed to publish the simulation runtime robot root")?;

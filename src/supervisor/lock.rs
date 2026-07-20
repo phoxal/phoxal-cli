@@ -16,29 +16,31 @@ pub struct SupervisorIdentity {
 }
 
 impl SupervisorIdentity {
-    pub fn resolve(project: &Path, mode: SessionMode) -> Result<Self> {
-        let project = fs::canonicalize(project)
-            .with_context(|| format!("failed to canonicalize project {}", project.display()))?;
+    #[must_use]
+    pub fn resolve(project: &Path, mode: SessionMode) -> Self {
+        let project = best_effort_absolute(project);
         let entry = phoxal_cli_core::project::resolver::discover_robot_yaml(&project)
-            .with_context(|| {
-                format!(
-                    "failed to locate the supervisor entry under {}",
-                    project.display()
-                )
-            })?;
-        let entry = fs::canonicalize(&entry).with_context(|| {
-            format!(
-                "failed to canonicalize supervisor entry {}",
-                entry.display()
-            )
-        })?;
-        Ok(Self {
+            .map(|entry| best_effort_absolute(&entry))
+            .unwrap_or_else(|_| project.join("robot.yaml"));
+        Self {
             project,
             entry,
             mode: mode.to_string(),
             pid: std::process::id(),
-        })
+        }
     }
+}
+
+fn best_effort_absolute(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    })
 }
 
 #[derive(Debug)]
@@ -174,6 +176,22 @@ mod tests {
         let stored: SupervisorIdentity = serde_json::from_slice(&fs::read(path)?)?;
         assert_eq!(stored.mode, "run");
         assert_eq!(stored.pid, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_diagnostic_entry_never_blocks_lock_authority() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let missing_project = temp.path().join("missing-project");
+        let identity = SupervisorIdentity::resolve(&missing_project, SessionMode::Run);
+        assert_eq!(identity.project, missing_project);
+        assert_eq!(identity.entry, missing_project.join("robot.yaml"));
+
+        let path = temp.path().join("supervisor.lock");
+        let lock = SupervisorLock::acquire_path(&path, identity.clone())?;
+        let stored: SupervisorIdentity = serde_json::from_slice(&fs::read(&path)?)?;
+        assert_eq!(stored, identity);
+        drop(lock);
         Ok(())
     }
 

@@ -15,6 +15,7 @@ use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::SITE_INFRASTRUCTURE_ROUTER;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::tooling::resolve_project_path;
+use phoxal_cli_core::session::human;
 use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 use std::path::PathBuf;
@@ -41,6 +42,11 @@ struct RouterProcess {
     stderr_task: tokio::task::JoinHandle<()>,
 }
 
+struct RouterLaunchAttempt {
+    child: Option<tokio::process::Child>,
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RouterRecoveryPolicy {
     pub(crate) restart_delay: Duration,
@@ -62,7 +68,52 @@ pub(crate) struct InfrastructureRouter {
     process: RouterProcess,
     launch: RouterLaunch,
     listeners: Vec<String>,
+    participant_endpoint: String,
     recovery_policy: RouterRecoveryPolicy,
+}
+
+impl RouterLaunchAttempt {
+    fn new(child: tokio::process::Child, stderr_task: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            child: Some(child),
+            stderr_task: Some(stderr_task),
+        }
+    }
+
+    async fn stop_failed(mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+        if let Some(stderr_task) = self.stderr_task.take() {
+            stderr_task.abort();
+        }
+    }
+
+    fn finish(mut self, stdout_task: tokio::task::JoinHandle<()>) -> RouterProcess {
+        RouterProcess {
+            child: self.child.take().expect("launch attempt owns its child"),
+            stdout_task,
+            stderr_task: self
+                .stderr_task
+                .take()
+                .expect("launch attempt owns its stderr task"),
+        }
+    }
+}
+
+impl Drop for RouterLaunchAttempt {
+    fn drop(&mut self) {
+        // A session cancellation may drop the launch future at any await.
+        // Keep failed/cancelled attempts from detaching their stderr pump or
+        // leaving a router child alive even when no explicit error path runs.
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
+        if let Some(stderr_task) = self.stderr_task.take() {
+            stderr_task.abort();
+        }
+    }
 }
 
 impl RouterProcess {
@@ -130,7 +181,11 @@ impl InfrastructureRouter {
                     () = session_token.cancelled() => return Ok(teardown_outcome),
                     () = tokio::time::sleep(self.recovery_policy.restart_delay) => {}
                 }
-                let restart = launch_router_process(&self.launch, &self.listeners);
+                let restart = launch_router_process(
+                    &self.launch,
+                    &self.listeners,
+                    Some(&self.participant_endpoint),
+                );
                 let restarted = tokio::select! {
                     () = session_token.cancelled() => return Ok(teardown_outcome),
                     result = restart => result,
@@ -140,7 +195,7 @@ impl InfrastructureRouter {
                         self.process = process;
                         self.listeners = listeners;
                         board.enable_presence_for_recovery();
-                        tracing::info!(recovery_epoch = epoch, endpoint = %self.listeners[0], "infrastructure router recovered; recreating staged graph");
+                        tracing::info!(recovery_epoch = epoch, endpoint = %self.participant_endpoint, "infrastructure router recovered; recreating staged graph");
                         break;
                     }
                     Err(error) => {
@@ -169,10 +224,10 @@ fn record_recovery_failure(
     failures.retain(|failure| now.duration_since(*failure) <= policy.start_limit_interval);
     failures.push_back(now);
     if failures.len() >= policy.start_limit_burst {
+        let interval = human::duration(policy.start_limit_interval);
         bail!(
-            "infrastructure router full-stack recovery exhausted after {} failures in {:?}: {fault}",
+            "infrastructure router full-stack recovery exhausted after {} failures in {interval}: {fault}",
             policy.start_limit_burst,
-            policy.start_limit_interval,
         );
     }
     Ok(())
@@ -218,7 +273,7 @@ pub(crate) async fn start_infrastructure_router(
         );
     }
     let launch = RouterLaunch { binary, config };
-    let (process, listeners) = launch_router_process(&launch, &[]).await?;
+    let (process, listeners) = launch_router_process(&launch, &[], None).await?;
     let endpoint = listeners
         .first()
         .cloned()
@@ -228,6 +283,7 @@ pub(crate) async fn start_infrastructure_router(
             process,
             launch,
             listeners,
+            participant_endpoint: endpoint.clone(),
             recovery_policy: RouterRecoveryPolicy::default(),
         },
         endpoint,
@@ -237,6 +293,7 @@ pub(crate) async fn start_infrastructure_router(
 async fn launch_router_process(
     launch: &RouterLaunch,
     exact_listeners: &[String],
+    required_endpoint: Option<&str>,
 ) -> Result<(RouterProcess, Vec<String>)> {
     let mut command = tokio::process::Command::new(&launch.binary);
     if let Some(config) = &launch.config {
@@ -280,63 +337,69 @@ async fn launch_router_process(
             }
         }
     });
+    let attempt = RouterLaunchAttempt::new(child, stderr_task);
     let mut lines = BufReader::new(stdout).lines();
-    let readiness = tokio::time::timeout(ROUTER_READY_TIMEOUT, async {
-        loop {
-            let line = lines
-                .next_line()
-                .await?
-                .context("infrastructure router exited before reporting readiness")?;
-            let event: RouterReadyEvent = serde_json::from_str(&line)
-                .with_context(|| format!("invalid infrastructure router event: {line}"))?;
-            if event.event == "ready" {
-                break parse_router_ready_listeners(&line);
+    let readiness: Result<Vec<String>> = async {
+        let readiness = tokio::time::timeout(ROUTER_READY_TIMEOUT, async {
+            loop {
+                let line = lines
+                    .next_line()
+                    .await?
+                    .context("infrastructure router exited before reporting readiness")?;
+                let event: RouterReadyEvent = serde_json::from_str(&line)
+                    .with_context(|| format!("invalid infrastructure router event: {line}"))?;
+                if event.event == "ready" {
+                    break parse_router_ready_listeners(&line);
+                }
+                tracing::info!(target: "infrastructure_router", "{line}");
             }
-            tracing::info!(target: "infrastructure_router", "{line}");
+        })
+        .await
+        .context("timed out waiting for infrastructure router readiness")?;
+        let listeners = match readiness {
+            Ok(listeners) => listeners,
+            Err(error) => {
+                let _ = tokio::time::timeout(Duration::from_millis(100), async {
+                    while stderr_tail.lock().is_ok_and(|tail| tail.is_empty()) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await;
+                let tail = stderr_tail
+                    .lock()
+                    .map(|tail| tail.clone())
+                    .unwrap_or_default();
+                if tail.is_empty() {
+                    return Err(error);
+                }
+                return Err(error.context(format!("infrastructure router stderr:\n{tail}")));
+            }
+        };
+        if let Some(required_endpoint) = required_endpoint {
+            // The first listener is the endpoint already distributed to every
+            // participant. Configured listeners may be reordered or expanded
+            // by the router, but that pinned endpoint must survive recovery.
+            anyhow::ensure!(
+                listeners.iter().any(|listener| listener == required_endpoint),
+                "replacement infrastructure router did not report the pinned participant endpoint {required_endpoint}; reported {listeners:?}",
+            );
         }
-    })
-    .await
-    .context("timed out waiting for infrastructure router readiness")?;
+        Ok(listeners)
+    }
+    .await;
     let listeners = match readiness {
         Ok(listeners) => listeners,
         Err(error) => {
-            let _ = tokio::time::timeout(Duration::from_millis(100), async {
-                while stderr_tail.lock().is_ok_and(|tail| tail.is_empty()) {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await;
-            let tail = stderr_tail
-                .lock()
-                .map(|tail| tail.clone())
-                .unwrap_or_default();
-            if tail.is_empty() {
-                return Err(error);
-            }
-            return Err(error.context(format!("infrastructure router stderr:\n{tail}")));
+            attempt.stop_failed().await;
+            return Err(error);
         }
     };
-    if !exact_listeners.is_empty() {
-        anyhow::ensure!(
-            listeners == exact_listeners,
-            "replacement infrastructure router reported listeners {:?}, expected the exact prior listeners {:?}",
-            listeners,
-            exact_listeners,
-        );
-    }
     let stdout_task = tokio::spawn(async move {
         while let Ok(Some(line)) = lines.next_line().await {
             tracing::info!(target: "infrastructure_router", "{line}");
         }
     });
-    Ok((
-        RouterProcess {
-            child,
-            stdout_task,
-            stderr_task,
-        },
-        listeners,
-    ))
+    Ok((attempt.finish(stdout_task), listeners))
 }
 
 #[cfg(test)]
@@ -389,6 +452,7 @@ mod recovery_tests {
     use std::os::unix::fs::PermissionsExt;
 
     const TEST_LISTENER: &str = "tcp/127.0.0.1:47999";
+    const TEST_EXTRA_LISTENER: &str = "tcp/127.0.0.1:48000";
 
     fn shell_quote(path: &Path) -> String {
         format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
@@ -402,10 +466,25 @@ mod recovery_tests {
         Ok(())
     }
 
-    fn write_fake_router(root: &Path, failures_before_stable: usize) -> Result<PathBuf> {
+    fn write_fake_router(
+        root: &Path,
+        failures_before_stable: usize,
+        add_listener_after_restart: bool,
+    ) -> Result<PathBuf> {
         let script = root.join("fake-router");
         let count = shell_quote(&root.join("router-count"));
         let args = shell_quote(&root.join("router-args"));
+        let ready = if add_listener_after_restart {
+            format!(
+                "if [ \"$count\" -gt 1 ]; then\n\
+                   printf '%s\\n' '{{\"event\":\"ready\",\"listen\":[\"{TEST_EXTRA_LISTENER}\",\"{TEST_LISTENER}\"]}}'\n\
+                 else\n\
+                   printf '%s\\n' '{{\"event\":\"ready\",\"listen\":[\"{TEST_LISTENER}\"]}}'\n\
+                 fi"
+            )
+        } else {
+            format!("printf '%s\\n' '{{\"event\":\"ready\",\"listen\":[\"{TEST_LISTENER}\"]}}'")
+        };
         write_executable(
             &script,
             &format!(
@@ -415,7 +494,7 @@ mod recovery_tests {
                  count=$((count + 1))\n\
                  printf '%s\\n' \"$count\" > {count}\n\
                  printf '%s\\n' \"$*\" >> {args}\n\
-                 printf '%s\\n' '{{\"event\":\"ready\",\"listen\":[\"{TEST_LISTENER}\"]}}'\n\
+                 {ready}\n\
                  if [ \"$count\" -le {failures_before_stable} ]; then\n\
                    sleep 0.5\n\
                    exit 17\n\
@@ -442,16 +521,23 @@ mod recovery_tests {
         result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
 
+    fn process_alive(pid: u32) -> bool {
+        // SAFETY: signal zero performs only the process existence check.
+        let result = unsafe { libc::kill(pid as i32, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
     async fn start_fake_router(binary: PathBuf) -> Result<InfrastructureRouter> {
         let launch = RouterLaunch {
             binary,
             config: None,
         };
-        let (process, listeners) = launch_router_process(&launch, &[]).await?;
+        let (process, listeners) = launch_router_process(&launch, &[], None).await?;
         Ok(InfrastructureRouter {
             process,
             launch,
             listeners,
+            participant_endpoint: TEST_LISTENER.to_string(),
             recovery_policy: RouterRecoveryPolicy {
                 restart_delay: Duration::from_millis(10),
                 start_limit_interval: Duration::from_secs(5),
@@ -476,9 +562,42 @@ mod recovery_tests {
     }
 
     #[tokio::test]
-    async fn router_death_recreates_cli_owned_graph_on_the_exact_endpoint() -> Result<()> {
+    async fn failed_readiness_reaps_the_child_and_stderr_pump_attempt() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let router_binary = write_fake_router(temp.path(), 1)?;
+        let script = temp.path().join("never-ready-router");
+        let pid_path = temp.path().join("router-pid");
+        write_executable(
+            &script,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > {}\nprintf '%s\\n' 'diagnostic' >&2\nprintf '%s\\n' 'not-json'\nsleep 30\n",
+                shell_quote(&pid_path),
+            ),
+        )?;
+        let launch = RouterLaunch {
+            binary: script,
+            config: None,
+        };
+
+        let error = match launch_router_process(&launch, &[], None).await {
+            Ok(_) => panic!("invalid readiness must fail the launch attempt"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("invalid infrastructure router event"),
+            "{error:#}"
+        );
+        let pid = fs::read_to_string(pid_path)?.trim().parse::<u32>()?;
+        assert!(
+            !process_alive(pid),
+            "a failed launch attempt must reap its router child"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn router_death_preserves_pinned_endpoint_with_an_extra_listener() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let router_binary = write_fake_router(temp.path(), 1, true)?;
         let webots_binary = write_fake_webots(temp.path())?;
         let router = start_fake_router(router_binary).await?;
         let board = BoardBackend::new();
@@ -576,7 +695,7 @@ mod recovery_tests {
     #[tokio::test]
     async fn repeated_router_death_exits_after_the_bounded_recovery_budget() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let router_binary = write_fake_router(temp.path(), 100)?;
+        let router_binary = write_fake_router(temp.path(), 100, false)?;
         let mut router = start_fake_router(router_binary).await?;
         router.set_recovery_policy(RouterRecoveryPolicy {
             restart_delay: Duration::from_millis(10),
@@ -597,6 +716,7 @@ mod recovery_tests {
                 .contains("full-stack recovery exhausted after 3 failures"),
             "{error:#}"
         );
+        assert!(error.to_string().contains("in 5.0s"), "{error:#}");
         assert_eq!(board.recovery_epoch(), 3);
         assert_eq!(
             fs::read_to_string(temp.path().join("router-count"))?.trim(),

@@ -139,7 +139,7 @@ impl Run {
         let identity = SupervisorIdentity::resolve(
             app.project.root(),
             phoxal_cli_core::session::SessionMode::Run,
-        )?;
+        );
         let _lock = SupervisorLock::acquire(identity)?;
         let project_root = app.project.root().to_path_buf();
         let ui = app.ui;

@@ -166,7 +166,7 @@ pub async fn run(
             let identity = crate::supervisor::SupervisorIdentity::resolve(
                 app.project.root(),
                 phoxal_cli_core::session::SessionMode::Simulation,
-            )?;
+            );
             let _supervisor_lock = crate::supervisor::SupervisorLock::acquire(identity)?;
             // One interactive surface for the whole session (Product
             // decision 1): the controller starts its renderer right now,
