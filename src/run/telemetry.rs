@@ -1,6 +1,6 @@
 //! Telemetry responsibilities for run.
 
-use phoxal_cli_core::project::launch_plan::LaunchPlan;
+use phoxal_cli_core::project::launch_plan::{LaunchPlan, ParticipantExecution};
 use phoxal_cli_core::session::stores::telemetry::RobotScope;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +17,7 @@ impl RobotFeedTarget {
                 let mut participant_ids = robot
                     .participants
                     .iter()
+                    .filter(|participant| runtime_telemetry_candidate(&participant.execution))
                     .map(|participant| participant.launch.participant_id.clone())
                     .collect::<Vec<_>>();
                 participant_ids.sort();
@@ -30,6 +31,14 @@ impl RobotFeedTarget {
                 }
             })
             .collect()
+    }
+}
+
+fn runtime_telemetry_candidate(execution: &ParticipantExecution) -> bool {
+    match execution {
+        ParticipantExecution::OfficialTool { .. } => false,
+        ParticipantExecution::SourceArtifact { kind, .. } if kind == "tool" => false,
+        _ => true,
     }
 }
 
@@ -86,4 +95,32 @@ pub(crate) fn start_telemetry_feeds_at(
         ]
     }));
     feeds
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn runtime_snapshot_fanout_excludes_official_and_overridden_tools() {
+        assert!(!runtime_telemetry_candidate(
+            &ParticipantExecution::OfficialTool {
+                artifact_ref: "tool-telemetry@0.1.5".to_string(),
+            }
+        ));
+        assert!(!runtime_telemetry_candidate(
+            &ParticipantExecution::SourceArtifact {
+                kind: "tool".to_string(),
+                crate_dir: PathBuf::from("tool/telemetry"),
+            }
+        ));
+        assert!(runtime_telemetry_candidate(
+            &ParticipantExecution::SourceArtifact {
+                kind: "service".to_string(),
+                crate_dir: PathBuf::from("service/map"),
+            }
+        ));
+    }
 }
