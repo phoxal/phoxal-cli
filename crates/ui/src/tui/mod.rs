@@ -10,7 +10,6 @@ mod visibility;
 
 pub use terminal::{TerminalGuard, install_panic_hook};
 
-use std::collections::BTreeMap;
 use std::io::{self, Stderr};
 use std::time::{Duration, Instant};
 
@@ -39,7 +38,6 @@ pub struct TuiDisplay {
     log_rx: mpsc::Receiver<RoutedLogLine>,
     runtime: RuntimeStore,
     telemetry: phoxal_cli_core::session::TelemetrySnapshot,
-    heartbeats: BTreeMap<String, Instant>,
     activated: Option<Activated>,
 }
 
@@ -94,7 +92,6 @@ impl TuiDisplay {
             log_rx,
             runtime: RuntimeStore::new(),
             telemetry: phoxal_cli_core::session::TelemetrySnapshot::default(),
-            heartbeats: BTreeMap::new(),
             activated: None,
         }
     }
@@ -105,10 +102,6 @@ impl TuiDisplay {
 
     pub fn set_runtime_store(&mut self, runtime: RuntimeStore) {
         self.runtime = runtime;
-    }
-
-    pub fn set_heartbeats(&mut self, heartbeats: BTreeMap<String, Instant>) {
-        self.heartbeats = heartbeats;
     }
 
     pub fn apply_session_event(&mut self, event: &SessionEvent) {
@@ -164,7 +157,7 @@ impl TuiDisplay {
         while let Ok(line) = self.log_rx.try_recv() {
             self.logs.record(line);
         }
-        self.runtime.observe_board(board, &self.heartbeats);
+        self.runtime.observe_board(board);
         self.telemetry = telemetry;
         let now = Instant::now();
         let model = SessionViewModel::new(board, &self.logs, &self.runtime, &self.telemetry, now);

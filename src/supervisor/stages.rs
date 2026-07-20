@@ -86,10 +86,10 @@ pub(crate) async fn spawn_stage(
 ) {
     for spec in specs {
         let id = spec.id.clone();
-        // A stage is an authoritative, locally constructed launch plan. It
-        // may therefore register its own row when the stage becomes active,
-        // while unsolicited wire heartbeats and logs remain unable to create
-        // board entries through `record_heartbeat`/`route_log`.
+        // Normal planning pre-registers every expected participant before the
+        // observer starts. Keep this authoritative, idempotent registration at
+        // the stage boundary for direct stage tests and defensive consistency;
+        // unsolicited Liveliness and logs still cannot create board entries.
         board.register_planned(&id, spec.kind);
         match RunningParticipant::spawn(spec, board).await {
             Ok(participant) => running.push(participant),
@@ -209,9 +209,9 @@ pub(crate) async fn spawn_until_pending(
 /// Wait until every id in `stage_ids` has been OBSERVED `Ready` on the
 /// board, or `timeout` elapses. Shared by host and simulation staged startup;
 /// returns `Ok(())` on
-/// success with no side effects; on an explicit terminal `Failed` readiness
-/// it returns `Err` immediately (never waits out the timeout for a graph
-/// that already ended unhealthy); on timeout it marks every still-missing id
+/// success with no side effects; a direct process `Failed` state returns
+/// `Err` immediately (never waits out the timeout for a graph that already
+/// ended unhealthy); on timeout it marks every still-missing id
 /// `Failed` on the board (so `SupervisorOutcome::graph_healthy` reflects the
 /// stall) and returns `Err` naming exactly what never showed up.
 #[cfg(test)]

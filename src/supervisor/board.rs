@@ -1,47 +1,26 @@
-//! Concurrent session-board state and heartbeat tracking.
+//! Concurrent session-board state derived from process and bus observations.
 
 use super::{
     BoardSnapshot, LogSeverity, LogSource, ParticipantLaunchCommand, ParticipantState,
     ParticipantStatus, RoutedLogLine, bounded_chars, bounded_log_text,
 };
-use phoxal_api::v1 as api;
 use phoxal_cli_core::session::ParticipantKind;
-use phoxal_cli_core::session::human;
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
-use std::time::Instant;
 use tokio::sync::mpsc;
+
+const NOT_PRESENT_NOTE: &str =
+    "participant not present on the robot bus; process lifecycle is unchanged";
 
 #[derive(Debug, Clone, Default)]
 pub struct BoardBackend {
     inner: Arc<Mutex<BoardSnapshot>>,
-    /// Wall-clock instant each participant's presence/heartbeat was last
-    /// observed. Separate from `inner` because it is process-local bookkeeping
-    /// (an `Instant`, not serializable) rather than board state; an entry
-    /// appears here from the FIRST heartbeat of any readiness (including the
-    /// pre-`#[setup]` `Initializing` beacon), so this alone cannot tell "never
-    /// checked in" apart from "checked in once and then went silent mid-setup"
-    /// - `ready_once` (below) makes that distinction.
-    pub(crate) heartbeats: Arc<Mutex<BTreeMap<String, Instant>>>,
-    /// Participant ids observed at `Readiness::Ready` at least once during
-    /// their current incarnation. `mark_stale_heartbeats` only applies its 5s
-    /// liveness sweep to ids in this set: a participant that has never reached
-    /// `Ready` is still within a legitimate `#[setup]` (the runner publishes
-    /// only one `Initializing` heartbeat before `#[setup]` runs, then nothing
-    /// until the post-setup `Ready` beacon, so a slow setup is heartbeat-silent
-    /// by design) and is bounded by its startup stage's timeout instead, not
-    /// this sweep. Cleared alongside `heartbeats` by
-    /// `reset_participant_liveness` on every (re)spawn so a fresh incarnation
-    /// must earn `Ready` again before the sweep applies to it.
-    pub(crate) ready_once: Arc<Mutex<BTreeSet<String>>>,
-    /// Participants whose process lifecycle belongs to an external owner
-    /// (currently Webots). Their heartbeat loss is observational: it degrades
-    /// the board entry but cannot become session-teardown authority, and a
-    /// later heartbeat may restore the current readiness.
-    recoverable_presence: Arc<Mutex<BTreeSet<String>>>,
+    /// Current robot-scoped Liveliness membership. This mirrors Zenoh's
+    /// binary present/not-present observation without timestamps, leases, or
+    /// inferred instances. Replacement processes may overlap under one stable
+    /// key, producing continuous presence rather than another `Alive` event.
+    present: Arc<Mutex<BTreeSet<String>>>,
     /// Optional live sink for [`RoutedLogLine`]s - set by
     /// `session::controller::SessionController::drive_supervision` once its
     /// `TuiDisplay` renderer exists, so it can maintain its own bounded
@@ -66,149 +45,60 @@ impl BoardBackend {
         Self::default()
     }
 
-    /// Record an observed `presence/heartbeat` for `id`, driving its board
-    /// state from OBSERVED readiness rather than any spawn-time assumption.
-    /// Ignored for a supervised participant already in a terminal state
-    /// (`Failed`, `Stopped`) - a heartbeat that was in flight when the process
-    /// was independently torn down must not resurrect it. Externally managed
-    /// participants registered with [`Self::mark_presence_recoverable`] may
-    /// recover from `Failed`/`Degraded` when their owner recreates them.
-    pub fn record_heartbeat(&self, id: &str, readiness: api::presence::Readiness) {
-        let recoverable = self
-            .recoverable_presence
-            .lock()
-            .expect("recoverable presence mutex poisoned")
-            .contains(id);
+    /// Record Zenoh Liveliness for a planned participant.
+    ///
+    /// Launch planning must register every expected row before the observer
+    /// starts. Presence for an unknown id is dropped rather than deferred, so
+    /// untrusted bus keys cannot grow supervisor state.
+    ///
+    /// Appearance is the sole transition to `Ready`. Disappearance is
+    /// observational: it degrades a participant that was ready, but never
+    /// marks it failed or commands a restart. Direct process lifecycle and
+    /// startup timeouts retain that authority. Observations cannot resurrect
+    /// terminal process state.
+    pub fn record_presence(&self, id: &str, present: bool) {
         let mut snapshot = self.inner.lock().expect("board mutex poisoned");
         let Some(status) = snapshot.participants.get_mut(id) else {
             drop(snapshot);
-            self.disclose_unknown_bus_id(id, "heartbeat");
+            self.disclose_unknown_bus_id(id, "liveliness");
             return;
         };
-        if status.state == ParticipantState::Stopped
-            || (status.state == ParticipantState::Failed && !recoverable)
-        {
-            return;
-        }
-        let was_unobserved = recoverable
-            && matches!(
-                status.state,
-                ParticipantState::Degraded | ParticipantState::Failed
-            );
-        status.state = match readiness {
-            api::presence::Readiness::Ready => ParticipantState::Ready,
-            api::presence::Readiness::Degraded => ParticipantState::Degraded,
-            api::presence::Readiness::Failed => ParticipantState::Failed,
-            api::presence::Readiness::NotStarted | api::presence::Readiness::Initializing => {
-                ParticipantState::Starting
-            }
-        };
-        if was_unobserved
-            && matches!(
-                status.state,
-                ParticipantState::Ready | ParticipantState::Starting
-            )
-        {
-            status.note = Some("Webots-managed participant observed again".to_string());
-        }
-        drop(snapshot);
-        self.heartbeats
-            .lock()
-            .expect("heartbeat mutex poisoned")
-            .insert(id.to_string(), Instant::now());
-        if matches!(readiness, api::presence::Readiness::Ready) {
-            self.ready_once
+        if present {
+            self.present
                 .lock()
-                .expect("ready-once mutex poisoned")
+                .expect("presence mutex poisoned")
                 .insert(id.to_string());
-        }
-    }
-
-    /// Mark `id` as externally managed presence. Its silence is recoverable
-    /// observation state, not proof that the developer session must end.
-    pub fn mark_presence_recoverable(&self, id: impl Into<String>) {
-        self.recoverable_presence
-            .lock()
-            .expect("recoverable presence mutex poisoned")
-            .insert(id.into());
-    }
-
-    /// Clear a participant's staleness bookkeeping - its last-heartbeat
-    /// timestamp and its "has been `Ready`" bit - so a fresh incarnation
-    /// starts with a clean liveness clock and must earn `Ready` again before
-    /// `mark_stale_heartbeats` will apply to it. Called from `spawn_child` on
-    /// every (re)spawn: the initial spawn, a crash restart, a `swap`, and a
-    /// `resume` after `release` all funnel through it. Without this, a
-    /// previously-`Ready`-then-crashed participant's stale pre-crash timestamp
-    /// would survive the reset to `Starting` and could immediately re-`Fail`
-    /// the freshly respawned process before it had a chance to publish its
-    /// first heartbeat.
-    pub fn reset_participant_liveness(&self, id: &str) {
-        self.heartbeats
-            .lock()
-            .expect("heartbeat mutex poisoned")
-            .remove(id);
-        self.ready_once
-            .lock()
-            .expect("ready-once mutex poisoned")
-            .remove(id);
-    }
-
-    /// Mark any participant that has reached `Ready` at least once this
-    /// incarnation and has gone silent for longer than `stale_after`.
-    /// CLI-supervised participants become `Failed`; externally managed
-    /// participants become recoverably `Degraded` because pause/deletion is
-    /// owned by Webots and may be followed by recreation.
-    ///
-    /// Deliberately excludes a participant that has never been observed
-    /// `Ready` (only ever `Starting`, e.g. mid a legitimately slow
-    /// `#[setup]`) - see the `ready_once` field docs. That case is bounded by
-    /// its startup stage's timeout, not this sweep.
-    pub fn mark_stale_heartbeats(&self, stale_after: Duration) {
-        let now = Instant::now();
-        let stale_ids: Vec<(String, bool)> = {
-            let heartbeats = self.heartbeats.lock().expect("heartbeat mutex poisoned");
-            let ready_once = self.ready_once.lock().expect("ready-once mutex poisoned");
-            let recoverable = self
-                .recoverable_presence
+        } else {
+            self.present
                 .lock()
-                .expect("recoverable presence mutex poisoned");
-            heartbeats
-                .iter()
-                .filter(|(id, seen)| {
-                    ready_once.contains(id.as_str()) && now.duration_since(**seen) > stale_after
-                })
-                .map(|(id, _)| (id.clone(), recoverable.contains(id)))
-                .collect()
-        };
-        if stale_ids.is_empty() {
+                .expect("presence mutex poisoned")
+                .remove(id);
+        }
+        if matches!(
+            status.state,
+            ParticipantState::Failed | ParticipantState::Stopped
+        ) {
             return;
         }
-        let mut snapshot = self.inner.lock().expect("board mutex poisoned");
-        for (id, recoverable) in stale_ids {
-            let Some(status) = snapshot.participants.get_mut(&id) else {
-                continue;
-            };
-            if matches!(
-                status.state,
-                ParticipantState::Failed | ParticipantState::Stopped
-            ) {
-                continue;
+        if present {
+            let clears_absence_note = status.state == ParticipantState::Degraded
+                && status.note.as_deref() == Some(NOT_PRESENT_NOTE);
+            status.state = ParticipantState::Ready;
+            if clears_absence_note {
+                status.note = None;
             }
-            if recoverable {
-                status.state = ParticipantState::Degraded;
-                status.note = Some(format!(
-                    "Webots-managed participant not observed for over {}; waiting for its owner",
-                    human::duration(stale_after)
-                ));
-            } else {
-                status.state = ParticipantState::Failed;
-                status.note = Some(format!(
-                    "heartbeat stopped: no presence/heartbeat observed for over {}",
-                    human::duration(stale_after)
-                ));
-            }
+        } else if status.state == ParticipantState::Ready {
+            status.state = ParticipantState::Degraded;
+            status.note = Some(NOT_PRESENT_NOTE.to_string());
         }
+    }
+
+    #[must_use]
+    pub fn is_present(&self, id: &str) -> bool {
+        self.present
+            .lock()
+            .expect("presence mutex poisoned")
+            .contains(id)
     }
 
     pub fn upsert(&self, status: ParticipantStatus) {
@@ -367,15 +257,5 @@ impl BoardBackend {
     #[must_use]
     pub fn snapshot(&self) -> BoardSnapshot {
         self.inner.lock().expect("board mutex poisoned").clone()
-    }
-
-    /// Session-only receive instants for the TUI. This stays outside the
-    /// persisted BoardSnapshot and its stable plain/JSON representations.
-    #[must_use]
-    pub fn heartbeat_snapshot(&self) -> BTreeMap<String, Instant> {
-        self.heartbeats
-            .lock()
-            .expect("heartbeat mutex poisoned")
-            .clone()
     }
 }

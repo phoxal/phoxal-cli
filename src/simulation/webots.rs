@@ -51,7 +51,7 @@ pub(crate) fn stage_and_prepare_webots_spec(
         process_group: true,
         note: None,
         // The Webots application itself has no bus identity of its own - it
-        // never publishes a presence/heartbeat (the supervisor and each
+        // never declares participant Liveliness (the supervisor and each
         // controller Webots launches do, and those are tracked separately as
         // SIMULATION-MANAGED participants). Its readiness is necessarily
         // process-lifecycle-only, so it keeps the old spawn-is-ready behavior.
@@ -170,8 +170,8 @@ pub(crate) async fn serve_spawn_queries(
 /// `--mode=realtime` is load-bearing, not cosmetic: Webots opens a world in the
 /// PAUSED state by default, so without an explicit run mode the supervisor's
 /// `#[step]` is never called, `simulation/clock` never advances, and services
-/// that use simulation time remain idle (only wall-clock traffic like
-/// `presence/heartbeat` flows). `realtime` starts the simulation running,
+/// that use simulation time remain idle (session Liveliness can remain
+/// present). `realtime` starts the simulation running,
 /// synced to wall time so the operator watches the robot move at a natural
 /// speed; the clock authority (the Webots supervisor) still owns logical time.
 ///

@@ -39,7 +39,6 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
             "odometry",
             "perception",
             "power",
-            "presence",
             "safety",
             "video"
         ]
@@ -396,7 +395,6 @@ fn resolves_known_api_to_its_official_set() -> anyhow::Result<()> {
             "odometry",
             "perception",
             "power",
-            "presence",
             "safety",
             "video"
         ]
@@ -827,7 +825,6 @@ fn service_names() -> Vec<&'static str> {
         "odometry",
         "perception",
         "power",
-        "presence",
         "video",
     ]
 }

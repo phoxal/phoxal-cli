@@ -87,12 +87,9 @@ impl RunningParticipant {
     }
 
     pub(crate) async fn spawn_child(&mut self, board: &BoardBackend) -> Result<()> {
-        // Bug 2 fix: every (re)spawn - first spawn, crash restart, `swap`,
-        // `resume` - resets board STATE to `Starting` below; it must also
-        // reset the staleness bookkeeping the same instant, or a stale
-        // pre-crash heartbeat timestamp can immediately re-`Fail` this fresh
-        // incarnation before it gets a chance to check in.
-        board.reset_participant_liveness(&self.spec.id);
+        // Every (re)spawn returns to `Starting`. A first appearance promotes
+        // the stable participant identity to `Ready`; an identity that is
+        // continuously present across replacement remains `Ready` below.
         board.set_state(
             &self.spec.id,
             ParticipantState::Starting,
@@ -148,11 +145,22 @@ impl RunningParticipant {
         if self.spec.bus_participant {
             // OBSERVED readiness (not spawn-is-ready): a bus participant stays
             // `Starting` (set at the top of this function) until the
-            // supervisor's presence/heartbeat subscriber observes its own
-            // heartbeat go `Ready` - see `BoardBackend::record_heartbeat`. A
+            // supervisor's history-enabled observer sees its Liveliness key -
+            // see `BoardBackend::record_presence`. A
             // process that spawned successfully but never gets that far
             // (crashed before `#[setup]` completed, hung, or was silently
-            // never launched by Webots) must never be reported ready.
+            // never launched by Webots) must never be reported ready. If a
+            // replacement overlaps a stale holder of the same stable key,
+            // Zenoh reports continuous presence rather than another `Alive`;
+            // preserve that known binary state instead of inventing an
+            // incarnation signal or waiting for a duplicate event.
+            if board.is_present(&self.spec.id) {
+                board.set_state(
+                    &self.spec.id,
+                    ParticipantState::Ready,
+                    self.spec.note.clone(),
+                );
+            }
         } else {
             // No bus identity to observe (e.g. the Webots application itself,
             // see `ParticipantSpec::bus_participant`) - readiness is
@@ -387,9 +395,10 @@ impl RunningParticipant {
             self.record_spawn_failure(board, "swap spawn", &error);
             return Ok(());
         }
-        // `spawn_child` already applied the observed-readiness state (Starting
-        // for a bus participant, Ready for a process-only one); attach the
-        // swap note without overriding whichever state it landed on.
+        // `spawn_child` already applied the observed-readiness state: a bus
+        // participant is `Starting`, or remains `Ready` when its stable
+        // identity is continuously present across replacement; a process-only
+        // participant is `Ready`. Attach the swap note without overriding it.
         board.set_note(&self.spec.id, note);
         Ok(())
     }

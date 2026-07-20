@@ -109,14 +109,12 @@ pub(super) fn draw_runtime_group(
     frame.render_widget(
         Paragraph::new(Line::styled(
             format!(
-                "    {:<id_width$} {:<state_width$} {:<heartbeat_width$} {:>restart_width$}",
+                "    {:<id_width$} {:<state_width$} {:>restart_width$}",
                 "ID",
                 "STATE",
-                if columns.compact { "SEEN" } else { "HEARTBEAT" },
                 if columns.compact { "RST" } else { "RESTARTS" },
                 id_width = columns.id,
                 state_width = columns.state,
-                heartbeat_width = columns.heartbeat,
                 restart_width = columns.restarts,
             ),
             color::muted(theme),
@@ -147,7 +145,6 @@ pub(super) fn draw_runtime_group(
 pub(super) struct RuntimeColumns {
     id: usize,
     state: usize,
-    heartbeat: usize,
     restarts: usize,
     compact: bool,
 }
@@ -157,19 +154,16 @@ pub(super) fn runtime_columns(inner_width: u16) -> RuntimeColumns {
         return RuntimeColumns {
             id: 26,
             state: 11,
-            heartbeat: 16,
             restarts: 8,
             compact: false,
         };
     }
     let state = 7;
-    let heartbeat = 8;
     let restarts = 5;
-    let fixed = 4 + 3 + state + heartbeat + restarts;
+    let fixed = 4 + 2 + state + restarts;
     RuntimeColumns {
         id: usize::from(inner_width).saturating_sub(fixed).max(6),
         state,
-        heartbeat,
         restarts,
         compact: true,
     }
@@ -184,17 +178,10 @@ pub(super) fn runtime_row(
     let restarts = observation.map_or(status.restart_count, |observation| {
         observation.displayed_restarts()
     });
-    let heartbeat = observation
-        .and_then(|observation| observation.last_seen_age(model.now))
-        .map_or_else(
-            || "n/a".to_string(),
-            |age| format!("{} ago", human::duration(age)),
-        );
     let id = sanitize_and_fit_cell(&status.id, columns.id);
     let state = fit_cell(status.state.label(), columns.state);
-    let heartbeat = fit_cell(&heartbeat, columns.heartbeat);
     format!(
-        "{} {id} {state} {heartbeat} {restarts:>restart_width$}",
+        "{} {id} {state} {restarts:>restart_width$}",
         state_symbol(status.state),
         restart_width = columns.restarts,
     )
@@ -244,12 +231,6 @@ pub(super) fn draw_runtime_detail(
         || "n/a".to_string(),
         |observation| human::duration(observation.uptime(model.now)),
     );
-    let last_seen = observation
-        .and_then(|observation| observation.last_seen_age(model.now))
-        .map_or_else(
-            || "n/a".to_string(),
-            |age| format!("{} ago", human::duration(age)),
-        );
     let restarts = observation.map_or(status.restart_count, |observation| {
         observation.displayed_restarts()
     });
@@ -268,7 +249,6 @@ pub(super) fn draw_runtime_detail(
         Line::from(format!("ownership     {ownership}")),
         Line::from(format!("ready after   {ready_after}")),
         Line::from(format!("uptime        {uptime}")),
-        Line::from(format!("heartbeat     {last_seen}")),
         Line::from(format!("restarts      {restarts}")),
     ];
     let vertical = Layout::default()

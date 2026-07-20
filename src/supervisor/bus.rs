@@ -1,4 +1,4 @@
-//! Raw bus adapters for logs, presence, clock, and endpoint reachability.
+//! Raw bus adapters for logs, Liveliness, clock, and endpoint reachability.
 
 use super::{BoardBackend, BoardSnapshot, LogSource, ParticipantState, log_severity};
 use anyhow::Result;
@@ -7,6 +7,7 @@ use phoxal::bus::Subscribe;
 use phoxal::bus::Subscriber;
 use phoxal::bus::Topic;
 use phoxal::raw::{Bus, BusConfig};
+use phoxal::raw::{ParticipantLivelinessEvent, ParticipantLivelinessStatus};
 use phoxal_api::v1 as api;
 use phoxal_api::v2 as preview_api;
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
@@ -113,13 +114,14 @@ pub fn logs_wildcard_topic_key() -> String {
     )
 }
 
-/// Subscribe every participant's `presence/heartbeat` on one robot's bus and
-/// drive the board's OBSERVED readiness from it (`BoardBackend::record_heartbeat`),
-/// mirroring `start_bus_log_subscriber`. Unlike `logs/{participant_id}`,
-/// `presence/heartbeat` is a single static (non-wildcarded) topic that every
-/// participant publishes to, told apart only by `metadata.source.participant` -
-/// see `phoxal-api`'s `presence` node.
-pub fn start_presence_heartbeat_subscriber(
+const LIVELINESS_OBSERVER_ID: &str = "phoxal-cli-liveliness-observer";
+
+/// Observe every planned participant's stable Zenoh Liveliness key on one
+/// robot bus. Callers register the finite participant set on the board before
+/// starting this observer; traffic for any other key is deliberately ignored.
+/// History is enabled by the framework wrapper, so participants that completed
+/// setup before this observer connected are discovered immediately.
+pub fn start_liveliness_observer(
     namespace: String,
     robot_id: String,
     connect: String,
@@ -128,7 +130,7 @@ pub fn start_presence_heartbeat_subscriber(
     tokio::spawn(async move {
         loop {
             wait_for_endpoint(&connect).await;
-            match presence_heartbeat_subscriber_loop(
+            match liveliness_observer_loop(
                 namespace.clone(),
                 robot_id.clone(),
                 connect.clone(),
@@ -138,7 +140,7 @@ pub fn start_presence_heartbeat_subscriber(
             {
                 Ok(()) => break,
                 Err(error) => {
-                    tracing::debug!("presence heartbeat subscriber waiting for router: {error:#}");
+                    tracing::debug!("liveliness observer waiting for router: {error:#}");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
@@ -146,7 +148,7 @@ pub fn start_presence_heartbeat_subscriber(
     })
 }
 
-pub(crate) async fn presence_heartbeat_subscriber_loop(
+pub(crate) async fn liveliness_observer_loop(
     namespace: String,
     robot_id: String,
     connect: String,
@@ -155,24 +157,36 @@ pub(crate) async fn presence_heartbeat_subscriber_loop(
     let bus = Bus::open(BusConfig {
         namespace,
         robot_id,
-        participant: "phoxal-cli-supervisor-presence".to_string(),
+        participant: LIVELINESS_OBSERVER_ID.to_string(),
         incarnation: 0,
         connect_endpoints: vec![connect],
     })
     .await
-    .map_err(|error| anyhow!("failed to open bus presence subscription: {error}"))?;
-    let topic = Topic::<Subscribe<api::presence::Heartbeat>>::new_static(
-        <api::presence::Heartbeat as phoxal::bus::ContractBody>::TOPIC,
-    );
-    let subscriber = Subscriber::<api::presence::Heartbeat>::new(&bus, &topic, 128).await?;
-    loop {
-        let received = subscriber.recv().await?;
-        // The body carries `participant` too (redundant with the metadata
-        // source), but `metadata.source.participant` is the framework-stamped
-        // identity - the same field the log subscriber trusts - so prefer it.
-        let id = received.metadata.source.participant;
-        board.record_heartbeat(&id, received.body.readiness);
+    .map_err(|error| anyhow!("failed to open bus Liveliness observer: {error}"))?;
+    let _observer = bus
+        .observe_participant_liveliness(move |event| {
+            apply_liveliness_event(&board, event);
+        })
+        .await
+        .map_err(|error| anyhow!("failed to observe participant Liveliness: {error}"))?;
+    // Once declared, the Bus session and Zenoh subscriber own transparent
+    // transport reconnection. The outer loop above retries only initial open
+    // or declaration failures; there is no application-level heartbeat loop.
+    std::future::pending::<()>().await;
+    Ok(())
+}
+
+fn apply_liveliness_event(board: &BoardBackend, event: ParticipantLivelinessEvent) {
+    let id = event.key.participant();
+    // Participant ids are the launch plan's validated, robot-scoped flat
+    // namespace. The framework documents that a session observing a key it also holds
+    // can receive an uncompensated self-Lost after duplicate-key
+    // reconciliation. This observer does not normally declare a token, but
+    // filtering its own id keeps that invariant explicit.
+    if id == LIVELINESS_OBSERVER_ID {
+        return;
     }
+    board.record_presence(id, event.status == ParticipantLivelinessStatus::Alive);
 }
 
 /// Start a background feed of `v2::simulation::Clock` samples. Returns a
@@ -275,4 +289,54 @@ pub fn render_log_event(event: &api::logs::Event) -> String {
 #[must_use]
 pub fn default_connect_endpoint() -> String {
     DEFAULT_ROUTER_CONNECT.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phoxal::raw::ParticipantLivelinessKey;
+    use phoxal_cli_core::session::ParticipantKind;
+
+    fn event(participant: &str, status: ParticipantLivelinessStatus) -> ParticipantLivelinessEvent {
+        ParticipantLivelinessEvent {
+            key: ParticipantLivelinessKey::new("dev/robots/rover", participant)
+                .expect("valid participant key"),
+            status,
+        }
+    }
+
+    #[test]
+    fn observer_events_drive_presence_without_becoming_restart_authority() {
+        let board = BoardBackend::new();
+        board.register_planned("drive", ParticipantKind::Service);
+
+        apply_liveliness_event(&board, event("drive", ParticipantLivelinessStatus::Alive));
+        assert_eq!(
+            board.snapshot().participants["drive"].state,
+            ParticipantState::Ready
+        );
+
+        apply_liveliness_event(&board, event("drive", ParticipantLivelinessStatus::Lost));
+        assert_eq!(
+            board.snapshot().participants["drive"].state,
+            ParticipantState::Degraded,
+            "Lost is observable but must not synthesize process failure"
+        );
+    }
+
+    #[test]
+    fn observer_filters_its_own_participant_id() {
+        // Synthetic guard coverage: the observer currently holds no
+        // Liveliness token, but its reserved id must never become a board row.
+        let board = BoardBackend::new();
+        board.register_planned(LIVELINESS_OBSERVER_ID, ParticipantKind::Tool);
+        apply_liveliness_event(
+            &board,
+            event(LIVELINESS_OBSERVER_ID, ParticipantLivelinessStatus::Alive),
+        );
+        assert_eq!(
+            board.snapshot().participants[LIVELINESS_OBSERVER_ID].state,
+            ParticipantState::Starting
+        );
+    }
 }

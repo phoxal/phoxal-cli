@@ -715,9 +715,6 @@ impl SessionController {
     }
 
     fn redraw_live(&mut self, board: &BoardBackend, telemetry: &TelemetryBackend) -> Result<()> {
-        if let Some(tui) = &mut self.tui {
-            tui.set_heartbeats(board.heartbeat_snapshot());
-        }
         self.redraw(&board.snapshot(), telemetry)
     }
 
