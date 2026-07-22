@@ -13,10 +13,10 @@ use anyhow::anyhow;
 use anyhow::bail;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
-use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::resolver::ResolvedComponentSource;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
+use phoxal_cli_core::project::suite::ArtifactKind;
 use phoxal_cli_core::project::tooling::hash_tree;
 use phoxal_cli_core::project::tooling::make_executable;
 use phoxal_cli_core::project::tooling::resolve_project_path;
@@ -182,9 +182,7 @@ pub(crate) fn source_record(
                     "tree": format!("sha256:{}", hash_tree(&full)?)
                 }))
             }
-            ResolvedComponentSource::Catalog => {
-                Ok(serde_json::json!({ "package": driver.package }))
-            }
+            ResolvedComponentSource::Suite => Ok(serde_json::json!({ "package": driver.package })),
         };
     }
 

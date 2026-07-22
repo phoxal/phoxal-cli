@@ -120,7 +120,7 @@ pub(crate) fn release_official_artifact(artifact: &OfficialArtifactPlan) -> Rele
         id: artifact.artifact_id.clone(),
         kind: artifact.kind.to_string(),
         version: Some(artifact.version.clone()),
-        source: Value::String("catalog".to_string()),
+        source: Value::String("suite".to_string()),
         sha256: artifact.sha256.clone(),
         target: Some(artifact.target.clone()),
         url: Some(artifact.url.clone()),

@@ -11,5 +11,6 @@ pub mod deploy;
 pub mod project;
 pub mod session;
 pub mod simulation;
+pub mod supervisor_api;
 
 pub use project::Project;

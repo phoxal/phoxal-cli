@@ -9,11 +9,6 @@ use anyhow::{Result, anyhow, bail};
 use graph_check::{ParticipantClass, Problem};
 use phoxal::model::robot::v0::Robot;
 use phoxal_cli_core::check::source::SourceParticipantKind;
-use phoxal_cli_core::project::catalog::{
-    ArtifactKind, OFFICIAL_SERVICES, SelectionChannel as CatalogChannel, fixture_catalog_for_tests,
-    fixture_component_assets_entry_for_tests, fixture_component_driver_entry_for_tests,
-    fixture_contract_for_tests, fixture_service_entry_for_tests,
-};
 use phoxal_cli_core::project::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_BUS, ROBOT_TOOL_DEVICE, ROBOT_TOOL_LOG,
     ROBOT_TOOL_TELEMETRY, SITE_TOOL_JOYPAD, SubstitutionRecord, build_launch_plan,
@@ -21,6 +16,11 @@ use phoxal_cli_core::project::launch_plan::{
 use phoxal_cli_core::project::resolver::{
     ResolveOptions, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
     ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, UserRuntimeManifestExtras,
+};
+use phoxal_cli_core::project::suite::{
+    ArtifactKind, fixture_component_assets_entry_for_tests,
+    fixture_component_driver_entry_for_tests, fixture_contract_for_tests,
+    fixture_service_entry_for_tests, fixture_suite_for_tests,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -87,20 +87,18 @@ fn launch_plan_covers_site_singletons_services_and_component_instances() -> Resu
     )?;
     std::fs::write(temp.path().join("runtimes/mission/src.txt"), "source")?;
     let robot = Robot::parse_from_string(LAUNCH_PLAN_FIXTURE_ROBOT)?;
-    let catalog = fixture_catalog_for_tests(vec![
+    let suite = fixture_suite_for_tests(vec![
         fixture_service_entry_for_tests(
             "drive",
             "0.1.0",
-            CatalogChannel::Stable,
             &crate::resolver::host_target_triple(),
             true,
-            vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
+            vec![fixture_contract_for_tests("v0.1::drive::Target", "publish")],
         ),
-        fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable),
+        fixture_component_assets_entry_for_tests("ddsm115", "0.1.0"),
         fixture_component_driver_entry_for_tests(
             "ddsm115",
             "0.1.0",
-            CatalogChannel::Stable,
             &crate::resolver::host_target_triple(),
             true,
             Vec::new(),
@@ -109,7 +107,7 @@ fn launch_plan_covers_site_singletons_services_and_component_instances() -> Resu
     let mut resolved = resolve(
         &robot,
         temp.path(),
-        Some(&catalog),
+        Some(&suite),
         ResolveOptions {
             resolve_source_commits: false,
             resolve_component_asset_commits: false,
@@ -204,9 +202,13 @@ fn launch_plan_covers_site_singletons_services_and_component_instances() -> Resu
         .iter()
         .map(|participant| participant.launch.participant_id.as_str())
         .collect::<Vec<_>>();
-    for (service, _) in OFFICIAL_SERVICES {
+    for service in resolved
+        .platform_runtimes
+        .iter()
+        .map(|runtime| runtime.name.as_str())
+    {
         assert!(
-            participant_ids.contains(service),
+            participant_ids.contains(&service),
             "missing platform service {service}: {participant_ids:?}"
         );
     }
@@ -293,7 +295,7 @@ fn launch_plan_tool(name: &str) -> ResolvedTool {
         size: None,
         published: false,
         path_override: None,
-        channel: CatalogChannel::Stable,
+        train: "0.36.0".to_string(),
         target: crate::resolver::host_target_triple(),
     }
 }
@@ -400,7 +402,7 @@ fn robot_graphs_are_checked_independently_not_pooled() {
 
 fn fixture_component_package(
     package: &str,
-    kind: phoxal_cli_core::project::catalog::ArtifactKind,
+    kind: phoxal_cli_core::project::suite::ArtifactKind,
     path: &str,
 ) -> ResolvedComponentPackage {
     ResolvedComponentPackage {
@@ -410,24 +412,24 @@ fn fixture_component_package(
             path: PathBuf::from(path),
         },
         path_override: None,
-        catalog_runtime: None,
+        suite_runtime: None,
     }
 }
 
-/// A Catalog-sourced component package with a populated `catalog_runtime`,
+/// A Suite-sourced component package with a populated `suite_runtime`,
 /// the shape `resolve_component_package` produces once a matching release
 /// asset exists.
-fn fixture_catalog_component_package(
+fn fixture_suite_component_package(
     package: &str,
-    kind: phoxal_cli_core::project::catalog::ArtifactKind,
+    kind: phoxal_cli_core::project::suite::ArtifactKind,
     component_name: &str,
 ) -> ResolvedComponentPackage {
     ResolvedComponentPackage {
         package: package.to_string(),
         kind,
-        source: ResolvedComponentSource::Catalog,
+        source: ResolvedComponentSource::Suite,
         path_override: None,
-        catalog_runtime: Some(ResolvedPlatformRuntime {
+        suite_runtime: Some(ResolvedPlatformRuntime {
             name: component_name.to_string(),
             package: package.to_string(),
             kind,
@@ -439,7 +441,7 @@ fn fixture_catalog_component_package(
             published: true,
             published_triples: Vec::new(),
             path_override: None,
-            channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
+            train: "0.36.0".to_string(),
             target: Some("aarch64-unknown-linux-gnu".to_string()),
         }),
     }
@@ -1220,12 +1222,12 @@ fn components_without_drivers_are_not_built() -> Result<()> {
             source_name: "ddsm115".to_string(),
             assets: Some(fixture_component_package(
                 "phoxal/component-ddsm115",
-                phoxal_cli_core::project::catalog::ArtifactKind::ComponentAssets,
+                phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
                 "components/ddsm115",
             )),
             driver: Some(fixture_component_package(
                 "phoxal/component-ddsm115",
-                phoxal_cli_core::project::catalog::ArtifactKind::ComponentDriver,
+                phoxal_cli_core::project::suite::ArtifactKind::ComponentDriver,
                 "components/ddsm115",
             )),
             has_driver: true,
@@ -1235,7 +1237,7 @@ fn components_without_drivers_are_not_built() -> Result<()> {
             source_name: "passive_caster".to_string(),
             assets: Some(fixture_component_package(
                 "phoxal/component-passive_caster",
-                phoxal_cli_core::project::catalog::ArtifactKind::ComponentAssets,
+                phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
                 "components/passive_caster",
             )),
             driver: None,
@@ -1281,22 +1283,22 @@ fn components_without_drivers_are_not_built() -> Result<()> {
 }
 
 #[test]
-fn catalog_component_driver_becomes_a_platform_ref_not_a_source_participant() -> Result<()> {
-    // A Catalog-sourced driver is a first-class catalog artifact - it
+fn suite_component_driver_becomes_a_platform_ref_not_a_source_participant() -> Result<()> {
+    // A Suite-sourced driver is a first-class suite artifact - it
     // must NOT enter `source_participants_from_resolved` (which would
     // later bail trying to build/locate a nonexistent local crate dir).
     let temp = tempfile::tempdir()?;
     let resolved = resolved_with_components(vec![ResolvedComponent {
         instance: "left_drive".to_string(),
         source_name: "ddsm115".to_string(),
-        assets: Some(fixture_catalog_component_package(
+        assets: Some(fixture_suite_component_package(
             "phoxal/component-ddsm115",
-            phoxal_cli_core::project::catalog::ArtifactKind::ComponentAssets,
+            phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
             "ddsm115",
         )),
-        driver: Some(fixture_catalog_component_package(
+        driver: Some(fixture_suite_component_package(
             "phoxal/component-ddsm115",
-            phoxal_cli_core::project::catalog::ArtifactKind::ComponentDriver,
+            phoxal_cli_core::project::suite::ArtifactKind::ComponentDriver,
             "ddsm115",
         )),
         has_driver: true,
@@ -1305,20 +1307,20 @@ fn catalog_component_driver_becomes_a_platform_ref_not_a_source_participant() ->
     let source_participants =
         source_participants_from_resolved(temp.path(), &resolved, |component, _project_root| {
             panic!(
-                "a Catalog-sourced driver for '{}' must never reach the source-crate locator",
+                "a Suite-sourced driver for '{}' must never reach the source-crate locator",
                 component.instance
             )
         })?;
     assert!(
         source_participants.is_empty(),
-        "catalog driver must not become a source participant: {source_participants:?}"
+        "suite driver must not become a source participant: {source_participants:?}"
     );
 
     let platform_refs = component_driver_platform_refs_from_resolved(&resolved);
     assert_eq!(platform_refs.len(), 1);
     assert_eq!(
         platform_refs[0].kind,
-        phoxal_cli_core::project::catalog::ArtifactKind::ComponentDriver
+        phoxal_cli_core::project::suite::ArtifactKind::ComponentDriver
     );
     assert_eq!(platform_refs[0].name, "ddsm115");
     assert_eq!(platform_refs[0].instances, vec!["left_drive".to_string()]);
@@ -1327,9 +1329,8 @@ fn catalog_component_driver_becomes_a_platform_ref_not_a_source_participant() ->
 }
 
 #[test]
-fn n_instances_of_one_catalog_driver_fetch_once_and_validate_as_n_graph_participants() -> Result<()>
-{
-    // Two instances (`left_drive`/`right_drive`) share one catalog
+fn n_instances_of_one_suite_driver_fetch_once_and_validate_as_n_graph_participants() -> Result<()> {
+    // Two instances (`left_drive`/`right_drive`) share one suite
     // driver package: the fetch closure must be called exactly once
     // (proving the driver is fetched once, not per instance), yet both
     // instances must appear as distinct, correctly-scoped graph
@@ -1340,14 +1341,14 @@ fn n_instances_of_one_catalog_driver_fetch_once_and_validate_as_n_graph_particip
         ResolvedComponent {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: Some(fixture_catalog_component_package(
+            assets: Some(fixture_suite_component_package(
                 "phoxal/component-ddsm115",
-                phoxal_cli_core::project::catalog::ArtifactKind::ComponentAssets,
+                phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
                 "ddsm115",
             )),
-            driver: Some(fixture_catalog_component_package(
+            driver: Some(fixture_suite_component_package(
                 "phoxal/component-ddsm115",
-                phoxal_cli_core::project::catalog::ArtifactKind::ComponentDriver,
+                phoxal_cli_core::project::suite::ArtifactKind::ComponentDriver,
                 "ddsm115",
             )),
             has_driver: true,
@@ -1355,14 +1356,14 @@ fn n_instances_of_one_catalog_driver_fetch_once_and_validate_as_n_graph_particip
         ResolvedComponent {
             instance: "right_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: Some(fixture_catalog_component_package(
+            assets: Some(fixture_suite_component_package(
                 "phoxal/component-ddsm115",
-                phoxal_cli_core::project::catalog::ArtifactKind::ComponentAssets,
+                phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
                 "ddsm115",
             )),
-            driver: Some(fixture_catalog_component_package(
+            driver: Some(fixture_suite_component_package(
                 "phoxal/component-ddsm115",
-                phoxal_cli_core::project::catalog::ArtifactKind::ComponentDriver,
+                phoxal_cli_core::project::suite::ArtifactKind::ComponentDriver,
                 "ddsm115",
             )),
             has_driver: true,
@@ -1384,7 +1385,7 @@ fn n_instances_of_one_catalog_driver_fetch_once_and_validate_as_n_graph_particip
 
     let source_participants =
         source_participants_from_resolved(temp.path(), &resolved, |_component, _project_root| {
-            panic!("catalog drivers never reach the source locator")
+            panic!("suite drivers never reach the source locator")
         })?;
     assert!(source_participants.is_empty());
 
@@ -1434,17 +1435,17 @@ fn n_instances_of_one_catalog_driver_fetch_once_and_validate_as_n_graph_particip
 }
 
 #[test]
-fn driverless_catalog_component_stages_assets_only_and_is_not_a_check_participant() -> Result<()> {
+fn driverless_suite_component_stages_assets_only_and_is_not_a_check_participant() -> Result<()> {
     // Component assets contribute no contracts and are never a check
-    // participant, catalog-sourced or not; a driverless instance yields
+    // participant, suite-sourced or not; a driverless instance yields
     // no source participant and no platform ref.
     let temp = tempfile::tempdir()?;
     let resolved = resolved_with_components(vec![ResolvedComponent {
         instance: "caster".to_string(),
         source_name: "passive_caster".to_string(),
-        assets: Some(fixture_catalog_component_package(
+        assets: Some(fixture_suite_component_package(
             "phoxal/component-passive_caster",
-            phoxal_cli_core::project::catalog::ArtifactKind::ComponentAssets,
+            phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
             "passive_caster",
         )),
         driver: None,
@@ -1468,7 +1469,7 @@ fn path_overridden_service_enters_check_through_source_emit_apis() -> Result<()>
     resolved.platform_runtimes.push(ResolvedPlatformRuntime {
         name: "drive".to_string(),
         package: "phoxal/service-drive".to_string(),
-        kind: phoxal_cli_core::project::catalog::ArtifactKind::Service,
+        kind: phoxal_cli_core::project::suite::ArtifactKind::Service,
         version: "0.1.0".to_string(),
         artifact_ref: "path:framework/service/drive".to_string(),
         sha256: None,
@@ -1477,7 +1478,7 @@ fn path_overridden_service_enters_check_through_source_emit_apis() -> Result<()>
         published: true,
         published_triples: Vec::new(),
         path_override: Some(temp.path().join("framework/service/drive")),
-        channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
+        train: "0.36.0".to_string(),
         target: Some("aarch64-unknown-linux-gnu".to_string()),
     });
 
@@ -1505,7 +1506,7 @@ fn path_overridden_service_enters_check_through_source_emit_apis() -> Result<()>
         CheckGraphContext {
             manifest_extras: &extras,
         },
-        |_| bail!("path-overridden service should not read catalog metadata"),
+        |_| bail!("path-overridden service should not read suite metadata"),
         |_| bail!("no tools in this fixture"),
         |participant| {
             assert_eq!(participant.kind, SourceParticipantKind::OfficialService);
@@ -1553,7 +1554,7 @@ fn raw_emit_apis_accepts_required_contracts_json() -> Result<()> {
                 "required_contracts": [
                     {
                         "role": "publish",
-                        "version": "v1",
+                        "version": "v0.1",
                         "contract": "drive::Target",
                         "external": false
                     }
@@ -1574,7 +1575,7 @@ fn raw_emit_apis_accepts_required_contracts_json() -> Result<()> {
             .and_then(Value::as_str),
         Some("object")
     );
-    assert_eq!(participant.contracts[0].family, "v1::drive::Target");
+    assert_eq!(participant.contracts[0].family, "v0.1::drive::Target");
     Ok(())
 }
 
@@ -1951,9 +1952,8 @@ fn raw_kind_class(
 fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<ResolvedRobot> {
     Ok(ResolvedRobot {
         robot: Robot::parse_from_string(MINIMAL_ROBOT)?,
-        channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
+        train: "0.36.0".to_string(),
         target: crate::resolver::host_target_triple(),
-        catalog_snapshot: None,
         platform_runtimes: Vec::new(),
         simulators: Vec::new(),
         user_runtimes: Vec::new(),
@@ -1979,6 +1979,5 @@ robot:
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
   components: {}
-artifacts:
-  channel: stable
+artifacts: {}
 "#;

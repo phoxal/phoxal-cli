@@ -225,7 +225,7 @@ impl CheckCmd {
         let project_root = app.project.root().to_path_buf();
         let options = CheckOptions {
             service: self.service.clone(),
-            catalog_source: app.catalog_source.clone(),
+            suite_source: app.suite_source.clone(),
             overlays: self.env.clone(),
             target: self.target.clone(),
             strict: self.strict,
@@ -239,7 +239,7 @@ impl CheckCmd {
             "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
         );
 
-        ensure_check_outcome_ok(&result.channel, &result.outcome)?;
+        ensure_check_outcome_ok(&result.train, &result.outcome)?;
         match coherence_disposition(CoherenceVerb::Check, result.strict, &result.coherence) {
             CoherenceDisposition::Pass => {}
             CoherenceDisposition::Warning => {
@@ -250,12 +250,9 @@ impl CheckCmd {
             }
         }
         println!(
-            "ok: {} participants validated (channel {})",
-            result.participant_count, result.channel
+            "ok: {} participants validated (framework train {})",
+            result.participant_count, result.train
         );
-        if let Some(revision) = &result.catalog_snapshot {
-            println!("catalog revision: {revision}");
-        }
         Ok(())
     }
 }

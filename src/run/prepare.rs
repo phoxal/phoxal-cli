@@ -46,16 +46,15 @@ pub(crate) fn prepare_run(
             &options.overlays,
         )?
     };
-    let catalog = crate::commands::load_catalog_for_robot_from_source(
-        options.catalog_source.clone(),
+    let suite = crate::commands::load_suite_for_robot_from_source(
+        options.suite_source.clone(),
         project_root,
-        loaded.robot.artifacts.channel,
         &loaded.extras,
     )?;
     let resolved = resolve(
         &loaded.robot,
         project_root,
-        catalog.as_ref(),
+        suite.as_ref(),
         ResolveOptions {
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
@@ -97,14 +96,14 @@ pub(crate) fn prepare_run(
                 return extract_emit_apis_from_staged_tool(tool);
             }
             Err(anyhow!(
-                "resolved official artifact {artifact_ref} is not in the catalog"
+                "resolved official artifact {artifact_ref} is not in the suite"
             ))
         },
         fetch_emit_apis_from_tool,
         build_emit_apis_from_source,
     )?;
     if !outcome.is_ok() {
-        crate::check::ensure_check_outcome_ok(&resolved.channel.to_string(), &outcome)?;
+        crate::check::ensure_check_outcome_ok(&resolved.train, &outcome)?;
     }
     let plan = build_launch_plan(
         LaunchMode::Run,

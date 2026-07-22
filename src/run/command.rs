@@ -14,6 +14,7 @@ use crate::supervisor::SupervisorLock;
 use crate::supervisor::SupervisorOptions;
 use crate::supervisor::start_bus_log_subscriber;
 use crate::supervisor::start_liveliness_observer;
+use crate::supervisor::start_robot_description_server;
 use anyhow::Result;
 use anyhow::bail;
 use clap::Args;
@@ -62,7 +63,7 @@ pub enum DriversMode {
 pub struct RunOptions {
     pub drivers: DriversMode,
     pub drivers_subset: Vec<String>,
-    pub catalog_source: Option<String>,
+    pub suite_source: Option<String>,
     pub overlays: Vec<String>,
     pub watch: bool,
 }
@@ -127,7 +128,7 @@ impl Run {
         let options = RunOptions {
             drivers: self.drivers,
             drivers_subset: self.drivers_subset.clone(),
-            catalog_source: app.catalog_source.clone(),
+            suite_source: app.suite_source.clone(),
             overlays: self.env.clone(),
             watch: self.watch,
         };
@@ -254,6 +255,18 @@ async fn live_run_setup(
             })
             .collect::<Vec<_>>(),
     );
+    let description = phoxal_cli_core::supervisor_api::v0::RobotDescription {
+        robot: prepared.ctx.resolved.robot.clone(),
+        framework_train: prepared.ctx.resolved.train.clone(),
+    };
+    background_tasks.extend(prepared.robot_targets.iter().map(|target| {
+        start_robot_description_server(
+            target.scope.namespace.clone(),
+            target.scope.robot_id.clone(),
+            connect.clone(),
+            description.clone(),
+        )
+    }));
     background_tasks.extend(prepared.robot_targets.iter().map(|target| {
         start_liveliness_observer(
             target.scope.namespace.clone(),

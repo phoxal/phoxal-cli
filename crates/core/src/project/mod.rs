@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub mod catalog;
 pub mod launch_plan;
 pub mod resolver;
+pub mod suite;
 pub mod tooling;
+pub mod train;
 
 // Bundle-layout conventions. These were `pub` constants in `phoxal::runtime` up to
 // framework 0.10.0; the 0.11 rewrite made them private to the framework's model

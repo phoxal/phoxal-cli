@@ -11,9 +11,9 @@ use phoxal::check as graph_check;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
 use phoxal_cli_core::check::source::ToolParticipant;
-use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::resolver::RobotManifestExtras;
 use phoxal_cli_core::project::resolver::tool_emit_apis_id;
+use phoxal_cli_core::project::suite::ArtifactKind;
 
 pub fn run_check(
     resolved_platform_image_refs: &[(String, String)],
@@ -128,7 +128,7 @@ pub fn run_check_with_deployed_user_service_images(
             contract_surfaces.push(contract_surface(&raw, artifact.name.clone()));
             participants.push(participant);
         } else {
-            // A catalog component driver is fetched once but launched once
+            // A suite component driver is fetched once but launched once
             // per instance that declares it - key each instance's graph
             // membership by its own id, exactly like a path/git-overridden
             // driver source participant does (see

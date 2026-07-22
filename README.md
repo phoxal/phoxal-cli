@@ -1,10 +1,11 @@
 # phoxal-cli
 
 Consumer CLI for the Phoxal robot framework.
-You run it from a robot project: it reads `robot.yaml`, resolves the graph against a verified generated artifact catalog when official artifacts are needed, and drives the develop, simulate, and deploy loop.
-It owns the resolver and `robot.yaml` discovery.
-There is no dependency lockfile or global artifact cache. The project's git-ignored `.phoxal/` tree is the vendored set; `phoxal update` is the explicit channel-head mutation boundary.
-Production reproducibility comes from explicit `artifacts.pins` plus the deployed `phoxal-release.json` record.
+You run it from a robot project: it reads `robot.yaml`, resolves the graph against a verified generated artifact suite when official artifacts are needed, and drives the develop, simulate, and deploy loop.
+It owns the resolver and `robot.yaml` discovery. Every robot project has a root
+Cargo anchor package and committed `Cargo.lock`; the exact resolved `phoxal`
+package selects the framework train. The git-ignored `.phoxal/` tree is only an
+artifact transport cache and never selects compatibility.
 
 ## Commands
 
@@ -14,7 +15,7 @@ Production reproducibility comes from explicit `artifacts.pins` plus the deploye
 cd rover
 
 phoxal-cli check                  # validate the graph's participants + config via phoxal::check
-phoxal-cli service catalog        # print official services from the configured artifact catalog
+phoxal-cli service suite          # print official services from the configured artifact suite
 phoxal-cli run --watch            # supervise the graph and hot-swap checked local edits
 phoxal-cli simulation run default # resolve and report the simulation launch plan
 phoxal-cli logs -f                # stream participant bus logs from a reachable robot
@@ -34,8 +35,8 @@ phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build va
 | `simulation join` | Reserved entry point for joining a running multi-robot simulation; currently reports that the workflow is not available yet. |
 | `logs [participant]` | Stream participant bus log events from a reachable robot. `-f`/`--follow` keeps streaming; omit `participant` for every participant. |
 | `status <safety|motion|localization>` | Inspect the latest domain state over the robot bus. `engage-estop` and `reset-estop` publish the robot-wide software emergency-stop request. |
-| `service catalog` | Print official services from the configured artifact catalog. |
-| `update` | Resolve stable/nightly heads, verify version and catalog SHA, atomically retarget `active`, and prune inactive versions after successful activation. Same-version digest changes are refreshed. Supports `--dry-run`. |
+| `service suite` | Print official services from the configured artifact suite. |
+| `update` | Fetch and verify the immutable suite for the locked train, atomically retarget cached artifacts, and prune inactive cached versions after successful activation. Supports `--dry-run`; use `cargo update -p phoxal` to change trains. |
 | `deploy <user@host>` | Probe the robot arch, resolve/check the graph, cross-build local source artifacts for musl, render native systemd units/env/release record, sync to `/opt/phoxal` and `/etc/systemd/system`, restart `phoxal.target`, and report systemd readiness. Prints the v0 pre-stable warning. `--dry-run --target <arch>` renders hostless for validation. |
 | `doctor` | Check host prerequisites (Webots, Rust toolchain) without changing anything. |
 | `version` | Print the CLI version, wire codec, and participant metadata section names. |
@@ -105,16 +106,19 @@ artifacts:
       path: ../framework/component/ddsm115
 ```
 
-Load escaping overrides with `--env dev`. Base `robot.yaml` remains fail-closed for absolute or escaping `{ path: ... }` pins so production manifests stay catalog/release based. Unknown or unused pin keys are errors.
+Load escaping overrides with `--env dev`. Base `robot.yaml` remains fail-closed for absolute or escaping `{ path: ... }` pins so production manifests stay suite/release based. Unknown or unused pin keys are errors.
 
-## Artifact Catalog
+## Artifact Suite
 
-`phoxal-cli` consumes the framework-generated `phoxal.catalog/v0` JSON catalog. The default is `https://github.com/phoxal/framework/releases/latest/download/catalog.json`. Local development may use `--catalog <path>`, `PHOXAL_ARTIFACT_CATALOG=<path>`, or `artifacts.catalog`; non-default sources are frozen single-catalog sources.
-
-Stable resolution follows `heads.stable` to that release's frozen catalog; nightly follows `heads.nightly`. Normal commands retain project-vendored `active` versions and warn about head drift. Use `--offline` or `PHOXAL_OFFLINE=1` to skip catalog probes. Fresh CI can run `phoxal update && phoxal check --strict`; deterministic CI should use explicit version/SHA pins.
-
-> `v0` is pre-stable: artifacts built at different times may not interoperate.
-> Pin exact artifact versions in `robot.yaml` when you need to re-deploy a previously recorded `phoxal-release.json` set.
+`phoxal-cli` consumes the framework-generated `phoxal.suite/v0` attached to the
+exact locked train release, for example
+`https://github.com/phoxal/framework/releases/download/v0.36.0/suite.json`.
+Local development may use `--suite <path>`, `PHOXAL_SUITE=<path>`, or
+`artifacts.suite`; every override must still declare the locked train version.
+Use `--offline --suite <local-path>` (or the equivalent environment variables)
+to disable network access and resolve from that immutable local descriptor plus
+already verified vendored artifacts. Offline mode never fetches or reconstructs
+the suite. `cargo update -p phoxal` is the explicit train-bump boundary.
 
 ## Install
 
@@ -157,10 +161,9 @@ Example: `phoxal-cli simulation run default` finds `worlds/default.wbt` in the p
 
 `scripts/live-simulate-gate.sh` is the split-recovery smoke gate for
 the separated repos. The D5 native artifact path now resolves official service
-and driver metadata from the generated artifact catalog; published native
+and driver metadata from the generated artifact suite; published native
 release assets are still pending. For local development, generate a metadata
-catalog from the framework checkout and pass it with `--catalog` or
-`PHOXAL_ARTIFACT_CATALOG`.
+suite from the framework checkout and pass it with `--suite` or `PHOXAL_SUITE`.
 
 ```sh
 # from the phoxal-cli checkout; ROBOT_DIR defaults to the framework hello-rover example
@@ -173,8 +176,8 @@ planned local launch without writing `.phoxal/run` or a release directory. It
 needs no daemon of any kind. The `--live` phase additionally requires Webots on
 `PATH`; run `phoxal update` first, then it runs `simulation run default` so you can confirm the router,
 Webots, host tools, and bus connectivity. Until native release assets publish,
-official-service launch failures should surface as catalog or native-pending
-diagnostics rather than as missing static catalog entries.
+official-service launch failures should surface as suite or native-pending
+diagnostics rather than as missing static suite entries.
 
 ## Host layout
 

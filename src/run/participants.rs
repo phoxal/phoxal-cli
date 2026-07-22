@@ -371,7 +371,7 @@ pub(crate) fn site_env(
 }
 
 /// Whether a tool is resolved from a local
-/// path-pin override rather than a fetched catalog artifact. Best-effort:
+/// path-pin override rather than a fetched suite artifact. Best-effort:
 /// `false` if the tool is missing from `resolved.tools` (surfaced properly by
 /// `locate_tool_binary`'s own lookup instead).
 pub(crate) fn site_tool_is_local(resolved: &ResolvedRobot, name: &str) -> bool {
@@ -449,7 +449,7 @@ pub(crate) fn locate_official_binary(
         return Ok(binary.is_file().then_some(binary));
     }
     // No env override, and no resolved runtime to derive a native-artifact
-    // descriptor from (a path-overridden or otherwise non-catalog runtime) -
+    // descriptor from (a path-overridden or otherwise non-suite runtime) -
     // the project-local store has no other identity from which to find this
     // participant's binary.
     Ok(None)

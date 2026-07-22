@@ -62,6 +62,7 @@ pub(crate) mod test_support {
     pub(crate) struct ScratchPhoxalHome {
         _root: std::path::PathBuf,
         previous: Option<OsString>,
+        previous_train: Option<OsString>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
@@ -72,11 +73,16 @@ pub(crate) mod test_support {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let root = tempfile::tempdir()?.keep();
             let previous = std::env::var_os(super::PROJECT_ROOT_ENV);
+            let previous_train = std::env::var_os("PHOXAL_TEST_LOCKED_TRAIN");
             // SAFETY: tests serialize mutations through PROJECT_ROOT_TEST_LOCK.
-            unsafe { std::env::set_var(super::PROJECT_ROOT_ENV, &root) };
+            unsafe {
+                std::env::set_var(super::PROJECT_ROOT_ENV, &root);
+                std::env::set_var("PHOXAL_TEST_LOCKED_TRAIN", "0.1.0");
+            };
             Ok(Self {
                 _root: root,
                 previous,
+                previous_train,
                 _lock: lock,
             })
         }
@@ -89,6 +95,10 @@ pub(crate) mod test_support {
                 match &self.previous {
                     Some(value) => std::env::set_var(super::PROJECT_ROOT_ENV, value),
                     None => std::env::remove_var(super::PROJECT_ROOT_ENV),
+                }
+                match &self.previous_train {
+                    Some(value) => std::env::set_var("PHOXAL_TEST_LOCKED_TRAIN", value),
+                    None => std::env::remove_var("PHOXAL_TEST_LOCKED_TRAIN"),
                 }
             }
         }

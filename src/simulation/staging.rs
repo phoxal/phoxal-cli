@@ -206,7 +206,7 @@ pub(crate) fn stage_robot_meshes(
 /// Stage one component type's `meshes/` directory (if any) as a SYMLINK at
 /// `<mesh_root>/<component_type>/` pointing at the component's resolved mesh
 /// source directory (the unpacked cached asset bundle's `meshes/` for a
-/// catalog component, or the local `components/<id>/meshes/` for a
+/// suite component, or the local `components/<id>/meshes/` for a
 /// path-pinned one - both already absolute, see `component_assets_dir`) - the
 /// cache/path-pin stays the single source of truth instead of a copy. The
 /// prefix `WebotsSceneDescription::from_component`'s `component_mesh_prefix`

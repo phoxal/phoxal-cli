@@ -41,7 +41,7 @@ use phoxal_cli_core::session::{
 pub struct TitleInfo {
     pub robot: String,
     pub namespace: String,
-    pub channel: String,
+    pub train: String,
     pub manifest: String,
     pub mode: SessionMode,
     pub bus_endpoint: String,

@@ -1,11 +1,11 @@
-//! Converts resolved catalog records into native artifact staging descriptors.
+//! Converts resolved suite records into native artifact staging descriptors.
 
 use anyhow::Result;
 
-use crate::project::catalog::ArtifactKind;
 use crate::project::resolver::{
     ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, official_binary_name, tool_emit_apis_id,
 };
+use crate::project::suite::ArtifactKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProvisioningMode {
@@ -100,7 +100,7 @@ pub fn descriptors_for(
                 .flatten(),
         );
         for package in packages {
-            if let Some(runtime) = &package.catalog_runtime
+            if let Some(runtime) = &package.suite_runtime
                 && let Some(descriptor) = NativeArtifactDescriptor::from_runtime(runtime)?
                 && components.insert((
                     descriptor.package_id.clone(),

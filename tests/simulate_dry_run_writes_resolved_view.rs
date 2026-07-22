@@ -3,22 +3,22 @@ use std::fs;
 use anyhow::Context;
 use phoxal_cli::resolver::host_target_triple;
 use phoxal_cli::simulation::{SimulateOptions, prepare};
-use phoxal_cli_core::project::catalog::{
-    SelectionChannel as CatalogChannel, fixture_catalog_for_tests, fixture_tool_entry_for_tests,
+use phoxal_cli_core::project::suite::{
+    fixture_simulator_entry_for_tests, fixture_suite_for_tests, fixture_tool_entry_for_tests,
 };
 
 #[test]
 fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     write_robot_project(temp.path())?;
-    write_vendored_fixture_binaries(temp.path())?;
-    let catalog_path = write_catalog(temp.path())?;
+    let suite_path = write_suite(temp.path())?;
+    write_vendored_fixture_binaries(temp.path(), &suite_path)?;
 
     let plan = prepare(
         temp.path(),
         SimulateOptions {
             world: "test".to_string(),
-            catalog_source: Some(catalog_path.display().to_string()),
+            suite_source: Some(suite_path.display().to_string()),
             ..SimulateOptions::default()
         },
     )?;
@@ -37,9 +37,9 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
     // Joypad and telemetry are standard, hard-required site tools, while
     // bus and log retention are robot-scoped launch participants in every
     // mode including `simulate` - no
-    // opt-in flag, no graceful-degrade path. `fixture_catalog_for_tests`
-    // auto-fills every `catalog::OFFICIAL_TOOLS` entry not explicitly listed
-    // in `write_catalog` above, which is why the standard tools resolve
+    // opt-in flag, no graceful-degrade path. `fixture_suite_for_tests`
+    // auto-fills every `suite::OFFICIAL_TOOLS` entry not explicitly listed
+    // in `write_suite` above, which is why the standard tools resolve
     // here despite not being in that fixture list.
     let site_ids = plan
         .plan
@@ -69,35 +69,24 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
             "tool-telemetry-testbot",
         ]
     );
-    assert_eq!(
-        plan.ctx.resolved.platform_runtimes.len(),
-        phoxal_cli_core::project::catalog::OFFICIAL_SERVICES.len()
-    );
+    assert_eq!(plan.ctx.resolved.platform_runtimes.len(), 0);
 
     Ok(())
 }
 
-fn write_vendored_fixture_binaries(root: &std::path::Path) -> anyhow::Result<()> {
+fn write_vendored_fixture_binaries(
+    root: &std::path::Path,
+    suite_path: &std::path::Path,
+) -> anyhow::Result<()> {
     // `prepare` is called directly rather than through AppContext in this
     // integration test, so point project-local path helpers at its fixture.
     unsafe { std::env::set_var(phoxal_cli::host_paths::PROJECT_ROOT_ENV, root) };
     let source = std::env::current_exe()?;
     let target = host_target_triple();
-    for (name, package, binary) in phoxal_cli_core::project::catalog::OFFICIAL_SERVICES
-        .iter()
-        .map(|(name, package)| (*name, *package, format!("phoxal-service-{name}")))
-        .chain(
-            phoxal_cli_core::project::catalog::OFFICIAL_TOOLS
-                .iter()
-                .map(|(name, package)| (*name, *package, format!("phoxal-tool-{name}"))),
-        )
-        .chain(
-            phoxal_cli_core::project::catalog::OFFICIAL_SIMULATORS
-                .iter()
-                .map(|(name, package)| (*name, *package, format!("phoxal-simulator-{name}"))),
-        )
-    {
-        let _ = name;
+    let suite = phoxal_cli_core::project::suite::read_suite_path(suite_path)?;
+    for artifact in &suite.artifacts {
+        let package = artifact.id.as_str();
+        let binary = package.replace('/', "-");
         let (provider, package_name) = package
             .split_once('/')
             .context("fixture package must be provider-qualified")?;
@@ -105,19 +94,74 @@ fn write_vendored_fixture_binaries(root: &std::path::Path) -> anyhow::Result<()>
             .join(".phoxal/artifacts")
             .join(provider)
             .join(package_name);
-        let version_dir = package_dir.join("versions/0.1.0/targets").join(&target);
+        let version_dir = package_dir
+            .join(format!("versions/{}/targets", suite.version))
+            .join(&target);
         fs::create_dir_all(&version_dir)?;
         fs::copy(&source, version_dir.join(binary))?;
         fs::write(version_dir.join(".phoxal-sha256"), "0".repeat(64))?;
         #[cfg(unix)]
-        std::os::unix::fs::symlink("versions/0.1.0", package_dir.join("active"))?;
+        std::os::unix::fs::symlink(
+            format!("versions/{}", suite.version),
+            package_dir.join("active"),
+        )?;
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir("versions/0.1.0", package_dir.join("active"))?;
+        std::os::windows::fs::symlink_dir(
+            format!("versions/{}", suite.version),
+            package_dir.join("active"),
+        )?;
     }
     Ok(())
 }
 
 fn write_robot_project(root: &std::path::Path) -> anyhow::Result<()> {
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(
+        root.join("Cargo.toml"),
+        r#"[package]
+name = "testbot-train-anchor"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+members = []
+exclude = ["train/phoxal"]
+resolver = "3"
+
+[dependencies]
+phoxal = { version = "=0.1.0", path = "train/phoxal" }
+"#,
+    )?;
+    fs::write(root.join("src/lib.rs"), "")?;
+    fs::create_dir_all(root.join("train/phoxal/src"))?;
+    fs::write(
+        root.join("train/phoxal/Cargo.toml"),
+        r#"[package]
+name = "phoxal"
+version = "0.1.0"
+edition = "2024"
+"#,
+    )?;
+    fs::write(root.join("train/phoxal/src/lib.rs"), "")?;
+    fs::write(
+        root.join("Cargo.lock"),
+        r#"# This file is automatically @generated by Cargo.
+# It is not intended for manual editing.
+version = 4
+
+[[package]]
+name = "phoxal"
+version = "0.1.0"
+
+[[package]]
+name = "testbot-train-anchor"
+version = "0.0.0"
+dependencies = [
+ "phoxal",
+]
+"#,
+    )?;
     fs::write(root.join("robot.yaml"), minimal_robot_yaml())?;
     fs::write(
         root.join("structure.urdf"),
@@ -151,31 +195,40 @@ robot:
     wheel_base_m: 0.5
   components: {}
 
-artifacts:
-  channel: stable
+artifacts: {}
 "#
 }
 
-fn write_catalog(root: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
-    let path = root.join("catalog.json");
-    let catalog = fixture_catalog_for_tests(vec![
+fn write_suite(root: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let path = root.join("suite.json");
+    let suite = fixture_suite_for_tests(vec![
+        fixture_tool_entry_for_tests("router", "0.1.0", &host_target_triple(), true, Vec::new()),
+        fixture_tool_entry_for_tests("joypad", "0.1.0", &host_target_triple(), true, Vec::new()),
+        fixture_tool_entry_for_tests("bus", "0.1.0", &host_target_triple(), true, Vec::new()),
+        fixture_tool_entry_for_tests("device", "0.1.0", &host_target_triple(), true, Vec::new()),
+        fixture_tool_entry_for_tests("log", "0.1.0", &host_target_triple(), true, Vec::new()),
         fixture_tool_entry_for_tests(
-            "router",
+            "telemetry",
             "0.1.0",
-            CatalogChannel::Stable,
             &host_target_triple(),
-            false,
+            true,
             Vec::new(),
         ),
-        fixture_tool_entry_for_tests(
-            "joypad",
+        fixture_simulator_entry_for_tests(
+            "webots-supervisor",
             "0.1.0",
-            CatalogChannel::Stable,
             &host_target_triple(),
-            false,
+            true,
+            Vec::new(),
+        ),
+        fixture_simulator_entry_for_tests(
+            "webots-controller",
+            "0.1.0",
+            &host_target_triple(),
+            true,
             Vec::new(),
         ),
     ]);
-    fs::write(&path, serde_json::to_string_pretty(&catalog)?)?;
+    fs::write(&path, serde_json::to_string_pretty(&suite)?)?;
     Ok(path)
 }

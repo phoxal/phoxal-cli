@@ -1,4 +1,4 @@
-//! Robot resolution, catalog hydration, and deployment-plan preparation.
+//! Robot resolution, suite hydration, and deployment-plan preparation.
 
 use super::{
     DeployOptions, RenderPayloadInput, RenderedPayload, TargetTriples,
@@ -20,7 +20,6 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use phoxal_cli_core::check::source::SourceParticipantKind;
-use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::launch_plan::CheckedRobotLaunchInput;
 use phoxal_cli_core::project::launch_plan::LaunchMode;
 use phoxal_cli_core::project::launch_plan::PlanContext;
@@ -30,6 +29,7 @@ use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::resolver::discover_robot_yaml;
 use phoxal_cli_core::project::resolver::load_robot_with_extras;
+use phoxal_cli_core::project::suite::ArtifactKind;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -55,44 +55,41 @@ pub(crate) fn prepare_deploy(
             &options.overlays,
         )?
     };
-    let catalog = crate::commands::load_catalog_for_robot_from_source(
-        options.catalog_source.clone(),
+    let suite = crate::commands::load_suite_for_robot_from_source(
+        options.suite_source.clone(),
         project_root,
-        loaded.robot.artifacts.channel,
         &loaded.extras,
     )?;
     let mut resolved = resolve(
         &loaded.robot,
         project_root,
-        catalog.as_ref(),
+        suite.as_ref(),
         ResolveOptions {
-            refresh_channel_head: false,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             official_target_triple: Some(target.official_triple.clone()),
             tool_target_triple: Some(target.official_triple.clone()),
         },
     )?;
-    if let Some(catalog) = catalog.as_ref() {
-        hydrate_catalog_blobs(&mut resolved, catalog)?;
+    if let Some(suite) = suite.as_ref() {
+        hydrate_suite_blobs(&mut resolved, suite)?;
     }
     if !options.dry_run {
         let mut host_resolved = resolve(
             &loaded.robot,
             project_root,
-            catalog.as_ref(),
+            suite.as_ref(),
             ResolveOptions {
-                refresh_channel_head: false,
                 resolve_source_commits: false,
                 resolve_component_asset_commits: false,
                 official_target_triple: Some(crate::resolver::host_target_triple()),
                 tool_target_triple: Some(crate::resolver::host_target_triple()),
             },
         )?;
-        let catalog = catalog
+        let suite = suite
             .as_ref()
-            .context("deploy requires the pinned catalog to recover immutable release URLs")?;
-        hydrate_catalog_blobs(&mut host_resolved, catalog)?;
+            .context("deploy requires the pinned suite to recover immutable release URLs")?;
+        hydrate_suite_blobs(&mut host_resolved, suite)?;
         ensure_cross_target_release_match(&resolved, &host_resolved)?;
         let descriptors = phoxal_cli_core::artifacts::descriptors_for(&host_resolved, false, true)?;
         crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
@@ -122,26 +119,24 @@ pub(crate) fn prepare_deploy(
     }
 }
 
-pub(crate) fn hydrate_catalog_blobs(
+pub(crate) fn hydrate_suite_blobs(
     resolved: &mut ResolvedRobot,
-    catalog: &phoxal_cli_core::project::catalog::Catalog,
+    suite: &phoxal_cli_core::project::suite::Suite,
 ) -> Result<()> {
     fn hydrate_runtime(
         runtime: &mut ResolvedPlatformRuntime,
-        catalog: &phoxal_cli_core::project::catalog::Catalog,
+        suite: &phoxal_cli_core::project::suite::Suite,
     ) -> Result<()> {
         if runtime.path_override.is_some() || runtime.version == "source" {
             return Ok(());
         }
-        let artifact = catalog
+        let artifact = suite
             .artifacts
             .iter()
-            .find(|artifact| {
-                artifact.package == runtime.package && artifact.version == runtime.version
-            })
+            .find(|artifact| artifact.id == runtime.package && suite.version == runtime.version)
             .with_context(|| {
                 format!(
-                    "pinned catalog is missing {} {}",
+                    "pinned suite is missing {} {}",
                     runtime.package, runtime.version
                 )
             })?;
@@ -166,37 +161,34 @@ pub(crate) fn hydrate_catalog_blobs(
     }
 
     for runtime in &mut resolved.platform_runtimes {
-        hydrate_runtime(runtime, catalog)?;
+        hydrate_runtime(runtime, suite)?;
     }
     for component in &mut resolved.components {
         if let Some(runtime) = component
             .assets
             .as_mut()
-            .and_then(|assets| assets.catalog_runtime.as_mut())
+            .and_then(|assets| assets.suite_runtime.as_mut())
         {
-            hydrate_runtime(runtime, catalog)?;
+            hydrate_runtime(runtime, suite)?;
         }
         if let Some(runtime) = component
             .driver
             .as_mut()
-            .and_then(|driver| driver.catalog_runtime.as_mut())
+            .and_then(|driver| driver.suite_runtime.as_mut())
         {
-            hydrate_runtime(runtime, catalog)?;
+            hydrate_runtime(runtime, suite)?;
         }
     }
     for tool in &mut resolved.tools {
         if tool.path_override.is_some() || tool.resolved == "source" {
             continue;
         }
-        let artifact = catalog
+        let artifact = suite
             .artifacts
             .iter()
-            .find(|artifact| artifact.package == tool.package && artifact.version == tool.resolved)
+            .find(|artifact| artifact.id == tool.package && suite.version == tool.resolved)
             .with_context(|| {
-                format!(
-                    "pinned catalog is missing {} {}",
-                    tool.package, tool.resolved
-                )
+                format!("pinned suite is missing {} {}", tool.package, tool.resolved)
             })?;
         let Some(blob) = artifact.targets.get(&tool.target) else {
             tool.published = false;
@@ -306,13 +298,13 @@ pub(crate) fn prepare_deploy_after_host_staging(
                 return extract_emit_apis_from_staged_tool(tool);
             }
             Err(anyhow!(
-                "resolved official artifact {artifact_ref} is not in the catalog"
+                "resolved official artifact {artifact_ref} is not in the suite"
             ))
         },
         fetch_emit_apis_from_tool,
         build_emit_apis_from_source,
     )?;
-    crate::check::ensure_check_outcome_ok(&resolved.channel.to_string(), &outcome)?;
+    crate::check::ensure_check_outcome_ok(&resolved.train, &outcome)?;
 
     let plan = build_launch_plan(
         LaunchMode::Deploy,

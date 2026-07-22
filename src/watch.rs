@@ -41,7 +41,7 @@ pub(crate) enum WatchMode {
 }
 
 /// The shared `ParticipantKind` (`Service`/`Driver`/`Tool`/`Simulator`) - a
-/// watch target only ever needs the role split, never a local/catalog bit
+/// watch target only ever needs the role split, never a local/suite bit
 /// (every watch target is by construction a locally-changing source
 /// directory), so this is a plain alias rather than a wrapping type.
 pub(crate) type WatchTargetKind = ParticipantKind;
@@ -367,16 +367,15 @@ fn recheck_run_target(
     } else {
         load_robot_with_extras_and_overlays(&robot_path, &options.overlays)?
     };
-    let catalog = crate::commands::load_catalog_for_robot_from_source(
-        options.catalog_source.clone(),
+    let suite = crate::commands::load_suite_for_robot_from_source(
+        options.suite_source.clone(),
         project_root,
-        loaded.robot.artifacts.channel,
         &loaded.extras,
     )?;
     let resolved = resolve(
         &loaded.robot,
         project_root,
-        catalog.as_ref(),
+        suite.as_ref(),
         ResolveOptions {
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
@@ -417,13 +416,13 @@ fn recheck_run_target(
                 return extract_emit_apis_from_staged_tool(tool);
             }
             Err(anyhow!(
-                "resolved official artifact {artifact_ref} is not in the catalog"
+                "resolved official artifact {artifact_ref} is not in the suite"
             ))
         },
         fetch_emit_apis_from_tool,
         build_emit_apis_from_source,
     )?;
-    crate::check::ensure_check_outcome_ok(&resolved.channel.to_string(), &outcome)?;
+    crate::check::ensure_check_outcome_ok(&resolved.train, &outcome)?;
     let plan = build_launch_plan(
         LaunchMode::Run,
         &[CheckedRobotLaunchInput {
@@ -463,7 +462,7 @@ fn recheck_sim_target(
         &resolved.world_path,
         &resolved.resolved,
         &resolved.manifest_extras,
-        resolved.catalog.as_ref(),
+        resolved.suite.as_ref(),
     )?;
     if target.kind == WatchTargetKind::Driver {
         return Ok(WatchOutcome::MetadataOnly);
@@ -730,9 +729,8 @@ robot:
         .unwrap();
         ResolvedRobot {
             robot,
-            channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
+            train: "0.36.0".to_string(),
             target: "host".to_string(),
-            catalog_snapshot: None,
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),

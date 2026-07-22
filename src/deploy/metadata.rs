@@ -36,7 +36,7 @@ pub(crate) fn write_robot_yaml(root: &Path, robot: &Robot) -> Result<()> {
 /// `component_assets` package's own source directory matters.
 ///
 /// `Path`-sourced (dev-overlay-pinned) assets stage from their local checkout
-/// directly. `Catalog`-sourced assets stage from the CLI's native-artifact
+/// directly. `Suite`-sourced assets stage from the CLI's native-artifact
 /// cache ONLY - never the network, matching the pre-existing offline
 /// guarantee official service/tool binaries already have (`phoxal update`
 /// populates the cache; deploy, live or `--dry-run`, only ever reads it). A
@@ -48,13 +48,13 @@ pub(crate) fn stage_payload_metadata(
     robot: &Robot,
     resolved: &ResolvedRobot,
 ) -> Result<Vec<String>> {
-    let reads_catalog_assets = resolved.components.iter().any(|component| {
+    let reads_suite_assets = resolved.components.iter().any(|component| {
         component
             .assets
             .as_ref()
-            .is_some_and(|assets| matches!(&assets.source, ResolvedComponentSource::Catalog))
+            .is_some_and(|assets| matches!(&assets.source, ResolvedComponentSource::Suite))
     });
-    let _artifact_lock = (reads_catalog_assets
+    let _artifact_lock = (reads_suite_assets
         && crate::host_paths::artifacts_dir().is_ok_and(|path| path.is_dir()))
     .then(crate::native_artifacts::ArtifactStoreLock::shared)
     .transpose()?;
@@ -77,7 +77,7 @@ pub(crate) fn stage_payload_metadata(
                 ResolvedComponentSource::Path { .. } => {
                     crate::component_driver::component_assets_dir(component, project_root)?
                 }
-                ResolvedComponentSource::Catalog => locate_cached_component_assets_dir(assets)?,
+                ResolvedComponentSource::Suite => locate_cached_component_assets_dir(assets)?,
                 ResolvedComponentSource::Git { .. } => None,
             },
         };
@@ -99,7 +99,7 @@ pub(crate) fn stage_payload_metadata(
     Ok(staged_files)
 }
 
-/// Locate a Catalog-sourced `component_assets` package's already-staged cache
+/// Locate a Suite-sourced `component_assets` package's already-staged cache
 /// directory, WITHOUT downloading - deploy (live or `--dry-run`) must never
 /// reach the network for artifacts; `phoxal update` populates this
 /// cache. `Ok(None)` when nothing is cached yet (a fresh clean machine that
@@ -111,7 +111,7 @@ pub(crate) fn stage_payload_metadata(
 pub(crate) fn locate_cached_component_assets_dir(
     package: &phoxal_cli_core::project::resolver::ResolvedComponentPackage,
 ) -> Result<Option<PathBuf>> {
-    let Some(runtime) = &package.catalog_runtime else {
+    let Some(runtime) = &package.suite_runtime else {
         return Ok(None);
     };
     let Some(descriptor) =

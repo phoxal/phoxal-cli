@@ -1,5 +1,5 @@
 //! Live telemetry feed for the TUI (CLI-UX Phase 3/4): background bus
-//! subscribers for the framework's retained stable tool telemetry and preview joypad
+//! subscribers for the framework train's tool telemetry and joypad contracts
 //! contracts, plus the simulation clock's live step/time readout,
 //! mirroring `supervisor::start_bus_log_subscriber`/
 //! `start_liveliness_observer`'s "observe, update shared
@@ -22,7 +22,8 @@ use phoxal::bus::{
     ContractBody, DEFAULT_QUERY_TIMEOUT, Publish, Publisher, Querier, Subscribe, Subscriber, Topic,
 };
 use phoxal::raw::{Bus, BusConfig, host_time};
-use phoxal_api::{v1 as state_api, v2 as api};
+use phoxal_api::v0_1 as api;
+use phoxal_api::v0_1 as state_api;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -1271,7 +1272,7 @@ fn apply_runtime_outcome(
     }
 }
 
-/// Subscribe v2::joypad::Devices and own the Select, SetEnabled, and Rescan
+/// Subscribe v0_1::joypad::Devices and own the Select, SetEnabled, and Rescan
 /// publishers. The TUI's Input page sends commands through DisplayAction;
 /// this loop publishes, and the next Devices receive is the authoritative
 /// acknowledgement. The command sender is installed on telemetry immediately,

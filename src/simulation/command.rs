@@ -6,11 +6,11 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Args;
 use clap::Subcommand;
-use phoxal_cli_core::project::catalog::Catalog;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::PlanContext;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::resolver::RobotManifestExtras;
+use phoxal_cli_core::project::suite::Suite;
 use std::path::PathBuf;
 
 /// The `simulation` command group: `run` (this repo's original `simulate
@@ -97,7 +97,7 @@ pub enum SimulateMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimulateOptions {
     pub world: String,
-    pub catalog_source: Option<String>,
+    pub suite_source: Option<String>,
     pub watch: bool,
     pub overlays: Vec<String>,
     pub target: Option<String>,
@@ -127,14 +127,14 @@ pub(crate) struct ResolvedSimulation {
     pub(crate) world_path: PathBuf,
     pub(crate) resolved: ResolvedRobot,
     pub(crate) manifest_extras: RobotManifestExtras,
-    pub(crate) catalog: Option<Catalog>,
+    pub(crate) suite: Option<Suite>,
 }
 
 impl SimulationRun {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let options = SimulateOptions {
             world: self.world.clone(),
-            catalog_source: app.catalog_source.clone(),
+            suite_source: app.suite_source.clone(),
             watch: self.watch,
             overlays: self.env.clone(),
             target: self.target.clone(),

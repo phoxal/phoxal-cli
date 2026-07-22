@@ -29,12 +29,10 @@ use phoxal_cli_test_support::write_basic_project;
 
 mod phoxal_cli_test_support {
     use super::*;
-    use phoxal_cli_core::project::catalog::{
-        SelectionChannel as CatalogChannel, fixture_tool_entry_for_tests,
-    };
+    use phoxal_cli_core::project::suite::fixture_tool_entry_for_tests;
 
     pub fn write_basic_project(root: &Path) -> Result<()> {
-        write_fixture_catalog(root)?;
+        write_fixture_suite(root)?;
         fs::write(root.join("robot.yaml"), basic_robot_yaml())?;
         fs::write(root.join("robot.dev.yaml"), basic_robot_dev_overlay_yaml())?;
         write_robot_structure(root)?;
@@ -44,7 +42,7 @@ mod phoxal_cli_test_support {
     }
 
     pub fn write_driver_project(root: &Path) -> Result<()> {
-        write_fixture_catalog(root)?;
+        write_fixture_suite(root)?;
         fs::write(root.join("robot.yaml"), driver_robot_yaml())?;
         fs::write(root.join("robot.dev.yaml"), driver_robot_dev_overlay_yaml())?;
         write_robot_structure(root)?;
@@ -55,7 +53,7 @@ mod phoxal_cli_test_support {
     }
 
     pub fn write_bench_camera_project(root: &Path) -> Result<()> {
-        write_fixture_catalog(root)?;
+        write_fixture_suite(root)?;
         fs::write(root.join("robot.yaml"), bench_camera_robot_yaml())?;
         fs::write(
             root.join("robot.dev.yaml"),
@@ -75,15 +73,15 @@ mod phoxal_cli_test_support {
         Ok(())
     }
 
-    pub fn write_catalog_only_project(root: &Path) -> Result<()> {
-        write_fixture_catalog(root)?;
-        fs::write(root.join("robot.yaml"), catalog_only_robot_yaml())?;
+    pub fn write_suite_only_project(root: &Path) -> Result<()> {
+        write_fixture_suite(root)?;
+        fs::write(root.join("robot.yaml"), suite_only_robot_yaml())?;
         write_robot_structure(root)?;
         Ok(())
     }
 
     pub fn write_native_dep_project(root: &Path) -> Result<()> {
-        write_fixture_catalog(root)?;
+        write_fixture_suite(root)?;
         fs::write(root.join("robot.yaml"), basic_robot_yaml())?;
         fs::write(root.join("robot.dev.yaml"), basic_robot_dev_overlay_yaml())?;
         let dir = root.join("runtimes/navtask");
@@ -96,47 +94,26 @@ mod phoxal_cli_test_support {
         Ok(())
     }
 
-    fn write_fixture_catalog(root: &Path) -> Result<()> {
-        let catalog = phoxal_cli_core::project::catalog::fixture_catalog_for_tests(vec![
-            // A decoy extra catalog entry proving multi-entry catalogs
-            // resolve fine; kept off the `stable` channel every fixture
-            // robot below targets, so it never becomes a real deploy
-            // participant (the lean manifest schema has no separate
-            // "declared target" concept to keep it inert by target alone
-            // - see `resolver::select_latest_artifact_entries`).
-            phoxal_cli_core::project::catalog::fixture_service_entry_for_tests(
-                "fixture_only",
-                "0.1.0",
-                phoxal_cli_core::project::catalog::SelectionChannel::Nightly,
-                "test-only-target",
-                false,
-                vec![
-                    phoxal_cli_core::project::catalog::fixture_contract_for_tests(
-                        "v1::fixture::Only",
-                        "publish",
-                    ),
-                ],
-            ),
-            fixture_tool_entry_for_tests(
-                "router",
-                "0.1.0",
-                CatalogChannel::Stable,
-                "aarch64-unknown-linux-gnu",
-                true,
-                Vec::new(),
-            ),
-            fixture_tool_entry_for_tests(
-                "router",
-                "0.1.0",
-                CatalogChannel::Stable,
-                &crate::resolver::host_target_triple(),
-                true,
-                Vec::new(),
-            ),
-        ]);
+    fn write_fixture_suite(root: &Path) -> Result<()> {
+        let mut entries = Vec::new();
+        for name in ["router", "bus", "joypad", "log", "telemetry", "device"] {
+            for target in [
+                "aarch64-unknown-linux-gnu".to_string(),
+                crate::resolver::host_target_triple(),
+            ] {
+                entries.push(fixture_tool_entry_for_tests(
+                    name,
+                    "0.1.0",
+                    &target,
+                    true,
+                    Vec::new(),
+                ));
+            }
+        }
+        let suite = phoxal_cli_core::project::suite::fixture_suite_for_tests(entries);
         fs::write(
-            root.join("catalog.json"),
-            serde_json::to_string_pretty(&catalog)?,
+            root.join("suite.json"),
+            serde_json::to_string_pretty(&suite)?,
         )?;
         Ok(())
     }
@@ -207,8 +184,7 @@ robot:
       component: ddsm115
       mount_link: right_wheel
 artifacts:
-  channel: stable
-  catalog: catalog.json
+  suite: suite.json
 services:
   navtask:
     path: runtimes/navtask
@@ -218,7 +194,7 @@ services:
     /// Path pins are dev-overlay-only; every fixture project pairs its base
     /// `robot.yaml` with this `robot.dev.yaml` overlay (loaded via
     /// `--env dev`, see `dry_options`/`live_options`) so local component
-    /// asset/driver directories resolve without a real catalog/network.
+    /// asset/driver directories resolve without a real suite/network.
     fn basic_robot_dev_overlay_yaml() -> &'static str {
         r#"artifacts:
   pins:
@@ -245,8 +221,7 @@ robot:
       component: bench_camera
       mount_link: camera_mount
 artifacts:
-  channel: stable
-  catalog: catalog.json
+  suite: suite.json
 "#
     }
 
@@ -258,10 +233,10 @@ artifacts:
 "#
     }
 
-    fn catalog_only_robot_yaml() -> &'static str {
+    fn suite_only_robot_yaml() -> &'static str {
         r#"schema: robot/v0
 robot:
-  id: catalogbot
+  id: suitebot
   namespace: dev
   motion_limits:
     max_linear_speed_mps: 0.6
@@ -269,17 +244,16 @@ robot:
   structure: structure.urdf
   kinematic:
     kind: omnidirectional
-    actuators: [catalog_drive.motor]
-    encoders: [catalog_drive.encoder]
+    actuators: [suite_drive.motor]
+    encoders: [suite_drive.encoder]
   components:
-    catalog_drive:
-      component: catalog_motor
+    suite_drive:
+      component: suite_motor
       mount_link: left_wheel
 artifacts:
-  channel: stable
-  catalog: catalog.json
+  suite: suite.json
   pins:
-    phoxal/component-catalog_motor:
+    phoxal/component-suite_motor:
       git: /definitely/not/a/component-assets-repo
       rev: main
 "#
@@ -314,8 +288,7 @@ robot:
       driver:
         connection: { type: i2c, bus: 1, address: 16 }
 artifacts:
-  channel: stable
-  catalog: catalog.json
+  suite: suite.json
 services:
   navtask:
     path: runtimes/navtask
@@ -708,14 +681,14 @@ fn collect_relative_files(base: &Path, dir: &Path, files: &mut Vec<String>) -> R
 /// Every `phoxal_cli_test_support` fixture stages its component asset/driver
 /// path pins in a `robot.dev.yaml` overlay (path pins are dev-overlay-only
 /// in the new grammar); both option builders load it so fixture projects
-/// resolve their components without touching a real catalog/network.
+/// resolve their components without touching a real suite/network.
 fn dry_options() -> DeployOptions {
     DeployOptions {
         host: None,
         dry_run: true,
         target: Some("aarch64".to_string()),
         overlays: vec!["dev".to_string()],
-        catalog_source: None,
+        suite_source: None,
         health_timeout: Duration::from_secs(3),
     }
 }
@@ -726,7 +699,7 @@ fn live_options() -> DeployOptions {
         dry_run: false,
         target: None,
         overlays: vec!["dev".to_string()],
-        catalog_source: None,
+        suite_source: None,
         health_timeout: Duration::from_secs(3),
     }
 }
@@ -906,7 +879,7 @@ fn payload_stages_path_component_metadata_and_structures() -> Result<()> {
 fn payload_without_path_components_has_no_components_dir() -> Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;
     let temp = tempfile::tempdir()?;
-    phoxal_cli_test_support::write_catalog_only_project(temp.path())?;
+    phoxal_cli_test_support::write_suite_only_project(temp.path())?;
     // This fixture's component pin is a git (not path) pin with a bogus
     // repository. Deploy metadata staging must skip it without trying
     // `git ls-remote` or `git clone`, so unlike the other fixtures it
@@ -1270,9 +1243,8 @@ fn resolved_with_components(
 ) -> Result<ResolvedRobot> {
     Ok(ResolvedRobot {
         robot: Robot::parse_from_string(MINIMAL_RESOLVED_ROBOT_YAML)?,
-        channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
+        train: "0.36.0".to_string(),
         target: crate::resolver::host_target_triple(),
-        catalog_snapshot: None,
         platform_runtimes: Vec::new(),
         simulators: Vec::new(),
         user_runtimes: Vec::new(),
@@ -1296,27 +1268,27 @@ robot:
   components: {}
 "#;
 
-/// A Catalog-sourced component package with a populated `catalog_runtime`
+/// A Suite-sourced component package with a populated `suite_runtime`
 /// but nothing warmed in the local artifact cache - the shape a fresh
 /// clean machine sees before any `phoxal update`.
-fn cold_cache_catalog_component_package(
+fn cold_cache_suite_component_package(
     package: &str,
-    kind: phoxal_cli_core::project::catalog::ArtifactKind,
+    kind: phoxal_cli_core::project::suite::ArtifactKind,
     component_name: &str,
 ) -> phoxal_cli_core::project::resolver::ResolvedComponentPackage {
     phoxal_cli_core::project::resolver::ResolvedComponentPackage {
         package: package.to_string(),
         kind,
-        source: ResolvedComponentSource::Catalog,
+        source: ResolvedComponentSource::Suite,
         path_override: None,
-        catalog_runtime: Some(ResolvedPlatformRuntime {
+        suite_runtime: Some(ResolvedPlatformRuntime {
             name: component_name.to_string(),
             package: package.to_string(),
             kind,
             version: "0.1.0".to_string(),
             artifact_ref: format!(
                 "phoxal-component-{component_name}-{}-v0.1.0-aarch64-unknown-linux-gnu.tar.zst",
-                kind.catalog_kind()
+                kind.emit_apis_kind()
             ),
             sha256: Some("a".repeat(64)),
             url: Some("https://example.invalid/component.tar.zst".to_string()),
@@ -1324,7 +1296,7 @@ fn cold_cache_catalog_component_package(
             published: true,
             published_triples: Vec::new(),
             path_override: None,
-            channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
+            train: "0.36.0".to_string(),
             target: Some("aarch64-unknown-linux-gnu".to_string()),
         }),
     }
@@ -1336,9 +1308,9 @@ fn cold_cache_catalog_component_package(
 use crate::host_paths::test_support::ScratchPhoxalHome;
 
 #[test]
-fn dry_run_stays_offline_for_catalog_resolved_component_driver() -> Result<()> {
+fn dry_run_stays_offline_for_suite_resolved_component_driver() -> Result<()> {
     // Band B kept `deploy --dry-run` from resolving git component
-    // commits so it never touches the network; a Catalog-sourced
+    // commits so it never touches the network; a Suite-sourced
     // component driver/assets pair must uphold the identical guarantee.
     // This exercises exactly the two functions `render_payload` calls to
     // stage a component's driver binary / assets bundle
@@ -1355,14 +1327,14 @@ fn dry_run_stays_offline_for_catalog_resolved_component_driver() -> Result<()> {
     // silent hang.
     let _phoxal_home = ScratchPhoxalHome::new()?;
 
-    let driver_package = cold_cache_catalog_component_package(
+    let driver_package = cold_cache_suite_component_package(
         "phoxal/component-ddsm115",
-        phoxal_cli_core::project::catalog::ArtifactKind::ComponentDriver,
+        phoxal_cli_core::project::suite::ArtifactKind::ComponentDriver,
         "ddsm115",
     );
-    let assets_package = cold_cache_catalog_component_package(
+    let assets_package = cold_cache_suite_component_package(
         "phoxal/component-ddsm115",
-        phoxal_cli_core::project::catalog::ArtifactKind::ComponentAssets,
+        phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
         "ddsm115",
     );
 
@@ -1374,7 +1346,7 @@ fn dry_run_stays_offline_for_catalog_resolved_component_driver() -> Result<()> {
         has_driver: true,
     }])?;
     resolved.tools.push(ResolvedTool {
-        kind: phoxal_cli_core::project::catalog::ArtifactKind::Infrastructure,
+        kind: phoxal_cli_core::project::suite::ArtifactKind::Infrastructure,
         name: SITE_INFRASTRUCTURE_ROUTER.to_string(),
         package: "phoxal/infrastructure-router".to_string(),
         requested: "0.1.0".to_string(),
@@ -1387,15 +1359,15 @@ fn dry_run_stays_offline_for_catalog_resolved_component_driver() -> Result<()> {
         size: None,
         published: true,
         path_override: Some(PathBuf::from("/fake/router")),
-        channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
+        train: "0.36.0".to_string(),
         target: "aarch64-unknown-linux-gnu".to_string(),
     });
 
     // 1) `official_runtime_by_artifact_id` finds the driver's
-    //    `catalog_runtime` (proving it is visible through the same
+    //    `suite_runtime` (proving it is visible through the same
     //    lookup a service uses).
     let found = official_runtime_by_artifact_id(&resolved, "ddsm115")
-        .expect("catalog driver runtime must be discoverable by its artifact id");
+        .expect("suite driver runtime must be discoverable by its artifact id");
     assert_eq!(found.package, "phoxal/component-ddsm115");
 
     // 2) `official_runtime_plan` (what `stage_official_artifacts` calls)
@@ -1426,9 +1398,9 @@ fn dry_run_stays_offline_for_catalog_resolved_component_driver() -> Result<()> {
 /// `tool-log`, and `tool-telemetry` alongside the router.
 /// Each gets its own unit ordered after the router, and
 /// `tool-joypad` carries the `/dev/input` tool-privilege grant
-/// (`unit_privileges_for_tool`). `write_basic_project`'s fixture catalog
+/// (`unit_privileges_for_tool`). `write_basic_project`'s fixture suite
 /// auto-fills every `OFFICIAL_TOOLS`/`OFFICIAL_OPTIONAL_TOOLS` entry
-/// (`catalog::fixture_catalog_for_tests`), so the complete set resolves here.
+/// (`suite::fixture_suite_for_tests`), so the complete set resolves here.
 #[test]
 fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;

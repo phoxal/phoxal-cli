@@ -199,10 +199,10 @@ pub(crate) fn validate_download_descriptor(descriptor: &DownloadDescriptor) -> R
     for artifact in &descriptor.artifacts {
         if !artifact.url.starts_with("https://")
             || artifact.size == 0
-            || !phoxal::catalog::is_sha256(&artifact.sha256)
+            || !phoxal::suite::is_sha256(&artifact.sha256)
         {
             bail!(
-                "NativePending: official artifact {} {} has no complete immutable blob for {}; run `phoxal update` and verify the catalog publishes this robot target",
+                "NativePending: official artifact {} {} has no complete immutable blob for {}; run `phoxal update` and verify the suite publishes this robot target",
                 artifact.package,
                 artifact.version,
                 artifact.target

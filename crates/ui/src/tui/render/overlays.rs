@@ -95,8 +95,8 @@ pub(super) fn draw_session_info(
         Line::from(format!("mode             {}", title.mode)),
         Line::from(format!("manifest         {manifest}")),
         Line::from(format!(
-            "artifact channel {}",
-            sanitize_terminal_text(&title.channel)
+            "framework train {}",
+            sanitize_terminal_text(&title.train)
         )),
         Line::from(format!(
             "bus endpoint     {}",

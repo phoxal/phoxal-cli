@@ -109,7 +109,7 @@ fn session_title(project_root: &Path, mode: SessionMode) -> TitleInfo {
     };
     title.robot = robot.robot.id;
     title.namespace = robot.robot.namespace;
-    title.channel = robot.artifacts.channel.as_str().to_string();
+    title.train = "Cargo.lock".to_string();
     title.manifest = display_manifest_path(&manifest_path, project_root);
     title
 }
@@ -134,7 +134,7 @@ fn unknown_session_title(mode: SessionMode) -> TitleInfo {
     TitleInfo {
         robot: "unknown".to_string(),
         namespace: "unknown".to_string(),
-        channel: "unknown".to_string(),
+        train: "unknown".to_string(),
         manifest: "n/a".to_string(),
         mode,
         bus_endpoint: crate::supervisor::default_connect_endpoint(),

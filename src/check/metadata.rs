@@ -79,7 +79,7 @@ pub(crate) fn extract_emit_apis_from_staged_tool(
 }
 
 /// Every native tool (`tool-router`, `tool-joypad`) is privileged (host/root
-/// access); every other kind is a checked participant. Neither the catalog
+/// access); every other kind is a checked participant. Neither the suite
 /// nor a binary's extracted metadata carries `participant_class` anymore, so
 /// the kind -> class mapping (always fixed) is derived here instead of read
 /// off either source.

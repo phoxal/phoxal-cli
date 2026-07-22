@@ -265,7 +265,7 @@ mod tests {
         TitleInfo {
             robot: "rover-01".to_string(),
             namespace: "dev".to_string(),
-            channel: "stable".to_string(),
+            train: "0.36.0".to_string(),
             manifest: "./robot.yaml".to_string(),
             mode: phoxal_cli_core::session::SessionMode::Run,
             bus_endpoint: "tcp/localhost:7447".to_string(),

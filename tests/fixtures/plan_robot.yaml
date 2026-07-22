@@ -31,7 +31,6 @@ robot:
         depth: [localization, mapping, traversability]
 
 artifacts:
-  channel: stable
   pins:
     phoxal/component-oak_d_lite:
       git: https://github.com/phoxal/framework

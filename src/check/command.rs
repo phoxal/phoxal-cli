@@ -3,7 +3,7 @@
 use super::{
     CheckGraphContext, CheckOptions, CheckOutcome, RobotCoherenceDiagnostic,
     build_emit_apis_from_source_for_check, check_artifact_refs_from_resolved,
-    component_driver_runtimes_by_ref, ensure_catalog_availability, ensure_user_service_exists,
+    component_driver_runtimes_by_ref, ensure_suite_availability, ensure_user_service_exists,
     evaluate_robot_coherence, extract_emit_apis_from_staged_runtime,
     extract_emit_apis_from_staged_tool, fetch_emit_apis_from_tool, run_check_with_context,
     source_participants_from_resolved, tool_participants_from_resolved,
@@ -13,15 +13,14 @@ use crate::resolver::resolve;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::discover_robot_yaml;
 use phoxal_cli_core::project::resolver::load_robot_with_extras;
+use phoxal_cli_core::project::suite::ArtifactKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CheckRunResult {
-    pub(super) channel: String,
-    pub(super) catalog_snapshot: Option<String>,
+    pub(super) train: String,
     pub(super) participant_count: usize,
     pub(super) outcome: CheckOutcome,
     pub(super) coherence: Vec<RobotCoherenceDiagnostic>,
@@ -35,7 +34,7 @@ pub struct PlatformArtifactRef {
     pub artifact_ref: String,
     /// The component instance ids launching this artifact, for a
     /// `ComponentDriver` ref only. Empty for every other kind (a normal
-    /// graph-scoped singleton participant). A catalog-resolved component
+    /// graph-scoped singleton participant). A suite-resolved component
     /// driver is fetched once but launched once per instance that declares
     /// it (`left_drive`/`right_drive` sharing one `phoxal/component-<id>
     /// -driver` package) - mirrors how [`SourceParticipant::component_driver_with_artifact_id`]
@@ -77,21 +76,10 @@ pub(super) fn run(
     };
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
-    let catalog = crate::commands::catalog_or_vendored(
-        phoxal_cli_core::project::catalog::load_pinned_catalog(
-            phoxal_cli_core::project::catalog::CatalogLoadOptions {
-                cli_source: options.catalog_source.clone(),
-                robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
-                    if source.is_absolute() {
-                        source.clone()
-                    } else {
-                        project_root.join(source)
-                    }
-                }),
-                offline: false,
-            },
-            phoxal_cli_core::project::catalog::selection_channel(robot.artifacts.channel),
-        ),
+    let suite = crate::commands::load_suite_for_robot_from_source(
+        options.suite_source.clone(),
+        project_root,
+        &manifest_extras,
     )?;
     // `check` resolves live git component refs so component drivers can be
     // located and staged. A path-only / official-only graph needs no component
@@ -106,9 +94,8 @@ pub(super) fn run(
     let resolved = resolve(
         &robot,
         project_root,
-        catalog.as_ref(),
+        suite.as_ref(),
         ResolveOptions {
-            refresh_channel_head: false,
             resolve_source_commits: true,
             resolve_component_asset_commits: false,
             official_target_triple: target_triple.clone(),
@@ -118,7 +105,7 @@ pub(super) fn run(
     let descriptors = phoxal_cli_core::artifacts::descriptors_for(&resolved, false, false)?;
     crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
     let platform_refs = check_artifact_refs_from_resolved(&resolved);
-    ensure_catalog_availability(&resolved)?;
+    ensure_suite_availability(&resolved)?;
     let tool_participants = tool_participants_from_resolved(&resolved)?;
     let all_source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
@@ -165,7 +152,7 @@ pub(super) fn run(
                 return extract_emit_apis_from_staged_tool(tool);
             }
             Err(anyhow!(
-                "resolved official artifact {artifact_ref} is not in the catalog"
+                "resolved official artifact {artifact_ref} is not in the suite"
             ))
         },
         fetch_emit_apis_from_tool,
@@ -177,8 +164,7 @@ pub(super) fn run(
         &outcome.contract_surfaces,
     )];
     Ok(CheckRunResult {
-        channel: resolved.channel.to_string(),
-        catalog_snapshot: resolved.catalog_snapshot,
+        train: resolved.train,
         participant_count,
         outcome,
         coherence,

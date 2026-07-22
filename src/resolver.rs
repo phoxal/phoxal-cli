@@ -6,15 +6,14 @@ use phoxal::model::robot::{
     RobotV0 as Robot,
     v0::{ArtifactPin, UserService},
 };
-pub use phoxal_cli_core::project::catalog::host_target_triple;
-use phoxal_cli_core::project::catalog::{
-    ArtifactKind, Catalog, OFFICIAL_INFRASTRUCTURE, OFFICIAL_SERVICES, OFFICIAL_SIMULATORS,
-    OFFICIAL_TOOLS, SelectionChannel, select_artifact, selection_channel,
+pub use phoxal_cli_core::project::suite::host_target_triple;
+use phoxal_cli_core::project::suite::{
+    ArtifactKind, Kind, Suite, artifacts_of_kind, select_artifact,
 };
 use phoxal_cli_core::project::tooling::{hash_tree, resolve_project_path};
 
 /// The provider every official Phoxal package uses in its provider-qualified
-/// `artifacts.pins` / catalog `package` identity (`phoxal/service-drive`, ...).
+/// `artifacts.pins` / suite `package` identity (`phoxal/service-drive`, ...).
 const PHOXAL_PROVIDER: &str = "phoxal";
 
 use phoxal_cli_core::project::resolver::{
@@ -27,25 +26,21 @@ use phoxal_cli_core::project::resolver::{
 pub fn resolve(
     robot: &Robot,
     project_root: &Path,
-    catalog: Option<&Catalog>,
+    suite: Option<&Suite>,
     options: ResolveOptions,
 ) -> Result<ResolvedRobot> {
-    if let Some(generation) = robot.artifacts.generation.as_deref() {
-        bail!(
-            "robot.yaml sets artifacts.generation = '{generation}', which no longer exists: \
-             contract compatibility is per-contract name identity now (D1), not a single \
-             per-artifact API-version ceiling. Remove artifacts.generation from robot.yaml."
-        );
-    }
-    let channel = robot.artifacts.channel;
-    let catalog_channel = selection_channel(channel);
+    let suite = suite.context(
+        "the locked framework train suite is required for resolution; restore network access or pass --suite <path> to the immutable suite.json",
+    )?;
+    let train = suite.version.clone();
     let target = options
         .official_target_triple
         .clone()
         .unwrap_or_else(host_target_triple);
-    let platform_names = catalog
-        .map(phoxal_cli_core::project::catalog::service_names)
-        .unwrap_or_default();
+    let platform_names = artifacts_of_kind(suite, Kind::Service)
+        .into_iter()
+        .map(|artifact| short_name(&artifact.id, Kind::Service))
+        .collect::<Vec<_>>();
     let platform_names = platform_names
         .iter()
         .map(String::as_str)
@@ -66,44 +61,26 @@ pub fn resolve(
     let tool_target = options
         .tool_target_triple
         .unwrap_or_else(host_target_triple);
-    if catalog.is_none() && !project_root.join(".phoxal/artifacts").is_dir() {
-        bail!(
-            "artifact catalog is unavailable and this project has no vendored binaries; run `phoxal update` online"
-        );
-    }
-    let prefer_vendored = !options.refresh_channel_head
-        && crate::host_paths::artifacts_dir().is_ok_and(|path| path.is_dir());
+    let prefer_vendored = crate::host_paths::artifacts_dir().is_ok_and(|path| path.is_dir());
     let _artifact_lock = prefer_vendored
         .then(crate::native_artifacts::ArtifactStoreLock::shared)
         .transpose()?;
-    let mut platform_runtimes = match catalog {
-        Some(catalog) => {
-            resolve_catalog_entries(robot, catalog, catalog_channel, &target, prefer_vendored)?
-        }
-        None => resolve_vendored_entries(
-            robot,
-            OFFICIAL_SERVICES,
-            ArtifactKind::Service,
-            catalog_channel,
-            &target,
-        )?,
-    };
-    let mut simulators = match catalog {
-        Some(catalog) => resolve_simulators(
-            robot,
-            catalog,
-            catalog_channel,
-            &tool_target,
-            prefer_vendored,
-        )?,
-        None => resolve_vendored_entries(
-            robot,
-            OFFICIAL_SIMULATORS,
-            ArtifactKind::Simulator,
-            catalog_channel,
-            &tool_target,
-        )?,
-    };
+    let mut platform_runtimes = resolve_suite_entries(
+        robot,
+        suite,
+        Kind::Service,
+        ArtifactKind::Service,
+        &target,
+        prefer_vendored,
+    )?;
+    let mut simulators = resolve_suite_entries(
+        robot,
+        suite,
+        Kind::Simulator,
+        ArtifactKind::Simulator,
+        &tool_target,
+        prefer_vendored,
+    )?;
 
     let user_runtimes = robot
         .services
@@ -119,27 +96,21 @@ pub fn resolve(
     // read non-local asset bundles during planning/staging; live simulate does.
     let mut components = resolve_components(&ComponentResolveContext {
         robot,
-        catalog,
-        channel: catalog_channel,
+        suite: Some(suite),
+        train: &train,
         target: &target,
         resolve_source_commits: options.resolve_source_commits,
         resolve_component_asset_commits: options.resolve_component_asset_commits,
         prefer_vendored,
     })?;
-    let mut tools = resolve_tools(
-        robot,
-        catalog,
-        catalog_channel,
-        &tool_target,
-        prefer_vendored,
-    )?;
+    let mut tools = resolve_tools(robot, Some(suite), &train, &tool_target, prefer_vendored)?;
     tools.extend(resolve_native_site_artifacts(
         robot,
-        catalog,
-        catalog_channel,
+        Some(suite),
+        &train,
         &tool_target,
         prefer_vendored,
-        OFFICIAL_INFRASTRUCTURE,
+        Kind::Infrastructure,
         ArtifactKind::Infrastructure,
     )?);
     let path_overrides = apply_path_pins(
@@ -156,9 +127,8 @@ pub fn resolve(
 
     Ok(ResolvedRobot {
         robot: robot.clone(),
-        channel: catalog_channel,
+        train,
         target,
-        catalog_snapshot: catalog.map(|catalog| catalog.build.tag.clone()),
         platform_runtimes,
         simulators,
         user_runtimes,
@@ -211,7 +181,6 @@ fn apply_path_pins(
                 };
                 path
             }
-            ArtifactPin::Sha256(_) | ArtifactPin::Version(_) => continue,
         };
         if apply_service_path_pin(key, &path, platform_runtimes, &mut overrides) {
             continue;
@@ -378,7 +347,7 @@ fn apply_simulator_path_pin(
     true
 }
 
-/// Once a path override replaces a catalog-resolved runtime, its catalog
+/// Once a path override replaces a suite-resolved runtime, its suite
 /// metadata is moot: the participant's contracts/config come from building
 /// its source instead (`crate::check::source_participants_from_resolved`).
 fn apply_platform_runtime_path_override(runtime: &mut ResolvedPlatformRuntime, path: &Path) {
@@ -451,93 +420,31 @@ fn used_path_pin_keys(
     keys
 }
 
-fn resolve_catalog_entries(
+fn resolve_suite_entries(
     robot: &Robot,
-    catalog: &Catalog,
-    channel: SelectionChannel,
-    target: &str,
-    prefer_vendored: bool,
-) -> Result<Vec<ResolvedPlatformRuntime>> {
-    OFFICIAL_SERVICES
-        .iter()
-        .map(|(name, package)| {
-            resolved_runtime_from_expected_package(
-                robot,
-                catalog,
-                ExpectedArtifact {
-                    kind: ArtifactKind::Service,
-                    name,
-                    package,
-                    channel,
-                    target: Some(target),
-                    pin_target: target,
-                    assets: false,
-                    prefer_vendored,
-                },
-            )
-        })
-        .collect()
-}
-
-fn resolve_simulators(
-    robot: &Robot,
-    catalog: &Catalog,
-    channel: SelectionChannel,
-    target: &str,
-    prefer_vendored: bool,
-) -> Result<Vec<ResolvedPlatformRuntime>> {
-    OFFICIAL_SIMULATORS
-        .iter()
-        .map(|(name, package)| {
-            resolved_runtime_from_expected_package(
-                robot,
-                catalog,
-                ExpectedArtifact {
-                    kind: ArtifactKind::Simulator,
-                    name,
-                    package,
-                    channel,
-                    target: Some(target),
-                    pin_target: target,
-                    assets: false,
-                    prefer_vendored,
-                },
-            )
-        })
-        .collect()
-}
-
-fn resolve_vendored_entries(
-    robot: &Robot,
-    expected: &[(&str, &str)],
+    suite: &Suite,
+    suite_kind: Kind,
     kind: ArtifactKind,
-    channel: SelectionChannel,
     target: &str,
+    prefer_vendored: bool,
 ) -> Result<Vec<ResolvedPlatformRuntime>> {
-    expected
-        .iter()
-        .map(|(name, package)| {
-            if matches!(
-                robot.artifacts.pins.get(*package),
-                Some(ArtifactPin::Path(_) | ArtifactPin::Git(_))
-            ) {
-                return Ok(ResolvedPlatformRuntime {
-                    name: (*name).to_string(),
-                    package: (*package).to_string(),
+    artifacts_of_kind(suite, suite_kind)
+        .into_iter()
+        .map(|artifact| {
+            let name = short_name(&artifact.id, suite_kind);
+            resolved_runtime_from_expected_package(
+                robot,
+                suite,
+                ExpectedArtifact {
                     kind,
-                    version: "source".to_string(),
-                    artifact_ref: format!("source:{package}"),
-                    sha256: None,
-                    url: None,
-                    size: None,
-                    published: true,
-                    published_triples: Vec::new(),
-                    path_override: None,
-                    channel,
-                    target: Some(target.to_string()),
-                });
-            }
-            vendored_runtime(name, package, kind, channel, Some(target))
+                    name: &name,
+                    package: &artifact.id,
+                    train: &suite.version,
+                    target: Some(target),
+                    assets: false,
+                    prefer_vendored,
+                },
+            )
         })
         .collect()
 }
@@ -546,12 +453,12 @@ fn vendored_runtime(
     name: &str,
     package: &str,
     kind: ArtifactKind,
-    channel: SelectionChannel,
+    train: &str,
     target: Option<&str>,
 ) -> Result<ResolvedPlatformRuntime> {
     let version = crate::native_artifacts::active_version_for(package)?.with_context(|| {
         format!(
-            "catalog unreachable and vendored package {package} has no active version; run `phoxal update` online"
+            "suite unreachable and vendored package {package} has no active version; run `phoxal update` online"
         )
     })?;
     let scope = match target {
@@ -560,7 +467,7 @@ fn vendored_runtime(
     };
     anyhow::ensure!(
         scope.is_dir(),
-        "catalog unreachable and vendored package {package} active version {version} has no {}; run `phoxal update` online",
+        "suite unreachable and vendored package {package} active version {version} has no {}; run `phoxal update` online",
         target.map_or("assets", |target| target)
     );
     Ok(ResolvedPlatformRuntime {
@@ -578,7 +485,7 @@ fn vendored_runtime(
         published: true,
         published_triples: target.into_iter().map(str::to_string).collect(),
         path_override: None,
-        channel,
+        train: train.to_string(),
         target: target.map(str::to_string),
     })
 }
@@ -587,25 +494,23 @@ struct ExpectedArtifact<'a> {
     kind: ArtifactKind,
     name: &'a str,
     package: &'a str,
-    channel: SelectionChannel,
+    train: &'a str,
     target: Option<&'a str>,
-    pin_target: &'a str,
     assets: bool,
     prefer_vendored: bool,
 }
 
 fn resolved_runtime_from_expected_package(
     robot: &Robot,
-    catalog: &Catalog,
+    suite: &Suite,
     expected: ExpectedArtifact<'_>,
 ) -> Result<ResolvedPlatformRuntime> {
     let ExpectedArtifact {
         kind,
         name,
         package,
-        channel,
+        train,
         target,
-        pin_target,
         assets,
         prefer_vendored,
     } = expected;
@@ -625,22 +530,34 @@ fn resolved_runtime_from_expected_package(
             published: true,
             published_triples: Vec::new(),
             path_override: None,
-            channel,
+            train: train.to_string(),
             target: target.map(str::to_string),
         });
     }
     if prefer_vendored
         && !robot.artifacts.pins.contains_key(package)
-        && let Ok(runtime) = vendored_runtime(name, package, kind, channel, target)
+        && let Ok(runtime) = vendored_runtime(name, package, kind, train, target)
     {
         return Ok(runtime);
     }
-    let entry = select_artifact(
-        catalog,
-        package,
-        robot.artifacts.pins.get(package),
-        pin_target,
-    )?;
+    let entry = if assets {
+        suite
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == package)
+            .with_context(|| {
+                format!(
+                    "required artifact {package} is absent from train {} suite",
+                    suite.version
+                )
+            })?
+    } else {
+        select_artifact(
+            suite,
+            package,
+            target.context("target artifact is missing a target triple")?,
+        )?
+    };
     let built = if assets {
         entry.assets.as_ref()
     } else {
@@ -653,7 +570,7 @@ fn resolved_runtime_from_expected_package(
             format!(
                 "{}:{}-{}",
                 filesystem_safe_package_name(package),
-                entry.version,
+                suite.version,
                 target.unwrap_or("assets")
             )
         },
@@ -663,7 +580,7 @@ fn resolved_runtime_from_expected_package(
         name: name.to_string(),
         package: package.to_string(),
         kind,
-        version: entry.version.clone(),
+        version: suite.version.clone(),
         artifact_ref,
         sha256: built.map(|blob| blob.sha256.clone()),
         url: built.map(|blob| blob.url.clone()),
@@ -671,7 +588,7 @@ fn resolved_runtime_from_expected_package(
         published: built.is_some(),
         published_triples: entry.targets.keys().cloned().collect(),
         path_override: None,
-        channel,
+        train: train.to_string(),
         target: target.map(str::to_string),
     })
 }
@@ -733,8 +650,8 @@ fn resolve_git_ref_inner(url: &str, git_ref: &str) -> Result<String> {
     Err(anyhow!("git ref {git_ref} does not exist in {url}"))
 }
 
-/// Resolve a user-supplied `--target` selector to the full catalog target
-/// triple official artifacts are cataloged under. Accepts the short arch aliases
+/// Resolve a user-supplied `--target` selector to the full suite target
+/// triple official artifacts are suiteed under. Accepts the short arch aliases
 /// (`aarch64`/`arm64`, `x86_64`/`amd64`) or a full triple passed through as-is.
 /// Official artifacts publish gnu Linux assets, so a bare arch maps to the gnu
 /// triple; deploy owns the separate musl cross-build triple.
@@ -780,15 +697,15 @@ fn resolve_user_runtime(
 ///
 /// Forks may replace either package slot via `artifacts.pins`; a pin with a
 /// `Git`/`Path` form resolves that package from the fork instead of the
-/// catalog. `resolve_source_commits` gates live `git ls-remote` the same way
+/// suite. `resolve_source_commits` gates live `git ls-remote` the same way
 /// it always has: metadata-only flows leave it off and skip this entirely.
 /// Shared resolution context for [`resolve_component_package`]: the pieces
 /// every component package slot (assets or driver) needs, bundled so the
 /// per-slot resolver stays under clippy's argument-count lint.
 struct ComponentResolveContext<'a> {
     robot: &'a Robot,
-    catalog: Option<&'a Catalog>,
-    channel: SelectionChannel,
+    suite: Option<&'a Suite>,
+    train: &'a str,
     target: &'a str,
     resolve_source_commits: bool,
     resolve_component_asset_commits: bool,
@@ -857,15 +774,15 @@ fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<Resol
 /// Resolve one component package slot (`component_assets` or
 /// `component_driver`) for `package`: an `artifacts.pins` entry takes
 /// precedence (`Git`/`Path`/version/sha256 pin form), otherwise it resolves
-/// from the catalog. A catalog resolution also captures the matched entry's
+/// from the suite. A suite resolution also captures the matched entry's
 /// built artifact for the needed scope (assets or the
-/// resolved target triple for drivers) into `catalog_runtime`, exactly like a
+/// resolved target triple for drivers) into `suite_runtime`, exactly like a
 /// service/simulator captures `artifact_ref`/`sha256`/`published` - see
 /// [`resolved_runtime_from_artifact_entry`]. If the entry exists but has no
 /// built artifact for that scope yet (a metadata-only entry, or not yet
 /// published for this target), resolution still succeeds (the entry is real
 /// and versioned - a bare `check` on an older version must not hard-fail
-/// here), but `catalog_runtime` carries `sha256: None, published: false` so a
+/// here), but `suite_runtime` carries `sha256: None, published: false` so a
 /// later staging attempt reports a clear diagnostic instead of silently
 /// succeeding with no bundle to fetch.
 fn resolve_component_package(
@@ -886,31 +803,30 @@ fn resolve_component_package(
         (Some(context.target), false)
     };
     let component_name = package.strip_prefix("phoxal/component-").unwrap_or(package);
-    let catalog_runtime = match context.catalog {
-        Some(catalog) => resolved_runtime_from_expected_package(
+    let suite_runtime = match context.suite {
+        Some(suite) => resolved_runtime_from_expected_package(
             context.robot,
-            catalog,
+            suite,
             ExpectedArtifact {
                 kind,
                 name: component_name,
                 package,
-                channel: context.channel,
+                train: context.train,
                 target,
-                pin_target: context.target,
                 assets,
                 prefer_vendored: context.prefer_vendored,
             },
         )
-        .with_context(|| format!("failed to resolve catalog entry for {package}"))?,
-        None => vendored_runtime(component_name, package, kind, context.channel, target)?,
+        .with_context(|| format!("failed to resolve suite entry for {package}"))?,
+        None => vendored_runtime(component_name, package, kind, context.train, target)?,
     };
 
     Ok(ResolvedComponentPackage {
         package: package.to_string(),
         kind,
-        source: ResolvedComponentSource::Catalog,
+        source: ResolvedComponentSource::Suite,
         path_override: None,
-        catalog_runtime: Some(catalog_runtime),
+        suite_runtime: Some(suite_runtime),
     })
 }
 
@@ -940,35 +856,32 @@ fn resolve_pinned_component_package(
                 directory: pin.directory.clone(),
             }
         }
-        ArtifactPin::Sha256(_) | ArtifactPin::Version(_) => {
-            bail!("internal error: catalog component pin entered source resolution")
-        }
     };
     Ok(ResolvedComponentPackage {
         package: package.to_string(),
         kind,
         source,
         path_override: None,
-        // Source pins deliberately bypass the catalog and carry no catalog
+        // Source pins deliberately bypass the suite and carry no suite
         // runtime. Version and digest pins never enter this path.
-        catalog_runtime: None,
+        suite_runtime: None,
     })
 }
 
 fn resolve_tools(
     robot: &Robot,
-    catalog: Option<&Catalog>,
-    channel: SelectionChannel,
+    suite: Option<&Suite>,
+    train: &str,
     target: &str,
     prefer_vendored: bool,
 ) -> Result<Vec<ResolvedTool>> {
     resolve_native_site_artifacts(
         robot,
-        catalog,
-        channel,
+        suite,
+        train,
         target,
         prefer_vendored,
-        OFFICIAL_TOOLS,
+        Kind::Tool,
         ArtifactKind::Tool,
     )
 }
@@ -976,102 +889,81 @@ fn resolve_tools(
 #[allow(clippy::too_many_arguments)]
 fn resolve_native_site_artifacts(
     robot: &Robot,
-    catalog: Option<&Catalog>,
-    channel: SelectionChannel,
+    suite: Option<&Suite>,
+    train: &str,
     target: &str,
     prefer_vendored: bool,
-    artifacts: &[(&str, &str)],
+    suite_kind: Kind,
     kind: ArtifactKind,
 ) -> Result<Vec<ResolvedTool>> {
-    let Some(catalog) = catalog else {
-        return artifacts
-            .iter()
-            .map(|(name, package)| {
-                let runtime = vendored_runtime(name, package, kind, channel, Some(target))?;
-                Ok(ResolvedTool {
-                    kind,
-                    name: format!("{}-{name}", kind.catalog_kind()),
-                    package: (*package).to_string(),
-                    requested: runtime.version.clone(),
-                    resolved: runtime.version,
-                    repo: "vendored".to_string(),
-                    asset: runtime.artifact_ref,
-                    binary_name: official_binary_name(kind, name),
-                    sha256: String::new(),
-                    url: None,
-                    size: None,
-                    published: true,
-                    path_override: None,
-                    channel,
-                    target: target.to_string(),
-                })
-            })
-            .collect();
+    let Some(suite) = suite else {
+        bail!("the locked framework train suite is required to enumerate {kind} artifacts");
     };
-    artifacts
-        .iter()
-        .map(|(artifact_name, package)| {
+    artifacts_of_kind(suite, suite_kind)
+        .into_iter()
+        .map(|entry| {
+            let package = entry.id.as_str();
+            let artifact_name = short_name(package, suite_kind);
             if matches!(
-                robot.artifacts.pins.get(*package),
+                robot.artifacts.pins.get(package),
                 Some(ArtifactPin::Path(_) | ArtifactPin::Git(_))
             ) {
                 return Ok(ResolvedTool {
                     kind,
-                    name: format!("{}-{artifact_name}", kind.catalog_kind()),
-                    package: (*package).to_string(),
+                    name: format!("{}-{artifact_name}", kind.emit_apis_kind()),
+                    package: package.to_string(),
                     requested: "source".to_string(),
                     resolved: "source".to_string(),
                     repo: "source".to_string(),
                     asset: format!("source:{package}"),
-                    binary_name: official_binary_name(kind, artifact_name),
+                    binary_name: official_binary_name(kind, &artifact_name),
                     sha256: String::new(),
                     url: None,
                     size: None,
                     published: true,
                     path_override: None,
-                    channel,
+                    train: train.to_string(),
                     target: target.to_string(),
                 });
             }
             if prefer_vendored
-                && !robot.artifacts.pins.contains_key(*package)
+                && !robot.artifacts.pins.contains_key(package)
                 && let Ok(runtime) =
-                    vendored_runtime(artifact_name, package, kind, channel, Some(target))
+                    vendored_runtime(&artifact_name, package, kind, train, Some(target))
             {
                 return Ok(ResolvedTool {
                     kind,
-                    name: format!("{}-{artifact_name}", kind.catalog_kind()),
+                    name: format!("{}-{artifact_name}", kind.emit_apis_kind()),
                     package: (*package).to_string(),
                     requested: runtime.version.clone(),
                     resolved: runtime.version,
                     repo: "vendored".to_string(),
                     asset: runtime.artifact_ref,
-                    binary_name: official_binary_name(kind, artifact_name),
+                    binary_name: official_binary_name(kind, &artifact_name),
                     sha256: String::new(),
                     url: None,
                     size: None,
                     published: true,
                     path_override: None,
-                    channel,
+                    train: train.to_string(),
                     target: target.to_string(),
                 });
             }
-            let entry =
-                select_artifact(catalog, package, robot.artifacts.pins.get(*package), target)?;
+            let entry = select_artifact(suite, package, target)?;
             let built = entry.targets.get(target);
             let asset = built.map_or_else(
-                || format!("{}:{}-{target}", entry.package, entry.version),
+                || format!("{}:{}-{target}", entry.id, suite.version),
                 |blob| blob.url.clone(),
             );
             Ok(ResolvedTool {
                 kind,
-                name: format!("{}-{artifact_name}", kind.catalog_kind()),
-                package: entry.package.clone(),
-                requested: entry.version.clone(),
-                resolved: entry.version.clone(),
+                name: format!("{}-{artifact_name}", kind.emit_apis_kind()),
+                package: entry.id.clone(),
+                requested: suite.version.clone(),
+                resolved: suite.version.clone(),
                 repo: "phoxal/framework".to_string(),
                 asset,
-                binary_name: official_binary_name(kind, artifact_name),
+                binary_name: official_binary_name(kind, &artifact_name),
                 sha256: built
                     .map(|blob| blob.sha256.clone())
                     .unwrap_or_else(|| "0".repeat(64)),
@@ -1079,7 +971,7 @@ fn resolve_native_site_artifacts(
                 size: built.map(|blob| blob.size),
                 published: built.is_some(),
                 path_override: None,
-                channel,
+                train: train.to_string(),
                 target: target.to_string(),
             })
         })
@@ -1088,10 +980,21 @@ fn resolve_native_site_artifacts(
 
 /// The filesystem/tag-safe projection of a provider-qualified package id
 /// (`phoxal/service-drive` -> `phoxal-service-drive`), used for the synthetic
-/// `artifact_ref` fallback when a catalog entry has no built artifact yet for
+/// `artifact_ref` fallback when a suite entry has no built artifact yet for
 /// the resolved target (docs #21's release-tag/asset projection).
 fn filesystem_safe_package_name(package: &str) -> String {
     package.replace('/', "-")
+}
+
+fn short_name(id: &str, kind: Kind) -> String {
+    let prefix = match kind {
+        Kind::Service => "phoxal/service-",
+        Kind::Component => "phoxal/component-",
+        Kind::Tool => "phoxal/tool-",
+        Kind::Simulator => "phoxal/simulator-",
+        Kind::Infrastructure => "phoxal/infrastructure-",
+    };
+    id.strip_prefix(prefix).unwrap_or(id).to_string()
 }
 
 fn join_errors(errors: Vec<phoxal::model::robot::ValidationError>) -> String {
@@ -1106,27 +1009,25 @@ fn join_errors(errors: Vec<phoxal::model::robot::ValidationError>) -> String {
 mod tests {
     use super::*;
     use crate::host_paths::test_support::ScratchPhoxalHome;
-    use phoxal_cli_core::project::catalog::{
-        SelectionChannel as CatalogChannel, fixture_catalog_for_tests,
-        fixture_component_assets_entry_for_tests, fixture_contract_for_tests,
-        fixture_service_entry_for_tests,
-    };
     use phoxal_cli_core::project::resolver::{load_robot, load_robot_with_extras};
+    use phoxal_cli_core::project::suite::{
+        fixture_component_assets_entry_for_tests, fixture_contract_for_tests,
+        fixture_service_entry_for_tests, fixture_suite_for_tests,
+    };
 
-    fn test_catalog() -> Catalog {
-        fixture_catalog_for_tests(vec![
+    fn test_suite() -> Suite {
+        fixture_suite_for_tests(vec![
             fixture_service_entry_for_tests(
                 "drive",
                 "0.1.0",
-                CatalogChannel::Stable,
                 &host_target_triple(),
                 // Published so the package resolves for this host target
                 // without robot.yaml needing any pin at all (D1: no
                 // `artifacts.generation` ceiling to auto-detect anymore).
                 true,
-                vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
+                vec![fixture_contract_for_tests("v0.1::drive::Target", "publish")],
             ),
-            fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable),
+            fixture_component_assets_entry_for_tests("ddsm115", "0.1.0"),
         ])
     }
 
@@ -1139,11 +1040,11 @@ mod tests {
         // commit proves no ls-remote was attempted.
         let _phoxal_home = ScratchPhoxalHome::new()?;
         let robot = Robot::parse_from_string(GIT_COMPONENT_ROBOT)?;
-        let catalog = test_catalog();
+        let suite = test_suite();
         let resolved = resolve(
             &robot,
             std::path::Path::new("."),
-            Some(&catalog),
+            Some(&suite),
             ResolveOptions {
                 resolve_source_commits: false,
                 resolve_component_asset_commits: false,
@@ -1196,7 +1097,6 @@ robot:
       component: ddsm115
       mount_link: right_wheel_mount
 artifacts:
-  channel: stable
   pins:
     phoxal/component-ddsm115:
       git: https://github.com/phoxal/framework
@@ -1214,11 +1114,11 @@ artifacts:
         let robot = Robot::parse_from_string(
             &GIT_COMPONENT_ROBOT.replace("rev: main", &format!("rev: {sha}")),
         )?;
-        let catalog = test_catalog();
+        let suite = test_suite();
         let resolved = resolve(
             &robot,
             std::path::Path::new("."),
-            Some(&catalog),
+            Some(&suite),
             ResolveOptions {
                 resolve_source_commits: true,
                 resolve_component_asset_commits: true,
@@ -1250,7 +1150,7 @@ artifacts:
     -> anyhow::Result<()> {
         // A passive mechanical component (e.g. robot-v1's `front_caster`,
         // `component: passive_caster`) declares no `driver:` block and has
-        // no official `phoxal/component-<id>` assets package in the catalog
+        // no official `phoxal/component-<id>` assets package in the suite
         // at all - that's a valid, real-world configuration. Resolution
         // must succeed with `assets: None`, not hard-fail (this was the
         // reported bug: `check` failed with "expected package
@@ -1276,18 +1176,17 @@ robot:
     front_caster:
       component: passive_caster
       mount_link: front_caster_mount
-artifacts:
-  channel: stable
+artifacts: {}
 "#,
         )?;
-        // `test_catalog()` carries no `phoxal/component-passive_caster`
+        // `test_suite()` carries no `phoxal/component-passive_caster`
         // entry at all - exactly the "absent from snapshot" case the bug
         // report hit.
-        let catalog = test_catalog();
+        let suite = test_suite();
         let resolved = resolve(
             &robot,
             std::path::Path::new("."),
-            Some(&catalog),
+            Some(&suite),
             ResolveOptions {
                 resolve_source_commits: false,
                 resolve_component_asset_commits: false,
@@ -1340,22 +1239,21 @@ robot:
       mount_link: left_wheel_mount
       driver:
         connection: { type: can, bus: 0, node_id: 1 }
-artifacts:
-  channel: stable
+artifacts: {}
 "#,
         )?;
-        let catalog = test_catalog();
+        let suite = test_suite();
         let error = resolve(
             &robot,
             std::path::Path::new("."),
-            Some(&catalog),
+            Some(&suite),
             ResolveOptions {
                 resolve_source_commits: false,
                 resolve_component_asset_commits: false,
                 ..ResolveOptions::default()
             },
         )
-        .expect_err("a driven component with no catalog entry at all must hard-fail");
+        .expect_err("a driven component with no suite entry at all must hard-fail");
 
         let message = format!("{error:#}");
         assert!(
@@ -1367,8 +1265,7 @@ artifacts:
         );
         assert!(
             message.contains(
-                "expected package phoxal/component-unknown_driven_component is absent from \
-                 snapshot"
+                "required artifact phoxal/component-unknown_driven_component is absent from train 0.1.0 suite"
             ),
             "{message}"
         );
@@ -1526,7 +1423,7 @@ services:
             published: false,
             published_triples: Vec::new(),
             path_override: None,
-            channel: CatalogChannel::Stable,
+            train: "0.36.0".to_string(),
             target: Some("aarch64-unknown-linux-gnu".to_string()),
         };
 

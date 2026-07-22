@@ -12,8 +12,8 @@ pub(crate) fn descriptor_is_current(descriptor: &NativeArtifactDescriptor) -> bo
         return false;
     };
     // Normal commands deliberately resolve through the project-vendored
-    // `active` link without consulting a channel head, so that offline view
-    // has no catalog digest to compare. `update` resolves the live catalog
+    // `active` link without consulting remote selection state, so that offline view
+    // has no suite digest to compare. `update` resolves the live suite
     // with a non-empty digest and therefore takes the strict branch below.
     if descriptor.sha256.is_empty() {
         return path.is_dir();

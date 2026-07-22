@@ -15,20 +15,20 @@ pub struct Service {
 
 #[derive(Debug, Subcommand)]
 pub enum ServiceSubcommand {
-    #[command(about = "Print official services from the configured artifact catalog.")]
-    Catalog(Catalog),
+    #[command(about = "Print official services from the configured artifact suite.")]
+    Suite(Suite),
 }
 
 #[derive(Debug, Args)]
-pub struct Catalog {}
+pub struct Suite {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ServiceCatalogSummary {
-    pub entries: Vec<ServiceCatalogEntry>,
+pub struct ServiceSuiteSummary {
+    pub entries: Vec<ServiceSuiteEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ServiceCatalogEntry {
+pub struct ServiceSuiteEntry {
     pub id: String,
     pub versions: Vec<String>,
     pub participant_kind: &'static str,
@@ -37,19 +37,19 @@ pub struct ServiceCatalogEntry {
 impl Service {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match &self.command {
-            ServiceSubcommand::Catalog(command) => command.run(app).await,
+            ServiceSubcommand::Suite(command) => command.run(app).await,
         }
     }
 }
 
-impl Catalog {
+impl Suite {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let root = app.project.root().to_path_buf();
-        let catalog_source = app.catalog_source.clone();
+        let suite_source = app.suite_source.clone();
         let summary =
-            tokio::task::spawn_blocking(move || service_catalog_summary(&root, catalog_source))
+            tokio::task::spawn_blocking(move || service_suite_summary(&root, suite_source))
                 .await
-                .context("service catalog worker failed")??;
+                .context("service suite worker failed")??;
         for entry in &summary.entries {
             println!(
                 "{} -> versions [{}] ({})",
@@ -62,37 +62,34 @@ impl Catalog {
     }
 }
 
-pub fn service_catalog_summary(
+pub fn service_suite_summary(
     project_start: &Path,
-    catalog_source: Option<String>,
-) -> Result<ServiceCatalogSummary> {
+    suite_source: Option<String>,
+) -> Result<ServiceSuiteSummary> {
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
     let loaded = load_robot_with_extras(&robot_path)?;
-    let catalog = crate::commands::load_catalog_for_robot_from_source(
-        catalog_source,
+    let suite = crate::commands::load_suite_for_robot_from_source(
+        suite_source,
         project_root,
-        loaded.robot.artifacts.channel,
         &loaded.extras,
     )?
-    .ok_or_else(|| anyhow::anyhow!("artifact catalog unavailable"))?;
-    Ok(ServiceCatalogSummary {
-        entries: phoxal_cli_core::project::catalog::OFFICIAL_SERVICES
-            .iter()
-            .map(|(_, package)| ServiceCatalogEntry {
-                id: (*package).to_string(),
-                versions: catalog
-                    .artifacts
-                    .iter()
-                    .filter(|entry| entry.package == *package)
-                    .map(|entry| entry.version.clone())
-                    .collect(),
-                participant_kind: "service",
-            })
-            .collect(),
+    .ok_or_else(|| anyhow::anyhow!("artifact suite unavailable"))?;
+    Ok(ServiceSuiteSummary {
+        entries: phoxal_cli_core::project::suite::artifacts_of_kind(
+            &suite,
+            phoxal_cli_core::project::suite::Kind::Service,
+        )
+        .into_iter()
+        .map(|artifact| ServiceSuiteEntry {
+            id: artifact.id.clone(),
+            versions: vec![suite.version.clone()],
+            participant_kind: "service",
+        })
+        .collect(),
     })
 }
 
@@ -102,23 +99,19 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use phoxal_cli_core::project::catalog::{
-        SelectionChannel as CatalogChannel, fixture_catalog_for_tests, fixture_contract_for_tests,
-        fixture_service_entry_for_tests,
+    use phoxal_cli_core::project::suite::{
+        fixture_contract_for_tests, fixture_service_entry_for_tests, fixture_suite_for_tests,
     };
 
     #[test]
-    fn service_catalog_summary_lists_official_services() -> Result<()> {
+    fn service_suite_summary_lists_official_services() -> Result<()> {
         let temp = tempfile::tempdir()?;
         fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
-        let catalog = write_catalog(temp.path())?;
+        let suite = write_suite(temp.path())?;
 
-        let summary = service_catalog_summary(temp.path(), Some(catalog))?;
+        let summary = service_suite_summary(temp.path(), Some(suite))?;
 
-        assert_eq!(
-            summary.entries.len(),
-            phoxal_cli_core::project::catalog::OFFICIAL_SERVICES.len()
-        );
+        assert_eq!(summary.entries.len(), 1);
         let entry = summary
             .entries
             .iter()
@@ -148,22 +141,20 @@ robot:
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
   components: {}
-artifacts:
-  channel: stable
+artifacts: {}
 "#
     }
 
-    fn write_catalog(root: &Path) -> Result<String> {
-        let catalog = fixture_catalog_for_tests(vec![fixture_service_entry_for_tests(
+    fn write_suite(root: &Path) -> Result<String> {
+        let suite = fixture_suite_for_tests(vec![fixture_service_entry_for_tests(
             "drive",
             "0.1.0",
-            CatalogChannel::Stable,
             &crate::resolver::host_target_triple(),
-            false,
-            vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
+            true,
+            vec![fixture_contract_for_tests("v0.1::drive::Target", "publish")],
         )]);
-        let path = root.join("catalog.json");
-        fs::write(&path, serde_json::to_string_pretty(&catalog)?)?;
+        let path = root.join("suite.json");
+        fs::write(&path, serde_json::to_string_pretty(&suite)?)?;
         Ok(path.display().to_string())
     }
 }

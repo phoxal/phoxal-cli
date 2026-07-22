@@ -12,6 +12,7 @@ pub mod behavior;
 pub mod check;
 pub mod deploy;
 pub mod doctor;
+pub mod init;
 pub mod logs;
 pub mod run;
 pub mod self_cmd;
@@ -21,69 +22,61 @@ pub mod status;
 pub mod update;
 pub mod validate;
 
-/// Load the artifact catalog for a robot project. There is no `refresh`
-/// parameter anymore: [`phoxal_cli_core::project::catalog::load_catalog`] always fetches the
-/// remote catalog fresh (no on-disk cache of the fetch) unless an explicit
-/// local/URL source is given - see its docs.
-pub(crate) fn load_catalog_for_robot(
+/// Load the artifact suite for a robot project. There is no `refresh`
+/// parameter anymore: [`phoxal_cli_core::project::suite::load_suite`] always fetches the
+/// remote suite fresh (no on-disk cache of the fetch) unless an explicit
+/// local/URL source is given. Offline resolution requires an explicit local
+/// suite and uses only already-vendored artifacts.
+pub(crate) fn load_suite_for_robot(
     app: &AppContext,
     project_root: &std::path::Path,
-    channel: phoxal::model::robot::v0::Channel,
     manifest_extras: &RobotManifestExtras,
-) -> Result<Option<phoxal_cli_core::project::catalog::Catalog>> {
-    load_catalog_for_robot_from_source(
-        app.catalog_source.clone(),
-        project_root,
-        channel,
-        manifest_extras,
-    )
+) -> Result<Option<phoxal_cli_core::project::suite::Suite>> {
+    load_suite_for_robot_from_source(app.suite_source.clone(), project_root, manifest_extras)
 }
 
-pub(crate) fn load_catalog_for_robot_from_source(
-    catalog_source: Option<String>,
+pub(crate) fn load_suite_for_robot_from_source(
+    suite_source: Option<String>,
     project_root: &std::path::Path,
-    channel: phoxal::model::robot::v0::Channel,
     manifest_extras: &RobotManifestExtras,
-) -> Result<Option<phoxal_cli_core::project::catalog::Catalog>> {
-    let robot_source = manifest_extras.catalog_source.as_ref().map(|source| {
+) -> Result<Option<phoxal_cli_core::project::suite::Suite>> {
+    let robot_source = manifest_extras.suite_source.as_ref().map(|source| {
         if source.is_absolute() {
             source.clone()
         } else {
             project_root.join(source)
         }
     });
-    catalog_or_vendored(phoxal_cli_core::project::catalog::load_pinned_catalog(
-        phoxal_cli_core::project::catalog::CatalogLoadOptions {
-            cli_source: catalog_source,
-            robot_source,
+    let source = suite_source.or_else(|| robot_source.map(|path| path.display().to_string()));
+    #[cfg(test)]
+    let locked_version = std::env::var("PHOXAL_TEST_LOCKED_TRAIN").ok().or_else(|| {
+        source.as_ref().and_then(|source| {
+            (!source.starts_with("https://"))
+                .then(|| {
+                    phoxal_cli_core::project::suite::read_suite_path(std::path::Path::new(source))
+                        .ok()
+                })
+                .flatten()
+                .map(|suite| suite.version)
+        })
+    });
+    #[cfg(not(test))]
+    let locked_version: Option<String> = None;
+    let locked = if let Some(version) = locked_version {
+        phoxal_cli_core::project::train::LockedTrain {
+            version,
+            source: phoxal_cli_core::project::train::TrainSource::Path,
+        }
+    } else {
+        phoxal_cli_core::project::train::resolve_locked_train(project_root)?
+    };
+    phoxal_cli_core::project::suite::load_suite(
+        phoxal_cli_core::project::suite::SuiteLoadOptions {
+            cli_source: source,
             offline: false,
         },
-        phoxal_cli_core::project::catalog::selection_channel(channel),
-    ))
-}
-
-pub(crate) fn catalog_or_vendored(
-    loaded: Result<Option<phoxal_cli_core::project::catalog::Catalog>>,
-) -> Result<Option<phoxal_cli_core::project::catalog::Catalog>> {
-    match loaded {
-        Ok(catalog) => Ok(catalog),
-        Err(error) if crate::host_paths::artifacts_dir().is_ok_and(|path| path.is_dir()) => {
-            let message =
-                format!("catalog unreachable, continuing with project-vendored files: {error:#}");
-            if matches!(
-                crate::session::diagnostics::try_route(
-                    phoxal_cli_core::session::event::DiagnosticSource::Cli,
-                    phoxal_cli_core::session::event::DiagnosticLevel::Warn,
-                    &message,
-                ),
-                crate::session::diagnostics::RouteResult::NoSession
-            ) {
-                eprintln!("warning: {message}");
-            }
-            Ok(None)
-        }
-        Err(error) => Err(error),
-    }
+        &locked.version,
+    )
 }
 
 /// Version string shared by the `--version` flag and the `version` subcommand,
@@ -132,12 +125,11 @@ impl VersionArgs {
     pub fn run(&self) -> Result<()> {
         println!("phoxal-cli {}", long_version());
         println!(
-            "default catalog URL: {}",
-            phoxal_cli_core::project::catalog::DEFAULT_CATALOG_URL
+            "default suite URL: the immutable suite attached to the Cargo.lock-selected framework release"
         );
         println!(
-            "catalog override env: {}",
-            phoxal_cli_core::project::catalog::CATALOG_SOURCE_ENV
+            "suite override env: {}",
+            phoxal_cli_core::project::suite::SUITE_SOURCE_ENV
         );
         Ok(())
     }
@@ -149,7 +141,7 @@ impl VersionArgs {
     version = long_version(),
     about = "Build, check, simulate, and deploy Phoxal robot projects.",
     long_about = "Build, check, simulate, and deploy Phoxal robot projects.\n\n\
-                  phoxal-cli reads robot.yaml, resolves the graph against a verified generated artifact catalog when official native artifacts are needed, and drives the develop/simulate/deploy loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `check`, `simulate`, and `deploy --dry-run --target aarch64`."
+                  phoxal-cli reads robot.yaml, resolves the graph against a verified generated artifact suite when official native artifacts are needed, and drives the develop/simulate/deploy loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `check`, `simulate`, and `deploy --dry-run --target aarch64`."
 )]
 pub struct Cli {
     #[arg(
@@ -159,18 +151,18 @@ pub struct Cli {
     )]
     pub project_path: Option<PathBuf>,
     #[arg(
-        long = "catalog",
-        env = phoxal_cli_core::project::catalog::CATALOG_SOURCE_ENV,
+        long = "suite",
+        env = phoxal_cli_core::project::suite::SUITE_SOURCE_ENV,
         global = true,
         value_name = "PATH_OR_HTTPS_URL",
-        help = "Artifact catalog override. Local paths are read directly; HTTPS sources (including the default) are always fetched fresh - there is no on-disk cache of this fetch."
+        help = "Artifact suite override. Local paths are read directly; HTTPS sources (including the default) are always fetched fresh - there is no on-disk cache of this fetch."
     )]
-    pub catalog_source: Option<String>,
+    pub suite_source: Option<String>,
     #[arg(
         long,
-        env = phoxal_cli_core::project::catalog::OFFLINE_ENV,
+        env = phoxal_cli_core::project::suite::OFFLINE_ENV,
         global = true,
-        help = "Use only project-vendored artifacts and skip catalog probes."
+        help = "Disable network access. Resolution requires --suite <local-path> and uses only project-vendored artifacts."
     )]
     pub offline: bool,
     #[command(subcommand)]
@@ -179,10 +171,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum RootCommand {
+    #[command(about = "Create a non-published root Cargo train anchor and committed lockfile.")]
+    Init(init::Init),
     #[command(
         about = "Check the robot graph's participants and config against phoxal::check.",
         long_about = "Check the robot graph's participants and config against phoxal::check.\n\n\
-                      Resolves robot.yaml, then reads each available participant's compiled-in contract metadata (official artifacts from the catalog, host tools and locally built user services/component drivers from their own built binary) and validates the graph with phoxal::check. Contract compatibility is per-contract name identity (D1) - two participants naming the same version-qualified contract are compatible by construction, so there is no wire-shape hash to agree on. This still validates each user service's manifest config against its emitted JSON Schema. Official artifact readiness comes from the configured generated catalog; git component commits resolve live unless pinned to a commit SHA in robot.yaml."
+                      Resolves robot.yaml, then reads each available participant's compiled-in contract metadata (official artifacts from the suite, host tools and locally built user services/component drivers from their own built binary) and validates the graph with phoxal::check. Contract compatibility is per-contract name identity (D1) - two participants naming the same version-qualified contract are compatible by construction, so there is no wire-shape hash to agree on. This still validates each user service's manifest config against its emitted JSON Schema. Official artifact readiness comes from the configured generated suite; git component commits resolve live unless pinned to a commit SHA in robot.yaml."
     )]
     Check(check::CheckCmd),
     // Preserved prototype for the parked behavior-orchestration design. Keep it
@@ -201,13 +195,13 @@ pub enum RootCommand {
     Status(status::Status),
     #[command(about = "Deploy the checked graph as a native systemd payload.")]
     Deploy(deploy::Deploy),
-    #[command(about = "Resolve channel heads and atomically update project-vendored artifacts.")]
+    #[command(about = "Verify the locked train suite and atomically refresh cached artifacts.")]
     Update(update::Update),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
-    #[command(about = "Inspect the user-service catalog.")]
+    #[command(about = "Inspect the user-service suite.")]
     Service(service::Service),
-    #[command(about = "Print the phoxal-cli version and catalog source defaults.")]
+    #[command(about = "Print the phoxal-cli version and suite source defaults.")]
     Version(VersionArgs),
     #[command(name = "self", about = "Manage this phoxal-cli installation.")]
     SelfCmd(self_cmd::SelfCmd),
@@ -231,6 +225,7 @@ impl RootCommand {
 
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match self {
+            Self::Init(command) => command.run(app).await,
             Self::Check(command) => command.run(app).await,
             Self::Behavior(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,

@@ -6,12 +6,12 @@ use anyhow::Result;
 use anyhow::bail;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::ToolParticipant;
-use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::resolver::ResolvedComponent;
 use phoxal_cli_core::project::resolver::ResolvedComponentSource;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::resolver::tool_emit_apis_id;
+use phoxal_cli_core::project::suite::ArtifactKind;
 use phoxal_cli_core::project::tooling::resolve_project_path;
 use std::path::Path;
 use std::path::PathBuf;
@@ -54,7 +54,7 @@ pub(crate) fn platform_artifact_refs_from_resolved(
         .collect()
 }
 
-/// One `PlatformArtifactRef` per distinct Catalog-sourced `component_driver`
+/// One `PlatformArtifactRef` per distinct Suite-sourced `component_driver`
 /// package, `instances` listing every component instance that shares it
 /// (`left_drive`/`right_drive` both resolving
 /// `phoxal/component-ddsm115`). A Path/Git-sourced driver is a source
@@ -67,26 +67,26 @@ pub(crate) fn platform_artifact_refs_from_resolved(
 pub(crate) fn component_driver_platform_refs_from_resolved(
     resolved: &ResolvedRobot,
 ) -> Vec<PlatformArtifactRef> {
-    struct CatalogDriverRef {
+    struct SuiteDriverRef {
         name: String,
         artifact_ref: String,
         instances: Vec<String>,
     }
 
-    let mut by_package = std::collections::BTreeMap::<String, CatalogDriverRef>::new();
+    let mut by_package = std::collections::BTreeMap::<String, SuiteDriverRef>::new();
     for component in &resolved.components {
         let Some(driver) = &component.driver else {
             continue;
         };
-        if !matches!(driver.source, ResolvedComponentSource::Catalog) {
+        if !matches!(driver.source, ResolvedComponentSource::Suite) {
             continue;
         }
-        let Some(runtime) = &driver.catalog_runtime else {
+        let Some(runtime) = &driver.suite_runtime else {
             continue;
         };
         by_package
             .entry(driver.package.clone())
-            .or_insert_with(|| CatalogDriverRef {
+            .or_insert_with(|| SuiteDriverRef {
                 name: runtime.name.clone(),
                 artifact_ref: runtime.artifact_ref().to_string(),
                 instances: Vec::new(),
@@ -105,11 +105,11 @@ pub(crate) fn component_driver_platform_refs_from_resolved(
         .collect()
 }
 
-/// Every distinct Catalog-sourced component driver's `catalog_runtime`, keyed
+/// Every distinct Suite-sourced component driver's `suite_runtime`, keyed
 /// by its `artifact_ref` - the same shape as the `official_by_ref` map every
 /// caller already builds from `resolved.platform_runtimes` for the shared
 /// `extract_emit_apis_from_staged_runtime` closure. Callers merge this in so
-/// one fetch closure resolves services, simulators, AND catalog component
+/// one fetch closure resolves services, simulators, AND suite component
 /// drivers identically.
 pub(crate) fn component_driver_runtimes_by_ref(
     resolved: &ResolvedRobot,
@@ -118,8 +118,8 @@ pub(crate) fn component_driver_runtimes_by_ref(
         .components
         .iter()
         .filter_map(|component| component.driver.as_ref())
-        .filter(|driver| matches!(driver.source, ResolvedComponentSource::Catalog))
-        .filter_map(|driver| driver.catalog_runtime.as_ref())
+        .filter(|driver| matches!(driver.source, ResolvedComponentSource::Suite))
+        .filter_map(|driver| driver.suite_runtime.as_ref())
         .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
         .collect()
 }
@@ -172,7 +172,7 @@ pub(crate) fn source_participants_from_resolved(
         )
     }));
 
-    // A Catalog-sourced driver is a first-class catalog artifact, not a
+    // A Suite-sourced driver is a first-class suite artifact, not a
     // build-from-source participant - it becomes a `PlatformArtifactRef`
     // instead (see `component_driver_platform_refs_from_resolved`), fetched
     // and validated like a service. Only a Path/Git (fork/dev-override)
@@ -181,7 +181,7 @@ pub(crate) fn source_participants_from_resolved(
         component
             .driver
             .as_ref()
-            .is_some_and(|driver| !matches!(driver.source, ResolvedComponentSource::Catalog))
+            .is_some_and(|driver| !matches!(driver.source, ResolvedComponentSource::Suite))
     }) {
         let crate_dir = if let Some(path) = component.driver_path_override() {
             path.to_path_buf()
@@ -261,7 +261,7 @@ pub(crate) fn ensure_user_service_exists(
     Ok(())
 }
 
-pub(crate) fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()> {
+pub(crate) fn ensure_suite_availability(resolved: &ResolvedRobot) -> Result<()> {
     let unavailable = resolved
         .platform_runtimes
         .iter()
@@ -276,10 +276,8 @@ pub(crate) fn ensure_catalog_availability(resolved: &ResolvedRobot) -> Result<()
         "NotYetAvailable: {} is not deployable on {}",
         resolved.robot.robot.id, resolved.target
     );
-    if let Some(revision) = &resolved.catalog_snapshot {
-        message.push_str("\n\ncatalog revision: ");
-        message.push_str(revision);
-    }
+    message.push_str("\n\nframework train: ");
+    message.push_str(&resolved.train);
     message.push_str("\n\nRequired artifacts not released:");
     for runtime in unavailable {
         message.push_str("\n  - ");

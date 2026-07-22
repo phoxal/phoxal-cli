@@ -6,11 +6,11 @@ use anyhow::bail;
 use phoxal::check as graph_check;
 use std::fmt;
 
-pub(crate) fn ensure_check_outcome_ok(channel: &str, outcome: &CheckOutcome) -> Result<()> {
+pub(crate) fn ensure_check_outcome_ok(train: &str, outcome: &CheckOutcome) -> Result<()> {
     if !outcome.missing_images.is_empty() {
         bail!(
             "{}",
-            format_missing_images_error(channel, &outcome.missing_images)
+            format_missing_images_error(train, &outcome.missing_images)
         );
     }
 
@@ -21,18 +21,17 @@ pub(crate) fn ensure_check_outcome_ok(channel: &str, outcome: &CheckOutcome) -> 
     Ok(())
 }
 
-pub(super) fn format_missing_images_error(channel: &str, missing_images: &[String]) -> String {
-    let mut message = format!("required official artifacts are not available on channel {channel}");
+pub(super) fn format_missing_images_error(train: &str, missing_images: &[String]) -> String {
+    let mut message =
+        format!("required official artifacts are not available in framework train {train}");
     message.push_str("\n\nMissing official artifacts:");
     for image_ref in missing_images {
         message.push_str("\n  - ");
         message.push_str(image_ref);
     }
     message.push_str("\n\nFix:");
-    message.push_str("\n  - refresh or override the generated artifact catalog with `phoxal-cli --catalog <path> check`");
-    message.push_str("\n  - or wait until Phoxal publishes the missing official artifacts on the ");
-    message.push_str(channel);
-    message.push_str(" channel");
+    message.push_str("\n  - refresh or override the generated artifact suite with `phoxal-cli --suite <path> check`");
+    message.push_str("\n  - or use a framework train that publishes the required target artifacts");
     message
 }
 

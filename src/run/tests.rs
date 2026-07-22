@@ -166,7 +166,7 @@ fn driver_subset_is_strict() -> Result<()> {
         &RunOptions {
             drivers: DriversMode::On,
             drivers_subset: vec!["imu".to_string()],
-            catalog_source: None,
+            suite_source: None,
             overlays: Vec::new(),
             watch: false,
         },
@@ -182,7 +182,7 @@ fn driver_subset_is_strict() -> Result<()> {
         &RunOptions {
             drivers: DriversMode::On,
             drivers_subset: vec!["missing".to_string()],
-            catalog_source: None,
+            suite_source: None,
             overlays: Vec::new(),
             watch: false,
         },
@@ -200,7 +200,7 @@ fn drivers_off_degrades_every_driver() -> Result<()> {
         &RunOptions {
             drivers: DriversMode::Off,
             drivers_subset: Vec::new(),
-            catalog_source: None,
+            suite_source: None,
             overlays: Vec::new(),
             watch: false,
         },

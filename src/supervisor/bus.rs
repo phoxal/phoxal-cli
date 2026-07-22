@@ -3,11 +3,12 @@
 use super::{BoardBackend, BoardSnapshot, LogSource, ParticipantState};
 use anyhow::Result;
 use anyhow::anyhow;
-use phoxal::bus::{DEFAULT_QUERY_TIMEOUT, Querier, Subscribe, Subscriber, Topic};
+use phoxal::bus::{
+    Codec, DEFAULT_QUERY_TIMEOUT, MessagePack, Querier, QueryFailure, Subscribe, Subscriber, Topic,
+};
 use phoxal::raw::{Bus, BusConfig};
 use phoxal::raw::{ParticipantLivelinessEvent, ParticipantLivelinessStatus};
-use phoxal_api::v1 as api;
-use phoxal_api::v2 as preview_api;
+use phoxal_api::v0_1 as api;
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
 use phoxal_cli_core::session::reconcile::{
     Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced,
@@ -23,6 +24,66 @@ use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+
+pub fn start_robot_description_server(
+    namespace: String,
+    robot_id: String,
+    connect: String,
+    description: phoxal_cli_core::supervisor_api::v0::RobotDescription,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            wait_for_endpoint(&connect).await;
+            if let Err(error) = robot_description_server_loop(
+                namespace.clone(),
+                robot_id.clone(),
+                connect.clone(),
+                &description,
+            )
+            .await
+            {
+                tracing::debug!("supervisor API waiting for router: {error:#}");
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    })
+}
+
+async fn robot_description_server_loop(
+    namespace: String,
+    robot_id: String,
+    connect: String,
+    description: &phoxal_cli_core::supervisor_api::v0::RobotDescription,
+) -> Result<()> {
+    use phoxal_cli_core::supervisor_api::v0::{ROBOT_DESCRIPTION_TOPIC, RobotDescriptionRequest};
+
+    let bus = Bus::open(BusConfig {
+        namespace,
+        robot_id,
+        participant: "phoxal-cli-supervisor-api".to_string(),
+        incarnation: 0,
+        connect_endpoints: vec![connect],
+    })
+    .await?;
+    let server = bus.declare_server(ROBOT_DESCRIPTION_TOPIC).await?;
+    loop {
+        let query = server.recv().await?;
+        let request = query
+            .request_metadata()
+            .and_then(|_| query.request_bytes())
+            .and_then(|bytes| {
+                MessagePack::decode::<RobotDescriptionRequest>(&bytes)
+                    .map_err(phoxal::bus::BusError::from)
+            });
+        if let Err(error) = request {
+            query
+                .reply_err(&QueryFailure::invalid_argument(error.to_string()))
+                .await?;
+            continue;
+        }
+        query.reply(&bus, MessagePack::encode(description)?).await?;
+    }
+}
 
 pub fn endpoint_reachable(endpoint: &str, timeout: Duration) -> bool {
     let Some(address) = endpoint.strip_prefix("tcp/") else {
@@ -403,7 +464,7 @@ fn apply_liveliness_event(board: &BoardBackend, event: ParticipantLivelinessEven
     board.record_presence(id, event.status == ParticipantLivelinessStatus::Alive);
 }
 
-/// Start a background feed of `v2::simulation::Clock` samples. Returns a
+/// Start a background feed of `v0_1::simulation::Clock` samples. Returns a
 /// `watch::Receiver` the TUI's telemetry layer polls cheaply, plus the feed
 /// task's handle.
 pub fn start_clock_feed(
@@ -442,10 +503,10 @@ pub(crate) async fn clock_feed_loop(
     })
     .await
     .map_err(|error| anyhow!("failed to open bus clock subscription: {error}"))?;
-    let topic = Topic::<Subscribe<preview_api::simulation::Clock>>::new_static(
-        <preview_api::simulation::Clock as phoxal::bus::ContractBody>::TOPIC,
+    let topic = Topic::<Subscribe<api::simulation::Clock>>::new_static(
+        <api::simulation::Clock as phoxal::bus::ContractBody>::TOPIC,
     );
-    let subscriber = Subscriber::<preview_api::simulation::Clock>::new(&bus, &topic, 32).await?;
+    let subscriber = Subscriber::<api::simulation::Clock>::new(&bus, &topic, 32).await?;
     loop {
         let received = subscriber.recv().await?;
         tx.send_modify(|observation| {
