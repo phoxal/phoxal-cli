@@ -47,7 +47,7 @@ mod stages;
 #[cfg(test)]
 pub(crate) use stages::await_participants_ready;
 pub(crate) use stages::{
-    SupervisionStage, await_stage_ready, emit_event, maybe_emit_staged_startup_complete,
+    SupervisionStage, await_stage_ready, emit_event, maybe_emit_startup_outcome,
     orderly_shutdown_budget, spawn_until_pending,
 };
 mod r#loop;
@@ -59,12 +59,11 @@ pub(crate) use signals::{
     stop_child,
 };
 mod lock;
-pub(crate) use lock::{SupervisorIdentity, SupervisorLock};
+pub(crate) use lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 mod bus;
 pub(crate) use bus::{
-    default_connect_endpoint, failed_expected_participants, missing_ready_participants,
-    start_bus_log_subscriber, start_clock_feed, start_liveliness_observer,
-    start_robot_description_server, wait_for_endpoint,
+    default_connect_endpoint, start_bus_log_subscriber, start_clock_feed,
+    start_liveliness_observer, wait_for_endpoint,
 };
 
 #[cfg(test)]

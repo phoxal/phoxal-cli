@@ -62,6 +62,7 @@ fn failed_status_keeps_a_live_pid_available_for_forced_shutdown() {
 
 fn spec(id: &str) -> ParticipantSpec {
     ParticipantSpec {
+        key: phoxal_cli_core::session::ProcessKey::project(id),
         id: id.to_string(),
         kind: ParticipantKind::Service,
         executable: PathBuf::from("/bin/echo"),
@@ -72,11 +73,19 @@ fn spec(id: &str) -> ParticipantSpec {
         process_group: false,
         note: None,
         bus_participant: true,
+        readiness: ParticipantSpec::exact_liveliness_template(
+            phoxal_cli_core::session::RobotKey::new("test", "robot"),
+            id,
+        ),
+        startup_requirement: phoxal_cli_core::session::StartupRequirement::Required,
+        runtime_failure: phoxal_cli_core::session::RuntimeFailurePolicy::StopProject,
+        restart_policy: Default::default(),
     }
 }
 
 fn sleep_spec(id: &str) -> ParticipantSpec {
     ParticipantSpec {
+        key: phoxal_cli_core::session::ProcessKey::project(id),
         id: id.to_string(),
         kind: ParticipantKind::Service,
         executable: PathBuf::from("/bin/sh"),
@@ -87,7 +96,102 @@ fn sleep_spec(id: &str) -> ParticipantSpec {
         process_group: false,
         note: None,
         bus_participant: true,
+        readiness: ParticipantSpec::exact_liveliness_template(
+            phoxal_cli_core::session::RobotKey::new("test", "robot"),
+            id,
+        ),
+        startup_requirement: phoxal_cli_core::session::StartupRequirement::Required,
+        runtime_failure: phoxal_cli_core::session::RuntimeFailurePolicy::StopProject,
+        restart_policy: Default::default(),
     }
+}
+
+fn delayed_failure_spec(
+    id: &str,
+    policy: phoxal_cli_core::session::RuntimeFailurePolicy,
+) -> ParticipantSpec {
+    ParticipantSpec {
+        executable: PathBuf::from("/bin/sh"),
+        args: vec!["-c".to_string(), "sleep 0.2; kill -9 $$".to_string()],
+        bus_participant: false,
+        readiness: phoxal_cli_core::session::ReadinessPolicy::ProcessSpawned,
+        runtime_failure: policy,
+        restart_policy: RestartPolicy {
+            restart_delay: Duration::from_millis(1),
+            start_limit_interval: Duration::from_secs(60),
+            start_limit_burst: 1,
+        },
+        ..spec(id)
+    }
+}
+
+#[tokio::test]
+async fn post_ready_stop_project_failure_terminates_the_project() -> Result<()> {
+    let board = BoardBackend::new();
+    let token = tokio_util::sync::CancellationToken::new();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        supervise_until_shutdown(
+            vec![SupervisionStage::new(
+                "graph",
+                vec![delayed_failure_spec(
+                    "mission",
+                    phoxal_cli_core::session::RuntimeFailurePolicy::StopProject,
+                )],
+                WaitBudget::Bounded(Duration::from_secs(2)),
+            )],
+            board.clone(),
+            SupervisorOptions {
+                token,
+                emits_running_on_startup_complete: true,
+                ..SupervisorOptions::default()
+            },
+        ),
+    )
+    .await
+    .expect("StopProject must terminate promptly")
+    .expect_err("permanent failure must stop the project");
+    assert!(result.to_string().contains("StopProject"));
+    assert_eq!(
+        board.supervisor_snapshot().lifecycle,
+        phoxal_cli_core::session::ProjectLifecycle::Failed
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn post_ready_keep_degraded_failure_keeps_the_project_active() -> Result<()> {
+    let board = BoardBackend::new();
+    let token = tokio_util::sync::CancellationToken::new();
+    let supervise = tokio::spawn(supervise_until_shutdown(
+        vec![SupervisionStage::new(
+            "infrastructure",
+            vec![delayed_failure_spec(
+                "observer",
+                phoxal_cli_core::session::RuntimeFailurePolicy::KeepProjectDegraded,
+            )],
+            WaitBudget::Bounded(Duration::from_secs(2)),
+        )],
+        board.clone(),
+        SupervisorOptions {
+            token: token.clone(),
+            emits_running_on_startup_complete: true,
+            ..SupervisorOptions::default()
+        },
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while board.supervisor_snapshot().lifecycle
+            != phoxal_cli_core::session::ProjectLifecycle::Degraded
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("KeepProjectDegraded must apply promptly");
+    assert!(!supervise.is_finished());
+    token.cancel();
+    supervise.await.expect("supervisor task panicked")?;
+    Ok(())
 }
 
 #[test]
@@ -175,10 +279,12 @@ async fn recovery_epoch_resets_reconcilers_and_preserves_webots_ownership() {
 
     let epoch = board.begin_recovery_epoch(
         &[(
-            "webots".to_string(),
+            phoxal_cli_core::session::ProcessKey::project("webots"),
             Some("CLI-managed Webots application".to_string()),
         )],
-        &["simulator-webots-controller-robot".to_string()],
+        &[phoxal_cli_core::session::ProcessKey::project(
+            "simulator-webots-controller-robot",
+        )],
     );
 
     assert_eq!(epoch, 1);
@@ -514,7 +620,7 @@ async fn swap_spawn_failure_is_participant_status_not_supervisor_error() -> Resu
 }
 
 #[tokio::test]
-async fn all_children_may_fail_without_ending_the_session() -> Result<()> {
+async fn optional_startup_failure_degrades_without_ending_the_session() -> Result<()> {
     let board = BoardBackend::new();
     board.upsert(ParticipantStatus::new(
         "flap",
@@ -522,16 +628,16 @@ async fn all_children_may_fail_without_ending_the_session() -> Result<()> {
         ParticipantState::Starting,
     ));
     let flappy = ParticipantSpec {
-        id: "flap".to_string(),
-        kind: ParticipantKind::Service,
         executable: PathBuf::from("/bin/sh"),
         args: vec!["-c".to_string(), "exit 7".to_string()],
-        cwd: None,
-        env: Vec::new(),
-        shutdown_grace: Duration::from_millis(10),
-        process_group: false,
-        note: None,
-        bus_participant: true,
+        startup_requirement: phoxal_cli_core::session::StartupRequirement::Optional,
+        runtime_failure: phoxal_cli_core::session::RuntimeFailurePolicy::KeepProjectDegraded,
+        restart_policy: RestartPolicy {
+            restart_delay: Duration::from_millis(1),
+            start_limit_interval: Duration::from_secs(60),
+            start_limit_burst: 1,
+        },
+        ..spec("flap")
     };
     let token = tokio_util::sync::CancellationToken::new();
     let supervise = tokio::spawn(supervise_until_shutdown(
@@ -542,12 +648,8 @@ async fn all_children_may_fail_without_ending_the_session() -> Result<()> {
         )],
         board.clone(),
         SupervisorOptions {
-            restart_policy: RestartPolicy {
-                restart_delay: Duration::from_millis(1),
-                start_limit_interval: Duration::from_secs(60),
-                start_limit_burst: 1,
-            },
             token: token.clone(),
+            emits_running_on_startup_complete: true,
             ..SupervisorOptions::default()
         },
     ));
@@ -569,7 +671,11 @@ async fn all_children_may_fail_without_ending_the_session() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(650)).await;
     assert!(
         !supervise.is_finished(),
-        "even an all-failed graph must wait for the user's stop action"
+        "an optional failure must leave the degraded project active"
+    );
+    assert_eq!(
+        board.supervisor_snapshot().lifecycle,
+        phoxal_cli_core::session::ProjectLifecycle::Degraded
     );
 
     token.cancel();
@@ -662,16 +768,14 @@ async fn local_log_capture_works_without_bus() -> Result<()> {
         ParticipantState::Starting,
     ));
     let specs = vec![ParticipantSpec {
-        id: "logger".to_string(),
-        kind: ParticipantKind::Service,
         executable: PathBuf::from("/bin/sh"),
         args: vec!["-c".to_string(), "echo local-line; exit 2".to_string()],
-        cwd: None,
-        env: Vec::new(),
-        shutdown_grace: Duration::from_millis(10),
-        process_group: false,
-        note: None,
-        bus_participant: true,
+        restart_policy: RestartPolicy {
+            restart_delay: Duration::from_millis(1),
+            start_limit_interval: Duration::from_secs(1),
+            start_limit_burst: 1,
+        },
+        ..spec("logger")
     }];
     let token = tokio_util::sync::CancellationToken::new();
     let supervise = tokio::spawn(supervise_until_shutdown(
@@ -682,11 +786,6 @@ async fn local_log_capture_works_without_bus() -> Result<()> {
         )],
         board.clone(),
         SupervisorOptions {
-            restart_policy: RestartPolicy {
-                restart_delay: Duration::from_millis(1),
-                start_limit_interval: Duration::from_secs(1),
-                start_limit_burst: 1,
-            },
             action_rx: None,
             requested_stop: None,
             token: token.clone(),
@@ -711,9 +810,11 @@ async fn local_log_capture_works_without_bus() -> Result<()> {
             .any(|line| line.contains("stdout: local-line")),
         "{status:?}"
     );
-    token.cancel();
-    let outcome = supervise.await.expect("supervisor task panicked")?;
-    assert_eq!(outcome.failed_participants, vec!["logger"]);
+    let error = supervise
+        .await
+        .expect("supervisor task panicked")
+        .expect_err("required pre-readiness crash must fail startup");
+    assert!(error.to_string().contains("stage"));
     Ok(())
 }
 
@@ -841,15 +942,11 @@ fn presence_loss_is_observational_and_can_recover() {
     let snapshot = board.snapshot();
     assert_eq!(
         snapshot.participants[id].state,
-        ParticipantState::Degraded,
+        ParticipantState::Ready,
         "losing presence is observable, not process failure authority"
     );
-    assert!(
-        snapshot.participants[id]
-            .note
-            .as_deref()
-            .is_some_and(|note| note.contains("process lifecycle is unchanged"))
-    );
+    assert_eq!(snapshot.participants[id].present, Some(false));
+    assert!(snapshot.participants[id].note.is_none());
 
     board.record_presence(id, true);
     let snapshot = board.snapshot();
@@ -892,7 +989,7 @@ fn lost_before_first_appearance_keeps_starting_state() {
 }
 
 #[tokio::test]
-async fn respawn_preserves_continuous_stable_key_presence() -> Result<()> {
+async fn respawn_requires_the_new_exact_incarnation_despite_stable_presence() -> Result<()> {
     let board = BoardBackend::new();
     board.upsert(ParticipantStatus::new(
         "mission",
@@ -900,16 +997,72 @@ async fn respawn_preserves_continuous_stable_key_presence() -> Result<()> {
         ParticipantState::Starting,
     ));
     let mut participant = RunningParticipant::spawn(sleep_spec("mission"), &board).await?;
-    board.record_presence("mission", true);
+    let first_incarnation = board.supervisor_snapshot().processes
+        [&phoxal_cli_core::session::ProcessKey::project("mission")]
+        .status
+        .incarnation
+        .expect("the first spawn mints an incarnation");
+    let robot = phoxal_cli_core::session::RobotKey::new("test", "robot");
+    board.record_instance_presence(
+        phoxal_cli_core::session::ParticipantInstanceKey {
+            robot: robot.clone(),
+            participant: "mission".to_string(),
+            incarnation: first_incarnation,
+        },
+        true,
+    );
+    assert_eq!(
+        board.snapshot().participants["mission"].state,
+        ParticipantState::Ready
+    );
 
-    // Respawn (as `poll` does after a crash, and `swap`/`resume` do too).
-    participant.spawn_child(&board).await?;
+    participant
+        .child
+        .as_mut()
+        .expect("spawned child")
+        .start_kill()?;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let restart_policy = RestartPolicy {
+        restart_delay: Duration::from_millis(1),
+        start_limit_interval: Duration::from_secs(60),
+        start_limit_burst: 3,
+    };
+    participant.poll(&board, &restart_policy).await?;
+    assert_eq!(
+        board.supervisor_snapshot().processes
+            [&phoxal_cli_core::session::ProcessKey::project("mission")]
+            .status
+            .incarnation,
+        Some(first_incarnation),
+        "the failed row keeps its incarnation until replacement spawn"
+    );
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    participant.poll(&board, &restart_policy).await?;
+    let second_incarnation = board.supervisor_snapshot().processes
+        [&phoxal_cli_core::session::ProcessKey::project("mission")]
+        .status
+        .incarnation
+        .expect("the replacement spawn mints an incarnation");
+    assert_ne!(first_incarnation, second_incarnation);
 
     let snapshot = board.snapshot();
     assert_eq!(
         snapshot.participants["mission"].state,
+        ParticipantState::Starting,
+        "a stale stable-key holder must not satisfy the replacement incarnation"
+    );
+    board.record_instance_presence(
+        phoxal_cli_core::session::ParticipantInstanceKey {
+            robot,
+            participant: "mission".to_string(),
+            incarnation: second_incarnation,
+        },
+        true,
+    );
+    assert_eq!(
+        board.snapshot().participants["mission"].state,
         ParticipantState::Ready,
-        "continuous stable-key presence must not wait for a duplicate Alive event"
+        "only the replacement incarnation may satisfy readiness"
     );
 
     participant.stop_current(&board).await?;
@@ -1165,19 +1318,18 @@ async fn restart_still_happens_while_a_stage_readiness_wait_is_pending() -> Resu
         ParticipantState::Starting,
     ));
     let flappy = ParticipantSpec {
-        id: "flap".to_string(),
-        kind: ParticipantKind::Service,
         executable: PathBuf::from("/bin/sh"),
         args: vec!["-c".to_string(), "exit 7".to_string()],
-        cwd: None,
-        env: Vec::new(),
-        shutdown_grace: Duration::from_millis(10),
-        process_group: false,
-        note: None,
         // Never appears in Liveliness, so this stage's own wait never completes -
         // the whole observation window below runs with `pending_stage`
         // `Some`, proving restart still happens during that wait.
         bus_participant: true,
+        restart_policy: RestartPolicy {
+            restart_delay: Duration::from_millis(20),
+            start_limit_interval: Duration::from_secs(60),
+            start_limit_burst: 1000,
+        },
+        ..spec("flap")
     };
     let stages = vec![SupervisionStage::new(
         "stage-one",
@@ -1189,11 +1341,6 @@ async fn restart_still_happens_while_a_stage_readiness_wait_is_pending() -> Resu
         stages,
         board.clone(),
         SupervisorOptions {
-            restart_policy: RestartPolicy {
-                restart_delay: Duration::from_millis(20),
-                start_limit_interval: Duration::from_secs(60),
-                start_limit_burst: 1000,
-            },
             token: token.clone(),
             ..SupervisorOptions::default()
         },
@@ -1278,21 +1425,31 @@ async fn cancellation_during_a_stage_wait_still_tears_down_promptly() -> Result<
     Ok(())
 }
 
-/// A stage that never reaches readiness marks its stalled participants but
-/// still leaves the session running until the user stops it.
+/// A required stage that never reaches readiness fails the project.
 #[tokio::test]
 async fn stalled_stage_times_out_and_marks_missing_participants_failed() -> Result<()> {
     let board = BoardBackend::new();
-    board.upsert(ParticipantStatus::new(
-        "one",
-        ParticipantKind::Service,
-        ParticipantState::Starting,
-    ));
-    let stages = vec![SupervisionStage::new(
-        "stage-one",
-        vec![sleep_spec("one")],
-        WaitBudget::Bounded(Duration::from_millis(150)),
-    )];
+    for id in ["one", "later"] {
+        board.upsert(ParticipantStatus::new(
+            id,
+            ParticipantKind::Service,
+            ParticipantState::Starting,
+        ));
+    }
+    let mut later = sleep_spec("later");
+    later.bus_participant = false;
+    let stages = vec![
+        SupervisionStage::new(
+            "stage-one",
+            vec![sleep_spec("one")],
+            WaitBudget::Bounded(Duration::from_millis(150)),
+        ),
+        SupervisionStage::new(
+            "stage-two",
+            vec![later],
+            WaitBudget::Bounded(Duration::from_secs(2)),
+        ),
+    ];
     let token = tokio_util::sync::CancellationToken::new();
     let supervise = tokio::spawn(supervise_until_shutdown(
         stages,
@@ -1310,19 +1467,26 @@ async fn stalled_stage_times_out_and_marks_missing_participants_failed() -> Resu
     .await
     .expect("a stalled stage must be marked within its own timeout");
 
-    assert!(
-        !supervise.is_finished(),
-        "a stalled stage is status, not session termination authority"
-    );
     assert_eq!(board.snapshot().failed_participants(), vec!["one"]);
-    token.cancel();
-    let outcome = supervise.await.expect("supervisor task panicked")?;
-    assert_eq!(outcome.failed_participants, vec!["one"]);
+    let error = supervise
+        .await
+        .expect("supervisor task panicked")
+        .expect_err("required startup timeout must fail the project");
+    assert!(error.to_string().contains("stage-one"));
+    assert_eq!(
+        board.snapshot().participants["later"].pid,
+        None,
+        "a hung required process must block every later phase"
+    );
+    assert_eq!(
+        board.supervisor_snapshot().lifecycle,
+        phoxal_cli_core::session::ProjectLifecycle::Failed
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn failed_stage_does_not_block_later_stage_or_end_session() -> Result<()> {
+async fn failed_required_stage_blocks_later_stage_and_ends_failed() -> Result<()> {
     let board = BoardBackend::new();
     for id in ["broken", "later"] {
         board.upsert(ParticipantStatus::new(
@@ -1356,26 +1520,55 @@ async fn failed_stage_does_not_block_later_stage_or_end_session() -> Result<()> 
         },
     ));
 
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let snapshot = board.snapshot();
-            if snapshot.participants["broken"].state == ParticipantState::Failed
-                && snapshot.participants["later"].state == ParticipantState::Ready
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the later stage must start after the earlier stage fails");
-    assert!(
-        !supervise.is_finished(),
-        "stage failure is visible status and the session still waits for user stop"
+    let error = tokio::time::timeout(Duration::from_secs(5), supervise)
+        .await
+        .expect("required failure must terminate promptly")
+        .expect("supervisor task panicked")
+        .expect_err("required failure must end the project");
+    assert!(error.to_string().contains("broken-stage"));
+    let later = &board.snapshot().participants["later"];
+    assert_eq!(later.state, ParticipantState::Starting);
+    assert_eq!(later.pid, None, "the later stage must never spawn");
+    assert_eq!(
+        board.supervisor_snapshot().lifecycle,
+        phoxal_cli_core::session::ProjectLifecycle::Failed
     );
+    Ok(())
+}
 
-    token.cancel();
-    let outcome = supervise.await.expect("supervisor task panicked")?;
-    assert_eq!(outcome.failed_participants, vec!["broken"]);
+#[tokio::test]
+async fn required_preparation_failure_blocks_every_stage_before_spawn() -> Result<()> {
+    let board = BoardBackend::new();
+    board.upsert(ParticipantStatus::new(
+        "missing-driver",
+        ParticipantKind::Driver,
+        ParticipantState::Failed,
+    ));
+    board.upsert(ParticipantStatus::new(
+        "later",
+        ParticipantKind::Service,
+        ParticipantState::Starting,
+    ));
+    let mut later = sleep_spec("later");
+    later.bus_participant = false;
+
+    let error = supervise_until_shutdown(
+        vec![SupervisionStage::new(
+            "later-stage",
+            vec![later],
+            WaitBudget::Bounded(Duration::from_secs(2)),
+        )],
+        board.clone(),
+        SupervisorOptions::default(),
+    )
+    .await
+    .expect_err("a required preparation failure must stop before spawning");
+
+    assert!(error.to_string().contains("missing-driver"));
+    assert_eq!(board.snapshot().participants["later"].pid, None);
+    assert_eq!(
+        board.supervisor_snapshot().lifecycle,
+        phoxal_cli_core::session::ProjectLifecycle::Failed
+    );
     Ok(())
 }

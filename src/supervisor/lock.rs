@@ -1,23 +1,42 @@
-//! Stable advisory-lock authority for one foreground supervisor per user.
+//! Stable project-operation authority for execution and artifact mutation.
 
 use anyhow::{Context, Result, bail};
-use phoxal_cli_core::session::SessionMode;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SupervisorIdentity {
+pub struct ProjectLockIdentity {
     pub project: PathBuf,
     pub entry: PathBuf,
-    pub mode: String,
+    pub operation: ProjectOperation,
     pub pid: u32,
 }
 
-impl SupervisorIdentity {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectOperation {
+    Run,
+    Update,
+    Install,
+    DeployMaterialization,
+}
+
+impl std::fmt::Display for ProjectOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Run => "run",
+            Self::Update => "update",
+            Self::Install => "install",
+            Self::DeployMaterialization => "deploy_materialization",
+        })
+    }
+}
+
+impl ProjectLockIdentity {
     #[must_use]
-    pub fn resolve(project: &Path, mode: SessionMode) -> Self {
+    pub fn resolve(project: &Path, operation: ProjectOperation) -> Self {
         let project = best_effort_absolute(project);
         let entry = phoxal_cli_core::project::resolver::discover_robot_yaml(&project)
             .map(|entry| best_effort_absolute(&entry))
@@ -25,7 +44,7 @@ impl SupervisorIdentity {
         Self {
             project,
             entry,
-            mode: mode.to_string(),
+            operation,
             pid: std::process::id(),
         }
     }
@@ -44,18 +63,19 @@ fn best_effort_absolute(path: &Path) -> PathBuf {
 }
 
 #[derive(Debug)]
-pub struct SupervisorLock {
+pub struct ProjectLock {
     file: File,
     #[cfg(test)]
     path: PathBuf,
 }
 
-impl SupervisorLock {
-    pub fn acquire(identity: SupervisorIdentity) -> Result<Self> {
-        Self::acquire_path(&crate::host_paths::supervisor_lock_path()?, identity)
+impl ProjectLock {
+    pub fn acquire(identity: ProjectLockIdentity) -> Result<Self> {
+        let path = identity.project.join(".phoxal/project.lock");
+        Self::acquire_path(&path, identity)
     }
 
-    pub fn acquire_path(path: &Path, identity: SupervisorIdentity) -> Result<Self> {
+    pub fn acquire_path(path: &Path, identity: ProjectLockIdentity) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -66,13 +86,13 @@ impl SupervisorLock {
             .create(true)
             .truncate(false)
             .open(path)
-            .with_context(|| format!("failed to open supervisor lock {}", path.display()))?;
+            .with_context(|| format!("failed to open project-operation lock {}", path.display()))?;
         if let Err(error) = crate::native_artifacts::try_advisory_lock(&file, true) {
             let active = read_identity(&mut file).ok();
             if let Some(active) = active {
                 bail!(
-                    "another phoxal-cli supervisor is active: mode={}, project={}, entry={}, pid={} (lock: {}; {error})",
-                    active.mode,
+                    "another exclusive phoxal project operation is active: operation={}, project={}, entry={}, pid={} (lock: {}; {error})",
+                    active.operation,
                     active.project.display(),
                     active.entry.display(),
                     active.pid,
@@ -80,12 +100,12 @@ impl SupervisorLock {
                 );
             }
             return Err(error).with_context(|| {
-                format!("another phoxal-cli supervisor holds {}", path.display())
+                format!("another phoxal project operation holds {}", path.display())
             });
         }
         write_identity(&mut file, &identity).with_context(|| {
             format!(
-                "failed to write supervisor owner metadata to {}",
+                "failed to write project-operation owner metadata to {}",
                 path.display()
             )
         })?;
@@ -102,7 +122,7 @@ impl SupervisorLock {
     }
 }
 
-impl Drop for SupervisorLock {
+impl Drop for ProjectLock {
     fn drop(&mut self) {
         // The inode is intentionally permanent. Unlinking a locked file lets a
         // competing process create and lock a different inode at the same path.
@@ -110,7 +130,7 @@ impl Drop for SupervisorLock {
     }
 }
 
-fn write_identity(file: &mut File, identity: &SupervisorIdentity) -> Result<()> {
+fn write_identity(file: &mut File, identity: &ProjectLockIdentity) -> Result<()> {
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
     serde_json::to_writer(&mut *file, identity)?;
@@ -119,11 +139,11 @@ fn write_identity(file: &mut File, identity: &SupervisorIdentity) -> Result<()> 
     Ok(())
 }
 
-fn read_identity(file: &mut File) -> Result<SupervisorIdentity> {
+fn read_identity(file: &mut File) -> Result<ProjectLockIdentity> {
     file.seek(SeekFrom::Start(0))?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
-    serde_json::from_str(&contents).context("invalid supervisor lock metadata")
+    serde_json::from_str(&contents).context("invalid project-operation lock metadata")
 }
 
 #[cfg(test)]
@@ -134,11 +154,15 @@ mod tests {
 
     const HELPER_ENV: &str = "PHOXAL_SUPERVISOR_LOCK_HELPER";
 
-    fn identity(root: &Path, mode: &str, pid: u32) -> SupervisorIdentity {
-        SupervisorIdentity {
+    fn identity(root: &Path, mode: &str, pid: u32) -> ProjectLockIdentity {
+        ProjectLockIdentity {
             project: root.join("project"),
             entry: root.join("project/robot.yaml"),
-            mode: mode.to_string(),
+            operation: if mode == "stale" {
+                ProjectOperation::Update
+            } else {
+                ProjectOperation::Run
+            },
             pid,
         }
     }
@@ -149,7 +173,7 @@ mod tests {
             return;
         };
         let path = PathBuf::from(path);
-        let lock = SupervisorLock::acquire_path(&path, identity(&path, "run", std::process::id()))
+        let lock = ProjectLock::acquire_path(&path, identity(&path, "run", std::process::id()))
             .expect("helper must acquire lock");
         println!("LOCKED");
         std::io::stdout().flush().expect("flush helper readiness");
@@ -165,7 +189,7 @@ mod tests {
             &path,
             serde_json::to_vec(&identity(temp.path(), "stale", 999_999))?,
         )?;
-        let lock = SupervisorLock::acquire_path(&path, identity(temp.path(), "run", 42))?;
+        let lock = ProjectLock::acquire_path(&path, identity(temp.path(), "run", 42))?;
         assert_eq!(lock.path(), path);
         assert!(path.is_file());
         drop(lock);
@@ -173,8 +197,8 @@ mod tests {
             path.is_file(),
             "dropping the owner must retain the stable inode"
         );
-        let stored: SupervisorIdentity = serde_json::from_slice(&fs::read(path)?)?;
-        assert_eq!(stored.mode, "run");
+        let stored: ProjectLockIdentity = serde_json::from_slice(&fs::read(path)?)?;
+        assert_eq!(stored.operation, ProjectOperation::Run);
         assert_eq!(stored.pid, 42);
         Ok(())
     }
@@ -183,20 +207,45 @@ mod tests {
     fn missing_diagnostic_entry_never_blocks_lock_authority() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let missing_project = temp.path().join("missing-project");
-        let identity = SupervisorIdentity::resolve(&missing_project, SessionMode::Run);
+        let identity = ProjectLockIdentity::resolve(&missing_project, ProjectOperation::Run);
         assert_eq!(identity.project, missing_project);
         assert_eq!(identity.entry, missing_project.join("robot.yaml"));
 
         let path = temp.path().join("supervisor.lock");
-        let lock = SupervisorLock::acquire_path(&path, identity.clone())?;
-        let stored: SupervisorIdentity = serde_json::from_slice(&fs::read(&path)?)?;
+        let lock = ProjectLock::acquire_path(&path, identity.clone())?;
+        let stored: ProjectLockIdentity = serde_json::from_slice(&fs::read(&path)?)?;
         assert_eq!(stored, identity);
         drop(lock);
         Ok(())
     }
 
     #[test]
-    fn process_death_releases_authority_and_metadata_is_diagnostic() -> Result<()> {
+    fn different_projects_have_independent_operation_authority() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let first_project = temp.path().join("first");
+        let second_project = temp.path().join("second");
+        fs::create_dir_all(&first_project)?;
+        fs::create_dir_all(&second_project)?;
+
+        let first = ProjectLock::acquire(ProjectLockIdentity::resolve(
+            &first_project,
+            ProjectOperation::Run,
+        ))?;
+        let second = ProjectLock::acquire(ProjectLockIdentity::resolve(
+            &second_project,
+            ProjectOperation::Update,
+        ))?;
+
+        assert!(first_project.join(".phoxal/project.lock").is_file());
+        assert!(second_project.join(".phoxal/project.lock").is_file());
+        drop((first, second));
+        assert!(first_project.join(".phoxal/project.lock").is_file());
+        assert!(second_project.join(".phoxal/project.lock").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn sigkill_releases_authority_and_metadata_is_diagnostic() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("supervisor.lock");
         let mut child = Command::new(std::env::current_exe()?)
@@ -226,19 +275,19 @@ mod tests {
             "unexpected helper output: {output}"
         );
 
-        let error = SupervisorLock::acquire_path(
+        let error = ProjectLock::acquire_path(
             &path,
             identity(temp.path(), "simulation", std::process::id()),
         )
         .expect_err("a second process must not acquire the advisory lock");
         let message = format!("{error:#}");
-        assert!(message.contains("mode=run"), "{message}");
+        assert!(message.contains("operation=run"), "{message}");
         assert!(message.contains("project="), "{message}");
         assert!(message.contains("entry="), "{message}");
 
         child.kill()?;
         child.wait()?;
-        let replacement = SupervisorLock::acquire_path(
+        let replacement = ProjectLock::acquire_path(
             &path,
             identity(temp.path(), "simulation", std::process::id()),
         )?;

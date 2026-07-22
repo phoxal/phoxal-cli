@@ -8,13 +8,13 @@ use super::{
 use crate::AppContext;
 use crate::supervisor::BoardBackend;
 use crate::supervisor::ParticipantSpec;
+use crate::supervisor::ProjectLock;
+use crate::supervisor::ProjectLockIdentity;
+use crate::supervisor::ProjectOperation;
 use crate::supervisor::SupervisionStage;
-use crate::supervisor::SupervisorIdentity;
-use crate::supervisor::SupervisorLock;
 use crate::supervisor::SupervisorOptions;
 use crate::supervisor::start_bus_log_subscriber;
 use crate::supervisor::start_liveliness_observer;
-use crate::supervisor::start_robot_description_server;
 use anyhow::Result;
 use anyhow::bail;
 use clap::Args;
@@ -138,11 +138,8 @@ impl Run {
         let watch_enabled = options.watch;
         let watch_options = options.clone();
 
-        let identity = SupervisorIdentity::resolve(
-            app.project.root(),
-            phoxal_cli_core::session::SessionMode::Run,
-        );
-        let _lock = SupervisorLock::acquire(identity)?;
+        let identity = ProjectLockIdentity::resolve(app.project.root(), ProjectOperation::Run);
+        let _lock = ProjectLock::acquire(identity)?;
         let project_root = app.project.root().to_path_buf();
         let ui = app.ui;
 
@@ -232,6 +229,12 @@ async fn live_run_setup(
         start_infrastructure_router(&prepared.ctx.resolved, &prepared.ctx.project_root, &ui)
             .await?;
     apply_session_connect(&mut prepared.plan, &mut prepared.specs, &connect);
+    prepared.board.set_router_status(format!("ready:{connect}"));
+    prepared.board.set_state(
+        phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
+        crate::supervisor::ParticipantState::Ready,
+        None,
+    );
     ui.info(format!(
         "launch plan resolved: {} robot(s), {} site tool(s)",
         prepared.plan.robots.len(),
@@ -255,18 +258,6 @@ async fn live_run_setup(
             })
             .collect::<Vec<_>>(),
     );
-    let description = phoxal_cli_core::supervisor_api::v0::RobotDescription {
-        robot: prepared.ctx.resolved.robot.clone(),
-        framework_train: prepared.ctx.resolved.train.clone(),
-    };
-    background_tasks.extend(prepared.robot_targets.iter().map(|target| {
-        start_robot_description_server(
-            target.scope.namespace.clone(),
-            target.scope.robot_id.clone(),
-            connect.clone(),
-            description.clone(),
-        )
-    }));
     background_tasks.extend(prepared.robot_targets.iter().map(|target| {
         start_liveliness_observer(
             target.scope.namespace.clone(),

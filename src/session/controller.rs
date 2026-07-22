@@ -472,6 +472,7 @@ impl SessionController {
             board.set_log_sink(tui.log_sender());
             tui.set_runtime_store(runtime_store);
         }
+        let mut supervisor_updates = board.subscribe();
         let mut ticker = tokio::time::interval(Duration::from_millis(100));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut cancel_requested = false;
@@ -492,6 +493,11 @@ impl SessionController {
                 }
                 Some(event) = self.events_rx.recv() => {
                     self.apply_event(event);
+                    if let Err(error) = self.redraw_live(&board, &telemetry) {
+                        break SupervisionEnd::Failed(error);
+                    }
+                }
+                Ok(()) = supervisor_updates.changed() => {
                     if let Err(error) = self.redraw_live(&board, &telemetry) {
                         break SupervisionEnd::Failed(error);
                     }
@@ -621,15 +627,17 @@ impl SessionController {
             }
             DisplayAction::Restart(id) => {
                 let failure = if let Some(tx) = &self.restart_tx {
-                    let action = SupervisorAction::Restart { id: id.clone() };
-                    match tx.try_send(action) {
-                        Ok(()) => None,
-                        Err(mpsc::error::TrySendError::Closed(_)) => Some(format!(
-                            "restart request for {id} was not sent because supervision ended"
-                        )),
-                        Err(mpsc::error::TrySendError::Full(_)) => Some(format!(
-                            "restart request for {id} was not sent because the supervisor is busy; try again"
-                        )),
+                    match id.parse() {
+                        Ok(key) => match tx.try_send(SupervisorAction::Restart { key }) {
+                            Ok(()) => None,
+                            Err(mpsc::error::TrySendError::Closed(_)) => Some(format!(
+                                "restart request for {id} was not sent because supervision ended"
+                            )),
+                            Err(mpsc::error::TrySendError::Full(_)) => Some(format!(
+                                "restart request for {id} was not sent because the supervisor is busy; try again"
+                            )),
+                        },
+                        Err(error) => Some(format!("invalid process key `{id}`: {error}")),
                     }
                 } else {
                     Some(format!(
@@ -675,31 +683,11 @@ impl SessionController {
         self.forward_to_renderer(&event);
     }
 
-    /// Apply one incoming event. `SessionChanged` is pre-validated by its
-    /// producer. `StagedStartupComplete` is the one observation the
-    /// controller reduces itself, through the state machine's transition to
-    /// `Running`.
+    /// Apply one incoming event. Lifecycle changes are derived and validated
+    /// by the supervisor state owner.
     fn apply_event(&mut self, event: SessionEvent) {
-        match event {
-            SessionEvent::StagedStartupComplete => {
-                self.apply_reduced_state(reduce_staged_startup_complete(self.state.clone()));
-            }
-            other => {
-                self.state = reduce_state(self.state.clone(), &other);
-                self.forward_to_renderer(&other);
-            }
-        }
-    }
-
-    /// Adopt `next` and forward a synthesized `SessionChanged` to the
-    /// renderer only if it actually differs from the current state - an
-    /// observation reduction rejected by `SessionState` returns the state
-    /// unchanged and must not spam the renderer with a no-op transition.
-    fn apply_reduced_state(&mut self, next: SessionState) {
-        if next != self.state {
-            self.state = next.clone();
-            self.forward_to_renderer(&SessionEvent::SessionChanged { state: next });
-        }
+        self.state = reduce_state(self.state.clone(), &event);
+        self.forward_to_renderer(&event);
     }
 
     /// Fold one event into the TUI startup model so the next redraw shows it.
@@ -866,15 +854,6 @@ fn reduce_state(current: SessionState, event: &SessionEvent) -> SessionState {
     }
 }
 
-/// Reduce `SessionEvent::StagedStartupComplete` into the next `SessionState`
-/// once every staged-startup stage has finished. It is a no-op for a session
-/// that is not in a state `to_running` accepts (for example, already
-/// `Stopping`).
-#[must_use]
-fn reduce_staged_startup_complete(current: SessionState) -> SessionState {
-    current.clone().to_running().unwrap_or(current)
-}
-
 #[cfg(test)]
 mod tests {
     use phoxal_cli_core::session::event::DiagnosticSource;
@@ -962,29 +941,6 @@ mod tests {
         assert!(
             outcome,
             "cancellation must win the race against a 60s wait, not time out"
-        );
-    }
-
-    /// `StagedStartupComplete` is the only path to `Running`; it must reach
-    /// `Running` from `Starting`, and must not resurrect a session already
-    /// on to `Stopping`.
-    #[test]
-    fn reduce_staged_startup_complete_reaches_running_but_never_past_stopping() {
-        let starting = SessionState::Preparing.start().unwrap();
-        assert_eq!(
-            reduce_staged_startup_complete(starting),
-            SessionState::Running
-        );
-
-        let stopping = SessionState::Preparing
-            .start()
-            .unwrap()
-            .to_stopping()
-            .unwrap();
-        assert_eq!(
-            reduce_staged_startup_complete(stopping.clone()),
-            stopping,
-            "staged-startup completing after Ctrl-C must not resurrect Running"
         );
     }
 
@@ -1082,7 +1038,9 @@ mod tests {
             // This is the exact supervisor shape: an awaited lifecycle send
             // while the bounded receiver is full.
             let _ = blocked_sender
-                .send(SessionEvent::StagedStartupComplete)
+                .send(SessionEvent::SessionChanged {
+                    state: SessionState::Running,
+                })
                 .await;
             Ok(SupervisorOutcome {
                 failed_participants: Vec::new(),

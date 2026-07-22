@@ -10,12 +10,19 @@ pub mod participant_kind;
 pub mod reconcile;
 pub mod state;
 pub mod stores;
+pub mod supervisor;
 pub mod telemetry;
 
 pub use board::{BoardSnapshot, ParticipantLaunchCommand, ParticipantState, ParticipantStatus};
 pub use log::{LogScope, LogSeverity, LogSource, RoutedLogLine, RoutedLogUpdate};
 pub use mode::SessionMode;
 pub use participant_kind::ParticipantKind;
+pub use supervisor::{
+    BoundedString, DesiredProcessState, ExitDescription, IncarnationId, ParticipantInstanceKey,
+    ProcessDescriptor, ProcessEntry, ProcessFailure, ProcessFailureKind, ProcessKey, ProcessScope,
+    ProcessState, ProjectLifecycle, ReadinessPolicy, RobotKey, RuntimeFailurePolicy,
+    StartupRequirement, SupervisorSnapshotV0,
+};
 pub use telemetry::{
     ClockObservation, ClockSample, DeviceDiskSample, DeviceSample, JoypadCommand, JoypadDevice,
     JoypadDeviceStatus, JoypadDevicesSample, RouterMetricsSample, RuntimeBufferKind,

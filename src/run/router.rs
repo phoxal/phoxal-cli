@@ -173,6 +173,12 @@ impl InfrastructureRouter {
 
             let epoch = board.begin_recovery_epoch(&spawned_rows, &wait_only_rows);
             let fault = format!("infrastructure router exited with {status}");
+            board.set_router_status(format!("restarting:{fault}"));
+            board.set_state(
+                phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
+                crate::supervisor::ParticipantState::Restarting,
+                Some(fault.clone()),
+            );
             tracing::warn!(recovery_epoch = epoch, %fault, "recreating the complete process graph");
             record_recovery_failure(&self.recovery_policy, &mut failures, &fault)?;
 
@@ -195,6 +201,12 @@ impl InfrastructureRouter {
                         self.process = process;
                         self.listeners = listeners;
                         board.enable_presence_for_recovery();
+                        board.set_router_status(format!("ready:{}", self.participant_endpoint));
+                        board.set_state(
+                            phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
+                            crate::supervisor::ParticipantState::Ready,
+                            None,
+                        );
                         tracing::info!(recovery_epoch = epoch, endpoint = %self.participant_endpoint, "infrastructure router recovered; recreating staged graph");
                         break;
                     }
@@ -233,12 +245,17 @@ fn record_recovery_failure(
     Ok(())
 }
 
-fn recovery_rows(stages: &[SupervisionStage]) -> (Vec<(String, Option<String>)>, Vec<String>) {
+fn recovery_rows(
+    stages: &[SupervisionStage],
+) -> (
+    Vec<(phoxal_cli_core::session::ProcessKey, Option<String>)>,
+    Vec<phoxal_cli_core::session::ProcessKey>,
+) {
     let mut spawned = Vec::new();
     let mut spawned_ids = BTreeSet::new();
     for spec in stages.iter().flat_map(|stage| &stage.specs) {
-        if spawned_ids.insert(spec.id.clone()) {
-            spawned.push((spec.id.clone(), spec.note.clone()));
+        if spawned_ids.insert(spec.key.clone()) {
+            spawned.push((spec.key.clone(), spec.note.clone()));
         }
     }
     let wait_only = stages
@@ -548,6 +565,7 @@ mod recovery_tests {
 
     fn webots_spec(executable: PathBuf) -> ParticipantSpec {
         ParticipantSpec {
+            key: phoxal_cli_core::session::ProcessKey::project("webots"),
             id: "webots".to_string(),
             kind: ParticipantKind::Tool,
             executable,
@@ -558,6 +576,10 @@ mod recovery_tests {
             process_group: true,
             note: Some("CLI-managed Webots application".to_string()),
             bus_participant: false,
+            readiness: phoxal_cli_core::session::ReadinessPolicy::ProcessSpawned,
+            startup_requirement: phoxal_cli_core::session::StartupRequirement::Required,
+            runtime_failure: phoxal_cli_core::session::RuntimeFailurePolicy::StopProject,
+            restart_policy: Default::default(),
         }
     }
 
@@ -615,7 +637,7 @@ mod recovery_tests {
                 vec![webots_spec(webots_binary)],
                 WaitBudget::Bounded(Duration::from_secs(5)),
             )
-            .with_extra_ready_ids([controller_id.to_string()]),
+            .with_extra_ready_ids([phoxal_cli_core::session::ProcessKey::project(controller_id)]),
         ];
         let token = tokio_util::sync::CancellationToken::new();
         let supervision = tokio::spawn(router.supervise(

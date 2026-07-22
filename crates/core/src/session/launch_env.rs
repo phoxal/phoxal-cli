@@ -248,6 +248,7 @@ mod tests {
     fn spawn_env_and_environment_file_carry_identical_variables() -> anyhow::Result<()> {
         let launch = ParticipantLaunch {
             participant_id: "mission".to_string(),
+            incarnation: 0,
             namespace: "dev".to_string(),
             robot_id: "robot_v1".to_string(),
             bus: BusProfile {
@@ -280,6 +281,7 @@ mod tests {
     fn tool_environment_is_clockless() -> anyhow::Result<()> {
         let launch = ParticipantLaunch {
             participant_id: "tool-log".to_string(),
+            incarnation: 0,
             namespace: "dev".to_string(),
             robot_id: "robot_v1".to_string(),
             bus: BusProfile {
@@ -312,6 +314,7 @@ mod tests {
     fn oversized_config_names_participant_size_and_limit() {
         let launch = ParticipantLaunch {
             participant_id: "huge_config".to_string(),
+            incarnation: 0,
             namespace: "dev".to_string(),
             robot_id: "robot_v1".to_string(),
             bus: BusProfile::default(),
@@ -338,6 +341,7 @@ mod tests {
     fn to_controller_args_emits_the_exact_flag_set() -> anyhow::Result<()> {
         let launch = ParticipantLaunch {
             participant_id: "simulator-webots-controller-robot_v1".to_string(),
+            incarnation: 0,
             namespace: "dev".to_string(),
             robot_id: "robot_v1".to_string(),
             bus: BusProfile {
@@ -418,6 +422,7 @@ mod tests {
     fn to_controller_args_omits_absent_optional_fields() -> anyhow::Result<()> {
         let launch = ParticipantLaunch {
             participant_id: "simulator-webots-supervisor".to_string(),
+            incarnation: 0,
             namespace: "dev".to_string(),
             robot_id: "robot_v1".to_string(),
             bus: BusProfile::default(),
@@ -448,6 +453,7 @@ mod tests {
     fn to_controller_args_rejects_oversized_config() {
         let launch = ParticipantLaunch {
             participant_id: "simulator-webots-supervisor".to_string(),
+            incarnation: 0,
             namespace: "dev".to_string(),
             robot_id: "robot_v1".to_string(),
             bus: BusProfile::default(),

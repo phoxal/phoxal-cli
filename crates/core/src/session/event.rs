@@ -160,11 +160,6 @@ pub enum SessionEvent {
     SessionChanged {
         state: super::state::SessionState,
     },
-    /// Every staged-startup stage has spawned and been observed ready with
-    /// nothing left pending. This is the sole transition to `Running` for
-    /// both host and simulation sessions; clock telemetry is observational
-    /// and never gates the session lifecycle.
-    StagedStartupComplete,
 }
 
 #[cfg(test)]

@@ -182,9 +182,9 @@ diagnostics rather than as missing static suite entries.
 ## Host layout
 
 ```text
-~/.phoxal/supervisor.lock           Stable per-user foreground-supervisor authority.
 ~/.phoxal/simulator.lock            Host-global simulation lease.
 
+<project>/.phoxal/project.lock      Permanent per-project operation authority for run, update, install, and deploy materialization.
 <project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/targets/<target>/  Unpacked target artifacts.
 <project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/assets/             Unpacked component assets.
 <project>/.phoxal/artifacts/<provider>/<package>/active                                 Atomic selected-version symlink.
@@ -197,10 +197,11 @@ diagnostics rather than as missing static suite entries.
 To reset all generated project state while no Phoxal command is active, delete
 `<project>/.phoxal/`. Deleting it during `run`, simulation, deploy, or update is
 unsupported because that bypasses the CLI's active locks. Do not delete
-`~/.phoxal/`: it contains host-global state such as the supervisor and
-simulator locks. The supervisor lock inode is intentionally permanent; while
-held, its JSON metadata identifies the canonical project, canonical robot
-entry, session mode, and owning PID for conflict diagnostics.
+`~/.phoxal/` while a simulation is active because it contains the host-global
+simulator lease. The project lock inode is intentionally permanent; its
+advisory lock is the authority, while its JSON metadata names the operation,
+project, selected entry, and owning PID for diagnostics only. Process death
+releases ownership without deleting or repairing the file.
 
 ## License
 

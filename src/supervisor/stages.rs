@@ -2,11 +2,12 @@
 
 use super::{
     BoardBackend, ParticipantSpec, ParticipantState, READER_JOIN_BUDGET, RunningParticipant,
-    SupervisorOptions, failed_expected_participants, missing_ready_participants,
+    SupervisorOptions,
 };
 use anyhow::Result;
 use anyhow::bail;
 use phoxal_cli_core::session::human;
+use phoxal_cli_core::session::{ProcessKey, ProcessState, ProjectLifecycle, StartupRequirement};
 use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
@@ -26,9 +27,10 @@ pub struct SupervisionStage {
     /// Defaults to every spawned spec's own id that is a bus participant
     /// (see [`Self::new`]); extend with [`Self::with_extra_ready_ids`] for a
     /// wait-only id that has no `ParticipantSpec` of its own.
-    pub ready_ids: Vec<String>,
+    pub ready_ids: Vec<ProcessKey>,
     /// Spawned processes whose terminal failure aborts this stage.
-    pub failure_ids: Vec<String>,
+    pub failure_ids: Vec<ProcessKey>,
+    pub optional_ids: Vec<ProcessKey>,
     pub timeout: crate::session::output::WaitBudget,
 }
 
@@ -60,21 +62,33 @@ impl SupervisionStage {
         let ready_ids = specs
             .iter()
             .filter(|spec| spec.bus_participant)
-            .map(|spec| spec.id.clone())
+            .map(|spec| spec.key.clone())
             .collect();
-        let failure_ids = specs.iter().map(|spec| spec.id.clone()).collect();
+        let failure_ids = specs
+            .iter()
+            .filter(|spec| spec.startup_requirement == StartupRequirement::Required)
+            .map(|spec| spec.key.clone())
+            .collect();
+        let optional_ids = specs
+            .iter()
+            .filter(|spec| spec.startup_requirement == StartupRequirement::Optional)
+            .map(|spec| spec.key.clone())
+            .collect();
         Self {
             label: label.into(),
             specs,
             ready_ids,
             failure_ids,
+            optional_ids,
             timeout,
         }
     }
 
     #[must_use]
-    pub fn with_extra_ready_ids(mut self, ids: impl IntoIterator<Item = String>) -> Self {
-        self.ready_ids.extend(ids);
+    pub fn with_extra_ready_ids(mut self, ids: impl IntoIterator<Item = ProcessKey>) -> Self {
+        let ids = ids.into_iter().collect::<Vec<_>>();
+        self.ready_ids.extend(ids.iter().cloned());
+        self.failure_ids.extend(ids);
         self
     }
 }
@@ -85,17 +99,17 @@ pub(crate) async fn spawn_stage(
     specs: Vec<ParticipantSpec>,
 ) {
     for spec in specs {
-        let id = spec.id.clone();
+        let key = spec.key.clone();
         // Normal planning pre-registers every expected participant before the
         // observer starts. Keep this authoritative, idempotent registration at
         // the stage boundary for direct stage tests and defensive consistency;
         // unsolicited Liveliness and logs still cannot create board entries.
-        board.register_planned(&id, spec.kind);
+        board.register_planned(&key, spec.kind, spec.startup_requirement);
         match RunningParticipant::spawn(spec, board).await {
             Ok(participant) => running.push(participant),
             Err(error) => {
                 board.set_state(
-                    &id,
+                    &key,
                     ParticipantState::Failed,
                     Some(format!("spawn failed: {error:#}")),
                 );
@@ -111,8 +125,9 @@ pub(crate) async fn spawn_stage(
 /// bookkeeping outgrew.
 pub(crate) struct PendingStage {
     pub(crate) label: String,
-    pub(crate) ready_ids: Vec<String>,
-    pub(crate) failure_ids: Vec<String>,
+    pub(crate) ready_ids: Vec<ProcessKey>,
+    pub(crate) failure_ids: Vec<ProcessKey>,
+    pub(crate) optional_ids: Vec<ProcessKey>,
     /// `None` for an unbounded wait (Product decision 6/finding D2) - there is
     /// no `Instant` to ever compare against.
     pub(crate) deadline: Option<Instant>,
@@ -156,6 +171,7 @@ pub(crate) async fn spawn_stage_emitting(
         specs,
         ready_ids,
         failure_ids,
+        optional_ids,
         timeout: stage_timeout,
     } = stage;
     if specs.is_empty() && ready_ids.is_empty() {
@@ -170,6 +186,7 @@ pub(crate) async fn spawn_stage_emitting(
         },
     )
     .await;
+    board.begin_phase(&label);
     spawn_stage(running, board, specs).await;
     if ready_ids.is_empty() {
         emit_event(
@@ -187,6 +204,7 @@ pub(crate) async fn spawn_stage_emitting(
         label,
         ready_ids,
         failure_ids,
+        optional_ids,
         deadline: stage_timeout.deadline_from(Instant::now()),
         started,
     })
@@ -215,19 +233,28 @@ pub(crate) async fn spawn_until_pending(
 /// `Failed` on the board (so `SupervisorOutcome::graph_healthy` reflects the
 /// stall) and returns `Err` naming exactly what never showed up.
 #[cfg(test)]
-pub async fn await_participants_ready(
+pub async fn await_participants_ready<T>(
     board: &BoardBackend,
-    stage_ids: &[String],
+    stage_ids: &[T],
     budget: crate::session::output::WaitBudget,
     poll_interval: Duration,
-) -> Result<()> {
-    await_stage_ready(board, stage_ids, stage_ids, budget, poll_interval).await
+) -> Result<()>
+where
+    T: Clone + Into<ProcessKey>,
+{
+    let stage_ids = stage_ids
+        .iter()
+        .cloned()
+        .map(Into::into)
+        .collect::<Vec<_>>();
+    await_stage_ready(board, &stage_ids, &stage_ids, &[], budget, poll_interval).await
 }
 
 pub(crate) async fn await_stage_ready(
     board: &BoardBackend,
-    ready_ids: &[String],
-    failure_ids: &[String],
+    ready_ids: &[ProcessKey],
+    failure_ids: &[ProcessKey],
+    optional_ids: &[ProcessKey],
     budget: crate::session::output::WaitBudget,
     poll_interval: Duration,
 ) -> Result<()> {
@@ -240,15 +267,26 @@ pub(crate) async fn await_stage_ready(
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
-        let snapshot = board.snapshot();
-        let failed = failed_expected_participants(&snapshot, failure_ids);
+        let failed = failure_ids
+            .iter()
+            .filter(|key| board.process_state(key) == Some(ProcessState::Failed))
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
         if !failed.is_empty() {
             bail!(
                 "stage ended unhealthy; failed participants: {}",
                 failed.join(", ")
             );
         }
-        let missing = missing_ready_participants(&snapshot, ready_ids);
+        let missing = ready_ids
+            .iter()
+            .filter(|key| {
+                let state = board.process_state(key);
+                state != Some(ProcessState::Ready)
+                    && !(optional_ids.contains(key) && state == Some(ProcessState::Failed))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         if missing.is_empty() {
             return Ok(());
         }
@@ -258,38 +296,56 @@ pub(crate) async fn await_stage_ready(
         // operator leaves the session open.
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             let waited = human::duration(started.elapsed());
-            for id in &missing {
+            for key in &missing {
                 board.set_state(
-                    id,
+                    key,
                     ParticipantState::Failed,
                     Some(format!(
                         "stage readiness timed out after {waited}: never observed ready"
                     )),
                 );
             }
+            if missing.iter().all(|key| optional_ids.contains(key)) {
+                return Ok(());
+            }
             bail!(
                 "stage readiness timed out after {waited}: participant(s) never observed ready: {}",
-                missing.join(", ")
+                missing
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
     }
 }
 
-/// Emit `SessionEvent::StagedStartupComplete` exactly when there is truly
-/// nothing left to spawn or wait for (finding B3) - `pending_stage.is_none()`
-/// after a stage-draining loop means the loop only stopped because the queue
-/// was genuinely empty, not because it parked on a stage awaiting readiness
-/// (a park always sets `pending_stage`). Only fires for a session that opted
-/// in via `emits_running_on_startup_complete`.
-pub(crate) async fn maybe_emit_staged_startup_complete(
+/// Publish the state owner's derived Ready/Degraded startup outcome exactly
+/// when no phase remains to spawn or await.
+pub(crate) async fn maybe_emit_startup_outcome(
+    board: &BoardBackend,
     options: &SupervisorOptions,
     events: Option<&mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>>,
     pending_stage: &Option<PendingStage>,
 ) {
     if options.emits_running_on_startup_complete && pending_stage.is_none() {
+        let snapshot = board.supervisor_snapshot();
+        let degraded = snapshot.processes.values().any(|entry| {
+            matches!(
+                entry.status.actual,
+                ProcessState::Failed | ProcessState::Degraded
+            )
+        });
+        board.set_lifecycle(if degraded {
+            ProjectLifecycle::Degraded
+        } else {
+            ProjectLifecycle::Ready
+        });
         emit_event(
             events,
-            phoxal_cli_core::session::event::SessionEvent::StagedStartupComplete,
+            phoxal_cli_core::session::event::SessionEvent::SessionChanged {
+                state: phoxal_cli_core::session::state::SessionState::Running,
+            },
         )
         .await;
     }

@@ -9,6 +9,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use phoxal_cli_core::session::human;
+use phoxal_cli_core::session::{ExitDescription, ProcessFailureKind, ReadinessPolicy};
 use std::collections::VecDeque;
 use std::fs;
 use std::process::Stdio;
@@ -91,10 +92,22 @@ impl RunningParticipant {
         // the stable participant identity to `Ready`; an identity that is
         // continuously present across replacement remains `Ready` below.
         board.set_state(
-            &self.spec.id,
+            &self.spec.key,
             ParticipantState::Starting,
             self.spec.note.clone(),
         );
+        if let ReadinessPolicy::ExactLiveliness(instance) = &mut self.spec.readiness {
+            let incarnation = board.mint_incarnation();
+            instance.incarnation = incarnation;
+            self.spec
+                .env
+                .retain(|(key, _)| key != phoxal::participant::launch::env::INCARNATION);
+            self.spec.env.push((
+                phoxal::participant::launch::env::INCARNATION.to_string(),
+                incarnation.to_string(),
+            ));
+            board.set_incarnation(&self.spec.key, incarnation);
+        }
         let mut command = Command::new(&self.spec.executable);
         command.args(&self.spec.args);
         #[cfg(unix)]
@@ -121,14 +134,14 @@ impl RunningParticipant {
             .ok()
             .filter(|metadata| metadata.is_file())
             .map(|metadata| metadata.len());
-        board.set_process_details(&self.spec.id, pid, artifact_size_bytes);
+        board.set_process_details(&self.spec.key, pid, artifact_size_bytes);
         let pid = pid.unwrap_or_default();
-        board.append_log(&self.spec.id, format!("supervisor: spawned pid {pid}"));
-        board.set_launch_command(&self.spec.id, self.spec.launch_command());
+        board.append_log(&self.spec.key, format!("supervisor: spawned pid {pid}"));
+        board.set_launch_command_for(&self.spec.key, self.spec.launch_command());
         if let Some(stdout) = child.stdout.take() {
             self.stdout_task = Some(spawn_output_reader(
                 board.clone(),
-                self.spec.id.clone(),
+                self.spec.key.clone(),
                 "stdout",
                 stdout,
             ));
@@ -136,13 +149,13 @@ impl RunningParticipant {
         if let Some(stderr) = child.stderr.take() {
             self.stderr_task = Some(spawn_output_reader(
                 board.clone(),
-                self.spec.id.clone(),
+                self.spec.key.clone(),
                 "stderr",
                 stderr,
             ));
         }
         self.child = Some(child);
-        if self.spec.bus_participant {
+        if let ReadinessPolicy::ExactLiveliness(instance) = &self.spec.readiness {
             // OBSERVED readiness (not spawn-is-ready): a bus participant stays
             // `Starting` (set at the top of this function) until the
             // supervisor's history-enabled observer sees its Liveliness key -
@@ -154,9 +167,9 @@ impl RunningParticipant {
             // Zenoh reports continuous presence rather than another `Alive`;
             // preserve that known binary state instead of inventing an
             // incarnation signal or waiting for a duplicate event.
-            if board.is_present(&self.spec.id) {
+            if board.is_exact_present(instance) {
                 board.set_state(
-                    &self.spec.id,
+                    &self.spec.key,
                     ParticipantState::Ready,
                     self.spec.note.clone(),
                 );
@@ -166,7 +179,7 @@ impl RunningParticipant {
             // see `ParticipantSpec::bus_participant`) - readiness is
             // necessarily process-lifecycle only.
             board.set_state(
-                &self.spec.id,
+                &self.spec.key,
                 ParticipantState::Ready,
                 self.spec.note.clone(),
             );
@@ -183,10 +196,10 @@ impl RunningParticipant {
         self.child = None;
         self.restart_at = None;
         self.failed = true;
-        board.set_process_details(&self.spec.id, None, None);
+        board.set_process_details(&self.spec.key, None, None);
         let detail = format!("{operation} failed: {error:#}");
-        board.append_log(&self.spec.id, format!("supervisor: {detail}"));
-        board.set_state(&self.spec.id, ParticipantState::Failed, Some(detail));
+        board.append_log(&self.spec.key, format!("supervisor: {detail}"));
+        board.record_failure(&self.spec.key, ProcessFailureKind::Spawn, None, detail);
     }
 
     pub(crate) async fn wait_for_requested_stop(
@@ -207,7 +220,7 @@ impl RunningParticipant {
         // descendant cleanup so forced-shutdown code can never signal a
         // recycled process-group id.
         self.child = None;
-        board.set_process_details(&self.spec.id, None, None);
+        board.set_process_details(&self.spec.key, None, None);
         let group_stop = async {
             if self.spec.process_group
                 && let Some(pid) = pid
@@ -223,13 +236,13 @@ impl RunningParticipant {
         self.failed = true;
         if requested_stop_exit_is_clean(&status, terminate_sent) {
             board.set_state(
-                &self.spec.id,
+                &self.spec.key,
                 ParticipantState::Stopped,
                 Some(format!("stopped after requested SIGTERM ({status})")),
             );
         } else {
             board.set_state(
-                &self.spec.id,
+                &self.spec.key,
                 ParticipantState::Failed,
                 Some(format!(
                     "exited independently during requested stop ({status})"
@@ -253,7 +266,7 @@ impl RunningParticipant {
             return Ok(());
         };
         board.append_log(
-            &self.spec.id,
+            &self.spec.key,
             "supervisor: SIGTERM grace expired; killing process group",
         );
         if let Err(error) = kill_child_process_group(&mut child).await {
@@ -264,7 +277,7 @@ impl RunningParticipant {
         join_reader(self.stderr_task.take()).await;
         self.failed = true;
         board.set_state(
-            &self.spec.id,
+            &self.spec.key,
             ParticipantState::Failed,
             Some("SIGTERM grace expired; SIGKILL fallback used".to_string()),
         );
@@ -301,7 +314,7 @@ impl RunningParticipant {
         };
 
         self.child = None;
-        board.set_process_details(&self.spec.id, None, None);
+        board.set_process_details(&self.spec.key, None, None);
         let group_stop = async {
             if self.spec.process_group
                 && let Some(pid) = pid
@@ -317,13 +330,11 @@ impl RunningParticipant {
 
         if status.success() {
             self.failed = true;
-            board.set_state(
-                &self.spec.id,
-                ParticipantState::Failed,
-                Some(
-                    "exited successfully; supervisor expected a long-running participant"
-                        .to_string(),
-                ),
+            board.record_failure(
+                &self.spec.key,
+                ProcessFailureKind::Exit,
+                Some(exit_description(&status)),
+                "exited successfully; supervisor expected a long-running participant",
             );
             return Ok(());
         }
@@ -334,22 +345,23 @@ impl RunningParticipant {
         self.failure_times.push_back(now);
         if self.failure_times.len() >= policy.start_limit_burst {
             self.failed = true;
-            board.set_state(
-                &self.spec.id,
-                ParticipantState::Failed,
-                Some(format!(
+            board.record_failure(
+                &self.spec.key,
+                ProcessFailureKind::Exit,
+                Some(exit_description(&status)),
+                format!(
                     "StartLimitBurst exhausted after {} failures in {}; last status {status}",
                     policy.start_limit_burst,
                     human::duration(policy.start_limit_interval)
-                )),
+                ),
             );
             return Ok(());
         }
 
         self.restart_count = self.restart_count.saturating_add(1);
-        board.set_restart_count(&self.spec.id, self.restart_count);
+        board.set_restart_count(&self.spec.key, self.restart_count);
         board.set_state(
-            &self.spec.id,
+            &self.spec.key,
             ParticipantState::Restarting,
             Some(format!(
                 "exited with {status}; restarting in {}",
@@ -367,14 +379,14 @@ impl RunningParticipant {
 
     pub(crate) async fn stop_current(&mut self, board: &BoardBackend) -> Result<()> {
         if let Some(mut child) = self.child.take() {
-            board.append_log(&self.spec.id, "supervisor: stopping");
+            board.append_log(&self.spec.key, "supervisor: stopping");
             stop_child(
                 &mut child,
                 self.spec.shutdown_grace,
                 self.spec.process_group,
             )
             .await?;
-            board.set_process_details(&self.spec.id, None, None);
+            board.set_process_details(&self.spec.key, None, None);
         }
         join_reader(self.stdout_task.take()).await;
         join_reader(self.stderr_task.take()).await;
@@ -399,7 +411,25 @@ impl RunningParticipant {
         // participant is `Starting`, or remains `Ready` when its stable
         // identity is continuously present across replacement; a process-only
         // participant is `Ready`. Attach the swap note without overriding it.
-        board.set_note(&self.spec.id, note);
+        board.set_note(&self.spec.key, note);
         Ok(())
+    }
+}
+
+fn exit_description(status: &std::process::ExitStatus) -> ExitDescription {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        ExitDescription {
+            code: status.code(),
+            signal: status.signal(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ExitDescription {
+            code: status.code(),
+            signal: None,
+        }
     }
 }

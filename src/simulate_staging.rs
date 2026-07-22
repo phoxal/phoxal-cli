@@ -457,6 +457,7 @@ robot:
     fn fixture_launch(participant_id: &str, robot_id: &str) -> ParticipantLaunch {
         ParticipantLaunch {
             participant_id: participant_id.to_string(),
+            incarnation: 0,
             namespace: "dev".to_string(),
             robot_id: robot_id.to_string(),
             bus: BusProfile {

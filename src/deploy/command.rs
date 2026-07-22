@@ -24,6 +24,16 @@ impl Deploy {
             health_timeout: Duration::from_secs(self.health_timeout_sec),
         };
         let project_root = app.project.root().to_path_buf();
+        let _project_lock = (!self.dry_run)
+            .then(|| {
+                crate::supervisor::ProjectLock::acquire(
+                    crate::supervisor::ProjectLockIdentity::resolve(
+                        &project_root,
+                        crate::supervisor::ProjectOperation::DeployMaterialization,
+                    ),
+                )
+            })
+            .transpose()?;
         let ui = app.ui;
         let result = tokio::task::spawn_blocking(move || run(&project_root, options, &ui))
             .await

@@ -25,6 +25,7 @@ use phoxal_cli_core::project::launch_plan::build_launch_plan;
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::discover_robot_yaml;
 use phoxal_cli_core::project::resolver::load_robot_with_extras;
+use phoxal_cli_core::session::{ProcessKey, StartupRequirement};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -134,6 +135,20 @@ pub(crate) fn prepare_run(
         &outcome.contract_surfaces,
     );
     let board = BoardBackend::new();
+    board.configure(
+        project_root.display().to_string(),
+        resolved.train.clone(),
+        "run",
+    );
+    board.upsert_process(
+        ProcessKey::project("infrastructure-router"),
+        crate::supervisor::ParticipantStatus::new(
+            "infrastructure-router",
+            phoxal_cli_core::session::ParticipantKind::Tool,
+            crate::supervisor::ParticipantState::Starting,
+        ),
+        StartupRequirement::Required,
+    );
     let mut specs = Vec::new();
 
     prepare_site_tools(&plan, &resolved, &runtime_root, &board, &mut specs, ui)?;

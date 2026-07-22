@@ -50,6 +50,12 @@ pub struct UpdateSummary {
 impl Update {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let project_root = app.project.root().to_path_buf();
+        let _project_lock = crate::supervisor::ProjectLock::acquire(
+            crate::supervisor::ProjectLockIdentity::resolve(
+                &project_root,
+                crate::supervisor::ProjectOperation::Update,
+            ),
+        )?;
         let suite_source = app.suite_source.clone();
         let dry_run = self.dry_run;
         let ui = app.ui;

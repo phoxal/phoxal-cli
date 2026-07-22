@@ -327,6 +327,7 @@ fn build_robot_launch(
             ),
             launch: ParticipantLaunch {
                 participant_id: format!("{}-{}", tool.name, input.resolved.robot.robot.id),
+                incarnation: 0,
                 namespace: input.resolved.robot.robot.namespace.clone(),
                 robot_id: input.resolved.robot.robot.id.clone(),
                 bus: BusProfile {
@@ -463,6 +464,7 @@ fn participant_launch(
     };
     ParticipantLaunch {
         participant_id: checked.participant_id.clone(),
+        incarnation: 0,
         namespace: input.resolved.robot.robot.namespace.clone(),
         robot_id: input.resolved.robot.robot.id.clone(),
         bus: BusProfile {

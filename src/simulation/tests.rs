@@ -6,7 +6,7 @@ use super::webots::webots_launch_args;
 use super::*;
 use crate::host_paths::test_support::ScratchPhoxalHome;
 use crate::resolver::host_target_triple;
-use crate::supervisor::SupervisorLock;
+use crate::supervisor::ProjectLock;
 use crate::webots_stage_root;
 use anyhow::Result;
 use phoxal::check as graph_check;
@@ -48,20 +48,20 @@ fn webots_launch_starts_realtime_batch_mode() {
 fn live_simulation_locks_remain_held_until_the_setup_owner_drops() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let simulator_lock = temp.path().join("simulator.lock");
-    let identity = crate::supervisor::SupervisorIdentity {
+    let identity = crate::supervisor::ProjectLockIdentity {
         project: temp.path().join("project"),
         entry: temp.path().join("project/robot.yaml"),
-        mode: "simulation".to_string(),
+        operation: crate::supervisor::ProjectOperation::Run,
         pid: std::process::id(),
     };
     let locks = LiveSimulationLocks::acquire(&simulator_lock, identity.clone())?;
     assert!(
-        SupervisorLock::acquire_path(&simulator_lock, identity.clone()).is_err(),
+        ProjectLock::acquire_path(&simulator_lock, identity.clone()).is_err(),
         "the simulator lock must remain held after setup returns"
     );
 
     drop(locks);
-    SupervisorLock::acquire_path(&simulator_lock, identity)?;
+    ProjectLock::acquire_path(&simulator_lock, identity)?;
     Ok(())
 }
 

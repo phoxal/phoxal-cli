@@ -1,6 +1,7 @@
 //! Captured child-output routing and reader task cleanup.
 
 use super::{BoardBackend, MAX_CAPTURED_LINE_BYTES};
+use phoxal_cli_core::session::ProcessKey;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::task::JoinHandle;
@@ -29,13 +30,14 @@ pub(crate) fn requested_stop_exit_is_clean(
 
 pub(crate) fn spawn_output_reader<R>(
     board: BoardBackend,
-    id: String,
+    id: impl Into<ProcessKey>,
     stream: &'static str,
     reader: R,
 ) -> JoinHandle<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
+    let id = id.into();
     tokio::spawn(async move {
         let mut reader = reader;
         let mut chunk = [0_u8; 4_096];
@@ -76,7 +78,7 @@ where
 
 pub(crate) fn route_captured_line(
     board: &BoardBackend,
-    id: &str,
+    id: &ProcessKey,
     stream: &str,
     bytes: &[u8],
     truncated: bool,

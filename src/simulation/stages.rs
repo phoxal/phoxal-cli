@@ -11,40 +11,41 @@ use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::SIMULATOR_SUPERVISOR_PROVIDER_ID;
 use phoxal_cli_core::project::launch_plan::SubstitutionRecord;
 use phoxal_cli_core::session::ParticipantKind;
+use phoxal_cli_core::session::{ProcessKey, RobotKey, StartupRequirement};
 
-/// Partition process specs and simulation-managed participants into ordered
-/// readiness stages. Clock samples remain independent telemetry.
+/// Build the same two ordered phases as a host run: all project
+/// infrastructure (router, tools, Webots, and its supervisor), then the robot
+/// graph (services and Webots-owned controllers). Clock samples remain
+/// independent telemetry.
 pub(crate) fn stages_for_simulate(
     specs: Vec<ParticipantSpec>,
     plan: &LaunchPlan,
     output: OutputContext,
 ) -> Vec<SupervisionStage> {
-    let mut tools = Vec::new();
-    let mut webots = Vec::new();
-    let mut services = Vec::new();
+    let mut infrastructure = Vec::new();
+    let mut graph = Vec::new();
     for spec in specs {
-        if spec.id == WEBOTS_SITE_ID {
-            webots.push(spec);
-        } else if spec.kind == ParticipantKind::Tool {
-            tools.push(spec);
+        if spec.id == WEBOTS_SITE_ID || spec.kind == ParticipantKind::Tool {
+            infrastructure.push(spec);
         } else {
-            services.push(spec);
+            graph.push(spec);
         }
     }
-    let (supervisor_ids, controller_ids): (Vec<String>, Vec<String>) =
+    let (supervisor_ids, controller_ids): (Vec<ProcessKey>, Vec<ProcessKey>) =
         simulation_managed_participant_ids(plan)
             .into_iter()
-            .partition(|id| id == SIMULATOR_SUPERVISOR_PROVIDER_ID);
+            .partition(|key| key.id == SIMULATOR_SUPERVISOR_PROVIDER_ID);
     // Product decision 6: no unconditional 60s teardown for an interactive
     // session - see `OutputContext::wait_budget`.
     let timeout = output.wait_budget(SIMULATE_READINESS_TIMEOUT);
     vec![
-        SupervisionStage::new("starting tools", tools, timeout),
-        SupervisionStage::new("starting Webots", webots, timeout),
-        SupervisionStage::new("waiting for the simulation supervisor", Vec::new(), timeout)
-            .with_extra_ready_ids(supervisor_ids),
-        SupervisionStage::new("starting services", services, timeout),
-        SupervisionStage::new("waiting for robot controllers", Vec::new(), timeout)
+        SupervisionStage::new("starting project infrastructure", infrastructure, timeout)
+            .with_extra_ready_ids(
+                [ProcessKey::project("infrastructure-router")]
+                    .into_iter()
+                    .chain(supervisor_ids),
+            ),
+        SupervisionStage::new("starting robot graph", graph, timeout)
             .with_extra_ready_ids(controller_ids),
     ]
 }
@@ -63,7 +64,14 @@ pub(crate) fn prepare_substitution_notes(plan: &LaunchPlan, board: &BoardBackend
             )
             .with_scope(scope.clone());
             status.note = Some(substitution_note(substitution));
-            board.upsert(status);
+            board.upsert_process(
+                ProcessKey::robot(
+                    RobotKey::new(&robot.namespace, &robot.id),
+                    &substitution.component_instance,
+                ),
+                status,
+                StartupRequirement::Optional,
+            );
         }
     }
 }

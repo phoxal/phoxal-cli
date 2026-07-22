@@ -8,6 +8,7 @@ use phoxal::check::ParticipantContractSurface;
 
 use crate::project::launch_plan::{LaunchOwnership, LaunchPlan, ParticipantExecution};
 use crate::session::board::{BoardSnapshot, ParticipantState};
+use crate::session::{ProcessKey, RobotKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuntimeOwnership {
@@ -109,7 +110,7 @@ impl RuntimeStore {
         let mut store = Self::new();
         for site in &plan.site {
             store.metadata.insert(
-                site.id.clone(),
+                ProcessKey::project(&site.id).to_string(),
                 RuntimeParticipantMetadata {
                     artifact_ref: Some(site.artifact_ref.clone()),
                     ..RuntimeParticipantMetadata::ownership(LaunchOwnership::CliManaged)
@@ -119,7 +120,11 @@ impl RuntimeStore {
         for robot in &plan.robots {
             for participant in &robot.participants {
                 store.metadata.insert(
-                    participant.launch.participant_id.clone(),
+                    ProcessKey::robot(
+                        RobotKey::new(&robot.namespace, &robot.id),
+                        &participant.launch.participant_id,
+                    )
+                    .to_string(),
                     RuntimeParticipantMetadata {
                         artifact_ref: artifact_ref_for_execution(&participant.execution),
                         origin: origin_for_execution(&participant.execution),
@@ -129,28 +134,40 @@ impl RuntimeStore {
             }
         }
         for surface in contract_surfaces {
-            let Some(entry) = store.metadata.get_mut(&surface.participant_id) else {
-                continue;
-            };
-            for contract in &surface.contracts {
-                let label = format!("{}::{}", contract.version, contract.contract);
-                match contract.role.as_str() {
-                    "publish" | "serve" => entry.output_contracts.push(label),
-                    "subscribe" | "ask" => entry.input_contracts.push(label),
-                    _ => {}
+            for (key, entry) in &mut store.metadata {
+                let process_key = key
+                    .parse::<ProcessKey>()
+                    .expect("store inserted valid process key");
+                if process_key.id != surface.participant_id {
+                    continue;
                 }
+                for contract in &surface.contracts {
+                    let label = format!("{}::{}", contract.version, contract.contract);
+                    match contract.role.as_str() {
+                        "publish" | "serve" => entry.output_contracts.push(label),
+                        "subscribe" | "ask" => entry.input_contracts.push(label),
+                        _ => {}
+                    }
+                }
+                entry.input_contracts.sort();
+                entry.input_contracts.dedup();
+                entry.output_contracts.sort();
+                entry.output_contracts.dedup();
             }
-            entry.input_contracts.sort();
-            entry.input_contracts.dedup();
-            entry.output_contracts.sort();
-            entry.output_contracts.dedup();
         }
         store
     }
 
     #[must_use]
     pub fn metadata(&self, id: &str) -> Option<&RuntimeParticipantMetadata> {
-        self.metadata.get(id)
+        self.metadata.get(id).or_else(|| {
+            let mut matches = self.metadata.iter().filter(|(key, _)| {
+                key.parse::<ProcessKey>()
+                    .is_ok_and(|process_key| process_key.id == id)
+            });
+            let (_, value) = matches.next()?;
+            matches.next().is_none().then_some(value)
+        })
     }
 
     #[must_use]
@@ -324,5 +341,25 @@ mod tests {
         let returned = start + Duration::from_secs(9);
         store.observe_board_at(&board(ParticipantState::Ready, 0), returned);
         assert_eq!(store.observation("drive").unwrap().started_at, returned);
+    }
+
+    #[test]
+    fn duplicate_participant_ids_require_scoped_runtime_lookup() {
+        let mut store = RuntimeStore::new();
+        let left = ProcessKey::robot(RobotKey::new("lab", "alpha"), "motion").to_string();
+        let right = ProcessKey::robot(RobotKey::new("lab", "beta"), "motion").to_string();
+        store
+            .metadata
+            .insert(left.clone(), RuntimeParticipantMetadata::default());
+        store
+            .metadata
+            .insert(right.clone(), RuntimeParticipantMetadata::default());
+
+        assert!(store.metadata(&left).is_some());
+        assert!(store.metadata(&right).is_some());
+        assert!(
+            store.metadata("motion").is_none(),
+            "bare lookup is ambiguous"
+        );
     }
 }
