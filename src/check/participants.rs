@@ -290,7 +290,7 @@ pub(crate) fn ensure_suite_availability(resolved: &ResolvedRobot) -> Result<()> 
         }
     }
     message.push_str(
-        "\n\nFix: wait for the listed official artifacts to publish, or pin artifacts.pins.<package> to an exact version/sha256 whose changed contracts you do not need.",
+        "\n\nFix: wait for the listed official artifacts to publish, pin artifacts.pins.<package> to a path/git override, or move the train with `cargo update -p phoxal`.",
     );
     bail!("{message}")
 }
