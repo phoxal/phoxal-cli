@@ -45,8 +45,6 @@ pub struct UpdateSummary {
     pub updates: Vec<PackageUpdate>,
     pub prune_versions: BTreeMap<String, Vec<String>>,
     pub pins_skipped: Vec<String>,
-    pub coherence: &'static str,
-    pub config: &'static str,
 }
 
 impl Update {
@@ -214,8 +212,6 @@ fn update_locked_train(
         updates,
         prune_versions,
         pins_skipped,
-        coherence: "deferred to W6",
-        config: "deferred to W7",
     })
 }
 
@@ -236,7 +232,7 @@ fn include_existing_target_scopes(
             })
             .with_context(|| {
                 format!(
-                    "resolved {} {} is absent from snapshot {}",
+                    "resolved {} {} is absent from framework train {} suite",
                     descriptor.package_id, descriptor.version, suite.version
                 )
             })?;
@@ -569,8 +565,6 @@ robot:
             ],
             prune_versions: BTreeMap::new(),
             pins_skipped: vec!["phoxal/component-passive_caster".to_string()],
-            coherence: "deferred to W6",
-            config: "deferred to W7",
         };
 
         assert_eq!(

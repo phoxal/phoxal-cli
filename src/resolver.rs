@@ -461,6 +461,10 @@ fn vendored_runtime(
             "suite unreachable and vendored package {package} has no active version; run `phoxal update` online"
         )
     })?;
+    anyhow::ensure!(
+        version == train,
+        "vendored package {package} belongs to framework train {version}, but Cargo.lock selects {train}; run `phoxal update` online"
+    );
     let scope = match target {
         Some(target) => crate::native_artifacts::artifact_target_dir_for(package, target)?,
         None => crate::native_artifacts::artifact_assets_dir_for(package)?,
@@ -1071,6 +1075,64 @@ mod tests {
             }
             other => panic!("expected a git component source, got {other:?}"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn stale_vendored_train_falls_through_to_the_locked_suite() -> anyhow::Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
+        let package = "phoxal/service-drive";
+        let target = host_target_triple();
+        let stale = crate::native_artifacts::artifact_package_dir(package)?
+            .join("versions")
+            .join("0.0.9")
+            .join("targets")
+            .join(&target);
+        std::fs::create_dir_all(stale)?;
+        crate::native_artifacts::retarget_active_version(package, "0.0.9")?;
+
+        let robot = Robot::parse_from_string(
+            r#"schema: robot/v0
+robot:
+  id: testbot
+  namespace: test
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: differential
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+  components:
+    left_drive:
+      component: ddsm115
+      mount_link: left_wheel_mount
+    right_drive:
+      component: ddsm115
+      mount_link: right_wheel_mount
+artifacts: {}
+"#,
+        )?;
+        let suite = test_suite();
+        let resolved = resolve(
+            &robot,
+            std::path::Path::new("."),
+            Some(&suite),
+            ResolveOptions::default(),
+        )?;
+
+        let drive = resolved
+            .platform_runtimes
+            .iter()
+            .find(|runtime| runtime.package == package)
+            .expect("drive resolves from the locked train suite");
+        assert_eq!(drive.version, suite.version);
+        assert_eq!(drive.train, suite.version);
+        assert!(drive.url.is_some(), "stale vendored state must not win");
         Ok(())
     }
 
