@@ -30,7 +30,7 @@ pub struct ServiceSuiteSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ServiceSuiteEntry {
     pub id: String,
-    pub versions: Vec<String>,
+    pub version: String,
     pub participant_kind: &'static str,
 }
 
@@ -52,10 +52,8 @@ impl Suite {
                 .context("service suite worker failed")??;
         for entry in &summary.entries {
             println!(
-                "{} -> versions [{}] ({})",
-                entry.id,
-                entry.versions.join(", "),
-                entry.participant_kind
+                "{} -> version {} ({})",
+                entry.id, entry.version, entry.participant_kind
             );
         }
         Ok(())
@@ -86,7 +84,7 @@ pub fn service_suite_summary(
         .into_iter()
         .map(|artifact| ServiceSuiteEntry {
             id: artifact.id.clone(),
-            versions: vec![suite.version.clone()],
+            version: suite.version.clone(),
             participant_kind: "service",
         })
         .collect(),
@@ -118,7 +116,7 @@ mod tests {
             .find(|entry| entry.id == "phoxal/service-drive")
             .expect("drive is part of the platform model");
         assert_eq!(entry.id, "phoxal/service-drive");
-        assert_eq!(entry.versions, vec!["0.1.0".to_string()]);
+        assert_eq!(entry.version, "0.1.0");
         assert_eq!(entry.participant_kind, "service");
 
         Ok(())

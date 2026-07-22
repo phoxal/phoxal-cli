@@ -777,7 +777,7 @@ fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<Resol
 
 /// Resolve one component package slot (`component_assets` or
 /// `component_driver`) for `package`: an `artifacts.pins` entry takes
-/// precedence (`Git`/`Path`/version/sha256 pin form), otherwise it resolves
+/// precedence (`Git`/`Path` pin form), otherwise it resolves
 /// from the suite. A suite resolution also captures the matched entry's
 /// built artifact for the needed scope (assets or the
 /// resolved target triple for drivers) into `suite_runtime`, exactly like a
@@ -867,7 +867,7 @@ fn resolve_pinned_component_package(
         source,
         path_override: None,
         // Source pins deliberately bypass the suite and carry no suite
-        // runtime. Version and digest pins never enter this path.
+        // runtime.
         suite_runtime: None,
     })
 }
@@ -985,7 +985,7 @@ fn resolve_native_site_artifacts(
 /// The filesystem/tag-safe projection of a provider-qualified package id
 /// (`phoxal/service-drive` -> `phoxal-service-drive`), used for the synthetic
 /// `artifact_ref` fallback when a suite entry has no built artifact yet for
-/// the resolved target (docs #21's release-tag/asset projection).
+/// the resolved target (the suite's package/target projection).
 fn filesystem_safe_package_name(package: &str) -> String {
     package.replace('/', "-")
 }

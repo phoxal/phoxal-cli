@@ -131,7 +131,7 @@ pub struct ResolvedPlatformRuntime {
     /// versioned), but there is nothing to fetch yet.
     pub published: bool,
     /// Every target triple the suite has a built tarball for, for
-    /// diagnostics (`ensure_suite_availability`, `generations status`).
+    /// diagnostics (`ensure_suite_availability`).
     pub published_triples: Vec<String>,
     pub path_override: Option<PathBuf>,
     /// Exact locked framework train this entry belongs to.
