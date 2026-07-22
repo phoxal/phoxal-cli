@@ -43,8 +43,9 @@ dependency audit.
 `phoxal-cli-core` owns reusable facts and behavior:
 
 - `project`: suite fetch/validation, resolver records, checked launch plans,
-  and tooling. The suite client is the one intentional core network edge;
-  artifact downloads and all runtime bus traffic remain root adapters.
+  and tooling. The immutable suite client and crates.io train-status probe are
+  the intentional core network edges; artifact downloads and all runtime bus
+  traffic remain root adapters.
 - `deploy`: transport-independent delivery records and target planning.
 - `simulation`: world resolution and simulation-domain records.
 - `session`: events, state, board/log/telemetry records, launch environment,
@@ -67,6 +68,6 @@ artifact provisioning, deployment, process supervision, or raw bus sessions.
 
 Move reusable behavior toward core and terminal behavior toward UI. Keep
 operating-system and network adapters in the root, except the suite client
-noted above. Do not add compatibility re-exports for old internal paths: update
+and train-status probe noted above. Do not add compatibility re-exports for old internal paths: update
 consumers to the owning crate. The audited dependency direction is
 `root -> UI -> core` and `root -> core`, with no reverse edge.
