@@ -7,7 +7,7 @@ use super::{
 use anyhow::Context;
 use anyhow::Result;
 use clap::Args;
-use phoxal_cli_core::project::catalog::ArtifactKind;
+use phoxal_cli_core::project::suite::ArtifactKind;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -58,7 +58,7 @@ pub(crate) struct DeployOptions {
     pub dry_run: bool,
     pub target: Option<String>,
     pub overlays: Vec<String>,
-    pub catalog_source: Option<String>,
+    pub suite_source: Option<String>,
     pub health_timeout: Duration,
 }
 

@@ -41,16 +41,21 @@ impl Validate {
             .context("robot.yaml did not have a parent directory")?;
         let loaded = phoxal_cli_core::project::resolver::load_robot_with_extras(&robot_path)?;
         let robot = loaded.robot;
-        let catalog = crate::commands::load_catalog_for_robot(
-            app,
-            project_root,
-            robot.artifacts.channel,
-            &loaded.extras,
-        )?;
-        let platform_names = catalog
-            .as_ref()
-            .map(phoxal_cli_core::project::catalog::service_names)
-            .unwrap_or_default();
+        let suite = crate::commands::load_suite_for_robot(app, project_root, &loaded.extras)?;
+        let platform_names = suite.as_ref().map_or_else(Vec::new, |suite| {
+            phoxal_cli_core::project::suite::artifacts_of_kind(
+                suite,
+                phoxal_cli_core::project::suite::Kind::Service,
+            )
+            .into_iter()
+            .map(|artifact| {
+                artifact
+                    .id
+                    .trim_start_matches("phoxal/service-")
+                    .to_string()
+            })
+            .collect()
+        });
         let platform_name_refs = platform_names
             .iter()
             .map(String::as_str)
@@ -78,8 +83,8 @@ impl Validate {
         ));
         if self.report {
             match self.report_format {
-                ReportFormat::Text => print_text_report(&robot, catalog.as_ref()),
-                ReportFormat::Json => print_json_report(&robot, catalog.as_ref())?,
+                ReportFormat::Text => print_text_report(&robot, suite.as_ref()),
+                ReportFormat::Json => print_json_report(&robot, suite.as_ref())?,
             }
         }
         Ok(())
@@ -193,22 +198,22 @@ fn phoxal_dependency(dep: &TomlValue) -> PhoxalDependency {
     PhoxalDependency::Unparsable
 }
 
-fn print_text_report(robot: &Robot, catalog: Option<&phoxal_cli_core::project::catalog::Catalog>) {
+fn print_text_report(robot: &Robot, suite: Option<&phoxal_cli_core::project::suite::Suite>) {
     println!("robot: {}", robot.robot.id);
     println!(
-        "channel: {}",
-        phoxal_cli_core::project::catalog::selection_channel(robot.artifacts.channel)
+        "train: {}",
+        suite.map_or("unavailable", |suite| suite.version.as_str())
     );
     println!("platform_services:");
-    for (_, package) in phoxal_cli_core::project::catalog::OFFICIAL_SERVICES {
-        let found = catalog.and_then(|catalog| {
-            phoxal_cli_core::project::catalog::latest_by_package(catalog)
-                .get(package)
-                .map(|artifact| artifact.version.as_str())
-        });
+    for artifact in suite
+        .into_iter()
+        .flat_map(|suite| suite.artifacts.iter())
+        .filter(|artifact| artifact.kind == phoxal_cli_core::project::suite::Kind::Service)
+    {
         println!(
-            "  - {package} -> {}",
-            found.map_or("missing", |version| version)
+            "  - {} -> {}",
+            artifact.id,
+            suite.map_or("unavailable", |suite| suite.version.as_str())
         );
     }
     println!("services:");
@@ -231,21 +236,17 @@ fn print_text_report(robot: &Robot, catalog: Option<&phoxal_cli_core::project::c
 
 fn print_json_report(
     robot: &Robot,
-    catalog: Option<&phoxal_cli_core::project::catalog::Catalog>,
+    suite: Option<&phoxal_cli_core::project::suite::Suite>,
 ) -> Result<()> {
     let report = serde_json::json!({
         "robot": robot.robot.id,
-        "channel": phoxal_cli_core::project::catalog::selection_channel(robot.artifacts.channel).as_str(),
-        "platform_services": phoxal_cli_core::project::catalog::OFFICIAL_SERVICES.iter().map(|(_, package)| {
-            let version = catalog.and_then(|catalog| {
-                phoxal_cli_core::project::catalog::latest_by_package(catalog)
-                    .get(package)
-                    .map(|artifact| artifact.version.clone())
-            });
+        "train": suite.map(|suite| suite.version.clone()),
+        "platform_services": suite.into_iter().flat_map(|suite| suite.artifacts.iter()).filter(|artifact| artifact.kind == phoxal_cli_core::project::suite::Kind::Service).map(|artifact| {
+            let version = suite.map(|suite| suite.version.clone());
             serde_json::json!({
-                "name": package,
+                "name": artifact.id,
                 "version": version,
-                "found": version.is_some(),
+                "found": true,
             })
         }).collect::<Vec<_>>(),
         "services": robot.services.iter().map(|(name, runtime)| {
@@ -446,8 +447,7 @@ robot:
     right_drive:
       component: ddsm115
       mount_link: right_wheel_mount
-artifacts:
-  channel: stable
+artifacts: {{}}
 services:
   drive:
     path: {runtime_path}

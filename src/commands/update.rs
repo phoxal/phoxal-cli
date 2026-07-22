@@ -37,8 +37,7 @@ pub struct PackageUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UpdateSummary {
     pub dry_run: bool,
-    pub channel: String,
-    pub snapshot: String,
+    pub train: String,
     pub destination: PathBuf,
     pub package_count: usize,
     pub download_bytes: u64,
@@ -53,52 +52,84 @@ pub struct UpdateSummary {
 impl Update {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let project_root = app.project.root().to_path_buf();
-        let catalog_source = app.catalog_source.clone();
+        let suite_source = app.suite_source.clone();
         let dry_run = self.dry_run;
         let ui = app.ui;
         let interactive = ui.interactive();
-        let summary = tokio::task::spawn_blocking(move || {
-            update(&project_root, catalog_source, dry_run, &ui)
-        })
-        .await
-        .context("update worker failed")??;
+        let summary =
+            tokio::task::spawn_blocking(move || update(&project_root, suite_source, dry_run, &ui))
+                .await
+                .context("update worker failed")??;
         print_human(&summary, interactive)
     }
 }
 
 fn update(
     project_start: &Path,
-    catalog_source: Option<String>,
+    suite_source: Option<String>,
     dry_run: bool,
     ui: &crate::Ui,
 ) -> Result<UpdateSummary> {
     let robot_path = discover_robot_yaml(project_start)?;
     let project_root = robot_path.parent().context("robot.yaml has no parent")?;
     let loaded = load_robot_with_extras(&robot_path)?;
-    let channel =
-        phoxal_cli_core::project::catalog::selection_channel(loaded.robot.artifacts.channel);
-    let robot_source = loaded.extras.catalog_source.as_ref().map(|source| {
+    let locked = phoxal_cli_core::project::train::resolve_locked_train(project_root)?;
+    if locked.is_published() && !phoxal_cli_core::project::suite::offline_from_env() {
+        match phoxal_cli_core::project::train::inspect_registry_train(&locked.version) {
+            Ok(phoxal_cli_core::project::train::RegistryStatus::Yanked) => {
+                eprintln!(
+                    "warning: locked framework train {} is yanked on crates.io; preserving this existing lock is supported, but Cargo will not select it for a new update",
+                    locked.version
+                );
+            }
+            Ok(phoxal_cli_core::project::train::RegistryStatus::Available) => {}
+            Err(error) => {
+                eprintln!(
+                    "warning: could not inspect framework train {} on crates.io: {error:#}",
+                    locked.version
+                );
+            }
+        }
+    }
+    update_locked_train(
+        project_root,
+        &loaded,
+        suite_source,
+        dry_run,
+        ui,
+        &locked.version,
+    )
+}
+
+fn update_locked_train(
+    project_root: &Path,
+    loaded: &phoxal_cli_core::project::resolver::LoadedRobot,
+    suite_source: Option<String>,
+    dry_run: bool,
+    ui: &crate::Ui,
+    locked_version: &str,
+) -> Result<UpdateSummary> {
+    let robot_source = loaded.extras.suite_source.as_ref().map(|source| {
         if source.is_absolute() {
             source.clone()
         } else {
             project_root.join(source)
         }
     });
-    let catalog = phoxal_cli_core::project::catalog::load_pinned_catalog(
-        phoxal_cli_core::project::catalog::CatalogLoadOptions {
-            cli_source: catalog_source,
-            robot_source,
+    let suite = phoxal_cli_core::project::suite::load_suite(
+        phoxal_cli_core::project::suite::SuiteLoadOptions {
+            cli_source: suite_source
+                .or_else(|| robot_source.map(|path| path.display().to_string())),
             offline: false,
         },
-        channel,
+        locked_version,
     )?
-    .context("update requires a reachable artifact catalog; --offline cannot update")?;
+    .context("update requires a reachable artifact suite; --offline cannot update")?;
     let resolved = resolve(
         &loaded.robot,
         project_root,
-        Some(&catalog),
+        Some(&suite),
         ResolveOptions {
-            refresh_channel_head: true,
             resolve_source_commits: false,
             resolve_component_asset_commits: false,
             ..ResolveOptions::default()
@@ -107,7 +138,7 @@ fn update(
 
     let destination = project_root.join(".phoxal/artifacts");
     let mut descriptors = crate::native_artifacts::descriptors(&resolved)?;
-    include_existing_target_scopes(&mut descriptors, &catalog)?;
+    include_existing_target_scopes(&mut descriptors, &suite)?;
     let updates = descriptors
         .iter()
         .map(|descriptor| {
@@ -175,8 +206,7 @@ fn update(
 
     Ok(UpdateSummary {
         dry_run,
-        channel: channel.to_string(),
-        snapshot: catalog.build.tag,
+        train: suite.version.clone(),
         destination,
         package_count: descriptors.len(),
         download_bytes,
@@ -191,23 +221,23 @@ fn update(
 
 fn include_existing_target_scopes(
     descriptors: &mut Vec<phoxal_cli_core::artifacts::NativeArtifactDescriptor>,
-    catalog: &phoxal_cli_core::project::catalog::Catalog,
+    suite: &phoxal_cli_core::project::suite::Suite,
 ) -> Result<()> {
     let current = descriptors.clone();
     for descriptor in current {
         if descriptor.target.is_none() {
             continue;
         }
-        let artifact = catalog
+        let artifact = suite
             .artifacts
             .iter()
             .find(|artifact| {
-                artifact.package == descriptor.package_id && artifact.version == descriptor.version
+                artifact.id == descriptor.package_id && suite.version == descriptor.version
             })
             .with_context(|| {
                 format!(
                     "resolved {} {} is absent from snapshot {}",
-                    descriptor.package_id, descriptor.version, catalog.build.tag
+                    descriptor.package_id, descriptor.version, suite.version
                 )
             })?;
         for target in crate::native_artifacts::existing_target_scopes(&descriptor.package_id)? {
@@ -219,8 +249,8 @@ fn include_existing_target_scopes(
             }
             let blob = artifact.targets.get(&target).with_context(|| {
                 format!(
-                    "snapshot {} has no {} blob for retained target {target}; switch channel or update phoxal-cli",
-                    catalog.build.tag, descriptor.package_id
+                    "framework train {} has no {} blob for retained target {target}; update phoxal-cli or choose a supported target",
+                    suite.version, descriptor.package_id
                 )
             })?;
             let mut retained_target = descriptor.clone();
@@ -287,7 +317,7 @@ fn update_result(update: &PackageUpdate) -> String {
 
 fn update_label(update: &PackageUpdate) -> String {
     let version = if update.refresh {
-        format!("refresh {} (catalog digest changed)", update.new)
+        format!("refresh {} (suite digest changed)", update.new)
     } else {
         match update.old.as_deref() {
             Some(old) if old != update.new => format!("{old} -> {}", update.new),
@@ -401,9 +431,8 @@ mod tests {
     use super::*;
     use crate::host_paths::test_support::ScratchPhoxalHome;
     use phoxal_cli_core::artifacts::NativeArtifactDescriptor;
-    use phoxal_cli_core::project::catalog::{
-        SelectionChannel, fixture_blob_for_tests, fixture_catalog_for_tests,
-        fixture_service_entry_for_tests,
+    use phoxal_cli_core::project::suite::{
+        fixture_blob_for_tests, fixture_service_entry_for_tests, fixture_suite_for_tests,
     };
 
     #[test]
@@ -432,17 +461,20 @@ robot:
 "#,
         )?;
         fs::write(root.join("structure.urdf"), "<robot/>")?;
-        let catalog_path = root.join("catalog.json");
+        let suite_path = root.join("suite.json");
         fs::write(
-            &catalog_path,
-            serde_json::to_vec(&fixture_catalog_for_tests(Vec::new()))?,
+            &suite_path,
+            serde_json::to_vec(&fixture_suite_for_tests(Vec::new()))?,
         )?;
 
-        let summary = update(
+        let loaded = load_robot_with_extras(&root.join("robot.yaml"))?;
+        let summary = update_locked_train(
             &root,
-            Some(catalog_path.display().to_string()),
+            &loaded,
+            Some(suite_path.display().to_string()),
             true,
             &crate::Ui::from_env(),
+            "0.36.0",
         )?;
 
         assert!(summary.dry_run);
@@ -468,22 +500,15 @@ robot:
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir("versions/1.1.0", package_dir.join("active"))?;
 
-        let mut entry = fixture_service_entry_for_tests(
-            "drive",
-            "1.2.3",
-            SelectionChannel::Stable,
-            host,
-            true,
-            Vec::new(),
-        );
+        let mut entry = fixture_service_entry_for_tests("drive", "1.2.3", host, true, Vec::new());
         entry.artifact.targets.insert(
             robot.to_string(),
             fixture_blob_for_tests("https://example.invalid/robot", &"b".repeat(64), 42),
         );
-        let catalog = fixture_catalog_for_tests(vec![entry]);
+        let suite = fixture_suite_for_tests(vec![entry]);
         let mut descriptors = vec![NativeArtifactDescriptor {
             package_id: package.to_string(),
-            kind: phoxal_cli_core::project::catalog::ArtifactKind::Service,
+            kind: phoxal_cli_core::project::suite::ArtifactKind::Service,
             name: "drive".to_string(),
             version: "1.2.3".to_string(),
             url: "https://example.invalid/host".to_string(),
@@ -493,7 +518,7 @@ robot:
             target: Some(host.to_string()),
         }];
 
-        include_existing_target_scopes(&mut descriptors, &catalog)?;
+        include_existing_target_scopes(&mut descriptors, &suite)?;
 
         let retained = descriptors
             .iter()
@@ -508,8 +533,7 @@ robot:
     fn human_update_rows_replace_the_footer_and_hide_pins() {
         let summary = UpdateSummary {
             dry_run: false,
-            channel: "stable".to_string(),
-            snapshot: "build-ignored".to_string(),
+            train: "0.36.0".to_string(),
             destination: PathBuf::from("/ignored"),
             package_count: 3,
             download_bytes: 7_461_785,
@@ -577,7 +601,7 @@ robot:
         assert_eq!(
             human_lines(&refresh, false),
             vec![
-                "✓ phoxal/service-drive [aarch64-apple-darwin] refresh 0.19.8 (catalog digest changed) (7.0 MiB)".to_string(),
+                "✓ phoxal/service-drive [aarch64-apple-darwin] refresh 0.19.8 (suite digest changed) (7.0 MiB)".to_string(),
                 "✓ prune phoxal/service-drive: 0.19.7".to_string(),
             ]
         );

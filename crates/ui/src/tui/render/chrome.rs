@@ -139,9 +139,9 @@ pub(super) fn compact_header_status(
 ) -> String {
     if inner_width >= 62 {
         return format!(
-            " {} · channel {} · {} · {}",
+            " {} · train {} · {} · {}",
             title.mode,
-            sanitize_terminal_text(&title.channel),
+            sanitize_terminal_text(&title.train),
             device_resource_slot(telemetry.device.as_ref(), now),
             simulation_clock_slot(title.mode, telemetry.clock, now)
         );
@@ -182,7 +182,7 @@ pub(super) fn header_identity_lines(
 ) -> Vec<Line<'static>> {
     let robot = sanitize_terminal_text(&title.robot);
     let namespace = sanitize_terminal_text(&title.namespace);
-    let channel = sanitize_terminal_text(&title.channel);
+    let train = sanitize_terminal_text(&title.train);
     let mut lines = vec![Line::from(Span::styled(
         "◇  p h o x a l",
         color::fg(theme, Role::Accent).add_modifier(Modifier::BOLD),
@@ -190,14 +190,14 @@ pub(super) fn header_identity_lines(
     if width >= 36 {
         lines.extend([
             Line::from(format!("robot      {robot}")),
-            Line::from(format!("namespace  {namespace} · channel {channel}")),
+            Line::from(format!("namespace  {namespace} · train {train}")),
             Line::from(format!("session    {}", title.mode)),
         ]);
     } else {
         lines.extend([
             Line::from(format!("robot      {robot}")),
             Line::from(format!("namespace  {namespace}")),
-            Line::from(format!("channel    {channel}")),
+            Line::from(format!("train      {train}")),
             Line::from(format!("session    {}", title.mode)),
         ]);
     }

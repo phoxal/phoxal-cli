@@ -28,7 +28,7 @@ pub(crate) fn prepare_with_mode(
         &resolved.world_path,
         &resolved.resolved,
         &resolved.manifest_extras,
-        resolved.catalog.as_ref(),
+        resolved.suite.as_ref(),
     )?;
     // Finding A5: resolved once here, from the same `plan`/`contract_surfaces`
     // this function already has - see `RuntimeStore::from_launch_plan`'s docs.
@@ -39,7 +39,7 @@ pub(crate) fn prepare_with_mode(
     let source_participants = sim_source_participants(
         &resolved.project_root,
         &resolved.resolved,
-        resolved.catalog.as_ref(),
+        resolved.suite.as_ref(),
     )?;
     Ok(SimPlan {
         plan,

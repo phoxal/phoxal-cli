@@ -36,7 +36,7 @@ pub fn simulator_controller_provider_id(robot_id: &str) -> String {
 /// "is this a standard site tool": [`build_site_launches`] (launch), and
 /// simulation launch resolution's graph-proof
 /// filtering (resolution/validation). Resolution itself
-/// (`catalog::OFFICIAL_TOOLS`) and readiness (`supervisor`'s per-`Tool`-kind
+/// (`suite::OFFICIAL_TOOLS`) and readiness (`supervisor`'s per-`Tool`-kind
 /// handling) already treat every standard tool uniformly by kind rather than
 /// naming site tools individually, so this is the one list the
 /// id-based call sites needed to share (finding A6).
@@ -195,7 +195,7 @@ fn build_site_launches(
     if matches!(mode, LaunchMode::Deploy) {
         if robots.iter().any(|robot| {
             robot.resolved.tools.iter().any(|artifact| {
-                artifact.kind == super::catalog::ArtifactKind::Infrastructure
+                artifact.kind == super::suite::ArtifactKind::Infrastructure
                     && artifact.path_override.is_some()
             })
         }) {
@@ -253,8 +253,9 @@ fn merge_site_tool_artifact(
 fn resolved_tool<'a>(resolved: &'a ResolvedRobot, tool_name: &str) -> Result<&'a ResolvedTool> {
     resolved.tools.iter().find(|tool| tool.name == tool_name).ok_or_else(|| {
         anyhow!(
-            "resolved robot {} is missing standard tool {tool_name}; the active catalog snapshot is outdated for this standard set - run `phoxal update`",
-            resolved.robot.robot.id
+            "resolved robot {} is missing standard tool {tool_name}; framework train {} does not provide the required official suite inventory",
+            resolved.robot.robot.id,
+            resolved.train
         )
     })
 }
@@ -280,8 +281,8 @@ fn build_robot_launch(
         .chain(input.resolved.simulators.iter())
         .map(|runtime| (runtime.name.as_str(), runtime.artifact_ref().to_string()))
         .collect::<BTreeMap<_, _>>();
-    // A Catalog-sourced component driver is a first-class catalog artifact
-    // too (docs #21): its `catalog_runtime` projects onto the identical
+    // A Suite-sourced component driver is a first-class suite artifact
+    // too (docs #21): its `suite_runtime` projects onto the identical
     // `ResolvedPlatformRuntime` shape a service/simulator resolves to, keyed
     // here by the component id (`checked.artifact_id`) exactly like a
     // service is keyed by its own name.
@@ -291,7 +292,7 @@ fn build_robot_launch(
             .components
             .iter()
             .filter_map(|component| component.driver.as_ref())
-            .filter_map(|driver| driver.catalog_runtime.as_ref())
+            .filter_map(|driver| driver.suite_runtime.as_ref())
             .map(|runtime| (runtime.name.as_str(), runtime.artifact_ref().to_string())),
     );
 
@@ -588,8 +589,8 @@ fn simulator_participant_id(artifact_name: &str, robot_id: &str) -> Option<Strin
 mod tests {
     use std::path::Path;
 
-    use crate::project::catalog::{ArtifactKind, SelectionChannel};
     use crate::project::resolver::{ResolvedRobot, ResolvedUserRuntime};
+    use crate::project::suite::ArtifactKind;
 
     use super::*;
 
@@ -809,20 +810,19 @@ mod tests {
 
     /// Standard robot tools are hard requirements, so a resolved robot
     /// missing any of them means the active
-    /// catalog snapshot is outdated for the current standard set - this
+    /// train suite is incomplete for the current standard set - this
     /// fails the whole launch plan with a direct remediation message rather
     /// than silently degrading (the old optional-tool behavior telemetry
     /// used to have).
     #[test]
-    fn a_catalog_missing_a_standard_robot_tool_fails_with_a_remediation_message()
-    -> anyhow::Result<()> {
+    fn a_suite_missing_a_standard_robot_tool_fails_with_a_remediation_message() -> anyhow::Result<()>
+    {
         let mut resolved = empty_resolved_robot("robot_v1")?;
         resolved.tools.push(tool(ROBOT_TOOL_BUS));
         resolved.tools.push(tool(SITE_TOOL_JOYPAD));
         resolved.tools.push(tool(ROBOT_TOOL_LOG));
         resolved.tools.push(tool(ROBOT_TOOL_DEVICE));
-        // Telemetry is deliberately left unresolved, as if the pinned catalog
-        // snapshot predates it.
+        // Telemetry is deliberately left unresolved, as if the train suite omitted it.
         let extras = RobotManifestExtras::default();
         let error = build_launch_plan(
             LaunchMode::Run,
@@ -835,7 +835,7 @@ mod tests {
         .expect_err("a missing standard robot tool must fail the launch plan");
         let message = error.to_string();
         assert!(message.contains(ROBOT_TOOL_TELEMETRY), "{message}");
-        assert!(message.contains("phoxal update"), "{message}");
+        assert!(message.contains("framework train"), "{message}");
         Ok(())
     }
 
@@ -890,9 +890,8 @@ robot:
         let robot = phoxal::model::robot::v0::Robot::parse_from_string(&yaml)?;
         Ok(ResolvedRobot {
             robot,
-            channel: SelectionChannel::Stable,
+            train: "0.36.0".to_string(),
             target: host_target_triple_for_tests(),
-            catalog_snapshot: None,
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
@@ -925,12 +924,12 @@ robot:
             size: None,
             published: false,
             path_override: None,
-            channel: SelectionChannel::Stable,
+            train: "0.36.0".to_string(),
             target: host_target_triple_for_tests(),
         }
     }
 
     fn host_target_triple_for_tests() -> String {
-        crate::project::catalog::host_target_triple()
+        crate::project::suite::host_target_triple()
     }
 }

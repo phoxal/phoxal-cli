@@ -35,6 +35,10 @@ pub(crate) fn download_blob(descriptor: &NativeArtifactDescriptor) -> Result<Pat
 pub(crate) fn download_blob_inner(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
     use std::io::Read;
 
+    ensure_download_allowed(
+        descriptor,
+        phoxal_cli_core::project::suite::offline_from_env(),
+    )?;
     let url = &descriptor.url;
     let client = reqwest::blocking::Client::builder()
         .user_agent("phoxal-cli")
@@ -62,6 +66,21 @@ pub(crate) fn download_blob_inner(descriptor: &NativeArtifactDescriptor) -> Resu
     let path = artifact_tarball_path(descriptor)?;
     write_file_atomic(&path, &bytes)?;
     Ok(path)
+}
+
+pub(crate) fn ensure_download_allowed(
+    descriptor: &NativeArtifactDescriptor,
+    offline: bool,
+) -> Result<()> {
+    if offline {
+        bail!(
+            "offline mode cannot download {} {} for {}; run `phoxal update` online to vendor the exact train artifacts before retrying with --offline",
+            descriptor.package_id,
+            descriptor.version,
+            descriptor_scope_label(descriptor)
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn verify_blob_bytes(descriptor: &NativeArtifactDescriptor, bytes: &[u8]) -> Result<()> {

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use phoxal::bus::{ContractBody, LogicalTime, Publish, Publisher, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::{v1 as api, v2 as preview};
+use phoxal_api::v0_1 as api;
 use tokio::time::timeout;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -51,8 +51,8 @@ async fn manual_command_moves_then_stops_after_ttl() {
         Publisher::new(bus.clone(), &component_estop_topic).expect("component e-stop publisher");
     let clock = Subscriber::new(
         &bus,
-        &Topic::<Subscribe<preview::simulation::Clock>>::new_static(
-            <preview::simulation::Clock as ContractBody>::TOPIC,
+        &Topic::<Subscribe<api::simulation::Clock>>::new_static(
+            <api::simulation::Clock as ContractBody>::TOPIC,
         ),
         32,
     )

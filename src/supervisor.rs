@@ -63,7 +63,8 @@ pub(crate) use lock::{SupervisorIdentity, SupervisorLock};
 mod bus;
 pub(crate) use bus::{
     default_connect_endpoint, failed_expected_participants, missing_ready_participants,
-    start_bus_log_subscriber, start_clock_feed, start_liveliness_observer, wait_for_endpoint,
+    start_bus_log_subscriber, start_clock_feed, start_liveliness_observer,
+    start_robot_description_server, wait_for_endpoint,
 };
 
 #[cfg(test)]

@@ -10,12 +10,8 @@ use crate::supervisor::SupervisorLock;
 use crate::webots_stage_root;
 use anyhow::Result;
 use phoxal::check as graph_check;
-use phoxal_api::v2::simulation::RobotSpawn;
+use phoxal_api::v0_1::simulation::RobotSpawn;
 use phoxal_cli_core::check::source::SourceParticipant;
-use phoxal_cli_core::project::catalog::{
-    ArtifactKind, SelectionChannel as CatalogChannel, fixture_catalog_for_tests,
-    fixture_contract_for_tests, fixture_tool_entry_for_tests,
-};
 use phoxal_cli_core::project::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchPlan, PlanContext, ROBOT_TOOL_DEVICE,
     ROBOT_TOOL_TELEMETRY, SIMULATOR_CONTROLLER_ARTIFACT_NAME, SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
@@ -25,6 +21,9 @@ use phoxal_cli_core::project::launch_plan::{
 use phoxal_cli_core::project::resolver::{
     ResolvedComponent, ResolvedComponentSource, ResolvedPathOverride, ResolvedPathOverrideKind,
     ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, ResolvedUserRuntime, RobotManifestExtras,
+};
+use phoxal_cli_core::project::suite::{
+    ArtifactKind, fixture_contract_for_tests, fixture_suite_for_tests, fixture_tool_entry_for_tests,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -115,10 +114,7 @@ fn live_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
         SimulateMode::Live,
     )?;
 
-    assert_eq!(
-        resolved.resolved.channel,
-        phoxal_cli_core::project::catalog::SelectionChannel::Stable
-    );
+    assert_eq!(resolved.resolved.train, "0.1.0");
     assert!(resolved.resolved.components.is_empty());
     Ok(())
 }
@@ -138,10 +134,7 @@ fn dry_run_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
         SimulateMode::DryRun,
     )?;
 
-    assert_eq!(
-        resolved.resolved.channel,
-        phoxal_cli_core::project::catalog::SelectionChannel::Stable
-    );
+    assert_eq!(resolved.resolved.train, "0.1.0");
     Ok(())
 }
 
@@ -152,7 +145,7 @@ fn no_components_sim_plan_matches_run_plan_participants() -> Result<()> {
     add_site_tools(&mut resolved);
     resolved.platform_runtimes.push(platform_runtime(
         "drive",
-        vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
+        vec![fixture_contract_for_tests("v0.1::drive::Target", "publish")],
     ));
     resolved.user_runtimes.push(ResolvedUserRuntime {
         name: "mission".to_string(),
@@ -836,13 +829,13 @@ fn real_sim_plan_with_component_names_missing_simulator_provider_still_succeeds(
     let _phoxal_home = ScratchPhoxalHome::new()?;
     let temp = tempfile::tempdir()?;
     write_robot_project_with_component(temp.path())?;
-    let catalog_path = write_catalog_with_driver(temp.path())?;
+    let suite_path = write_suite_with_driver(temp.path())?;
 
     let plan = prepare(
         temp.path(),
         SimulateOptions {
             world: "test".to_string(),
-            catalog_source: Some(catalog_path.display().to_string()),
+            suite_source: Some(suite_path.display().to_string()),
             overlays: vec!["dev".to_string()],
             ..SimulateOptions::default()
         },
@@ -868,13 +861,13 @@ fn custom_driver_metadata_unavailable_is_named() -> Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;
     let temp = tempfile::tempdir()?;
     write_robot_project_with_custom_component(temp.path())?;
-    let catalog_path = write_catalog_with_driver(temp.path())?;
+    let suite_path = write_suite_with_driver(temp.path())?;
 
     let error = prepare(
         temp.path(),
         SimulateOptions {
             world: "test".to_string(),
-            catalog_source: Some(catalog_path.display().to_string()),
+            suite_source: Some(suite_path.display().to_string()),
             overlays: vec!["dev".to_string()],
             ..SimulateOptions::default()
         },
@@ -890,7 +883,7 @@ fn custom_driver_metadata_unavailable_is_named() -> Result<()> {
 
 fn write_robot_project(root: &Path) -> Result<()> {
     fs::write(root.join("robot.yaml"), minimal_robot_yaml())?;
-    write_catalog_with_site_tools(root)?;
+    write_suite_with_site_tools(root)?;
     fs::write(
         root.join("structure.urdf"),
         r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="base_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
@@ -909,7 +902,7 @@ fn write_robot_project_with_custom_component(root: &Path) -> Result<()> {
         root.join("robot.dev.yaml"),
         robot_yaml_with_component_dev_overlay(),
     )?;
-    write_catalog_with_site_tools(root)?;
+    write_suite_with_site_tools(root)?;
     fs::write(
         root.join("structure.urdf"),
         r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="base_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
@@ -943,8 +936,7 @@ robot:
   components: {}
 
 artifacts:
-  channel: stable
-  catalog: catalog.json
+  suite: suite.json
 "#
 }
 
@@ -954,7 +946,7 @@ fn write_robot_project_with_component(root: &Path) -> Result<()> {
         root.join("robot.dev.yaml"),
         robot_yaml_with_component_dev_overlay(),
     )?;
-    write_catalog_with_site_tools(root)?;
+    write_suite_with_site_tools(root)?;
     write_driver_crate(root, "ddsm115")?;
     fs::write(
         root.join("structure.urdf"),
@@ -993,8 +985,7 @@ robot:
         connection: { type: can, bus: 0, node_id: 1 }
 
 artifacts:
-  channel: stable
-  catalog: catalog.json
+  suite: suite.json
 "#
 }
 
@@ -1013,31 +1004,21 @@ fn robot_yaml_with_custom_component() -> &'static str {
     robot_yaml_with_component()
 }
 
-fn write_catalog_with_driver(root: &Path) -> Result<PathBuf> {
-    write_catalog_with_site_tools(root)
+fn write_suite_with_driver(root: &Path) -> Result<PathBuf> {
+    write_suite_with_site_tools(root)
 }
 
-fn write_catalog_with_site_tools(root: &Path) -> Result<PathBuf> {
-    let path = root.join("catalog.json");
-    let catalog = fixture_catalog_for_tests(vec![
-        fixture_tool_entry_for_tests(
-            "router",
-            "0.1.0",
-            CatalogChannel::Stable,
-            &host_target_triple(),
-            false,
-            Vec::new(),
-        ),
-        fixture_tool_entry_for_tests(
-            "joypad",
-            "0.1.0",
-            CatalogChannel::Stable,
-            &host_target_triple(),
-            false,
-            Vec::new(),
-        ),
-    ]);
-    fs::write(&path, serde_json::to_string_pretty(&catalog)?)?;
+fn write_suite_with_site_tools(root: &Path) -> Result<PathBuf> {
+    let path = root.join("suite.json");
+    let suite = fixture_suite_for_tests(
+        ["router", "bus", "joypad", "log", "telemetry", "device"]
+            .into_iter()
+            .map(|name| {
+                fixture_tool_entry_for_tests(name, "0.1.0", &host_target_triple(), true, Vec::new())
+            })
+            .collect(),
+    );
+    fs::write(&path, serde_json::to_string_pretty(&suite)?)?;
     Ok(path)
 }
 
@@ -1057,7 +1038,7 @@ fn write_driver_crate(root: &Path, name: &str) -> Result<()> {
         dir.join("Cargo.toml"),
         format!("[package]\nname = \"driver-{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
     )?;
-    let json = r#"{"participant_api":"Api","contracts":[{"role":"subscribe","version":"v1","contract":"component::MotorCommand","external":false}],"config_schema":{"type":"null"}}"#;
+    let json = r#"{"participant_api":"Api","contracts":[{"role":"subscribe","version":"v0.1","contract":"component::MotorCommand","external":false}],"config_schema":{"type":"null"}}"#;
     let len = json.len();
     fs::write(
         dir.join("src/main.rs"),
@@ -1151,9 +1132,8 @@ robot:
     let robot = phoxal::model::robot::v0::Robot::parse_from_string(&yaml)?;
     Ok(ResolvedRobot {
         robot,
-        channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
+        train: "0.36.0".to_string(),
         target: host_target_triple(),
-        catalog_snapshot: None,
         platform_runtimes: Vec::new(),
         simulators: Vec::new(),
         user_runtimes: Vec::new(),
@@ -1186,23 +1166,23 @@ fn resolved_with_drive_components(instances: &[&str], include_user: bool) -> Res
             assets: Some(
                 phoxal_cli_core::project::resolver::ResolvedComponentPackage {
                     package: "phoxal/component-ddsm115".to_string(),
-                    kind: phoxal_cli_core::project::catalog::ArtifactKind::ComponentAssets,
+                    kind: phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
                     source: ResolvedComponentSource::Path {
                         path: PathBuf::from("components/ddsm115"),
                     },
                     path_override: None,
-                    catalog_runtime: None,
+                    suite_runtime: None,
                 },
             ),
             driver: Some(
                 phoxal_cli_core::project::resolver::ResolvedComponentPackage {
                     package: "phoxal/component-ddsm115".to_string(),
-                    kind: phoxal_cli_core::project::catalog::ArtifactKind::ComponentDriver,
+                    kind: phoxal_cli_core::project::suite::ArtifactKind::ComponentDriver,
                     source: ResolvedComponentSource::Path {
                         path: PathBuf::from("components/ddsm115"),
                     },
                     path_override: None,
-                    catalog_runtime: None,
+                    suite_runtime: None,
                 },
             ),
             has_driver: true,
@@ -1211,7 +1191,10 @@ fn resolved_with_drive_components(instances: &[&str], include_user: bool) -> Res
     Ok(resolved)
 }
 
-fn platform_runtime(name: &str, _contracts: Vec<()>) -> ResolvedPlatformRuntime {
+fn platform_runtime(
+    name: &str,
+    _contracts: Vec<phoxal_cli_core::project::suite::FixtureContract>,
+) -> ResolvedPlatformRuntime {
     ResolvedPlatformRuntime {
         name: name.to_string(),
         package: format!("phoxal/service-{name}"),
@@ -1224,7 +1207,7 @@ fn platform_runtime(name: &str, _contracts: Vec<()>) -> ResolvedPlatformRuntime 
         published: false,
         published_triples: Vec::new(),
         path_override: None,
-        channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
+        train: "0.36.0".to_string(),
         target: Some(host_target_triple()),
     }
 }
@@ -1242,7 +1225,7 @@ fn simulator_runtime(name: &str) -> ResolvedPlatformRuntime {
         published: false,
         published_triples: Vec::new(),
         path_override: None,
-        channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
+        train: "0.36.0".to_string(),
         target: Some(host_target_triple()),
     }
 }
@@ -1261,7 +1244,7 @@ fn add_site_tools(resolved: &mut ResolvedRobot) {
 
 fn tool(name: &str) -> ResolvedTool {
     ResolvedTool {
-        kind: phoxal_cli_core::project::catalog::ArtifactKind::Tool,
+        kind: phoxal_cli_core::project::suite::ArtifactKind::Tool,
         name: name.to_string(),
         package: format!("phoxal/{name}"),
         requested: "0.1.0".to_string(),
@@ -1274,7 +1257,7 @@ fn tool(name: &str) -> ResolvedTool {
         size: None,
         published: false,
         path_override: None,
-        channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
+        train: "0.36.0".to_string(),
         target: host_target_triple(),
     }
 }
@@ -1369,12 +1352,12 @@ fn path_overridden_simulators_are_built_and_staged_as_webots_controllers() -> Re
     Ok(())
 }
 
-/// A catalog (non path-overridden) simulator with no native-artifact
+/// A suite (non path-overridden) simulator with no native-artifact
 /// metadata and nothing in the artifact cache must fail loudly during
 /// staging rather than silently leaving the controller unstaged - the
 /// exact "generic controller" trap bug 1 exists to close.
 #[test]
-fn catalog_simulator_missing_from_cache_is_a_hard_error() -> Result<()> {
+fn suite_simulator_missing_from_cache_is_a_hard_error() -> Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;
     let mut resolved = resolved_with_drive_components(&[], false)?;
     resolved.simulators.clear();
@@ -1383,7 +1366,7 @@ fn catalog_simulator_missing_from_cache_is_a_hard_error() -> Result<()> {
         .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
 
     let error = stage_simulator_controller_binaries(&resolved, &crate::Ui::from_env())
-        .expect_err("a catalog simulator with no cached binary must error, not silently skip");
+        .expect_err("a suite simulator with no cached binary must error, not silently skip");
     let message = format!("{error:#}");
     assert!(
         message.contains("webots-supervisor"),

@@ -44,9 +44,9 @@ pub struct ParticipantStatus {
     pub kind: ParticipantKind,
     /// Whether this participant runs from a locally resolved directory
     /// (user-authored source, or a local path-pin override) rather than a
-    /// fetched catalog artifact. Orthogonal to `kind` - see
+    /// fetched suite artifact. Orthogonal to `kind` - see
     /// `phoxal_cli_core::session::participant_kind` module docs. Defaults to `false`
-    /// (catalog) via [`Self::new`]; set explicitly with [`Self::with_local`].
+    /// (suite) via [`Self::new`]; set explicitly with [`Self::with_local`].
     #[serde(default)]
     pub local: bool,
     pub state: ParticipantState,
@@ -133,7 +133,7 @@ impl BoardSnapshot {
     pub fn render(&self) -> String {
         // The kind column carries a trailing `*` for a participant running
         // from a local directory (user-authored source, or a local path-pin
-        // override) rather than a fetched catalog artifact - see
+        // override) rather than a fetched suite artifact - see
         // `ParticipantStatus::local`.
         let mut out = String::from(
             "participant                 kind          state       restarts  note  last log\n",

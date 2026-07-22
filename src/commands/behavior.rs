@@ -7,7 +7,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use phoxal::behavior::{BehaviorCatalog, Node, ValueType};
 use phoxal::bus::{ContractBody, LogicalTime, Publish, Publisher, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::v1 as api;
+use phoxal_api::v0_1 as api;
 use serde::Serialize;
 use tokio::time::timeout;
 
@@ -173,18 +173,18 @@ fn validate(app: &AppContext, args: &ValidateArgs) -> Result<()> {
     let root = explicit_root(app, args.robot.as_ref())?;
     let robot_path = discover_robot_yaml(&root)?;
     let loaded = load_robot_with_extras(&robot_path)?;
-    let catalog = BehaviorCatalog::load(&root)?;
+    let suite = BehaviorCatalog::load(&root)?;
     let configured = loaded
         .robot
         .behavior
         .as_ref()
         .map(|behavior| behavior.root.clone());
     if let Some(root_id) = &configured {
-        catalog.validate_root(root_id)?;
+        suite.validate_root(root_id)?;
     }
     let summary = ValidationSummary {
         root: configured,
-        definitions: catalog
+        definitions: suite
             .iter()
             .map(|(_, definition)| DefinitionSummary {
                 id: definition.authored.id.clone(),
@@ -213,8 +213,8 @@ fn validate(app: &AppContext, args: &ValidateArgs) -> Result<()> {
 fn test(app: &AppContext, args: &TestArgs) -> Result<()> {
     let robot_path = discover_robot_yaml(app.project.root())?;
     let root = robot_path.parent().context("robot.yaml has no parent")?;
-    let catalog = BehaviorCatalog::load(root)?;
-    let definition = catalog
+    let suite = BehaviorCatalog::load(root)?;
+    let definition = suite
         .get(&args.behavior_id)
         .with_context(|| format!("unknown behavior '{}'", args.behavior_id))?;
     let parsed = parse_args(&args.args)?;
@@ -222,7 +222,7 @@ fn test(app: &AppContext, args: &TestArgs) -> Result<()> {
     let scenario = FakeScenario::parse(&args.scenario)?;
     let mut visited_nodes = Vec::new();
     let succeeded = run_fake_node(
-        &catalog,
+        &suite,
         &definition.authored.root,
         &definition.authored.id,
         scenario,
@@ -288,7 +288,7 @@ fn validate_test_args(
 }
 
 fn run_fake_node(
-    catalog: &BehaviorCatalog,
+    suite: &BehaviorCatalog,
     node: &Node,
     parent: &str,
     scenario: FakeScenario,
@@ -299,7 +299,7 @@ fn run_fake_node(
     match node {
         Node::Sequence { children, .. } => {
             for child in children {
-                if !run_fake_node(catalog, child, &path, scenario, visited)? {
+                if !run_fake_node(suite, child, &path, scenario, visited)? {
                     return Ok(false);
                 }
             }
@@ -307,7 +307,7 @@ fn run_fake_node(
         }
         Node::Selector { children, .. } | Node::ReactiveSelector { children, .. } => {
             for child in children {
-                if run_fake_node(catalog, child, &path, scenario, visited)? {
+                if run_fake_node(suite, child, &path, scenario, visited)? {
                     return Ok(true);
                 }
             }
@@ -321,25 +321,25 @@ fn run_fake_node(
             if matches!(scenario, FakeScenario::Timeout) {
                 Ok(false)
             } else {
-                run_fake_node(catalog, child, &path, scenario, visited)
+                run_fake_node(suite, child, &path, scenario, visited)
             }
         }
         Node::Retry {
             attempts, child, ..
         } => {
             for _ in 0..*attempts {
-                if run_fake_node(catalog, child, &path, scenario, visited)? {
+                if run_fake_node(suite, child, &path, scenario, visited)? {
                     return Ok(true);
                 }
             }
             Ok(false)
         }
         Node::Subtree { behavior, .. } => {
-            let definition = catalog
+            let definition = suite
                 .get(behavior)
-                .with_context(|| format!("subtree '{behavior}' is not in the validated catalog"))?;
+                .with_context(|| format!("subtree '{behavior}' is not in the validated suite"))?;
             run_fake_node(
-                catalog,
+                suite,
                 &definition.authored.root,
                 &format!("{path}::{behavior}"),
                 scenario,

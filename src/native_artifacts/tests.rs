@@ -1,12 +1,12 @@
 //! Tests for this module.
 
-use super::download::verify_blob_bytes;
+use super::download::{ensure_download_allowed, verify_blob_bytes};
 use super::storage::package_storage_key;
 use super::*;
 use crate::host_paths::test_support::ScratchPhoxalHome;
 use anyhow::{Context, Result};
 use phoxal_cli_core::artifacts::NativeArtifactDescriptor;
-use phoxal_cli_core::project::catalog::ArtifactKind;
+use phoxal_cli_core::project::suite::ArtifactKind;
 use sha2::{Digest, Sha256};
 use std::fs;
 
@@ -40,6 +40,19 @@ fn blob_size_and_sha_are_both_enforced() {
     let mut wrong_sha = descriptor;
     wrong_sha.sha256 = "0".repeat(64);
     assert!(verify_blob_bytes(&wrong_sha, bytes).is_err());
+}
+
+#[test]
+fn offline_mode_rejects_missing_vendored_artifacts_before_download() {
+    let descriptor = descriptor("1.0.0", b"missing");
+    let error = ensure_download_allowed(&descriptor, true).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("offline mode cannot download"),
+        "{message}"
+    );
+    assert!(message.contains("phoxal update"), "{message}");
+    assert!(ensure_download_allowed(&descriptor, false).is_ok());
 }
 
 #[test]
@@ -338,9 +351,9 @@ fn minimal_tar_gz(entry_name: &str, contents: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[test]
-fn same_version_with_a_new_catalog_digest_is_refreshed() -> Result<()> {
+fn same_version_with_a_new_suite_digest_is_refreshed() -> Result<()> {
     let _root = ScratchPhoxalHome::new()?;
-    let old = descriptor("1.0.0", b"old-catalog-blob");
+    let old = descriptor("1.0.0", b"old-suite-blob");
     mark_current(&old)?;
     fs::write(artifact_exec_dir(&old)?.join(&old.binary_name), "old")?;
     retarget_active(&old)?;

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use phoxal::bus::{LogicalTime, Publish, Publisher, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::v1 as api;
+use phoxal_api::v0_1 as api;
 use tokio::time::timeout;
 
 use crate::AppContext;

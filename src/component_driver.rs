@@ -61,11 +61,11 @@ fn resolved_component_package_dir(
             let repo_dir = git_artifact::ensure_git_artifact(git, rev)?;
             git_artifact::subdir(repo_dir, directory.as_deref())
         }
-        ResolvedComponentSource::Catalog => catalog_component_package_dir(package),
+        ResolvedComponentSource::Suite => suite_component_package_dir(package),
     }
 }
 
-/// Fetch and unpack a catalog-resolved component package's release asset via
+/// Fetch and unpack a suite-resolved component package's release asset via
 /// the identical native-staging path services/tools already use
 /// (`native_artifacts::stage_runtime`/`stage_descriptor`), and return its
 /// local exec directory: the unpacked assets bundle root
@@ -74,10 +74,10 @@ fn resolved_component_package_dir(
 /// binary for a `component_driver` package.
 /// `MissingOnly` mode: reuses an already-staged local unpack without touching
 /// the network again, matching how a service's cache is consulted.
-fn catalog_component_package_dir(package: &ResolvedComponentPackage) -> Result<PathBuf> {
-    let Some(runtime) = &package.catalog_runtime else {
+fn suite_component_package_dir(package: &ResolvedComponentPackage) -> Result<PathBuf> {
+    let Some(runtime) = &package.suite_runtime else {
         bail!(
-            "component package {} resolves from the artifact catalog but has no release asset for \
+            "component package {} resolves from the artifact suite but has no release asset for \
              this target yet; it cannot be staged locally. Wait for it to publish, or pin \
              artifacts.pins.{} to a path/git override.",
             package.package,

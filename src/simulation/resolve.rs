@@ -19,7 +19,6 @@ use anyhow::Result;
 use anyhow::anyhow;
 use phoxal::check as graph_check;
 use phoxal_cli_core::check::source::SourceParticipantKind;
-use phoxal_cli_core::project::catalog::Catalog;
 use phoxal_cli_core::project::launch_plan::CheckedRobotLaunchInput;
 use phoxal_cli_core::project::launch_plan::LaunchMode;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
@@ -29,6 +28,7 @@ use phoxal_cli_core::project::launch_plan::simulator_controller_provider_id;
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::resolver::RobotManifestExtras;
+use phoxal_cli_core::project::suite::Suite;
 use phoxal_cli_core::simulation::world;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -55,21 +55,10 @@ pub(crate) fn resolve_project(
     };
     let robot = loaded.robot;
     let manifest_extras = loaded.extras;
-    let catalog = crate::commands::catalog_or_vendored(
-        phoxal_cli_core::project::catalog::load_pinned_catalog(
-            phoxal_cli_core::project::catalog::CatalogLoadOptions {
-                cli_source: options.catalog_source.clone(),
-                robot_source: manifest_extras.catalog_source.as_ref().map(|source| {
-                    if source.is_absolute() {
-                        source.clone()
-                    } else {
-                        project_root.join(source)
-                    }
-                }),
-                offline: false,
-            },
-            phoxal_cli_core::project::catalog::selection_channel(robot.artifacts.channel),
-        ),
+    let suite = crate::commands::load_suite_for_robot_from_source(
+        options.suite_source.clone(),
+        &project_root,
+        &manifest_extras,
     )?;
 
     // Always resolve live git component driver commits so driver metadata can
@@ -87,7 +76,7 @@ pub(crate) fn resolve_project(
     let resolved = resolve(
         &robot,
         &project_root,
-        catalog.as_ref(),
+        suite.as_ref(),
         ResolveOptions {
             resolve_source_commits: true,
             resolve_component_asset_commits: mode == SimulateMode::Live,
@@ -101,7 +90,7 @@ pub(crate) fn resolve_project(
         world_path,
         resolved,
         manifest_extras,
-        catalog,
+        suite,
     })
 }
 
@@ -119,9 +108,9 @@ pub(crate) fn build_checked_sim_launch_plan(
     world: &Path,
     resolved: &ResolvedRobot,
     manifest_extras: &RobotManifestExtras,
-    catalog: Option<&Catalog>,
+    suite: Option<&Suite>,
 ) -> Result<(LaunchPlan, Vec<graph_check::ParticipantContractSurface>)> {
-    let source_participants = sim_source_participants(project_root, resolved, catalog)
+    let source_participants = sim_source_participants(project_root, resolved, suite)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
     // Finding A6: all three filters below admit exactly the standard site-
     // tool set (`STANDARD_SITE_TOOLS`), derived
@@ -137,14 +126,14 @@ pub(crate) fn build_checked_sim_launch_plan(
         })
         .cloned()
         .collect::<Vec<_>>();
-    // A Catalog-sourced component driver is a platform ref here too (docs
-    // #21), exactly like `check`/`run`/`deploy` - synthesized from catalog
+    // A Suite-sourced component driver is a platform ref here too (docs
+    // #21), exactly like `check`/`run`/`deploy` - synthesized from suite
     // metadata rather than built from source. Only a Path/Git-overridden
     // driver crate reaches the `build` closure below.
     let platform_refs = check_artifact_refs_from_resolved(resolved)
         .into_iter()
         .filter(|artifact| {
-            artifact.kind != phoxal_cli_core::project::catalog::ArtifactKind::Tool
+            artifact.kind != phoxal_cli_core::project::suite::ArtifactKind::Tool
                 || STANDARD_SITE_TOOLS.contains(&artifact.name.as_str())
         })
         .collect::<Vec<_>>();
@@ -177,7 +166,7 @@ pub(crate) fn build_checked_sim_launch_plan(
                 return extract_emit_apis_from_staged_tool(tool);
             }
             Err(anyhow!(
-                "resolved official artifact {artifact_ref} is not in the catalog"
+                "resolved official artifact {artifact_ref} is not in the suite"
             ))
         },
         fetch_emit_apis_from_tool,
@@ -209,7 +198,7 @@ pub(crate) fn build_checked_sim_launch_plan(
     let report = graph_check::check_graph(&sim_participants);
     if !report.is_ok() {
         crate::check::ensure_check_outcome_ok(
-            &resolved.channel.to_string(),
+            &resolved.train,
             &crate::check::CheckOutcome {
                 missing_images: Vec::new(),
                 report: report.clone(),

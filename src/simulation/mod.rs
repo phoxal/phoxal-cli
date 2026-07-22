@@ -1,7 +1,7 @@
 #[cfg(test)]
 use phoxal::bus::ContractBody;
 #[cfg(test)]
-use phoxal_api::v2::simulation::{SpawnRequest, SpawnSet};
+use phoxal_api::v0_1::simulation::{SpawnRequest, SpawnSet};
 
 /// Bound on each non-interactive simulate participant-readiness stage. The
 /// simulation clock is telemetry and never participates in this budget.

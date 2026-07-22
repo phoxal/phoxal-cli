@@ -9,7 +9,6 @@ use anyhow::anyhow;
 use anyhow::bail;
 use phoxal::check as graph_check;
 use phoxal_cli_core::check::source::SourceParticipant;
-use phoxal_cli_core::project::catalog::Catalog;
 use phoxal_cli_core::project::launch_plan::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
 use phoxal_cli_core::project::launch_plan::SIMULATOR_SUPERVISOR_ARTIFACT_NAME;
 use phoxal_cli_core::project::launch_plan::SIMULATOR_SUPERVISOR_PROVIDER_ID;
@@ -17,6 +16,7 @@ use phoxal_cli_core::project::launch_plan::SubstitutedContract;
 use phoxal_cli_core::project::launch_plan::SubstitutionRecord;
 use phoxal_cli_core::project::launch_plan::simulator_controller_provider_id;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
+use phoxal_cli_core::project::suite::Suite;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -36,7 +36,7 @@ pub(crate) fn official_simulator_participants(
     {
         let raw = extract_emit_apis_from_staged_runtime(runtime).with_context(|| {
             format!(
-                "failed to synthesize catalog emit-apis for simulator {}",
+                "failed to synthesize suite emit-apis for simulator {}",
                 runtime.name
             )
         })?;
@@ -140,15 +140,15 @@ pub(crate) fn simulator_participant_id_for_resolved_artifact(
 }
 
 /// Simulate's source participants: identical to
-/// `source_participants_from_resolved` (a Catalog-sourced driver is never a
+/// `source_participants_from_resolved` (a Suite-sourced driver is never a
 /// source participant - see `component_driver_platform_refs_from_resolved`),
-/// sorted for stable dry-run/watch-target output. `catalog` is accepted for
+/// sorted for stable dry-run/watch-target output. `suite` is accepted for
 /// signature symmetry with the other `sim_*` helpers but no longer consulted
-/// here now that catalog drivers route entirely through the platform-ref path.
+/// here now that suite drivers route entirely through the platform-ref path.
 pub(crate) fn sim_source_participants(
     project_root: &Path,
     resolved: &ResolvedRobot,
-    _catalog: Option<&Catalog>,
+    _suite: Option<&Suite>,
 ) -> Result<Vec<SourceParticipant>> {
     let mut participants =
         source_participants_from_resolved(project_root, resolved, component_driver_crate_dir)?;
@@ -161,7 +161,7 @@ pub(crate) fn driver_metadata_unavailable(
     error: anyhow::Error,
 ) -> anyhow::Error {
     anyhow!(
-        "DriverMetadataUnavailable: component driver crate '{}' for instance '{}' could not build on this host to extract its compiled-in API metadata section: {error:#}\n\nCustom and git-sourced driver crates must compile far enough on the dev host to emit the `#[derive(phoxal::Api)]` linker section; keep hardware transport behind a target cfg boundary such as `cfg(target_os = \"linux\")`. Alternatively use a verified artifact catalog entry with inlined driver metadata.",
+        "DriverMetadataUnavailable: component driver crate '{}' for instance '{}' could not build on this host to extract its compiled-in API metadata section: {error:#}\n\nCustom and git-sourced driver crates must compile far enough on the dev host to emit the `#[derive(phoxal::Api)]` linker section; keep hardware transport behind a target cfg boundary such as `cfg(target_os = \"linux\")`. Alternatively use a verified artifact suite entry with inlined driver metadata.",
         participant.expected_artifact_id,
         participant.name
     )

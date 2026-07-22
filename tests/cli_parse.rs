@@ -70,13 +70,7 @@ fn message_format_is_removed_from_every_former_surface() {
         vec!["phoxal-cli", "deploy", "--message-format", "json"],
         vec!["phoxal-cli", "update", "--message-format", "json"],
         vec!["phoxal-cli", "status", "--message-format", "json", "safety"],
-        vec![
-            "phoxal-cli",
-            "service",
-            "catalog",
-            "--message-format",
-            "json",
-        ],
+        vec!["phoxal-cli", "service", "suite", "--message-format", "json"],
         vec!["phoxal-cli", "version", "--message-format", "json"],
         vec!["phoxal-cli", "self", "upgrade", "--message-format", "json"],
         vec![

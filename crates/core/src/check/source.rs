@@ -97,14 +97,14 @@ impl SourceParticipant {
     }
 }
 
-/// A source participant's role plus whether it has a known official/catalog
+/// A source participant's role plus whether it has a known official/suite
 /// identity it locally overrides. Deliberately kept as its own enum rather
 /// than collapsed into the shared
 /// `crate::session::ParticipantKind`: every
 /// `SourceParticipant` already carries a `crate_dir`, so it is inherently
 /// "local" in the supervisor's sense - the real orthogonal bit this domain
-/// needs is "does an official/catalog identity exist for this name" (see
-/// `official`), not "is it local". `UserService` has no catalog counterpart
+/// needs is "does an official/suite identity exist for this name" (see
+/// `official`), not "is it local". `UserService` has no suite counterpart
 /// at all (a robot developer's own service); `OfficialService` is a known
 /// official service whose source the robot developer is locally overriding;
 /// `Tool`/`Simulator` are always the latter shape (a source override of a
@@ -131,9 +131,9 @@ impl SourceParticipantKind {
         }
     }
 
-    /// Whether this source participant has a known official/catalog identity
+    /// Whether this source participant has a known official/suite identity
     /// it is locally overriding, vs one invented purely by the user with no
-    /// catalog counterpart at all (only `UserService`). See the type docs for
+    /// suite counterpart at all (only `UserService`). See the type docs for
     /// why this is named `official`, not `local`.
     #[must_use]
     pub const fn official(self) -> bool {

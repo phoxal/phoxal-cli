@@ -15,6 +15,7 @@ use crate::supervisor::SupervisorOptions;
 use crate::supervisor::start_bus_log_subscriber;
 use crate::supervisor::start_clock_feed;
 use crate::supervisor::start_liveliness_observer;
+use crate::supervisor::start_robot_description_server;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -155,6 +156,18 @@ pub(crate) async fn live_simulate_setup(
             })
             .collect::<Vec<_>>(),
     );
+    let description = phoxal_cli_core::supervisor_api::v0::RobotDescription {
+        robot: sim.ctx.resolved.robot.clone(),
+        framework_train: sim.ctx.resolved.train.clone(),
+    };
+    background_tasks.extend(sim.plan.robots.iter().map(|robot| {
+        start_robot_description_server(
+            robot.namespace.clone(),
+            robot.id.clone(),
+            connect.clone(),
+            description.clone(),
+        )
+    }));
     // OBSERVED readiness: drive board state from each participant's own
     // Liveliness token, including SIMULATION-MANAGED ones (the
     // supervisor and every controller), which have no supervised

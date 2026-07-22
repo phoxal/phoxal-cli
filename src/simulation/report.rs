@@ -16,10 +16,7 @@ use std::path::PathBuf;
 
 pub(crate) fn report_plan_only(sim: &SimPlan) -> Result<()> {
     let output = build_dry_run_output(sim);
-    println!("channel: {}", sim.ctx.resolved.channel);
-    if let Some(revision) = &sim.ctx.resolved.catalog_snapshot {
-        println!("catalog revision: {revision}");
-    }
+    println!("framework train: {}", sim.ctx.resolved.train);
     println!(
         "official services ({}):",
         sim.ctx.resolved.platform_runtimes.len()
@@ -79,8 +76,7 @@ pub(crate) fn build_dry_run_output(sim: &SimPlan) -> SimulateDryRunOutput {
     let native_tools = native_tool_labels_from_plan(&sim.plan);
     SimulateDryRunOutput {
         mode: "dry-run",
-        channel: sim.ctx.resolved.channel.to_string(),
-        catalog_snapshot: sim.ctx.resolved.catalog_snapshot.clone(),
+        train: sim.ctx.resolved.train.clone(),
         world_path,
         bus_connect: DEFAULT_ROUTER_CONNECT.to_string(),
         platform_service_count: sim.ctx.resolved.platform_runtimes.len(),
@@ -109,8 +105,7 @@ pub(crate) fn webots_world(mode: &LaunchMode) -> &Path {
 #[derive(Debug, Serialize)]
 pub(crate) struct SimulateDryRunOutput {
     pub(crate) mode: &'static str,
-    pub(crate) channel: String,
-    pub(crate) catalog_snapshot: Option<String>,
+    pub(crate) train: String,
     pub(crate) world_path: PathBuf,
     pub(crate) bus_connect: String,
     pub(crate) platform_service_count: usize,

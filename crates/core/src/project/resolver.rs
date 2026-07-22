@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use phoxal::model::robot::RobotV0 as Robot;
 use serde_json::Value;
 
-use super::catalog::{ArtifactKind, SelectionChannel};
+use super::suite::ArtifactKind;
 use super::tooling::resolve_project_path;
 
 const PHOXAL_PROVIDER: &str = "phoxal";
@@ -38,9 +38,6 @@ pub fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolveOptions {
-    /// Move unpinned channel selections to the supplied head snapshot. Only
-    /// `phoxal update` sets this; normal commands prefer `active` symlinks.
-    pub refresh_channel_head: bool,
     /// Resolve git component `tag` → `commit`. A `tag` that is already a full
     /// commit SHA resolves with no network; a tag/branch ref is resolved live
     /// via `git ls-remote`. Flows that need to locate/stage component driver
@@ -54,7 +51,7 @@ pub struct ResolveOptions {
     /// files locally.
     pub resolve_component_asset_commits: bool,
     /// Override the official service/driver target triple. Deploy probes the
-    /// robot arch and resolves catalog assets for that Linux triple instead of
+    /// robot arch and resolves suite assets for that Linux triple instead of
     /// the host.
     pub official_target_triple: Option<String>,
     /// Override native tool asset target triple. Host-native run/sim use the
@@ -65,7 +62,6 @@ pub struct ResolveOptions {
 impl Default for ResolveOptions {
     fn default() -> Self {
         Self {
-            refresh_channel_head: false,
             resolve_source_commits: true,
             resolve_component_asset_commits: true,
             official_target_triple: None,
@@ -77,9 +73,8 @@ impl Default for ResolveOptions {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedRobot {
     pub robot: Robot,
-    pub channel: SelectionChannel,
+    pub train: String,
     pub target: String,
-    pub catalog_snapshot: Option<String>,
     pub platform_runtimes: Vec<ResolvedPlatformRuntime>,
     pub simulators: Vec<ResolvedPlatformRuntime>,
     pub user_runtimes: Vec<ResolvedUserRuntime>,
@@ -90,7 +85,7 @@ pub struct ResolvedRobot {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RobotManifestExtras {
-    pub catalog_source: Option<PathBuf>,
+    pub suite_source: Option<PathBuf>,
     pub user_runtimes: BTreeMap<String, UserRuntimeManifestExtras>,
 }
 
@@ -118,7 +113,7 @@ pub struct LoadedRobot {
 /// public identity is the provider-qualified `package` id
 /// (`phoxal/service-drive`); there is no separate `artifact_id` (docs #21).
 ///
-/// Location and integrity come from the catalog. Contract/config metadata is
+/// Location and integrity come from the suite. Contract/config metadata is
 /// always extracted from the staged binary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedPlatformRuntime {
@@ -130,19 +125,19 @@ pub struct ResolvedPlatformRuntime {
     pub sha256: Option<String>,
     pub url: Option<String>,
     pub size: Option<u64>,
-    /// Whether the catalog has a built [`phoxal_cli_core::project::catalog::Artifact`] (tarball)
+    /// Whether the suite has a built [`phoxal_cli_core::project::suite::Artifact`] (tarball)
     /// for the resolved target triple. `false` for a metadata-only / not yet
     /// published entry - resolution still succeeds (the package is real and
     /// versioned), but there is nothing to fetch yet.
     pub published: bool,
-    /// Every target triple the catalog has a built tarball for, for
-    /// diagnostics (`ensure_catalog_availability`, `generations status`).
+    /// Every target triple the suite has a built tarball for, for
+    /// diagnostics (`ensure_suite_availability`, `generations status`).
     pub published_triples: Vec<String>,
     pub path_override: Option<PathBuf>,
-    /// The channel snapshot this entry belongs to.
-    pub channel: SelectionChannel,
+    /// Exact locked framework train this entry belongs to.
+    pub train: String,
     /// The target triple this entry was resolved/built for. `None` identifies
-    /// the catalog's distinct component-assets blob.
+    /// the suite's distinct component-assets blob.
     pub target: Option<String>,
 }
 
@@ -181,7 +176,7 @@ pub struct ResolvedComponent {
     /// `phoxal/component-<id>` assets package resolved for this component.
     /// `None` for a driverless (passive) component - e.g. a mechanical
     /// mount like a caster wheel - whose assets package doesn't exist in
-    /// the catalog; that's a valid configuration, not an error. A
+    /// the suite; that's a valid configuration, not an error. A
     /// component that declares a `driver:` block always has `Some` here
     /// (a missing assets package for a driven component is still a hard
     /// resolution failure).
@@ -214,14 +209,14 @@ pub struct ResolvedComponentPackage {
     pub kind: ArtifactKind,
     pub source: ResolvedComponentSource,
     pub path_override: Option<PathBuf>,
-    /// Present exactly when `source == Catalog` and the catalog resolved a
+    /// Present exactly when `source == Suite` and the suite resolved a
     /// matching entry for the needed scope (assets or `context.target`).
     /// Carries the same shape a
     /// service/simulator resolves to ([`ResolvedPlatformRuntime`]) so
     /// components stage through the identical native-artifact machinery
     /// (`native_artifacts::NativeArtifactDescriptor`) instead of a parallel
     /// bespoke path. `None` for `Path`/`Git` sources.
-    pub catalog_runtime: Option<ResolvedPlatformRuntime>,
+    pub suite_runtime: Option<ResolvedPlatformRuntime>,
 }
 
 impl ResolvedComponentPackage {
@@ -243,9 +238,9 @@ pub enum ResolvedComponentSource {
     Path {
         path: PathBuf,
     },
-    /// Resolves from the official artifact catalog (no fork pin for this
-    /// package); staged from a catalog release asset.
-    Catalog,
+    /// Resolves from the official artifact suite (no fork pin for this
+    /// package); staged from a suite release asset.
+    Suite,
 }
 
 /// A resolved native artifact (`tool-bus`, `tool-log`, `tool-joypad`, or
@@ -253,7 +248,7 @@ pub enum ResolvedComponentSource {
 /// launch-safe kind-qualified id used for participant/site ids, systemd unit
 /// names, and env var keys (`ROBOT_TOOL_BUS` etc.); `package` is the
 /// canonical provider-qualified identity (`phoxal/tool-bus`) used for
-/// catalog lookups and native-artifact provisioning.
+/// suite lookups and native-artifact provisioning.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedTool {
     pub kind: ArtifactKind,
@@ -267,16 +262,15 @@ pub struct ResolvedTool {
     pub sha256: String,
     pub url: Option<String>,
     pub size: Option<u64>,
-    /// Whether the catalog has a built [`phoxal_cli_core::project::catalog::Artifact`] (tarball)
+    /// Whether the suite has a built [`phoxal_cli_core::project::suite::Artifact`] (tarball)
     /// for the resolved target triple; `false` for a metadata-only / not yet
     /// published entry, in which case `sha256` is a placeholder
     /// (`"0".repeat(64)`) rather than a real digest - mirrors
     /// [`ResolvedPlatformRuntime::published`].
     pub published: bool,
     pub path_override: Option<PathBuf>,
-    /// The channel this entry was selected on; see
-    /// [`ResolvedPlatformRuntime::channel`].
-    pub channel: SelectionChannel,
+    /// Exact locked framework train this entry belongs to.
+    pub train: String,
     /// The target triple this entry was resolved/built for; see
     /// [`ResolvedPlatformRuntime::target`].
     pub target: String,
@@ -413,7 +407,7 @@ fn ensure_no_base_path_pins(yaml: &serde_yaml::Value, path: &Path) -> Result<()>
     // Only a path that ESCAPES the project (absolute, lexically climbing out
     // with `..`, or resolving outside through a symlink) is a dev override and
     // must live in a `robot.<env>.yaml` overlay so production manifests stay
-    // catalog/release based.
+    // suite/release based.
     let project_root = path.parent().unwrap_or_else(|| Path::new("."));
     let escaping_pins = pins
         .iter()
@@ -481,41 +475,12 @@ fn path_pin_lexically_escapes_project(pin_path: &Path) -> bool {
 
 fn parse_robot_value_with_extras(yaml: &mut serde_yaml::Value, path: &Path) -> Result<LoadedRobot> {
     let (extras, _) = take_manifest_extras(yaml, path)?;
-    translate_nightly_channel_for_framework(yaml, path)?;
     let sanitized = serde_yaml::to_string(&yaml)
         .with_context(|| format!("failed to prepare {}", path.display()))?;
     let robot = Robot::read_from_string(&sanitized)?;
     validate_launch_participant_ids(&robot, path)?;
 
     Ok(LoadedRobot { robot, extras })
-}
-
-fn translate_nightly_channel_for_framework(
-    yaml: &mut serde_yaml::Value,
-    path: &Path,
-) -> Result<()> {
-    let Some(channel) = yaml
-        .as_mapping_mut()
-        .and_then(|root| root.get_mut("artifacts"))
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .and_then(|artifacts| artifacts.get_mut("channel"))
-    else {
-        return Ok(());
-    };
-    match channel.as_str() {
-        Some("nightly") => {
-            // Framework main has not yet renamed its internal variant. Keep
-            // this translation confined to deserialization; CLI UX never
-            // accepts or prints the removed preview spelling.
-            *channel = serde_yaml::Value::String("preview".to_string());
-            Ok(())
-        }
-        Some("preview") => bail!(
-            "{} uses removed artifacts.channel `preview`; replace it with `nightly`",
-            path.display()
-        ),
-        _ => Ok(()),
-    }
 }
 
 fn validate_launch_participant_ids(robot: &Robot, path: &Path) -> Result<()> {
@@ -617,9 +582,9 @@ fn take_manifest_extras(
     if let Some(root) = yaml.as_mapping_mut()
         && let Some(artifacts) = root.get_mut("artifacts")
         && let Some(artifacts) = artifacts.as_mapping_mut()
-        && let Some(catalog) = artifacts.remove("catalog")
+        && let Some(suite) = artifacts.remove("suite")
     {
-        extras.catalog_source = Some(parse_catalog_source_extra(&catalog, robot_path)?);
+        extras.suite_source = Some(parse_suite_source_extra(&suite, robot_path)?);
         stripped_extras = true;
     }
 
@@ -658,16 +623,16 @@ fn take_manifest_extras(
     Ok((extras, stripped_extras))
 }
 
-fn parse_catalog_source_extra(value: &serde_yaml::Value, robot_path: &Path) -> Result<PathBuf> {
+fn parse_suite_source_extra(value: &serde_yaml::Value, robot_path: &Path) -> Result<PathBuf> {
     let Some(source) = value.as_str() else {
         bail!(
-            "artifacts.catalog in {} must be a local path string",
+            "artifacts.suite in {} must be a local path string",
             robot_path.display()
         );
     };
     if source.trim().is_empty() {
         bail!(
-            "artifacts.catalog in {} must not be empty",
+            "artifacts.suite in {} must not be empty",
             robot_path.display()
         );
     }
@@ -698,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn official_binary_name_uses_catalog_kind_for_other_kinds() {
+    fn official_binary_name_uses_suite_kind_for_other_kinds() {
         assert_eq!(
             official_binary_name(ArtifactKind::Service, "drive"),
             "phoxal-service-drive"

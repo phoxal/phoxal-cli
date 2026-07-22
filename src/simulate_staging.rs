@@ -28,7 +28,7 @@ use phoxal::model::simulation::Simulation as SimulationModel;
 use phoxal::model::structure::Structure;
 use phoxal::model::v0::Robot as RobotBundle;
 use phoxal::participant::launch::ParticipantLaunch;
-use phoxal_api::v2::simulation::RobotSpawn;
+use phoxal_api::v0_1::simulation::RobotSpawn;
 use serde::Serialize;
 
 use crate::webots_staging::{

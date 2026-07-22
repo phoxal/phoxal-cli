@@ -2,24 +2,23 @@ use std::fs;
 
 use phoxal::model::robot::RobotV0 as Robot;
 use phoxal_cli::resolver::{host_target_triple, resolve};
-use phoxal_cli_core::project::catalog::{
-    Catalog, SelectionChannel as CatalogChannel, fixture_artifact_for_tests,
-    fixture_catalog_for_tests, fixture_component_assets_entry_for_tests,
-    fixture_component_driver_entry_for_tests, fixture_contract_for_tests,
-    fixture_service_entry_for_tests, fixture_simulator_entry_for_tests,
-    fixture_tool_entry_for_tests,
-};
 use phoxal_cli_core::project::resolver::{
     ResolveOptions, ResolvedComponentSource, ResolvedPathOverrideKind, ResolvedRobot,
     load_robot_with_extras, load_robot_with_extras_and_overlays,
 };
+use phoxal_cli_core::project::suite::{
+    Suite, fixture_artifact_for_tests, fixture_component_assets_entry_for_tests,
+    fixture_component_driver_entry_for_tests, fixture_contract_for_tests,
+    fixture_service_entry_for_tests, fixture_simulator_entry_for_tests, fixture_suite_for_tests,
+    fixture_tool_entry_for_tests,
+};
 
 #[test]
-fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
+fn resolves_minimal_robot_to_train_platform_set() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
-    let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
+    let resolved = resolve_with_suite(&robot, std::path::Path::new("."))?;
 
-    assert_eq!(resolved.channel.to_string(), "stable");
+    assert_eq!(resolved.train, "0.1.0");
     assert_eq!(
         resolved
             .platform_runtimes
@@ -56,22 +55,25 @@ fn resolves_minimal_robot_to_api_channel_platform_set() -> anyhow::Result<()> {
             .find(|runtime| runtime.name == "drive")
             .expect("drive runtime")
             .artifact_ref(),
-        format!("phoxal-service-drive:0.1.0-{}", host_target_triple())
+        format!(
+            "https://example.invalid/phoxal/service-drive/{}",
+            host_target_triple()
+        )
     );
 
     Ok(())
 }
 
 #[test]
-fn catalog_component_drivers_do_not_enter_platform_service_set() -> anyhow::Result<()> {
+fn suite_component_drivers_do_not_enter_platform_service_set() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
-    let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
+    let resolved = resolve_with_suite(&robot, std::path::Path::new("."))?;
 
     assert!(
         resolved
             .platform_runtimes
             .iter()
-            .all(|runtime| runtime.kind == phoxal_cli_core::project::catalog::ArtifactKind::Service)
+            .all(|runtime| runtime.kind == phoxal_cli_core::project::suite::ArtifactKind::Service)
     );
     assert!(
         !resolved
@@ -86,7 +88,7 @@ fn catalog_component_drivers_do_not_enter_platform_service_set() -> anyhow::Resu
 #[test]
 fn driverless_component_resolves_assets_only() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
-    let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
+    let resolved = resolve_with_suite(&robot, std::path::Path::new("."))?;
 
     let left_drive = resolved
         .components
@@ -99,11 +101,11 @@ fn driverless_component_resolves_assets_only() -> anyhow::Result<()> {
     let assets = left_drive
         .assets
         .as_ref()
-        .expect("ddsm115 assets package resolves from the catalog");
+        .expect("ddsm115 assets package resolves from the suite");
     assert_eq!(assets.package, "phoxal/component-ddsm115");
     assert_eq!(
         assets.source,
-        phoxal_cli_core::project::resolver::ResolvedComponentSource::Catalog
+        phoxal_cli_core::project::resolver::ResolvedComponentSource::Suite
     );
 
     Ok(())
@@ -115,7 +117,7 @@ fn component_with_driver_block_resolves_both_assets_and_driver() -> anyhow::Resu
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount",
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount\n      driver:\n        connection: { type: can, bus: 0, node_id: 1 }",
     ))?;
-    let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
+    let resolved = resolve_with_suite(&robot, std::path::Path::new("."))?;
 
     let left_drive = resolved
         .components
@@ -128,7 +130,7 @@ fn component_with_driver_block_resolves_both_assets_and_driver() -> anyhow::Resu
         left_drive
             .assets
             .as_ref()
-            .expect("ddsm115 assets package resolves from the catalog")
+            .expect("ddsm115 assets package resolves from the suite")
             .package,
         "phoxal/component-ddsm115"
     );
@@ -139,77 +141,24 @@ fn component_with_driver_block_resolves_both_assets_and_driver() -> anyhow::Resu
 }
 
 #[test]
-fn component_version_pin_resolves_the_full_index_for_assets_and_driver() -> anyhow::Result<()> {
+fn component_version_pin_is_rejected_because_the_train_owns_versions() -> anyhow::Result<()> {
     let yaml = minimal_robot_yaml()
         .replace(
             "      mount_link: left_wheel_mount",
             "      mount_link: left_wheel_mount\n      driver:\n        connection: { type: can, bus: 0, node_id: 1 }",
         )
         .replace(
-            "artifacts:\n  channel: stable",
-            "artifacts:\n  channel: stable\n  pins:\n    phoxal/component-ddsm115: v0.2.0",
+            "artifacts: {}\n",
+            "artifacts:\n  pins:\n    phoxal/component-ddsm115: v0.2.0\n",
         );
-    let robot = Robot::parse_from_string(&yaml)?;
-    let target = host_target_triple();
-    let catalog = fixture_catalog_for_tests(vec![
-        fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable),
-        fixture_component_driver_entry_for_tests(
-            "ddsm115",
-            "0.1.0",
-            CatalogChannel::Stable,
-            &target,
-            true,
-            Vec::new(),
-        ),
-        fixture_component_assets_entry_for_tests("ddsm115", "0.2.0", CatalogChannel::Stable),
-        fixture_component_driver_entry_for_tests(
-            "ddsm115",
-            "0.2.0",
-            CatalogChannel::Stable,
-            &target,
-            true,
-            Vec::new(),
-        ),
-    ]);
-
-    let resolved = resolve(
-        &robot,
-        std::path::Path::new("."),
-        Some(&catalog),
-        offline_options(),
-    )?;
-    let component = resolved
-        .components
-        .iter()
-        .find(|component| component.instance == "left_drive")
-        .expect("left_drive component resolved");
-    assert_eq!(
-        component
-            .assets
-            .as_ref()
-            .expect("assets package resolved")
-            .catalog_runtime
-            .as_ref()
-            .expect("pinned assets runtime")
-            .version,
-        "0.2.0"
-    );
-    assert_eq!(
-        component
-            .driver
-            .as_ref()
-            .and_then(|driver| driver.catalog_runtime.as_ref())
-            .expect("pinned driver runtime")
-            .version,
-        "0.2.0"
-    );
+    Robot::parse_from_string(&yaml).expect_err("version pins are not source overrides");
     Ok(())
 }
 
 #[test]
-fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyhow::Result<()> {
-    // The resolver must capture, for a Catalog-sourced component package,
-    // exactly the same shape a service captures: the resolved catalog
+fn suite_component_captures_the_release_asset_for_assets_and_driver() -> anyhow::Result<()> {
+    // The resolver must capture, for a Suite-sourced component package,
+    // exactly the same shape a service captures: the resolved suite
     // entry's version, the per-scope `ReleaseAsset`, and the resolved target
     // scope (assets for metadata, the target triple for drivers).
     let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
@@ -217,20 +166,13 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount\n      driver:\n        connection: { type: can, bus: 0, node_id: 1 }",
     ))?;
     let target = host_target_triple();
-    let mut assets_entry =
-        fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable);
+    let mut assets_entry = fixture_component_assets_entry_for_tests("ddsm115", "0.1.0");
     assets_entry.as_asset_entry_mut().assets = Some(fixture_artifact_for_tests(
         "phoxal-component-ddsm115-assets-v0.1.0.tar.zst",
         &"a".repeat(64),
     ));
-    let mut driver_entry = fixture_component_driver_entry_for_tests(
-        "ddsm115",
-        "0.1.0",
-        CatalogChannel::Stable,
-        &target,
-        false,
-        Vec::new(),
-    );
+    let mut driver_entry =
+        fixture_component_driver_entry_for_tests("ddsm115", "0.1.0", &target, false, Vec::new());
     driver_entry.as_artifact_entry_mut().targets.insert(
         target.clone(),
         fixture_artifact_for_tests(
@@ -238,14 +180,13 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
             &"b".repeat(64),
         ),
     );
-    let catalog = fixture_catalog_for_tests(vec![
+    let suite = fixture_suite_for_tests(vec![
         fixture_service_entry_for_tests(
             "drive",
             "0.1.0",
-            CatalogChannel::Stable,
             &target,
-            false,
-            vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
+            true,
+            vec![fixture_contract_for_tests("v0.1::drive::Target", "publish")],
         ),
         assets_entry,
         driver_entry,
@@ -254,7 +195,7 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
     let resolved = resolve(
         &robot,
         std::path::Path::new("."),
-        Some(&catalog),
+        Some(&suite),
         offline_options(),
     )?;
     let left_drive = resolved
@@ -264,11 +205,11 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
         .expect("left_drive component resolved");
 
     let assets = left_drive.assets.as_ref().expect("assets package resolved");
-    assert_eq!(assets.source, ResolvedComponentSource::Catalog);
+    assert_eq!(assets.source, ResolvedComponentSource::Suite);
     let assets_runtime = assets
-        .catalog_runtime
+        .suite_runtime
         .as_ref()
-        .expect("catalog-sourced assets package captures a catalog_runtime");
+        .expect("suite-sourced assets package captures a suite_runtime");
     assert_eq!(assets_runtime.name, "ddsm115");
     assert_eq!(assets_runtime.version, "0.1.0");
     assert_eq!(
@@ -277,15 +218,15 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
     );
     assert_eq!(
         assets_runtime.artifact_ref(),
-        "phoxal-component-ddsm115-assets-v0.1.0.tar.zst"
+        "https://example.invalid/phoxal-component-ddsm115-assets-v0.1.0.tar.zst"
     );
 
     let driver = left_drive.driver.as_ref().expect("driver package resolved");
-    assert_eq!(driver.source, ResolvedComponentSource::Catalog);
+    assert_eq!(driver.source, ResolvedComponentSource::Suite);
     let driver_runtime = driver
-        .catalog_runtime
+        .suite_runtime
         .as_ref()
-        .expect("catalog-sourced driver package captures a catalog_runtime");
+        .expect("suite-sourced driver package captures a suite_runtime");
     assert_eq!(driver_runtime.name, "ddsm115");
     assert_eq!(
         driver_runtime.sha256.as_deref(),
@@ -293,28 +234,27 @@ fn catalog_component_captures_the_release_asset_for_assets_and_driver() -> anyho
     );
     assert_eq!(
         driver_runtime.artifact_ref(),
-        format!("phoxal-component-ddsm115-driver-v0.1.0-{target}.tar.zst")
+        format!("https://example.invalid/phoxal-component-ddsm115-driver-v0.1.0-{target}.tar.zst")
     );
 
     Ok(())
 }
 
 #[test]
-fn catalog_component_with_no_release_asset_yet_still_resolves_with_none_runtime_sha256()
+fn suite_component_with_no_release_asset_yet_still_resolves_with_none_runtime_sha256()
 -> anyhow::Result<()> {
-    // A metadata-only / not-yet-published catalog entry must not silently
+    // A metadata-only / not-yet-published suite entry must not silently
     // succeed as if a bundle exists to fetch: resolution succeeds (the
-    // package is real and versioned), but `catalog_runtime.sha256` stays
+    // package is real and versioned), but `suite_runtime.sha256` stays
     // `None` so a later staging attempt reports a clear diagnostic.
     let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
-    let mut component =
-        fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable);
+    let mut component = fixture_component_assets_entry_for_tests("ddsm115", "0.1.0");
     component.as_asset_entry_mut().assets = None;
-    let catalog = fixture_catalog_for_tests(vec![component]);
+    let suite = fixture_suite_for_tests(vec![component]);
     let resolved = resolve(
         &robot,
         std::path::Path::new("."),
-        Some(&catalog),
+        Some(&suite),
         offline_options(),
     )?;
 
@@ -326,10 +266,10 @@ fn catalog_component_with_no_release_asset_yet_still_resolves_with_none_runtime_
     let runtime = left_drive
         .assets
         .as_ref()
-        .expect("assets package resolved (the catalog entry exists, just unpublished)")
-        .catalog_runtime
+        .expect("assets package resolved (the suite entry exists, just unpublished)")
+        .suite_runtime
         .as_ref()
-        .expect("catalog_runtime is populated even with no release asset yet");
+        .expect("suite_runtime is populated even with no release asset yet");
     assert!(runtime.sha256.is_none());
     assert!(!runtime.published);
 
@@ -337,36 +277,33 @@ fn catalog_component_with_no_release_asset_yet_still_resolves_with_none_runtime_
 }
 
 #[test]
-fn declared_driver_with_no_target_blob_resolves_as_unpublished() -> anyhow::Result<()> {
+fn declared_driver_with_no_target_blob_is_unavailable() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount",
         "    left_drive:\n      component: ddsm115\n      mount_link: left_wheel_mount\n      driver:\n        connection: { type: can, bus: 0, node_id: 1 }",
     ))?;
-    let catalog = fixture_catalog_for_tests(vec![
+    let suite = fixture_suite_for_tests(vec![
         fixture_service_entry_for_tests(
             "drive",
             "0.1.0",
-            CatalogChannel::Stable,
             &host_target_triple(),
-            false,
-            vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
+            true,
+            vec![fixture_contract_for_tests("v0.1::drive::Target", "publish")],
         ),
-        fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable),
+        fixture_component_assets_entry_for_tests("ddsm115", "0.1.0"),
     ]);
 
-    let resolved = resolve(
+    let error = resolve(
         &robot,
         std::path::Path::new("."),
-        Some(&catalog),
+        Some(&suite),
         offline_options(),
-    )?;
-    let driver = resolved.components[0]
-        .driver
-        .as_ref()
-        .and_then(|driver| driver.catalog_runtime.as_ref())
-        .expect("driver view resolves from the flattened component entry");
-    assert!(!driver.published);
-    assert!(driver.sha256.is_none());
+    )
+    .expect_err("a declared driver must have an artifact for the target");
+    assert!(
+        format!("{error:#}").contains("ComponentDriverUnavailable"),
+        "{error:#}"
+    );
 
     Ok(())
 }
@@ -374,7 +311,7 @@ fn declared_driver_with_no_target_blob_resolves_as_unpublished() -> anyhow::Resu
 #[test]
 fn resolves_known_api_to_its_official_set() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
-    let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
+    let resolved = resolve_with_suite(&robot, std::path::Path::new("."))?;
 
     assert_eq!(
         resolved
@@ -420,9 +357,9 @@ fn user_service_resolves_source_hash() -> anyhow::Result<()> {
 "#,
     ))?;
 
-    let catalog = test_catalog();
-    let first = resolve(&robot, temp.path(), Some(&catalog), offline_options())?;
-    let second = resolve(&robot, temp.path(), Some(&catalog), offline_options())?;
+    let suite = test_suite();
+    let first = resolve(&robot, temp.path(), Some(&suite), offline_options())?;
+    let second = resolve(&robot, temp.path(), Some(&suite), offline_options())?;
 
     let runtime = first
         .user_runtimes
@@ -446,8 +383,8 @@ fn missing_user_service_source_dir_fails() -> anyhow::Result<()> {
 "#,
     ))?;
 
-    let catalog = test_catalog();
-    let error = resolve(&robot, temp.path(), Some(&catalog), offline_options())
+    let suite = test_suite();
+    let error = resolve(&robot, temp.path(), Some(&suite), offline_options())
         .expect_err("missing source dir should fail");
 
     assert!(error.to_string().contains("does not exist"), "{error:#}");
@@ -455,9 +392,9 @@ fn missing_user_service_source_dir_fails() -> anyhow::Result<()> {
 }
 
 #[test]
-fn tools_resolve_from_catalog_entries() -> anyhow::Result<()> {
+fn tools_resolve_from_suite_entries() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
-    let resolved = resolve_with_catalog(&robot, std::path::Path::new("."))?;
+    let resolved = resolve_with_suite(&robot, std::path::Path::new("."))?;
 
     for (tool_name, package) in [
         ("tool-bus", "phoxal/tool-bus"),
@@ -498,7 +435,7 @@ fn path_pin_with_unqualified_key_is_rejected() -> anyhow::Result<()> {
         "runtime-drive",
         "./framework/service/drive",
     ))?;
-    let error = resolve_with_catalog(&robot, std::path::Path::new("."))
+    let error = resolve_with_suite(&robot, std::path::Path::new("."))
         .expect_err("unqualified path pin key should fail");
 
     assert!(
@@ -514,7 +451,7 @@ fn unused_provider_qualified_path_pin_is_rejected() -> anyhow::Result<()> {
         "phoxal/component-bno085",
         "./framework/component/bno085",
     ))?;
-    let error = resolve_with_catalog(&robot, std::path::Path::new("."))
+    let error = resolve_with_suite(&robot, std::path::Path::new("."))
         .expect_err("unused path pin key should fail");
 
     assert!(
@@ -526,45 +463,39 @@ fn unused_provider_qualified_path_pin_is_rejected() -> anyhow::Result<()> {
 
 #[test]
 fn artifacts_generation_field_is_rejected_as_a_dead_field() -> anyhow::Result<()> {
-    // D1 (X-tools slice): the artifact catalog no longer carries a per-entry
+    // D1 (X-tools slice): the artifact suite no longer carries a per-entry
     // API version, so `artifacts.generation` cannot mean anything against
     // it anymore. `resolve()` must reject it explicitly rather than silently
     // ignore it.
-    let robot = Robot::parse_from_string(&minimal_robot_yaml().replace(
-        "artifacts:\n  channel: stable",
-        "artifacts:\n  channel: stable\n  generation: v1",
-    ))?;
-    let error = resolve_with_catalog(&robot, std::path::Path::new("."))
-        .expect_err("artifacts.generation should be rejected");
-    let message = error.to_string();
+    let error = Robot::parse_from_string(
+        &minimal_robot_yaml().replace("artifacts: {}\n", "artifacts:\n  generation: v1\n"),
+    )
+    .expect_err("artifacts.generation should be rejected");
+    let message = format!("{error:#}");
 
-    assert!(message.contains("artifacts.generation"), "{message}");
-    assert!(
-        message.contains("no longer meaningful") || message.contains("no longer exists"),
-        "{message}"
-    );
+    assert!(message.contains("generation"), "{message}");
+    assert!(message.contains("unknown field"), "{message}");
     Ok(())
 }
 
 #[test]
-fn frozen_catalog_is_name_driven_not_entry_channel_driven() -> anyhow::Result<()> {
+fn immutable_suite_is_name_driven() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
     let target = "aarch64-unknown-linux-gnu";
-    let catalog = fixture_catalog_for_tests(vec![
+    let suite = fixture_suite_for_tests(vec![
         fixture_service_entry_for_tests(
             "drive",
             "0.1.0",
-            CatalogChannel::Nightly,
             target,
             true,
-            vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
+            vec![fixture_contract_for_tests("v0.1::drive::Target", "publish")],
         ),
-        fixture_component_assets_entry_for_tests("ddsm115", "0.1.0", CatalogChannel::Stable),
+        fixture_component_assets_entry_for_tests("ddsm115", "0.1.0"),
     ]);
     let resolved = resolve(
         &robot,
         std::path::Path::new("."),
-        Some(&catalog),
+        Some(&suite),
         ResolveOptions {
             official_target_triple: Some(target.to_string()),
             resolve_source_commits: false,
@@ -573,15 +504,12 @@ fn frozen_catalog_is_name_driven_not_entry_channel_driven() -> anyhow::Result<()
         },
     )?;
 
-    assert_eq!(
-        resolved.platform_runtimes.len(),
-        phoxal_cli_core::project::catalog::OFFICIAL_SERVICES.len()
-    );
+    assert_eq!(resolved.platform_runtimes.len(), 1);
     Ok(())
 }
 
 #[test]
-fn official_only_robot_without_catalog_keeps_no_catalog_error() -> anyhow::Result<()> {
+fn official_only_robot_without_suite_keeps_no_suite_error() -> anyhow::Result<()> {
     let robot = Robot::parse_from_string(&minimal_robot_yaml())?;
     let error = resolve(
         &robot,
@@ -593,10 +521,14 @@ fn official_only_robot_without_catalog_keeps_no_catalog_error() -> anyhow::Resul
             ..ResolveOptions::default()
         },
     )
-    .expect_err("no catalog should keep the catalog-unavailable diagnostic");
+    .expect_err("no suite should keep the suite-unavailable diagnostic");
     let message = error.to_string();
 
-    assert!(message.contains("no vendored binaries"), "{message}");
+    assert!(
+        message.contains("locked framework train suite"),
+        "{message}"
+    );
+    assert!(message.contains("suite.json"), "{message}");
     assert!(!message.contains("NotYetAvailable"), "{message}");
     Ok(())
 }
@@ -635,7 +567,7 @@ fn simulator_path_pin_replaces_the_supervisor_or_controller_artifact() -> anyhow
         "phoxal/simulator-webots-controller",
         "../framework/simulator/webots-controller",
     ))?;
-    let resolved = resolve_with_catalog(&robot, temp.path())?;
+    let resolved = resolve_with_suite(&robot, temp.path())?;
     let controller = resolved
         .simulators
         .iter()
@@ -673,13 +605,13 @@ fn simulator_path_pin_replaces_the_supervisor_or_controller_artifact() -> anyhow
 }
 
 #[test]
-fn service_path_pin_replaces_catalog_artifact() -> anyhow::Result<()> {
+fn service_path_pin_replaces_suite_artifact() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let robot = Robot::parse_from_string(&robot_with_path_pin(
         "phoxal/service-drive",
         "../framework/service/drive",
     ))?;
-    let resolved = resolve_with_catalog(&robot, temp.path())?;
+    let resolved = resolve_with_suite(&robot, temp.path())?;
     let drive = resolved
         .platform_runtimes
         .iter()
@@ -709,7 +641,7 @@ fn component_asset_path_pin_forks_the_assets_package() -> anyhow::Result<()> {
         "phoxal/component-ddsm115",
         "../framework/component/ddsm115",
     ))?;
-    let resolved = resolve_with_catalog(&robot, temp.path())?;
+    let resolved = resolve_with_suite(&robot, temp.path())?;
     let left_drive = resolved
         .components
         .iter()
@@ -735,12 +667,12 @@ fn component_asset_path_pin_forks_the_assets_package() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn resolve_with_catalog(robot: &Robot, root: &std::path::Path) -> anyhow::Result<ResolvedRobot> {
-    let catalog = test_catalog();
-    resolve(robot, root, Some(&catalog), offline_options())
+fn resolve_with_suite(robot: &Robot, root: &std::path::Path) -> anyhow::Result<ResolvedRobot> {
+    let suite = test_suite();
+    resolve(robot, root, Some(&suite), offline_options())
 }
 
-fn test_catalog() -> Catalog {
+fn test_suite() -> Suite {
     let target = host_target_triple();
     let mut entries = service_names()
         .into_iter()
@@ -748,74 +680,59 @@ fn test_catalog() -> Catalog {
             fixture_service_entry_for_tests(
                 name,
                 "0.1.0",
-                CatalogChannel::Stable,
                 &target,
-                false,
-                vec![fixture_contract_for_tests("v1::drive::Target", "publish")],
+                true,
+                vec![fixture_contract_for_tests("v0.1::drive::Target", "publish")],
             )
         })
         .collect::<Vec<_>>();
     for name in component_names() {
-        entries.push(fixture_component_assets_entry_for_tests(
-            name,
-            "0.1.0",
-            CatalogChannel::Stable,
-        ));
+        entries.push(fixture_component_assets_entry_for_tests(name, "0.1.0"));
         entries.push(fixture_component_driver_entry_for_tests(
             name,
             "0.1.0",
-            CatalogChannel::Stable,
             &target,
-            false,
+            true,
             vec![fixture_contract_for_tests(
-                "v1::component::State",
+                "v0.1::component::State",
                 "publish",
             )],
         ));
     }
     entries.extend([
-        fixture_tool_entry_for_tests(
-            "router",
-            "0.1.0",
-            CatalogChannel::Stable,
-            &target,
-            false,
-            Vec::new(),
-        ),
+        fixture_tool_entry_for_tests("bus", "0.1.0", &target, true, Vec::new()),
+        fixture_tool_entry_for_tests("router", "0.1.0", &target, true, Vec::new()),
         fixture_tool_entry_for_tests(
             "joypad",
             "0.1.0",
-            CatalogChannel::Stable,
             &target,
-            false,
-            vec![fixture_contract_for_tests("v1::drive::Target", "subscribe")],
+            true,
+            vec![fixture_contract_for_tests(
+                "v0.1::drive::Target",
+                "subscribe",
+            )],
         ),
-        fixture_simulator_entry_for_tests(
-            "webots-supervisor",
-            "0.14.0",
-            CatalogChannel::Stable,
-            &target,
-            false,
-            Vec::new(),
-        ),
+        fixture_tool_entry_for_tests("log", "0.1.0", &target, true, Vec::new()),
+        fixture_tool_entry_for_tests("telemetry", "0.1.0", &target, true, Vec::new()),
         fixture_simulator_entry_for_tests(
             "webots-controller",
             "0.14.0",
-            CatalogChannel::Stable,
             &target,
-            false,
+            true,
             vec![fixture_contract_for_tests(
-                "v1::component::MotorCommand",
+                "v0.1::component::MotorCommand",
                 "publish",
             )],
         ),
+        fixture_simulator_entry_for_tests("webots-supervisor", "0.14.0", &target, true, Vec::new()),
     ]);
-    fixture_catalog_for_tests(entries)
+    fixture_suite_for_tests(entries)
 }
 
 fn service_names() -> Vec<&'static str> {
     vec![
         "asset",
+        "behavior",
         "drive",
         "frame",
         "joint",
@@ -826,6 +743,7 @@ fn service_names() -> Vec<&'static str> {
         "odometry",
         "perception",
         "power",
+        "safety",
         "video",
     ]
 }
@@ -866,23 +784,22 @@ robot:
     right_drive:
       component: ddsm115
       mount_link: right_wheel_mount
-artifacts:
-  channel: stable
+artifacts: {}
 "#
     .to_string()
 }
 
 fn robot_with_path_pin(key: &str, path: &str) -> String {
     minimal_robot_yaml().replace(
-        "artifacts:\n  channel: stable",
-        &format!("artifacts:\n  channel: stable\n  pins:\n    {key}:\n      path: {path}"),
+        "artifacts: {}\n",
+        &format!("artifacts:\n  pins:\n    {key}:\n      path: {path}\n"),
     )
 }
 
 fn robot_with_user_service(services: &str) -> String {
     minimal_robot_yaml().replace(
-        "artifacts:\n  channel: stable",
-        &format!("services:\n{services}\nartifacts:\n  channel: stable"),
+        "artifacts: {}\n",
+        &format!("services:\n{services}\nartifacts: {{}}\n"),
     )
 }
 

@@ -28,9 +28,9 @@ pub(crate) fn official_runtimes_including_component_drivers(
         .components
         .iter()
         .filter_map(|component| component.driver.as_ref())
-        .filter(|driver| matches!(driver.source, ResolvedComponentSource::Catalog))
+        .filter(|driver| matches!(driver.source, ResolvedComponentSource::Suite))
     {
-        if let Some(runtime) = &driver.catalog_runtime
+        if let Some(runtime) = &driver.suite_runtime
             && seen.insert(runtime.package.clone())
         {
             runtimes.push(runtime);
@@ -39,7 +39,7 @@ pub(crate) fn official_runtimes_including_component_drivers(
     runtimes
 }
 
-/// Find a resolved runtime (service, simulator, or Catalog-sourced component
+/// Find a resolved runtime (service, simulator, or Suite-sourced component
 /// driver) by its participant/launch `artifact_id` - a driver's is the
 /// component id (`runtime.name`), matching how a service's is its own name.
 pub(crate) fn official_runtime_by_artifact_id<'a>(

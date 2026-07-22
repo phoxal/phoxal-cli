@@ -1,7 +1,7 @@
 //! The shared role a participant plays in a robot contract graph.
 //!
 //! Source origin is orthogonal: command and supervisor adapters carry their
-//! own local/catalog bit alongside this enum when that distinction matters.
+//! own local/suite bit alongside this enum when that distinction matters.
 use serde::{Deserialize, Serialize};
 
 /// What role a participant plays in a robot's contract graph: a CLI-managed
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// application), a bus service, a component driver, or a simulator (the
 /// Webots supervisor or a robot's controller). Orthogonal to whether this
 /// particular incarnation is running from a locally resolved directory or a
-/// fetched catalog artifact - callers that need that distinction carry it
+/// fetched suite artifact - callers that need that distinction carry it
 /// alongside, not inside, this enum (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

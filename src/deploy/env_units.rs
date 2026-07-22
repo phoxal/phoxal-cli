@@ -134,7 +134,7 @@ pub(crate) fn render_units(
     // (`site_tool_unit`'s `After=`/`Wants=`) and matching the staged
     // readiness the CLI supervisor itself uses (router before the other
     // tools - `crate::run::stages_for_run`). `plan.site` already omits
-    // a standard tool entirely when the catalog snapshot in use predates it
+    // a standard tool entirely when the suite snapshot in use predates it
     // (`launch_plan::build_site_launches`), so this loop never renders a unit
     // for a tool that was never resolved.
     for site in &plan.site {

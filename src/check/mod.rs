@@ -36,7 +36,7 @@ pub struct CheckCmd {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CheckOptions {
     pub service: Option<String>,
-    pub catalog_source: Option<String>,
+    pub suite_source: Option<String>,
     pub overlays: Vec<String>,
     pub target: Option<String>,
     pub strict: bool,
@@ -110,9 +110,8 @@ pub use command::PlatformArtifactRef;
 use command::run;
 mod participants;
 pub(crate) use participants::{
-    check_artifact_refs_from_resolved, component_driver_runtimes_by_ref,
-    ensure_catalog_availability, ensure_user_service_exists, source_participants_from_resolved,
-    tool_participants_from_resolved,
+    check_artifact_refs_from_resolved, component_driver_runtimes_by_ref, ensure_suite_availability,
+    ensure_user_service_exists, source_participants_from_resolved, tool_participants_from_resolved,
 };
 mod graph;
 pub use graph::{run_check, run_check_with_context, run_check_with_deployed_user_service_images};

@@ -21,7 +21,7 @@ fn title() -> TitleInfo {
     TitleInfo {
         robot: "rover".to_string(),
         namespace: "dev".to_string(),
-        channel: "stable".to_string(),
+        train: "0.36.0".to_string(),
         manifest: "./robot.yaml".to_string(),
         mode: SessionMode::Run,
         bus_endpoint: "tcp/localhost:7447".to_string(),
@@ -948,18 +948,18 @@ fn motion_panel_stays_compact_when_input_state_is_stale() {
         }),
         motion: Some(Timestamped {
             received_at: old,
-            value: phoxal_api::v1::motion::State {
+            value: phoxal_api::v0_1::motion::State {
                 manual_candidate_age_ns: None,
                 autonomous_candidate_age_ns: None,
                 safety_constraints_age_ns: None,
                 selected_source: None,
-                final_target: phoxal_api::v1::motion::Target {
+                final_target: phoxal_api::v0_1::motion::Target {
                     linear_x_mps: 0.0,
                     angular_z_radps: 0.0,
                     curvature_limit_radpm: None,
                 },
                 zero_reason: None,
-                safety_runtime: phoxal_api::v1::motion::SafetyRuntime::Absent,
+                safety_runtime: phoxal_api::v0_1::motion::SafetyRuntime::Absent,
                 software_estop_engaged: false,
                 component_estop_blocked: false,
                 active_safety_constraints: Vec::new(),

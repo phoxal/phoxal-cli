@@ -20,7 +20,7 @@ impl Deploy {
             dry_run: self.dry_run,
             target: self.target.clone(),
             overlays: self.env.clone(),
-            catalog_source: app.catalog_source.clone(),
+            suite_source: app.suite_source.clone(),
             health_timeout: Duration::from_secs(self.health_timeout_sec),
         };
         let project_root = app.project.root().to_path_buf();

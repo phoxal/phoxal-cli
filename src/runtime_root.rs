@@ -106,7 +106,7 @@ fn ensure_safe_relative_path(path: &Path, label: &str) -> Result<()> {
 
 fn validate_candidate(candidate: &Path, resolved: &ResolvedRobot) -> Result<()> {
     // Resolution already ran the model's semantic validation against the
-    // catalog's platform names. Reparse the serialized candidate here to
+    // suite's platform names. Reparse the serialized candidate here to
     // prove the on-disk manifest is complete and strict without losing that
     // owner-specific validation context.
     let staged = phoxal::model::robot::Robot::parse_from_dir(candidate)
@@ -216,10 +216,10 @@ mod tests {
     use super::*;
     use crate::host_paths::test_support::ScratchPhoxalHome;
     use crate::resolver::host_target_triple;
-    use phoxal_cli_core::project::catalog::ArtifactKind;
     use phoxal_cli_core::project::resolver::{
         ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
     };
+    use phoxal_cli_core::project::suite::ArtifactKind;
 
     fn resolved_robot() -> Result<ResolvedRobot> {
         let yaml = r#"schema: robot/v0
@@ -238,9 +238,8 @@ robot:
 "#;
         Ok(ResolvedRobot {
             robot: phoxal::model::robot::v0::Robot::parse_from_string(yaml)?,
-            channel: phoxal_cli_core::project::catalog::SelectionChannel::Stable,
+            train: "0.36.0".to_string(),
             target: host_target_triple(),
-            catalog_snapshot: None,
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
@@ -356,7 +355,7 @@ robot:
                     path: PathBuf::from("components/ddsm115"),
                 },
                 path_override: None,
-                catalog_runtime: None,
+                suite_runtime: None,
             }),
             driver: None,
             has_driver: false,

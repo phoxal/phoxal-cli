@@ -3,7 +3,7 @@
 #
 # Proves the separated repos still resolve together:
 #
-#   robot.yaml -> phoxal-cli -> live resolution (native artifact catalog, git
+#   robot.yaml -> phoxal-cli -> live resolution (native artifact suite, git
 #             component commits, host tools) -> dry-run launch report
 #
 # There is NO lockfile: every run resolves live. Production reproducibility
@@ -20,7 +20,7 @@
 #     launch the full staged Webots simulation and supervise it until Ctrl-C.
 #
 # The smoke phase is CI-safe and proves the resolver still lines up with the
-# configured artifact catalog.
+# configured artifact suite.
 #
 # Usage:
 #   scripts/live-simulate-gate.sh [--live] [ROBOT_DIR]
