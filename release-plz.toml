@@ -1,0 +1,33 @@
+# release-plz owns the CLI version, changelog, and managed release PR. The
+# repository workflow owns target builds, checksums, the vX.Y.Z tag, and the
+# GitHub Release so no public release exists before every binary is packaged.
+[workspace]
+publish = false
+# Required for release-plz to process these packages in `release-pr`; the
+# publish/tag/GitHub-release side effects are disabled independently below.
+release = true
+release_always = false
+dependencies_update = false
+pr_name = "chore(release): release"
+pr_branch_prefix = "release-plz-"
+semver_check = false
+changelog_config = "cliff.toml"
+git_tag_enable = false
+git_release_enable = false
+git_tag_name = "v{{ version }}"
+
+[[package]]
+name = "phoxal-cli"
+version_group = "phoxal-cli"
+
+[[package]]
+name = "phoxal-cli-core"
+version_group = "phoxal-cli"
+
+[[package]]
+name = "phoxal-cli-ui"
+version_group = "phoxal-cli"
+
+[[package]]
+name = "phoxal-cli-test-api-fixture"
+release = false

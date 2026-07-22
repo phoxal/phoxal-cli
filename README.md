@@ -138,6 +138,26 @@ To update an existing install to the latest release:
 phoxal-cli self upgrade
 ```
 
+## Releasing
+
+`release-plz` owns the workspace version, `CHANGELOG.md`, and the single
+automation-managed release PR. Normal changes on `main` update a
+`release-plz-*` branch through the `phoxal-release-bot` GitHub App. The fixture
+crate is excluded; `phoxal-cli`, `phoxal-cli-core`, and `phoxal-cli-ui` inherit
+the one root workspace version. Because none of those packages publish to a
+Cargo registry, release-plz compares them with the latest immutable `vX.Y.Z`
+tag checkout supplied as its local registry baseline.
+
+Merging that managed PR is the only publication trigger. The repository-owned
+release workflow builds the CLI for every supported target, produces sibling
+SHA-256 files, and calls the shared retry-safe GitHub release seam only after
+all builds succeed. `release-plz` does not publish crates, create tags, or
+create GitHub Releases directly in this repository.
+
+See [`.github/workflows/release-plz.yml`](.github/workflows/release-plz.yml),
+[`.github/workflows/release.yml`](.github/workflows/release.yml), and
+[`release-plz.toml`](release-plz.toml).
+
 ### Build from Source
 
 ```sh
