@@ -30,8 +30,8 @@ phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build va
 |---|---|
 | `check` | Resolve `robot.yaml`, stage participants, extract their embedded metadata sections, and validate the graph against `phoxal::check`. `--service <name>` scopes user-service selection. `--strict` additionally fails on coherence warnings. |
 | `validate` | Lower-level `robot.yaml` structure and user-service phoxal-dependency checks that back `check`. |
-| `run` | Supervise the resolved host-native graph in the terminal UI. `--watch` rebuilds changed local participants, re-runs the graph proof, and swaps the checked process in place. |
-| `simulation run <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` hot-swaps service edits and re-checks driver metadata/substitutions without launching drivers. |
+| `run` | Supervise the resolved host-native graph in the terminal UI. `--watch` recompiles an immutable whole-plan revision and reconciles only changed participants. |
+| `simulation run <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` creates a new plan revision for source or manifest edits and re-checks driver metadata/substitutions without launching drivers. |
 | `simulation join` | Reserved entry point for joining a running multi-robot simulation; currently reports that the workflow is not available yet. |
 | `logs [participant]` | Stream participant bus log events from a reachable robot. `-f`/`--follow` keeps streaming; omit `participant` for every participant. |
 | `status <safety|motion|localization>` | Inspect the latest domain state over the robot bus. `engage-estop` and `reset-estop` publish the robot-wide software emergency-stop request. |
@@ -41,6 +41,14 @@ phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build va
 | `doctor` | Check host prerequisites (Webots, Rust toolchain) without changing anything. |
 | `version` | Print the CLI version, wire codec, and participant metadata section names. |
 | `self upgrade` | Update the CLI binary itself. |
+
+Interactive sessions bind their infrastructure router at the exact project-local
+`<project>/.phoxal/zenoh.sock` endpoint. Router bootstrap readiness travels over
+an inherited one-shot file descriptor; stdout and stderr are logs only. Every
+launched graph process crosses the same environment-scrubbing `ManagedChild`
+boundary and is registered with an out-of-process guardian, so killing the CLI
+cannot leave its process graph behind. Shutdown drains graph participants
+concurrently before host tools and budgets each phase by its slowest member.
 
 Finite commands print append-only, pipe-friendly text. Live `run` and `simulation run`
 sessions require a terminal and fail with an actionable error when redirected.

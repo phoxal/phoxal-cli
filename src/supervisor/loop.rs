@@ -1,10 +1,10 @@
 //! Main supervision loop, actions, and orderly shutdown.
 
 use super::{
-    BoardBackend, ParticipantState, RequestedStop, RunningParticipant, SupervisionStage,
-    SupervisorAction, SupervisorOptions, SupervisorOutcome, await_stage_ready, emit_event,
-    join_reader, maybe_emit_startup_outcome, send_process_group_terminate, send_terminate,
-    spawn_until_pending, stop_child,
+    BoardBackend, ParticipantSpec, ParticipantState, RequestedStop, RunningParticipant,
+    SupervisionStage, SupervisorAction, SupervisorOptions, SupervisorOutcome, await_stage_ready,
+    emit_event, join_reader, maybe_emit_startup_outcome, send_process_group_terminate,
+    send_terminate, spawn_until_pending, stop_child,
 };
 use crate::session::output::WaitBudget;
 use anyhow::Result;
@@ -12,7 +12,6 @@ use phoxal_cli_core::session::{ProjectLifecycle, RuntimeFailurePolicy};
 use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
-use tokio::process::Child;
 use tokio::time::MissedTickBehavior;
 
 pub async fn supervise_until_shutdown(
@@ -201,7 +200,7 @@ pub(crate) async fn request_participant_stop(
         &participant.spec.key,
         "supervisor: sending SIGTERM for requested stop",
     );
-    let Some(pid) = participant.child.as_ref().and_then(Child::id) else {
+    let Some(pid) = participant.child.as_ref().and_then(|child| child.id()) else {
         board.set_state(
             &participant.spec.key,
             ParticipantState::Failed,
@@ -264,20 +263,49 @@ pub(crate) async fn recv_action(
 }
 
 pub(crate) async fn handle_action(
-    running: &mut [RunningParticipant],
+    running: &mut Vec<RunningParticipant>,
     board: &BoardBackend,
     action: SupervisorAction,
 ) -> Result<()> {
     match action {
-        SupervisorAction::Swap { key, spec, note } => {
-            let Some(participant) = running
-                .iter_mut()
-                .find(|participant| participant.spec.key == key)
-            else {
-                tracing::warn!(process = %key, "swap requested for unknown process");
-                return Ok(());
-            };
-            participant.swap(*spec, board, note).await
+        SupervisorAction::ReconcilePlan {
+            revision,
+            specs,
+            remove_ids,
+            note,
+        } => {
+            for remove_id in remove_ids {
+                if let Some(index) = running
+                    .iter()
+                    .position(|participant| participant.spec.id == remove_id)
+                {
+                    running[index].stop_current(board).await?;
+                    running.remove(index);
+                }
+            }
+            for spec in specs {
+                let key = spec.key.clone();
+                if let Some(index) = running
+                    .iter()
+                    .position(|participant| participant.spec.key == key)
+                {
+                    if running[index].spec != spec {
+                        running[index].swap(spec, board, note.clone()).await?;
+                    }
+                } else {
+                    let phase = canonical_phase(&spec);
+                    let participant =
+                        RunningParticipant::spawn_in_phase(spec, board, phase).await?;
+                    running.push(participant);
+                }
+            }
+            let accepted_revision = board.activate_next_plan_revision();
+            tracing::info!(
+                accepted_revision,
+                candidate_digest = %revision.digest,
+                "activated immutable plan revision"
+            );
+            Ok(())
         }
         SupervisorAction::Restart { key } => {
             let Some(participant) = running
@@ -296,25 +324,62 @@ pub(crate) async fn handle_action(
 }
 
 pub(crate) async fn shutdown_all(running: &mut [RunningParticipant], board: &BoardBackend) {
-    for participant in running.iter_mut().rev() {
-        if let Some(mut child) = participant.child.take() {
-            board.append_log(&participant.spec.key, "supervisor: stopping");
-            if let Err(error) = stop_child(
-                &mut child,
-                participant.spec.shutdown_grace,
-                participant.spec.process_group,
-            )
-            .await
-            {
-                board.set_state(
-                    &participant.spec.key,
-                    ParticipantState::Failed,
-                    Some(format!("failed to stop: {error:#}")),
-                );
-            }
-            board.set_process_details(&participant.spec.key, None, None);
+    // Reverse exact startup phase order, concurrency within each phase.
+    let mut phases = running
+        .iter()
+        .map(|participant| participant.shutdown_phase.clone())
+        .collect::<Vec<_>>();
+    phases.sort_by_key(|phase| phase_rank(phase));
+    phases.dedup();
+    for phase in phases.into_iter().rev() {
+        let mut joins = tokio::task::JoinSet::new();
+        for participant in running
+            .iter_mut()
+            .filter(|participant| participant.shutdown_phase == phase)
+        {
+            let mut child = participant.child.take();
+            let stdout = participant.stdout_task.take();
+            let stderr = participant.stderr_task.take();
+            let spec = participant.spec.clone();
+            let board = board.clone();
+            joins.spawn(async move {
+                if let Some(child) = child.as_mut() {
+                    board.append_log(&spec.key, "supervisor: stopping");
+                    if let Err(error) =
+                        stop_child(child, spec.shutdown_grace, spec.process_group).await
+                    {
+                        board.set_state(
+                            &spec.key,
+                            ParticipantState::Failed,
+                            Some(format!("failed to stop: {error:#}")),
+                        );
+                    }
+                    board.set_process_details(&spec.key, None, None);
+                }
+                join_reader(stdout).await;
+                join_reader(stderr).await;
+            });
         }
-        join_reader(participant.stdout_task.take()).await;
-        join_reader(participant.stderr_task.take()).await;
+        while let Some(result) = joins.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!(%error, "shutdown worker failed");
+            }
+        }
+    }
+}
+
+fn canonical_phase(spec: &ParticipantSpec) -> &'static str {
+    if spec.kind == phoxal_cli_core::session::ParticipantKind::Tool || spec.id == "webots" {
+        "starting project infrastructure"
+    } else {
+        "starting robot graph"
+    }
+}
+
+fn phase_rank(phase: &str) -> u8 {
+    match phase {
+        "starting project infrastructure" => 0,
+        "starting robot graph" => 1,
+        _ => 2,
     }
 }

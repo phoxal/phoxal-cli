@@ -5,6 +5,7 @@ use super::{
     join_reader, kill_child_process_group, requested_stop_exit_is_clean, send_process_group_signal,
     send_process_signal, spawn_output_reader, stop_child,
 };
+use crate::supervisor::ManagedChild;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
@@ -15,14 +16,14 @@ use std::fs;
 use std::process::Stdio;
 use std::time::Duration;
 use std::time::Instant;
-use tokio::process::Child;
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 pub(crate) struct RunningParticipant {
     pub(crate) spec: ParticipantSpec,
-    pub(crate) child: Option<Child>,
+    pub(crate) shutdown_phase: String,
+    pub(crate) child: Option<ManagedChild>,
     pub(crate) stdout_task: Option<JoinHandle<()>>,
     pub(crate) stderr_task: Option<JoinHandle<()>>,
     pub(crate) failure_times: VecDeque<Instant>,
@@ -72,9 +73,19 @@ impl Drop for RunningParticipant {
 }
 
 impl RunningParticipant {
+    #[cfg(test)]
     pub(crate) async fn spawn(spec: ParticipantSpec, board: &BoardBackend) -> Result<Self> {
+        Self::spawn_in_phase(spec, board, "direct").await
+    }
+
+    pub(crate) async fn spawn_in_phase(
+        spec: ParticipantSpec,
+        board: &BoardBackend,
+        phase: impl Into<String>,
+    ) -> Result<Self> {
         let mut running = Self {
             spec,
+            shutdown_phase: phase.into(),
             child: None,
             stdout_task: None,
             stderr_task: None,
@@ -110,15 +121,10 @@ impl RunningParticipant {
         }
         let mut command = Command::new(&self.spec.executable);
         command.args(&self.spec.args);
-        #[cfg(unix)]
-        if self.spec.process_group {
-            command.process_group(0);
-        }
         if let Some(cwd) = &self.spec.cwd {
             command.current_dir(cwd);
         }
         command
-            .envs(self.spec.env.iter().map(|(key, value)| (key, value)))
             // No terminal input for any child: the TUI (Part 4) owns terminal
             // input exclusively (there is no Interact/raw-io tab), and a
             // child that inherited this process's stdin could otherwise race
@@ -126,8 +132,7 @@ impl RunningParticipant {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
+        let mut child = ManagedChild::spawn(&mut command, self.spec.process_group, &self.spec.env)
             .with_context(|| format!("failed to spawn {}", self.spec.command_line()))?;
         let pid = child.id();
         let artifact_size_bytes = fs::metadata(&self.spec.executable)

@@ -1,13 +1,12 @@
 //! Tests for this module.
 
-use super::r#loop::{recv_action, request_participant_stop};
+use super::r#loop::{recv_action, request_participant_stop, shutdown_all};
 use super::signals::process_group_alive;
 use super::*;
 use anyhow::{Context, Result};
 use phoxal_cli_core::session::ParticipantKind;
 use std::path::PathBuf;
 use std::time::Instant;
-use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use crate::session::output::WaitBudget;
@@ -206,7 +205,53 @@ fn orderly_shutdown_budget_covers_grace_group_reap_and_reader_joins() {
         WaitBudget::Unbounded,
     )];
 
-    assert_eq!(orderly_shutdown_budget(&stages), Duration::from_secs(9));
+    assert_eq!(
+        orderly_shutdown_budget(&stages),
+        Duration::from_millis(5_500)
+    );
+}
+
+#[tokio::test]
+async fn shutdown_drains_concurrently_within_reverse_canonical_phases() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let log = temp.path().join("shutdown-order");
+    let board = BoardBackend::new();
+    let mut running = Vec::new();
+    for (id, phase) in [
+        ("infra", "starting project infrastructure"),
+        ("graph-a", "starting robot graph"),
+        ("graph-b", "starting robot graph"),
+    ] {
+        let mut spec = sleep_spec(id);
+        spec.args = vec![
+            "-c".to_string(),
+            format!(
+                "trap 'sleep 0.2; echo {id} >> {}; exit 0' TERM; while :; do :; done",
+                log.display()
+            ),
+        ];
+        spec.process_group = true;
+        spec.shutdown_grace = Duration::from_secs(1);
+        running.push(RunningParticipant::spawn_in_phase(spec, &board, phase).await?);
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let started = Instant::now();
+    shutdown_all(&mut running, &board).await;
+    let elapsed = started.elapsed();
+    let lines = std::fs::read_to_string(log)?
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert!(matches!(lines.as_slice(), [first, second, third]
+        if (first == "graph-a" || first == "graph-b")
+            && (second == "graph-a" || second == "graph-b")
+            && first != second
+            && third == "infra"));
+    assert!(
+        elapsed < Duration::from_millis(750),
+        "shutdown was not concurrent: {elapsed:?}"
+    );
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -229,7 +274,7 @@ async fn ordinary_stop_kills_the_entire_isolated_process_group() -> Result<()> {
     let pid = participant
         .child
         .as_ref()
-        .and_then(Child::id)
+        .and_then(|child| child.id())
         .context("group leader should have a pid")?;
 
     participant.stop_current(&board).await?;
@@ -498,7 +543,7 @@ async fn requested_webots_stop_uses_sigkill_only_after_term_grace() -> Result<()
     let pid = participant
         .child
         .as_ref()
-        .and_then(Child::id)
+        .and_then(|child| child.id())
         .context("test child has no pid")?;
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut running = vec![participant];

@@ -628,6 +628,14 @@ impl BoardBackend {
         actor.publish(&self.snapshot_tx);
     }
 
+    pub(crate) fn activate_next_plan_revision(&self) -> u64 {
+        let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
+        actor.snapshot.plan_revision = actor.snapshot.plan_revision.saturating_add(1);
+        let revision = actor.snapshot.plan_revision;
+        actor.publish(&self.snapshot_tx);
+        revision
+    }
+
     pub fn set_router_status(&self, status: impl Into<String>) {
         let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
         actor.snapshot.router = status.into();

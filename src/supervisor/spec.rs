@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParticipantSpec {
     pub key: ProcessKey,
     pub id: String,
@@ -92,7 +92,7 @@ pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{escaped}'")
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RestartPolicy {
     pub restart_delay: Duration,
     pub start_limit_interval: Duration,
@@ -171,9 +171,10 @@ impl RequestedStop {
 
 #[derive(Debug)]
 pub enum SupervisorAction {
-    Swap {
-        key: ProcessKey,
-        spec: Box<ParticipantSpec>,
+    ReconcilePlan {
+        revision: phoxal_cli_core::project::launch_plan::PlanRevision,
+        specs: Vec<ParticipantSpec>,
+        remove_ids: Vec<String>,
         note: String,
     },
     /// Stop and respawn a participant from its own current spec, unchanged -

@@ -150,6 +150,9 @@ pub(crate) async fn live_simulate_setup(
     ensure_active()?;
     let requested_stop = RequestedStop::new(webots_spec.key.clone(), webots_spec.shutdown_grace);
     specs.push(webots_spec);
+    let revision =
+        phoxal_cli_core::project::launch_plan::PlanRevision::compile(1, sim.plan.clone())?;
+    crate::supervisor::materialize_plan_binaries(&sim.ctx.project_root, &revision, &mut specs)?;
 
     ui.info(format!(
         "simulation launch plan resolved: {} robot(s), {} site tool(s)",

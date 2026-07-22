@@ -41,15 +41,16 @@ pub struct SupervisionStage {
 /// joins for stdout and stderr. A second cancel still forces an immediate exit.
 #[must_use]
 pub fn orderly_shutdown_budget(stages: &[SupervisionStage]) -> Duration {
-    stages
-        .iter()
-        .flat_map(|stage| &stage.specs)
-        .fold(Duration::from_secs(1), |budget, spec| {
-            budget
-                .saturating_add(spec.shutdown_grace)
-                .saturating_add(Duration::from_secs(1))
-                .saturating_add(READER_JOIN_BUDGET.saturating_mul(2))
-        })
+    stages.iter().fold(Duration::from_secs(1), |budget, stage| {
+        let phase_max = stage.specs.iter().fold(Duration::ZERO, |maximum, spec| {
+            maximum.max(
+                spec.shutdown_grace
+                    .saturating_add(Duration::from_secs(1))
+                    .saturating_add(READER_JOIN_BUDGET.saturating_mul(2)),
+            )
+        });
+        budget.saturating_add(phase_max)
+    })
 }
 
 impl SupervisionStage {
@@ -96,6 +97,7 @@ impl SupervisionStage {
 pub(crate) async fn spawn_stage(
     running: &mut Vec<RunningParticipant>,
     board: &BoardBackend,
+    phase: &str,
     specs: Vec<ParticipantSpec>,
 ) {
     for spec in specs {
@@ -105,7 +107,7 @@ pub(crate) async fn spawn_stage(
         // the stage boundary for direct stage tests and defensive consistency;
         // unsolicited Liveliness and logs still cannot create board entries.
         board.register_planned(&key, spec.kind, spec.startup_requirement);
-        match RunningParticipant::spawn(spec, board).await {
+        match RunningParticipant::spawn_in_phase(spec, board, phase).await {
             Ok(participant) => running.push(participant),
             Err(error) => {
                 board.set_state(
@@ -187,7 +189,7 @@ pub(crate) async fn spawn_stage_emitting(
     )
     .await;
     board.begin_phase(&label);
-    spawn_stage(running, board, specs).await;
+    spawn_stage(running, board, &label, specs).await;
     if ready_ids.is_empty() {
         emit_event(
             events,

@@ -13,6 +13,9 @@ use phoxal_cli::commands::Cli;
 
 #[tokio::main()]
 async fn main() -> ExitCode {
+    if let Some(exit) = phoxal_cli::maybe_run_guardian() {
+        return exit;
+    }
     let cli = Cli::parse();
     init_tracing();
 
