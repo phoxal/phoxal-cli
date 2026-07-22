@@ -18,7 +18,7 @@ use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::tooling::resolve_project_path;
 use phoxal_cli_core::session::human;
 use std::collections::{BTreeSet, VecDeque};
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -283,10 +283,7 @@ pub(crate) async fn start_infrastructure_router(
     }
     let launch = RouterLaunch { binary, config };
     std::fs::create_dir_all(project_root.join(".phoxal"))?;
-    let endpoint = format!(
-        "unixsock-stream/{}",
-        project_root.join(".phoxal/zenoh.sock").display()
-    );
+    let endpoint = project_router_endpoint(project_root);
     let (process, listeners) = launch_router_process(&launch, &endpoint).await?;
     Ok((
         InfrastructureRouter {
@@ -300,6 +297,13 @@ pub(crate) async fn start_infrastructure_router(
     ))
 }
 
+pub(crate) fn project_router_endpoint(project_root: &Path) -> String {
+    format!(
+        "unixsock-stream/{}",
+        project_root.join(".phoxal/zenoh.sock").display()
+    )
+}
+
 async fn launch_router_process(
     launch: &RouterLaunch,
     required_endpoint: &str,
@@ -309,19 +313,25 @@ async fn launch_router_process(
     if unsafe { libc::pipe(readiness_fds.as_mut_ptr()) } != 0 {
         return Err(std::io::Error::last_os_error()).context("create router readiness pipe");
     }
-    let (read_fd, ready_fd) = (readiness_fds[0], readiness_fds[1]);
+    // SAFETY: ownership of both descriptors returned by pipe transfers into
+    // these guards exactly once, including every early-error path below.
+    let read_fd = unsafe { OwnedFd::from_raw_fd(readiness_fds[0]) };
+    let ready_fd = unsafe { OwnedFd::from_raw_fd(readiness_fds[1]) };
     // SAFETY: valid parent-owned read descriptor; only the write end is a
     // router bootstrap capability.
-    if unsafe { libc::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+    if unsafe { libc::fcntl(read_fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
         return Err(std::io::Error::last_os_error())
             .context("mark router readiness read end close-on-exec");
     }
     let mut command = tokio::process::Command::new(&launch.binary);
+    prepare_inherited_bootstrap_fd(&mut command, ready_fd.as_raw_fd())?;
     if let Some(config) = &launch.config {
         command.arg("--config").arg(config);
     }
     command.arg("--local-endpoint").arg(required_endpoint);
-    command.arg("--ready-fd").arg(ready_fd.to_string());
+    command
+        .arg("--ready-fd")
+        .arg(ready_fd.as_raw_fd().to_string());
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -330,7 +340,7 @@ async fn launch_router_process(
     let mut child = ManagedChild::spawn(&mut command, true, &[])
         .context("failed to launch phoxal-infrastructure-router")?;
     // SAFETY: the child inherited this valid descriptor; parent no longer owns it.
-    unsafe { libc::close(ready_fd) };
+    drop(ready_fd);
     let stdout = child
         .stdout
         .take()
@@ -359,8 +369,7 @@ async fn launch_router_process(
         }
     });
     let attempt = RouterLaunchAttempt::new(child, stderr_task);
-    // SAFETY: read_fd is the unique parent-owned read side.
-    let readiness_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+    let readiness_file = std::fs::File::from(read_fd);
     let mut readiness_reader = tokio::fs::File::from_std(readiness_file);
     let readiness: Result<Vec<String>> = async {
         let readiness = tokio::time::timeout(ROUTER_READY_TIMEOUT, async {
@@ -428,6 +437,34 @@ async fn launch_router_process(
         }
     });
     Ok((attempt.finish(stdout_task), listeners))
+}
+
+fn prepare_inherited_bootstrap_fd(
+    command: &mut tokio::process::Command,
+    fd: libc::c_int,
+) -> Result<()> {
+    // Keep the parent-side descriptor CLOEXEC while ManagedChild lazily starts
+    // the guardian. Otherwise that unrelated exec inherits the write end and
+    // the supervisor can never observe EOF on this one-shot readiness pipe.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("mark router readiness write end close-on-exec");
+    }
+    // The intended router child clears CLOEXEC only after fork and immediately
+    // before exec. Multiple pre_exec hooks are supported; ManagedChild adds its
+    // guardian registration hook after this one.
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags == -1 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -506,7 +543,7 @@ mod recovery_tests {
         write_executable(
             &script,
             &format!(
-                "#!/bin/sh\n\
+                "#!/usr/bin/env bash\n\
                  count=0\n\
                  if [ -f {count} ]; then count=$(sed -n '1p' {count}); fi\n\
                  count=$((count + 1))\n\
@@ -549,6 +586,41 @@ mod recovery_tests {
         // SAFETY: signal zero performs only the process existence check.
         let result = unsafe { libc::kill(pid as i32, 0) };
         result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    #[tokio::test]
+    async fn unrelated_exec_cannot_hold_the_readiness_pipe_open() -> Result<()> {
+        let mut fds = [0_i32; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let (read_fd, write_fd) = (fds[0], fds[1]);
+        let mut writer = tokio::process::Command::new("/usr/bin/env");
+        writer
+            .arg("bash")
+            .arg("-c")
+            .arg(format!("printf ready >&{write_fd}"));
+        prepare_inherited_bootstrap_fd(&mut writer, write_fd)?;
+
+        // This models the guardian's first lazy exec between readiness-pipe
+        // creation and router spawn. CLOEXEC must prevent it retaining the
+        // write end for its lifetime.
+        let mut unrelated_command = tokio::process::Command::new("/bin/sleep");
+        unrelated_command.arg("30").kill_on_drop(true);
+        let mut unrelated = unrelated_command.spawn()?;
+        let mut writer = writer.spawn()?;
+        unsafe { libc::close(write_fd) };
+        let readiness_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+        let mut reader = tokio::fs::File::from_std(readiness_file);
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), reader.read_to_end(&mut bytes))
+            .await
+            .context("unrelated exec retained router readiness writer")??;
+        assert_eq!(bytes, b"ready");
+        assert!(writer.wait().await?.success());
+        unrelated.kill().await?;
+        let _ = unrelated.wait().await;
+        Ok(())
     }
 
     async fn start_fake_router(binary: PathBuf) -> Result<InfrastructureRouter> {
@@ -598,7 +670,7 @@ mod recovery_tests {
         write_executable(
             &script,
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$$\" > {}\nprintf '%s\\n' 'diagnostic' >&2\nready_fd=\nwhile [ \"$#\" -gt 0 ]; do if [ \"$1\" = '--ready-fd' ]; then ready_fd=$2; shift 2; else shift; fi; done\neval \"printf '%s' 'not-json' >&$ready_fd\"\neval \"exec $ready_fd>&-\"\nsleep 30\n",
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$$\" > {}\nprintf '%s\\n' 'diagnostic' >&2\nready_fd=\nwhile [ \"$#\" -gt 0 ]; do if [ \"$1\" = '--ready-fd' ]; then ready_fd=$2; shift 2; else shift; fi; done\neval \"printf '%s' 'not-json' >&$ready_fd\"\neval \"exec $ready_fd>&-\"\nsleep 30\n",
                 shell_quote(&pid_path),
             ),
         )?;

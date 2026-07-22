@@ -511,7 +511,7 @@ fn recheck_run_target(
         build_emit_apis_from_source,
     )?;
     crate::check::ensure_check_outcome_ok(&resolved.train, &outcome)?;
-    let plan = build_launch_plan(
+    let mut plan = build_launch_plan(
         LaunchMode::Run,
         &[CheckedRobotLaunchInput {
             project_root,
@@ -533,7 +533,9 @@ fn recheck_run_target(
         crate::check::robot_contract_surfaces(&resolved.robot.robot.id, &outcome.contract_surfaces);
     let coherence = crate::check::coherence_for_launch_plan(&coherence_plan, &[coherence_graph])?;
     crate::check::enforce_coherence(crate::check::CoherenceVerb::Run, &coherence)?;
-    let specs = specs_for_target(&plan, target)?;
+    let mut specs = specs_for_target(&plan, target)?;
+    let endpoint = crate::run::project_router_endpoint(project_root);
+    crate::run::apply_session_connect(&mut plan, &mut specs, &endpoint);
     Ok(WatchOutcome::Revision { plan, specs })
 }
 
@@ -546,7 +548,7 @@ fn recheck_sim_target(
     // A watch recheck only needs the plan itself (to diff specs), not the
     // contract surfaces `build_checked_sim_launch_plan` now also returns for
     // `RuntimeStore` (finding A5) - this path never builds a fresh session.
-    let (plan, _contract_surfaces) = build_checked_sim_launch_plan(
+    let (mut plan, _contract_surfaces) = build_checked_sim_launch_plan(
         &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,
@@ -556,7 +558,9 @@ fn recheck_sim_target(
     if target.kind == WatchTargetKind::Driver {
         return Ok(WatchOutcome::MetadataOnly);
     }
-    let specs = specs_for_target(&plan, target)?;
+    let mut specs = specs_for_target(&plan, target)?;
+    let endpoint = crate::run::project_router_endpoint(project_root);
+    crate::run::apply_session_connect(&mut plan, &mut specs, &endpoint);
     Ok(WatchOutcome::Revision { plan, specs })
 }
 

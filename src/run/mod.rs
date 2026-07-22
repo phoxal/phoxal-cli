@@ -10,7 +10,10 @@ const RUN_STAGE_READY_TIMEOUT: Duration = Duration::from_secs(60);
 const ROUTER_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 mod router;
-pub(crate) use router::{InfrastructureRouter, apply_session_connect, start_infrastructure_router};
+pub(crate) use router::{
+    InfrastructureRouter, apply_session_connect, project_router_endpoint,
+    start_infrastructure_router,
+};
 mod command;
 pub(crate) use command::{AbortTasks, PreparedRun};
 pub use command::{DriversMode, Run, RunOptions};

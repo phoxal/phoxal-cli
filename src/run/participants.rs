@@ -141,7 +141,12 @@ pub(crate) fn prepare_robot_participants(
                     "SimulationManaged: launched by Webots via the supervisor, not the CLI supervisor"
                         .to_string(),
                 );
-                board.upsert_process(key, status, StartupRequirement::Required);
+                register_simulation_managed_participant(
+                    board,
+                    key,
+                    status,
+                    participant.launch.incarnation,
+                );
                 continue;
             }
             board.upsert_process(
@@ -320,6 +325,21 @@ pub(crate) fn prepare_robot_participants(
         }
     }
     Ok(())
+}
+
+fn register_simulation_managed_participant(
+    board: &BoardBackend,
+    key: ProcessKey,
+    status: ParticipantStatus,
+    incarnation: u64,
+) {
+    board.upsert_process(key.clone(), status, StartupRequirement::Required);
+    // Webots-owned controllers are intentionally outside `ManagedChild`, so
+    // their launch record keeps the reserved unmanaged incarnation (zero).
+    // Record that exact value on the board: observed Liveliness remains the
+    // readiness proof, but can now satisfy the same exact-incarnation gate as
+    // a supervisor-minted child.
+    board.set_incarnation(&key, incarnation);
 }
 
 /// The board `ParticipantKind` plus whether the participant runs from a
@@ -515,4 +535,41 @@ pub(crate) fn locate_official_binary(
     // the project-local store has no other identity from which to find this
     // participant's binary.
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phoxal_cli_core::session::{ParticipantInstanceKey, ParticipantKind};
+
+    #[test]
+    fn simulation_managed_readiness_accepts_its_exact_unmanaged_incarnation() {
+        let board = BoardBackend::new();
+        let robot = RobotKey::new("dev", "rover");
+        let key = ProcessKey::robot(robot.clone(), "simulator-webots-supervisor");
+        register_simulation_managed_participant(
+            &board,
+            key.clone(),
+            ParticipantStatus::new(
+                key.to_string(),
+                ParticipantKind::Simulator,
+                ParticipantState::Starting,
+            ),
+            0,
+        );
+
+        board.record_instance_presence(
+            ParticipantInstanceKey {
+                robot,
+                participant: "simulator-webots-supervisor".to_string(),
+                incarnation: 0,
+            },
+            true,
+        );
+
+        assert_eq!(
+            board.snapshot().participants[&key.to_string()].state,
+            ParticipantState::Ready
+        );
+    }
 }
