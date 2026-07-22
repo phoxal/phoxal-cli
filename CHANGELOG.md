@@ -4,6 +4,17 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.20.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.20.0) - 2026-07-22
+
+
+### Added
+
+- Select immutable framework suites by Cargo.lock (#168)
+
+### Fixed
+
+- Run doctor registry probe off async runtime (#170)
+
 ## [0.19.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.19.0) - 2026-07-20
 
 
