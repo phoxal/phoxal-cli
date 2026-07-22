@@ -1,7 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Args;
 
 use crate::AppContext;
+use phoxal_cli_core::project::train::RegistryStatus;
 
 #[derive(Debug, Args)]
 pub struct Doctor {}
@@ -24,11 +25,11 @@ impl Doctor {
             if app.offline || phoxal_cli_core::project::suite::offline_from_env() {
                 println!("framework facade: crates.io probe skipped in offline mode");
             } else {
-                match phoxal_cli_core::project::train::inspect_registry_train(&train.version) {
-                    Ok(phoxal_cli_core::project::train::RegistryStatus::Available) => {
+                match inspect_registry_train(train.version.clone()).await {
+                    Ok(RegistryStatus::Available) => {
                         println!("framework facade: available on crates.io");
                     }
-                    Ok(phoxal_cli_core::project::train::RegistryStatus::Yanked) => {
+                    Ok(RegistryStatus::Yanked) => {
                         println!(
                             "warning: locked framework train {} is yanked; existing locked deployment remains valid, but a new Cargo update will not select it",
                             train.version
@@ -44,5 +45,36 @@ impl Doctor {
             }
         }
         Ok(())
+    }
+}
+
+async fn inspect_registry_train(version: String) -> Result<RegistryStatus> {
+    run_registry_probe(move || phoxal_cli_core::project::train::inspect_registry_train(&version))
+        .await
+}
+
+async fn run_registry_probe<F>(probe: F) -> Result<RegistryStatus>
+where
+    F: FnOnce() -> Result<RegistryStatus> + Send + 'static,
+{
+    tokio::task::spawn_blocking(probe)
+        .await
+        .context("crates.io probe worker failed")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn blocking_http_client_is_dropped_outside_the_async_runtime() {
+        let status = run_registry_probe(|| {
+            let _client = reqwest::blocking::Client::new();
+            Ok(RegistryStatus::Available)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(status, RegistryStatus::Available);
     }
 }
