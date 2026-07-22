@@ -131,12 +131,6 @@ impl StartupState {
                     self.reached_running = true;
                 }
             }
-            // The controller's own `apply_event` reduces this into a
-            // `SessionChanged` via `reduce_staged_startup_complete` and
-            // forwards that instead of the raw event. This arm exists only
-            // for exhaustiveness; the `SessionChanged` arm above is what this
-            // model actually observes.
-            SessionEvent::StagedStartupComplete => {}
         }
     }
 }

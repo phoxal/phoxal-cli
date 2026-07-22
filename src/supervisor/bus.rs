@@ -1,11 +1,11 @@
 //! Raw bus adapters for logs, Liveliness, clock, and endpoint reachability.
 
-use super::{BoardBackend, BoardSnapshot, LogSource, ParticipantState};
+#[cfg(test)]
+use super::ParticipantState;
+use super::{BoardBackend, LogSource};
 use anyhow::Result;
 use anyhow::anyhow;
-use phoxal::bus::{
-    Codec, DEFAULT_QUERY_TIMEOUT, MessagePack, Querier, QueryFailure, Subscribe, Subscriber, Topic,
-};
+use phoxal::bus::{DEFAULT_QUERY_TIMEOUT, Querier, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
 use phoxal::raw::{ParticipantLivelinessEvent, ParticipantLivelinessStatus};
 use phoxal_api::v0_1 as api;
@@ -16,6 +16,7 @@ use phoxal_cli_core::session::reconcile::{
 use phoxal_cli_core::session::telemetry::ClockObservation;
 use phoxal_cli_core::session::telemetry::ClockSample;
 use phoxal_cli_core::session::{LogScope, LogSeverity, RoutedLogLine};
+use phoxal_cli_core::session::{ParticipantInstanceKey, RobotKey};
 use std::convert::Infallible;
 use std::net::TcpStream;
 use std::net::ToSocketAddrs;
@@ -24,66 +25,6 @@ use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-
-pub fn start_robot_description_server(
-    namespace: String,
-    robot_id: String,
-    connect: String,
-    description: phoxal_cli_core::supervisor_api::v0::RobotDescription,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            wait_for_endpoint(&connect).await;
-            if let Err(error) = robot_description_server_loop(
-                namespace.clone(),
-                robot_id.clone(),
-                connect.clone(),
-                &description,
-            )
-            .await
-            {
-                tracing::debug!("supervisor API waiting for router: {error:#}");
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-        }
-    })
-}
-
-async fn robot_description_server_loop(
-    namespace: String,
-    robot_id: String,
-    connect: String,
-    description: &phoxal_cli_core::supervisor_api::v0::RobotDescription,
-) -> Result<()> {
-    use phoxal_cli_core::supervisor_api::v0::{ROBOT_DESCRIPTION_TOPIC, RobotDescriptionRequest};
-
-    let bus = Bus::open(BusConfig {
-        namespace,
-        robot_id,
-        participant: "phoxal-cli-supervisor-api".to_string(),
-        incarnation: 0,
-        connect_endpoints: vec![connect],
-    })
-    .await?;
-    let server = bus.declare_server(ROBOT_DESCRIPTION_TOPIC).await?;
-    loop {
-        let query = server.recv().await?;
-        let request = query
-            .request_metadata()
-            .and_then(|_| query.request_bytes())
-            .and_then(|bytes| {
-                MessagePack::decode::<RobotDescriptionRequest>(&bytes)
-                    .map_err(phoxal::bus::BusError::from)
-            });
-        if let Err(error) = request {
-            query
-                .reply_err(&QueryFailure::invalid_argument(error.to_string()))
-                .await?;
-            continue;
-        }
-        query.reply(&bus, MessagePack::encode(description)?).await?;
-    }
-}
 
 pub fn endpoint_reachable(endpoint: &str, timeout: Duration) -> bool {
     let Some(address) = endpoint.strip_prefix("tcp/") else {
@@ -430,8 +371,8 @@ pub(crate) async fn liveliness_observer_loop(
     board: BoardBackend,
 ) -> Result<()> {
     let bus = Bus::open(BusConfig {
-        namespace,
-        robot_id,
+        namespace: namespace.clone(),
+        robot_id: robot_id.clone(),
         participant: LIVELINESS_OBSERVER_ID.to_string(),
         incarnation: 0,
         connect_endpoints: vec![connect],
@@ -440,7 +381,7 @@ pub(crate) async fn liveliness_observer_loop(
     .map_err(|error| anyhow!("failed to open bus Liveliness observer: {error}"))?;
     let _observer = bus
         .observe_participant_liveliness(move |event| {
-            apply_liveliness_event(&board, event);
+            apply_liveliness_event(&board, &namespace, &robot_id, event);
         })
         .await
         .map_err(|error| anyhow!("failed to observe participant Liveliness: {error}"))?;
@@ -451,7 +392,12 @@ pub(crate) async fn liveliness_observer_loop(
     Ok(())
 }
 
-fn apply_liveliness_event(board: &BoardBackend, event: ParticipantLivelinessEvent) {
+fn apply_liveliness_event(
+    board: &BoardBackend,
+    namespace: &str,
+    robot_id: &str,
+    event: ParticipantLivelinessEvent,
+) {
     let id = event.key.participant();
     // Participant ids are the launch plan's validated, robot-scoped flat
     // namespace. The framework documents that a session observing a key it also holds
@@ -461,7 +407,14 @@ fn apply_liveliness_event(board: &BoardBackend, event: ParticipantLivelinessEven
     if id == LIVELINESS_OBSERVER_ID {
         return;
     }
-    board.record_presence(id, event.status == ParticipantLivelinessStatus::Alive);
+    board.record_instance_presence(
+        ParticipantInstanceKey {
+            robot: RobotKey::new(namespace, robot_id),
+            participant: id.to_string(),
+            incarnation: event.key.incarnation(),
+        },
+        event.status == ParticipantLivelinessStatus::Alive,
+    );
 }
 
 /// Start a background feed of `v0_1::simulation::Clock` samples. Returns a
@@ -519,39 +472,6 @@ pub(crate) async fn clock_feed_loop(
     }
 }
 
-/// Ids in `expected_bus_ids` not yet observed `Ready` on the board.
-pub(crate) fn missing_ready_participants(
-    board: &BoardSnapshot,
-    expected_bus_ids: &[String],
-) -> Vec<String> {
-    expected_bus_ids
-        .iter()
-        .filter(|id| {
-            !board
-                .participants
-                .get(id.as_str())
-                .is_some_and(|status| status.state == ParticipantState::Ready)
-        })
-        .cloned()
-        .collect()
-}
-
-pub(crate) fn failed_expected_participants(
-    board: &BoardSnapshot,
-    expected_bus_ids: &[String],
-) -> Vec<String> {
-    expected_bus_ids
-        .iter()
-        .filter(|id| {
-            board
-                .participants
-                .get(id.as_str())
-                .is_some_and(|status| status.state == ParticipantState::Failed)
-        })
-        .cloned()
-        .collect()
-}
-
 #[must_use]
 pub fn default_connect_endpoint() -> String {
     DEFAULT_ROUTER_CONNECT.to_string()
@@ -565,7 +485,7 @@ mod tests {
 
     fn event(participant: &str, status: ParticipantLivelinessStatus) -> ParticipantLivelinessEvent {
         ParticipantLivelinessEvent {
-            key: ParticipantLivelinessKey::new("dev/robots/rover", participant)
+            key: ParticipantLivelinessKey::new("dev/robots/rover", participant, 7)
                 .expect("valid participant key"),
             status,
         }
@@ -574,19 +494,38 @@ mod tests {
     #[test]
     fn observer_events_drive_presence_without_becoming_restart_authority() {
         let board = BoardBackend::new();
-        board.register_planned("drive", ParticipantKind::Service);
+        let key = phoxal_cli_core::session::ProcessKey::robot(
+            phoxal_cli_core::session::RobotKey::new("dev", "rover"),
+            "drive",
+        );
+        board.register_planned(
+            &key,
+            ParticipantKind::Service,
+            phoxal_cli_core::session::StartupRequirement::Required,
+        );
+        board.set_incarnation(&key, 7);
 
-        apply_liveliness_event(&board, event("drive", ParticipantLivelinessStatus::Alive));
+        apply_liveliness_event(
+            &board,
+            "dev",
+            "rover",
+            event("drive", ParticipantLivelinessStatus::Alive),
+        );
         assert_eq!(
-            board.snapshot().participants["drive"].state,
+            board.snapshot().participants["dev/rover::drive"].state,
             ParticipantState::Ready
         );
 
-        apply_liveliness_event(&board, event("drive", ParticipantLivelinessStatus::Lost));
+        apply_liveliness_event(
+            &board,
+            "dev",
+            "rover",
+            event("drive", ParticipantLivelinessStatus::Lost),
+        );
         assert_eq!(
-            board.snapshot().participants["drive"].state,
-            ParticipantState::Degraded,
-            "Lost is observable but must not synthesize process failure"
+            board.snapshot().participants["dev/rover::drive"].state,
+            ParticipantState::Ready,
+            "Lost is observational and must not mutate process lifecycle"
         );
     }
 
@@ -595,13 +534,23 @@ mod tests {
         // Synthetic guard coverage: the observer currently holds no
         // Liveliness token, but its reserved id must never become a board row.
         let board = BoardBackend::new();
-        board.register_planned(LIVELINESS_OBSERVER_ID, ParticipantKind::Tool);
+        let key = phoxal_cli_core::session::ProcessKey::robot(
+            phoxal_cli_core::session::RobotKey::new("dev", "rover"),
+            LIVELINESS_OBSERVER_ID,
+        );
+        board.register_planned(
+            &key,
+            ParticipantKind::Tool,
+            phoxal_cli_core::session::StartupRequirement::Optional,
+        );
         apply_liveliness_event(
             &board,
+            "dev",
+            "rover",
             event(LIVELINESS_OBSERVER_ID, ParticipantLivelinessStatus::Alive),
         );
         assert_eq!(
-            board.snapshot().participants[LIVELINESS_OBSERVER_ID].state,
+            board.snapshot().participants["dev/rover::phoxal-cli-liveliness-observer"].state,
             ParticipantState::Starting
         );
     }

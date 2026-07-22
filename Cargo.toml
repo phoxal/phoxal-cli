@@ -30,6 +30,7 @@ console = "0.15.11"
 crossterm = "0.28"
 dirs = "5"
 flate2 = "1.1.9"
+getrandom = "0.3.4"
 heck = "0.5.0"
 hex = "0.4.3"
 libc = "0.2.186"
@@ -53,8 +54,8 @@ tracing-subscriber = "0.3.23"
 unicode-width = "0.2"
 urdf-rs = "0.9.0"
 webots-proto = "0.2.0"
-phoxal = "=0.36.0"
-phoxal-api = "=0.36.0"
+phoxal = "=0.36.2"
+phoxal-api = "=0.36.2"
 phoxal-cli-core = { path = "crates/core" }
 phoxal-cli-ui = { path = "crates/ui" }
 ratatui = "0.29"
@@ -85,6 +86,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 console = { workspace = true }
 dirs = { workspace = true }
 flate2 = { workspace = true }
+getrandom = { workspace = true }
 heck = { workspace = true }
 libc = { workspace = true }
 tracing = { workspace = true }

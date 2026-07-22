@@ -177,14 +177,25 @@ pub(crate) fn simulation_managed_lines(plan: &LaunchPlan) -> Vec<String> {
 /// plan (the Webots supervisor plus one controller per robot) - the readiness
 /// barrier's counterpart to `simulation_managed_lines`, which formats the same
 /// filtered set for display instead of returning ids to wait on.
-pub(crate) fn simulation_managed_participant_ids(plan: &LaunchPlan) -> Vec<String> {
+pub(crate) fn simulation_managed_participant_ids(
+    plan: &LaunchPlan,
+) -> Vec<phoxal_cli_core::session::ProcessKey> {
     plan.robots
         .iter()
-        .flat_map(|robot| &robot.participants)
-        .filter(|participant| {
-            participant.launch_ownership
-                == phoxal_cli_core::project::launch_plan::LaunchOwnership::SimulationManaged
+        .flat_map(|robot| {
+            robot
+                .participants
+                .iter()
+                .filter(|participant| {
+                    participant.launch_ownership
+                        == phoxal_cli_core::project::launch_plan::LaunchOwnership::SimulationManaged
+                })
+                .map(|participant| {
+                    phoxal_cli_core::session::ProcessKey::robot(
+                        phoxal_cli_core::session::RobotKey::new(&robot.namespace, &robot.id),
+                        &participant.launch.participant_id,
+                    )
+                })
         })
-        .map(|participant| participant.launch.participant_id.clone())
         .collect()
 }

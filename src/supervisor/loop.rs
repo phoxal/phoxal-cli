@@ -3,12 +3,12 @@
 use super::{
     BoardBackend, ParticipantState, RequestedStop, RunningParticipant, SupervisionStage,
     SupervisorAction, SupervisorOptions, SupervisorOutcome, await_stage_ready, emit_event,
-    join_reader, maybe_emit_staged_startup_complete, send_process_group_terminate, send_terminate,
+    join_reader, maybe_emit_startup_outcome, send_process_group_terminate, send_terminate,
     spawn_until_pending, stop_child,
 };
 use crate::session::output::WaitBudget;
-use anyhow::Context;
 use anyhow::Result;
+use phoxal_cli_core::session::{ProjectLifecycle, RuntimeFailurePolicy};
 use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
@@ -20,6 +20,25 @@ pub async fn supervise_until_shutdown(
     board: BoardBackend,
     mut options: SupervisorOptions,
 ) -> Result<SupervisorOutcome> {
+    let failed_required = board
+        .supervisor_snapshot()
+        .processes
+        .into_iter()
+        .filter(|(_, entry)| {
+            entry.descriptor.startup_requirement
+                == phoxal_cli_core::session::StartupRequirement::Required
+                && entry.status.actual == phoxal_cli_core::session::ProcessState::Failed
+        })
+        .map(|(key, _)| key.to_string())
+        .collect::<Vec<_>>();
+    if !failed_required.is_empty() {
+        board.set_lifecycle(ProjectLifecycle::Failed);
+        options.token.cancel();
+        anyhow::bail!(
+            "required process(es) failed before startup: {}",
+            failed_required.join(", ")
+        );
+    }
     let mut running = Vec::new();
     let mut stage_queue: VecDeque<SupervisionStage> = stages.into();
     let token = options.token.clone();
@@ -32,7 +51,7 @@ pub async fn supervise_until_shutdown(
     // that actually gates the next one.
     let mut pending_stage =
         spawn_until_pending(&mut running, &board, events_tx.as_ref(), &mut stage_queue).await;
-    maybe_emit_staged_startup_complete(&options, events_tx.as_ref(), &pending_stage).await;
+    maybe_emit_startup_outcome(&board, &options, events_tx.as_ref(), &pending_stage).await;
 
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -47,10 +66,7 @@ pub async fn supervise_until_shutdown(
                 if let Some(action) = action
                     && let Err(error) = handle_action(&mut running, &board, action).await
                 {
-                    board.append_log(
-                        "supervisor",
-                        format!("supervisor: action failed; shutting down graph: {error:#}"),
-                    );
+                    tracing::error!(error = %error, "supervisor action failed; shutting down graph");
                     supervisor_error = Some(error);
                     break 'supervision;
                 }
@@ -64,6 +80,7 @@ pub async fn supervise_until_shutdown(
                 &board,
                 pending_stage.as_ref().map_or(&[][..], |stage| stage.ready_ids.as_slice()),
                 pending_stage.as_ref().map_or(&[][..], |stage| stage.failure_ids.as_slice()),
+                pending_stage.as_ref().map_or(&[][..], |stage| stage.optional_ids.as_slice()),
                 pending_stage.as_ref().map_or(WaitBudget::Unbounded, |stage| match stage.deadline {
                     Some(deadline) => WaitBudget::Bounded(deadline.saturating_duration_since(Instant::now())),
                     None => WaitBudget::Unbounded,
@@ -73,7 +90,8 @@ pub async fn supervise_until_shutdown(
                 let stage = pending_stage.take().expect("guarded by is_some");
                 match result {
                     Ok(()) => {
-                        board.append_log("supervisor", format!("supervisor: stage '{}' ready", stage.label));
+                        tracing::info!(stage = %stage.label, "supervisor startup phase ready");
+                        board.complete_phase(&stage.label);
                         emit_event(events_tx.as_ref(), phoxal_cli_core::session::event::SessionEvent::PhaseFinished {
                             id: phoxal_cli_core::session::event::PhaseId::new(stage.label.clone()),
                             outcome: phoxal_cli_core::session::event::PhaseOutcome::Succeeded,
@@ -85,57 +103,72 @@ pub async fn supervise_until_shutdown(
                             events_tx.as_ref(),
                             &mut stage_queue,
                         ).await;
-                        maybe_emit_staged_startup_complete(&options, events_tx.as_ref(), &pending_stage).await;
+                        maybe_emit_startup_outcome(&board, &options, events_tx.as_ref(), &pending_stage).await;
                     }
                     Err(error) => {
                         let reason = format!("stage '{}' stalled: {error:#}", stage.label);
-                        board.append_log(
-                            "supervisor",
-                            format!("supervisor: {reason}"),
-                        );
+                        tracing::error!(stage = %stage.label, error = %error, "required startup phase failed");
                         emit_event(events_tx.as_ref(), phoxal_cli_core::session::event::SessionEvent::PhaseFinished {
                             id: phoxal_cli_core::session::event::PhaseId::new(stage.label.clone()),
                             outcome: phoxal_cli_core::session::event::PhaseOutcome::Failed { error: format!("{error:#}") },
                             elapsed: stage.started.elapsed(),
                         }).await;
-                        pending_stage = spawn_until_pending(
-                            &mut running,
-                            &board,
-                            events_tx.as_ref(),
-                            &mut stage_queue,
-                        ).await;
-                        maybe_emit_staged_startup_complete(
-                            &options,
-                            events_tx.as_ref(),
-                            &pending_stage,
-                        ).await;
+                        board.set_lifecycle(ProjectLifecycle::Failed);
+                        supervisor_error = Some(anyhow::anyhow!(reason));
+                        token.cancel();
+                        break 'supervision;
                     }
                 }
             }
             _ = ticker.tick() => {
                 for participant in &mut running {
-                    if let Err(error) = participant.poll(&board, &options.restart_policy).await {
-                        board.append_log(
-                            "supervisor",
-                            format!(
-                                "supervisor: participant poll failed; shutting down graph: {error:#}"
-                            ),
-                        );
+                    if let Err(error) = participant.poll(&board, &participant.spec.restart_policy.clone()).await {
+                        tracing::error!(error = %error, "participant poll failed; shutting down graph");
                         supervisor_error = Some(error);
                         break 'supervision;
+                    }
+                    if participant.failed
+                        && matches!(board.supervisor_snapshot().lifecycle, ProjectLifecycle::Ready | ProjectLifecycle::Degraded)
+                    {
+                        match participant.spec.runtime_failure {
+                            RuntimeFailurePolicy::KeepProjectDegraded => {
+                                board.set_lifecycle(ProjectLifecycle::Degraded);
+                            }
+                            RuntimeFailurePolicy::StopProject => {
+                                supervisor_error = Some(anyhow::anyhow!(
+                                    "process {} exhausted its restart policy; StopProject",
+                                    participant.spec.key
+                                ));
+                                board.set_lifecycle(ProjectLifecycle::Failed);
+                                token.cancel();
+                                break 'supervision;
+                            }
+                            RuntimeFailurePolicy::RecreateGraph => {
+                                supervisor_error = Some(anyhow::anyhow!(
+                                    "process {} requires graph recreation",
+                                    participant.spec.key
+                                ));
+                                board.set_lifecycle(ProjectLifecycle::Failed);
+                                break 'supervision;
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
+    if supervisor_error.is_none() {
+        board.set_lifecycle(ProjectLifecycle::Stopping);
+    }
     if let Some(requested_stop) = options.requested_stop.take() {
         request_participant_stop(&mut running, &board, requested_stop).await;
     }
     shutdown_all(&mut running, &board).await;
     if let Some(error) = supervisor_error {
-        return Err(error).context("supervisor failed after shutting down the process graph");
+        return Err(error);
     }
+    board.set_lifecycle(ProjectLifecycle::Stopped);
     Ok(SupervisorOutcome {
         failed_participants: board.snapshot().failed_participants(),
     })
@@ -148,7 +181,7 @@ pub(crate) async fn request_participant_stop(
 ) {
     let Some(participant) = running
         .iter_mut()
-        .find(|participant| participant.spec.id == requested_stop.participant_id)
+        .find(|participant| participant.spec.key == requested_stop.key)
     else {
         return;
     };
@@ -156,7 +189,7 @@ pub(crate) async fn request_participant_stop(
         if participant.restart_at.take().is_some() {
             participant.failed = true;
             board.set_state(
-                &participant.spec.id,
+                &participant.spec.key,
                 ParticipantState::Failed,
                 Some("crashed before requested stop while restart was pending".to_string()),
             );
@@ -165,12 +198,12 @@ pub(crate) async fn request_participant_stop(
     }
 
     board.append_log(
-        &participant.spec.id,
+        &participant.spec.key,
         "supervisor: sending SIGTERM for requested stop",
     );
     let Some(pid) = participant.child.as_ref().and_then(Child::id) else {
         board.set_state(
-            &participant.spec.id,
+            &participant.spec.key,
             ParticipantState::Failed,
             Some("requested-stop child has no pid".to_string()),
         );
@@ -183,14 +216,14 @@ pub(crate) async fn request_participant_stop(
     } {
         Ok(()) => {
             board.append_log(
-                &participant.spec.id,
+                &participant.spec.key,
                 "supervisor: SIGTERM sent; waiting for child exit",
             );
             true
         }
         Err(error) => {
             board.append_log(
-                &participant.spec.id,
+                &participant.spec.key,
                 format!("supervisor: failed to send SIGTERM; waiting before fallback: {error:#}"),
             );
             false
@@ -205,7 +238,7 @@ pub(crate) async fn request_participant_stop(
         Ok(false) => {
             if let Err(error) = participant.kill_process_group_after_timeout(board).await {
                 board.set_state(
-                    &participant.spec.id,
+                    &participant.spec.key,
                     ParticipantState::Failed,
                     Some(format!("process-group SIGKILL failed: {error:#}")),
                 );
@@ -213,7 +246,7 @@ pub(crate) async fn request_participant_stop(
         }
         Err(error) => {
             board.set_state(
-                &participant.spec.id,
+                &participant.spec.key,
                 ParticipantState::Failed,
                 Some(format!("requested-stop wait failed: {error:#}")),
             );
@@ -236,22 +269,22 @@ pub(crate) async fn handle_action(
     action: SupervisorAction,
 ) -> Result<()> {
     match action {
-        SupervisorAction::Swap { id, spec, note } => {
+        SupervisorAction::Swap { key, spec, note } => {
             let Some(participant) = running
                 .iter_mut()
-                .find(|participant| participant.spec.id == id)
+                .find(|participant| participant.spec.key == key)
             else {
-                board.append_log(&id, "supervisor: swap requested for unknown participant");
+                tracing::warn!(process = %key, "swap requested for unknown process");
                 return Ok(());
             };
-            participant.swap(spec, board, note).await
+            participant.swap(*spec, board, note).await
         }
-        SupervisorAction::Restart { id } => {
+        SupervisorAction::Restart { key } => {
             let Some(participant) = running
                 .iter_mut()
-                .find(|participant| participant.spec.id == id)
+                .find(|participant| participant.spec.key == key)
             else {
-                board.append_log(&id, "supervisor: restart requested for unknown participant");
+                tracing::warn!(process = %key, "restart requested for unknown process");
                 return Ok(());
             };
             let spec = participant.spec.clone();
@@ -265,7 +298,7 @@ pub(crate) async fn handle_action(
 pub(crate) async fn shutdown_all(running: &mut [RunningParticipant], board: &BoardBackend) {
     for participant in running.iter_mut().rev() {
         if let Some(mut child) = participant.child.take() {
-            board.append_log(&participant.spec.id, "supervisor: stopping");
+            board.append_log(&participant.spec.key, "supervisor: stopping");
             if let Err(error) = stop_child(
                 &mut child,
                 participant.spec.shutdown_grace,
@@ -274,12 +307,12 @@ pub(crate) async fn shutdown_all(running: &mut [RunningParticipant], board: &Boa
             .await
             {
                 board.set_state(
-                    &participant.spec.id,
+                    &participant.spec.key,
                     ParticipantState::Failed,
                     Some(format!("failed to stop: {error:#}")),
                 );
             }
-            board.set_process_details(&participant.spec.id, None, None);
+            board.set_process_details(&participant.spec.key, None, None);
         }
         join_reader(participant.stdout_task.take()).await;
         join_reader(participant.stderr_task.take()).await;

@@ -16,6 +16,9 @@ use phoxal_api::v0_1::simulation::RobotSpawn;
 use phoxal_api::v0_1::simulation::{SpawnRequest, SpawnSet};
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::session::ParticipantKind;
+use phoxal_cli_core::session::{
+    ProcessKey, ReadinessPolicy, RuntimeFailurePolicy, StartupRequirement,
+};
 use std::path::Path;
 use tokio::task::JoinHandle;
 
@@ -41,6 +44,7 @@ pub(crate) fn stage_and_prepare_webots_spec(
         staged.staged_world_path.display()
     ));
     let spec = ParticipantSpec {
+        key: ProcessKey::project(WEBOTS_SITE_ID),
         id: WEBOTS_SITE_ID.to_string(),
         kind: ParticipantKind::Tool,
         executable: webots_path,
@@ -56,6 +60,10 @@ pub(crate) fn stage_and_prepare_webots_spec(
         // SIMULATION-MANAGED participants). Its readiness is necessarily
         // process-lifecycle-only, so it keeps the old spawn-is-ready behavior.
         bus_participant: false,
+        readiness: ReadinessPolicy::ProcessSpawned,
+        startup_requirement: StartupRequirement::Required,
+        runtime_failure: RuntimeFailurePolicy::StopProject,
+        restart_policy: Default::default(),
     };
     Ok((spec, staged.spawn_descriptors))
 }

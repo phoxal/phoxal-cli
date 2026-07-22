@@ -3,6 +3,10 @@
 use super::{ParticipantLaunchCommand, RESTART_SEC, START_LIMIT_BURST, START_LIMIT_INTERVAL};
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::launch_env;
+use phoxal_cli_core::session::{
+    ParticipantInstanceKey, ProcessKey, ReadinessPolicy, RobotKey, RuntimeFailurePolicy,
+    StartupRequirement,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,6 +16,7 @@ use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub struct ParticipantSpec {
+    pub key: ProcessKey,
     pub id: String,
     pub kind: ParticipantKind,
     pub executable: PathBuf,
@@ -31,9 +36,20 @@ pub struct ParticipantSpec {
     /// supervisor waits for observed presence before marking the process
     /// `Ready`.
     pub bus_participant: bool,
+    pub readiness: ReadinessPolicy,
+    pub startup_requirement: StartupRequirement,
+    pub runtime_failure: RuntimeFailurePolicy,
+    pub restart_policy: RestartPolicy,
 }
 
 impl ParticipantSpec {
+    pub(crate) fn exact_liveliness_template(robot: RobotKey, participant: &str) -> ReadinessPolicy {
+        ReadinessPolicy::ExactLiveliness(ParticipantInstanceKey {
+            robot,
+            participant: participant.to_string(),
+            incarnation: 0,
+        })
+    }
     #[must_use]
     pub fn command_line(&self) -> String {
         let mut parts = vec![self.executable.display().to_string()];
@@ -101,7 +117,6 @@ impl Default for RestartPolicy {
 /// here was dead weight, not a real dependency.
 #[derive(Debug, Clone)]
 pub struct SupervisorOptions {
-    pub restart_policy: RestartPolicy,
     pub action_rx: Option<SupervisorActionReceiver>,
     pub requested_stop: Option<RequestedStop>,
     /// The session's root cancellation signal (`session::SessionController`
@@ -121,17 +136,15 @@ pub struct SupervisorOptions {
     /// Whether staged startup completion should transition the session to
     /// `SessionState::Running`. When `true`, once
     /// every stage has spawned and been observed ready with nothing left
-    /// pending, this loop emits `SessionEvent::StagedStartupComplete` itself
-    /// instead of the caller claiming `Running` before the supervisor even
-    /// exists. Both host and simulation sessions enable this; simulation
-    /// clock telemetry is not a lifecycle authority.
+    /// pending, the state owner derives and publishes Ready or Degraded and
+    /// emits the corresponding session lifecycle change. Simulation clock
+    /// telemetry is not a lifecycle authority.
     pub emits_running_on_startup_complete: bool,
 }
 
 impl Default for SupervisorOptions {
     fn default() -> Self {
         Self {
-            restart_policy: RestartPolicy::default(),
             action_rx: None,
             requested_stop: None,
             token: tokio_util::sync::CancellationToken::new(),
@@ -143,14 +156,14 @@ impl Default for SupervisorOptions {
 
 #[derive(Debug, Clone)]
 pub struct RequestedStop {
-    pub(crate) participant_id: String,
+    pub(crate) key: ProcessKey,
     pub(crate) grace: Duration,
 }
 
 impl RequestedStop {
-    pub fn new(participant_id: impl Into<String>, grace: Duration) -> Self {
+    pub fn new(key: impl Into<ProcessKey>, grace: Duration) -> Self {
         Self {
-            participant_id: participant_id.into(),
+            key: key.into(),
             grace,
         }
     }
@@ -159,8 +172,8 @@ impl RequestedStop {
 #[derive(Debug)]
 pub enum SupervisorAction {
     Swap {
-        id: String,
-        spec: ParticipantSpec,
+        key: ProcessKey,
+        spec: Box<ParticipantSpec>,
         note: String,
     },
     /// Stop and respawn a participant from its own current spec, unchanged -
@@ -169,7 +182,7 @@ pub enum SupervisorAction {
     /// back in, rather than a new field on `RunningParticipant`, so it reuses
     /// the exact same stop/spawn/board-note sequence a hot-reload swap
     /// already goes through.
-    Restart { id: String },
+    Restart { key: ProcessKey },
 }
 
 #[derive(Clone)]

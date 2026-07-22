@@ -24,6 +24,7 @@ use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::launch_env::{encode_participant_env, encode_tool_env};
 use phoxal_cli_core::session::stores::telemetry::RobotScope;
+use phoxal_cli_core::session::{ProcessKey, RobotKey, RuntimeFailurePolicy, StartupRequirement};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -55,6 +56,8 @@ pub(crate) fn prepare_site_tools(
         .unwrap_or("site");
 
     for site in &plan.site {
+        let robot = RobotKey::new(namespace, robot_id);
+        let key = ProcessKey::project(&site.id);
         let status =
             ParticipantStatus::new(&site.id, ParticipantKind::Tool, ParticipantState::Starting)
                 .with_local(site_tool_is_local(resolved, &site.id))
@@ -62,9 +65,10 @@ pub(crate) fn prepare_site_tools(
                     namespace: namespace.to_string(),
                     robot_id: robot_id.to_string(),
                 });
-        board.upsert(status);
+        board.upsert_process(key.clone(), status, StartupRequirement::Optional);
         match locate_tool_binary(resolved, &site.id, ui)? {
             Some(path) => specs.push(ParticipantSpec {
+                key: key.clone(),
                 id: site.id.clone(),
                 kind: ParticipantKind::Tool,
                 executable: path,
@@ -75,9 +79,13 @@ pub(crate) fn prepare_site_tools(
                 process_group: true,
                 note: None,
                 bus_participant: true,
+                readiness: ParticipantSpec::exact_liveliness_template(robot, &site.id),
+                startup_requirement: StartupRequirement::Optional,
+                runtime_failure: RuntimeFailurePolicy::KeepProjectDegraded,
+                restart_policy: Default::default(),
             }),
             None => board.set_state(
-                &site.id,
+                &key,
                 ParticipantState::Failed,
                 Some(native_pending_tool_note(&site.id)),
             ),
@@ -101,12 +109,14 @@ pub(crate) fn prepare_robot_participants(
         .map(|runtime| (runtime.name.as_str(), runtime))
         .collect::<BTreeMap<_, _>>();
     for robot in &plan.robots {
+        let robot_key = RobotKey::new(&robot.namespace, &robot.id);
         let scope = RobotScope {
             namespace: robot.namespace.clone(),
             robot_id: robot.id.clone(),
         };
         for participant in &robot.participants {
             let id = participant.launch.participant_id.clone();
+            let key = ProcessKey::robot(robot_key.clone(), &id);
             let (kind, local) = participant_kind(&participant.execution);
             if participant.launch_ownership == LaunchOwnership::SimulationManaged {
                 // Webots (via the supervisor) owns this participant's
@@ -119,8 +129,9 @@ pub(crate) fn prepare_robot_participants(
                 // controller/supervisor Webots never launches, or that fails
                 // before its own `#[setup]` completes, therefore never reaches
                 // `Ready`; the staged startup wait detects that omission.
-                // Disappearance after startup remains observational
-                // `Degraded`, not synthesized process failure authority.
+                // Disappearance after startup remains observational presence
+                // state and never becomes synthesized process failure
+                // authority.
                 // `crate::simulation` renders its controllerArgs into the
                 // staged world instead of a `ParticipantSpec` (Part 5).
                 let mut status = ParticipantStatus::new(&id, kind, ParticipantState::Starting)
@@ -130,18 +141,21 @@ pub(crate) fn prepare_robot_participants(
                     "SimulationManaged: launched by Webots via the supervisor, not the CLI supervisor"
                         .to_string(),
                 );
-                board.upsert(status);
+                board.upsert_process(key, status, StartupRequirement::Required);
                 continue;
             }
-            board.upsert(
+            board.upsert_process(
+                key.clone(),
                 ParticipantStatus::new(&id, kind, ParticipantState::Starting)
                     .with_local(local)
                     .with_scope(scope.clone()),
+                StartupRequirement::Required,
             );
             match &participant.execution {
                 ParticipantExecution::OfficialTool { .. } => {
                     match locate_tool_binary(resolved, &participant.artifact_id, ui)? {
                         Some(path) => specs.push(ParticipantSpec {
+                            key: key.clone(),
                             id,
                             kind,
                             executable: path,
@@ -154,9 +168,16 @@ pub(crate) fn prepare_robot_participants(
                             process_group: true,
                             note: None,
                             bus_participant: true,
+                            readiness: ParticipantSpec::exact_liveliness_template(
+                                robot_key.clone(),
+                                &participant.launch.participant_id,
+                            ),
+                            startup_requirement: StartupRequirement::Required,
+                            runtime_failure: RuntimeFailurePolicy::StopProject,
+                            restart_policy: Default::default(),
                         }),
                         None => board.set_state(
-                            &participant.launch.participant_id,
+                            &key,
                             ParticipantState::Failed,
                             Some(native_pending_tool_note(&participant.artifact_id)),
                         ),
@@ -168,6 +189,7 @@ pub(crate) fn prepare_robot_participants(
                         .copied();
                     match locate_official_binary(runtime, &participant.artifact_id)? {
                         Some(path) => specs.push(ParticipantSpec {
+                            key: key.clone(),
                             id,
                             kind,
                             executable: path,
@@ -180,9 +202,16 @@ pub(crate) fn prepare_robot_participants(
                             process_group: true,
                             note: None,
                             bus_participant: true,
+                            readiness: ParticipantSpec::exact_liveliness_template(
+                                robot_key.clone(),
+                                &participant.launch.participant_id,
+                            ),
+                            startup_requirement: StartupRequirement::Required,
+                            runtime_failure: RuntimeFailurePolicy::StopProject,
+                            restart_policy: Default::default(),
                         }),
                         None => board.set_state(
-                            &participant.launch.participant_id,
+                            &key,
                             ParticipantState::Failed,
                             Some(native_pending_official_note(
                                 runtime,
@@ -194,6 +223,7 @@ pub(crate) fn prepare_robot_participants(
                 ParticipantExecution::UserService { crate_dir } => {
                     let binary = build_source_binary(crate_dir, &id, ui)?;
                     specs.push(ParticipantSpec {
+                        key: key.clone(),
                         id,
                         kind,
                         executable: binary,
@@ -204,6 +234,13 @@ pub(crate) fn prepare_robot_participants(
                         process_group: true,
                         note: None,
                         bus_participant: true,
+                        readiness: ParticipantSpec::exact_liveliness_template(
+                            robot_key.clone(),
+                            &participant.launch.participant_id,
+                        ),
+                        startup_requirement: StartupRequirement::Required,
+                        runtime_failure: RuntimeFailurePolicy::StopProject,
+                        restart_policy: Default::default(),
                     });
                 }
                 ParticipantExecution::SourceArtifact {
@@ -217,6 +254,7 @@ pub(crate) fn prepare_robot_participants(
                         encode_participant_env(&participant.launch)?
                     };
                     specs.push(ParticipantSpec {
+                        key: key.clone(),
                         id,
                         kind,
                         executable: binary,
@@ -227,30 +265,38 @@ pub(crate) fn prepare_robot_participants(
                         process_group: true,
                         note: None,
                         bus_participant: true,
+                        readiness: ParticipantSpec::exact_liveliness_template(
+                            robot_key.clone(),
+                            &participant.launch.participant_id,
+                        ),
+                        startup_requirement: StartupRequirement::Required,
+                        runtime_failure: RuntimeFailurePolicy::StopProject,
+                        restart_policy: Default::default(),
                     });
                 }
                 ParticipantExecution::ComponentDriver { crate_dir } => {
                     match driver_policy.decision(&id) {
                         DriverDecision::Degraded(note) => {
-                            board.set_state(&id, ParticipantState::Degraded, Some(note));
+                            board.set_state(&key, ParticipantState::Degraded, Some(note));
                             continue;
                         }
                         DriverDecision::Launch => {}
                     }
                     if cfg!(target_os = "macos") {
                         board.set_state(
-                            &id,
+                            &key,
                             ParticipantState::Failed,
                             Some("DriverUnsupported: component driver binaries are Linux-only on macOS (D21)".to_string()),
                         );
                         continue;
                     }
                     if let Some(note) = device_missing_note(resolved, &id) {
-                        board.set_state(&id, ParticipantState::Failed, Some(note));
+                        board.set_state(&key, ParticipantState::Failed, Some(note));
                         continue;
                     }
                     let binary = build_source_binary(crate_dir, &id, ui)?;
                     specs.push(ParticipantSpec {
+                        key: key.clone(),
                         id,
                         kind,
                         executable: binary,
@@ -261,6 +307,13 @@ pub(crate) fn prepare_robot_participants(
                         process_group: true,
                         note: None,
                         bus_participant: true,
+                        readiness: ParticipantSpec::exact_liveliness_template(
+                            robot_key.clone(),
+                            &participant.launch.participant_id,
+                        ),
+                        startup_requirement: StartupRequirement::Required,
+                        runtime_failure: RuntimeFailurePolicy::StopProject,
+                        restart_policy: Default::default(),
                     });
                 }
             }
@@ -303,6 +356,7 @@ pub(crate) fn source_spec_from_launch_record(
     ui: &crate::Ui,
 ) -> Result<Option<ParticipantSpec>> {
     let id = participant.launch.participant_id.clone();
+    let robot = RobotKey::new(&participant.launch.namespace, &participant.launch.robot_id);
     // `_local`: this function only builds a `ParticipantSpec` (no
     // `ParticipantStatus` to mark `.with_local` on) - see the other
     // `participant_kind` call sites for where the bool is actually consumed.
@@ -325,6 +379,7 @@ pub(crate) fn source_spec_from_launch_record(
         encode_participant_env(&participant.launch)?
     };
     Ok(Some(ParticipantSpec {
+        key: ProcessKey::robot(robot.clone(), &id),
         id,
         kind,
         executable: binary,
@@ -335,6 +390,13 @@ pub(crate) fn source_spec_from_launch_record(
         process_group: true,
         note: None,
         bus_participant: true,
+        readiness: ParticipantSpec::exact_liveliness_template(
+            robot,
+            &participant.launch.participant_id,
+        ),
+        startup_requirement: StartupRequirement::Required,
+        runtime_failure: RuntimeFailurePolicy::StopProject,
+        restart_policy: Default::default(),
     }))
 }
 

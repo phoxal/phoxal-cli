@@ -288,11 +288,11 @@ async fn apply_watch_result(
                 elapsed_label(started)
             );
             for spec in specs {
-                let id = spec.id.clone();
+                let key = spec.key.clone();
                 if action_tx
                     .send(SupervisorAction::Swap {
-                        id,
-                        spec,
+                        key,
+                        spec: Box::new(spec),
                         note: note.clone(),
                     })
                     .await
@@ -342,7 +342,7 @@ fn elapsed_label(started: Instant) -> String {
 fn set_note_all(board: &BoardBackend, target: &WatchTarget, note: impl AsRef<str>) {
     let note = note.as_ref();
     for id in &target.board_ids {
-        board.set_note(id, note);
+        board.set_note_by_participant_id(id, note);
     }
 }
 
@@ -677,6 +677,7 @@ mod tests {
             board_ids: vec!["mission".to_string()],
         };
         let spec = ParticipantSpec {
+            key: phoxal_cli_core::session::ProcessKey::project("mission"),
             id: "mission".to_string(),
             kind: phoxal_cli_core::session::ParticipantKind::Service,
             executable: PathBuf::from("/bin/echo"),
@@ -687,6 +688,13 @@ mod tests {
             process_group: true,
             note: None,
             bus_participant: true,
+            readiness: ParticipantSpec::exact_liveliness_template(
+                phoxal_cli_core::session::RobotKey::new("test", "robot"),
+                "mission",
+            ),
+            startup_requirement: phoxal_cli_core::session::StartupRequirement::Required,
+            runtime_failure: phoxal_cli_core::session::RuntimeFailurePolicy::StopProject,
+            restart_policy: Default::default(),
         };
 
         apply_watch_result(
@@ -699,10 +707,13 @@ mod tests {
         .await;
 
         let action = rx.try_recv().expect("swap action");
-        let SupervisorAction::Swap { id, note, .. } = action else {
+        let SupervisorAction::Swap { key, note, .. } = action else {
             panic!("expected swap action");
         };
-        assert_eq!(id, "mission");
+        assert_eq!(
+            key,
+            phoxal_cli_core::session::ProcessKey::project("mission")
+        );
         assert!(note.contains("restarted"), "{note}");
     }
 

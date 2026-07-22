@@ -1,21 +1,21 @@
 //! Live simulation resource assembly and ownership.
 
 use super::{
-    SimPlan, SimulateOptions, WEBOTS_SITE_ID, prepare_substitution_notes,
-    stage_and_prepare_webots_spec, stages_for_simulate, start_spawn_responder,
+    SimPlan, SimulateOptions, prepare_substitution_notes, stage_and_prepare_webots_spec,
+    stages_for_simulate, start_spawn_responder,
 };
 use crate::session::output::OutputContext;
 use crate::supervisor::BoardBackend;
+use crate::supervisor::ProjectLock;
+use crate::supervisor::ProjectLockIdentity;
+use crate::supervisor::ProjectOperation;
 use crate::supervisor::RequestedStop;
 use crate::supervisor::SupervisionStage;
 use crate::supervisor::SupervisorAction;
-use crate::supervisor::SupervisorIdentity;
-use crate::supervisor::SupervisorLock;
 use crate::supervisor::SupervisorOptions;
 use crate::supervisor::start_bus_log_subscriber;
 use crate::supervisor::start_clock_feed;
 use crate::supervisor::start_liveliness_observer;
-use crate::supervisor::start_robot_description_server;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -29,7 +29,7 @@ pub(crate) struct LiveSimSetup {
     pub(crate) router: crate::run::InfrastructureRouter,
     pub(crate) connect: String,
     // Keep the simulation-specific lease alive for the entire supervision
-    // lifetime. The foreground-supervisor lock is held by the command from
+    // lifetime. The project-operation lock is held by the command from
     // before preparation until this setup and supervision have both ended.
     pub(crate) _locks: LiveSimulationLocks,
     pub(crate) board: BoardBackend,
@@ -47,16 +47,16 @@ pub(crate) struct LiveSimSetup {
 }
 
 pub(crate) struct LiveSimulationLocks {
-    _simulator_lock: SupervisorLock,
+    _simulator_lock: ProjectLock,
 }
 
 impl LiveSimulationLocks {
     pub(crate) fn acquire(
         simulator_lock_path: &std::path::Path,
-        identity: SupervisorIdentity,
+        identity: ProjectLockIdentity,
     ) -> Result<Self> {
         Ok(Self {
-            _simulator_lock: SupervisorLock::acquire_path(simulator_lock_path, identity)?,
+            _simulator_lock: ProjectLock::acquire_path(simulator_lock_path, identity)?,
         })
     }
 }
@@ -89,15 +89,26 @@ pub(crate) async fn live_simulate_setup(
         .context("Webots preflight failed; live simulate cannot launch the simulator")?;
     ensure_active()?;
 
-    let identity = SupervisorIdentity::resolve(
-        &sim.ctx.project_root,
-        phoxal_cli_core::session::SessionMode::Simulation,
-    );
+    let identity = ProjectLockIdentity::resolve(&sim.ctx.project_root, ProjectOperation::Run);
     let locks = LiveSimulationLocks::acquire(&crate::host_paths::simulator_lock_path()?, identity)?;
     let runtime_root = crate::runtime_root::publish(&sim.ctx.project_root, &sim.ctx.resolved)
         .context("failed to publish the simulation runtime robot root")?;
     ensure_active()?;
     let board = BoardBackend::new();
+    board.configure(
+        sim.ctx.project_root.display().to_string(),
+        sim.ctx.resolved.train.clone(),
+        "simulation",
+    );
+    board.upsert_process(
+        phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
+        crate::supervisor::ParticipantStatus::new(
+            "infrastructure-router",
+            phoxal_cli_core::session::ParticipantKind::Tool,
+            crate::supervisor::ParticipantState::Starting,
+        ),
+        phoxal_cli_core::session::StartupRequirement::Required,
+    );
     let runtime_store = sim.runtime_store.clone();
     let mut specs = Vec::new();
     crate::run::prepare_site_tools(
@@ -121,6 +132,12 @@ pub(crate) async fn live_simulate_setup(
     let (router, connect) =
         crate::run::start_infrastructure_router(&sim.ctx.resolved, &sim.ctx.project_root, &ui)
             .await?;
+    board.set_router_status(format!("ready:{connect}"));
+    board.set_state(
+        phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
+        crate::supervisor::ParticipantState::Ready,
+        None,
+    );
     crate::run::apply_session_connect(&mut sim.plan, &mut specs, &connect);
     ensure_active()?;
     prepare_substitution_notes(&sim.plan, &board);
@@ -131,7 +148,7 @@ pub(crate) async fn live_simulate_setup(
     let spawn_responder = start_spawn_responder(&sim.plan, spawn_descriptors, &connect).await?;
     background_tasks.push(spawn_responder);
     ensure_active()?;
-    let requested_stop = RequestedStop::new(WEBOTS_SITE_ID, webots_spec.shutdown_grace);
+    let requested_stop = RequestedStop::new(webots_spec.key.clone(), webots_spec.shutdown_grace);
     specs.push(webots_spec);
 
     ui.info(format!(
@@ -156,18 +173,6 @@ pub(crate) async fn live_simulate_setup(
             })
             .collect::<Vec<_>>(),
     );
-    let description = phoxal_cli_core::supervisor_api::v0::RobotDescription {
-        robot: sim.ctx.resolved.robot.clone(),
-        framework_train: sim.ctx.resolved.train.clone(),
-    };
-    background_tasks.extend(sim.plan.robots.iter().map(|robot| {
-        start_robot_description_server(
-            robot.namespace.clone(),
-            robot.id.clone(),
-            connect.clone(),
-            description.clone(),
-        )
-    }));
     // OBSERVED readiness: drive board state from each participant's own
     // Liveliness token, including SIMULATION-MANAGED ones (the
     // supervisor and every controller), which have no supervised
@@ -247,7 +252,6 @@ pub(crate) async fn live_simulate_setup(
         token: token.clone(),
         events: Some(events.clone()),
         emits_running_on_startup_complete: true,
-        ..SupervisorOptions::default()
     };
 
     let orderly_shutdown_timeout = crate::supervisor::orderly_shutdown_budget(&stages);

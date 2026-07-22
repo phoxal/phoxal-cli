@@ -121,6 +121,7 @@ fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRe
         execution,
         launch: ParticipantLaunch {
             participant_id: id.to_string(),
+            incarnation: 0,
             namespace: "dev".to_string(),
             robot_id: "robot".to_string(),
             bus: BusProfile {
@@ -289,6 +290,7 @@ fn router_ready_event_selects_first_listener_and_tolerates_additive_fields() {
 fn selected_router_endpoint_reaches_plan_and_spawn_environment() {
     let mut plan = plan_with_drivers(&["imu"]);
     let mut specs = vec![ParticipantSpec {
+        key: phoxal_cli_core::session::ProcessKey::project("tool-bus"),
         id: "tool-bus".to_string(),
         kind: ParticipantKind::Tool,
         executable: PathBuf::from("/tmp/tool-bus"),
@@ -302,6 +304,13 @@ fn selected_router_endpoint_reaches_plan_and_spawn_environment() {
         process_group: true,
         note: None,
         bus_participant: true,
+        readiness: ParticipantSpec::exact_liveliness_template(
+            phoxal_cli_core::session::RobotKey::new("test", "robot"),
+            "tool-bus",
+        ),
+        startup_requirement: phoxal_cli_core::session::StartupRequirement::Optional,
+        runtime_failure: phoxal_cli_core::session::RuntimeFailurePolicy::KeepProjectDegraded,
+        restart_policy: Default::default(),
     }];
 
     apply_session_connect(&mut plan, &mut specs, "tcp/127.0.0.1:7448");
