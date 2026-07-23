@@ -2,6 +2,7 @@
 
 use phoxal_cli_core::project::launch_plan::{LaunchPlan, ParticipantExecution};
 use phoxal_cli_core::session::stores::telemetry::RobotScope;
+use phoxal_cli_core::session::{ProcessScope, SupervisorSnapshotV0};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RobotFeedTarget {
@@ -26,6 +27,32 @@ impl RobotFeedTarget {
                     scope: RobotScope {
                         namespace: robot.namespace.clone(),
                         robot_id: robot.id.clone(),
+                    },
+                    participant_ids,
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn from_snapshot(snapshot: &SupervisorSnapshotV0) -> Vec<Self> {
+        let mut targets = std::collections::BTreeMap::<(String, String), Vec<String>>::new();
+        for key in snapshot.processes.keys() {
+            if let ProcessScope::Robot(robot) = &key.scope {
+                targets
+                    .entry((robot.namespace.clone(), robot.robot_id.clone()))
+                    .or_default()
+                    .push(key.id.clone());
+            }
+        }
+        targets
+            .into_iter()
+            .map(|((namespace, robot_id), mut participant_ids)| {
+                participant_ids.sort();
+                participant_ids.dedup();
+                Self {
+                    scope: RobotScope {
+                        namespace,
+                        robot_id,
                     },
                     participant_ids,
                 }

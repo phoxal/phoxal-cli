@@ -99,6 +99,39 @@ impl BoardBackend {
         Self::default()
     }
 
+    /// Replace the disposable client-side projection with authoritative
+    /// resident state. Local Zenoh-derived fields are retained for rows that
+    /// still exist; they are never copied into the supervisor snapshot.
+    pub fn replace_from_supervisor(&self, snapshot: SupervisorSnapshotV0) {
+        let mut board = self.inner.lock().expect("board mutex poisoned");
+        let previous = std::mem::take(&mut board.participants);
+        for (key, entry) in &snapshot.processes {
+            let id = key.to_string();
+            let mut status = previous.get(&id).cloned().unwrap_or_else(|| {
+                ParticipantStatus::new(
+                    id.clone(),
+                    entry.descriptor.kind,
+                    ParticipantState::Starting,
+                )
+            });
+            status.kind = entry.descriptor.kind;
+            status.state = participant_state(entry.status.actual);
+            status.pid = entry.status.pid;
+            status.restart_count = entry.status.restart_count_in_generation;
+            status.note = entry
+                .status
+                .last_failure
+                .as_ref()
+                .map(|failure| failure.detail.as_str().to_string())
+                .or(status.note);
+            board.participants.insert(id, status);
+        }
+        drop(board);
+        let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
+        actor.snapshot = snapshot;
+        self.snapshot_tx.send_replace(actor.snapshot.clone());
+    }
+
     /// Record Zenoh Liveliness for a planned participant.
     ///
     /// Launch planning must register every expected row before the observer
@@ -390,7 +423,12 @@ impl BoardBackend {
                     occurred_at: SystemTime::now(),
                     exit: None,
                     detail: BoundedString::new(note.as_deref().unwrap_or("process failed")),
-                    stderr_tail: self.stderr_tail(&key).map(BoundedString::new),
+                    stderr_tail: self.stderr_tail(&key).map(|tail| {
+                        BoundedString::with_max_bytes(
+                            tail,
+                            phoxal_cli_core::session::protocol::MAX_PROCESS_STDERR_TAIL_BYTES,
+                        )
+                    }),
                 });
             }
             actor.publish(&self.snapshot_tx);
@@ -433,7 +471,12 @@ impl BoardBackend {
         let key = key.into();
         let detail = detail.into();
         self.set_state(&key, ParticipantState::Failed, Some(detail.clone()));
-        let stderr_tail = self.stderr_tail(&key).map(BoundedString::new);
+        let stderr_tail = self.stderr_tail(&key).map(|tail| {
+            BoundedString::with_max_bytes(
+                tail,
+                phoxal_cli_core::session::protocol::MAX_PROCESS_STDERR_TAIL_BYTES,
+            )
+        });
         let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
         if let Some(entry) = actor.snapshot.processes.get_mut(&key) {
             entry.status.last_failure = Some(ProcessFailure {
@@ -621,9 +664,17 @@ impl BoardBackend {
         execution: impl Into<String>,
     ) {
         let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
-        actor.snapshot.project = project.into();
-        actor.snapshot.framework_train = framework_train.into();
-        actor.snapshot.execution = execution.into();
+        actor.snapshot.project = bounded_snapshot_text(&project.into());
+        actor.snapshot.entry = bounded_snapshot_text(
+            &phoxal_cli_core::project::resolver::discover_robot_yaml(std::path::Path::new(
+                &actor.snapshot.project,
+            ))
+            .unwrap_or_else(|_| std::path::Path::new(&actor.snapshot.project).join("robot.yaml"))
+            .display()
+            .to_string(),
+        );
+        actor.snapshot.framework_train = bounded_snapshot_text(&framework_train.into());
+        actor.snapshot.execution = bounded_snapshot_text(&execution.into());
         actor.snapshot.plan_revision = 1;
         actor.publish(&self.snapshot_tx);
     }
@@ -638,13 +689,13 @@ impl BoardBackend {
 
     pub fn set_router_status(&self, status: impl Into<String>) {
         let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
-        actor.snapshot.router = status.into();
+        actor.snapshot.router = bounded_snapshot_text(&status.into());
         actor.publish(&self.snapshot_tx);
     }
 
     pub fn begin_phase(&self, phase: &str) {
         let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
-        actor.snapshot.startup.active_phase = Some(phase.to_string());
+        actor.snapshot.startup.active_phase = Some(bounded_snapshot_text(phase));
         actor.publish(&self.snapshot_tx);
     }
 
@@ -655,7 +706,12 @@ impl BoardBackend {
             .snapshot
             .startup
             .completed_phases
-            .push(phase.to_string());
+            .push(bounded_snapshot_text(phase));
+        let maximum = phoxal_cli_core::session::protocol::MAX_STARTUP_PHASES;
+        if actor.snapshot.startup.completed_phases.len() > maximum {
+            let remove = actor.snapshot.startup.completed_phases.len() - maximum;
+            actor.snapshot.startup.completed_phases.drain(..remove);
+        }
         actor.publish(&self.snapshot_tx);
     }
 
@@ -789,6 +845,19 @@ fn random_nonzero_u64() -> u64 {
             return value;
         }
     }
+}
+
+fn bounded_snapshot_text(value: &str) -> String {
+    let maximum = phoxal_cli_core::session::protocol::MAX_SNAPSHOT_TEXT_BYTES;
+    if value.len() <= maximum {
+        return value.to_string();
+    }
+    let suffix = "…";
+    let mut end = maximum.saturating_sub(suffix.len());
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    format!("{}{}", &value[..end], suffix)
 }
 
 #[cfg(test)]
@@ -942,7 +1011,7 @@ mod tests {
             failure
                 .stderr_tail
                 .as_ref()
-                .is_some_and(|tail| tail.as_str().chars().count() <= BoundedString::MAX_CHARS + 1)
+                .is_some_and(|tail| tail.as_str().len() <= BoundedString::MAX_BYTES)
         );
     }
 

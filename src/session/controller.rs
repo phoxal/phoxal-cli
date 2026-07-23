@@ -82,6 +82,7 @@ use crate::supervisor::{BoardBackend, BoardSnapshot, SupervisorAction, Superviso
 use crate::telemetry::TelemetryBackend;
 use phoxal_cli_core::session::JoypadCommand;
 use phoxal_cli_core::session::stores::telemetry::RobotScope;
+use phoxal_cli_core::session::{CommandAction, ProjectLifecycle};
 
 use super::diagnostics;
 use super::output::OutputContext;
@@ -161,6 +162,12 @@ pub struct SessionController {
     /// `SupervisorAction` channel `run`/`simulation run` already wires up for
     /// `--watch` hot-reload, shared here rather than duplicated.
     restart_tx: Option<mpsc::Sender<SupervisorAction>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttachmentOutcome {
+    Terminal,
+    Disconnected,
 }
 
 impl SessionController {
@@ -562,6 +569,196 @@ impl SessionController {
                 finish_after_failure(&mut self.events_rx, &self.token, &board, supervise, error)
                     .await
             }
+        }
+    }
+
+    /// Drive the disposable TUI projection of a resident supervisor. Terminal
+    /// loss only tears down this controller; it never owns graph processes.
+    pub async fn drive_attachment(
+        mut self,
+        board: BoardBackend,
+        telemetry: TelemetryBackend,
+        client: phoxal_cli_client::SupervisorClient,
+        shutdown_on_quit: bool,
+    ) -> Result<AttachmentOutcome> {
+        if let Some(tui) = &mut self.tui {
+            board.set_log_sink(tui.log_sender());
+        }
+        let store = client.snapshots();
+        board.replace_from_supervisor(store.current());
+        let mut snapshots = store.subscribe();
+        let mut connection = store.connection();
+        let current = store.current();
+        self.reflect_resident_lifecycle(current.lifecycle);
+        let mut last_phase = None;
+        self.reflect_resident_phase(current.startup.active_phase.as_deref(), &mut last_phase);
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        self.redraw_live(&board, &telemetry)?;
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.interrupts.recv() => {
+                    if shutdown_on_quit {
+                        self.request_resident_shutdown(&client).await?;
+                    } else {
+                        return Ok(AttachmentOutcome::Disconnected);
+                    }
+                }
+                _ = self.terminates.recv() => {
+                    if shutdown_on_quit {
+                        self.request_resident_shutdown(&client).await?;
+                    } else {
+                        return Ok(AttachmentOutcome::Disconnected);
+                    }
+                }
+                _ = self.hangups.recv() => {
+                    // Terminal/session loss belongs only to this disposable
+                    // client. Never translate SIGHUP into graph shutdown.
+                    return Ok(AttachmentOutcome::Disconnected);
+                }
+                Ok(()) = snapshots.changed() => {
+                    let snapshot = snapshots.borrow_and_update().clone();
+                    let terminal = matches!(snapshot.lifecycle, ProjectLifecycle::Stopped | ProjectLifecycle::Failed);
+                    board.replace_from_supervisor(snapshot.clone());
+                    self.reflect_resident_lifecycle(snapshot.lifecycle);
+                    self.reflect_resident_phase(snapshot.startup.active_phase.as_deref(), &mut last_phase);
+                    self.redraw_live(&board, &telemetry)?;
+                    if terminal {
+                        return if snapshot.lifecycle == ProjectLifecycle::Failed {
+                            Err(anyhow!("resident supervisor failed"))
+                        } else {
+                            Ok(AttachmentOutcome::Terminal)
+                        };
+                    }
+                }
+                Ok(()) = connection.changed() => {
+                    if *connection.borrow_and_update() == phoxal_cli_client::ConnectionState::Crashed {
+                        return Err(anyhow!("resident supervisor disconnected before a terminal snapshot"));
+                    }
+                }
+                Some(input) = poll_next_input(&mut self.tui) => {
+                    let event = input.context("terminal input reader failed")?;
+                    let action = handle_input(&mut self.tui, event, &board.snapshot());
+                    match action {
+                        DisplayAction::None => {}
+                        DisplayAction::Quit if !shutdown_on_quit => return Ok(AttachmentOutcome::Disconnected),
+                        DisplayAction::Quit => {
+                            self.request_resident_shutdown(&client).await?;
+                        }
+                        DisplayAction::Restart(id) => {
+                            match id.parse() {
+                                Err(error) => self.report_command_warning(
+                                    format!("restart request has invalid process key `{id}`: {error}")
+                                ),
+                                Ok(key) => {
+                                    let snapshot = board.supervisor_snapshot();
+                                    match snapshot.processes.get(&key)
+                                        .and_then(|entry| entry.status.incarnation)
+                                    {
+                                        None => self.report_command_warning(
+                                            format!("process `{id}` has no restartable incarnation")
+                                        ),
+                                        Some(expected_incarnation) => {
+                                            let result = client.command_with_reconnect(CommandAction::Restart {
+                                                process: key,
+                                                expected_incarnation,
+                                            }).await;
+                                            match result {
+                                                Ok(reply) if !reply.accepted => {
+                                                    self.report_command_rejection("restart", reply.error);
+                                                }
+                                                Err(error) => self.report_command_warning(
+                                                    format!("supervisor restart command failed after reconnect: {error:#}")
+                                                ),
+                                                Ok(_) => {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        DisplayAction::JoypadSelect(id) => telemetry.send_joypad_command(JoypadCommand::Select(id)),
+                        DisplayAction::JoypadSetEnabled(enabled) => telemetry.send_joypad_command(JoypadCommand::SetEnabled(enabled)),
+                        DisplayAction::JoypadRescan => telemetry.send_joypad_command(JoypadCommand::Rescan),
+                    }
+                    self.redraw_live(&board, &telemetry)?;
+                }
+                _ = ticker.tick() => self.redraw_live(&board, &telemetry)?,
+            }
+        }
+    }
+
+    async fn request_resident_shutdown(
+        &mut self,
+        client: &phoxal_cli_client::SupervisorClient,
+    ) -> Result<()> {
+        let reply = client
+            .command_with_reconnect(CommandAction::Shutdown)
+            .await
+            .context("resident shutdown command failed after reconnect")?;
+        if reply.accepted {
+            self.transition_to_stopping();
+        } else {
+            self.report_command_rejection("shutdown", reply.error);
+        }
+        Ok(())
+    }
+
+    fn reflect_resident_lifecycle(&mut self, lifecycle: ProjectLifecycle) {
+        self.state = match lifecycle {
+            ProjectLifecycle::Starting => SessionState::Starting,
+            ProjectLifecycle::Ready | ProjectLifecycle::Degraded => SessionState::Running,
+            ProjectLifecycle::Stopping => SessionState::Stopping,
+            ProjectLifecycle::Stopped => SessionState::Stopped,
+            ProjectLifecycle::Failed => SessionState::Failed(FailReason::Terminal(
+                "resident supervisor failed".to_string(),
+            )),
+        };
+        self.emit_session_changed_locally();
+    }
+
+    fn report_command_rejection(
+        &mut self,
+        operation: &str,
+        error: Option<phoxal_cli_core::session::CommandError>,
+    ) {
+        self.report_command_warning(format!(
+            "supervisor rejected {operation}: {}",
+            error.map_or_else(
+                || "unspecified rejection".to_string(),
+                |error| format!("{error:?}")
+            )
+        ));
+    }
+
+    fn report_command_warning(&mut self, message: String) {
+        self.apply_event(SessionEvent::Diagnostic {
+            source: DiagnosticSource::Cli,
+            level: DiagnosticLevel::Warn,
+            message,
+        });
+    }
+
+    fn reflect_resident_phase(&mut self, active: Option<&str>, previous: &mut Option<String>) {
+        if previous.as_deref() == active {
+            return;
+        }
+        if let Some(finished) = previous.take() {
+            self.apply_event(SessionEvent::PhaseFinished {
+                id: PhaseId::new(finished),
+                outcome: PhaseOutcome::Succeeded,
+                elapsed: Duration::ZERO,
+            });
+        }
+        if let Some(active) = active {
+            let active = active.to_string();
+            self.apply_event(SessionEvent::PhaseStarted {
+                id: PhaseId::new(active.clone()),
+                label: active.clone(),
+            });
+            *previous = Some(active);
         }
     }
 
@@ -1161,5 +1358,20 @@ mod tests {
         assert!(!register_cancel_request(&mut requested));
         assert!(requested);
         assert!(register_cancel_request(&mut requested));
+    }
+
+    #[tokio::test]
+    async fn resident_command_rejection_is_diagnostic_not_session_failure() {
+        let _guard = super::super::diagnostics::DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .await;
+        let mut controller =
+            SessionController::new_for_test(SessionMode::Run).expect("test controller");
+        controller.state = SessionState::Running;
+        controller.report_command_rejection(
+            "restart",
+            Some(phoxal_cli_core::session::CommandError::SupersededIncarnation),
+        );
+        assert_eq!(controller.state, SessionState::Running);
     }
 }

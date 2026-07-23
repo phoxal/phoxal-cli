@@ -5,17 +5,25 @@ fn bin() -> Command {
 }
 
 #[test]
-fn interactive_foreground_verbs_fail_clearly_without_a_tty() {
-    for args in [vec!["run"], vec!["simulation", "run", "default"]] {
-        let output = bin().args(&args).output().expect("CLI should run");
-        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
-        assert!(output.stdout.is_empty());
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(
-            stderr.contains("require a terminal") && stderr.contains("TTY"),
-            "expected actionable TTY error for {args:?}, got {stderr:?}"
-        );
-    }
+fn interactive_simulation_fails_clearly_without_a_tty() {
+    let args = ["simulation", "run", "default"];
+    let output = bin().args(args).output().expect("CLI should run");
+    assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("require a terminal") && stderr.contains("TTY"),
+        "expected actionable TTY error for {args:?}, got {stderr:?}"
+    );
+}
+
+#[test]
+fn plain_run_without_a_tty_enters_the_resident_role() {
+    let output = bin().arg("run").output().expect("CLI should run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("failed to find robot.yaml"));
+    assert!(!stderr.contains("require a terminal"));
 }
 
 #[test]

@@ -14,6 +14,7 @@ pub mod deploy;
 pub mod doctor;
 pub mod init;
 pub mod logs;
+pub mod resident;
 pub mod run;
 pub mod self_cmd;
 pub mod service;
@@ -189,6 +190,10 @@ pub enum RootCommand {
     Simulation(simulate::Simulation),
     #[command(about = "Run the resolved robot graph with the host-native supervisor.")]
     Run(run::Run),
+    #[command(about = "Attach a thin terminal client to a running project supervisor.")]
+    Attach(resident::Attach),
+    #[command(about = "Orderly stop a running project supervisor.")]
+    Stop(resident::Stop),
     #[command(about = "Stream participant bus logs from a reachable robot.")]
     Logs(logs::Logs),
     #[command(about = "Inspect live robot state through typed bus contracts.")]
@@ -214,7 +219,8 @@ impl RootCommand {
     /// (report-only, no controller) are excluded.
     fn enters_interactive_session(&self) -> bool {
         match self {
-            Self::Run(_) => true,
+            Self::Run(run) => !run.detach,
+            Self::Attach(_) => true,
             Self::Simulation(command) => matches!(
                 &command.command,
                 simulate::SimulationSubcommand::Run(run) if !run.dry_run
@@ -231,6 +237,8 @@ impl RootCommand {
             Self::Validate(command) => command.run(app).await,
             Self::Simulation(command) => command.run(app).await,
             Self::Run(command) => command.run(app).await,
+            Self::Attach(command) => command.run(app).await,
+            Self::Stop(command) => command.run(app).await,
             Self::Logs(command) => command.run(app).await,
             Self::Status(command) => command.run(app).await,
             Self::Deploy(command) => command.run(app).await,
@@ -245,7 +253,10 @@ impl RootCommand {
 
 pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
     let terminal = std::io::stderr().is_terminal();
-    if cli.command.enters_interactive_session() && !terminal {
+    if cli.command.enters_interactive_session()
+        && !terminal
+        && !matches!(cli.command, RootCommand::Run(_))
+    {
         bail!(
             "interactive `run` and `simulation run` sessions require a terminal; run this command in a TTY"
         );
