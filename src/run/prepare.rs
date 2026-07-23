@@ -22,9 +22,9 @@ use phoxal_cli_core::project::launch_plan::CheckedRobotLaunchInput;
 use phoxal_cli_core::project::launch_plan::LaunchMode;
 use phoxal_cli_core::project::launch_plan::PlanContext;
 use phoxal_cli_core::project::launch_plan::build_launch_plan;
-use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::discover_robot_yaml;
 use phoxal_cli_core::project::resolver::load_robot_with_extras;
+use phoxal_cli_core::project::resolver::{ResolveOptions, ToolProfile};
 use phoxal_cli_core::session::{ProcessKey, StartupRequirement};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -70,8 +70,30 @@ pub(crate) fn prepare_run_on_board(
 
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
-    let platform_refs = check_artifact_refs_from_resolved(&resolved);
-    let tool_participants = tool_participants_from_resolved(&resolved)?;
+    let active_tools = resolved.active_profile_tools(ToolProfile::Native);
+    let checked_source_participants = source_participants
+        .iter()
+        .filter(|participant| {
+            active_tools.includes_named(
+                participant.kind == phoxal_cli_core::check::source::SourceParticipantKind::Tool,
+                &participant.name,
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let platform_refs = check_artifact_refs_from_resolved(&resolved)
+        .into_iter()
+        .filter(|artifact| {
+            active_tools.includes_named(
+                artifact.kind == phoxal_cli_core::project::suite::ArtifactKind::Tool,
+                &artifact.name,
+            )
+        })
+        .collect::<Vec<_>>();
+    let tool_participants = tool_participants_from_resolved(&resolved)?
+        .into_iter()
+        .filter(|tool| active_tools.contains(&tool.name))
+        .collect::<Vec<_>>();
     let mut official_by_ref = resolved
         .platform_runtimes
         .iter()
@@ -86,7 +108,7 @@ pub(crate) fn prepare_run_on_board(
     let outcome = run_check_with_context(
         &platform_refs,
         &tool_participants,
-        &source_participants,
+        &checked_source_participants,
         CheckGraphContext {
             manifest_extras: &loaded.extras,
         },
@@ -115,7 +137,7 @@ pub(crate) fn prepare_run_on_board(
             manifest_extras: &loaded.extras,
             checked_participants: &outcome.checked_participants,
             substitutions: &[],
-            source_participants: &source_participants,
+            source_participants: &checked_source_participants,
         }],
     )?;
     let driver_policy = DriverPolicy::from_options(&options, &plan)?;

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use phoxal_api::v0_1 as state_api;
+use phoxal_api::v0_2 as state_api;
 
 use crate::session::telemetry::{
     DeviceSample, JoypadDevicesSample, RouterMetricsSample, RuntimeFeedStatus,

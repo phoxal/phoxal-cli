@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use phoxal::bus::{ContractBody, LogicalTime, Publish, Publisher, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::v0_1 as api;
+use phoxal_api::v0_2 as api;
 use tokio::time::timeout;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

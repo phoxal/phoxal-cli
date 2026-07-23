@@ -10,11 +10,11 @@ use crate::supervisor::ProjectLock;
 use crate::webots_stage_root;
 use anyhow::Result;
 use phoxal::check as graph_check;
-use phoxal_api::v0_1::simulation::RobotSpawn;
+use phoxal_api::v0_2::simulation::RobotSpawn;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::project::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchPlan, PlanContext, ROBOT_TOOL_DEVICE,
-    ROBOT_TOOL_TELEMETRY, SIMULATOR_CONTROLLER_ARTIFACT_NAME, SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
+    SIMULATOR_CONTROLLER_ARTIFACT_NAME, SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
     SIMULATOR_SUPERVISOR_PROVIDER_ID, SITE_TOOL_JOYPAD, build_launch_plan,
     simulator_controller_provider_id,
 };
@@ -23,7 +23,8 @@ use phoxal_cli_core::project::resolver::{
     ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, ResolvedUserRuntime, RobotManifestExtras,
 };
 use phoxal_cli_core::project::suite::{
-    ArtifactKind, fixture_contract_for_tests, fixture_suite_for_tests, fixture_tool_entry_for_tests,
+    ActivationCriticality, ActivationScope, ArtifactActivation, ArtifactKind,
+    fixture_contract_for_tests, fixture_suite_for_tests, fixture_tool_entry_for_tests,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1139,6 +1140,7 @@ robot:
         user_runtimes: Vec::new(),
         components: Vec::new(),
         tools: Vec::new(),
+        suite_profiles: Default::default(),
         path_overrides: Vec::new(),
     })
 }
@@ -1231,15 +1233,26 @@ fn simulator_runtime(name: &str) -> ResolvedPlatformRuntime {
 }
 
 fn add_site_tools(resolved: &mut ResolvedRobot) {
-    resolved
-        .tools
-        .push(tool(phoxal_cli_core::project::launch_plan::ROBOT_TOOL_BUS));
+    resolved.tools.push(tool("tool-bus"));
     resolved.tools.push(tool(SITE_TOOL_JOYPAD));
-    resolved
-        .tools
-        .push(tool(phoxal_cli_core::project::launch_plan::ROBOT_TOOL_LOG));
-    resolved.tools.push(tool(ROBOT_TOOL_TELEMETRY));
+    resolved.tools.push(tool("tool-log"));
+    resolved.tools.push(tool("tool-telemetry"));
     resolved.tools.push(tool(ROBOT_TOOL_DEVICE));
+    let activations = resolved
+        .tools
+        .iter()
+        .map(|tool| ArtifactActivation {
+            package: tool.package.clone(),
+            scope: if tool.name == SITE_TOOL_JOYPAD {
+                ActivationScope::PerProject
+            } else {
+                ActivationScope::PerRobot
+            },
+            criticality: ActivationCriticality::Optional,
+        })
+        .collect::<Vec<_>>();
+    resolved.suite_profiles.native = activations.clone();
+    resolved.suite_profiles.webots = activations;
 }
 
 fn tool(name: &str) -> ResolvedTool {

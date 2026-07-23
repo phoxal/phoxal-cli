@@ -8,7 +8,7 @@ use anyhow::anyhow;
 use phoxal::bus::{DEFAULT_QUERY_TIMEOUT, Querier, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
 use phoxal::raw::{ParticipantLivelinessEvent, ParticipantLivelinessStatus};
-use phoxal_api::v0_1 as api;
+use phoxal_api::v0_2 as api;
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
 use phoxal_cli_core::session::reconcile::{
     Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced,

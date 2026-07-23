@@ -10,17 +10,17 @@ use graph_check::{ParticipantClass, Problem};
 use phoxal::model::robot::v0::Robot;
 use phoxal_cli_core::check::source::SourceParticipantKind;
 use phoxal_cli_core::project::launch_plan::{
-    CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_BUS, ROBOT_TOOL_DEVICE, ROBOT_TOOL_LOG,
-    ROBOT_TOOL_TELEMETRY, SITE_TOOL_JOYPAD, SubstitutionRecord, build_launch_plan,
+    CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_DEVICE, SITE_TOOL_JOYPAD, SubstitutionRecord,
+    build_launch_plan,
 };
 use phoxal_cli_core::project::resolver::{
     ResolveOptions, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
     ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, UserRuntimeManifestExtras,
 };
 use phoxal_cli_core::project::suite::{
-    ArtifactKind, fixture_component_assets_entry_for_tests,
-    fixture_component_driver_entry_for_tests, fixture_contract_for_tests,
-    fixture_service_entry_for_tests, fixture_suite_for_tests,
+    ActivationCriticality, ActivationScope, ArtifactActivation, ArtifactKind,
+    fixture_component_assets_entry_for_tests, fixture_component_driver_entry_for_tests,
+    fixture_contract_for_tests, fixture_service_entry_for_tests, fixture_suite_for_tests,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -270,11 +270,39 @@ fn launch_plan_raw_emit_apis(kind: &str, id: &str) -> RawEmitApis {
 }
 
 fn add_launch_plan_site_tools(resolved: &mut ResolvedRobot) {
-    resolved.tools.push(launch_plan_tool(ROBOT_TOOL_BUS));
+    resolved.tools.push(launch_plan_tool("tool-bus"));
     resolved.tools.push(launch_plan_tool(SITE_TOOL_JOYPAD));
-    resolved.tools.push(launch_plan_tool(ROBOT_TOOL_LOG));
-    resolved.tools.push(launch_plan_tool(ROBOT_TOOL_TELEMETRY));
+    resolved.tools.push(launch_plan_tool("tool-log"));
+    resolved.tools.push(launch_plan_tool("tool-telemetry"));
     resolved.tools.push(launch_plan_tool(ROBOT_TOOL_DEVICE));
+    resolved.suite_profiles.native = vec![
+        ArtifactActivation {
+            package: "phoxal/tool-bus".to_string(),
+            scope: ActivationScope::PerRobot,
+            criticality: ActivationCriticality::Optional,
+        },
+        ArtifactActivation {
+            package: "phoxal/tool-device".to_string(),
+            scope: ActivationScope::PerRobot,
+            criticality: ActivationCriticality::Optional,
+        },
+        ArtifactActivation {
+            package: "phoxal/tool-joypad".to_string(),
+            scope: ActivationScope::PerProject,
+            criticality: ActivationCriticality::Optional,
+        },
+        ArtifactActivation {
+            package: "phoxal/tool-log".to_string(),
+            scope: ActivationScope::PerRobot,
+            criticality: ActivationCriticality::Optional,
+        },
+        ArtifactActivation {
+            package: "phoxal/tool-telemetry".to_string(),
+            scope: ActivationScope::PerRobot,
+            criticality: ActivationCriticality::Optional,
+        },
+    ];
+    resolved.suite_profiles.webots = resolved.suite_profiles.native.clone();
 }
 
 fn launch_plan_tool(name: &str) -> ResolvedTool {
@@ -1959,6 +1987,7 @@ fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<Resolv
         user_runtimes: Vec::new(),
         components,
         tools: Vec::new(),
+        suite_profiles: Default::default(),
         path_overrides: Vec::new(),
     })
 }

@@ -245,6 +245,7 @@ robot:
             user_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
+            suite_profiles: Default::default(),
             path_overrides: Vec::new(),
         })
     }

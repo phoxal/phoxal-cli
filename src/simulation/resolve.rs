@@ -22,7 +22,6 @@ use phoxal_cli_core::check::source::SourceParticipantKind;
 use phoxal_cli_core::project::launch_plan::CheckedRobotLaunchInput;
 use phoxal_cli_core::project::launch_plan::LaunchMode;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
-use phoxal_cli_core::project::launch_plan::STANDARD_SITE_TOOLS;
 use phoxal_cli_core::project::launch_plan::build_launch_plan;
 use phoxal_cli_core::project::launch_plan::simulator_controller_provider_id;
 use phoxal_cli_core::project::resolver::ResolveOptions;
@@ -112,17 +111,18 @@ pub(crate) fn build_checked_sim_launch_plan(
 ) -> Result<(LaunchPlan, Vec<graph_check::ParticipantContractSurface>)> {
     let source_participants = sim_source_participants(project_root, resolved, suite)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
-    // Finding A6: all three filters below admit exactly the standard site-
-    // tool set (`STANDARD_SITE_TOOLS`), derived
-    // once in `launch_plan` and shared with `build_site_launches` there.
-    // This used to hardcode only joypad, silently excluding
-    // telemetry's declared graph contracts from validation even though
-    // telemetry is started and readiness-waited exactly like the other two.
+    let active_tools =
+        resolved.active_profile_tools(phoxal_cli_core::project::resolver::ToolProfile::Webots);
+    // Metadata validation follows the exact selected suite profile. Tools
+    // outside that profile do not join the execution graph merely because
+    // their artifact exists in the train inventory.
     let metadata_source_participants = source_participants
         .iter()
         .filter(|participant| {
-            participant.kind != SourceParticipantKind::Tool
-                || STANDARD_SITE_TOOLS.contains(&participant.name.as_str())
+            active_tools.includes_named(
+                participant.kind == SourceParticipantKind::Tool,
+                &participant.name,
+            )
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -133,13 +133,15 @@ pub(crate) fn build_checked_sim_launch_plan(
     let platform_refs = check_artifact_refs_from_resolved(resolved)
         .into_iter()
         .filter(|artifact| {
-            artifact.kind != phoxal_cli_core::project::suite::ArtifactKind::Tool
-                || STANDARD_SITE_TOOLS.contains(&artifact.name.as_str())
+            active_tools.includes_named(
+                artifact.kind == phoxal_cli_core::project::suite::ArtifactKind::Tool,
+                &artifact.name,
+            )
         })
         .collect::<Vec<_>>();
     let tool_participants = tool_participants_from_resolved(resolved)?
         .into_iter()
-        .filter(|tool| STANDARD_SITE_TOOLS.contains(&tool.name.as_str()))
+        .filter(|tool| active_tools.contains(&tool.name))
         .collect::<Vec<_>>();
     let mut official_by_ref = resolved
         .platform_runtimes

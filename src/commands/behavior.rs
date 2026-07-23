@@ -7,7 +7,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use phoxal::behavior::{BehaviorCatalog, Node, ValueType};
 use phoxal::bus::{ContractBody, LogicalTime, Publish, Publisher, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::v0_1 as api;
+use phoxal_api::v0_2 as api;
 use serde::Serialize;
 use tokio::time::timeout;
 
