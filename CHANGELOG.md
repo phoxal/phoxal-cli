@@ -4,6 +4,26 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.21.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.21.0) - 2026-07-23
+
+
+### Added
+
+- *(supervisor)* Add immutable managed execution plans [**breaking**]
+
+### Fixed
+
+- *(release)* Restore release-plz-managed CLI publication ([#175](https://github.com/phoxal/phoxal-cli/pull/175)) [**breaking**]
+
+### Other
+
+- Drop stale multi-version catalog remnants ([#173](https://github.com/phoxal/phoxal-cli/pull/173))
+
+### Refactored
+
+- Harden supervisor state and readiness
+
+
 ## [0.20.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.20.1) - 2026-07-22
 
 
