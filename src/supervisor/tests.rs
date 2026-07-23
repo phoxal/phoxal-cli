@@ -1,6 +1,6 @@
 //! Tests for this module.
 
-use super::r#loop::{recv_action, request_participant_stop, shutdown_all};
+use super::r#loop::{handle_action, recv_action, request_participant_stop, shutdown_all};
 use super::signals::process_group_alive;
 use super::*;
 use anyhow::{Context, Result};
@@ -600,6 +600,53 @@ async fn watch_swap_does_not_consume_restart_budget() -> Result<()> {
     assert_eq!(status.note.as_deref(), Some("ok 0.1s, restarted"));
 
     participant.stop_current(&board).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn watch_reconciles_environment_and_shutdown_policy_changes() -> Result<()> {
+    use phoxal_cli_core::project::launch_plan::{LaunchMode, LaunchPlan, PlanRevision};
+
+    let board = BoardBackend::new();
+    board.configure("test", "0.37.0", "run");
+    board.upsert(ParticipantStatus::new(
+        "mission",
+        ParticipantKind::Service,
+        ParticipantState::Starting,
+    ));
+    let mut initial = sleep_spec("mission");
+    initial.bus_participant = false;
+    initial.readiness = phoxal_cli_core::session::ReadinessPolicy::ProcessSpawned;
+    initial.env = vec![("PHOXAL_CONFIG".to_string(), "old".to_string())];
+    let running = RunningParticipant::spawn(initial.clone(), &board).await?;
+    let mut running = vec![running];
+
+    let mut candidate = initial;
+    candidate.env = vec![("PHOXAL_CONFIG".to_string(), "new".to_string())];
+    candidate.shutdown_grace = Duration::from_millis(250);
+    let revision = PlanRevision::compile(
+        2,
+        LaunchPlan {
+            mode: LaunchMode::Run,
+            site: Vec::new(),
+            robots: Vec::new(),
+        },
+    )?;
+    handle_action(
+        &mut running,
+        &board,
+        SupervisorAction::ReconcilePlan {
+            revision,
+            specs: vec![candidate.clone()],
+            remove_ids: Vec::new(),
+            note: "manifest changed".to_string(),
+        },
+    )
+    .await?;
+
+    assert_eq!(running[0].spec, candidate);
+    assert_eq!(board.supervisor_snapshot().plan_revision, 2);
+    shutdown_all(&mut running, &board).await;
     Ok(())
 }
 

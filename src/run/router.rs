@@ -7,6 +7,7 @@ use crate::supervisor::ParticipantSpec;
 use crate::supervisor::SupervisionStage;
 use crate::supervisor::SupervisorOptions;
 use crate::supervisor::SupervisorOutcome;
+use crate::supervisor::create_cloexec_pipe;
 use crate::supervisor::supervise_until_shutdown;
 use anyhow::Context;
 use anyhow::Result;
@@ -18,7 +19,9 @@ use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::tooling::resolve_project_path;
 use phoxal_cli_core::session::human;
 use std::collections::{BTreeSet, VecDeque};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
+#[cfg(test)]
+use std::os::fd::FromRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -308,21 +311,7 @@ async fn launch_router_process(
     launch: &RouterLaunch,
     required_endpoint: &str,
 ) -> Result<(RouterProcess, Vec<String>)> {
-    let mut readiness_fds = [0_i32; 2];
-    // SAFETY: valid pointer to storage for two pipe descriptors.
-    if unsafe { libc::pipe(readiness_fds.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error()).context("create router readiness pipe");
-    }
-    // SAFETY: ownership of both descriptors returned by pipe transfers into
-    // these guards exactly once, including every early-error path below.
-    let read_fd = unsafe { OwnedFd::from_raw_fd(readiness_fds[0]) };
-    let ready_fd = unsafe { OwnedFd::from_raw_fd(readiness_fds[1]) };
-    // SAFETY: valid parent-owned read descriptor; only the write end is a
-    // router bootstrap capability.
-    if unsafe { libc::fcntl(read_fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("mark router readiness read end close-on-exec");
-    }
+    let (read_fd, ready_fd) = create_cloexec_pipe().context("create router readiness pipe")?;
     let mut command = tokio::process::Command::new(&launch.binary);
     prepare_inherited_bootstrap_fd(&mut command, ready_fd.as_raw_fd())?;
     if let Some(config) = &launch.config {

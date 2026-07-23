@@ -15,7 +15,7 @@ use crate::check::{
 };
 use crate::component_driver::component_driver_crate_dir;
 use crate::resolver::resolve;
-use crate::run::{DriverPolicy, RunOptions, source_spec_from_launch_record};
+use crate::run::{DriverPolicy, RunOptions, spec_from_launch_record};
 use crate::simulation::{
     SimulateMode, SimulateOptions, build_checked_sim_launch_plan, resolve_project,
 };
@@ -112,7 +112,7 @@ pub(crate) fn spawn_run_watch(config: RunWatchConfig) -> JoinHandle<()> {
     );
     targets.push(plan_input_target(
         &config.ctx.project_root,
-        &config.ctx.source_participants,
+        &config.live_ids,
     ));
     spawn_watch_loop(
         WatchMode::Run,
@@ -133,7 +133,7 @@ pub(crate) fn spawn_sim_watch(config: SimWatchConfig) -> JoinHandle<()> {
     );
     targets.push(plan_input_target(
         &config.ctx.project_root,
-        &config.ctx.source_participants,
+        &config.live_ids,
     ));
     spawn_watch_loop(
         WatchMode::Sim,
@@ -228,11 +228,8 @@ fn initial_hashes(targets: &[WatchTarget], board: &BoardBackend) -> BTreeMap<Str
     hashes
 }
 
-fn plan_input_target(project_root: &Path, sources: &[SourceParticipant]) -> WatchTarget {
-    let ids = sources
-        .iter()
-        .map(|source| source.name.clone())
-        .collect::<Vec<_>>();
+fn plan_input_target(project_root: &Path, live_ids: &BTreeSet<String>) -> WatchTarget {
+    let ids = live_ids.iter().cloned().collect::<Vec<_>>();
     WatchTarget {
         key: "plan-inputs".to_string(),
         kind: ParticipantKind::Service,
@@ -248,28 +245,44 @@ fn hash_watch_target(target: &WatchTarget) -> Result<String> {
         return hash_tree(&target.crate_dir);
     }
     use sha2::{Digest, Sha256};
-    let mut files = std::fs::read_dir(&target.crate_dir)?
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && matches!(
-                    path.extension().and_then(|value| value.to_str()),
-                    Some("yaml" | "yml" | "toml" | "lock" | "json")
-                )
-        })
-        .collect::<Vec<_>>();
+    let mut files = Vec::new();
+    collect_plan_input_files(&target.crate_dir, &target.crate_dir, &mut files)?;
     files.sort();
     let mut digest = Sha256::new();
     for path in files {
-        digest.update(
-            path.file_name()
-                .expect("root file has name")
-                .as_encoded_bytes(),
-        );
-        digest.update(std::fs::read(path)?);
+        let relative = path
+            .strip_prefix(&target.crate_dir)
+            .expect("collected plan input is below project root");
+        digest.update(relative.as_os_str().as_encoded_bytes());
+        digest.update(std::fs::read(&path)?);
     }
     Ok(hex::encode(digest.finalize()))
+}
+
+fn collect_plan_input_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if matches!(
+                entry.file_name().to_str(),
+                Some(".git" | ".phoxal" | ".claude" | "target")
+            ) {
+                continue;
+            }
+            collect_plan_input_files(root, &path, files)?;
+        } else if file_type.is_file()
+            && matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("yaml" | "yml" | "toml" | "lock" | "json" | "urdf" | "wbt")
+            )
+        {
+            debug_assert!(path.starts_with(root));
+            files.push(path);
+        }
+    }
+    Ok(())
 }
 
 async fn handle_target_change(
@@ -533,7 +546,7 @@ fn recheck_run_target(
         crate::check::robot_contract_surfaces(&resolved.robot.robot.id, &outcome.contract_surfaces);
     let coherence = crate::check::coherence_for_launch_plan(&coherence_plan, &[coherence_graph])?;
     crate::check::enforce_coherence(crate::check::CoherenceVerb::Run, &coherence)?;
-    let mut specs = specs_for_target(&plan, target)?;
+    let mut specs = specs_for_target(&plan, &resolved, target)?;
     let endpoint = crate::run::project_router_endpoint(project_root);
     crate::run::apply_session_connect(&mut plan, &mut specs, &endpoint);
     Ok(WatchOutcome::Revision { plan, specs })
@@ -558,13 +571,17 @@ fn recheck_sim_target(
     if target.kind == WatchTargetKind::Driver {
         return Ok(WatchOutcome::MetadataOnly);
     }
-    let mut specs = specs_for_target(&plan, target)?;
+    let mut specs = specs_for_target(&plan, &resolved.resolved, target)?;
     let endpoint = crate::run::project_router_endpoint(project_root);
     crate::run::apply_session_connect(&mut plan, &mut specs, &endpoint);
     Ok(WatchOutcome::Revision { plan, specs })
 }
 
-fn specs_for_target(plan: &LaunchPlan, target: &WatchTarget) -> Result<Vec<ParticipantSpec>> {
+fn specs_for_target(
+    plan: &LaunchPlan,
+    resolved: &ResolvedRobot,
+    target: &WatchTarget,
+) -> Result<Vec<ParticipantSpec>> {
     let wanted = target
         .participant_ids
         .iter()
@@ -584,7 +601,7 @@ fn specs_for_target(plan: &LaunchPlan, target: &WatchTarget) -> Result<Vec<Parti
                 || wanted.contains(participant.launch.participant_id.as_str())
         })
     {
-        if let Some(spec) = source_spec_from_launch_record(participant, &ui)? {
+        if let Some(spec) = spec_from_launch_record(participant, resolved, &ui)? {
             specs.push(spec);
         }
     }
@@ -669,10 +686,29 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let manifest = temp.path().join("robot.yaml");
         std::fs::write(&manifest, "schema: robot/v0\n")?;
-        let target = plan_input_target(temp.path(), &[]);
+        let target = plan_input_target(temp.path(), &BTreeSet::new());
         let before = hash_watch_target(&target)?;
         std::fs::write(&manifest, "schema: robot/v0\nrobot: {}\n")?;
         assert_ne!(before, hash_watch_target(&target)?);
+        Ok(())
+    }
+
+    #[test]
+    fn plan_input_hash_detects_nested_manifests_and_urdf() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let component = temp.path().join("components/drive");
+        std::fs::create_dir_all(&component)?;
+        let manifest = component.join("component.yaml");
+        let urdf = component.join("structure.urdf");
+        std::fs::write(&manifest, "schema: component/v0\n")?;
+        std::fs::write(&urdf, "<robot/>")?;
+        let target = plan_input_target(temp.path(), &BTreeSet::new());
+        let before = hash_watch_target(&target)?;
+        std::fs::write(&urdf, "<robot name=\"changed\"/>")?;
+        assert_ne!(before, hash_watch_target(&target)?);
+        let after_urdf = hash_watch_target(&target)?;
+        std::fs::write(&manifest, "schema: component/v0\ncomponent: {}\n")?;
+        assert_ne!(after_urdf, hash_watch_target(&target)?);
         Ok(())
     }
 

@@ -41,6 +41,7 @@ mod process;
 pub(crate) use process::RunningParticipant;
 mod managed_child;
 pub(crate) use managed_child::ManagedChild;
+pub(crate) use managed_child::create_cloexec_pipe;
 pub(crate) use managed_child::materialize_plan_binaries;
 pub use managed_child::maybe_run_guardian;
 mod output;

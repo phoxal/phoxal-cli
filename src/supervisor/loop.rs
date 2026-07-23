@@ -302,6 +302,7 @@ pub(crate) async fn handle_action(
             let accepted_revision = board.activate_next_plan_revision();
             tracing::info!(
                 accepted_revision,
+                candidate_revision = revision.number,
                 candidate_digest = %revision.digest,
                 "activated immutable plan revision"
             );

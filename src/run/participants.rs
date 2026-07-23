@@ -351,9 +351,8 @@ fn register_simulation_managed_participant(
 /// ever contains Service and Driver participants (`Tool` and `Simulator`
 /// checked participants are excluded upstream by
 /// `launch_plan::is_robot_launch_participant`), so `"service"` is the only
-/// value seen here in practice, but Sim-mode plans reuse this same helper via
-/// `source_spec_from_launch_record` (through `watch`), where a
-/// source-overridden simulator is possible.
+/// value seen here in practice, but Sim-mode plans reuse this same helper
+/// through `watch`, where a source-overridden simulator is possible.
 pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (ParticipantKind, bool) {
     match execution {
         ParticipantExecution::OfficialArtifact { .. } => (ParticipantKind::Service, false),
@@ -371,28 +370,53 @@ pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (Participant
     }
 }
 
-pub(crate) fn source_spec_from_launch_record(
+pub(crate) fn spec_from_launch_record(
     participant: &ParticipantLaunchRecord,
+    resolved: &ResolvedRobot,
     ui: &crate::Ui,
 ) -> Result<Option<ParticipantSpec>> {
+    if participant.launch_ownership == LaunchOwnership::SimulationManaged {
+        return Ok(None);
+    }
     let id = participant.launch.participant_id.clone();
     let robot = RobotKey::new(&participant.launch.namespace, &participant.launch.robot_id);
     // `_local`: this function only builds a `ParticipantSpec` (no
     // `ParticipantStatus` to mark `.with_local` on) - see the other
     // `participant_kind` call sites for where the bool is actually consumed.
     let (kind, _local) = participant_kind(&participant.execution);
-    let is_tool = matches!(
-        &participant.execution,
-        ParticipantExecution::SourceArtifact { kind, .. } if kind == "tool"
-    );
-    let crate_dir = match &participant.execution {
+    let is_tool = match &participant.execution {
+        ParticipantExecution::OfficialTool { .. } => true,
+        ParticipantExecution::SourceArtifact { kind, .. } => kind == "tool",
+        _ => false,
+    };
+    let (binary, cwd) = match &participant.execution {
         ParticipantExecution::UserService { crate_dir }
         | ParticipantExecution::SourceArtifact { crate_dir, .. }
-        | ParticipantExecution::ComponentDriver { crate_dir } => crate_dir,
-        ParticipantExecution::OfficialArtifact { .. }
-        | ParticipantExecution::OfficialTool { .. } => return Ok(None),
+        | ParticipantExecution::ComponentDriver { crate_dir } => (
+            build_source_binary(crate_dir, &id, ui)?,
+            Some(crate_dir.clone()),
+        ),
+        ParticipantExecution::OfficialTool { .. } => (
+            locate_tool_binary(resolved, &participant.artifact_id, ui)?
+                .ok_or_else(|| anyhow!(native_pending_tool_note(&participant.artifact_id)))?,
+            None,
+        ),
+        ParticipantExecution::OfficialArtifact { .. } => {
+            let runtime = resolved
+                .platform_runtimes
+                .iter()
+                .find(|runtime| runtime.name == participant.artifact_id);
+            (
+                locate_official_binary(runtime, &participant.artifact_id)?.ok_or_else(|| {
+                    anyhow!(native_pending_official_note(
+                        runtime,
+                        &participant.artifact_id
+                    ))
+                })?,
+                None,
+            )
+        }
     };
-    let binary = build_source_binary(crate_dir, &id, ui)?;
     let env = if is_tool {
         encode_tool_env(&participant.launch)?
     } else {
@@ -404,7 +428,7 @@ pub(crate) fn source_spec_from_launch_record(
         kind,
         executable: binary,
         args: Vec::new(),
-        cwd: Some(crate_dir.clone()),
+        cwd,
         env: env.spawn_env(),
         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
         process_group: true,

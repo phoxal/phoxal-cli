@@ -7,51 +7,85 @@ use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt as _;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use tokio::process::{Child, Command};
 
 static GUARDIAN: LazyLock<Mutex<Option<GuardianClient>>> = LazyLock::new(|| Mutex::new(None));
+static SPAWN_GATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static NEXT_GUARDIAN_TOKEN: AtomicU64 = AtomicU64::new(1);
+const GUARDIAN_RECORD_LEN: usize = 17;
+type GuardianRecord = [u8; GUARDIAN_RECORD_LEN];
+
+fn next_guardian_token() -> u64 {
+    NEXT_GUARDIAN_TOKEN.fetch_add(1, Ordering::Relaxed)
+}
+
+fn guardian_record(operation: u8, pgid: u32, token: u64) -> GuardianRecord {
+    let mut record = [0_u8; GUARDIAN_RECORD_LEN];
+    record[0] = operation;
+    record[1..9].copy_from_slice(&u64::from(pgid).to_ne_bytes());
+    record[9..].copy_from_slice(&token.to_ne_bytes());
+    record
+}
+
+fn guardian_record_pgid(record: &GuardianRecord) -> u32 {
+    u64::from_ne_bytes(record[1..9].try_into().expect("fixed guardian pgid")) as u32
+}
+
+fn guardian_record_token(record: &GuardianRecord) -> u64 {
+    u64::from_ne_bytes(record[9..].try_into().expect("fixed guardian token"))
+}
+
+pub(crate) fn create_cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0_i32; 2];
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // SAFETY: valid pointer to a two-element fd array. pipe2 applies
+        // CLOEXEC atomically, eliminating the concurrent-fork inheritance
+        // window on supported targets.
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        // Darwin does not expose pipe2. Mark both descriptors immediately;
+        // the same gate covers every Phoxal child spawn so none can race this
+        // fallback's pipe-to-fcntl window.
+        let _spawn_gate = SPAWN_GATE.lock().expect("spawn gate poisoned");
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        for fd in fds {
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                let error = std::io::Error::last_os_error();
+                // SAFETY: both descriptors were returned by pipe and have not
+                // transferred to an owner yet.
+                unsafe {
+                    libc::close(fds[0]);
+                    libc::close(fds[1]);
+                }
+                return Err(error);
+            }
+        }
+    }
+    // SAFETY: each descriptor returned by pipe/pipe2 transfers exactly once.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
 
 struct GuardianClient {
     writer: std::fs::File,
     acknowledgements: std::fs::File,
-    pending_acknowledgements: std::collections::BTreeMap<[u8; 9], usize>,
+    pending_acknowledgements: std::collections::BTreeMap<GuardianRecord, usize>,
     _process: Option<std::process::Child>,
 }
 
 impl GuardianClient {
     fn start() -> Result<Self> {
-        let mut fds = [0_i32; 2];
-        // SAFETY: valid pointer to a two-element fd array.
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("create guardian pipe");
-        }
-        // SAFETY: ownership of every descriptor returned by pipe transfers to
-        // exactly one guard, including all startup error paths below.
-        let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
-        let mut acknowledgement_fds = [0_i32; 2];
-        if unsafe { libc::pipe(acknowledgement_fds.as_mut_ptr()) } != 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("create guardian acknowledgement pipe");
-        }
-        let acknowledgement_read_fd = unsafe { OwnedFd::from_raw_fd(acknowledgement_fds[0]) };
-        let acknowledgement_write_fd = unsafe { OwnedFd::from_raw_fd(acknowledgement_fds[1]) };
-        // The guardian inherits only the read end. The writer is CLOEXEC so
-        // participants cannot keep containment alive after the supervisor dies.
-        // SAFETY: fds were just returned by pipe.
-        if unsafe { libc::fcntl(write_fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0
-            || unsafe {
-                libc::fcntl(
-                    acknowledgement_read_fd.as_raw_fd(),
-                    libc::F_SETFD,
-                    libc::FD_CLOEXEC,
-                )
-            } != 0
-        {
-            return Err(std::io::Error::last_os_error())
-                .context("mark guardian parent descriptors close-on-exec");
-        }
+        let (read_fd, write_fd) = create_cloexec_pipe().context("create guardian control pipe")?;
+        let (acknowledgement_read_fd, acknowledgement_write_fd) =
+            create_cloexec_pipe().context("create guardian acknowledgement pipe")?;
         if cfg!(test) {
             // Unit-test executables use the libtest harness, not the CLI main.
             // Keep identical EOF semantics in a dedicated thread.
@@ -68,16 +102,19 @@ impl GuardianClient {
             });
         }
         let exe = std::env::current_exe().context("resolve supervisor executable")?;
-        let process = std::process::Command::new(exe)
-            .arg("__graph-guardian")
-            .arg(read_fd.as_raw_fd().to_string())
-            .arg(acknowledgement_write_fd.as_raw_fd().to_string())
-            .process_group(0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("spawn graph guardian")?;
+        let process = {
+            let _spawn_gate = SPAWN_GATE.lock().expect("spawn gate poisoned");
+            std::process::Command::new(exe)
+                .arg("__graph-guardian")
+                .arg(read_fd.as_raw_fd().to_string())
+                .arg(acknowledgement_write_fd.as_raw_fd().to_string())
+                .process_group(0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .context("spawn graph guardian")?
+        };
         drop(read_fd);
         drop(acknowledgement_write_fd);
         let writer = std::fs::File::from(write_fd);
@@ -91,9 +128,7 @@ impl GuardianClient {
     }
 
     fn record(&mut self, operation: u8, pgid: u32) -> Result<()> {
-        let mut record = [0_u8; 9];
-        record[0] = operation;
-        record[1..].copy_from_slice(&u64::from(pgid).to_ne_bytes());
+        let record = guardian_record(operation, pgid, next_guardian_token());
         self.writer
             .write_all(&record)
             .context("write graph guardian record")?;
@@ -101,7 +136,7 @@ impl GuardianClient {
         self.confirm(record)
     }
 
-    fn confirm(&mut self, expected: [u8; 9]) -> Result<()> {
+    fn confirm(&mut self, expected: GuardianRecord) -> Result<()> {
         if let Some(count) = self.pending_acknowledgements.get_mut(&expected) {
             *count -= 1;
             if *count == 0 {
@@ -110,12 +145,66 @@ impl GuardianClient {
             return Ok(());
         }
         loop {
-            let mut acknowledgement = [0_u8; 9];
+            let mut acknowledgement = [0_u8; GUARDIAN_RECORD_LEN];
             self.acknowledgements
                 .read_exact(&mut acknowledgement)
                 .context("read graph guardian acknowledgement")?;
             if acknowledgement == expected {
                 return Ok(());
+            }
+            *self
+                .pending_acknowledgements
+                .entry(acknowledgement)
+                .or_default() += 1;
+        }
+    }
+
+    fn confirm_token_with_timeout(
+        &mut self,
+        operation: u8,
+        token: u64,
+        timeout: std::time::Duration,
+    ) -> Result<Option<GuardianRecord>> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(record) = self
+                .pending_acknowledgements
+                .keys()
+                .find(|record| record[0] == operation && guardian_record_token(record) == token)
+                .copied()
+            {
+                self.confirm(record)?;
+                return Ok(Some(record));
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            let mut poll_fd = libc::pollfd {
+                fd: self.acknowledgements.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout_ms = i32::try_from(remaining.as_millis().max(1)).unwrap_or(i32::MAX);
+            // SAFETY: poll_fd points to one initialized descriptor for the
+            // duration of the call.
+            let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+            if ready == 0 {
+                return Ok(None);
+            }
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error).context("poll graph guardian acknowledgement");
+            }
+            let mut acknowledgement = [0_u8; GUARDIAN_RECORD_LEN];
+            self.acknowledgements
+                .read_exact(&mut acknowledgement)
+                .context("read graph guardian acknowledgement")?;
+            if acknowledgement[0] == operation && guardian_record_token(&acknowledgement) == token {
+                return Ok(Some(acknowledgement));
             }
             *self
                 .pending_acknowledgements
@@ -163,6 +252,7 @@ impl ManagedChild {
                 return Err(std::io::Error::last_os_error())
                     .context("mark guardian writer close-on-exec");
             }
+            let token = next_guardian_token();
             // Register from the post-fork/pre-exec child: the inherited transient
             // writer prevents EOF until the ADD record is atomically visible.
             // SAFETY: the closure calls only async-signal-safe getpid/write and
@@ -170,9 +260,7 @@ impl ManagedChild {
             unsafe {
                 command.pre_exec(move || {
                     let pid = libc::getpid();
-                    let mut record = [0_u8; 9];
-                    record[0] = b'+';
-                    record[1..].copy_from_slice(&(pid as u64).to_ne_bytes());
+                    let record = guardian_record(b'+', pid as u32, token);
                     let written = libc::write(
                         registration_fd,
                         record.as_ptr().cast::<libc::c_void>(),
@@ -185,16 +273,36 @@ impl ManagedChild {
                     }
                 });
             }
-            Some(registration)
+            Some((registration, token))
         } else {
             None
         };
-        let mut inner = command.spawn().context("spawn managed child")?;
+        let spawn_result = {
+            let _spawn_gate = SPAWN_GATE.lock().expect("spawn gate poisoned");
+            command.spawn()
+        };
+        if let Err(spawn_error) = spawn_result {
+            if let Some((_, token)) = &registration {
+                with_guardian(|guardian| {
+                    if let Some(acknowledged) = guardian.confirm_token_with_timeout(
+                        b'+',
+                        *token,
+                        std::time::Duration::from_secs(1),
+                    )? {
+                        guardian.record(b'-', guardian_record_pgid(&acknowledged))?;
+                    }
+                    Ok(())
+                })
+                .context("roll back failed-exec guardian registration")?;
+            }
+            return Err(spawn_error).context("spawn managed child");
+        }
+        let mut inner = spawn_result.expect("handled managed child spawn error");
         let pgid = process_group.then(|| inner.id()).flatten();
-        if let Some(pgid) = pgid {
-            let mut pre_exec_record = [0_u8; 9];
-            pre_exec_record[0] = b'+';
-            pre_exec_record[1..].copy_from_slice(&u64::from(pgid).to_ne_bytes());
+        if let Some(pgid) = pgid
+            && let Some((_, token)) = &registration
+        {
+            let pre_exec_record = guardian_record(b'+', pgid, *token);
             let confirmation = with_guardian(|guardian| {
                 guardian.confirm(pre_exec_record)?;
                 guardian.record(b'+', pgid)
@@ -448,13 +556,13 @@ fn guard_reader(
 ) -> Result<()> {
     let mut groups = std::collections::BTreeSet::<u32>::new();
     loop {
-        let mut record = [0_u8; 9];
+        let mut record = [0_u8; GUARDIAN_RECORD_LEN];
         match reader.read_exact(&mut record) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(error) => return Err(error.into()),
         }
-        let pgid = u64::from_ne_bytes(record[1..].try_into().expect("fixed record")) as u32;
+        let pgid = guardian_record_pgid(&record);
         match record[0] {
             b'+' => {
                 groups.insert(pgid);
@@ -502,8 +610,8 @@ mod tests {
         let acknowledgements = unsafe { std::fs::File::from_raw_fd(acknowledgement_fds[0]) };
         let mut acknowledgement_writer =
             unsafe { std::fs::File::from_raw_fd(acknowledgement_fds[1]) };
-        let first = [b'+', 1, 0, 0, 0, 0, 0, 0, 0];
-        let second = [b'+', 2, 0, 0, 0, 0, 0, 0, 0];
+        let first = guardian_record(b'+', 1, 11);
+        let second = guardian_record(b'+', 2, 22);
         acknowledgement_writer.write_all(&second)?;
         acknowledgement_writer.write_all(&first)?;
         drop(acknowledgement_writer);
@@ -517,6 +625,54 @@ mod tests {
         guardian.confirm(first)?;
         guardian.confirm(second)?;
         assert!(guardian.pending_acknowledgements.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn guardian_confirm_token_recovers_failed_exec_registration_identity() -> Result<()> {
+        let (control_reader, control_writer) = create_cloexec_pipe()?;
+        let (acknowledgement_reader, acknowledgement_writer) = create_cloexec_pipe()?;
+        let writer = std::fs::File::from(control_writer);
+        let _control_reader = std::fs::File::from(control_reader);
+        let acknowledgements = std::fs::File::from(acknowledgement_reader);
+        let mut acknowledgement_writer = std::fs::File::from(acknowledgement_writer);
+        let unrelated = guardian_record(b'+', 41, 1);
+        let failed_exec = guardian_record(b'+', 42, 2);
+        acknowledgement_writer.write_all(&unrelated)?;
+        acknowledgement_writer.write_all(&failed_exec)?;
+
+        let mut guardian = GuardianClient {
+            writer,
+            acknowledgements,
+            pending_acknowledgements: std::collections::BTreeMap::new(),
+            _process: None,
+        };
+        assert_eq!(
+            guardian.confirm_token_with_timeout(b'+', 2, std::time::Duration::from_secs(1))?,
+            Some(failed_exec)
+        );
+        guardian.confirm(unrelated)?;
+        assert!(guardian.pending_acknowledgements.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_exec_rolls_back_without_blocking_the_guardian() -> Result<()> {
+        let started = std::time::Instant::now();
+        let mut missing = Command::new("/definitely/not/a/phoxal/executable");
+        let error = match ManagedChild::spawn(&mut missing, true, &[]) {
+            Ok(_) => panic!("missing executable must fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("spawn managed child"),
+            "{error:#}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+        let mut valid = Command::new("/usr/bin/true");
+        let mut child = ManagedChild::spawn(&mut valid, true, &[])?;
+        assert!(child.wait().await?.success());
         Ok(())
     }
 
@@ -611,9 +767,7 @@ mod tests {
         let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
         let mut writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
         let guard = std::thread::spawn(move || guard_reader(reader, None));
-        let mut record = [0_u8; 9];
-        record[0] = b'+';
-        record[1..].copy_from_slice(&u64::from(pid).to_ne_bytes());
+        let record = guardian_record(b'+', pid, 1);
         writer.write_all(&record)?;
         drop(writer);
         guard.join().expect("guardian thread panicked")?;

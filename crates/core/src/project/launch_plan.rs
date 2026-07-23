@@ -117,13 +117,16 @@ impl PlanRevision {
     pub fn content_path(&self, root: &Path, name: &str) -> PathBuf {
         root.join(".phoxal")
             .join("plans")
-            .join(&self.digest)
+            .join("content")
             .join(name)
     }
 
-    /// Publish revision-owned bytes without ever overwriting an existing
-    /// artifact. A repeated identical write is idempotent; different bytes at
-    /// the same content address are corruption and fail closed.
+    /// Publish content-addressed bytes without ever overwriting an existing
+    /// artifact. The shared content store deliberately does not include the
+    /// whole-plan digest: an unchanged binary keeps the same executable path
+    /// across revisions, so reconciliation does not restart unrelated
+    /// participants. A repeated identical write is idempotent; different
+    /// bytes at the same content address are corruption and fail closed.
     pub fn publish_content(&self, root: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf> {
         anyhow::ensure!(
             !name.is_empty() && Path::new(name).components().count() == 1,
@@ -670,6 +673,19 @@ mod tests {
         let first = PlanRevision::compile(1, plan.clone())?;
         let second = PlanRevision::compile(2, plan)?;
         assert_eq!(first.digest, second.digest);
+        let changed_plan = PlanRevision::compile(
+            3,
+            LaunchPlan {
+                mode: LaunchMode::Deploy,
+                site: Vec::new(),
+                robots: Vec::new(),
+            },
+        )?;
+        assert_ne!(first.digest, changed_plan.digest);
+        assert_eq!(
+            first.content_path(Path::new("/tmp/project"), "participant"),
+            changed_plan.content_path(Path::new("/tmp/project"), "participant")
+        );
         let temp = tempfile::tempdir()?;
         let path = first.publish_content(temp.path(), "participant", b"revision-one")?;
         assert_eq!(std::fs::read(&path)?, b"revision-one");
