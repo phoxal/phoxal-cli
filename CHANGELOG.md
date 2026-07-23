@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.21.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.21.1) - 2026-07-23
+
+
+### Fixed
+
+- *(release)* Converge release automation
+
+
 ## [0.21.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.21.0) - 2026-07-23
 
 
