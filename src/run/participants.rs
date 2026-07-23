@@ -141,7 +141,12 @@ pub(crate) fn prepare_robot_participants(
                     "SimulationManaged: launched by Webots via the supervisor, not the CLI supervisor"
                         .to_string(),
                 );
-                board.upsert_process(key, status, StartupRequirement::Required);
+                register_simulation_managed_participant(
+                    board,
+                    key,
+                    status,
+                    participant.launch.incarnation,
+                );
                 continue;
             }
             board.upsert_process(
@@ -322,6 +327,21 @@ pub(crate) fn prepare_robot_participants(
     Ok(())
 }
 
+fn register_simulation_managed_participant(
+    board: &BoardBackend,
+    key: ProcessKey,
+    status: ParticipantStatus,
+    incarnation: u64,
+) {
+    board.upsert_process(key.clone(), status, StartupRequirement::Required);
+    // Webots-owned controllers are intentionally outside `ManagedChild`, so
+    // their launch record keeps the reserved unmanaged incarnation (zero).
+    // Record that exact value on the board: observed Liveliness remains the
+    // readiness proof, but can now satisfy the same exact-incarnation gate as
+    // a supervisor-minted child.
+    board.set_incarnation(&key, incarnation);
+}
+
 /// The board `ParticipantKind` plus whether the participant runs from a
 /// locally resolved directory, for a checked participant's `execution`.
 /// `SourceArtifact`'s own `kind: String` (`"tool"`/`"simulator"`/`"service"`,
@@ -331,9 +351,8 @@ pub(crate) fn prepare_robot_participants(
 /// ever contains Service and Driver participants (`Tool` and `Simulator`
 /// checked participants are excluded upstream by
 /// `launch_plan::is_robot_launch_participant`), so `"service"` is the only
-/// value seen here in practice, but Sim-mode plans reuse this same helper via
-/// `source_spec_from_launch_record` (through `watch`), where a
-/// source-overridden simulator is possible.
+/// value seen here in practice, but Sim-mode plans reuse this same helper
+/// through `watch`, where a source-overridden simulator is possible.
 pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (ParticipantKind, bool) {
     match execution {
         ParticipantExecution::OfficialArtifact { .. } => (ParticipantKind::Service, false),
@@ -351,28 +370,53 @@ pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (Participant
     }
 }
 
-pub(crate) fn source_spec_from_launch_record(
+pub(crate) fn spec_from_launch_record(
     participant: &ParticipantLaunchRecord,
+    resolved: &ResolvedRobot,
     ui: &crate::Ui,
 ) -> Result<Option<ParticipantSpec>> {
+    if participant.launch_ownership == LaunchOwnership::SimulationManaged {
+        return Ok(None);
+    }
     let id = participant.launch.participant_id.clone();
     let robot = RobotKey::new(&participant.launch.namespace, &participant.launch.robot_id);
     // `_local`: this function only builds a `ParticipantSpec` (no
     // `ParticipantStatus` to mark `.with_local` on) - see the other
     // `participant_kind` call sites for where the bool is actually consumed.
     let (kind, _local) = participant_kind(&participant.execution);
-    let is_tool = matches!(
-        &participant.execution,
-        ParticipantExecution::SourceArtifact { kind, .. } if kind == "tool"
-    );
-    let crate_dir = match &participant.execution {
+    let is_tool = match &participant.execution {
+        ParticipantExecution::OfficialTool { .. } => true,
+        ParticipantExecution::SourceArtifact { kind, .. } => kind == "tool",
+        _ => false,
+    };
+    let (binary, cwd) = match &participant.execution {
         ParticipantExecution::UserService { crate_dir }
         | ParticipantExecution::SourceArtifact { crate_dir, .. }
-        | ParticipantExecution::ComponentDriver { crate_dir } => crate_dir,
-        ParticipantExecution::OfficialArtifact { .. }
-        | ParticipantExecution::OfficialTool { .. } => return Ok(None),
+        | ParticipantExecution::ComponentDriver { crate_dir } => (
+            build_source_binary(crate_dir, &id, ui)?,
+            Some(crate_dir.clone()),
+        ),
+        ParticipantExecution::OfficialTool { .. } => (
+            locate_tool_binary(resolved, &participant.artifact_id, ui)?
+                .ok_or_else(|| anyhow!(native_pending_tool_note(&participant.artifact_id)))?,
+            None,
+        ),
+        ParticipantExecution::OfficialArtifact { .. } => {
+            let runtime = resolved
+                .platform_runtimes
+                .iter()
+                .find(|runtime| runtime.name == participant.artifact_id);
+            (
+                locate_official_binary(runtime, &participant.artifact_id)?.ok_or_else(|| {
+                    anyhow!(native_pending_official_note(
+                        runtime,
+                        &participant.artifact_id
+                    ))
+                })?,
+                None,
+            )
+        }
     };
-    let binary = build_source_binary(crate_dir, &id, ui)?;
     let env = if is_tool {
         encode_tool_env(&participant.launch)?
     } else {
@@ -384,7 +428,7 @@ pub(crate) fn source_spec_from_launch_record(
         kind,
         executable: binary,
         args: Vec::new(),
-        cwd: Some(crate_dir.clone()),
+        cwd,
         env: env.spawn_env(),
         shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
         process_group: true,
@@ -515,4 +559,41 @@ pub(crate) fn locate_official_binary(
     // the project-local store has no other identity from which to find this
     // participant's binary.
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phoxal_cli_core::session::{ParticipantInstanceKey, ParticipantKind};
+
+    #[test]
+    fn simulation_managed_readiness_accepts_its_exact_unmanaged_incarnation() {
+        let board = BoardBackend::new();
+        let robot = RobotKey::new("dev", "rover");
+        let key = ProcessKey::robot(robot.clone(), "simulator-webots-supervisor");
+        register_simulation_managed_participant(
+            &board,
+            key.clone(),
+            ParticipantStatus::new(
+                key.to_string(),
+                ParticipantKind::Simulator,
+                ParticipantState::Starting,
+            ),
+            0,
+        );
+
+        board.record_instance_presence(
+            ParticipantInstanceKey {
+                robot,
+                participant: "simulator-webots-supervisor".to_string(),
+                incarnation: 0,
+            },
+            true,
+        );
+
+        assert_eq!(
+            board.snapshot().participants[&key.to_string()].state,
+            ParticipantState::Ready
+        );
+    }
 }

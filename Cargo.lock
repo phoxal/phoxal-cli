@@ -2869,9 +2869,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal"
-version = "0.36.2"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01be7e93a383212ec9fc5da3ce2900cb0a605648dcea735673ac6e31df986892"
+checksum = "a450e9dcb20e9b0951f1b34a940a5cbb7b8b2c53287788283273f9cf75443067"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2899,9 +2899,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-api"
-version = "0.36.2"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a2bb495d650f6831552fdfc6e4934516c6a5ea340a07071ab960559b5df879b"
+checksum = "f8d60e76048f3c66d227ae8550bd157d5613b904bc4379c42ef1f8e34c6d0920"
 dependencies = [
  "phoxal-bus",
  "phoxal-macros",
@@ -2911,9 +2911,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-bus"
-version = "0.36.2"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4a3af23a4e664e4a84107d93e0d52be96c08ea56db3a846edc1733c0ebf3d1a"
+checksum = "8dfde8f8d6375f41dfa2f769555011319ef4dc812d1e330fc4b525854999e6ba"
 dependencies = [
  "arc-swap",
  "rmp-serde",
@@ -3016,9 +3016,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-macros"
-version = "0.36.2"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eaa5e584a395a908e207ab814d619efae4e0f409ae4ad68325c503af13fd153a"
+checksum = "54e1d5ca24cbe8bf2825fc9412a2d359d2976e05ce67f96e85e71c045e716f2c"
 dependencies = [
  "heck",
  "proc-macro2",

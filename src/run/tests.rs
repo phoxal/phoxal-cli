@@ -276,14 +276,14 @@ async fn dropping_setup_background_tasks_aborts_every_handle() {
 }
 
 #[test]
-fn router_ready_event_selects_first_listener_and_tolerates_additive_fields() {
+fn router_ready_fd_contract_returns_the_exact_local_endpoint() {
     assert_eq!(
-        parse_router_ready(r#"{"event":"ready","listen":["tcp/127.0.0.1:7448"],"future":true}"#)
+        parse_router_ready(r#"{"status":"ready","local_endpoint":"unixsock-stream//tmp/zenoh.sock","listeners":["unixsock-stream//tmp/zenoh.sock"],"future":true}"#)
             .expect("ready event"),
-        "tcp/127.0.0.1:7448"
+        "unixsock-stream//tmp/zenoh.sock"
     );
-    assert!(parse_router_ready(r#"{"event":"ready","listen":[]}"#).is_err());
-    assert!(parse_router_ready(r#"{"event":"starting","listen":["tcp/x"]}"#).is_err());
+    assert!(parse_router_ready(r#"{"status":"failed","message":"bind refused"}"#).is_err());
+    assert!(parse_router_ready(r#"{"status":"starting"}"#).is_err());
 }
 
 #[test]

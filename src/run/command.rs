@@ -229,6 +229,13 @@ async fn live_run_setup(
         start_infrastructure_router(&prepared.ctx.resolved, &prepared.ctx.project_root, &ui)
             .await?;
     apply_session_connect(&mut prepared.plan, &mut prepared.specs, &connect);
+    let revision =
+        phoxal_cli_core::project::launch_plan::PlanRevision::compile(1, prepared.plan.clone())?;
+    crate::supervisor::materialize_plan_binaries(
+        &prepared.ctx.project_root,
+        &revision,
+        &mut prepared.specs,
+    )?;
     prepared.board.set_router_status(format!("ready:{connect}"));
     prepared.board.set_state(
         phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),

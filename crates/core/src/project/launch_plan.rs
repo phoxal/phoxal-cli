@@ -10,6 +10,7 @@ use phoxal::participant::launch::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::resolver::{ResolvedRobot, ResolvedTool, RobotManifestExtras};
 use crate::check::source::{SourceParticipant, SourceParticipantKind};
@@ -89,6 +90,72 @@ pub struct LaunchPlan {
     pub mode: LaunchMode,
     pub site: Vec<SiteLaunch>,
     pub robots: Vec<RobotLaunch>,
+}
+
+/// An immutable, content-identified compilation of the complete launch graph.
+/// Watch rebuilds create a new value; a running revision is never edited.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanRevision {
+    pub number: u64,
+    pub digest: String,
+    pub plan: LaunchPlan,
+}
+
+impl PlanRevision {
+    pub fn compile(number: u64, plan: LaunchPlan) -> Result<Self> {
+        anyhow::ensure!(number > 0, "plan revision numbers start at one");
+        let canonical = serde_json::to_vec(&plan)?;
+        let digest = hex::encode(Sha256::digest(canonical));
+        Ok(Self {
+            number,
+            digest,
+            plan,
+        })
+    }
+
+    #[must_use]
+    pub fn content_path(&self, root: &Path, name: &str) -> PathBuf {
+        root.join(".phoxal")
+            .join("plans")
+            .join("content")
+            .join(name)
+    }
+
+    /// Publish content-addressed bytes without ever overwriting an existing
+    /// artifact. The shared content store deliberately does not include the
+    /// whole-plan digest: an unchanged binary keeps the same executable path
+    /// across revisions, so reconciliation does not restart unrelated
+    /// participants. A repeated identical write is idempotent; different
+    /// bytes at the same content address are corruption and fail closed.
+    pub fn publish_content(&self, root: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf> {
+        anyhow::ensure!(
+            !name.is_empty() && Path::new(name).components().count() == 1,
+            "plan content name must be one path component"
+        );
+        let path = self.content_path(root, name);
+        let parent = path.parent().expect("content path has parent");
+        std::fs::create_dir_all(parent)?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                file.write_all(bytes)?;
+                file.sync_all()?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                anyhow::ensure!(
+                    std::fs::read(&path)? == bytes,
+                    "immutable plan content collision at {}",
+                    path.display()
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(path)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -595,6 +662,42 @@ mod tests {
     use crate::project::suite::ArtifactKind;
 
     use super::*;
+
+    #[test]
+    fn plan_revisions_are_content_identified_and_never_overwritten() -> anyhow::Result<()> {
+        let plan = LaunchPlan {
+            mode: LaunchMode::Run,
+            site: Vec::new(),
+            robots: Vec::new(),
+        };
+        let first = PlanRevision::compile(1, plan.clone())?;
+        let second = PlanRevision::compile(2, plan)?;
+        assert_eq!(first.digest, second.digest);
+        let changed_plan = PlanRevision::compile(
+            3,
+            LaunchPlan {
+                mode: LaunchMode::Deploy,
+                site: Vec::new(),
+                robots: Vec::new(),
+            },
+        )?;
+        assert_ne!(first.digest, changed_plan.digest);
+        assert_eq!(
+            first.content_path(Path::new("/tmp/project"), "participant"),
+            changed_plan.content_path(Path::new("/tmp/project"), "participant")
+        );
+        let temp = tempfile::tempdir()?;
+        let path = first.publish_content(temp.path(), "participant", b"revision-one")?;
+        assert_eq!(std::fs::read(&path)?, b"revision-one");
+        first.publish_content(temp.path(), "participant", b"revision-one")?;
+        assert!(
+            first
+                .publish_content(temp.path(), "participant", b"mutated")
+                .is_err()
+        );
+        assert_eq!(std::fs::read(path)?, b"revision-one");
+        Ok(())
+    }
 
     #[test]
     fn launch_plan_covers_site_singletons_and_user_service_config() -> anyhow::Result<()> {

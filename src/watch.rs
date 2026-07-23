@@ -15,7 +15,7 @@ use crate::check::{
 };
 use crate::component_driver::component_driver_crate_dir;
 use crate::resolver::resolve;
-use crate::run::{DriverPolicy, RunOptions, source_spec_from_launch_record};
+use crate::run::{DriverPolicy, RunOptions, spec_from_launch_record};
 use crate::simulation::{
     SimulateMode, SimulateOptions, build_checked_sim_launch_plan, resolve_project,
 };
@@ -104,12 +104,16 @@ pub(crate) struct SimWatchConfig {
 }
 
 pub(crate) fn spawn_run_watch(config: RunWatchConfig) -> JoinHandle<()> {
-    let targets = watch_targets_from_sources(
+    let mut targets = watch_targets_from_sources(
         WatchMode::Run,
         &config.ctx.resolved,
         &config.ctx.source_participants,
         &config.live_ids,
     );
+    targets.push(plan_input_target(
+        &config.ctx.project_root,
+        &config.live_ids,
+    ));
     spawn_watch_loop(
         WatchMode::Run,
         config.ctx.project_root,
@@ -121,12 +125,16 @@ pub(crate) fn spawn_run_watch(config: RunWatchConfig) -> JoinHandle<()> {
 }
 
 pub(crate) fn spawn_sim_watch(config: SimWatchConfig) -> JoinHandle<()> {
-    let targets = watch_targets_from_sources(
+    let mut targets = watch_targets_from_sources(
         WatchMode::Sim,
         &config.ctx.resolved,
         &config.ctx.source_participants,
         &config.live_ids,
     );
+    targets.push(plan_input_target(
+        &config.ctx.project_root,
+        &config.live_ids,
+    ));
     spawn_watch_loop(
         WatchMode::Sim,
         config.ctx.project_root,
@@ -167,7 +175,7 @@ fn spawn_watch_loop(
         loop {
             ticker.tick().await;
             for target in targets_by_key.values() {
-                match hash_tree(&target.crate_dir) {
+                match hash_watch_target(target) {
                     Ok(hash) if hashes.get(&target.key) != Some(&hash) => {
                         hashes.insert(target.key.clone(), hash);
                         debounce.note_change(target.key.clone(), Instant::now());
@@ -204,7 +212,7 @@ fn spawn_watch_loop(
 fn initial_hashes(targets: &[WatchTarget], board: &BoardBackend) -> BTreeMap<String, String> {
     let mut hashes = BTreeMap::new();
     for target in targets {
-        match hash_tree(&target.crate_dir) {
+        match hash_watch_target(target) {
             Ok(hash) => {
                 hashes.insert(target.key.clone(), hash);
             }
@@ -220,6 +228,63 @@ fn initial_hashes(targets: &[WatchTarget], board: &BoardBackend) -> BTreeMap<Str
     hashes
 }
 
+fn plan_input_target(project_root: &Path, live_ids: &BTreeSet<String>) -> WatchTarget {
+    let ids = live_ids.iter().cloned().collect::<Vec<_>>();
+    WatchTarget {
+        key: "plan-inputs".to_string(),
+        kind: ParticipantKind::Service,
+        label: "launch plan".to_string(),
+        crate_dir: project_root.to_path_buf(),
+        participant_ids: ids.clone(),
+        board_ids: ids,
+    }
+}
+
+fn hash_watch_target(target: &WatchTarget) -> Result<String> {
+    if target.key != "plan-inputs" {
+        return hash_tree(&target.crate_dir);
+    }
+    use sha2::{Digest, Sha256};
+    let mut files = Vec::new();
+    collect_plan_input_files(&target.crate_dir, &target.crate_dir, &mut files)?;
+    files.sort();
+    let mut digest = Sha256::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(&target.crate_dir)
+            .expect("collected plan input is below project root");
+        digest.update(relative.as_os_str().as_encoded_bytes());
+        digest.update(std::fs::read(&path)?);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+fn collect_plan_input_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if matches!(
+                entry.file_name().to_str(),
+                Some(".git" | ".phoxal" | ".claude" | "target")
+            ) {
+                continue;
+            }
+            collect_plan_input_files(root, &path, files)?;
+        } else if file_type.is_file()
+            && matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("yaml" | "yml" | "toml" | "lock" | "json" | "urdf" | "wbt")
+            )
+        {
+            debug_assert!(path.starts_with(root));
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
 async fn handle_target_change(
     mode: WatchMode,
     project_root: PathBuf,
@@ -229,6 +294,7 @@ async fn handle_target_change(
     target: WatchTarget,
 ) {
     let started = Instant::now();
+    let material_root = project_root.clone();
     set_note_all(&board, &target, format!("rebuilding {}...", target.label));
     let result = match (mode, options) {
         (_, _)
@@ -258,10 +324,11 @@ async fn handle_target_change(
         _ => Err(anyhow!("watch mode/options mismatch")),
     };
 
-    apply_watch_result(&board, &action_tx, &target, started, result).await;
+    apply_watch_result(&material_root, &board, &action_tx, &target, started, result).await;
 }
 
 async fn apply_watch_result(
+    project_root: &Path,
     board: &BoardBackend,
     action_tx: &mpsc::Sender<SupervisorAction>,
     target: &WatchTarget,
@@ -269,7 +336,7 @@ async fn apply_watch_result(
     result: Result<WatchOutcome>,
 ) {
     match result {
-        Ok(WatchOutcome::Swaps(specs)) => {
+        Ok(WatchOutcome::Revision { plan, mut specs }) => {
             if specs.is_empty() {
                 set_note_all(
                     board,
@@ -287,20 +354,51 @@ async fn apply_watch_result(
                 target.label,
                 elapsed_label(started)
             );
-            for spec in specs {
-                let key = spec.key.clone();
-                if action_tx
-                    .send(SupervisorAction::Swap {
-                        key,
-                        spec: Box::new(spec),
-                        note: note.clone(),
-                    })
-                    .await
-                    .is_err()
-                {
-                    set_note_all(board, target, "watch stopped: supervisor channel closed");
+            let revision = match phoxal_cli_core::project::launch_plan::PlanRevision::compile(
+                board.supervisor_snapshot().plan_revision.saturating_add(1),
+                plan,
+            ) {
+                Ok(revision) => revision,
+                Err(error) => {
+                    set_note_all(
+                        board,
+                        target,
+                        format!("watch plan compilation failed: {error:#}"),
+                    );
                     return;
                 }
+            };
+            let new_ids = specs
+                .iter()
+                .map(|spec| spec.id.as_str())
+                .collect::<BTreeSet<_>>();
+            let remove_ids = target
+                .participant_ids
+                .iter()
+                .filter(|id| !new_ids.contains(id.as_str()))
+                .cloned()
+                .collect();
+            if let Err(error) =
+                crate::supervisor::materialize_plan_binaries(project_root, &revision, &mut specs)
+            {
+                set_note_all(
+                    board,
+                    target,
+                    format!("watch plan materialization failed: {error:#}"),
+                );
+                return;
+            }
+            if action_tx
+                .send(SupervisorAction::ReconcilePlan {
+                    revision,
+                    specs,
+                    remove_ids,
+                    note,
+                })
+                .await
+                .is_err()
+            {
+                set_note_all(board, target, "watch stopped: supervisor channel closed");
             }
         }
         Ok(WatchOutcome::MetadataOnly) => {
@@ -347,7 +445,10 @@ fn set_note_all(board: &BoardBackend, target: &WatchTarget, note: impl AsRef<str
 }
 
 enum WatchOutcome {
-    Swaps(Vec<ParticipantSpec>),
+    Revision {
+        plan: LaunchPlan,
+        specs: Vec<ParticipantSpec>,
+    },
     MetadataOnly,
     RestartNeeded,
 }
@@ -423,7 +524,7 @@ fn recheck_run_target(
         build_emit_apis_from_source,
     )?;
     crate::check::ensure_check_outcome_ok(&resolved.train, &outcome)?;
-    let plan = build_launch_plan(
+    let mut plan = build_launch_plan(
         LaunchMode::Run,
         &[CheckedRobotLaunchInput {
             project_root,
@@ -445,7 +546,10 @@ fn recheck_run_target(
         crate::check::robot_contract_surfaces(&resolved.robot.robot.id, &outcome.contract_surfaces);
     let coherence = crate::check::coherence_for_launch_plan(&coherence_plan, &[coherence_graph])?;
     crate::check::enforce_coherence(crate::check::CoherenceVerb::Run, &coherence)?;
-    Ok(WatchOutcome::Swaps(specs_for_target(&plan, target)?))
+    let mut specs = specs_for_target(&plan, &resolved, target)?;
+    let endpoint = crate::run::project_router_endpoint(project_root);
+    crate::run::apply_session_connect(&mut plan, &mut specs, &endpoint);
+    Ok(WatchOutcome::Revision { plan, specs })
 }
 
 fn recheck_sim_target(
@@ -457,7 +561,7 @@ fn recheck_sim_target(
     // A watch recheck only needs the plan itself (to diff specs), not the
     // contract surfaces `build_checked_sim_launch_plan` now also returns for
     // `RuntimeStore` (finding A5) - this path never builds a fresh session.
-    let (plan, _contract_surfaces) = build_checked_sim_launch_plan(
+    let (mut plan, _contract_surfaces) = build_checked_sim_launch_plan(
         &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,
@@ -467,10 +571,17 @@ fn recheck_sim_target(
     if target.kind == WatchTargetKind::Driver {
         return Ok(WatchOutcome::MetadataOnly);
     }
-    Ok(WatchOutcome::Swaps(specs_for_target(&plan, target)?))
+    let mut specs = specs_for_target(&plan, &resolved.resolved, target)?;
+    let endpoint = crate::run::project_router_endpoint(project_root);
+    crate::run::apply_session_connect(&mut plan, &mut specs, &endpoint);
+    Ok(WatchOutcome::Revision { plan, specs })
 }
 
-fn specs_for_target(plan: &LaunchPlan, target: &WatchTarget) -> Result<Vec<ParticipantSpec>> {
+fn specs_for_target(
+    plan: &LaunchPlan,
+    resolved: &ResolvedRobot,
+    target: &WatchTarget,
+) -> Result<Vec<ParticipantSpec>> {
     let wanted = target
         .participant_ids
         .iter()
@@ -485,9 +596,12 @@ fn specs_for_target(plan: &LaunchPlan, target: &WatchTarget) -> Result<Vec<Parti
         .robots
         .iter()
         .flat_map(|robot| robot.participants.iter())
-        .filter(|participant| wanted.contains(participant.launch.participant_id.as_str()))
+        .filter(|participant| {
+            target.key == "plan-inputs"
+                || wanted.contains(participant.launch.participant_id.as_str())
+        })
     {
-        if let Some(spec) = source_spec_from_launch_record(participant, &ui)? {
+        if let Some(spec) = spec_from_launch_record(participant, resolved, &ui)? {
             specs.push(spec);
         }
     }
@@ -568,6 +682,37 @@ mod tests {
     use crate::supervisor::{ParticipantState, ParticipantStatus};
 
     #[test]
+    fn plan_input_hash_detects_manifest_only_changes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let manifest = temp.path().join("robot.yaml");
+        std::fs::write(&manifest, "schema: robot/v0\n")?;
+        let target = plan_input_target(temp.path(), &BTreeSet::new());
+        let before = hash_watch_target(&target)?;
+        std::fs::write(&manifest, "schema: robot/v0\nrobot: {}\n")?;
+        assert_ne!(before, hash_watch_target(&target)?);
+        Ok(())
+    }
+
+    #[test]
+    fn plan_input_hash_detects_nested_manifests_and_urdf() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let component = temp.path().join("components/drive");
+        std::fs::create_dir_all(&component)?;
+        let manifest = component.join("component.yaml");
+        let urdf = component.join("structure.urdf");
+        std::fs::write(&manifest, "schema: component/v0\n")?;
+        std::fs::write(&urdf, "<robot/>")?;
+        let target = plan_input_target(temp.path(), &BTreeSet::new());
+        let before = hash_watch_target(&target)?;
+        std::fs::write(&urdf, "<robot name=\"changed\"/>")?;
+        assert_ne!(before, hash_watch_target(&target)?);
+        let after_urdf = hash_watch_target(&target)?;
+        std::fs::write(&manifest, "schema: component/v0\ncomponent: {}\n")?;
+        assert_ne!(after_urdf, hash_watch_target(&target)?);
+        Ok(())
+    }
+
+    #[test]
     fn debounce_collapses_save_bursts() {
         let start = Instant::now();
         let mut debounce = DebounceQueue::new(Duration::from_millis(100));
@@ -644,6 +789,7 @@ mod tests {
         };
 
         apply_watch_result(
+            Path::new("/tmp"),
             &board,
             &tx,
             &target,
@@ -698,20 +844,35 @@ mod tests {
         };
 
         apply_watch_result(
+            Path::new("/tmp"),
             &board,
             &tx,
             &target,
             Instant::now(),
-            Ok(WatchOutcome::Swaps(vec![spec])),
+            Ok(WatchOutcome::Revision {
+                plan: LaunchPlan {
+                    mode: LaunchMode::Run,
+                    site: Vec::new(),
+                    robots: Vec::new(),
+                },
+                specs: vec![spec],
+            }),
         )
         .await;
 
         let action = rx.try_recv().expect("swap action");
-        let SupervisorAction::Swap { key, note, .. } = action else {
+        let SupervisorAction::ReconcilePlan {
+            revision,
+            specs,
+            note,
+            ..
+        } = action
+        else {
             panic!("expected swap action");
         };
+        assert_eq!(revision.number, 1);
         assert_eq!(
-            key,
+            specs[0].key,
             phoxal_cli_core::session::ProcessKey::project("mission")
         );
         assert!(note.contains("restarted"), "{note}");

@@ -2,10 +2,12 @@
 
 use super::{ROUTER_READY_TIMEOUT, locate_tool_binary};
 use crate::supervisor::BoardBackend;
+use crate::supervisor::ManagedChild;
 use crate::supervisor::ParticipantSpec;
 use crate::supervisor::SupervisionStage;
 use crate::supervisor::SupervisorOptions;
 use crate::supervisor::SupervisorOutcome;
+use crate::supervisor::create_cloexec_pipe;
 use crate::supervisor::supervise_until_shutdown;
 use anyhow::Context;
 use anyhow::Result;
@@ -17,18 +19,15 @@ use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::tooling::resolve_project_path;
 use phoxal_cli_core::session::human;
 use std::collections::{BTreeSet, VecDeque};
+use std::os::fd::AsRawFd;
+#[cfg(test)]
+use std::os::fd::FromRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
-use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
-
-#[derive(Debug, serde::Deserialize)]
-pub(crate) struct RouterReadyEvent {
-    event: String,
-    listen: Vec<String>,
-}
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
 #[derive(Debug, Clone)]
 struct RouterLaunch {
@@ -37,13 +36,13 @@ struct RouterLaunch {
 }
 
 struct RouterProcess {
-    child: tokio::process::Child,
+    child: ManagedChild,
     stdout_task: tokio::task::JoinHandle<()>,
     stderr_task: tokio::task::JoinHandle<()>,
 }
 
 struct RouterLaunchAttempt {
-    child: Option<tokio::process::Child>,
+    child: Option<ManagedChild>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -73,7 +72,7 @@ pub(crate) struct InfrastructureRouter {
 }
 
 impl RouterLaunchAttempt {
-    fn new(child: tokio::process::Child, stderr_task: tokio::task::JoinHandle<()>) -> Self {
+    fn new(child: ManagedChild, stderr_task: tokio::task::JoinHandle<()>) -> Self {
         Self {
             child: Some(child),
             stderr_task: Some(stderr_task),
@@ -187,11 +186,7 @@ impl InfrastructureRouter {
                     () = session_token.cancelled() => return Ok(teardown_outcome),
                     () = tokio::time::sleep(self.recovery_policy.restart_delay) => {}
                 }
-                let restart = launch_router_process(
-                    &self.launch,
-                    &self.listeners,
-                    Some(&self.participant_endpoint),
-                );
+                let restart = launch_router_process(&self.launch, &self.participant_endpoint);
                 let restarted = tokio::select! {
                     () = session_token.cancelled() => return Ok(teardown_outcome),
                     result = restart => result,
@@ -290,11 +285,9 @@ pub(crate) async fn start_infrastructure_router(
         );
     }
     let launch = RouterLaunch { binary, config };
-    let (process, listeners) = launch_router_process(&launch, &[], None).await?;
-    let endpoint = listeners
-        .first()
-        .cloned()
-        .context("infrastructure router reported no listener endpoint")?;
+    std::fs::create_dir_all(project_root.join(".phoxal"))?;
+    let endpoint = project_router_endpoint(project_root);
+    let (process, listeners) = launch_router_process(&launch, &endpoint).await?;
     Ok((
         InfrastructureRouter {
             process,
@@ -307,26 +300,36 @@ pub(crate) async fn start_infrastructure_router(
     ))
 }
 
+pub(crate) fn project_router_endpoint(project_root: &Path) -> String {
+    format!(
+        "unixsock-stream/{}",
+        project_root.join(".phoxal/zenoh.sock").display()
+    )
+}
+
 async fn launch_router_process(
     launch: &RouterLaunch,
-    exact_listeners: &[String],
-    required_endpoint: Option<&str>,
+    required_endpoint: &str,
 ) -> Result<(RouterProcess, Vec<String>)> {
+    let (read_fd, ready_fd) = create_cloexec_pipe().context("create router readiness pipe")?;
     let mut command = tokio::process::Command::new(&launch.binary);
+    prepare_inherited_bootstrap_fd(&mut command, ready_fd.as_raw_fd())?;
     if let Some(config) = &launch.config {
         command.arg("--config").arg(config);
     }
-    for listener in exact_listeners {
-        command.arg("--listen").arg(listener);
-    }
+    command.arg("--local-endpoint").arg(required_endpoint);
+    command
+        .arg("--ready-fd")
+        .arg(ready_fd.as_raw_fd().to_string());
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command
-        .spawn()
+    let mut child = ManagedChild::spawn(&mut command, true, &[])
         .context("failed to launch phoxal-infrastructure-router")?;
+    // SAFETY: the child inherited this valid descriptor; parent no longer owns it.
+    drop(ready_fd);
     let stdout = child
         .stdout
         .take()
@@ -355,20 +358,28 @@ async fn launch_router_process(
         }
     });
     let attempt = RouterLaunchAttempt::new(child, stderr_task);
-    let mut lines = BufReader::new(stdout).lines();
+    let readiness_file = std::fs::File::from(read_fd);
+    let mut readiness_reader = tokio::fs::File::from_std(readiness_file);
     let readiness: Result<Vec<String>> = async {
         let readiness = tokio::time::timeout(ROUTER_READY_TIMEOUT, async {
-            loop {
-                let line = lines
-                    .next_line()
-                    .await?
-                    .context("infrastructure router exited before reporting readiness")?;
-                let event: RouterReadyEvent = serde_json::from_str(&line)
-                    .with_context(|| format!("invalid infrastructure router event: {line}"))?;
-                if event.event == "ready" {
-                    break parse_router_ready_listeners(&line);
+            let mut bytes = Vec::new();
+            readiness_reader.read_to_end(&mut bytes).await?;
+            let event: phoxal::infrastructure::router::RouterReadyV0 =
+                serde_json::from_slice(&bytes).context("invalid router readiness FD payload")?;
+            match event {
+                phoxal::infrastructure::router::RouterReadyV0::Ready {
+                    local_endpoint,
+                    listeners,
+                } => {
+                    anyhow::ensure!(
+                        local_endpoint == required_endpoint,
+                        "router returned endpoint {local_endpoint}, expected {required_endpoint}"
+                    );
+                    Ok(listeners)
                 }
-                tracing::info!(target: "infrastructure_router", "{line}");
+                phoxal::infrastructure::router::RouterReadyV0::Failed { message } => {
+                    bail!("{message}")
+                }
             }
         })
         .await
@@ -392,15 +403,12 @@ async fn launch_router_process(
                 return Err(error.context(format!("infrastructure router stderr:\n{tail}")));
             }
         };
-        if let Some(required_endpoint) = required_endpoint {
-            // The first listener is the endpoint already distributed to every
-            // participant. Configured listeners may be reordered or expanded
-            // by the router, but that pinned endpoint must survive recovery.
-            anyhow::ensure!(
-                listeners.iter().any(|listener| listener == required_endpoint),
-                "replacement infrastructure router did not report the pinned participant endpoint {required_endpoint}; reported {listeners:?}",
-            );
-        }
+        anyhow::ensure!(
+            listeners
+                .first()
+                .is_some_and(|listener| listener == required_endpoint),
+            "router did not report mandatory local endpoint first: {listeners:?}"
+        );
         Ok(listeners)
     }
     .await;
@@ -411,6 +419,7 @@ async fn launch_router_process(
             return Err(error);
         }
     };
+    let mut lines = BufReader::new(stdout).lines();
     let stdout_task = tokio::spawn(async move {
         while let Ok(Some(line)) = lines.next_line().await {
             tracing::info!(target: "infrastructure_router", "{line}");
@@ -419,27 +428,43 @@ async fn launch_router_process(
     Ok((attempt.finish(stdout_task), listeners))
 }
 
-#[cfg(test)]
-pub(crate) fn parse_router_ready(line: &str) -> Result<String> {
-    parse_router_ready_listeners(line)?
-        .into_iter()
-        .next()
-        .context("infrastructure router reported no listener endpoint")
+fn prepare_inherited_bootstrap_fd(
+    command: &mut tokio::process::Command,
+    fd: libc::c_int,
+) -> Result<()> {
+    // Keep the parent-side descriptor CLOEXEC while ManagedChild lazily starts
+    // the guardian. Otherwise that unrelated exec inherits the write end and
+    // the supervisor can never observe EOF on this one-shot readiness pipe.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("mark router readiness write end close-on-exec");
+    }
+    // The intended router child clears CLOEXEC only after fork and immediately
+    // before exec. Multiple pre_exec hooks are supported; ManagedChild adds its
+    // guardian registration hook after this one.
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags == -1 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    Ok(())
 }
 
-fn parse_router_ready_listeners(line: &str) -> Result<Vec<String>> {
-    let ready: RouterReadyEvent = serde_json::from_str(line)
-        .with_context(|| format!("invalid infrastructure router readiness event: {line}"))?;
-    anyhow::ensure!(
-        ready.event == "ready",
-        "unexpected router event {}",
-        ready.event
-    );
-    anyhow::ensure!(
-        !ready.listen.is_empty(),
-        "infrastructure router reported no listener endpoint"
-    );
-    Ok(ready.listen)
+#[cfg(test)]
+pub(crate) fn parse_router_ready(line: &str) -> Result<String> {
+    let event: phoxal::infrastructure::router::RouterReadyV0 = serde_json::from_str(line)?;
+    match event {
+        phoxal::infrastructure::router::RouterReadyV0::Ready { local_endpoint, .. } => {
+            Ok(local_endpoint)
+        }
+        phoxal::infrastructure::router::RouterReadyV0::Failed { message } => bail!("{message}"),
+    }
 }
 
 pub(crate) fn apply_session_connect(
@@ -468,7 +493,7 @@ mod recovery_tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    const TEST_LISTENER: &str = "tcp/127.0.0.1:47999";
+    const TEST_LISTENER: &str = "unixsock-stream//tmp/phoxal-router-test.sock";
     const TEST_EXTRA_LISTENER: &str = "tcp/127.0.0.1:48000";
 
     fn shell_quote(path: &Path) -> String {
@@ -494,24 +519,32 @@ mod recovery_tests {
         let ready = if add_listener_after_restart {
             format!(
                 "if [ \"$count\" -gt 1 ]; then\n\
-                   printf '%s\\n' '{{\"event\":\"ready\",\"listen\":[\"{TEST_EXTRA_LISTENER}\",\"{TEST_LISTENER}\"]}}'\n\
+                   ready='{{\"status\":\"ready\",\"local_endpoint\":\"{TEST_LISTENER}\",\"listeners\":[\"{TEST_LISTENER}\",\"{TEST_EXTRA_LISTENER}\"]}}'\n\
                  else\n\
-                   printf '%s\\n' '{{\"event\":\"ready\",\"listen\":[\"{TEST_LISTENER}\"]}}'\n\
+                   ready='{{\"status\":\"ready\",\"local_endpoint\":\"{TEST_LISTENER}\",\"listeners\":[\"{TEST_LISTENER}\"]}}'\n\
                  fi"
             )
         } else {
-            format!("printf '%s\\n' '{{\"event\":\"ready\",\"listen\":[\"{TEST_LISTENER}\"]}}'")
+            format!(
+                "ready='{{\"status\":\"ready\",\"local_endpoint\":\"{TEST_LISTENER}\",\"listeners\":[\"{TEST_LISTENER}\"]}}'"
+            )
         };
         write_executable(
             &script,
             &format!(
-                "#!/bin/sh\n\
+                "#!/usr/bin/env bash\n\
                  count=0\n\
                  if [ -f {count} ]; then count=$(sed -n '1p' {count}); fi\n\
                  count=$((count + 1))\n\
                  printf '%s\\n' \"$count\" > {count}\n\
                  printf '%s\\n' \"$*\" >> {args}\n\
+                 ready_fd=\n\
+                 while [ \"$#\" -gt 0 ]; do\n\
+                   if [ \"$1\" = '--ready-fd' ]; then ready_fd=$2; shift 2; else shift; fi\n\
+                 done\n\
                  {ready}\n\
+                 eval \"printf '%s' '$ready' >&$ready_fd\"\n\
+                 eval \"exec $ready_fd>&-\"\n\
                  if [ \"$count\" -le {failures_before_stable} ]; then\n\
                    sleep 0.5\n\
                    exit 17\n\
@@ -544,12 +577,47 @@ mod recovery_tests {
         result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
 
+    #[tokio::test]
+    async fn unrelated_exec_cannot_hold_the_readiness_pipe_open() -> Result<()> {
+        let mut fds = [0_i32; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let (read_fd, write_fd) = (fds[0], fds[1]);
+        let mut writer = tokio::process::Command::new("/usr/bin/env");
+        writer
+            .arg("bash")
+            .arg("-c")
+            .arg(format!("printf ready >&{write_fd}"));
+        prepare_inherited_bootstrap_fd(&mut writer, write_fd)?;
+
+        // This models the guardian's first lazy exec between readiness-pipe
+        // creation and router spawn. CLOEXEC must prevent it retaining the
+        // write end for its lifetime.
+        let mut unrelated_command = tokio::process::Command::new("/bin/sleep");
+        unrelated_command.arg("30").kill_on_drop(true);
+        let mut unrelated = unrelated_command.spawn()?;
+        let mut writer = writer.spawn()?;
+        unsafe { libc::close(write_fd) };
+        let readiness_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+        let mut reader = tokio::fs::File::from_std(readiness_file);
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), reader.read_to_end(&mut bytes))
+            .await
+            .context("unrelated exec retained router readiness writer")??;
+        assert_eq!(bytes, b"ready");
+        assert!(writer.wait().await?.success());
+        unrelated.kill().await?;
+        let _ = unrelated.wait().await;
+        Ok(())
+    }
+
     async fn start_fake_router(binary: PathBuf) -> Result<InfrastructureRouter> {
         let launch = RouterLaunch {
             binary,
             config: None,
         };
-        let (process, listeners) = launch_router_process(&launch, &[], None).await?;
+        let (process, listeners) = launch_router_process(&launch, TEST_LISTENER).await?;
         Ok(InfrastructureRouter {
             process,
             launch,
@@ -591,7 +659,7 @@ mod recovery_tests {
         write_executable(
             &script,
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$$\" > {}\nprintf '%s\\n' 'diagnostic' >&2\nprintf '%s\\n' 'not-json'\nsleep 30\n",
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$$\" > {}\nprintf '%s\\n' 'diagnostic' >&2\nready_fd=\nwhile [ \"$#\" -gt 0 ]; do if [ \"$1\" = '--ready-fd' ]; then ready_fd=$2; shift 2; else shift; fi; done\neval \"printf '%s' 'not-json' >&$ready_fd\"\neval \"exec $ready_fd>&-\"\nsleep 30\n",
                 shell_quote(&pid_path),
             ),
         )?;
@@ -600,12 +668,12 @@ mod recovery_tests {
             config: None,
         };
 
-        let error = match launch_router_process(&launch, &[], None).await {
+        let error = match launch_router_process(&launch, TEST_LISTENER).await {
             Ok(_) => panic!("invalid readiness must fail the launch attempt"),
             Err(error) => error,
         };
         assert!(
-            format!("{error:#}").contains("invalid infrastructure router event"),
+            format!("{error:#}").contains("invalid router readiness FD payload"),
             "{error:#}"
         );
         let pid = fs::read_to_string(pid_path)?.trim().parse::<u32>()?;
@@ -692,7 +760,8 @@ mod recovery_tests {
         let args = fs::read_to_string(temp.path().join("router-args"))?;
         assert!(
             args.lines()
-                .any(|line| line == format!("--listen {TEST_LISTENER}")),
+                .any(|line| line
+                    .starts_with(&format!("--local-endpoint {TEST_LISTENER} --ready-fd "))),
             "replacement router must receive the original listener: {args:?}"
         );
         assert_eq!(
