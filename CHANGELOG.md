@@ -4,6 +4,19 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.22.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.22.0) - 2026-07-23
+
+
+### Added
+
+- *(supervisor)* Add resident attachable sessions ([#180](https://github.com/phoxal/phoxal-cli/pull/180)) [**breaking**]
+- *(suite)* Consume versioned launch profiles ([#183](https://github.com/phoxal/phoxal-cli/pull/183)) [**breaking**]
+
+### Fixed
+
+- *(supervisor)* Preserve guardian descriptors across exec ([#182](https://github.com/phoxal/phoxal-cli/pull/182))
+
+
 ## [0.21.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.21.1) - 2026-07-23
 
 
