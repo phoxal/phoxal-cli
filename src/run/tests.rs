@@ -16,9 +16,10 @@ use phoxal::participant::launch::{
 };
 use phoxal_cli_core::project::launch_plan::{
     LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
-    SITE_TOOL_JOYPAD, STANDARD_SITE_TOOLS, SiteLaunch,
+    SITE_TOOL_JOYPAD, SiteLaunch,
 };
-use phoxal_cli_core::session::ParticipantKind;
+use phoxal_cli_core::project::suite::ArtifactKind;
+use phoxal_cli_core::session::{ParticipantKind, RuntimeFailurePolicy, StartupRequirement};
 use std::path::{Path, PathBuf};
 
 use crate::supervisor::{ParticipantSpec, default_connect_endpoint};
@@ -62,8 +63,11 @@ fn configless_site_tool_omits_config_and_gets_connect() {
     // a real bus client, MUST receive PHOXAL_CONNECT to reach the router bus.
     let tool = SiteLaunch {
         id: "tool-example".to_string(),
+        kind: ArtifactKind::Tool,
         artifact_ref: "phoxal/tool-example@0.1.0".to_string(),
         phoxal_config: serde_json::Value::Null,
+        startup_requirement: StartupRequirement::Optional,
+        runtime_failure: RuntimeFailurePolicy::KeepProjectDegraded,
     };
     let env = site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
     assert!(
@@ -75,8 +79,9 @@ fn configless_site_tool_omits_config_and_gets_connect() {
         "observable bus tool must get PHOXAL_CONNECT: {env:?}"
     );
     assert!(
-        !env.iter().any(|(k, _)| k == env::ROBOT_ROOT),
-        "the generic configless path must not add an unrelated robot root: {env:?}"
+        env.iter()
+            .any(|(key, value)| key == env::ROBOT_ROOT && value == "/tmp/robot"),
+        "project tools receive the compiled robot root generically: {env:?}"
     );
     assert!(
         !env.iter().any(|(key, _)| key == env::CLOCK),
@@ -88,8 +93,11 @@ fn configless_site_tool_omits_config_and_gets_connect() {
 fn joypad_receives_the_compiled_robot_root() {
     let tool = SiteLaunch {
         id: SITE_TOOL_JOYPAD.to_string(),
+        kind: ArtifactKind::Tool,
         artifact_ref: "phoxal/tool-joypad@0.1.0".to_string(),
         phoxal_config: serde_json::Value::Null,
+        startup_requirement: StartupRequirement::Optional,
+        runtime_failure: RuntimeFailurePolicy::KeepProjectDegraded,
     };
     let env = site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
     assert!(
@@ -100,19 +108,20 @@ fn joypad_receives_the_compiled_robot_root() {
 }
 
 #[test]
-fn every_standard_site_tool_uses_the_clockless_launch_path() {
-    for tool_id in STANDARD_SITE_TOOLS {
-        let tool = SiteLaunch {
-            id: (*tool_id).to_string(),
-            artifact_ref: format!("phoxal/{tool_id}@0.1.0"),
-            phoxal_config: serde_json::Value::Null,
-        };
-        let env = site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
-        assert!(
-            !env.iter().any(|(key, _)| key == env::CLOCK),
-            "{tool_id} must not receive a clock selection: {env:?}"
-        );
-    }
+fn profile_selected_project_tools_use_the_clockless_launch_path() {
+    let tool = SiteLaunch {
+        id: "tool-example".to_string(),
+        kind: ArtifactKind::Tool,
+        artifact_ref: "phoxal/tool-example@0.1.0".to_string(),
+        phoxal_config: serde_json::Value::Null,
+        startup_requirement: StartupRequirement::Optional,
+        runtime_failure: RuntimeFailurePolicy::KeepProjectDegraded,
+    };
+    let env = site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
+    assert!(
+        !env.iter().any(|(key, _)| key == env::CLOCK),
+        "project tools must not receive a clock selection: {env:?}"
+    );
 }
 
 fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRecord {
@@ -131,9 +140,12 @@ fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRe
             config: None,
             robot_root: Some(PathBuf::from("/tmp/robot")),
             component_instance: None,
+            execution_device_id: None,
             shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
         },
         launch_ownership: LaunchOwnership::CliManaged,
+        startup_requirement: StartupRequirement::Required,
+        runtime_failure: RuntimeFailurePolicy::StopProject,
     }
 }
 

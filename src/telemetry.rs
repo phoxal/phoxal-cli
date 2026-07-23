@@ -22,8 +22,8 @@ use phoxal::bus::{
     ContractBody, DEFAULT_QUERY_TIMEOUT, Publish, Publisher, Querier, Subscribe, Subscriber, Topic,
 };
 use phoxal::raw::{Bus, BusConfig, host_time};
-use phoxal_api::v0_1 as api;
-use phoxal_api::v0_1 as state_api;
+use phoxal_api::v0_2 as api;
+use phoxal_api::v0_2 as state_api;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -459,9 +459,9 @@ async fn control_state_feed_loop(
     result
 }
 
-/// Reconcile one robot root's retained `main` device observation with its
-/// live follow feed. Device totals stay scoped to that robot root and are
-/// never attributed to a runtime.
+/// Reconcile one robot root's retained device observation with its live
+/// follow feed. Device totals retain both their project/deployment identity
+/// and robot-root attribution and are never attributed to a runtime.
 pub fn start_device_feed(
     namespace: String,
     robot_id: String,
@@ -537,7 +537,7 @@ async fn device_feed_loop(
     'query: loop {
         reconciler.begin_query();
         let query = querier.query(state_api::tool::device::SnapshotRequest {
-            device_id: Some("main".to_string()),
+            device_id: None,
             limit: 1,
             before_sequence: None,
         });
@@ -564,7 +564,7 @@ async fn device_feed_loop(
         };
         if snapshot.records.len() > 1
             || snapshot.records.first().is_some_and(|record| {
-                record.sequence != anchor.sequence || record.sample.device_id != "main"
+                record.sequence != anchor.sequence || record.sample.device_id.is_empty()
             })
         {
             tracing::warn!("tool-telemetry device snapshot violated its bounded query contract");
@@ -644,18 +644,17 @@ fn apply_device_outcome(
             if let Some(latest) = snapshot
                 .into_iter()
                 .chain(replay)
-                .filter(|item| item.record.sample.device_id == "main")
                 .max_by_key(|item| item.record.sequence)
             {
                 telemetry.record_device(scope.clone(), device_sample_from(latest.record));
             }
             true
         }
-        ReconcileOutcome::Append(item) if item.record.sample.device_id == "main" => {
+        ReconcileOutcome::Append(item) => {
             telemetry.record_device(scope.clone(), device_sample_from(item.record));
             true
         }
-        ReconcileOutcome::Append(_) | ReconcileOutcome::Buffered => true,
+        ReconcileOutcome::Buffered => true,
         ReconcileOutcome::Requery => false,
     }
 }
@@ -1541,7 +1540,7 @@ mod tests {
         telemetry.record_device(
             scope("r1"),
             DeviceSample {
-                device_id: "main".to_string(),
+                device_id: "project-e2e".to_string(),
                 cpu_pct: Some(42.0),
                 ram_used_bytes: Some(100),
                 ram_total_bytes: Some(200),
@@ -1559,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn device_reconciliation_installs_only_the_latest_main_sample() {
+    fn device_reconciliation_installs_the_latest_identity_derived_sample() {
         fn item(sequence: u64, device_id: &str, cpu_pct: f32) -> DeviceRecordFollow {
             DeviceRecordFollow {
                 cursor: Cursor {
@@ -1593,16 +1592,16 @@ mod tests {
             &telemetry,
             &target,
             ReconcileOutcome::Installed {
-                snapshot: vec![item(1, "main", 10.0), item(2, "other", 99.0)],
-                replay: vec![item(3, "main", 30.0)],
+                snapshot: vec![item(1, "project-a", 10.0)],
+                replay: vec![item(3, "project-a", 30.0)],
             },
         ));
         assert_eq!(
             telemetry
                 .snapshot(&target)
                 .device
-                .and_then(|device| device.value.cpu_pct),
-            Some(30.0)
+                .map(|device| (device.value.device_id, device.value.cpu_pct)),
+            Some(("project-a".to_string(), Some(30.0)))
         );
     }
 
@@ -1699,7 +1698,7 @@ mod tests {
         let device = device_sample_from(state_api::tool::device::Record {
             sequence: 1,
             sample: state_api::tool::device::Sample {
-                device_id: "main".to_string(),
+                device_id: "project-e2e".to_string(),
                 cpu_pct: None,
                 ram_used_bytes: None,
                 ram_total_bytes: None,

@@ -17,6 +17,7 @@ use phoxal_cli_core::project::launch_plan::SITE_INFRASTRUCTURE_ROUTER;
 use phoxal_cli_core::project::launch_plan::SITE_TOOL_JOYPAD;
 use phoxal_cli_core::project::launch_plan::SiteLaunch;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
+use phoxal_cli_core::project::suite::ArtifactKind;
 use phoxal_cli_core::session::launch_env::EncodedParticipantEnv;
 use phoxal_cli_core::session::launch_env::{encode_participant_env, encode_tool_env};
 use std::collections::BTreeMap;
@@ -32,7 +33,7 @@ pub(crate) fn render_env_files(
         .first()
         .context("deploy launch plan has no robot")?;
     for site in &plan.site {
-        if site.id == SITE_INFRASTRUCTURE_ROUTER {
+        if site.kind == ArtifactKind::Infrastructure {
             continue;
         }
         // Every OTHER standard site tool (`tool-joypad`) -
@@ -129,16 +130,10 @@ pub(crate) fn render_units(
     )?;
     unit_names.push("phoxal-router.service".to_string());
 
-    // Every OTHER standard site tool (`tool-joypad` -
-    // CLI-UX Phase 4) gets its own unit too, ordered AFTER the router
-    // (`site_tool_unit`'s `After=`/`Wants=`) and matching the staged
-    // readiness the CLI supervisor itself uses (router before the other
-    // tools - `crate::run::stages_for_run`). `plan.site` already omits
-    // a standard tool entirely when the suite snapshot in use predates it
-    // (`launch_plan::build_site_launches`), so this loop never renders a unit
-    // for a tool that was never resolved.
+    // Every profile-selected per-project tool gets its own unit after the
+    // infrastructure router. Profile membership is the sole autostart policy.
     for site in &plan.site {
-        if site.id == SITE_INFRASTRUCTURE_ROUTER {
+        if site.kind == ArtifactKind::Infrastructure {
             continue;
         }
         let unit_name = site_tool_unit_name(&site.id);
@@ -201,20 +196,14 @@ pub(crate) fn router_unit(binary: &str) -> String {
     )
 }
 
-/// The unit for a standard site tool OTHER than the router (`tool-joypad`) -
-/// shaped exactly like `participant_unit` (same
+/// The unit for a profile-selected per-project tool, shaped exactly like
+/// `participant_unit` (same
 /// `Type=notify` readiness contract, same restart/watchdog/hardening
 /// defaults: no `MemoryMax`/`CPUQuota` here either, consistent with every
 /// other unit this deploy renders) but ordered after the router by unit
 /// name rather than a `ParticipantLaunchRecord`, since a site tool has no
 /// graph-checked participant record of its own.
 ///
-/// No-controller idle policy (design doc): a site tool with nothing to do
-/// yet (`tool-joypad` with no gamepad plugged in) is expected to start and
-/// idle cleanly rather than exit - the framework tool itself already stays
-/// up in that case (see `tool/joypad`'s own graceful-absence handling), so
-/// `Restart=on-failure` never actually flaps for it; this unit adds no
-/// additional restart-suppression logic because none is needed.
 pub(crate) fn site_tool_unit(id: &str, binary: &str, privileges: &UnitPrivileges) -> String {
     let mut unit = format!(
         "[Unit]\nDescription=Phoxal tool {id}\nAfter=network-online.target phoxal-router.service\nWants=network-online.target\nPartOf=phoxal.target\nStartLimitIntervalSec={}\nStartLimitBurst={START_LIMIT_BURST}\n\n[Service]\nType=notify\nEnvironmentFile={OPT_ENV}/{id}.env\nExecStart={OPT_BIN}/{binary}\n\nRestart=on-failure\nRestartSec=2s\nTimeoutStopSec=5s\nWatchdogSec={WATCHDOG_SEC}s\n\nUser=phoxal\nGroup=phoxal\nNoNewPrivileges=true\n",

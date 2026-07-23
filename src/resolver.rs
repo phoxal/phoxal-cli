@@ -134,6 +134,7 @@ pub fn resolve(
         user_runtimes,
         components,
         tools,
+        suite_profiles: suite.profiles.clone(),
         path_overrides,
     })
 }

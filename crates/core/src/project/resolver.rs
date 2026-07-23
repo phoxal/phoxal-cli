@@ -1,6 +1,6 @@
 //! Robot-manifest loading and terminal-independent resolution records.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use phoxal::model::robot::RobotV0 as Robot;
 use serde_json::Value;
 
-use super::suite::ArtifactKind;
+use super::suite::{ArtifactKind, SuiteProfiles};
 use super::tooling::resolve_project_path;
 
 const PHOXAL_PROVIDER: &str = "phoxal";
@@ -80,7 +80,57 @@ pub struct ResolvedRobot {
     pub user_runtimes: Vec<ResolvedUserRuntime>,
     pub components: Vec<ResolvedComponent>,
     pub tools: Vec<ResolvedTool>,
+    /// Framework-owned launch policy for this exact immutable train.
+    pub suite_profiles: SuiteProfiles,
     pub path_overrides: Vec<ResolvedPathOverride>,
+}
+
+/// Selects the framework-owned suite profile used by an execution leg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolProfile {
+    Native,
+    Webots,
+}
+
+/// The tool artifact names activated by one exact suite profile.
+///
+/// Metadata/check callers use this boundary for source, official, and tool
+/// records alike so inventory presence cannot accidentally activate a tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveProfileTools {
+    names: BTreeSet<String>,
+}
+
+impl ActiveProfileTools {
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+
+    #[must_use]
+    pub fn includes_named(&self, is_tool: bool, name: &str) -> bool {
+        !is_tool || self.contains(name)
+    }
+}
+
+impl ResolvedRobot {
+    #[must_use]
+    pub fn active_profile_tools(&self, profile: ToolProfile) -> ActiveProfileTools {
+        let activations = match profile {
+            ToolProfile::Native => &self.suite_profiles.native,
+            ToolProfile::Webots => &self.suite_profiles.webots,
+        };
+        let names = activations
+            .iter()
+            .filter_map(|activation| {
+                self.tools
+                    .iter()
+                    .find(|tool| tool.package == activation.package)
+                    .map(|tool| tool.name.clone())
+            })
+            .collect();
+        ActiveProfileTools { names }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -246,7 +296,7 @@ pub enum ResolvedComponentSource {
 /// A resolved native artifact (`tool-bus`, `tool-log`, `tool-joypad`, or
 /// `infrastructure-router`). `name` is the short,
 /// launch-safe kind-qualified id used for participant/site ids, systemd unit
-/// names, and env var keys (`ROBOT_TOOL_BUS` etc.); `package` is the
+/// names and env var keys; `package` is the
 /// canonical provider-qualified identity (`phoxal/tool-bus`) used for
 /// suite lookups and native-artifact provisioning.
 #[derive(Debug, Clone, PartialEq)]
@@ -644,6 +694,18 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn active_profile_tools_filter_only_tool_records() {
+        let active = ActiveProfileTools {
+            names: ["bus".to_string()].into_iter().collect(),
+        };
+        assert!(active.contains("bus"));
+        assert!(!active.contains("log"));
+        assert!(active.includes_named(true, "bus"));
+        assert!(!active.includes_named(true, "log"));
+        assert!(active.includes_named(false, "any-service"));
+    }
 
     #[test]
     fn tool_emit_apis_id_strips_provider_and_site_tool_prefixes() {

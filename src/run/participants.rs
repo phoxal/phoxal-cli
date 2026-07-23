@@ -17,14 +17,14 @@ use phoxal_cli_core::project::launch_plan::LaunchOwnership;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
-use phoxal_cli_core::project::launch_plan::SITE_TOOL_JOYPAD;
 use phoxal_cli_core::project::launch_plan::SiteLaunch;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
+use phoxal_cli_core::project::suite::ArtifactKind;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::launch_env::{encode_participant_env, encode_tool_env};
 use phoxal_cli_core::session::stores::telemetry::RobotScope;
-use phoxal_cli_core::session::{ProcessKey, RobotKey, RuntimeFailurePolicy, StartupRequirement};
+use phoxal_cli_core::session::{ProcessKey, RobotKey, StartupRequirement};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -56,6 +56,9 @@ pub(crate) fn prepare_site_tools(
         .unwrap_or("site");
 
     for site in &plan.site {
+        if site.kind == ArtifactKind::Infrastructure {
+            continue;
+        }
         let robot = RobotKey::new(namespace, robot_id);
         let key = ProcessKey::project(&site.id);
         let status =
@@ -65,7 +68,7 @@ pub(crate) fn prepare_site_tools(
                     namespace: namespace.to_string(),
                     robot_id: robot_id.to_string(),
                 });
-        board.upsert_process(key.clone(), status, StartupRequirement::Optional);
+        board.upsert_process(key.clone(), status, site.startup_requirement);
         match locate_tool_binary(resolved, &site.id, ui)? {
             Some(path) => specs.push(ParticipantSpec {
                 key: key.clone(),
@@ -80,8 +83,8 @@ pub(crate) fn prepare_site_tools(
                 note: None,
                 bus_participant: true,
                 readiness: ParticipantSpec::exact_liveliness_template(robot, &site.id),
-                startup_requirement: StartupRequirement::Optional,
-                runtime_failure: RuntimeFailurePolicy::KeepProjectDegraded,
+                startup_requirement: site.startup_requirement,
+                runtime_failure: site.runtime_failure,
                 restart_policy: Default::default(),
             }),
             None => board.set_state(
@@ -146,6 +149,7 @@ pub(crate) fn prepare_robot_participants(
                     key,
                     status,
                     participant.launch.incarnation,
+                    participant.startup_requirement,
                 );
                 continue;
             }
@@ -154,7 +158,7 @@ pub(crate) fn prepare_robot_participants(
                 ParticipantStatus::new(&id, kind, ParticipantState::Starting)
                     .with_local(local)
                     .with_scope(scope.clone()),
-                StartupRequirement::Required,
+                participant.startup_requirement,
             );
             match &participant.execution {
                 ParticipantExecution::OfficialTool { .. } => {
@@ -177,8 +181,8 @@ pub(crate) fn prepare_robot_participants(
                                 robot_key.clone(),
                                 &participant.launch.participant_id,
                             ),
-                            startup_requirement: StartupRequirement::Required,
-                            runtime_failure: RuntimeFailurePolicy::StopProject,
+                            startup_requirement: participant.startup_requirement,
+                            runtime_failure: participant.runtime_failure,
                             restart_policy: Default::default(),
                         }),
                         None => board.set_state(
@@ -211,8 +215,8 @@ pub(crate) fn prepare_robot_participants(
                                 robot_key.clone(),
                                 &participant.launch.participant_id,
                             ),
-                            startup_requirement: StartupRequirement::Required,
-                            runtime_failure: RuntimeFailurePolicy::StopProject,
+                            startup_requirement: participant.startup_requirement,
+                            runtime_failure: participant.runtime_failure,
                             restart_policy: Default::default(),
                         }),
                         None => board.set_state(
@@ -243,8 +247,8 @@ pub(crate) fn prepare_robot_participants(
                             robot_key.clone(),
                             &participant.launch.participant_id,
                         ),
-                        startup_requirement: StartupRequirement::Required,
-                        runtime_failure: RuntimeFailurePolicy::StopProject,
+                        startup_requirement: participant.startup_requirement,
+                        runtime_failure: participant.runtime_failure,
                         restart_policy: Default::default(),
                     });
                 }
@@ -274,8 +278,8 @@ pub(crate) fn prepare_robot_participants(
                             robot_key.clone(),
                             &participant.launch.participant_id,
                         ),
-                        startup_requirement: StartupRequirement::Required,
-                        runtime_failure: RuntimeFailurePolicy::StopProject,
+                        startup_requirement: participant.startup_requirement,
+                        runtime_failure: participant.runtime_failure,
                         restart_policy: Default::default(),
                     });
                 }
@@ -316,8 +320,8 @@ pub(crate) fn prepare_robot_participants(
                             robot_key.clone(),
                             &participant.launch.participant_id,
                         ),
-                        startup_requirement: StartupRequirement::Required,
-                        runtime_failure: RuntimeFailurePolicy::StopProject,
+                        startup_requirement: participant.startup_requirement,
+                        runtime_failure: participant.runtime_failure,
                         restart_policy: Default::default(),
                     });
                 }
@@ -332,8 +336,9 @@ fn register_simulation_managed_participant(
     key: ProcessKey,
     status: ParticipantStatus,
     incarnation: u64,
+    startup_requirement: StartupRequirement,
 ) {
-    board.upsert_process(key.clone(), status, StartupRequirement::Required);
+    board.upsert_process(key.clone(), status, startup_requirement);
     // Webots-owned controllers are intentionally outside `ManagedChild`, so
     // their launch record keeps the reserved unmanaged incarnation (zero).
     // Record that exact value on the board: observed Liveliness remains the
@@ -438,8 +443,8 @@ pub(crate) fn spec_from_launch_record(
             robot,
             &participant.launch.participant_id,
         ),
-        startup_requirement: StartupRequirement::Required,
-        runtime_failure: RuntimeFailurePolicy::StopProject,
+        startup_requirement: participant.startup_requirement,
+        runtime_failure: participant.runtime_failure,
         restart_policy: Default::default(),
     }))
 }
@@ -455,12 +460,10 @@ pub(crate) fn site_env(
         (env::NAMESPACE.to_string(), namespace.to_string()),
         (env::ROBOT_ID.to_string(), robot_id.to_string()),
     ];
-    if site.id == SITE_TOOL_JOYPAD {
-        envs.push((
-            env::ROBOT_ROOT.to_string(),
-            robot_root.display().to_string(),
-        ));
-    }
+    envs.push((
+        env::ROBOT_ROOT.to_string(),
+        robot_root.display().to_string(),
+    ));
     // A configless tool (`phoxal_config == Value::Null`)
     // must run with `PHOXAL_CONFIG` ABSENT: a unit config (`type Config = ()`)
     // fails to deserialize `{}` ("invalid type: map, expected unit"), and an
@@ -580,6 +583,7 @@ mod tests {
                 ParticipantState::Starting,
             ),
             0,
+            StartupRequirement::Required,
         );
 
         board.record_instance_presence(

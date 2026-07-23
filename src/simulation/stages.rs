@@ -107,12 +107,10 @@ pub(crate) fn substitution_topic_summary(substitution: &SubstitutionRecord) -> S
     format!("component/{}/*", substitution.component_instance)
 }
 
-/// Site tool labels are derived straight from the resolved `LaunchPlan` (Part
-/// 3/6): `tool-joypad` is the standard, hard-required site tool in every mode
-/// including Webots (product decision 9),
-/// so they always appear here alongside the Webots app itself. This function
-/// never needs `options` - it replaces the old `SimulatePlan::native_tools`
-/// stored field.
+/// Site tool labels are derived straight from the resolved `LaunchPlan`, so
+/// profile-selected project tools such as the infrastructure router and joypad
+/// appear here alongside the Webots app itself. This function never needs
+/// `options` - it replaces the old `SimulatePlan::native_tools` stored field.
 pub(crate) fn native_tool_labels_from_plan(plan: &LaunchPlan) -> Vec<String> {
     let mut labels = plan
         .site

@@ -1,13 +1,16 @@
 //! Immutable per-framework-train suite loading and integrity validation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 
-pub use phoxal::suite::{Artifact, Blob, Kind, Suite};
+pub use phoxal::suite::v1::{
+    ActivationCriticality, ActivationScope, Artifact, ArtifactActivation, Blob, Kind, Suite,
+    SuiteProfiles,
+};
 
 pub const SUITE_SOURCE_ENV: &str = "PHOXAL_SUITE";
 pub const OFFLINE_ENV: &str = "PHOXAL_OFFLINE";
@@ -85,13 +88,29 @@ fn read_source(source: &str) -> Result<Suite> {
 }
 
 fn parse_suite(text: &str) -> Result<Suite> {
-    let suite: Suite = serde_json::from_str(text).context("suite was not valid JSON")?;
+    let value: serde_json::Value =
+        serde_json::from_str(text).context("suite was not valid JSON")?;
+    let schema = value
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        .context("suite schema is missing or is not a string")?;
+    if schema == phoxal::suite::v0::SCHEMA {
+        let train = value
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        bail!(
+            "framework train {train} publishes legacy suite schema {:?}, but this phoxal-cli requires {:?} from framework train 0.38.0 or newer; update the project train with `cargo update -p phoxal`, commit Cargo.lock, then run `phoxal update`",
+            phoxal::suite::v0::SCHEMA,
+            phoxal::suite::v1::SCHEMA
+        );
+    }
     ensure!(
-        suite.schema == phoxal::suite::SCHEMA,
-        "unsupported suite schema {:?}; expected {:?}",
-        suite.schema,
-        phoxal::suite::SCHEMA
+        schema == phoxal::suite::v1::SCHEMA,
+        "unsupported suite schema {schema:?}; this phoxal-cli requires {:?}. Update the project train with `cargo update -p phoxal`, commit Cargo.lock, then run `phoxal update`",
+        phoxal::suite::v1::SCHEMA
     );
+    let suite: Suite = serde_json::from_value(value).context("suite was not valid JSON")?;
     validate_suite(&suite)?;
     Ok(suite)
 }
@@ -123,6 +142,58 @@ fn validate_suite(suite: &Suite) -> Result<()> {
                 .with_context(|| format!("invalid assets blob for {}", artifact.id))?;
         }
     }
+    validate_profile("native", &suite.profiles.native, suite)?;
+    validate_profile("webots", &suite.profiles.webots, suite)?;
+    let activated = suite
+        .profiles
+        .native
+        .iter()
+        .chain(&suite.profiles.webots)
+        .map(|activation| activation.package.as_str())
+        .collect::<BTreeSet<_>>();
+    for artifact in &suite.artifacts {
+        ensure!(
+            !matches!(artifact.kind, Kind::Tool | Kind::Infrastructure)
+                || activated.contains(artifact.id.as_str()),
+            "suite {} artifact {} is absent from every launch profile",
+            match artifact.kind {
+                Kind::Tool => "tool",
+                Kind::Infrastructure => "infrastructure",
+                _ => unreachable!(),
+            },
+            artifact.id
+        );
+    }
+    Ok(())
+}
+
+fn validate_profile(name: &str, profile: &[ArtifactActivation], suite: &Suite) -> Result<()> {
+    let artifacts = suite
+        .artifacts
+        .iter()
+        .map(|artifact| (artifact.id.as_str(), artifact.kind))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    for activation in profile {
+        ensure!(
+            seen.insert(activation.package.as_str()),
+            "suite profile {name} contains duplicate activation {}",
+            activation.package
+        );
+        let kind = artifacts
+            .get(activation.package.as_str())
+            .with_context(|| {
+                format!(
+                    "suite profile {name} activates missing artifact {}",
+                    activation.package
+                )
+            })?;
+        ensure!(
+            matches!(kind, Kind::Tool | Kind::Infrastructure),
+            "suite profile {name} activates non-launch-policy artifact {}",
+            activation.package
+        );
+    }
     Ok(())
 }
 
@@ -153,7 +224,10 @@ fn fetch_https(url: &str) -> Result<Suite> {
     parse_suite(&response.text()?)
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     Service,
     ComponentAssets,
@@ -294,7 +368,44 @@ pub fn fixture_suite_for_tests(entries: Vec<FixtureArtifact>) -> Suite {
             artifacts.push(entry.artifact);
         }
     }
-    Suite::new(version, artifacts)
+    let activations = artifacts
+        .iter()
+        .filter_map(|artifact| match artifact.kind {
+            Kind::Infrastructure => Some(ArtifactActivation {
+                package: artifact.id.clone(),
+                scope: ActivationScope::PerProject,
+                criticality: ActivationCriticality::Required,
+            }),
+            Kind::Tool => Some(ArtifactActivation {
+                package: artifact.id.clone(),
+                scope: if artifact.id == "phoxal/tool-joypad" {
+                    ActivationScope::PerProject
+                } else {
+                    ActivationScope::PerRobot
+                },
+                criticality: ActivationCriticality::Optional,
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    Suite::new(
+        version,
+        SuiteProfiles {
+            native: activations.clone(),
+            webots: activations,
+        },
+        artifacts,
+    )
+}
+
+#[doc(hidden)]
+pub fn fixture_suite_with_profiles_for_tests(
+    entries: Vec<FixtureArtifact>,
+    profiles: SuiteProfiles,
+) -> Suite {
+    let mut suite = fixture_suite_for_tests(entries);
+    suite.profiles = profiles;
+    suite
 }
 
 #[doc(hidden)]
@@ -451,7 +562,7 @@ mod tests {
         let path = dir.path().join("suite.json");
         fs::write(
             &path,
-            r#"{"schema":"phoxal.suite/v0","version":"0.35.0","artifacts":[]}"#,
+            r#"{"schema":"phoxal.suite/v1","version":"0.35.0","profiles":{"native":[],"webots":[]},"artifacts":[]}"#,
         )
         .unwrap();
         let error = load_suite(
@@ -466,13 +577,13 @@ mod tests {
     }
 
     #[test]
-    fn one_cli_loads_two_historical_train_descriptors() {
+    fn one_cli_loads_two_v1_train_descriptors() {
         let dir = tempfile::tempdir().unwrap();
         for version in ["0.35.1", "0.36.0"] {
             let path = dir.path().join(format!("suite-{version}.json"));
             fs::write(
                 &path,
-                format!(r#"{{"schema":"phoxal.suite/v0","version":"{version}","artifacts":[]}}"#),
+                format!(r#"{{"schema":"phoxal.suite/v1","version":"{version}","profiles":{{"native":[],"webots":[]}},"artifacts":[]}}"#),
             )
             .unwrap();
             let suite = load_suite(
@@ -486,6 +597,17 @@ mod tests {
             .unwrap();
             assert_eq!(suite.version, version);
         }
+    }
+
+    #[test]
+    fn v0_rejection_names_the_minimum_required_train_and_update_path() {
+        let error =
+            parse_suite(r#"{"schema":"phoxal.suite/v0","version":"0.37.0","artifacts":[]}"#)
+                .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("0.38.0"), "{message}");
+        assert!(message.contains("cargo update -p phoxal"), "{message}");
+        assert!(message.contains("phoxal update"), "{message}");
     }
 
     #[test]
@@ -504,7 +626,7 @@ mod tests {
         let path = dir.path().join("suite.json");
         fs::write(
             &path,
-            r#"{"schema":"phoxal.suite/v0","version":"0.36.0","artifacts":[]}"#,
+            r#"{"schema":"phoxal.suite/v1","version":"0.36.0","profiles":{"native":[],"webots":[]},"artifacts":[]}"#,
         )
         .unwrap();
         let suite = load_suite(
@@ -535,7 +657,7 @@ mod tests {
     #[test]
     fn malformed_integrity_metadata_is_rejected() {
         let error = parse_suite(
-            r#"{"schema":"phoxal.suite/v0","version":"0.36.0","artifacts":[{"id":"phoxal/service-drive","kind":"service","targets":{"aarch64-unknown-linux-gnu":{"url":"https://example.invalid/drive","sha256":"bad","size":0}}}]}"#,
+            r#"{"schema":"phoxal.suite/v1","version":"0.36.0","profiles":{"native":[],"webots":[]},"artifacts":[{"id":"phoxal/service-drive","kind":"service","targets":{"aarch64-unknown-linux-gnu":{"url":"https://example.invalid/drive","sha256":"bad","size":0}}}]}"#,
         )
         .unwrap_err();
         let message = format!("{error:#}");
@@ -549,6 +671,7 @@ mod tests {
     fn missing_target_names_the_train_and_available_targets() {
         let suite = Suite::new(
             "0.36.0",
+            SuiteProfiles::default(),
             vec![Artifact {
                 id: "phoxal/service-drive".into(),
                 kind: Kind::Service,

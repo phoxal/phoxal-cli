@@ -1250,6 +1250,7 @@ fn resolved_with_components(
         user_runtimes: Vec::new(),
         components,
         tools: Vec::new(),
+        suite_profiles: Default::default(),
         path_overrides: Vec::new(),
     })
 }
@@ -1399,7 +1400,7 @@ fn dry_run_stays_offline_for_suite_resolved_component_driver() -> Result<()> {
 /// Each gets its own unit ordered after the router, and
 /// `tool-joypad` carries the `/dev/input` tool-privilege grant
 /// (`unit_privileges_for_tool`). `write_basic_project`'s fixture suite
-/// auto-fills every `OFFICIAL_TOOLS`/`OFFICIAL_OPTIONAL_TOOLS` entry
+/// compiles every activation declared by the fixture suite's native profile
 /// (`suite::fixture_suite_for_tests`), so the complete set resolves here.
 #[test]
 fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {

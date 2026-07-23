@@ -28,7 +28,7 @@ use phoxal::model::simulation::Simulation as SimulationModel;
 use phoxal::model::structure::Structure;
 use phoxal::model::v0::Robot as RobotBundle;
 use phoxal::participant::launch::ParticipantLaunch;
-use phoxal_api::v0_1::simulation::RobotSpawn;
+use phoxal_api::v0_2::simulation::RobotSpawn;
 use serde::Serialize;
 
 use crate::webots_staging::{
@@ -467,6 +467,7 @@ robot:
             config: None,
             robot_root: Some(PathBuf::from("/robot")),
             component_instance: None,
+            execution_device_id: None,
             shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
         }
     }

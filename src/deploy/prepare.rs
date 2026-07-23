@@ -253,13 +253,16 @@ pub(crate) fn prepare_deploy_after_host_staging(
 ) -> Result<RenderedPayload> {
     let all_source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
+    let active_tools =
+        host_resolved.active_profile_tools(phoxal_cli_core::project::resolver::ToolProfile::Native);
     let checked_source_participants = all_source_participants
         .iter()
         .filter(|participant| {
-            !matches!(
-                participant.kind,
-                SourceParticipantKind::Tool | SourceParticipantKind::Simulator
-            )
+            participant.kind != SourceParticipantKind::Simulator
+                && active_tools.includes_named(
+                    participant.kind == SourceParticipantKind::Tool,
+                    &participant.name,
+                )
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -267,9 +270,14 @@ pub(crate) fn prepare_deploy_after_host_staging(
     ensure_no_native_c_source_dependencies(&checked_source_participants)?;
     let platform_refs = check_artifact_refs_from_resolved(&host_resolved)
         .into_iter()
-        .filter(|artifact| artifact.kind != ArtifactKind::Tool)
+        .filter(|artifact| {
+            active_tools.includes_named(artifact.kind == ArtifactKind::Tool, &artifact.name)
+        })
         .collect::<Vec<_>>();
-    let tool_participants = Vec::new();
+    let tool_participants = crate::check::tool_participants_from_resolved(&host_resolved)?
+        .into_iter()
+        .filter(|tool| active_tools.contains(&tool.name))
+        .collect::<Vec<_>>();
     let mut official_by_ref = host_resolved
         .platform_runtimes
         .iter()

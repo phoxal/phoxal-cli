@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use phoxal::bus::{DEFAULT_QUERY_TIMEOUT, Querier, Subscriber};
 use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::v0_1 as api;
+use phoxal_api::v0_2 as api;
 use std::path::Path;
 use std::time::Duration;
 

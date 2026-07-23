@@ -118,15 +118,28 @@ Load escaping overrides with `--env dev`. Base `robot.yaml` remains fail-closed 
 
 ## Artifact Suite
 
-`phoxal-cli` consumes the framework-generated `phoxal.suite/v0` attached to the
-exact locked train release, for example
-`https://github.com/phoxal/framework/releases/download/v0.36.0/suite.json`.
+`phoxal-cli` consumes the framework-generated `phoxal.suite/v1` attached to the
+exact locked train release. Suite v1 starts with framework train 0.38.0 and
+contains the framework-owned `native` and `webots` activation profiles. The CLI
+compiles each selected `per_project` activation once and each `per_robot`
+activation once per robot, mapping required/optional criticality onto its
+startup and runtime-failure policies. Legacy `phoxal.suite/v0` descriptors are
+rejected with the required train-update path rather than guessed or upgraded in
+place.
+
+For example:
+`https://github.com/phoxal/framework/releases/download/v0.38.0/suite.json`.
 Local development may use `--suite <path>`, `PHOXAL_SUITE=<path>`, or
 `artifacts.suite`; every override must still declare the locked train version.
 Use `--offline --suite <local-path>` (or the equivalent environment variables)
 to disable network access and resolve from that immutable local descriptor plus
 already verified vendored artifacts. Offline mode never fetches or reconstructs
 the suite. `cargo update -p phoxal` is the explicit train-bump boundary.
+
+Every per-robot `tool-device` receives the same bounded identity derived from
+the canonical project root. Device samples remain attributed to their robot
+roots, while co-hosted robots expose the shared identity so clients can join or
+deduplicate those observations honestly.
 
 ## Install
 

@@ -81,11 +81,9 @@ pub(crate) fn stage_official_artifacts(
         }
         artifacts.insert(runtime.package.clone(), plan);
     }
-    // Every standard tool (`infrastructure-router`, `tool-joypad`,
-    // `tool-bus`, `tool-device`, `tool-log`, and `tool-telemetry`) stages the same way: locate its
-    // resolved tool entry and, unless it is a local path-pin override, plan
-    // its official binary. Generalized from a router-only block now that
-    // deploy ships every standard tool, not just the router.
+    // Every profile-selected tool stages the same way: locate its resolved
+    // entry and, unless it is a local path-pin override, plan its official
+    // binary.
     let requested_tools = plan
         .site
         .iter()

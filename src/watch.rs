@@ -25,7 +25,7 @@ use phoxal_cli_core::project::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchPlan, PlanContext, build_launch_plan,
 };
 use phoxal_cli_core::project::resolver::{
-    ResolveOptions, ResolvedRobot, discover_robot_yaml, load_robot_with_extras,
+    ResolveOptions, ResolvedRobot, ToolProfile, discover_robot_yaml, load_robot_with_extras,
     load_robot_with_extras_and_overlays,
 };
 use phoxal_cli_core::project::tooling::hash_tree;
@@ -489,8 +489,30 @@ fn recheck_run_target(
     // of the whole source graph rather than just the changed one.
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
-    let platform_refs = check_artifact_refs_from_resolved(&resolved);
-    let tool_participants = tool_participants_from_resolved(&resolved)?;
+    let active_tools = resolved.active_profile_tools(ToolProfile::Native);
+    let checked_source_participants = source_participants
+        .iter()
+        .filter(|participant| {
+            active_tools.includes_named(
+                participant.kind == phoxal_cli_core::check::source::SourceParticipantKind::Tool,
+                &participant.name,
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let platform_refs = check_artifact_refs_from_resolved(&resolved)
+        .into_iter()
+        .filter(|artifact| {
+            active_tools.includes_named(
+                artifact.kind == phoxal_cli_core::project::suite::ArtifactKind::Tool,
+                &artifact.name,
+            )
+        })
+        .collect::<Vec<_>>();
+    let tool_participants = tool_participants_from_resolved(&resolved)?
+        .into_iter()
+        .filter(|tool| active_tools.contains(&tool.name))
+        .collect::<Vec<_>>();
     let mut official_by_ref = resolved
         .platform_runtimes
         .iter()
@@ -505,7 +527,7 @@ fn recheck_run_target(
     let outcome = run_check_with_context(
         &platform_refs,
         &tool_participants,
-        &source_participants,
+        &checked_source_participants,
         CheckGraphContext {
             manifest_extras: &loaded.extras,
         },
@@ -532,7 +554,7 @@ fn recheck_run_target(
             manifest_extras: &loaded.extras,
             checked_participants: &outcome.checked_participants,
             substitutions: &[],
-            source_participants: &source_participants,
+            source_participants: &checked_source_participants,
         }],
     )?;
     let driver_policy = DriverPolicy::from_options(options, &plan)?;
@@ -908,6 +930,7 @@ robot:
             user_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
+            suite_profiles: Default::default(),
             path_overrides: Vec::new(),
         }
     }

@@ -12,8 +12,8 @@ use anyhow::Result;
 use anyhow::anyhow;
 use phoxal::bus::{Codec, ContractBody, MessagePack, QueryFailure};
 use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::v0_1::simulation::RobotSpawn;
-use phoxal_api::v0_1::simulation::{SpawnRequest, SpawnSet};
+use phoxal_api::v0_2::simulation::RobotSpawn;
+use phoxal_api::v0_2::simulation::{SpawnRequest, SpawnSet};
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::{

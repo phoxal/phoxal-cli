@@ -6,21 +6,22 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 use phoxal::check as graph_check;
 use phoxal::participant::launch::{
-    BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
+    BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ExecutionDeviceId, ParticipantLaunch,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::resolver::{ResolvedRobot, ResolvedTool, RobotManifestExtras};
+use super::suite::{
+    ActivationCriticality, ActivationScope, ArtifactActivation, ArtifactKind, SuiteProfiles,
+};
 use crate::check::source::{SourceParticipant, SourceParticipantKind};
+use crate::session::{RuntimeFailurePolicy, StartupRequirement};
 
 pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
 pub const SITE_INFRASTRUCTURE_ROUTER: &str = "infrastructure-router";
-pub const ROBOT_TOOL_BUS: &str = "tool-bus";
 pub const SITE_TOOL_JOYPAD: &str = "tool-joypad";
-pub const ROBOT_TOOL_LOG: &str = "tool-log";
-pub const ROBOT_TOOL_TELEMETRY: &str = "tool-telemetry";
 pub const ROBOT_TOOL_DEVICE: &str = "tool-device";
 pub const RUNTIME_ROBOT_ROOT_RELATIVE: &str = ".phoxal/run/robot";
 pub const SIMULATOR_SUPERVISOR_PROVIDER_ID: &str = "simulator-webots-supervisor";
@@ -32,27 +33,22 @@ pub fn simulator_controller_provider_id(robot_id: &str) -> String {
     format!("simulator-webots-controller-{robot_id}")
 }
 
-/// The full standard, hard-required site-tool id set (product decision 9) -
-/// derived ONCE here and used consistently everywhere a caller needs to ask
-/// "is this a standard site tool": [`build_site_launches`] (launch), and
-/// simulation launch resolution's graph-proof
-/// filtering (resolution/validation). Resolution itself
-/// (`suite::OFFICIAL_TOOLS`) and readiness (`supervisor`'s per-`Tool`-kind
-/// handling) already treat every standard tool uniformly by kind rather than
-/// naming site tools individually, so this is the one list the
-/// id-based call sites needed to share (finding A6).
-///
-/// Finding A6's regression: `simulate`'s metadata/contract filter used to
-/// hardcode only `SITE_INFRASTRUCTURE_ROUTER`/`SITE_TOOL_JOYPAD` at three separate call
-/// sites, silently excluding a standard site tool's declared graph contracts
-/// from validation.
-pub const STANDARD_SITE_TOOLS: &[&str] = &[SITE_TOOL_JOYPAD];
-pub const STANDARD_ROBOT_TOOLS: &[&str] = &[
-    ROBOT_TOOL_BUS,
-    ROBOT_TOOL_LOG,
-    ROBOT_TOOL_TELEMETRY,
-    ROBOT_TOOL_DEVICE,
-];
+/// Mint the bounded observation identity shared by every per-robot
+/// `tool-device` launched by one canonical project supervisor.
+pub fn execution_device_id(project_root: &Path) -> Result<ExecutionDeviceId> {
+    let canonical = project_root.canonicalize().unwrap_or_else(|_| {
+        if project_root.is_absolute() {
+            project_root.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(project_root))
+                .unwrap_or_else(|_| project_root.to_path_buf())
+        }
+    });
+    let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
+    ExecutionDeviceId::new(format!("project-{}", &hex::encode(digest)[..24]))
+        .map_err(|error| anyhow!("failed to mint execution-device identity: {error}"))
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -221,9 +217,12 @@ fn validate_supervisor_identity_bounds(plan: &LaunchPlan) -> Result<()> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SiteLaunch {
     pub id: String,
+    pub kind: ArtifactKind,
     pub artifact_ref: String,
     #[serde(rename = "PHOXAL_CONFIG")]
     pub phoxal_config: Value,
+    pub startup_requirement: StartupRequirement,
+    pub runtime_failure: RuntimeFailurePolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -241,6 +240,8 @@ pub struct ParticipantLaunchRecord {
     pub launch: ParticipantLaunch,
     #[serde(default)]
     pub launch_ownership: LaunchOwnership,
+    pub startup_requirement: StartupRequirement,
+    pub runtime_failure: RuntimeFailurePolicy,
 }
 
 /// Who owns a participant's process lifecycle. Orthogonal to `participant_kind`:
@@ -302,11 +303,19 @@ pub fn build_launch_plan(
     if matches!(mode, LaunchMode::Deploy) && robots.len() != 1 {
         bail!("deploy LaunchPlan must contain exactly one robot");
     }
+    let profiles = &robots[0].resolved.suite_profiles;
+    if robots
+        .iter()
+        .any(|robot| &robot.resolved.suite_profiles != profiles)
+    {
+        bail!("LaunchPlan robots resolved conflicting framework suite profiles");
+    }
 
-    let site = build_site_launches(&mode, robots)?;
+    let profile = profile_for_mode(&mode, profiles);
+    let site = build_site_launches(&mode, robots, profile)?;
     let robots = robots
         .iter()
-        .map(|robot| build_robot_launch(&mode, robot))
+        .map(|robot| build_robot_launch(&mode, robot, profile))
         .collect::<Result<Vec<_>>>()?;
 
     Ok(LaunchPlan { mode, site, robots })
@@ -317,8 +326,9 @@ pub fn build_launch_plan(
 fn build_site_launches(
     mode: &LaunchMode,
     robots: &[CheckedRobotLaunchInput<'_>],
+    profile: &[ArtifactActivation],
 ) -> Result<Vec<SiteLaunch>> {
-    let mut site = Vec::with_capacity(STANDARD_SITE_TOOLS.len() + 1);
+    let mut site = Vec::new();
     if matches!(mode, LaunchMode::Deploy) {
         if robots.iter().any(|robot| {
             robot.resolved.tools.iter().any(|artifact| {
@@ -338,50 +348,74 @@ fn build_site_launches(
                 "deploy does not yet stage router.config; remove it for the default loopback router or run locally"
             );
         }
-        site.push(SiteLaunch {
-            id: SITE_INFRASTRUCTURE_ROUTER.to_string(),
-            artifact_ref: merge_site_tool_artifact(SITE_INFRASTRUCTURE_ROUTER, robots)?,
-            phoxal_config: Value::Null,
-        });
     }
-    for &tool_name in STANDARD_SITE_TOOLS {
-        let artifact_ref = merge_site_tool_artifact(tool_name, robots)?;
-        let phoxal_config = Value::Null;
+    for activation in profile
+        .iter()
+        .filter(|activation| activation.scope == ActivationScope::PerProject)
+    {
+        let (id, kind, artifact_ref) = merge_project_artifact(activation, robots)?;
+        let (startup_requirement, runtime_failure) =
+            activation_policy(activation.criticality, kind);
         site.push(SiteLaunch {
-            id: tool_name.to_string(),
+            id,
+            kind,
             artifact_ref,
-            phoxal_config,
+            phoxal_config: Value::Null,
+            startup_requirement,
+            runtime_failure,
         });
     }
+    site.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(site)
 }
 
-fn merge_site_tool_artifact(
-    tool_name: &str,
+fn merge_project_artifact(
+    activation: &ArtifactActivation,
     robots: &[CheckedRobotLaunchInput<'_>],
-) -> Result<String> {
+) -> Result<(String, ArtifactKind, String)> {
     let mut artifact_ref = None;
+    let mut selected = None;
     for robot in robots {
-        let tool = resolved_tool(robot.resolved, tool_name)?;
+        let tool = resolved_activation(robot.resolved, activation)?;
         let current = tool_artifact_ref(tool);
         if let Some(existing) = &artifact_ref {
             if existing != &current {
                 bail!(
-                    "site tool {tool_name} resolves to conflicting artifacts: {existing} and {current}"
+                    "per-project activation {} resolves to conflicting artifacts: {existing} and {current}",
+                    activation.package
                 );
             }
         } else {
             artifact_ref = Some(current);
+            selected = Some(tool);
         }
     }
-    artifact_ref.ok_or_else(|| anyhow!("site tool {tool_name} was not resolved"))
+    let selected = selected.ok_or_else(|| {
+        anyhow!(
+            "per-project activation {} was not resolved",
+            activation.package
+        )
+    })?;
+    Ok((
+        selected.name.clone(),
+        selected.kind,
+        artifact_ref.expect("selected activation has an artifact ref"),
+    ))
 }
 
-fn resolved_tool<'a>(resolved: &'a ResolvedRobot, tool_name: &str) -> Result<&'a ResolvedTool> {
-    resolved.tools.iter().find(|tool| tool.name == tool_name).ok_or_else(|| {
+fn resolved_activation<'a>(
+    resolved: &'a ResolvedRobot,
+    activation: &ArtifactActivation,
+) -> Result<&'a ResolvedTool> {
+    resolved
+        .tools
+        .iter()
+        .find(|tool| tool.package == activation.package)
+        .ok_or_else(|| {
         anyhow!(
-            "resolved robot {} is missing standard tool {tool_name}; framework train {} does not provide the required official suite inventory",
+            "resolved robot {} is missing profile activation {}; framework train {} suite is inconsistent",
             resolved.robot.robot.id,
+            activation.package,
             resolved.train
         )
     })
@@ -394,6 +428,7 @@ fn tool_artifact_ref(tool: &ResolvedTool) -> String {
 fn build_robot_launch(
     mode: &LaunchMode,
     input: &CheckedRobotLaunchInput<'_>,
+    profile: &[ArtifactActivation],
 ) -> Result<RobotLaunch> {
     ensure_launch_set_parity(mode, input)?;
     let source_participants = input
@@ -437,10 +472,20 @@ fn build_robot_launch(
             execution,
             launch,
             launch_ownership,
+            startup_requirement: StartupRequirement::Required,
+            runtime_failure: RuntimeFailurePolicy::StopProject,
         });
     }
-    for &tool_name in STANDARD_ROBOT_TOOLS {
-        let tool = resolved_tool(input.resolved, tool_name)?;
+    for activation in profile
+        .iter()
+        .filter(|activation| activation.scope == ActivationScope::PerRobot)
+    {
+        let tool = resolved_activation(input.resolved, activation)?;
+        let (startup_requirement, runtime_failure) =
+            activation_policy(activation.criticality, tool.kind);
+        let execution_device_id = (tool.name == ROBOT_TOOL_DEVICE)
+            .then(|| execution_device_id(input.project_root))
+            .transpose()?;
         participants.push(ParticipantLaunchRecord {
             artifact_id: tool.name.clone(),
             execution: tool.path_override.as_ref().map_or_else(
@@ -464,9 +509,12 @@ fn build_robot_launch(
                 config: None,
                 robot_root: Some(robot_root_for_mode(mode, input.project_root)),
                 component_instance: None,
+                execution_device_id,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
             launch_ownership: LaunchOwnership::CliManaged,
+            startup_requirement,
+            runtime_failure,
         });
     }
     participants.sort_by(|left, right| {
@@ -482,6 +530,35 @@ fn build_robot_launch(
         participants,
         substitutions: input.substitutions.to_vec(),
     })
+}
+
+fn profile_for_mode<'a>(
+    mode: &LaunchMode,
+    profiles: &'a SuiteProfiles,
+) -> &'a [ArtifactActivation] {
+    match mode {
+        LaunchMode::Run | LaunchMode::Deploy => &profiles.native,
+        LaunchMode::Webots { .. } => &profiles.webots,
+    }
+}
+
+fn activation_policy(
+    criticality: ActivationCriticality,
+    kind: ArtifactKind,
+) -> (StartupRequirement, RuntimeFailurePolicy) {
+    let startup_requirement = match criticality {
+        ActivationCriticality::Required => StartupRequirement::Required,
+        ActivationCriticality::Optional => StartupRequirement::Optional,
+    };
+    let runtime_failure = if kind == ArtifactKind::Infrastructure {
+        RuntimeFailurePolicy::RecreateGraph
+    } else {
+        match criticality {
+            ActivationCriticality::Required => RuntimeFailurePolicy::StopProject,
+            ActivationCriticality::Optional => RuntimeFailurePolicy::KeepProjectDegraded,
+        }
+    };
+    (startup_requirement, runtime_failure)
 }
 
 fn is_robot_launch_participant(
@@ -611,6 +688,7 @@ fn participant_launch(
             .cloned(),
         robot_root: Some(robot_root_for_mode(mode, input.project_root)),
         component_instance,
+        execution_device_id: None,
         shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
     }
 }
@@ -801,7 +879,7 @@ mod tests {
                 .iter()
                 .map(|site| site.id.as_str())
                 .collect::<Vec<_>>(),
-            vec![SITE_TOOL_JOYPAD]
+            vec!["tool-joypad"]
         );
         assert_eq!(
             plan.robots[0]
@@ -859,11 +937,19 @@ mod tests {
         add_site_tools(&mut robot_b);
         let extras = RobotManifestExtras::default();
         let inputs = [
-            empty_checked_input(Path::new("/tmp/a"), &robot_a, &extras),
-            empty_checked_input(Path::new("/tmp/b"), &robot_b, &extras),
+            empty_checked_input(Path::new("/tmp/project"), &robot_a, &extras),
+            empty_checked_input(Path::new("/tmp/project"), &robot_b, &extras),
         ];
 
         let plan = build_launch_plan(LaunchMode::Run, &inputs)?;
+        assert_eq!(
+            plan.site
+                .iter()
+                .map(|launch| launch.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tool-joypad"],
+            "per-project activation must compile exactly once"
+        );
         let ids = plan
             .robots
             .iter()
@@ -878,6 +964,70 @@ mod tests {
         assert!(ids.contains(&"tool-log-robot_a"));
         assert!(ids.contains(&"tool-bus-robot_b"));
         assert!(ids.contains(&"tool-log-robot_b"));
+        let devices = plan
+            .robots
+            .iter()
+            .map(|robot| {
+                robot
+                    .participants
+                    .iter()
+                    .find(|participant| participant.artifact_id == ROBOT_TOOL_DEVICE)
+                    .expect("per-robot device activation")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(
+            devices[0].launch.execution_device_id, devices[1].launch.execution_device_id,
+            "co-hosted robot samplers must expose one project device identity"
+        );
+        assert_eq!(devices[0].startup_requirement, StartupRequirement::Optional);
+        assert_eq!(
+            devices[0].runtime_failure,
+            RuntimeFailurePolicy::KeepProjectDegraded
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn activation_criticality_maps_to_supervisor_policy_without_overriding_router_recovery() {
+        assert_eq!(
+            activation_policy(ActivationCriticality::Required, ArtifactKind::Tool),
+            (
+                StartupRequirement::Required,
+                RuntimeFailurePolicy::StopProject
+            )
+        );
+        assert_eq!(
+            activation_policy(ActivationCriticality::Optional, ArtifactKind::Tool),
+            (
+                StartupRequirement::Optional,
+                RuntimeFailurePolicy::KeepProjectDegraded
+            )
+        );
+        assert_eq!(
+            activation_policy(
+                ActivationCriticality::Required,
+                ArtifactKind::Infrastructure
+            ),
+            (
+                StartupRequirement::Required,
+                RuntimeFailurePolicy::RecreateGraph
+            )
+        );
+    }
+
+    #[test]
+    fn execution_device_identity_is_project_scoped_stable_and_bounded() -> anyhow::Result<()> {
+        let first = tempfile::tempdir()?;
+        let second = tempfile::tempdir()?;
+        let first_identity = execution_device_id(first.path())?;
+
+        assert_eq!(first_identity, execution_device_id(first.path())?);
+        assert_ne!(first_identity, execution_device_id(second.path())?);
+        assert!(
+            first_identity.to_string().len()
+                <= phoxal::participant::launch::MAX_EXECUTION_DEVICE_ID_BYTES
+        );
         Ok(())
     }
 
@@ -983,10 +1133,37 @@ mod tests {
     fn a_suite_missing_a_standard_robot_tool_fails_with_a_remediation_message() -> anyhow::Result<()>
     {
         let mut resolved = empty_resolved_robot("robot_v1")?;
-        resolved.tools.push(tool(ROBOT_TOOL_BUS));
-        resolved.tools.push(tool(SITE_TOOL_JOYPAD));
-        resolved.tools.push(tool(ROBOT_TOOL_LOG));
+        resolved.tools.push(tool("tool-bus"));
+        resolved.tools.push(tool("tool-joypad"));
+        resolved.tools.push(tool("tool-log"));
         resolved.tools.push(tool(ROBOT_TOOL_DEVICE));
+        resolved.suite_profiles.native = vec![
+            activation(
+                "tool-bus",
+                ActivationScope::PerRobot,
+                ActivationCriticality::Optional,
+            ),
+            activation(
+                "tool-device",
+                ActivationScope::PerRobot,
+                ActivationCriticality::Optional,
+            ),
+            activation(
+                "tool-joypad",
+                ActivationScope::PerProject,
+                ActivationCriticality::Optional,
+            ),
+            activation(
+                "tool-log",
+                ActivationScope::PerRobot,
+                ActivationCriticality::Optional,
+            ),
+            activation(
+                "tool-telemetry",
+                ActivationScope::PerRobot,
+                ActivationCriticality::Optional,
+            ),
+        ];
         // Telemetry is deliberately left unresolved, as if the train suite omitted it.
         let extras = RobotManifestExtras::default();
         let error = build_launch_plan(
@@ -999,7 +1176,7 @@ mod tests {
         )
         .expect_err("a missing standard robot tool must fail the launch plan");
         let message = error.to_string();
-        assert!(message.contains(ROBOT_TOOL_TELEMETRY), "{message}");
+        assert!(message.contains("phoxal/tool-telemetry"), "{message}");
         assert!(message.contains("framework train"), "{message}");
         Ok(())
     }
@@ -1062,16 +1239,57 @@ robot:
             user_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
+            suite_profiles: SuiteProfiles::default(),
             path_overrides: Vec::new(),
         })
     }
 
     fn add_site_tools(resolved: &mut ResolvedRobot) {
-        resolved.tools.push(tool(ROBOT_TOOL_BUS));
-        resolved.tools.push(tool(SITE_TOOL_JOYPAD));
-        resolved.tools.push(tool(ROBOT_TOOL_LOG));
-        resolved.tools.push(tool(ROBOT_TOOL_TELEMETRY));
+        resolved.tools.push(tool("tool-bus"));
+        resolved.tools.push(tool("tool-joypad"));
+        resolved.tools.push(tool("tool-log"));
+        resolved.tools.push(tool("tool-telemetry"));
         resolved.tools.push(tool(ROBOT_TOOL_DEVICE));
+        resolved.suite_profiles.native = vec![
+            activation(
+                "tool-bus",
+                ActivationScope::PerRobot,
+                ActivationCriticality::Optional,
+            ),
+            activation(
+                "tool-device",
+                ActivationScope::PerRobot,
+                ActivationCriticality::Optional,
+            ),
+            activation(
+                "tool-joypad",
+                ActivationScope::PerProject,
+                ActivationCriticality::Optional,
+            ),
+            activation(
+                "tool-log",
+                ActivationScope::PerRobot,
+                ActivationCriticality::Optional,
+            ),
+            activation(
+                "tool-telemetry",
+                ActivationScope::PerRobot,
+                ActivationCriticality::Optional,
+            ),
+        ];
+        resolved.suite_profiles.webots = resolved.suite_profiles.native.clone();
+    }
+
+    fn activation(
+        name: &str,
+        scope: ActivationScope,
+        criticality: ActivationCriticality,
+    ) -> ArtifactActivation {
+        ArtifactActivation {
+            package: format!("phoxal/{name}"),
+            scope,
+            criticality,
+        }
     }
 
     fn tool(name: &str) -> ResolvedTool {

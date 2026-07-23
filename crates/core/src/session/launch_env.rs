@@ -55,6 +55,7 @@ pub const COMMON_ENV_TO_FLAG: &[(&str, &str)] = &[
     (env::NAMESPACE, "--namespace"),
     (env::ROBOT_ROOT, "--robot-root"),
     (env::COMPONENT_INSTANCE, "--component-instance"),
+    (env::EXECUTION_DEVICE_ID, "--execution-device-id"),
     (env::CONNECT, "--connect"),
     (env::CONFIG, "--config"),
 ];
@@ -68,6 +69,7 @@ pub const ENV_TO_FLAG: &[(&str, &str)] = &[
     (env::NAMESPACE, "--namespace"),
     (env::ROBOT_ROOT, "--robot-root"),
     (env::COMPONENT_INSTANCE, "--component-instance"),
+    (env::EXECUTION_DEVICE_ID, "--execution-device-id"),
     (env::CONNECT, "--connect"),
     (env::CONFIG, "--config"),
     (env::CLOCK, "--clock"),
@@ -133,6 +135,12 @@ fn encode_common_participant_variables(
         variables.insert(
             env::COMPONENT_INSTANCE.to_string(),
             component_instance.clone(),
+        );
+    }
+    if let Some(execution_device_id) = &launch.execution_device_id {
+        variables.insert(
+            env::EXECUTION_DEVICE_ID.to_string(),
+            execution_device_id.to_string(),
         );
     }
     if !launch.bus.connect_endpoints.is_empty() {
@@ -261,6 +269,7 @@ mod tests {
             })),
             robot_root: Some(PathBuf::from("/tmp/phoxal/robot")),
             component_instance: None,
+            execution_device_id: None,
             shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
         };
 
@@ -291,6 +300,9 @@ mod tests {
             config: None,
             robot_root: Some(PathBuf::from("/tmp/phoxal/robot")),
             component_instance: None,
+            execution_device_id: Some(
+                phoxal::participant::launch::ExecutionDeviceId::new("project-e2e").unwrap(),
+            ),
             shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
         };
 
@@ -306,6 +318,13 @@ mod tests {
         assert_eq!(
             encoded.variables().get(env::CONNECT).map(String::as_str),
             Some("tcp/localhost:7447")
+        );
+        assert_eq!(
+            encoded
+                .variables()
+                .get(env::EXECUTION_DEVICE_ID)
+                .map(String::as_str),
+            Some("project-e2e")
         );
         Ok(())
     }
@@ -324,6 +343,7 @@ mod tests {
             })),
             robot_root: None,
             component_instance: None,
+            execution_device_id: None,
             shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
         };
 
@@ -353,6 +373,7 @@ mod tests {
             config: Some(serde_json::json!({"require_native": true})),
             robot_root: Some(PathBuf::from("/tmp/phoxal/robot")),
             component_instance: Some("left_drive".to_string()),
+            execution_device_id: None,
             shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
         };
 
@@ -430,6 +451,7 @@ mod tests {
             config: None,
             robot_root: None,
             component_instance: None,
+            execution_device_id: None,
             shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
         };
 
@@ -461,6 +483,7 @@ mod tests {
             config: Some(serde_json::json!({"blob": "x".repeat(MAX_CONFIG_ENV_BYTES)})),
             robot_root: None,
             component_instance: None,
+            execution_device_id: None,
             shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
         };
 

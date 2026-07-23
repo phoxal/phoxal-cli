@@ -34,13 +34,9 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
         }
         other => panic!("expected LaunchMode::Webots, got {other:?}"),
     }
-    // Joypad and telemetry are standard, hard-required site tools, while
-    // bus and log retention are robot-scoped launch participants in every
-    // mode including `simulate` - no
-    // opt-in flag, no graceful-degrade path. `fixture_suite_for_tests`
-    // auto-fills every `suite::OFFICIAL_TOOLS` entry not explicitly listed
-    // in `write_suite` above, which is why the standard tools resolve
-    // here despite not being in that fixture list.
+    // `fixture_suite_for_tests` activates the site-scoped infrastructure
+    // router and joypad declared by its Webots profile, while the remaining
+    // profile tools are robot-scoped participants.
     let site_ids = plan
         .plan
         .site
@@ -49,7 +45,10 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
         .collect::<Vec<_>>();
     assert_eq!(
         site_ids,
-        vec![phoxal_cli_core::project::launch_plan::SITE_TOOL_JOYPAD]
+        vec![
+            "infrastructure-router",
+            phoxal_cli_core::project::launch_plan::SITE_TOOL_JOYPAD,
+        ]
     );
     assert_eq!(
         plan.plan.robots[0]
