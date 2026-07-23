@@ -12,21 +12,22 @@ jobs:
   plan:
     if: |
       github.event.pull_request.merged == true &&
-      startsWith(github.event.pull_request.head.ref, 'release/v')
+      startsWith(github.event.pull_request.head.ref, 'release-plz-')
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
       - id: v
-        env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
-          # Caller-owned gate + version. The release-prep branch
-          # (release/vX.Y.Z) carries the intended version; the reusable
-          # release workflow verifies it against Cargo.toml on the merged commit
-          # before tagging/publishing.
-          echo "version=${HEAD_REF#release/v}" >> "$GITHUB_OUTPUT"
+          # The tooling-controlled release-plz branch is the release gate. Read
+          # the version from the exact merged commit; the reusable publication
+          # seam verifies the same commit again before tagging.
+          version=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: plan
@@ -42,7 +43,7 @@ jobs:
             runner: macos-14
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: ${{ matrix.target }}
