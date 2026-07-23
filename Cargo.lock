@@ -2946,6 +2946,7 @@ dependencies = [
  "pathdiff",
  "phoxal",
  "phoxal-api",
+ "phoxal-cli-client",
  "phoxal-cli-core",
  "phoxal-cli-ui",
  "ratatui",
@@ -2967,6 +2968,18 @@ dependencies = [
  "urdf-rs",
  "webots-proto",
  "zeroize",
+]
+
+[[package]]
+name = "phoxal-cli-client"
+version = "0.21.1"
+dependencies = [
+ "anyhow",
+ "phoxal-cli-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

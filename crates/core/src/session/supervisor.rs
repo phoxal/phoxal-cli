@@ -204,19 +204,31 @@ pub struct ExitDescription {
     pub signal: Option<i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BoundedString(String);
 
 impl BoundedString {
-    pub const MAX_CHARS: usize = 4_096;
+    pub const MAX_BYTES: usize = super::protocol::MAX_PROCESS_STDERR_TAIL_BYTES;
 
     #[must_use]
     pub fn new(value: impl AsRef<str>) -> Self {
+        Self::with_max_bytes(value, super::protocol::MAX_PROCESS_FAILURE_DETAIL_BYTES)
+    }
+
+    #[must_use]
+    pub fn with_max_bytes(value: impl AsRef<str>, maximum: usize) -> Self {
         let value = value.as_ref();
-        let mut chars = value.chars();
-        let mut bounded = chars.by_ref().take(Self::MAX_CHARS).collect::<String>();
-        if chars.next().is_some() {
-            bounded.push('…');
+        if value.len() <= maximum {
+            return Self(value.to_string());
+        }
+        let suffix = "…";
+        let mut end = maximum.saturating_sub(suffix.len()).min(value.len());
+        while !value.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        let mut bounded = value[..end].to_string();
+        if maximum >= suffix.len() {
+            bounded.push_str(suffix);
         }
         Self(bounded)
     }
@@ -224,6 +236,23 @@ impl BoundedString {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for BoundedString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.len() > Self::MAX_BYTES {
+            return Err(serde::de::Error::custom(format!(
+                "bounded supervisor string is {} bytes; limit is {}",
+                value.len(),
+                Self::MAX_BYTES
+            )));
+        }
+        Ok(Self(value))
     }
 }
 
@@ -287,6 +316,8 @@ pub struct SupervisorSnapshotV0 {
     pub supervisor_generation: u64,
     pub revision: u64,
     pub project: String,
+    #[serde(default)]
+    pub entry: String,
     pub framework_train: String,
     pub execution: String,
     pub lifecycle: ProjectLifecycle,
@@ -303,6 +334,7 @@ impl Default for SupervisorSnapshotV0 {
             supervisor_generation: 0,
             revision: 0,
             project: String::new(),
+            entry: String::new(),
             framework_train: String::new(),
             execution: String::new(),
             lifecycle: ProjectLifecycle::Starting,

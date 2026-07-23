@@ -4,7 +4,13 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const ALLOWED_BASELINE: &[&str] = &["phoxal", "phoxal-api", "phoxal-cli-core", "phoxal-cli-ui"];
+const ALLOWED_BASELINE: &[&str] = &[
+    "phoxal",
+    "phoxal-api",
+    "phoxal-cli-client",
+    "phoxal-cli-core",
+    "phoxal-cli-ui",
+];
 const ALLOWED_RAW_MODULE_IMPORTS: &[&str] = &[
     "src/commands/behavior.rs",
     "src/commands/logs.rs",
@@ -84,6 +90,7 @@ fn extracted_crates_follow_the_one_way_dependency_rule() {
         .as_array()
         .expect("cargo metadata packages field was not an array");
     for (package_name, expected_path_dependencies) in [
+        ("phoxal-cli-client", &["phoxal-cli-core"][..]),
         ("phoxal-cli-core", &[][..]),
         ("phoxal-cli-ui", &["phoxal-cli-core"][..]),
     ] {

@@ -29,10 +29,11 @@ use phoxal_cli_core::session::{ProcessKey, StartupRequirement};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub(crate) fn prepare_run(
+pub(crate) fn prepare_run_on_board(
     project_start: &Path,
     options: RunOptions,
     ui: &crate::Ui,
+    board: BoardBackend,
 ) -> Result<PreparedRun> {
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
@@ -128,13 +129,6 @@ pub(crate) fn prepare_run(
         crate::check::robot_contract_surfaces(&resolved.robot.robot.id, &outcome.contract_surfaces);
     let coherence = crate::check::coherence_for_launch_plan(&coherence_plan, &[coherence_graph])?;
     crate::check::enforce_coherence(crate::check::CoherenceVerb::Run, &coherence)?;
-    // Finding A5: resolved once here, from the same `plan`/`outcome` this
-    // function already built - see `RuntimeStore::from_launch_plan`'s docs.
-    let runtime_store = phoxal_cli_core::session::stores::runtime::RuntimeStore::from_launch_plan(
-        &plan,
-        &outcome.contract_surfaces,
-    );
-    let board = BoardBackend::new();
     board.configure(
         project_root.display().to_string(),
         resolved.train.clone(),
@@ -177,6 +171,5 @@ pub(crate) fn prepare_run(
         plan,
         board,
         specs,
-        runtime_store,
     })
 }

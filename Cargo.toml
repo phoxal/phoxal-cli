@@ -12,12 +12,14 @@ repository = "https://github.com/phoxal/phoxal-cli"
 resolver = "3"
 members = [
     ".",
+    "crates/client",
     "crates/core",
     "crates/ui",
     "tests/fixtures/api-fixture",
 ]
 default-members = [
     ".",
+    "crates/client",
     "crates/core",
     "crates/ui",
     "tests/fixtures/api-fixture",
@@ -56,6 +58,7 @@ urdf-rs = "0.9.0"
 webots-proto = "0.2.0"
 phoxal = "=0.37.0"
 phoxal-api = "=0.37.0"
+phoxal-cli-client = { path = "crates/client" }
 phoxal-cli-core = { path = "crates/core" }
 phoxal-cli-ui = { path = "crates/ui" }
 ratatui = "0.29"
@@ -105,6 +108,7 @@ tar = { workspace = true }
 
 phoxal = { workspace = true }
 phoxal-api = { workspace = true }
+phoxal-cli-client = { workspace = true }
 phoxal-cli-core = { workspace = true }
 phoxal-cli-ui = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -123,6 +127,7 @@ unicode-width = { workspace = true }
 
 [dev-dependencies]
 object = { workspace = true, features = ["write"] }
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

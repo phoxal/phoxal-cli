@@ -64,7 +64,7 @@ pub(crate) use signals::{
     stop_child,
 };
 mod lock;
-pub(crate) use lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
+pub(crate) use lock::{ProjectLock, ProjectLockIdentity, ProjectLockStatus, ProjectOperation};
 mod bus;
 pub(crate) use bus::{
     default_connect_endpoint, start_bus_log_subscriber, start_clock_feed,

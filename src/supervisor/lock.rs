@@ -69,9 +69,44 @@ pub struct ProjectLock {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectLockStatus {
+    Free,
+    Held(ProjectLockIdentity),
+}
+
 impl ProjectLock {
+    #[must_use]
+    pub fn lock_path(project: &Path) -> PathBuf {
+        project.join(".phoxal/project.lock")
+    }
+
+    pub fn inspect(project: &Path) -> Result<ProjectLockStatus> {
+        let path = Self::lock_path(project);
+        let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ProjectLockStatus::Free);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+            }
+        };
+        match crate::native_artifacts::try_advisory_lock(&file, true) {
+            Ok(()) => {
+                crate::native_artifacts::unlock_advisory(&file)?;
+                Ok(ProjectLockStatus::Free)
+            }
+            Err(_) => Ok(ProjectLockStatus::Held(
+                read_identity(&mut file).with_context(|| {
+                    format!("failed to read active operation from {}", path.display())
+                })?,
+            )),
+        }
+    }
+
     pub fn acquire(identity: ProjectLockIdentity) -> Result<Self> {
-        let path = identity.project.join(".phoxal/project.lock");
+        let path = Self::lock_path(&identity.project);
         Self::acquire_path(&path, identity)
     }
 

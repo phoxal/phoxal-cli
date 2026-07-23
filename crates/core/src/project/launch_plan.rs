@@ -104,6 +104,19 @@ pub struct PlanRevision {
 impl PlanRevision {
     pub fn compile(number: u64, plan: LaunchPlan) -> Result<Self> {
         anyhow::ensure!(number > 0, "plan revision numbers start at one");
+        let process_count = plan
+            .site
+            .len()
+            .saturating_add(
+                plan.robots
+                    .iter()
+                    .map(|robot| robot.participants.len())
+                    .sum::<usize>(),
+            )
+            // Infrastructure router plus bounded supervisor-owned helpers.
+            .saturating_add(4);
+        crate::session::protocol::validate_snapshot_capacity(process_count)?;
+        validate_supervisor_identity_bounds(&plan)?;
         let canonical = serde_json::to_vec(&plan)?;
         let digest = hex::encode(Sha256::digest(canonical));
         Ok(Self {
@@ -156,6 +169,53 @@ impl PlanRevision {
         }
         Ok(path)
     }
+}
+
+fn validate_supervisor_identity_bounds(plan: &LaunchPlan) -> Result<()> {
+    use crate::session::protocol::{MAX_ARTIFACT_ID_BYTES, MAX_SNAPSHOT_TEXT_BYTES};
+    let bounded = |label: &str, value: &str, maximum: usize| -> Result<()> {
+        anyhow::ensure!(
+            value.len() <= maximum,
+            "{label} is {} bytes; supervisor protocol v0 limit is {maximum}",
+            value.len()
+        );
+        Ok(())
+    };
+    for site in &plan.site {
+        bounded("site process id", &site.id, MAX_ARTIFACT_ID_BYTES)?;
+        bounded(
+            "site artifact reference",
+            &site.artifact_ref,
+            MAX_ARTIFACT_ID_BYTES,
+        )?;
+    }
+    for robot in &plan.robots {
+        bounded("robot id", &robot.id, MAX_SNAPSHOT_TEXT_BYTES)?;
+        bounded("robot namespace", &robot.namespace, MAX_SNAPSHOT_TEXT_BYTES)?;
+        for participant in &robot.participants {
+            bounded(
+                "participant process id",
+                &participant.launch.participant_id,
+                MAX_ARTIFACT_ID_BYTES,
+            )?;
+            bounded(
+                "participant artifact id",
+                &participant.artifact_id,
+                MAX_ARTIFACT_ID_BYTES,
+            )?;
+            bounded(
+                "participant robot id",
+                &participant.launch.robot_id,
+                MAX_SNAPSHOT_TEXT_BYTES,
+            )?;
+            bounded(
+                "participant namespace",
+                &participant.launch.namespace,
+                MAX_SNAPSHOT_TEXT_BYTES,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
