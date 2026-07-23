@@ -37,6 +37,16 @@ fn guardian_record_token(record: &GuardianRecord) -> u64 {
     u64::from_ne_bytes(record[9..].try_into().expect("fixed guardian token"))
 }
 
+fn clear_close_on_exec(fd: RawFd) -> std::io::Result<()> {
+    // SAFETY: callers pass a live descriptor and invoke this either before
+    // spawning or from the post-fork child before exec.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub(crate) fn create_cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0_i32; 2];
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -104,16 +114,27 @@ impl GuardianClient {
         let exe = std::env::current_exe().context("resolve supervisor executable")?;
         let process = {
             let _spawn_gate = SPAWN_GATE.lock().expect("spawn gate poisoned");
-            std::process::Command::new(exe)
+            let control_fd = read_fd.as_raw_fd();
+            let acknowledgement_fd = acknowledgement_write_fd.as_raw_fd();
+            let mut command = std::process::Command::new(exe);
+            command
                 .arg("__graph-guardian")
                 .arg(read_fd.as_raw_fd().to_string())
                 .arg(acknowledgement_write_fd.as_raw_fd().to_string())
                 .process_group(0)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .context("spawn graph guardian")?
+                .stderr(Stdio::null());
+            // SAFETY: this post-fork hook calls only fcntl. The spawn gate
+            // prevents any unrelated child from inheriting these descriptors,
+            // while the parent keeps its CLOEXEC defaults.
+            unsafe {
+                command.pre_exec(move || {
+                    clear_close_on_exec(control_fd)?;
+                    clear_close_on_exec(acknowledgement_fd)
+                });
+            }
+            command.spawn().context("spawn graph guardian")?
         };
         drop(read_fd);
         drop(acknowledgement_write_fd);
@@ -625,6 +646,21 @@ mod tests {
         guardian.confirm(first)?;
         guardian.confirm(second)?;
         assert!(guardian.pending_acknowledgements.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn guardian_descriptor_can_be_made_inheritable_for_exec() -> Result<()> {
+        let (read_fd, _write_fd) = create_cloexec_pipe()?;
+        let before = unsafe { libc::fcntl(read_fd.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(before, -1);
+        assert_ne!(before & libc::FD_CLOEXEC, 0);
+
+        clear_close_on_exec(read_fd.as_raw_fd())?;
+
+        let after = unsafe { libc::fcntl(read_fd.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(after, -1);
+        assert_eq!(after & libc::FD_CLOEXEC, 0);
         Ok(())
     }
 
