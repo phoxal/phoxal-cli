@@ -18,65 +18,7 @@ concurrency:
 jobs:
   release-plz-pr:
     name: prepare release PR
-    runs-on: ubuntu-latest
-    env:
-      HAS_RELEASE_APP: ${{ secrets.RELEASE_APP_ID != '' }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Detect a prepared release awaiting publication
-        id: gate
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
-          latest_tag="$(git describe --tags --match 'v*.*.*' --abbrev=0)"
-          if ! git rev-parse -q --verify "v${version}^{commit}" >/dev/null 2>&1 \
-             && [[ "$version" != "${latest_tag#v}" ]]; then
-            echo "v${version} is prepared but not tagged; the release workflow owns it."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        if: steps.gate.outputs.skip != 'true'
-      - uses: taiki-e/install-action@v2
-        if: steps.gate.outputs.skip != 'true'
-        with:
-          tool: release-plz
-      - name: Require the release App on the canonical repository
-        if: >-
-          steps.gate.outputs.skip != 'true' &&
-          github.repository == 'phoxal/phoxal-cli' &&
-          env.HAS_RELEASE_APP != 'true'
-        run: |
-          echo "phoxal/phoxal-cli must author release PRs with the phoxal-release-bot App;" >&2
-          echo "RELEASE_APP_ID/RELEASE_APP_PRIVATE_KEY are missing or unavailable." >&2
-          exit 1
-      - name: Generate GitHub App token
-        id: app-token
-        if: steps.gate.outputs.skip != 'true' && env.HAS_RELEASE_APP == 'true'
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          permission-contents: write
-          permission-pull-requests: write
-      - name: Prepare tagged comparison baseline
-        id: baseline
-        if: steps.gate.outputs.skip != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="$(git describe --tags --match 'v*.*.*' --abbrev=0)"
-          baseline="${RUNNER_TEMP}/phoxal-cli-release-baseline"
-          git worktree add --detach "$baseline" "$tag"
-          echo "manifest=${baseline}/Cargo.toml" >> "$GITHUB_OUTPUT"
-      - name: Prepare release PR
-        if: steps.gate.outputs.skip != 'true'
-        env:
-          GIT_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
-        run: >-
-          release-plz release-pr
-          --registry-manifest-path "${{ steps.baseline.outputs.manifest }}"
+    uses: phoxal/.github/.github/workflows/rust-release-plz-pr.yml@main
+    secrets: inherit
+    with:
+      registry-manifest-from-latest-tag: true

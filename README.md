@@ -152,7 +152,8 @@ phoxal-cli self upgrade
 automation-managed release PR. Normal changes on `main` update a
 `release-plz-*` branch through the `phoxal-release-bot` GitHub App. The fixture
 crate is excluded; `phoxal-cli`, `phoxal-cli-core`, and `phoxal-cli-ui` inherit
-the one root workspace version. Because none of those packages publish to a
+the one root workspace version, and the PR title tracks that version as
+`chore(release): release vX.Y.Z`. Because none of those packages publish to a
 Cargo registry, release-plz compares them with the latest immutable `vX.Y.Z`
 tag checkout supplied as its local registry baseline.
 
