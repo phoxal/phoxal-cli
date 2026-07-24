@@ -78,6 +78,63 @@ pub fn extract_participant_metadata(binary_path: &Path) -> Result<ParticipantMet
     extract_participant_metadata_from_bytes(&data, &binary_path.display().to_string())
 }
 
+/// The [`object::Architecture`] this CLI process runs on, mapped from
+/// [`std::env::consts::ARCH`]. A layout run only launches binaries built for
+/// the host, so a selected binary's architecture is compared against this
+/// before it is ever spawned. Unknown/exotic host arches map to
+/// [`object::Architecture::Unknown`], which compares equal to nothing and so
+/// disables the arch gate rather than rejecting every binary.
+#[must_use]
+pub fn host_architecture() -> object::Architecture {
+    match std::env::consts::ARCH {
+        "x86_64" => object::Architecture::X86_64,
+        "x86" => object::Architecture::I386,
+        "aarch64" => object::Architecture::Aarch64,
+        "arm" => object::Architecture::Arm,
+        "riscv64" => object::Architecture::Riscv64,
+        "riscv32" => object::Architecture::Riscv32,
+        "powerpc64" => object::Architecture::PowerPc64,
+        "powerpc" => object::Architecture::PowerPc,
+        "s390x" => object::Architecture::S390x,
+        "loongarch64" => object::Architecture::LoongArch64,
+        "mips64" => object::Architecture::Mips64,
+        "mips" => object::Architecture::Mips,
+        _ => object::Architecture::Unknown,
+    }
+}
+
+/// Fails when `object_bytes` is an object file built for an architecture this
+/// host cannot execute, so a foreign-architecture binary (e.g. an
+/// `aarch64-unknown-linux-gnu` bundle unpacked on an `x86_64` host) is rejected
+/// at inspection with a precise diagnostic rather than crashing later with an
+/// exec-format error. Reads and parses only; never executes the binary. When
+/// the host architecture is not one this mapping knows, the gate is skipped
+/// (returns `Ok`) rather than rejecting a binary it cannot reason about.
+pub fn ensure_host_architecture(object_bytes: &[u8], describe: &str) -> Result<()> {
+    let file = object::File::parse(object_bytes)
+        .with_context(|| format!("{describe} is not a recognized object file (ELF/Mach-O/...)"))?;
+    let host = host_architecture();
+    let binary = file.architecture();
+    if host == object::Architecture::Unknown || binary == host {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{describe} is built for {binary:?}, but this host runs {host:?}; \
+         stage or build a runtime layout for the host architecture before running it"
+    )
+}
+
+/// Reads `binary_path`, verifies it is executable on the host architecture,
+/// and returns its embedded participant metadata - the two off-disk
+/// inspections a layout run performs on a selected binary, in one read.
+pub fn inspect_selected_binary(binary_path: &Path) -> Result<ParticipantMeta> {
+    let data = fs::read(binary_path)
+        .with_context(|| format!("failed to read {}", binary_path.display()))?;
+    let describe = binary_path.display().to_string();
+    ensure_host_architecture(&data, &describe)?;
+    extract_participant_metadata_from_bytes(&data, &describe)
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;
@@ -238,6 +295,39 @@ mod tests {
         let from_macho =
             extract_participant_metadata_from_bytes(&macho, "synthetic x86_64 Mach-O")?;
         assert_eq!(from_macho.contracts, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn host_arch_binary_passes_and_a_foreign_arch_binary_is_rejected() -> Result<()> {
+        // Pick a concrete arch that is NOT the host's, so the assertion holds
+        // on any runner. The paired host-arch object must pass.
+        let foreign = if host_architecture() == object::Architecture::X86_64 {
+            object::Architecture::Aarch64
+        } else {
+            object::Architecture::X86_64
+        };
+        let host_object = synthesize_object(
+            object::BinaryFormat::Elf,
+            host_architecture(),
+            b".phoxal_api_meta",
+            b"",
+            b"payload",
+        );
+        ensure_host_architecture(&host_object, "synthetic host ELF")?;
+
+        let foreign_object = synthesize_object(
+            object::BinaryFormat::Elf,
+            foreign,
+            b".phoxal_api_meta",
+            b"",
+            b"payload",
+        );
+        let error = ensure_host_architecture(&foreign_object, "bin/phoxal-service-drive")
+            .expect_err("a foreign-arch binary must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("bin/phoxal-service-drive"), "{message}");
+        assert!(message.contains("built for"), "{message}");
         Ok(())
     }
 

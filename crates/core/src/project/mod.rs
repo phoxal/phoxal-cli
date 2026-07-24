@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 
 pub mod catalog;
 pub mod launch_plan;
+pub mod layout;
 pub mod resolver;
 pub mod suite;
 pub mod tooling;
