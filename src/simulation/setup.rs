@@ -138,8 +138,7 @@ pub(crate) async fn live_simulate_setup(
     // Resolve the router config from the STAGED layout, matching `run`: staging
     // copied `router.config` into `staged_root` under its relative path (#936,
     // finding 4).
-    let router_config =
-        crate::run::resolve_router_config(&sim.ctx.resolved.robot, &staged_root)?;
+    let router_config = crate::run::resolve_router_config(&sim.ctx.resolved.robot, &staged_root)?;
     let (router, connect) =
         crate::run::start_infrastructure_router(&staged_root, &sim.ctx.project_root, router_config)
             .await?;

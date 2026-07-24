@@ -110,6 +110,30 @@ pub(crate) fn copy_component_bundle_files(source_dir: &Path, dest_dir: &Path) ->
     Ok(())
 }
 
+pub(crate) fn copy_dir_recursive_into(source: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest).with_context(|| format!("failed to create {}", dest.display()))?;
+    for entry in
+        fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let source_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive_into(&source_path, &dest_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &dest_path).with_context(|| {
+                format!(
+                    "failed to stage {} to {}",
+                    source_path.display(),
+                    dest_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,28 +173,4 @@ mod tests {
         assert!(error.contains("ddsm115"), "{error}");
         assert!(error.contains("component.yaml"), "{error}");
     }
-}
-
-pub(crate) fn copy_dir_recursive_into(source: &Path, dest: &Path) -> Result<()> {
-    fs::create_dir_all(dest).with_context(|| format!("failed to create {}", dest.display()))?;
-    for entry in
-        fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
-    {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let source_path = entry.path();
-        let dest_path = dest.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive_into(&source_path, &dest_path)?;
-        } else if file_type.is_file() {
-            fs::copy(&source_path, &dest_path).with_context(|| {
-                format!(
-                    "failed to stage {} to {}",
-                    source_path.display(),
-                    dest_path.display()
-                )
-            })?;
-        }
-    }
-    Ok(())
 }
