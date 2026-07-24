@@ -15,7 +15,10 @@ pub(crate) use router::{
     start_infrastructure_router,
 };
 mod command;
-pub(crate) use command::{AbortTasks, PreparedRun};
+pub(crate) use command::{
+    AbortTasks, PreparedRun, connect_to_detached_resident, run_resident_supervision,
+    wait_for_required_readiness,
+};
 pub use command::{DriversMode, Run, RunOptions};
 mod stages;
 pub(crate) use stages::stages_for_run;

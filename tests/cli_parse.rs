@@ -140,6 +140,35 @@ fn parses_watch_and_simulation_join_and_rejects_removed_overlays() {
 }
 
 #[test]
+fn parses_start_and_rejects_interactive_flags() {
+    let cli = Cli::try_parse_from(["phoxal", "start"]).expect("start should parse");
+    assert!(matches!(cli.command, RootCommand::Start(_)));
+
+    let cli = Cli::try_parse_from(["phoxal", "start", "/var/phoxal"])
+        .expect("start with an explicit root should parse");
+    let RootCommand::Start(start) = cli.command else {
+        panic!("expected start command");
+    };
+    assert_eq!(
+        start.target.as_deref(),
+        Some(std::path::Path::new("/var/phoxal"))
+    );
+
+    // `start` is headless: no `--watch`, no `run`-only driver/detach flags.
+    for rejected in [
+        vec!["phoxal", "start", "--watch"],
+        vec!["phoxal", "start", "-d"],
+        vec!["phoxal", "start", "--drivers", "off"],
+        vec!["phoxal", "start", "--driver", "left_drive"],
+    ] {
+        assert!(
+            Cli::try_parse_from(rejected.clone()).is_err(),
+            "start unexpectedly accepted {rejected:?}"
+        );
+    }
+}
+
+#[test]
 fn parses_bus_backed_status_commands() {
     assert!(Cli::try_parse_from(["phoxal", "status"]).is_err());
     assert!(Cli::try_parse_from(["phoxal", "status", "release", "mission"]).is_err());

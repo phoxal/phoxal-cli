@@ -17,6 +17,7 @@ pub mod run;
 pub mod self_cmd;
 pub mod service;
 pub mod simulate;
+pub mod start;
 pub mod status;
 pub mod update;
 pub mod validate;
@@ -172,6 +173,12 @@ pub enum RootCommand {
     Simulation(simulate::Simulation),
     #[command(about = "Run the resolved robot graph with the host-native supervisor.")]
     Run(run::Run),
+    #[command(
+        about = "Run a robot instance headless (no TUI); the systemd-facing verb.",
+        long_about = "Run a robot instance headless, with no terminal UI - the verb `phoxal.service` invokes.\n\n\
+                      Uses the same universal pipeline as `run`: it classifies the root, refreshes staging when it is a buildable source project, and supervises the staged runtime layout. Invoked interactively it behaves like `run -d` - it detaches the resident supervisor, returns once required participants are ready, and prints how to attach or stop. Invoked under systemd (`Type=notify`) it stays the in-process foreground resident, signalling `READY=1` after readiness and pinging the watchdog while it runs."
+    )]
+    Start(start::Start),
     #[command(about = "Attach a thin terminal client to a running project supervisor.")]
     Attach(resident::Attach),
     #[command(about = "Orderly stop a running project supervisor.")]
@@ -217,6 +224,7 @@ impl RootCommand {
             Self::Validate(command) => command.run(app).await,
             Self::Simulation(command) => command.run(app).await,
             Self::Run(command) => command.run(app).await,
+            Self::Start(command) => command.run(app).await,
             Self::Attach(command) => command.run(app).await,
             Self::Stop(command) => command.run(app).await,
             Self::Logs(command) => command.run(app).await,
@@ -309,5 +317,17 @@ mod tests {
 
         let check = Cli::try_parse_from(["phoxal", "check"]).unwrap();
         assert!(!check.command.enters_interactive_session());
+    }
+
+    /// `phoxal start` is headless: it never drives the interactive
+    /// `SessionController`/TUI, so it must never be classified as an interactive
+    /// session (that classification is exactly what mounts the TUI for `run`).
+    #[test]
+    fn start_is_headless_and_never_enters_the_interactive_session() {
+        let start = Cli::try_parse_from(["phoxal", "start"]).expect("start should parse");
+        assert!(!start.command.enters_interactive_session());
+        let start = Cli::try_parse_from(["phoxal", "start", "/var/phoxal"])
+            .expect("start with a root should parse");
+        assert!(!start.command.enters_interactive_session());
     }
 }

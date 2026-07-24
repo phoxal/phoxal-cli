@@ -36,6 +36,7 @@ pub(crate) mod progress;
 pub(crate) mod resident;
 pub mod resolver;
 pub mod run;
+pub(crate) mod sd_notify;
 pub(crate) mod session;
 pub(crate) mod shell;
 pub(crate) mod simulate_staging;

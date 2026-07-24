@@ -770,13 +770,22 @@ mod tests {
         Ok(())
     }
 
+    /// Every managed child - the router and all participants - must launch with
+    /// the systemd notify/watchdog variables removed: only the `phoxal start`
+    /// resident owns notify authority (#936). The scrub is at this single spawn
+    /// boundary, so covering it here covers every spawn site.
     #[tokio::test]
     async fn managed_child_strips_supervisor_bootstrap_env_but_preserves_display() -> Result<()> {
         let mut command = Command::new("/bin/sh");
         command
             .arg("-c")
-            .arg("test -z \"$NOTIFY_SOCKET\" && test \"$DISPLAY\" = preserved")
+            .arg(
+                "test -z \"$NOTIFY_SOCKET\" && test -z \"$WATCHDOG_USEC\" \
+                 && test -z \"$WATCHDOG_PID\" && test \"$DISPLAY\" = preserved",
+            )
             .env("NOTIFY_SOCKET", "forbidden")
+            .env("WATCHDOG_USEC", "30000000")
+            .env("WATCHDOG_PID", "1234")
             .env("DISPLAY", "preserved")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

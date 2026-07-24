@@ -159,7 +159,8 @@ impl Run {
             self.detach,
             crate::resident::has_private_bootstrap(),
         ) {
-            return self.run_resident(app, target.project, options).await;
+            // `run` never owns the systemd notify socket; that is `start`'s job.
+            return run_resident_supervision(app, target.project, options, None).await;
         }
         self.launch_client(app, target, options).await
     }
@@ -170,24 +171,7 @@ impl Run {
         target: crate::commands::resident::ProjectTarget,
         _options: RunOptions,
     ) -> Result<()> {
-        let mut launched = crate::resident::launch_detached()?;
-        let generation = match &launched.result {
-            phoxal_cli_core::session::BootstrapResult::Bound {
-                supervisor_generation,
-                ..
-            } => *supervisor_generation,
-            phoxal_cli_core::session::BootstrapResult::Rejected { error } => {
-                bail!(
-                    "{error}; use `phoxal attach` or `phoxal stop` if another run owns the project"
-                )
-            }
-        };
-        let socket = crate::resident::supervisor_socket_path(&target.project)?;
-        let client = phoxal_cli_client::SupervisorClient::connect(socket).await?;
-        anyhow::ensure!(
-            client.snapshots().current().supervisor_generation == generation,
-            "resident generation did not match private bootstrap"
-        );
+        let (mut launched, client) = connect_to_detached_resident(&target.project).await?;
         if self.detach {
             return wait_for_required_readiness(&client, &mut launched.child).await;
         }
@@ -201,126 +185,201 @@ impl Run {
         }
         result.map(|_| ())
     }
+}
 
-    async fn run_resident(
-        &self,
-        app: &AppContext,
-        project_root: PathBuf,
-        options: RunOptions,
-    ) -> Result<()> {
-        let nonce = crate::resident::private_bootstrap_nonce()?;
-        match self
-            .run_resident_inner(app, project_root, options, nonce.clone())
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                if nonce.is_some() {
-                    let _ = crate::resident::report_private_bootstrap(
-                        &phoxal_cli_core::session::BootstrapResult::Rejected {
-                            error: format!("{error:#}"),
-                        },
-                    );
-                }
-                Err(error)
-            }
-        }
-    }
-
-    async fn run_resident_inner(
-        &self,
-        app: &AppContext,
-        project_root: PathBuf,
-        options: RunOptions,
-        launch_nonce: Option<phoxal_cli_core::session::LaunchNonce>,
-    ) -> Result<()> {
-        let identity = ProjectLockIdentity::resolve(&project_root, ProjectOperation::Run);
-        let _lock = ProjectLock::acquire(identity)?;
-        let board = BoardBackend::new();
-        board.configure(project_root.display().to_string(), "resolving", "run");
-        board.begin_phase("prepare");
-        let token = tokio_util::sync::CancellationToken::new();
-        let (action_tx, action_rx) = mpsc::channel(16);
-        let socket = crate::resident::ResidentSocket::bind(
-            &project_root,
-            board.clone(),
-            action_tx.clone(),
-            token.clone(),
-        )?;
-        if let Some(launch_nonce) = launch_nonce {
-            crate::resident::report_private_bootstrap(
-                &phoxal_cli_core::session::BootstrapResult::Bound {
-                    supervisor_generation: board.supervisor_snapshot().supervisor_generation,
-                    launch_nonce,
-                },
-            )?;
-        }
-
-        let prepare_root = project_root.clone();
-        let ui = app.ui;
-        let prepare_board = board.clone();
-        let prepare_options = options.clone();
-        let prepared = match tokio::task::spawn_blocking(move || {
-            prepare_run(&prepare_root, prepare_options, &ui, prepare_board)
-        })
-        .await?
-        {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                board.set_lifecycle(phoxal_cli_core::session::ProjectLifecycle::Failed);
-                socket.close().await;
-                return Err(error);
-            }
-        };
-        board.complete_phase("prepare");
-        let (events, _events_rx) = mpsc::channel(16);
-        let setup = match live_run_setup(
-            prepared,
-            app.ui,
-            options.watch,
-            options,
-            app.output,
-            token.clone(),
-            events,
-            Some((action_tx, action_rx)),
-        )
-        .await
-        {
-            Ok(setup) => setup,
-            Err(error) => {
-                board.set_lifecycle(phoxal_cli_core::session::ProjectLifecycle::Failed);
-                socket.close().await;
-                return Err(error);
-            }
-        };
-        let LiveRunSetup {
-            router,
-            board,
-            stages,
-            supervisor_options,
-            background_tasks,
+/// Spawn a detached resident supervisor, connect a client to it, and confirm the
+/// running generation matches the one this launcher just bootstrapped. Shared by
+/// `run` (interactive and `-d`) and `phoxal start` (interactive), which then
+/// either drive the TUI or wait for required readiness and return.
+pub(crate) async fn connect_to_detached_resident(
+    project: &Path,
+) -> Result<(
+    crate::resident::LaunchedResident,
+    phoxal_cli_client::SupervisorClient,
+)> {
+    let launched = crate::resident::launch_detached()?;
+    let generation = match &launched.result {
+        phoxal_cli_core::session::BootstrapResult::Bound {
+            supervisor_generation,
             ..
-        } = setup;
-        let mut supervise =
-            tokio::spawn(router.supervise(stages, board.clone(), supervisor_options));
-        let outcome = tokio::select! {
-            result = &mut supervise => result?,
-            signal = resident_shutdown_signal() => {
-                signal?;
-                token.cancel();
-                supervise.await?
-            }
-        };
-        if outcome.is_err()
-            && board.supervisor_snapshot().lifecycle
-                != phoxal_cli_core::session::ProjectLifecycle::Failed
-        {
-            board.set_lifecycle(phoxal_cli_core::session::ProjectLifecycle::Failed);
+        } => *supervisor_generation,
+        phoxal_cli_core::session::BootstrapResult::Rejected { error } => {
+            bail!("{error}; use `phoxal attach` or `phoxal stop` if another run owns the project")
         }
-        drop(background_tasks);
-        socket.close().await;
-        outcome.map(|_| ())
+    };
+    let socket = crate::resident::supervisor_socket_path(project)?;
+    let client = phoxal_cli_client::SupervisorClient::connect(socket).await?;
+    anyhow::ensure!(
+        client.snapshots().current().supervisor_generation == generation,
+        "resident generation did not match private bootstrap"
+    );
+    Ok((launched, client))
+}
+
+/// Drive a resident supervisor in this process: acquire the project lock, bind
+/// the resident socket, prepare and supervise the graph, and return when it stops
+/// or a shutdown signal arrives. `notify` is `Some` only for `phoxal start` under
+/// systemd - the in-process foreground resident that owns `sd_notify`; `run` and
+/// the detached-child `start` always pass `None`. A private-bootstrap failure is
+/// reported back to the launcher so it never hangs waiting for the bootstrap
+/// frame (#936).
+pub(crate) async fn run_resident_supervision(
+    app: &AppContext,
+    project_root: PathBuf,
+    options: RunOptions,
+    notify: Option<crate::sd_notify::SdNotify>,
+) -> Result<()> {
+    let nonce = crate::resident::private_bootstrap_nonce()?;
+    match resident_supervision_inner(app, project_root, options, nonce.clone(), notify).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if nonce.is_some() {
+                let _ = crate::resident::report_private_bootstrap(
+                    &phoxal_cli_core::session::BootstrapResult::Rejected {
+                        error: format!("{error:#}"),
+                    },
+                );
+            }
+            Err(error)
+        }
     }
+}
+
+async fn resident_supervision_inner(
+    app: &AppContext,
+    project_root: PathBuf,
+    options: RunOptions,
+    launch_nonce: Option<phoxal_cli_core::session::LaunchNonce>,
+    notify: Option<crate::sd_notify::SdNotify>,
+) -> Result<()> {
+    let identity = ProjectLockIdentity::resolve(&project_root, ProjectOperation::Run);
+    let _lock = ProjectLock::acquire(identity)?;
+    let board = BoardBackend::new();
+    board.configure(project_root.display().to_string(), "resolving", "run");
+    board.begin_phase("prepare");
+    let token = tokio_util::sync::CancellationToken::new();
+    let (action_tx, action_rx) = mpsc::channel(16);
+    let socket = crate::resident::ResidentSocket::bind(
+        &project_root,
+        board.clone(),
+        action_tx.clone(),
+        token.clone(),
+    )?;
+    if let Some(launch_nonce) = launch_nonce {
+        crate::resident::report_private_bootstrap(
+            &phoxal_cli_core::session::BootstrapResult::Bound {
+                supervisor_generation: board.supervisor_snapshot().supervisor_generation,
+                launch_nonce,
+            },
+        )?;
+    }
+
+    let prepare_root = project_root.clone();
+    let ui = app.ui;
+    let prepare_board = board.clone();
+    let prepare_options = options.clone();
+    let prepared = match tokio::task::spawn_blocking(move || {
+        prepare_run(&prepare_root, prepare_options, &ui, prepare_board)
+    })
+    .await?
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            board.set_lifecycle(phoxal_cli_core::session::ProjectLifecycle::Failed);
+            socket.close().await;
+            return Err(error);
+        }
+    };
+    board.complete_phase("prepare");
+    let (events, _events_rx) = mpsc::channel(16);
+    let setup = match live_run_setup(
+        prepared,
+        app.ui,
+        options.watch,
+        options,
+        app.output,
+        token.clone(),
+        events,
+        Some((action_tx, action_rx)),
+    )
+    .await
+    {
+        Ok(setup) => setup,
+        Err(error) => {
+            board.set_lifecycle(phoxal_cli_core::session::ProjectLifecycle::Failed);
+            socket.close().await;
+            return Err(error);
+        }
+    };
+    let LiveRunSetup {
+        router,
+        board,
+        stages,
+        supervisor_options,
+        mut background_tasks,
+    } = setup;
+    // Under systemd the foreground resident owns readiness/watchdog signalling:
+    // once the supervised graph reaches required readiness send `READY=1`, then
+    // ping `WATCHDOG=1` on a timer. The task is a background task, so it is
+    // aborted when supervision ends alongside the others.
+    if let Some(notify) = notify {
+        background_tasks.push(spawn_readiness_notify(notify, board.clone()));
+    }
+    let mut supervise = tokio::spawn(router.supervise(stages, board.clone(), supervisor_options));
+    let outcome = tokio::select! {
+        result = &mut supervise => result?,
+        signal = resident_shutdown_signal() => {
+            signal?;
+            token.cancel();
+            supervise.await?
+        }
+    };
+    if outcome.is_err()
+        && board.supervisor_snapshot().lifecycle
+            != phoxal_cli_core::session::ProjectLifecycle::Failed
+    {
+        board.set_lifecycle(phoxal_cli_core::session::ProjectLifecycle::Failed);
+    }
+    drop(background_tasks);
+    socket.close().await;
+    outcome.map(|_| ())
+}
+
+/// Wait for the supervised graph to reach required readiness on the board, send
+/// systemd `READY=1`, then send `WATCHDOG=1` at the notify socket's cadence until
+/// the task is aborted. A graph that fails startup never signals ready - systemd
+/// times the start out and marks the unit failed, which is the correct outcome.
+fn spawn_readiness_notify(
+    notify: crate::sd_notify::SdNotify,
+    board: BoardBackend,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut snapshots = board.subscribe();
+        loop {
+            match required_readiness(&snapshots.borrow_and_update().clone()) {
+                Readiness::Ready => break,
+                Readiness::Failed(_) => return,
+                Readiness::Pending => {}
+            }
+            if snapshots.changed().await.is_err() {
+                return;
+            }
+        }
+        if notify.notify_ready().is_err() {
+            return;
+        }
+        let Some(interval) = notify.watchdog_interval() else {
+            return;
+        };
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            if notify.notify_watchdog().is_err() {
+                return;
+            }
+        }
+    })
 }
 
 /// Prepare a run without classifying "source versus compiled" beyond routing to
@@ -394,36 +453,61 @@ async fn resident_shutdown_signal() -> Result<()> {
     }
 }
 
-async fn wait_for_required_readiness(
+/// Whether the supervised graph has reached required readiness, from a board or
+/// client snapshot. Shared by the detached-launcher wait (`run -d`, interactive
+/// `start`) and the systemd readiness-notify task, so both apply the identical
+/// rule: `Ready` is ready; `Degraded` is ready unless a startup-required process
+/// has actually failed; `Failed` names the failed processes; everything else is
+/// still pending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Readiness {
+    Ready,
+    Pending,
+    Failed(Vec<String>),
+}
+
+pub(crate) fn required_readiness(
+    snapshot: &phoxal_cli_core::session::SupervisorSnapshotV0,
+) -> Readiness {
+    use phoxal_cli_core::session::{ProcessState, ProjectLifecycle, StartupRequirement};
+    match snapshot.lifecycle {
+        ProjectLifecycle::Ready => Readiness::Ready,
+        ProjectLifecycle::Degraded => {
+            let required_failed = snapshot.processes.values().any(|entry| {
+                entry.descriptor.startup_requirement == StartupRequirement::Required
+                    && entry.status.actual == ProcessState::Failed
+            });
+            if required_failed {
+                Readiness::Pending
+            } else {
+                Readiness::Ready
+            }
+        }
+        ProjectLifecycle::Failed => Readiness::Failed(
+            snapshot
+                .processes
+                .iter()
+                .filter(|(_, entry)| entry.status.actual == ProcessState::Failed)
+                .map(|(key, _)| key.to_string())
+                .collect(),
+        ),
+        _ => Readiness::Pending,
+    }
+}
+
+pub(crate) async fn wait_for_required_readiness(
     client: &phoxal_cli_client::SupervisorClient,
     child: &mut std::process::Child,
 ) -> Result<()> {
-    use phoxal_cli_core::session::{ProcessState, ProjectLifecycle, StartupRequirement};
     let mut snapshots = client.snapshots().subscribe();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5 * 60);
     loop {
-        let snapshot = snapshots.borrow_and_update().clone();
-        match snapshot.lifecycle {
-            ProjectLifecycle::Ready => return Ok(()),
-            ProjectLifecycle::Degraded => {
-                let required_failed = snapshot.processes.values().any(|entry| {
-                    entry.descriptor.startup_requirement == StartupRequirement::Required
-                        && entry.status.actual == ProcessState::Failed
-                });
-                if !required_failed {
-                    return Ok(());
-                }
+        match required_readiness(&snapshots.borrow_and_update().clone()) {
+            Readiness::Ready => return Ok(()),
+            Readiness::Failed(failures) => {
+                bail!("resident startup failed: {}", failures.join(", "))
             }
-            ProjectLifecycle::Failed => {
-                let failures = snapshot
-                    .processes
-                    .iter()
-                    .filter(|(_, entry)| entry.status.actual == ProcessState::Failed)
-                    .map(|(key, _)| key.to_string())
-                    .collect::<Vec<_>>();
-                bail!("resident startup failed: {}", failures.join(", "));
-            }
-            _ => {}
+            Readiness::Pending => {}
         }
         if let Some(status) = child.try_wait()? {
             bail!("resident exited before readiness with {status}");
@@ -555,6 +639,71 @@ mod resident_role_tests {
         assert!(should_run_resident_in_process(false, false, false));
         assert!(should_run_resident_in_process(false, true, true));
         assert!(!should_run_resident_in_process(true, true, false));
+    }
+}
+
+/// The readiness decision `run -d`, interactive `start`, and the systemd
+/// readiness-notify task all share (#936): it is what decides when to return
+/// after a detached launch and when the foreground resident sends `READY=1`.
+#[cfg(test)]
+mod readiness_tests {
+    use super::{Readiness, required_readiness};
+    use crate::supervisor::{BoardBackend, ParticipantState};
+    use phoxal_cli_core::session::{
+        ParticipantKind, ParticipantStatus, ProcessKey, ProjectLifecycle, StartupRequirement,
+    };
+
+    #[test]
+    fn readiness_tracks_lifecycle_and_required_failures() {
+        let board = BoardBackend::new();
+        board.configure("/tmp/project".to_string(), "v0.test", "run");
+        // A freshly configured board is Starting - still pending.
+        assert_eq!(
+            required_readiness(&board.supervisor_snapshot()),
+            Readiness::Pending
+        );
+
+        // Ready is ready.
+        board.set_lifecycle(ProjectLifecycle::Ready);
+        assert_eq!(
+            required_readiness(&board.supervisor_snapshot()),
+            Readiness::Ready
+        );
+
+        // Degraded with no required failure is ready enough to signal `READY=1`.
+        board.set_lifecycle(ProjectLifecycle::Degraded);
+        assert_eq!(
+            required_readiness(&board.supervisor_snapshot()),
+            Readiness::Ready
+        );
+
+        // A startup-required process that failed keeps a Degraded graph pending,
+        // so readiness is never signalled on a broken required participant.
+        let key = ProcessKey::project("drive");
+        board.upsert_process(
+            key.clone(),
+            ParticipantStatus::new(
+                "drive",
+                ParticipantKind::Service,
+                ParticipantState::Starting,
+            ),
+            StartupRequirement::Required,
+        );
+        board.set_state(&key, ParticipantState::Failed, Some("boom".to_string()));
+        board.set_lifecycle(ProjectLifecycle::Degraded);
+        assert_eq!(
+            required_readiness(&board.supervisor_snapshot()),
+            Readiness::Pending
+        );
+
+        // A failed lifecycle names the failed processes.
+        assert!(matches!(
+            required_readiness(&{
+                board.set_lifecycle(ProjectLifecycle::Failed);
+                board.supervisor_snapshot()
+            }),
+            Readiness::Failed(failures) if failures.iter().any(|failure| failure.contains("drive"))
+        ));
     }
 }
 
