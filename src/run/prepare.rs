@@ -148,6 +148,14 @@ pub(crate) fn prepare_run_on_board(
     let bin_names = crate::stager::canonical_bin_names(&plan);
     crate::stager::link_runtime_binaries(&staged_root, &mut specs, &bin_names)
         .context("failed to link planned binaries into the staged bin store")?;
+    // Complete `bin/` into the loader's full required store: every dormant
+    // catalog official plus the infrastructure router, none of which appears as
+    // an active plan participant. `bin/` is then the true complete lookup store
+    // an extracted bundle runs from with no source (#936/#945).
+    crate::stager::stage_complete_official_store(&staged_root, &resolved, |crate_dir, name| {
+        crate::run::build_source_binary(crate_dir, name, ui)
+    })
+    .context("failed to complete the staged bin store with the full official runtime set")?;
 
     let robot_targets = super::RobotFeedTarget::from_plan(&plan);
     let project_root = project_root.to_path_buf();

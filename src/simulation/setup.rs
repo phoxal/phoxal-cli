@@ -129,9 +129,15 @@ pub(crate) async fn live_simulate_setup(
     let bin_names = crate::stager::canonical_bin_names(&sim.plan);
     crate::stager::link_runtime_binaries(&staged_root, &mut specs, &bin_names)
         .context("failed to link planned binaries into the staged simulation bin store")?;
+    // The router launches from the staged `bin/` entry like every other
+    // official; stage it there before starting it (the remaining simulation
+    // runtime set is staged through the simulation-managed route, #931).
+    crate::stager::stage_router_binary(&staged_root, &sim.ctx.resolved, |crate_dir, name| {
+        crate::run::build_source_binary(crate_dir, name, &ui)
+    })
+    .context("failed to stage the infrastructure router into the simulation bin store")?;
     let (router, connect) =
-        crate::run::start_infrastructure_router(&sim.ctx.resolved, &sim.ctx.project_root, &ui)
-            .await?;
+        crate::run::start_infrastructure_router(&sim.ctx.resolved, &sim.ctx.project_root).await?;
     board.set_router_status(format!("ready:{connect}"));
     board.set_state(
         phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),

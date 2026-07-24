@@ -1,6 +1,6 @@
 //! Router responsibilities for run.
 
-use super::{ROUTER_READY_TIMEOUT, locate_tool_binary};
+use super::ROUTER_READY_TIMEOUT;
 use crate::supervisor::BoardBackend;
 use crate::supervisor::ManagedChild;
 use crate::supervisor::ParticipantSpec;
@@ -13,7 +13,6 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use phoxal::participant::launch::env;
-use phoxal_cli_core::project::launch_plan::INFRASTRUCTURE_ROUTER;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::tooling::resolve_project_path;
@@ -267,10 +266,18 @@ fn recovery_rows(
 pub(crate) async fn start_infrastructure_router(
     resolved: &ResolvedRobot,
     project_root: &Path,
-    ui: &crate::Ui,
 ) -> Result<(InfrastructureRouter, String)> {
-    let binary = locate_tool_binary(resolved, INFRASTRUCTURE_ROUTER, ui)?
-        .context("phoxal-infrastructure-router is not staged; run `phoxal update`")?;
+    // The router is resolved through the staged layout's flat `bin/` store,
+    // exactly like every other official runtime - staging links it there from
+    // the vendored store (or a source override) via
+    // `stager::stage_complete_official_store` / `stage_router_binary`.
+    let staged_root = crate::stager::layout_path(project_root, resolved);
+    let binary = crate::stager::staged_router_binary(&staged_root);
+    anyhow::ensure!(
+        binary.is_file(),
+        "phoxal-infrastructure-router is not staged at {}; run `phoxal update`",
+        binary.display()
+    );
     let config = resolved
         .robot
         .router

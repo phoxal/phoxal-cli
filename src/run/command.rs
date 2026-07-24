@@ -383,8 +383,7 @@ pub(crate) async fn live_run_setup(
     )>,
 ) -> Result<LiveRunSetup> {
     let (router, connect) =
-        start_infrastructure_router(&prepared.ctx.resolved, &prepared.ctx.project_root, &ui)
-            .await?;
+        start_infrastructure_router(&prepared.ctx.resolved, &prepared.ctx.project_root).await?;
     apply_session_connect(&mut prepared.plan, &mut prepared.specs, &connect);
     let revision =
         phoxal_cli_core::project::launch_plan::PlanRevision::compile(1, prepared.plan.clone())?;
