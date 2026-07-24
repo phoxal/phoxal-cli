@@ -19,6 +19,14 @@ pub struct Update {
         help = "Plan and report the update without downloading or changing active versions."
     )]
     pub dry_run: bool,
+    #[arg(
+        long = "target",
+        value_name = "TRIPLE",
+        help = "Additionally vendor the official per-target blobs for this Rust target triple, so \
+                `phoxal build --target <TRIPLE>` can stage offline. Repeatable. Already-vendored \
+                triples are always kept fresh without this flag."
+    )]
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -56,12 +64,14 @@ impl Update {
         )?;
         let suite_source = app.suite_source.clone();
         let dry_run = self.dry_run;
+        let targets = self.targets.clone();
         let ui = app.ui;
         let interactive = ui.interactive();
-        let summary =
-            tokio::task::spawn_blocking(move || update(&project_root, suite_source, dry_run, &ui))
-                .await
-                .context("update worker failed")??;
+        let summary = tokio::task::spawn_blocking(move || {
+            update(&project_root, suite_source, dry_run, &targets, &ui)
+        })
+        .await
+        .context("update worker failed")??;
         print_human(&summary, interactive)
     }
 }
@@ -70,6 +80,7 @@ fn update(
     project_start: &Path,
     suite_source: Option<String>,
     dry_run: bool,
+    targets: &[String],
     ui: &crate::Ui,
 ) -> Result<UpdateSummary> {
     let robot_path = discover_robot_yaml(project_start)?;
@@ -98,16 +109,19 @@ fn update(
         &robot,
         suite_source,
         dry_run,
+        targets,
         ui,
         &locked.version,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_locked_train(
     project_root: &Path,
     robot: &phoxal::model::robot::RobotV0,
     suite_source: Option<String>,
     dry_run: bool,
+    targets: &[String],
     ui: &crate::Ui,
     locked_version: &str,
 ) -> Result<UpdateSummary> {
@@ -131,6 +145,7 @@ fn update_locked_train(
     let destination = project_root.join(".phoxal/artifacts");
     let mut descriptors = crate::native_artifacts::descriptors(&resolved)?;
     include_existing_target_scopes(&mut descriptors, &suite)?;
+    include_requested_target_scopes(&mut descriptors, &suite, targets)?;
     let updates = descriptors
         .iter()
         .map(|descriptor| {
@@ -201,6 +216,77 @@ fn update_locked_train(
         prune_versions,
         pins_skipped,
     })
+}
+
+/// Vendor the official per-target blobs for each explicitly requested triple
+/// (`update --target <TRIPLE>`), so a later `phoxal build --target <TRIPLE>`
+/// stages entirely from the vendored store with no network (#936). A triple the
+/// suite has no blob for fails naming the package, so a typo'd or unsupported
+/// target is caught here rather than at build time.
+fn include_requested_target_scopes(
+    descriptors: &mut Vec<phoxal_cli_core::artifacts::NativeArtifactDescriptor>,
+    suite: &phoxal_cli_core::project::suite::Suite,
+    targets: &[String],
+) -> Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let current = descriptors.clone();
+    for descriptor in current {
+        if descriptor.target.is_none() {
+            continue;
+        }
+        // Native runtime layouts exclude simulator binaries, and the Webots
+        // simulators only exist for hosts Webots itself supports - a requested
+        // device target never needs them.
+        if descriptor.kind == phoxal_cli_core::project::suite::ArtifactKind::Simulator {
+            continue;
+        }
+        let artifact = suite
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == descriptor.package_id)
+            .with_context(|| {
+                format!(
+                    "resolved {} is absent from framework train {} suite",
+                    descriptor.package_id, suite.version
+                )
+            })?;
+        for target in targets {
+            if descriptors.iter().any(|existing| {
+                existing.package_id == descriptor.package_id
+                    && existing.target.as_deref() == Some(target.as_str())
+            }) {
+                continue;
+            }
+            let blob = artifact.targets.get(target.as_str()).with_context(|| {
+                format!(
+                    "framework train {} has no {} blob for requested target {target}; \
+                     supported targets: {}",
+                    suite.version,
+                    descriptor.package_id,
+                    artifact
+                        .targets
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+            let mut requested = descriptor.clone();
+            requested.target = Some(target.clone());
+            requested.url = blob.url.clone();
+            requested.sha256 = blob.sha256.clone();
+            requested.size = blob.size;
+            descriptors.push(requested);
+        }
+    }
+    descriptors.sort_by(|left, right| {
+        (&left.package_id, &left.target).cmp(&(&right.package_id, &right.target))
+    });
+    descriptors
+        .dedup_by(|left, right| left.package_id == right.package_id && left.target == right.target);
+    Ok(())
 }
 
 fn include_existing_target_scopes(
@@ -477,6 +563,7 @@ robot:
             &robot,
             Some(suite_path.display().to_string()),
             true,
+            &[],
             &crate::Ui::from_env(),
             "0.36.0",
         )?;
@@ -486,6 +573,73 @@ robot:
             !root.join(".phoxal").exists(),
             "dry-run must not create the project state directory"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn update_vendors_requested_target_scopes_and_skips_simulators() -> Result<()> {
+        let host = "aarch64-apple-darwin";
+        let device = "aarch64-unknown-linux-gnu";
+
+        let mut service = fixture_service_entry_for_tests("drive", "1.2.3", host, true, Vec::new());
+        service.artifact.targets.insert(
+            device.to_string(),
+            fixture_blob_for_tests("https://example.invalid/device", &"b".repeat(64), 42),
+        );
+        let suite = fixture_suite_for_tests(vec![service]);
+        let mut descriptors = vec![
+            NativeArtifactDescriptor {
+                package_id: "phoxal/service-drive".to_string(),
+                kind: phoxal_cli_core::project::suite::ArtifactKind::Service,
+                name: "drive".to_string(),
+                version: "1.2.3".to_string(),
+                url: "https://example.invalid/host".to_string(),
+                sha256: "a".repeat(64),
+                size: 21,
+                binary_name: "phoxal-service-drive".to_string(),
+                target: Some(host.to_string()),
+            },
+            // A simulator artifact must be skipped: native layouts exclude
+            // simulators and Webots does not exist for device targets.
+            NativeArtifactDescriptor {
+                package_id: "phoxal/simulator-webots-controller".to_string(),
+                kind: phoxal_cli_core::project::suite::ArtifactKind::Simulator,
+                name: "webots-controller".to_string(),
+                version: "1.2.3".to_string(),
+                url: "https://example.invalid/sim".to_string(),
+                sha256: "c".repeat(64),
+                size: 7,
+                binary_name: "phoxal-simulator-webots-controller".to_string(),
+                target: Some(host.to_string()),
+            },
+        ];
+
+        include_requested_target_scopes(&mut descriptors, &suite, &[device.to_string()])?;
+
+        assert!(
+            descriptors.iter().any(|descriptor| {
+                descriptor.package_id == "phoxal/service-drive"
+                    && descriptor.target.as_deref() == Some(device)
+                    && descriptor.url == "https://example.invalid/device"
+            }),
+            "the requested device blob must be vendored"
+        );
+        assert!(
+            !descriptors.iter().any(|descriptor| {
+                descriptor.package_id == "phoxal/simulator-webots-controller"
+                    && descriptor.target.as_deref() == Some(device)
+            }),
+            "simulator artifacts are never vendored for a requested device target"
+        );
+
+        // An unsupported triple fails naming the package and supported targets.
+        let error = include_requested_target_scopes(
+            &mut descriptors,
+            &suite,
+            &["riscv64gc-unknown-linux-gnu".to_string()],
+        )
+        .expect_err("an unsupported requested target must fail");
+        assert!(format!("{error:#}").contains("phoxal/service-drive"));
         Ok(())
     }
 
