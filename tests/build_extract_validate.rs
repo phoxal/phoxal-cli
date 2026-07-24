@@ -63,7 +63,11 @@ fn build_api_fixture() -> Result<PathBuf> {
         .join("target")
         .join("debug")
         .join(format!("{package}{}", std::env::consts::EXE_SUFFIX));
-    assert!(binary.is_file(), "expected built fixture at {}", binary.display());
+    assert!(
+        binary.is_file(),
+        "expected built fixture at {}",
+        binary.display()
+    );
     Ok(binary)
 }
 

@@ -296,7 +296,12 @@ mod tests {
         assert_eq!(platform_for_triple("riscv64gc-unknown-linux-gnu"), None);
         let error = require_platform_for_triple("riscv64gc-unknown-linux-gnu")
             .expect_err("an unmappable arch must be rejected for the default image");
-        assert!(error.to_string().contains("cannot select a container platform"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot select a container platform"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -368,7 +373,10 @@ mod tests {
         assert!(!joined.contains("artifacts"), "{joined}");
         // The snapshot mount and cargo build survive.
         assert!(joined.contains(CONTAINER_WORKDIR), "{joined}");
-        assert!(joined.contains("cargo build --workspace --locked"), "{joined}");
+        assert!(
+            joined.contains("cargo build --workspace --locked"),
+            "{joined}"
+        );
     }
 
     #[test]
@@ -378,8 +386,14 @@ mod tests {
         spec.platform = None;
         let joined = spec.invocation().args.join(" ");
         assert!(!joined.contains("--platform"), "{joined}");
-        assert!(joined.contains("my-registry/exotic-toolchain:latest"), "{joined}");
-        assert!(joined.contains("cargo build --workspace --locked"), "{joined}");
+        assert!(
+            joined.contains("my-registry/exotic-toolchain:latest"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("cargo build --workspace --locked"),
+            "{joined}"
+        );
     }
 
     /// A fake runner proves the orchestration seam: command construction is

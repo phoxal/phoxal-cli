@@ -316,9 +316,7 @@ fn ensure_fresh_destination(dest: &Path) -> Result<()> {
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir_all(dest)
             .with_context(|| format!("failed to create extraction directory {}", dest.display())),
-        Err(error) => {
-            Err(error).with_context(|| format!("failed to inspect {}", dest.display()))
-        }
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", dest.display())),
     }
 }
 
@@ -342,8 +340,10 @@ fn create_dirs_no_symlink(dest: &Path, relative: &Path) -> Result<PathBuf> {
                             );
                         }
                     }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&current)
-                        .with_context(|| format!("failed to create {}", current.display()))?,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        fs::create_dir(&current)
+                            .with_context(|| format!("failed to create {}", current.display()))?
+                    }
                     Err(error) => {
                         return Err(error)
                             .with_context(|| format!("failed to inspect {}", current.display()));

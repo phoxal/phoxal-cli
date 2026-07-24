@@ -197,11 +197,11 @@ impl Build {
         self.stage_validate_archive(app, project_root, project_root, target, &staging)
     }
 
-    /// Build inside a toolchain image, then reuse the identical host-side staging
-    /// + validation + archive with the container-built binaries. The Build lock
-    /// is already held by [`Self::run`], so the snapshot, the compile, and the
-    /// staging that reads that same frozen snapshot all happen under one lock
-    /// (#936, finding B).
+    /// Build inside a toolchain image, then reuse the identical host-side
+    /// staging, validation, and archive with the container-built binaries. The
+    /// Build lock is already held by [`Self::run`], so the snapshot, the compile,
+    /// and the staging that reads that same frozen snapshot all happen under one
+    /// lock (#936, finding B).
     fn build_container(
         &self,
         app: &AppContext,
@@ -260,7 +260,10 @@ impl Build {
         // its own toolchain, so we only pass `--platform` when the arch is one we
         // can map.
         let (image, platform) = match &self.builder_image {
-            Some(custom) => (custom.clone(), platform_for_triple(target).map(str::to_string)),
+            Some(custom) => (
+                custom.clone(),
+                platform_for_triple(target).map(str::to_string),
+            ),
             None => (
                 default_builder_image().to_string(),
                 Some(require_platform_for_triple(target)?.to_string()),
@@ -400,9 +403,7 @@ fn classify_snapshot_entry(source: &Path) -> Result<SnapshotEntry> {
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SnapshotEntry::Missing),
-        Err(error) => {
-            Err(error).with_context(|| format!("failed to inspect {}", source.display()))
-        }
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", source.display())),
     }
 }
 
@@ -463,9 +464,8 @@ fn snapshot_source(project_root: &Path, dest: &Path) -> Result<()> {
                 }
                 let link = std::fs::read_link(&source)
                     .with_context(|| format!("failed to read symlink {}", source.display()))?;
-                symlink_verbatim(&link, &target).with_context(|| {
-                    format!("failed to snapshot symlink {}", source.display())
-                })?;
+                symlink_verbatim(&link, &target)
+                    .with_context(|| format!("failed to snapshot symlink {}", source.display()))?;
             }
             SnapshotEntry::File => {
                 if let Some(parent) = target.parent() {
@@ -691,8 +691,8 @@ mod tests {
         assert!(add.success());
 
         let dest = tempfile::tempdir()?;
-        let error = snapshot_source(project.path(), dest.path())
-            .expect_err("a submodule must be rejected");
+        let error =
+            snapshot_source(project.path(), dest.path()).expect_err("a submodule must be rejected");
         assert!(error.to_string().contains("submodule"), "{error}");
         Ok(())
     }
@@ -758,8 +758,12 @@ mod tests {
         let runner = LockAssertingRunner {
             project: project.path().to_path_buf(),
         };
-        let snapshot =
-            build.compile_in_container(project.path(), "aarch64-unknown-linux-gnu", &runner, &ui)?;
+        let snapshot = build.compile_in_container(
+            project.path(),
+            "aarch64-unknown-linux-gnu",
+            &runner,
+            &ui,
+        )?;
         // The compile returns the frozen snapshot, ready for staging.
         assert!(snapshot.path().join("robot.yaml").is_file());
         assert!(snapshot.path().join("Cargo.lock").is_file());
