@@ -846,6 +846,73 @@ robot:
     }
 
     #[test]
+    fn an_excluded_driver_is_not_resolved_even_when_its_artifact_is_missing() -> anyhow::Result<()>
+    {
+        // Round-2 finding 1 (#936): the driver policy gates RESOLUTION, not
+        // just staging. `test_suite()` carries ddsm115 assets but NO driver
+        // artifact, so resolving the driver would fail - with the driver
+        // excluded (`--drivers off`), resolution must succeed and leave the
+        // driver slot empty while `has_driver` keeps the declared intent.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
+        let robot = Robot::parse_from_string(
+            r#"schema: robot/v0
+robot:
+  id: testbot
+  namespace: test
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: differential
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+  components:
+    left_drive:
+      component: ddsm115
+      mount_link: left_wheel_mount
+      driver:
+        connection: { type: can, bus: 0, node_id: 1 }
+"#,
+        )?;
+        let suite = test_suite();
+        let project = locked_project_root()?;
+
+        // Sanity: with the driver selected, the missing driver artifact fails.
+        resolve(
+            &robot,
+            project.path(),
+            Some(&suite),
+            ResolveOptions {
+                ..ResolveOptions::default()
+            },
+        )
+        .expect_err("a selected driver with no suite artifact must fail resolution");
+
+        // Excluded: resolution succeeds and never touches the driver artifact.
+        let resolved = resolve(
+            &robot,
+            project.path(),
+            Some(&suite),
+            ResolveOptions {
+                drivers: phoxal_cli_core::project::layout::DriverSelection::None,
+                ..ResolveOptions::default()
+            },
+        )?;
+        let left = resolved
+            .components
+            .iter()
+            .find(|component| component.instance == "left_drive")
+            .expect("component resolved");
+        assert!(left.has_driver, "the declared driver intent is kept");
+        assert!(left.driver.is_none(), "the excluded driver is not resolved");
+        Ok(())
+    }
+
+    #[test]
     fn driverless_component_absent_from_workspace_and_suite_fails_precisely() -> anyhow::Result<()>
     {
         // Since #945, the real driverless component (robot-v1's

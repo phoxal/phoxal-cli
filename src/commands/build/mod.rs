@@ -779,6 +779,58 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_rejects_a_symlink_escaping_the_project() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        git_init(project.path());
+        let outside = tempfile::tempdir()?;
+        std::fs::write(outside.path().join("secret.urdf"), b"outside")?;
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.urdf"),
+            project.path().join("model.urdf"),
+        )?;
+
+        let dest = tempfile::tempdir()?;
+        let error = snapshot_source(project.path(), dest.path())
+            .expect_err("an absolute external symlink must be rejected");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("model.urdf") && message.contains("escapes"),
+            "{message}"
+        );
+
+        // A lexical `..` escape is rejected the same way.
+        std::fs::remove_file(project.path().join("model.urdf"))?;
+        std::os::unix::fs::symlink("../elsewhere.txt", project.path().join("up.txt"))?;
+        let dest = tempfile::tempdir()?;
+        let error = snapshot_source(project.path(), dest.path())
+            .expect_err("a ..-escaping symlink must be rejected");
+        assert!(format!("{error:#}").contains("up.txt"));
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_link_containment_is_lexical_and_depth_aware() -> Result<()> {
+        let root = Path::new("/proj");
+        // Internal relative links are fine, including into a sibling directory.
+        ensure_snapshot_link_contained(
+            root,
+            Path::new("worlds/a.wbt"),
+            Path::new("../meshes/a.stl"),
+        )?;
+        // Climbing past the project root is rejected.
+        assert!(
+            ensure_snapshot_link_contained(root, Path::new("a.txt"), Path::new("../out.txt"))
+                .is_err()
+        );
+        // Absolute targets are always rejected.
+        assert!(
+            ensure_snapshot_link_contained(root, Path::new("a.txt"), Path::new("/etc/hosts"))
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn snapshot_rejects_a_submodule() -> Result<()> {
         // A nested git repo added as a gitlink is a submodule: `git ls-files`
         // lists it as a single path materializing as a directory on disk.

@@ -308,3 +308,43 @@ pub(crate) fn usb_missing(vendor_id: Option<u16>, product_id: Option<u16>) -> Op
     }
     Some(format!("usb {wanted_vendor}:{wanted_product}"))
 }
+
+#[cfg(test)]
+mod prebuilt_tests {
+    use super::*;
+
+    /// The container always compiles with an explicit `--target`, so the
+    /// prebuilt lookup must read `target/<triple>/debug` even when the triple
+    /// equals the CLI host triple - a Linux host container-building its own
+    /// arch previously collapsed to `target/debug` and missed the binary
+    /// (#936, round-2 finding 2).
+    #[test]
+    fn prebuilt_lookup_uses_the_explicit_target_dir_for_the_host_triple() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let crate_dir = dir.path().join("svc");
+        std::fs::create_dir_all(&crate_dir)?;
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = \"svc\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )?;
+        let host = crate::resolver::host_target_triple();
+        let target_dir = dir.path().join("target");
+        let debug = target_dir.join(&host).join("debug");
+        std::fs::create_dir_all(&debug)?;
+        std::fs::write(debug.join(binary_name_with_suffix("svc")), b"bin")?;
+
+        let found = locate_prebuilt_binary(&crate_dir, "svc", &target_dir, Some(&host))?;
+        assert_eq!(found, debug.join(binary_name_with_suffix("svc")));
+
+        // The implicit `target/debug` location must NOT satisfy the lookup.
+        std::fs::remove_file(debug.join(binary_name_with_suffix("svc")))?;
+        let plain = target_dir.join("debug");
+        std::fs::create_dir_all(&plain)?;
+        std::fs::write(plain.join(binary_name_with_suffix("svc")), b"bin")?;
+        assert!(
+            locate_prebuilt_binary(&crate_dir, "svc", &target_dir, Some(&host)).is_err(),
+            "the prebuilt lookup must never collapse to the implicit target/debug"
+        );
+        Ok(())
+    }
+}
