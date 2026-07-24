@@ -143,22 +143,22 @@ mod tests {
     /// A privileged tool defaults to `Api = ()`, so it never derives
     /// `#[derive(phoxal::Api)]` and its binary carries no metadata section at
     /// all - a valid, expected shape (zero contracts and a no-config schema), not
-    /// an extraction error. Proven end-to-end against `phoxal-cli`'s own compiled
-    /// binary, which has no participant attribute.
+    /// an extraction error. Proven end-to-end against the CLI's own compiled
+    /// `phoxal` binary, which has no participant attribute.
     #[test]
     fn a_real_binary_with_no_section_parses_as_zero_contracts() -> Result<()> {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let status = Command::new("cargo")
-            .args(["build", "--quiet", "--bin", "phoxal-cli"])
+            .args(["build", "--quiet", "--bin", "phoxal"])
             .current_dir(&manifest_dir)
             .status()
-            .context("failed to spawn cargo build for phoxal-cli")?;
-        assert!(status.success(), "cargo build --bin phoxal-cli failed");
+            .context("failed to spawn cargo build for the phoxal binary")?;
+        assert!(status.success(), "cargo build --bin phoxal failed");
 
         let binary_path = manifest_dir
             .join("target")
             .join("debug")
-            .join(format!("phoxal-cli{}", std::env::consts::EXE_SUFFIX));
+            .join(format!("phoxal{}", std::env::consts::EXE_SUFFIX));
         assert!(
             binary_path.is_file(),
             "expected built binary at {}",

@@ -1,8 +1,8 @@
 //! Self-upgrade support.
 //!
 //! Asset naming contract: each release publishes an archive named
-//! `phoxal-cli-<version-no-v>-<target>.tar.gz` containing a binary named
-//! `phoxal-cli-<target>`. The archive has a sibling checksum asset named
+//! `phoxal-<version-no-v>-<target>.tar.gz` containing a binary named
+//! `phoxal-<target>`. The archive has a sibling checksum asset named
 //! `<archive>.sha256` whose content is `<hex>  <archive-filename>`.
 
 use std::fs;
@@ -410,8 +410,8 @@ struct ReleaseAsset {
 
 impl ReleaseAsset {
     fn new(version: &Version, target: &str) -> Self {
-        let archive_name = format!("phoxal-cli-{version}-{target}.tar.gz");
-        let binary_name = format!("phoxal-cli-{target}");
+        let archive_name = format!("phoxal-{version}-{target}.tar.gz");
+        let binary_name = format!("phoxal-{target}");
         let checksum_name = format!("{archive_name}.sha256");
         let archive_url = format!("{DOWNLOAD_BASE_URL}/v{version}/{archive_name}");
         let checksum_url = format!("{DOWNLOAD_BASE_URL}/v{version}/{checksum_name}");

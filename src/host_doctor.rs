@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::AppContext;
 use crate::shell;
 
-const DRY_RUN_FALLBACK: &str = "phoxal-cli simulation run <world> --dry-run";
+const DRY_RUN_FALLBACK: &str = "phoxal simulation run <world> --dry-run";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeStatus {
@@ -120,7 +120,7 @@ pub fn webots_home_path() -> Result<PathBuf, HostError> {
 }
 
 pub fn probe_version() -> ProbeStatus {
-    ProbeStatus::Ok(format!("phoxal-cli {}", env!("CARGO_PKG_VERSION")))
+    ProbeStatus::Ok(format!("phoxal {}", env!("CARGO_PKG_VERSION")))
 }
 
 pub fn probe_rust_tools() -> ProbeStatus {

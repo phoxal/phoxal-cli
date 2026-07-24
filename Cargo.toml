@@ -83,6 +83,12 @@ documentation.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+# The shipped executable is `phoxal`; the package stays `phoxal-cli` because the
+# crate name `phoxal` is taken by the framework on crates.io.
+[[bin]]
+name = "phoxal"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }

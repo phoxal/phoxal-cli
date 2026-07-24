@@ -107,7 +107,7 @@ pub fn version_summary() -> VersionSummary {
 
 impl VersionArgs {
     pub fn run(&self) -> Result<()> {
-        println!("phoxal-cli {}", long_version());
+        println!("phoxal {}", long_version());
         println!(
             "default suite URL: the immutable suite attached to the Cargo.lock-selected framework release"
         );
@@ -121,11 +121,11 @@ impl VersionArgs {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "phoxal-cli",
+    name = "phoxal",
     version = long_version(),
     about = "Build, check, simulate, and deploy Phoxal robot projects.",
     long_about = "Build, check, simulate, and deploy Phoxal robot projects.\n\n\
-                  phoxal-cli reads robot.yaml, resolves the graph against a verified generated artifact suite when official native artifacts are needed, and drives the develop/simulate/deploy loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `check`, `simulate`, and `deploy --dry-run --target aarch64`."
+                  phoxal reads robot.yaml, resolves the graph against a verified generated artifact suite when official native artifacts are needed, and drives the develop/simulate/deploy loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `check`, `simulate`, and `deploy --dry-run --target aarch64`."
 )]
 pub struct Cli {
     #[arg(
@@ -295,23 +295,23 @@ mod tests {
     /// terminal. Dry-run and join commands never build a session controller.
     #[test]
     fn enters_interactive_session_covers_run_and_live_simulate_only() {
-        let run = Cli::try_parse_from(["phoxal-cli", "run"]).unwrap();
+        let run = Cli::try_parse_from(["phoxal", "run"]).unwrap();
         assert!(run.command.enters_interactive_session());
 
-        let simulate_live = Cli::try_parse_from(["phoxal-cli", "simulation", "run", "default"])
+        let simulate_live = Cli::try_parse_from(["phoxal", "simulation", "run", "default"])
             .expect("simulation run should parse");
         assert!(simulate_live.command.enters_interactive_session());
 
         let simulate_dry_run =
-            Cli::try_parse_from(["phoxal-cli", "simulation", "run", "default", "--dry-run"])
+            Cli::try_parse_from(["phoxal", "simulation", "run", "default", "--dry-run"])
                 .expect("simulation run --dry-run should parse");
         assert!(!simulate_dry_run.command.enters_interactive_session());
 
-        let simulate_join = Cli::try_parse_from(["phoxal-cli", "simulation", "join"])
+        let simulate_join = Cli::try_parse_from(["phoxal", "simulation", "join"])
             .expect("simulation join should parse");
         assert!(!simulate_join.command.enters_interactive_session());
 
-        let check = Cli::try_parse_from(["phoxal-cli", "check"]).unwrap();
+        let check = Cli::try_parse_from(["phoxal", "check"]).unwrap();
         assert!(!check.command.enters_interactive_session());
     }
 }

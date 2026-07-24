@@ -1,7 +1,7 @@
 use std::process::Command;
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_phoxal-cli"))
+    Command::new(env!("CARGO_BIN_EXE_phoxal"))
 }
 
 #[test]
@@ -34,7 +34,7 @@ fn finite_commands_remain_pipe_friendly() {
     assert!(
         String::from_utf8(output.stdout)
             .unwrap()
-            .starts_with("phoxal-cli ")
+            .starts_with("phoxal ")
     );
 
     let missing = tempfile::tempdir().expect("tempdir").path().join("missing");
