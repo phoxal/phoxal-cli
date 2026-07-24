@@ -25,14 +25,18 @@
 //! present - the universal staged-root loader - is the next slice; `run` still
 //! requires a source project root today.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
 use phoxal_cli_core::artifacts::NativeArtifactDescriptor;
-use phoxal_cli_core::project::launch_plan::runtime_layout_dir;
-use phoxal_cli_core::project::resolver::ResolvedRobot;
+use phoxal_cli_core::project::launch_plan::{
+    LaunchPlan, ParticipantExecution, ParticipantLaunchRecord, runtime_layout_dir,
+};
+use phoxal_cli_core::project::resolver::{ResolvedRobot, official_binary_name};
+use phoxal_cli_core::project::suite::ArtifactKind;
 
 use crate::supervisor::ParticipantSpec;
 
@@ -126,19 +130,92 @@ fn compile_manifest(resolved: &ResolvedRobot) -> phoxal::model::robot::v0::Robot
     compiled
 }
 
+/// The canonical `bin/` file name every launched participant is staged under,
+/// keyed by its launch participant id. `bin/` is an identity-keyed lookup
+/// store: an official service built from a Cargo workspace override lands at the
+/// SAME `bin/` name a vendored one would, so the loader's
+/// [`RuntimeLayout::resolve_binary`](phoxal_cli_core::project::layout::RuntimeLayout::resolve_binary)
+/// matches source-built and vendored binaries identically. The names computed
+/// here are exactly the ones the loader derives from the compiled `robot.yaml`
+/// and the CLI catalog.
+#[must_use]
+pub fn canonical_bin_names(plan: &LaunchPlan) -> BTreeMap<String, String> {
+    plan.robots
+        .iter()
+        .flat_map(|robot| robot.participants.iter())
+        .map(|participant| {
+            (
+                participant.launch.participant_id.clone(),
+                canonical_binary_name(participant),
+            )
+        })
+        .collect()
+}
+
+/// The canonical identity name one launched participant is stored under in
+/// `bin/`, matching the loader's derivation from the compiled `robot.yaml`.
+fn canonical_binary_name(participant: &ParticipantLaunchRecord) -> String {
+    // Component drivers (source- or suite-sourced) are scoped to a component
+    // instance and share one driver binary named by the component id, so every
+    // instance of the same component resolves to a single `bin/` entry.
+    if participant.launch.component_instance.is_some() {
+        return official_binary_name(ArtifactKind::ComponentDriver, &participant.artifact_id);
+    }
+    match &participant.execution {
+        // A user service is its own identity - the key it occupies in the
+        // compiled `robot.yaml` `services` map.
+        ParticipantExecution::UserService { .. } => participant.artifact_id.clone(),
+        ParticipantExecution::OfficialTool { .. } => official_binary_name(
+            ArtifactKind::Tool,
+            tool_short_name(&participant.artifact_id),
+        ),
+        ParticipantExecution::SourceArtifact { kind, .. } if kind == "tool" => {
+            official_binary_name(
+                ArtifactKind::Tool,
+                tool_short_name(&participant.artifact_id),
+            )
+        }
+        ParticipantExecution::SourceArtifact { kind, .. } if kind == "simulator" => {
+            official_binary_name(ArtifactKind::Simulator, &participant.artifact_id)
+        }
+        // An official service resolves to the same canonical service binary
+        // whether it is vendored (`OfficialArtifact`) or built from a workspace
+        // override (`SourceArtifact { kind: "service" }`).
+        ParticipantExecution::OfficialArtifact { .. }
+        | ParticipantExecution::SourceArtifact { .. } => {
+            official_binary_name(ArtifactKind::Service, &participant.artifact_id)
+        }
+        ParticipantExecution::ComponentDriver { .. } => {
+            official_binary_name(ArtifactKind::ComponentDriver, &participant.artifact_id)
+        }
+    }
+}
+
+/// The kind-stripped short name of an official tool artifact id
+/// (`tool-bus` -> `bus`), matching the loader's catalog short name.
+fn tool_short_name(artifact_id: &str) -> &str {
+    artifact_id.strip_prefix("tool-").unwrap_or(artifact_id)
+}
+
 /// Hardlink (with a cross-filesystem copy fallback) every planned binary into
-/// the staged `bin/`, then repoint each spec's `executable` at its staged entry.
-/// `bin/` is a flat store: one canonical file per binary, named by the binary's
-/// own file name, so one driver binary shared by several component instances is
-/// linked once. `bin/` is cleared and recreated every pass, so it can never go
-/// stale. No symlinks: the staged layout holds real file identities that keep
-/// working if `target/` is later cleaned.
+/// the staged `bin/` under its canonical identity name (from `names`, keyed by
+/// participant id), then repoint each spec's `executable` at its staged entry.
+/// `bin/` is a flat identity-keyed store: one canonical file per binary, so one
+/// driver binary shared by several component instances is linked once, and a
+/// source-overridden official lands at the same name the vendored one would.
+/// `bin/` is cleared and recreated every pass, so it can never go stale. No
+/// symlinks: the staged layout holds real file identities that keep working if
+/// `target/` is later cleaned.
 ///
 /// macOS `.app`-bundled executables are left untouched (still pointing into
 /// their bundle) so the supervisor's `.app` materialization keeps working;
 /// flattening a bundle into one `bin/` file would drop its `Contents/`. Native
 /// Linux runtime binaries - the real deployment target - are always flattened.
-pub fn link_runtime_binaries(staged_root: &Path, specs: &mut [ParticipantSpec]) -> Result<()> {
+pub fn link_runtime_binaries(
+    staged_root: &Path,
+    specs: &mut [ParticipantSpec],
+    names: &BTreeMap<String, String>,
+) -> Result<()> {
     let bin_dir = staged_root.join(BIN_DIR);
     remove_if_present(&bin_dir)?;
     fs::create_dir_all(&bin_dir)
@@ -151,11 +228,13 @@ pub fn link_runtime_binaries(staged_root: &Path, specs: &mut [ParticipantSpec]) 
         if !spec.executable.is_file() {
             continue;
         }
-        let file_name = spec
-            .executable
-            .file_name()
-            .context("planned binary has no file name")?;
-        let staged = bin_dir.join(file_name);
+        let canonical = names.get(&spec.id).with_context(|| {
+            format!(
+                "no canonical bin/ name for launched participant `{}`",
+                spec.id
+            )
+        })?;
+        let staged = bin_dir.join(canonical);
         link_or_copy(&spec.executable, &staged)?;
         spec.executable = staged;
     }
@@ -412,6 +491,46 @@ robot:
         })
     }
 
+    fn name_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(id, name)| ((*id).to_string(), (*name).to_string()))
+            .collect()
+    }
+
+    fn launch_record(
+        participant_id: &str,
+        artifact_id: &str,
+        execution: ParticipantExecution,
+        component_instance: Option<&str>,
+    ) -> ParticipantLaunchRecord {
+        use phoxal::participant::launch::{
+            BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
+        };
+        ParticipantLaunchRecord {
+            artifact_id: artifact_id.to_string(),
+            execution,
+            launch: ParticipantLaunch {
+                participant_id: participant_id.to_string(),
+                incarnation: 0,
+                namespace: "dev".to_string(),
+                robot_id: "robot_v1".to_string(),
+                bus: BusProfile {
+                    connect_endpoints: Vec::new(),
+                },
+                clock: ClockMode::Real,
+                config: None,
+                robot_root: None,
+                component_instance: component_instance.map(str::to_string),
+                execution_device_id: None,
+                shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
+            },
+            launch_ownership: Default::default(),
+            startup_requirement: phoxal_cli_core::session::StartupRequirement::Required,
+            runtime_failure: phoxal_cli_core::session::RuntimeFailurePolicy::StopProject,
+        }
+    }
+
     fn spec(name: &str, executable: PathBuf) -> ParticipantSpec {
         let robot = RobotKey::new("dev", "robot_v1");
         ParticipantSpec {
@@ -584,7 +703,7 @@ robot:
         fs::write(&built, "ELF")?;
 
         let mut specs = vec![spec("mission", built.clone())];
-        link_runtime_binaries(&staged, &mut specs)?;
+        link_runtime_binaries(&staged, &mut specs, &name_map(&[("mission", "mission")]))?;
 
         let staged_bin = staged.join("bin/mission");
         assert!(staged_bin.is_file());
@@ -601,7 +720,7 @@ robot:
         fs::remove_file(&built)?;
         fs::write(&built, "ELF-v2")?;
         let mut specs = vec![spec("mission", built.clone())];
-        link_runtime_binaries(&staged, &mut specs)?;
+        link_runtime_binaries(&staged, &mut specs, &name_map(&[("mission", "mission")]))?;
         assert_eq!(fs::read_to_string(staged.join("bin/mission"))?, "ELF-v2");
         assert_eq!(
             fs::metadata(&built)?.ino(),
@@ -668,10 +787,158 @@ robot:
         fs::write(&bundled, "MACHO")?;
 
         let mut specs = vec![spec("tool-joypad", bundled.clone())];
-        link_runtime_binaries(&staged, &mut specs)?;
+        link_runtime_binaries(
+            &staged,
+            &mut specs,
+            &name_map(&[("tool-joypad", "phoxal-tool-joypad")]),
+        )?;
         // Bundle-internal binaries are never flattened into bin/.
         assert!(!staged.join("bin/joypad").exists());
+        assert!(!staged.join("bin/phoxal-tool-joypad").exists());
         assert_eq!(specs[0].executable, bundled);
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_binary_names_are_identity_keyed_across_sources() {
+        // A vendored official service and a source-overridden one resolve to
+        // the SAME canonical bin/ name, so the loader matches them identically.
+        assert_eq!(
+            canonical_binary_name(&launch_record(
+                "drive",
+                "drive",
+                ParticipantExecution::OfficialArtifact {
+                    artifact_ref: "ref".to_string()
+                },
+                None,
+            )),
+            "phoxal-service-drive"
+        );
+        assert_eq!(
+            canonical_binary_name(&launch_record(
+                "drive",
+                "drive",
+                ParticipantExecution::SourceArtifact {
+                    kind: "service".to_string(),
+                    crate_dir: PathBuf::from("services/drive"),
+                },
+                None,
+            )),
+            "phoxal-service-drive"
+        );
+        // A user service is stored under its own identity.
+        assert_eq!(
+            canonical_binary_name(&launch_record(
+                "mission",
+                "mission",
+                ParticipantExecution::UserService {
+                    crate_dir: PathBuf::from("services/mission"),
+                },
+                None,
+            )),
+            "mission"
+        );
+        // An official tool: the kind-prefixed short name.
+        assert_eq!(
+            canonical_binary_name(&launch_record(
+                "tool-bus-robot_v1",
+                "tool-bus",
+                ParticipantExecution::OfficialTool {
+                    artifact_ref: "ref".to_string()
+                },
+                None,
+            )),
+            "phoxal-tool-bus"
+        );
+        // A component driver is named by its component id and shared across
+        // every instance - whether built from source or resolved from the suite.
+        assert_eq!(
+            canonical_binary_name(&launch_record(
+                "left_drive",
+                "ddsm115",
+                ParticipantExecution::ComponentDriver {
+                    crate_dir: PathBuf::from("components/ddsm115"),
+                },
+                Some("left_drive"),
+            )),
+            "phoxal-component-ddsm115"
+        );
+        assert_eq!(
+            canonical_binary_name(&launch_record(
+                "right_drive",
+                "ddsm115",
+                ParticipantExecution::OfficialArtifact {
+                    artifact_ref: "ref".to_string()
+                },
+                Some("right_drive"),
+            )),
+            "phoxal-component-ddsm115"
+        );
+    }
+
+    #[test]
+    fn links_officials_and_shared_drivers_under_canonical_identity_names() -> Result<()> {
+        let _scratch = ScratchPhoxalHome::new()?;
+        let project = tempfile::tempdir()?;
+        fs::create_dir_all(project.path().join("model"))?;
+        fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
+        let resolved = resolved_robot()?;
+        let staged = stage_runtime_layout(project.path(), &resolved)?;
+
+        let target_dir = project.path().join("target/debug");
+        fs::create_dir_all(&target_dir)?;
+        // A cargo-built official-service override and one driver binary shared
+        // by two component instances - both under their local cargo names.
+        let drive = target_dir.join("robot-service-drive");
+        fs::write(&drive, "DRIVE")?;
+        let driver = target_dir.join("ddsm115-driver");
+        fs::write(&driver, "DDSM")?;
+
+        let mut specs = vec![
+            spec("drive", drive.clone()),
+            spec("left_drive", driver.clone()),
+            spec("right_drive", driver.clone()),
+        ];
+        link_runtime_binaries(
+            &staged,
+            &mut specs,
+            &name_map(&[
+                ("drive", "phoxal-service-drive"),
+                ("left_drive", "phoxal-component-ddsm115"),
+                ("right_drive", "phoxal-component-ddsm115"),
+            ]),
+        )?;
+
+        // The source-overridden official lands at the vendored canonical name.
+        let staged_drive = staged.join("bin/phoxal-service-drive");
+        assert!(staged_drive.is_file());
+        assert_eq!(specs[0].executable, staged_drive);
+        // One driver binary, one bin/ entry, both instance specs repointed at it.
+        let shared = staged.join("bin/phoxal-component-ddsm115");
+        assert!(shared.is_file());
+        assert_eq!(specs[1].executable, shared);
+        assert_eq!(specs[2].executable, shared);
+        assert_eq!(fs::metadata(&driver)?.ino(), fs::metadata(&shared)?.ino());
+        Ok(())
+    }
+
+    #[test]
+    fn linking_a_participant_absent_from_the_name_map_is_an_error() -> Result<()> {
+        let _scratch = ScratchPhoxalHome::new()?;
+        let project = tempfile::tempdir()?;
+        fs::create_dir_all(project.path().join("model"))?;
+        fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
+        let resolved = resolved_robot()?;
+        let staged = stage_runtime_layout(project.path(), &resolved)?;
+
+        let built = project.path().join("target/debug/mission");
+        fs::create_dir_all(built.parent().unwrap())?;
+        fs::write(&built, "ELF")?;
+        let mut specs = vec![spec("mission", built)];
+        let error = link_runtime_binaries(&staged, &mut specs, &name_map(&[]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mission"), "{error}");
         Ok(())
     }
 

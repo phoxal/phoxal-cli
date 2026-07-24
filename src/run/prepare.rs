@@ -140,10 +140,13 @@ pub(crate) fn prepare_run_on_board(
         &mut specs,
         ui,
     )?;
-    // Flatten every planned binary into the staged `bin/` and repoint each spec
-    // at it, so execution consumes the staged runtime layout rather than the
-    // cargo target dir / artifact store directly.
-    crate::stager::link_runtime_binaries(&staged_root, &mut specs)
+    // Flatten every planned binary into the staged `bin/` under its canonical
+    // identity name and repoint each spec at it, so execution consumes the
+    // staged runtime layout (an identity-keyed lookup store) rather than the
+    // cargo target dir / artifact store directly. The names are derived from the
+    // plan participants and are exactly what the loader resolves against.
+    let bin_names = crate::stager::canonical_bin_names(&plan);
+    crate::stager::link_runtime_binaries(&staged_root, &mut specs, &bin_names)
         .context("failed to link planned binaries into the staged bin store")?;
 
     let robot_targets = super::RobotFeedTarget::from_plan(&plan);

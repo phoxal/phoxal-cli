@@ -91,7 +91,7 @@ pub(crate) async fn live_simulate_setup(
 
     let identity = ProjectLockIdentity::resolve(&sim.ctx.project_root, ProjectOperation::Run);
     let locks = LiveSimulationLocks::acquire(&crate::host_paths::simulator_lock_path()?, identity)?;
-    crate::stager::stage_runtime_layout(&sim.ctx.project_root, &sim.ctx.resolved)
+    let staged_root = crate::stager::stage_runtime_layout(&sim.ctx.project_root, &sim.ctx.resolved)
         .context("failed to stage the simulation runtime layout")?;
     ensure_active()?;
     let board = BoardBackend::new();
@@ -121,6 +121,14 @@ pub(crate) async fn live_simulate_setup(
         &mut specs,
         &ui,
     )?;
+    // Populate the staged `bin/` for the CLI-managed simulation participants
+    // (services and tools) under the same canonical identity names a native run
+    // uses, so `simulation webots run` reads an identity-keyed `bin/` exactly
+    // like `run`. The Webots-managed supervisor/controllers are staged into the
+    // world instead, so they are not linked here.
+    let bin_names = crate::stager::canonical_bin_names(&sim.plan);
+    crate::stager::link_runtime_binaries(&staged_root, &mut specs, &bin_names)
+        .context("failed to link planned binaries into the staged simulation bin store")?;
     let (router, connect) =
         crate::run::start_infrastructure_router(&sim.ctx.resolved, &sim.ctx.project_root, &ui)
             .await?;
