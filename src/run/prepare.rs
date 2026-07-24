@@ -217,8 +217,12 @@ pub(crate) fn prepare_run_on_board(
         ui,
     )?;
 
+    // Resolve the router config from the STAGED layout, not the source tree:
+    // staging copies `router.config` into the layout under its relative path, so
+    // a source run and an extracted `build.phoxal` resolve the identical staged
+    // asset (#936, finding 4).
     let router_config =
-        crate::run::resolve_router_config(&staged.resolved.robot, &staged.project_root)?;
+        crate::run::resolve_router_config(&staged.resolved.robot, &staged.staged_root)?;
     let robot_targets = super::RobotFeedTarget::from_plan(&plan);
     let StagedProject {
         robot_path,

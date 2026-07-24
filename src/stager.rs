@@ -402,6 +402,16 @@ fn stage_candidate(
     }
     copy_optional_dir_preserving_path(project_root, candidate, Path::new(BEHAVIORS_DIR))?;
 
+    // The router's optional Zenoh config file is a real runtime asset: stage it
+    // into the layout under its runtime-root-relative path so a `build.phoxal`
+    // extracted anywhere resolves the same relative path a source run does
+    // (#936, finding 4). It must be a safe relative path with no escapes, exactly
+    // like the robot structure.
+    if let Some(router_config) = &resolved.robot.router.config {
+        ensure_safe_relative_path(router_config, "router.config")?;
+        copy_file_preserving_path(project_root, candidate, router_config, "router.config")?;
+    }
+
     crate::native_artifacts::stage_component_bundles_into_robot_root(
         project_root,
         candidate,
@@ -696,6 +706,82 @@ robot:
             Some(serde_json::json!({"speed": 1}))
         );
         assert_eq!(compiled.services["telemetry"].config, None);
+        Ok(())
+    }
+
+    /// The router's `router.config` file is staged into the layout under its
+    /// relative path and resolves inside the layout in both a source run and an
+    /// extracted bundle (#936, finding 4): staging copies it, and simulating an
+    /// extraction (moving the layout elsewhere) still resolves it inside the
+    /// moved layout.
+    #[test]
+    fn router_config_is_staged_into_the_layout_and_resolves_after_extraction() -> Result<()> {
+        let _scratch = ScratchPhoxalHome::new()?;
+        let project = tempfile::tempdir()?;
+        fs::create_dir_all(project.path().join("model"))?;
+        fs::create_dir_all(project.path().join("config"))?;
+        fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
+        fs::write(
+            project.path().join("config/zenoh.json5"),
+            "{ mode: \"router\" }",
+        )?;
+
+        let mut resolved = resolved_robot()?;
+        resolved.robot.router.config = Some(PathBuf::from("config/zenoh.json5"));
+        let staged = stage_runtime_layout(project.path(), &resolved)?;
+
+        // The config landed inside the layout under its relative path.
+        assert_eq!(
+            fs::read_to_string(staged.join("config/zenoh.json5"))?,
+            "{ mode: \"router\" }"
+        );
+        // A source run resolves it inside the staged layout.
+        assert_eq!(
+            crate::run::resolve_router_config(&resolved.robot, &staged)?,
+            Some(staged.join("config/zenoh.json5"))
+        );
+
+        // Simulate extracting a `build.phoxal`: move the layout to a fresh root
+        // (the source tree is gone). Resolution must still succeed inside it.
+        let extracted = tempfile::tempdir()?;
+        let extracted_root = extracted.path().join("layout");
+        copy_tree(&staged, &extracted_root)?;
+        assert_eq!(
+            crate::run::resolve_router_config(&resolved.robot, &extracted_root)?,
+            Some(extracted_root.join("config/zenoh.json5"))
+        );
+        Ok(())
+    }
+
+    /// A `router.config` that escapes the runtime layout is rejected at staging,
+    /// exactly like an escaping robot structure (#936, finding 4).
+    #[test]
+    fn router_config_cannot_escape_the_runtime_layout() -> Result<()> {
+        let _scratch = ScratchPhoxalHome::new()?;
+        let project = tempfile::tempdir()?;
+        fs::create_dir_all(project.path().join("model"))?;
+        fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
+        let mut resolved = resolved_robot()?;
+        resolved.robot.router.config = Some(PathBuf::from("../outside.json5"));
+        let error = stage_runtime_layout(project.path(), &resolved)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("router.config"), "{error}");
+        Ok(())
+    }
+
+    /// A small recursive copy for the extraction simulation above.
+    fn copy_tree(source: &Path, dest: &Path) -> Result<()> {
+        fs::create_dir_all(dest)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let target = dest.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_tree(&entry.path(), &target)?;
+            } else {
+                fs::copy(entry.path(), &target)?;
+            }
+        }
         Ok(())
     }
 

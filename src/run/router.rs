@@ -263,9 +263,11 @@ fn recovery_rows(
 }
 
 /// Resolve the router's optional config file against `root`, verifying it
-/// exists. `root` is the source project root for a source run and the staged
-/// layout root for a staged/bundle run - the router config asset lives wherever
-/// the compiled `robot.yaml` was read from, so both resolve identically.
+/// exists. `root` is always the staged runtime-layout root - a source run passes
+/// `.phoxal/build/<triple>/` and a staged/bundle run passes its layout root -
+/// because staging copies `router.config` into the layout under its relative
+/// path (#936, finding 4), so every mode resolves the same staged asset and an
+/// extracted `build.phoxal` carries its own router config.
 pub(crate) fn resolve_router_config(
     robot: &phoxal::model::robot::v0::Robot,
     root: &Path,
