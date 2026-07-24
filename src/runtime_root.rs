@@ -251,6 +251,11 @@ robot:
 
     #[test]
     fn publishes_complete_resolved_root_and_replaces_previous_generation() -> Result<()> {
+        // Publishing stages component bundles under the process-wide
+        // artifact-store lock; join the same serialized scratch-root scope as
+        // the other artifact-store tests so a parallel test cannot hold the
+        // lock when this one stages.
+        let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model/meshes"))?;
         fs::create_dir_all(project.path().join(BEHAVIORS_DIR))?;
@@ -281,6 +286,10 @@ robot:
 
     #[test]
     fn failed_candidate_preserves_previous_published_root() -> Result<()> {
+        // Serialize with the other artifact-store tests: `publish` stages
+        // component bundles under the process-wide store lock (see
+        // `publishes_complete_resolved_root_and_replaces_previous_generation`).
+        let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "first")?;
