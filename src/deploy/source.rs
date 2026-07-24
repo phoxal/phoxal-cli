@@ -172,9 +172,6 @@ pub(crate) fn source_record(
         && let Some(driver) = &component.driver
     {
         return match &driver.source {
-            ResolvedComponentSource::Git { git, rev, .. } => {
-                Ok(serde_json::json!({ "git": git, "rev": rev }))
-            }
             ResolvedComponentSource::Path { path } => {
                 let full = resolve_project_path(project_root, path);
                 Ok(serde_json::json!({

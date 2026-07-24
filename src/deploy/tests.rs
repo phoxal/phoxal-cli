@@ -10,7 +10,7 @@ use super::*;
 use anyhow::{Context, Result, bail};
 use phoxal::model::robot::v0::Robot;
 use phoxal_cli_core::deploy::target_from_selector;
-use phoxal_cli_core::project::launch_plan::SITE_INFRASTRUCTURE_ROUTER;
+use phoxal_cli_core::project::launch_plan::INFRASTRUCTURE_ROUTER;
 use phoxal_cli_core::project::resolver::{
     ResolvedComponentSource, ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool,
 };
@@ -34,31 +34,27 @@ mod phoxal_cli_test_support {
     pub fn write_basic_project(root: &Path) -> Result<()> {
         write_fixture_suite(root)?;
         fs::write(root.join("robot.yaml"), basic_robot_yaml())?;
-        fs::write(root.join("robot.dev.yaml"), basic_robot_dev_overlay_yaml())?;
         write_robot_structure(root)?;
         write_service_crate(root, "navtask", "service", "navtask")?;
         write_component_metadata(root, "ddsm115")?;
+        write_cargo_workspace(root)?;
         Ok(())
     }
 
     pub fn write_driver_project(root: &Path) -> Result<()> {
         write_fixture_suite(root)?;
         fs::write(root.join("robot.yaml"), driver_robot_yaml())?;
-        fs::write(root.join("robot.dev.yaml"), driver_robot_dev_overlay_yaml())?;
         write_robot_structure(root)?;
         write_service_crate(root, "navtask", "service", "navtask")?;
         write_driver_crate(root, "ddsm115", "driver-ddsm115")?;
         write_component_metadata(root, "ddsm115")?;
+        write_cargo_workspace(root)?;
         Ok(())
     }
 
     pub fn write_bench_camera_project(root: &Path) -> Result<()> {
         write_fixture_suite(root)?;
         fs::write(root.join("robot.yaml"), bench_camera_robot_yaml())?;
-        fs::write(
-            root.join("robot.dev.yaml"),
-            bench_camera_robot_dev_overlay_yaml(),
-        )?;
         write_robot_structure(root)?;
         write_component_metadata(root, "bench_camera")?;
         let component_dir = root.join("components").join("bench_camera");
@@ -68,8 +64,9 @@ mod phoxal_cli_test_support {
             component_dir.join("Cargo.toml"),
             "[package]\nname = \"bench-camera\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
         )?;
-        fs::write(component_dir.join("src/main.rs"), "fn main() {}\n")?;
+        fs::write(component_dir.join("src/lib.rs"), "")?;
         fs::write(component_dir.join("target/debug/ignored"), "ignored\n")?;
+        write_cargo_workspace(root)?;
         Ok(())
     }
 
@@ -77,20 +74,21 @@ mod phoxal_cli_test_support {
         write_fixture_suite(root)?;
         fs::write(root.join("robot.yaml"), suite_only_robot_yaml())?;
         write_robot_structure(root)?;
+        write_cargo_workspace(root)?;
         Ok(())
     }
 
     pub fn write_native_dep_project(root: &Path) -> Result<()> {
         write_fixture_suite(root)?;
         fs::write(root.join("robot.yaml"), basic_robot_yaml())?;
-        fs::write(root.join("robot.dev.yaml"), basic_robot_dev_overlay_yaml())?;
-        let dir = root.join("runtimes/navtask");
+        let dir = root.join("services/navtask");
         fs::create_dir_all(dir.join("src"))?;
         fs::write(
             dir.join("Cargo.toml"),
-            "[package]\nname = \"navtask\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nopencv = \"0.1\"\n",
+            "[package]\nname = \"navtask\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nopencv = { path = \"../../train/opencv\" }\n",
         )?;
         fs::write(dir.join("src/main.rs"), service_main("service", "navtask"))?;
+        write_cargo_workspace(root)?;
         Ok(())
     }
 
@@ -119,7 +117,7 @@ mod phoxal_cli_test_support {
     }
 
     fn write_service_crate(root: &Path, name: &str, kind: &str, artifact_id: &str) -> Result<()> {
-        let dir = root.join("runtimes").join(name);
+        let dir = root.join("services").join(name);
         fs::create_dir_all(dir.join("src"))?;
         fs::write(
             dir.join("Cargo.toml"),
@@ -147,9 +145,77 @@ mod phoxal_cli_test_support {
 
     fn write_component_metadata(root: &Path, name: &str) -> Result<()> {
         let dir = root.join("components").join(name);
-        fs::create_dir_all(&dir)?;
+        fs::create_dir_all(dir.join("src"))?;
+        if !dir.join("Cargo.toml").is_file() {
+            fs::write(
+                dir.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"component-{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
+                ),
+            )?;
+            fs::write(dir.join("src/lib.rs"), "")?;
+        }
         fs::write(dir.join("component.yaml"), component_yaml())?;
         fs::write(dir.join("structure.urdf"), component_structure_urdf(name))?;
+        Ok(())
+    }
+
+    fn write_cargo_workspace(root: &Path) -> Result<()> {
+        fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join("train/phoxal/src"))?;
+        fs::create_dir_all(root.join("train/opencv/src"))?;
+        let mut members = vec!["\".\"".to_string()];
+        for base in ["services", "components"] {
+            let directory = root.join(base);
+            if !directory.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(directory)? {
+                let entry = entry?;
+                if entry.path().join("Cargo.toml").is_file() {
+                    members.push(format!(
+                        "\"{base}/{}\"",
+                        entry.file_name().to_string_lossy()
+                    ));
+                }
+            }
+        }
+        members.sort();
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                r#"[package]
+name = "robot-train-anchor"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+members = [{}]
+resolver = "2"
+
+[dependencies]
+phoxal = {{ path = "train/phoxal" }}
+"#,
+                members.join(", ")
+            ),
+        )?;
+        fs::write(root.join("src/lib.rs"), "")?;
+        fs::write(
+            root.join("train/phoxal/Cargo.toml"),
+            "[package]\nname = \"phoxal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )?;
+        fs::write(root.join("train/phoxal/src/lib.rs"), "")?;
+        fs::write(
+            root.join("train/opencv/Cargo.toml"),
+            "[package]\nname = \"opencv\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )?;
+        fs::write(root.join("train/opencv/src/lib.rs"), "")?;
+        let status = Command::new("cargo")
+            .arg("generate-lockfile")
+            .current_dir(root)
+            .status()?;
+        anyhow::ensure!(status.success(), "failed to generate fixture Cargo.lock");
         Ok(())
     }
 
@@ -183,23 +249,8 @@ robot:
     right_drive:
       component: ddsm115
       mount_link: right_wheel
-artifacts:
-  suite: suite.json
 services:
-  navtask:
-    path: runtimes/navtask
-"#
-    }
-
-    /// Path pins are dev-overlay-only; every fixture project pairs its base
-    /// `robot.yaml` with this `robot.dev.yaml` overlay (loaded via
-    /// `--env dev`, see `dry_options`/`live_options`) so local component
-    /// asset/driver directories resolve without a real suite/network.
-    fn basic_robot_dev_overlay_yaml() -> &'static str {
-        r#"artifacts:
-  pins:
-    phoxal/component-ddsm115:
-      path: components/ddsm115
+  navtask: {}
 "#
     }
 
@@ -220,16 +271,6 @@ robot:
     front_camera:
       component: bench_camera
       mount_link: camera_mount
-artifacts:
-  suite: suite.json
-"#
-    }
-
-    fn bench_camera_robot_dev_overlay_yaml() -> &'static str {
-        r#"artifacts:
-  pins:
-    phoxal/component-bench_camera:
-      path: components/bench_camera
 "#
     }
 
@@ -250,12 +291,6 @@ robot:
     suite_drive:
       component: suite_motor
       mount_link: left_wheel
-artifacts:
-  suite: suite.json
-  pins:
-    phoxal/component-suite_motor:
-      git: /definitely/not/a/component-assets-repo
-      rev: main
 "#
     }
 
@@ -287,19 +322,8 @@ robot:
       mount_link: right_wheel
       driver:
         connection: { type: i2c, bus: 1, address: 16 }
-artifacts:
-  suite: suite.json
 services:
-  navtask:
-    path: runtimes/navtask
-"#
-    }
-
-    fn driver_robot_dev_overlay_yaml() -> &'static str {
-        r#"artifacts:
-  pins:
-    phoxal/component-ddsm115:
-      path: components/ddsm115
+  navtask: {}
 "#
     }
 
@@ -678,28 +702,23 @@ fn collect_relative_files(base: &Path, dir: &Path, files: &mut Vec<String>) -> R
     Ok(())
 }
 
-/// Every `phoxal_cli_test_support` fixture stages its component asset/driver
-/// path pins in a `robot.dev.yaml` overlay (path pins are dev-overlay-only
-/// in the new grammar); both option builders load it so fixture projects
-/// resolve their components without touching a real suite/network.
-fn dry_options() -> DeployOptions {
+/// Every fixture uses a locked Cargo workspace for source participants.
+fn dry_options(root: &Path) -> DeployOptions {
     DeployOptions {
         host: None,
         dry_run: true,
         target: Some("aarch64".to_string()),
-        overlays: vec!["dev".to_string()],
-        suite_source: None,
+        suite_source: Some(root.join("suite.json").display().to_string()),
         health_timeout: Duration::from_secs(3),
     }
 }
 
-fn live_options() -> DeployOptions {
+fn live_options(root: &Path) -> DeployOptions {
     DeployOptions {
         host: Some("robot@test".to_string()),
         dry_run: false,
         target: None,
-        overlays: vec!["dev".to_string()],
-        suite_source: None,
+        suite_source: Some(root.join("suite.json").display().to_string()),
         health_timeout: Duration::from_secs(3),
     }
 }
@@ -753,7 +772,7 @@ fn dry_run_renders_units_env_release_and_install_plan() -> Result<()> {
     write_basic_project(temp.path())?;
     let payload = prepare_deploy(
         temp.path(),
-        &dry_options(),
+        &dry_options(temp.path()),
         target_for_arch("aarch64"),
         false,
         DRY_RUN_REMOTE_USER,
@@ -831,7 +850,7 @@ fn payload_stages_path_component_metadata_and_structures() -> Result<()> {
     phoxal_cli_test_support::write_bench_camera_project(temp.path())?;
     let payload = prepare_deploy(
         temp.path(),
-        &dry_options(),
+        &dry_options(temp.path()),
         target_for_arch("aarch64"),
         false,
         DRY_RUN_REMOTE_USER,
@@ -880,15 +899,11 @@ fn payload_without_path_components_has_no_components_dir() -> Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;
     let temp = tempfile::tempdir()?;
     phoxal_cli_test_support::write_suite_only_project(temp.path())?;
-    // This fixture's component pin is a git (not path) pin with a bogus
-    // repository. Deploy metadata staging must skip it without trying
-    // `git ls-remote` or `git clone`, so unlike the other fixtures it
-    // carries no `robot.dev.yaml` overlay to load.
+    // This fixture has no local component workspace member.
     let payload = prepare_deploy(
         temp.path(),
         &DeployOptions {
-            overlays: Vec::new(),
-            ..dry_options()
+            ..dry_options(temp.path())
         },
         target_for_arch("aarch64"),
         false,
@@ -912,7 +927,7 @@ fn sync_payload_stages_opt_tree_and_invokes_install_payload_helper() -> Result<(
     write_basic_project(temp.path())?;
     let payload = prepare_deploy(
         temp.path(),
-        &dry_options(),
+        &dry_options(temp.path()),
         target_for_arch("aarch64"),
         false,
         DRY_RUN_REMOTE_USER,
@@ -1015,7 +1030,7 @@ fn helper_script_restart_target_resets_failed_units_before_restart() {
 }
 
 #[test]
-fn helper_and_stale_cleanup_accept_generated_site_tool_units() {
+fn helper_and_stale_cleanup_accept_generated_robot_tool_units() {
     let script = helper_script();
     assert!(script.contains("phoxal-tool-*.service"), "{script}");
     assert!(managed_unit_name("phoxal-tool-joypad.service"));
@@ -1170,7 +1185,7 @@ fn render_payload_rejects_a_hostile_remote_user() {
     transport.probe.remote_user = "evil'; rm -rf /".to_string();
     let error = deploy_with_transport(
         temp.path(),
-        &live_options(),
+        &live_options(temp.path()),
         &mut transport,
         false,
         &crate::Ui::from_env(),
@@ -1215,7 +1230,7 @@ fn driver_graph_renders_one_unit_per_instance_with_privileges() -> Result<()> {
     phoxal_cli_test_support::write_driver_project(temp.path())?;
     let payload = prepare_deploy(
         temp.path(),
-        &dry_options(),
+        &dry_options(temp.path()),
         target_for_arch("aarch64"),
         false,
         DRY_RUN_REMOTE_USER,
@@ -1250,7 +1265,6 @@ fn resolved_with_components(
         user_runtimes: Vec::new(),
         components,
         tools: Vec::new(),
-        suite_profiles: Default::default(),
         path_overrides: Vec::new(),
     })
 }
@@ -1310,9 +1324,7 @@ use crate::host_paths::test_support::ScratchPhoxalHome;
 
 #[test]
 fn dry_run_stays_offline_for_suite_resolved_component_driver() -> Result<()> {
-    // Band B kept `deploy --dry-run` from resolving git component
-    // commits so it never touches the network; a Suite-sourced
-    // component driver/assets pair must uphold the identical guarantee.
+    // A suite-sourced component driver/assets pair must stay offline.
     // This exercises exactly the two functions `render_payload` calls to
     // stage a component's driver binary / assets bundle
     // (`stage_official_artifacts`'s runtime lookup and
@@ -1348,7 +1360,7 @@ fn dry_run_stays_offline_for_suite_resolved_component_driver() -> Result<()> {
     }])?;
     resolved.tools.push(ResolvedTool {
         kind: phoxal_cli_core::project::suite::ArtifactKind::Infrastructure,
-        name: SITE_INFRASTRUCTURE_ROUTER.to_string(),
+        name: INFRASTRUCTURE_ROUTER.to_string(),
         package: "phoxal/infrastructure-router".to_string(),
         requested: "0.1.0".to_string(),
         resolved: "0.1.0".to_string(),
@@ -1395,21 +1407,20 @@ fn dry_run_stays_offline_for_suite_resolved_component_driver() -> Result<()> {
     Ok(())
 }
 
-/// Deploy ships site `tool-joypad` and one per-robot `tool-bus`, `tool-device`,
+/// Deploy ships one per-robot instance of every tool, including `tool-joypad`,
 /// `tool-log`, and `tool-telemetry` alongside the router.
 /// Each gets its own unit ordered after the router, and
 /// `tool-joypad` carries the `/dev/input` tool-privilege grant
-/// (`unit_privileges_for_tool`). `write_basic_project`'s fixture suite
-/// compiles every activation declared by the fixture suite's native profile
-/// (`suite::fixture_suite_for_tests`), so the complete set resolves here.
+/// (`unit_privileges_for_tool`). `write_basic_project`'s fixture suite supplies
+/// every package in the CLI-owned native catalog, so the complete set resolves.
 #[test]
-fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {
+fn privileged_tool_graph_renders_per_robot_tool_units() -> Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;
     let temp = tempfile::tempdir()?;
     write_basic_project(temp.path())?;
     let payload = prepare_deploy(
         temp.path(),
-        &dry_options(),
+        &dry_options(temp.path()),
         target_for_arch("aarch64"),
         false,
         DRY_RUN_REMOTE_USER,
@@ -1422,7 +1433,7 @@ fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {
     );
     let joypad_unit = payload
         .rendered_units
-        .get("/etc/systemd/system/phoxal-tool-joypad.service")
+        .get("/etc/systemd/system/phoxal-participant-tool-joypad-testbot.service")
         .expect("tool-joypad unit must render");
     assert!(joypad_unit.contains("After=network-online.target phoxal-router.service"));
     assert!(joypad_unit.contains("SupplementaryGroups=input"));
@@ -1433,7 +1444,7 @@ fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {
             .contains_key("/opt/phoxal/active/env/router.env")
     );
     for env_name in [
-        "tool-joypad.env",
+        "tool-joypad-testbot.env",
         "tool-bus-testbot.env",
         "tool-device-testbot.env",
         "tool-log-testbot.env",
@@ -1455,7 +1466,7 @@ fn privileged_tool_graph_renders_site_and_robot_tool_units() -> Result<()> {
     assert!(
         payload
             .unit_names
-            .contains(&"phoxal-tool-joypad.service".to_string())
+            .contains(&"phoxal-participant-tool-joypad-testbot.service".to_string())
     );
     for tool in [
         "tool-bus-testbot",
@@ -1484,7 +1495,7 @@ fn rejected_non_immutable_artifact_gets_designed_error() -> Result<()> {
     phoxal_cli_test_support::write_native_dep_project(temp.path())?;
     let error = prepare_deploy(
         temp.path(),
-        &dry_options(),
+        &dry_options(temp.path()),
         target_for_arch("aarch64"),
         false,
         DRY_RUN_REMOTE_USER,
@@ -1572,7 +1583,7 @@ fn stale_unit_removal_is_computed_by_tree_comparison() -> Result<()> {
     ];
     let report = deploy_with_transport(
         temp.path(),
-        &live_options(),
+        &live_options(temp.path()),
         &mut transport,
         false,
         &crate::Ui::from_env(),
@@ -1612,7 +1623,7 @@ fn unreachable_github_uses_host_transfer_fallback() -> Result<()> {
 
     let report = deploy_with_transport(
         temp.path(),
-        &live_options(),
+        &live_options(temp.path()),
         &mut transport,
         false,
         &crate::Ui::from_env(),
@@ -1638,7 +1649,7 @@ fn failed_artifact_verification_never_activates() -> Result<()> {
 
     let error = deploy_with_transport(
         temp.path(),
-        &live_options(),
+        &live_options(temp.path()),
         &mut transport,
         false,
         &crate::Ui::from_env(),
@@ -1794,7 +1805,7 @@ fn row3_deploy_bootstrap_uses_sudo_s_and_writes_password_once() -> Result<()> {
 
     deploy_with_transport_with_sudo(
         temp.path(),
-        &live_options(),
+        &live_options(temp.path()),
         &mut transport,
         true,
         &mut source,
@@ -1910,7 +1921,7 @@ fn deploy_with_transport_writes_static_fragment_and_enrolls_probed_user() -> Res
     transport.probe.remote_user = "jetson-op".to_string();
     deploy_with_transport(
         temp.path(),
-        &live_options(),
+        &live_options(temp.path()),
         &mut transport,
         false,
         &crate::Ui::from_env(),
@@ -1949,7 +1960,7 @@ fn stale_helper_grant_triggers_bootstrap_repair_over_tty() -> Result<()> {
     let mut source = ScriptedSudoPasswordSource::with_prompts(&["secret"]);
     deploy_with_transport_with_sudo(
         temp.path(),
-        &live_options(),
+        &live_options(temp.path()),
         &mut transport,
         true,
         &mut source,
@@ -1992,7 +2003,7 @@ fn blanket_sudo_without_group_membership_still_triggers_bootstrap_repair() -> Re
     let mut source = ScriptedSudoPasswordSource::none();
     deploy_with_transport_with_sudo(
         temp.path(),
-        &live_options(),
+        &live_options(temp.path()),
         &mut transport,
         false,
         &mut source,
@@ -2024,7 +2035,7 @@ fn stale_helper_hash_triggers_bootstrap_repair_with_existing_grant() -> Result<(
     let mut source = ScriptedSudoPasswordSource::with_prompts(&["secret"]);
     deploy_with_transport_with_sudo(
         temp.path(),
-        &live_options(),
+        &live_options(temp.path()),
         &mut transport,
         true,
         &mut source,
@@ -2055,7 +2066,7 @@ fn failed_health_push_exits_nonzero_with_diagnosis() -> Result<()> {
     };
     let error = deploy_with_transport(
         temp.path(),
-        &live_options(),
+        &live_options(temp.path()),
         &mut transport,
         false,
         &crate::Ui::from_env(),

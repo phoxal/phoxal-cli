@@ -108,15 +108,6 @@ impl RuntimeStore {
         contract_surfaces: &[ParticipantContractSurface],
     ) -> Self {
         let mut store = Self::new();
-        for site in &plan.site {
-            store.metadata.insert(
-                ProcessKey::project(&site.id).to_string(),
-                RuntimeParticipantMetadata {
-                    artifact_ref: Some(site.artifact_ref.clone()),
-                    ..RuntimeParticipantMetadata::ownership(LaunchOwnership::CliManaged)
-                },
-            );
-        }
         for robot in &plan.robots {
             for participant in &robot.participants {
                 store.metadata.insert(

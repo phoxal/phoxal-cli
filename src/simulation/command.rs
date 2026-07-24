@@ -9,7 +9,6 @@ use clap::Subcommand;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::PlanContext;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
-use phoxal_cli_core::project::resolver::RobotManifestExtras;
 use phoxal_cli_core::project::suite::Suite;
 use std::path::PathBuf;
 
@@ -58,12 +57,6 @@ pub struct SimulationRun {
     )]
     pub watch: bool,
     #[arg(
-        long = "env",
-        value_name = "ENV",
-        help = "Apply a robot.<env>.yaml overlay before simulating (repeatable). Path pins are only legal through overlays."
-    )]
-    pub env: Vec<String>,
-    #[arg(
         long,
         value_name = "TRIPLE",
         help = "Resolve the robot's official artifacts for this target instead of the host (e.g. aarch64, x86_64, or a full triple). The simulator itself still runs on the host. Use it to plan a Linux robot's simulation from a non-Linux host."
@@ -99,7 +92,6 @@ pub struct SimulateOptions {
     pub world: String,
     pub suite_source: Option<String>,
     pub watch: bool,
-    pub overlays: Vec<String>,
     pub target: Option<String>,
 }
 
@@ -126,7 +118,6 @@ pub(crate) struct ResolvedSimulation {
     pub(crate) project_root: PathBuf,
     pub(crate) world_path: PathBuf,
     pub(crate) resolved: ResolvedRobot,
-    pub(crate) manifest_extras: RobotManifestExtras,
     pub(crate) suite: Option<Suite>,
 }
 
@@ -136,7 +127,6 @@ impl SimulationRun {
             world: self.world.clone(),
             suite_source: app.suite_source.clone(),
             watch: self.watch,
-            overlays: self.env.clone(),
             target: self.target.clone(),
         };
         let mode = if self.dry_run {

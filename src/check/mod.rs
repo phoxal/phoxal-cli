@@ -3,26 +3,14 @@ use phoxal::check as graph_check;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use phoxal::model::robot::RobotV0;
 use phoxal_cli_core::check::participant_metadata;
 use phoxal_cli_core::check::source::{
     SourceParticipant, ToolParticipant, UserServiceImageParticipant,
 };
-use phoxal_cli_core::project::resolver::RobotManifestExtras;
 
 #[derive(Debug, Args)]
 pub struct CheckCmd {
-    #[arg(
-        long,
-        value_name = "NAME",
-        help = "Only build/check the named user service crate after resolving the full project."
-    )]
-    pub service: Option<String>,
-    #[arg(
-        long = "env",
-        value_name = "ENV",
-        help = "Apply a robot.<env>.yaml overlay before checking (repeatable). Path pins are only legal through overlays."
-    )]
-    pub env: Vec<String>,
     #[arg(
         long,
         value_name = "TRIPLE",
@@ -35,9 +23,7 @@ pub struct CheckCmd {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CheckOptions {
-    pub service: Option<String>,
     pub suite_source: Option<String>,
-    pub overlays: Vec<String>,
     pub target: Option<String>,
     pub strict: bool,
 }
@@ -79,7 +65,7 @@ pub struct CheckOutcome {
 
 #[derive(Debug, Clone, Copy)]
 pub struct CheckGraphContext<'a> {
-    pub manifest_extras: &'a RobotManifestExtras,
+    pub robot: Option<&'a RobotV0>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,7 +97,7 @@ use command::run;
 mod participants;
 pub(crate) use participants::{
     check_artifact_refs_from_resolved, component_driver_runtimes_by_ref, ensure_suite_availability,
-    ensure_user_service_exists, source_participants_from_resolved, tool_participants_from_resolved,
+    source_participants_from_resolved, tool_participants_from_resolved,
 };
 mod graph;
 pub use graph::{run_check, run_check_with_context, run_check_with_deployed_user_service_images};

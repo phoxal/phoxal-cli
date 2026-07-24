@@ -10,19 +10,18 @@ use graph_check::{ParticipantClass, Problem};
 use phoxal::model::robot::v0::Robot;
 use phoxal_cli_core::check::source::SourceParticipantKind;
 use phoxal_cli_core::project::launch_plan::{
-    CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_DEVICE, SITE_TOOL_JOYPAD, SubstitutionRecord,
+    CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_DEVICE, ROBOT_TOOL_JOYPAD, SubstitutionRecord,
     build_launch_plan,
 };
 use phoxal_cli_core::project::resolver::{
     ResolveOptions, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
-    ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, UserRuntimeManifestExtras,
+    ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool,
 };
 use phoxal_cli_core::project::suite::{
-    ActivationCriticality, ActivationScope, ArtifactActivation, ArtifactKind,
-    fixture_component_assets_entry_for_tests, fixture_component_driver_entry_for_tests,
-    fixture_contract_for_tests, fixture_service_entry_for_tests, fixture_suite_for_tests,
+    ArtifactKind, fixture_component_assets_entry_for_tests,
+    fixture_component_driver_entry_for_tests, fixture_contract_for_tests,
+    fixture_service_entry_for_tests, fixture_suite_for_tests,
 };
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::host_paths::test_support::ScratchPhoxalHome;
@@ -77,16 +76,46 @@ fn assert_severity_matrix(diagnostics: &[RobotCoherenceDiagnostic], coherent: bo
 }
 
 #[test]
-fn launch_plan_covers_site_singletons_services_and_component_instances() -> Result<()> {
+fn launch_plan_covers_services_services_and_component_instances() -> Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;
     let temp = tempfile::tempdir()?;
-    std::fs::create_dir_all(temp.path().join("runtimes/mission"))?;
+    std::fs::create_dir_all(temp.path().join("services/mission/src"))?;
+    std::fs::create_dir_all(temp.path().join("src"))?;
+    std::fs::create_dir_all(temp.path().join("train/phoxal/src"))?;
     std::fs::write(
-        temp.path().join("runtimes/mission/Cargo.toml"),
+        temp.path().join("services/mission/Cargo.toml"),
         "[package]\nname = \"mission\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
     )?;
-    std::fs::write(temp.path().join("runtimes/mission/src.txt"), "source")?;
-    let robot = Robot::parse_from_string(LAUNCH_PLAN_FIXTURE_ROBOT)?;
+    std::fs::write(
+        temp.path().join("services/mission/src/main.rs"),
+        "fn main() {}",
+    )?;
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\nmembers = [\".\", \"services/mission\"]\nresolver = \"2\"\n\n[dependencies]\nphoxal = { path = \"train/phoxal\" }\n",
+    )?;
+    std::fs::write(temp.path().join("src/lib.rs"), "")?;
+    std::fs::write(
+        temp.path().join("train/phoxal/Cargo.toml"),
+        "[package]\nname = \"phoxal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )?;
+    std::fs::write(temp.path().join("train/phoxal/src/lib.rs"), "")?;
+    anyhow::ensure!(
+        std::process::Command::new("cargo")
+            .arg("generate-lockfile")
+            .current_dir(temp.path())
+            .status()?
+            .success(),
+        "failed to generate fixture Cargo.lock"
+    );
+    let mut robot = Robot::parse_from_string(LAUNCH_PLAN_FIXTURE_ROBOT)?;
+    robot
+        .services
+        .get_mut("mission")
+        .expect("mission service")
+        .config = Some(serde_json::json!({
+        "message": "line\nquoted \"value\"",
+    }));
     let suite = fixture_suite_for_tests(vec![
         fixture_service_entry_for_tests(
             "drive",
@@ -109,23 +138,12 @@ fn launch_plan_covers_site_singletons_services_and_component_instances() -> Resu
         temp.path(),
         Some(&suite),
         ResolveOptions {
-            resolve_source_commits: false,
-            resolve_component_asset_commits: false,
             ..ResolveOptions::default()
         },
     )?;
-    add_launch_plan_site_tools(&mut resolved);
-    let mut extras = RobotManifestExtras::default();
-    extras.user_runtimes.insert(
-        "mission".to_string(),
-        UserRuntimeManifestExtras {
-            config: Some(serde_json::json!({
-                "message": "line\nquoted \"value\"",
-            })),
-        },
-    );
+    add_launch_plan_robot_tools(&mut resolved);
     let source_participants = vec![
-        SourceParticipant::user_service("mission", temp.path().join("runtimes/mission")),
+        SourceParticipant::user_service("mission", temp.path().join("services/mission")),
         SourceParticipant::component_driver_with_artifact_id(
             "left_drive",
             "ddsm115",
@@ -143,7 +161,7 @@ fn launch_plan_covers_site_singletons_services_and_component_instances() -> Resu
         &[],
         &source_participants,
         CheckGraphContext {
-            manifest_extras: &extras,
+            robot: Some(&robot),
         },
         |artifact_ref| {
             let participant = platform_refs
@@ -184,7 +202,6 @@ fn launch_plan_covers_site_singletons_services_and_component_instances() -> Resu
         &[CheckedRobotLaunchInput {
             project_root: temp.path(),
             resolved: &resolved,
-            manifest_extras: &extras,
             checked_participants: &outcome.checked_participants,
             substitutions: &[],
             source_participants: &source_participants,
@@ -192,8 +209,6 @@ fn launch_plan_covers_site_singletons_services_and_component_instances() -> Resu
     )?;
 
     assert_eq!(plan.mode, LaunchMode::Run);
-    assert_eq!(plan.site[0].id, SITE_TOOL_JOYPAD);
-    assert_eq!(plan.site[0].phoxal_config, Value::Null);
     let robot = &plan.robots[0];
     assert_eq!(robot.id, "robot_v1");
     assert_eq!(robot.substitutions, Vec::<SubstitutionRecord>::new());
@@ -218,6 +233,7 @@ fn launch_plan_covers_site_singletons_services_and_component_instances() -> Resu
     assert!(participant_ids.contains(&"tool-log-robot_v1"));
     assert!(participant_ids.contains(&"tool-telemetry-robot_v1"));
     assert!(participant_ids.contains(&"tool-device-robot_v1"));
+    assert!(participant_ids.contains(&"tool-joypad-robot_v1"));
     assert_eq!(
         participant_ids
             .iter()
@@ -269,40 +285,12 @@ fn launch_plan_raw_emit_apis(kind: &str, id: &str) -> RawEmitApis {
     }
 }
 
-fn add_launch_plan_site_tools(resolved: &mut ResolvedRobot) {
+fn add_launch_plan_robot_tools(resolved: &mut ResolvedRobot) {
     resolved.tools.push(launch_plan_tool("tool-bus"));
-    resolved.tools.push(launch_plan_tool(SITE_TOOL_JOYPAD));
+    resolved.tools.push(launch_plan_tool(ROBOT_TOOL_JOYPAD));
     resolved.tools.push(launch_plan_tool("tool-log"));
     resolved.tools.push(launch_plan_tool("tool-telemetry"));
     resolved.tools.push(launch_plan_tool(ROBOT_TOOL_DEVICE));
-    resolved.suite_profiles.native = vec![
-        ArtifactActivation {
-            package: "phoxal/tool-bus".to_string(),
-            scope: ActivationScope::PerRobot,
-            criticality: ActivationCriticality::Optional,
-        },
-        ArtifactActivation {
-            package: "phoxal/tool-device".to_string(),
-            scope: ActivationScope::PerRobot,
-            criticality: ActivationCriticality::Optional,
-        },
-        ArtifactActivation {
-            package: "phoxal/tool-joypad".to_string(),
-            scope: ActivationScope::PerProject,
-            criticality: ActivationCriticality::Optional,
-        },
-        ArtifactActivation {
-            package: "phoxal/tool-log".to_string(),
-            scope: ActivationScope::PerRobot,
-            criticality: ActivationCriticality::Optional,
-        },
-        ArtifactActivation {
-            package: "phoxal/tool-telemetry".to_string(),
-            scope: ActivationScope::PerRobot,
-            criticality: ActivationCriticality::Optional,
-        },
-    ];
-    resolved.suite_profiles.webots = resolved.suite_profiles.native.clone();
 }
 
 fn launch_plan_tool(name: &str) -> ResolvedTool {
@@ -355,9 +343,19 @@ robot:
       driver:
         connection: { type: can, bus: 0, node_id: 2 }
 services:
-  mission:
-    path: runtimes/mission
+  mission: {}
 "#;
+
+fn robot_with_service_config(service_id: &str, config: Value) -> Result<Robot> {
+    let mut robot =
+        Robot::parse_from_string(&LAUNCH_PLAN_FIXTURE_ROBOT.replace("mission", service_id))?;
+    robot
+        .services
+        .get_mut(service_id)
+        .expect("fixture service")
+        .config = Some(config);
+    Ok(robot)
+}
 
 #[test]
 fn coherent_contract_set_passes_every_verb() {
@@ -635,7 +633,6 @@ fn deployed_user_service_images_are_checked_from_image_refs() -> Result<()> {
         "ddsm115".to_string(),
         PathBuf::from("/fake/project/components/ddsm115"),
     )];
-    let extras = RobotManifestExtras::default();
 
     let mut fetched_images = Vec::new();
     let mut built_sources = Vec::new();
@@ -646,9 +643,7 @@ fn deployed_user_service_images_are_checked_from_image_refs() -> Result<()> {
             tool_participants: &[],
             source_participants: &sources,
         },
-        CheckGraphContext {
-            manifest_extras: &extras,
-        },
+        CheckGraphContext { robot: None },
         |image_ref| {
             fetched_images.push(image_ref.to_string());
             Ok(raw("avoid", "v1", &[]))
@@ -769,15 +764,12 @@ fn official_driver_artifact_identity_uses_driver_label() {
         artifact_ref: "driver-bno085:swapped".to_string(),
         instances: vec!["imu".to_string()],
     }];
-    let extras = RobotManifestExtras::default();
 
     let error = run_check_with_context(
         &artifacts,
         &[],
         &[],
-        CheckGraphContext {
-            manifest_extras: &extras,
-        },
+        CheckGraphContext { robot: None },
         |artifact_ref| match artifact_ref {
             "driver-bno085:swapped" => Ok(raw_kind("service", "bno085", "v1", &[])),
             unexpected => bail!("unexpected artifact {unexpected}"),
@@ -981,9 +973,8 @@ fn tool_artifact_kind_garbage_is_rejected() {
 
 #[test]
 fn every_source_participant_always_builds_no_scoping_no_cache() -> Result<()> {
-    // The old `check --service <name>` build-scoping ("UseCached" siblings
-    // served from a disk cache) is gone: every source participant is
-    // rebuilt live on every `check` invocation, scoped or not. This proves
+    // Every source participant is rebuilt live on every `check` invocation.
+    // This proves
     // `run_check` invokes the build closure for every source participant,
     // not just a named one.
     let sources = vec![
@@ -1422,9 +1413,7 @@ fn n_instances_of_one_suite_driver_fetch_once_and_validate_as_n_graph_participan
         &platform_refs,
         &[],
         &source_participants,
-        CheckGraphContext {
-            manifest_extras: &RobotManifestExtras::default(),
-        },
+        CheckGraphContext { robot: None },
         |artifact_ref| {
             fetch_calls += 1;
             assert_eq!(artifact_ref, "ddsm115-driver-v0.1.0.tar.zst");
@@ -1525,15 +1514,11 @@ fn path_overridden_service_enters_check_through_source_emit_apis() -> Result<()>
             temp.path().join("framework/service/drive"),
         )]
     );
-
-    let extras = RobotManifestExtras::default();
     let outcome = run_check_with_context(
         &platform_refs,
         &[],
         &source_participants,
-        CheckGraphContext {
-            manifest_extras: &extras,
-        },
+        CheckGraphContext { robot: None },
         |_| bail!("path-overridden service should not read suite metadata"),
         |_| bail!("no tools in this fixture"),
         |participant| {
@@ -1656,22 +1641,14 @@ fn user_service_config_is_validated_against_emitted_schema() -> Result<()> {
     );
 
     let check_config = |config: Value| -> Result<CheckOutcome> {
-        let extras = RobotManifestExtras {
-            user_runtimes: BTreeMap::from([(
-                "avoid".to_string(),
-                phoxal_cli_core::project::resolver::UserRuntimeManifestExtras {
-                    config: Some(config),
-                },
-            )]),
-            ..RobotManifestExtras::default()
-        };
+        let robot = robot_with_service_config("avoid", config)?;
 
         run_check_with_context(
             &[],
             &[],
             &sources,
             CheckGraphContext {
-                manifest_extras: &extras,
+                robot: Some(&robot),
             },
             |_| bail!("no platform images should be fetched"),
             |_| bail!("no tools should be fetched"),
@@ -1722,15 +1699,12 @@ fn absent_user_service_config_validates_as_null() -> Result<()> {
         "optional".to_string(),
         PathBuf::from("/fake/project/runtimes/optional"),
     )];
-    let extras = RobotManifestExtras::default();
 
     let outcome = run_check_with_context(
         &[],
         &[],
         &sources,
-        CheckGraphContext {
-            manifest_extras: &extras,
-        },
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |_| {
@@ -1758,15 +1732,12 @@ fn absent_user_service_config_still_fails_required_object_schema() -> Result<()>
         "required".to_string(),
         PathBuf::from("/fake/project/runtimes/required"),
     )];
-    let extras = RobotManifestExtras::default();
 
     let outcome = run_check_with_context(
         &[],
         &[],
         &sources,
-        CheckGraphContext {
-            manifest_extras: &extras,
-        },
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |_| {
@@ -1802,26 +1773,21 @@ fn user_service_config_uses_full_json_schema_keywords() -> Result<()> {
         "avoid".to_string(),
         PathBuf::from("/fake/project/runtimes/avoid"),
     )];
-    let extras = RobotManifestExtras {
-        user_runtimes: BTreeMap::from([(
-            "avoid".to_string(),
-            phoxal_cli_core::project::resolver::UserRuntimeManifestExtras {
-                config: Some(serde_json::json!({
-                    "gains": [0.25, 5.5],
-                    "mode": "FAST",
-                    "extra": true
-                })),
-            },
-        )]),
-        ..RobotManifestExtras::default()
-    };
+    let robot = robot_with_service_config(
+        "avoid",
+        serde_json::json!({
+            "gains": [0.25, 5.5],
+            "mode": "FAST",
+            "extra": true
+        }),
+    )?;
 
     let outcome = run_check_with_context(
         &[],
         &[],
         &sources,
         CheckGraphContext {
-            manifest_extras: &extras,
+            robot: Some(&robot),
         },
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
@@ -1987,7 +1953,6 @@ fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<Resolv
         user_runtimes: Vec::new(),
         components,
         tools: Vec::new(),
-        suite_profiles: Default::default(),
         path_overrides: Vec::new(),
     })
 }
@@ -2008,5 +1973,4 @@ robot:
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
   components: {}
-artifacts: {}
 "#;

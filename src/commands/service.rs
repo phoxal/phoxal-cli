@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::AppContext;
-use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot_with_extras};
+use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot};
 
 #[derive(Debug, Args)]
 pub struct Service {
@@ -69,13 +69,11 @@ pub fn service_suite_summary(
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let loaded = load_robot_with_extras(&robot_path)?;
-    let suite = crate::commands::load_suite_for_robot_from_source(
-        suite_source,
-        project_root,
-        &loaded.extras,
-    )?
-    .ok_or_else(|| anyhow::anyhow!("artifact suite unavailable"))?;
+    // Keep `service suite` project-bound: malformed robot intent must fail
+    // before presenting an inventory for that project.
+    let _ = load_robot(&robot_path)?;
+    let suite = crate::commands::load_suite_for_robot_from_source(suite_source, project_root)?
+        .ok_or_else(|| anyhow::anyhow!("artifact suite unavailable"))?;
     Ok(ServiceSuiteSummary {
         entries: phoxal_cli_core::project::suite::artifacts_of_kind(
             &suite,
@@ -139,7 +137,6 @@ robot:
     wheel_radius_m: 0.1
     wheel_base_m: 0.5
   components: {}
-artifacts: {}
 "#
     }
 

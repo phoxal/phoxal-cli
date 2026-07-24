@@ -39,12 +39,6 @@ pub struct Deploy {
     )]
     pub target: Option<String>,
     #[arg(
-        long = "env",
-        value_name = "ENV",
-        help = "Apply a robot.<env>.yaml overlay before deploying (repeatable)."
-    )]
-    pub env: Vec<String>,
-    #[arg(
         long,
         default_value_t = 30,
         help = "Health readiness deadline after restart, in seconds."
@@ -57,7 +51,6 @@ pub(crate) struct DeployOptions {
     pub host: Option<String>,
     pub dry_run: bool,
     pub target: Option<String>,
-    pub overlays: Vec<String>,
     pub suite_source: Option<String>,
     pub health_timeout: Duration,
 }

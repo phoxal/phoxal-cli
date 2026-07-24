@@ -14,17 +14,15 @@ use phoxal_api::v0_2::simulation::RobotSpawn;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::project::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchPlan, PlanContext, ROBOT_TOOL_DEVICE,
-    SIMULATOR_CONTROLLER_ARTIFACT_NAME, SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
-    SIMULATOR_SUPERVISOR_PROVIDER_ID, SITE_TOOL_JOYPAD, build_launch_plan,
-    simulator_controller_provider_id,
+    ROBOT_TOOL_JOYPAD, SIMULATOR_CONTROLLER_ARTIFACT_NAME, SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
+    SIMULATOR_SUPERVISOR_PROVIDER_ID, build_launch_plan, simulator_controller_provider_id,
 };
 use phoxal_cli_core::project::resolver::{
     ResolvedComponent, ResolvedComponentSource, ResolvedPathOverride, ResolvedPathOverrideKind,
-    ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, ResolvedUserRuntime, RobotManifestExtras,
+    ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, ResolvedUserRuntime,
 };
 use phoxal_cli_core::project::suite::{
-    ActivationCriticality, ActivationScope, ArtifactActivation, ArtifactKind,
-    fixture_contract_for_tests, fixture_suite_for_tests, fixture_tool_entry_for_tests,
+    ArtifactKind, fixture_contract_for_tests, fixture_suite_for_tests, fixture_tool_entry_for_tests,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -95,13 +93,7 @@ fn spawn_responder_wire_shape_matches_additive_simulation_contract() {
 }
 
 #[test]
-fn live_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
-    // With no lockfile, a path-only / official-only project resolves live
-    // with no network for either mode: there is nothing to look up remotely
-    // (no git components), so resolution succeeds and writes no lock. A
-    // scratch home still isolates the process-global `PHOXAL_PROJECT_ROOT`
-    // so `resolve()`'s ambient `artifacts_dir()` check can't race a
-    // concurrent test's real store lock.
+fn live_resolve_uses_locked_cargo_workspace() -> Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;
     let temp = tempfile::tempdir()?;
     write_robot_project(temp.path())?;
@@ -110,6 +102,7 @@ fn live_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
         temp.path(),
         SimulateOptions {
             world: "test".to_string(),
+            suite_source: Some(temp.path().join("suite.json").display().to_string()),
             ..SimulateOptions::default()
         },
         SimulateMode::Live,
@@ -121,7 +114,7 @@ fn live_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
 }
 
 #[test]
-fn dry_run_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
+fn dry_run_resolve_uses_locked_cargo_workspace() -> Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;
     let temp = tempfile::tempdir()?;
     write_robot_project(temp.path())?;
@@ -130,6 +123,7 @@ fn dry_run_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
         temp.path(),
         SimulateOptions {
             world: "test".to_string(),
+            suite_source: Some(temp.path().join("suite.json").display().to_string()),
             ..SimulateOptions::default()
         },
         SimulateMode::DryRun,
@@ -143,7 +137,7 @@ fn dry_run_resolve_path_only_project_needs_no_lock_or_network() -> Result<()> {
 fn no_components_sim_plan_matches_run_plan_participants() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut resolved = empty_resolved_robot("robot_v1")?;
-    add_site_tools(&mut resolved);
+    add_robot_tools(&mut resolved);
     resolved.platform_runtimes.push(platform_runtime(
         "drive",
         vec![fixture_contract_for_tests("v0.1::drive::Target", "publish")],
@@ -153,7 +147,6 @@ fn no_components_sim_plan_matches_run_plan_participants() -> Result<()> {
         path: PathBuf::from("runtimes/mission"),
         source_hash: "hash".to_string(),
     });
-    let extras = RobotManifestExtras::default();
     let sources = vec![SourceParticipant::user_service(
         "mission",
         temp.path().join("runtimes/mission"),
@@ -168,7 +161,6 @@ fn no_components_sim_plan_matches_run_plan_participants() -> Result<()> {
         &[CheckedRobotLaunchInput {
             project_root: temp.path(),
             resolved: &resolved,
-            manifest_extras: &extras,
             checked_participants: &checked,
             substitutions: &[],
             source_participants: &sources,
@@ -179,7 +171,6 @@ fn no_components_sim_plan_matches_run_plan_participants() -> Result<()> {
         &[CheckedRobotLaunchInput {
             project_root: temp.path(),
             resolved: &resolved,
-            manifest_extras: &extras,
             checked_participants: &checked,
             substitutions: &[],
             source_participants: &sources,
@@ -195,7 +186,6 @@ fn no_components_sim_plan_matches_run_plan_participants() -> Result<()> {
 fn one_instance_substitution_is_checked_and_rendered() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let resolved = resolved_with_drive_components(&["left_drive"], false)?;
-    let extras = RobotManifestExtras::default();
     let controller_id = simulator_controller_provider_id("robot_v1");
     let checked = vec![
         service_participant("drive", vec![motor_command()]),
@@ -212,7 +202,6 @@ fn one_instance_substitution_is_checked_and_rendered() -> Result<()> {
         &[CheckedRobotLaunchInput {
             project_root: temp.path(),
             resolved: &resolved,
-            manifest_extras: &extras,
             checked_participants: &sim_participants,
             substitutions: &substitutions,
             source_participants: &[],
@@ -235,6 +224,7 @@ fn one_instance_substitution_is_checked_and_rendered() -> Result<()> {
             controller_id.as_str(),
             "tool-bus-robot_v1",
             "tool-device-robot_v1",
+            "tool-joypad-robot_v1",
             "tool-log-robot_v1",
             "tool-telemetry-robot_v1",
         ]
@@ -353,15 +343,12 @@ fn path_overridden_simulators_use_the_same_provider_ids_as_official() -> Result<
         participant.participant_id == controller_id
             && participant.artifact_id == SIMULATOR_CONTROLLER_ARTIFACT_NAME
     }));
-
-    let extras = RobotManifestExtras::default();
     let sources = sim_source_participants(temp.path(), &resolved, None)?;
     let plan = build_launch_plan(
         webots_mode_for_tests(),
         &[CheckedRobotLaunchInput {
             project_root: temp.path(),
             resolved: &resolved,
-            manifest_extras: &extras,
             checked_participants: &checked,
             substitutions: &[],
             source_participants: &sources,
@@ -376,6 +363,7 @@ fn path_overridden_simulators_use_the_same_provider_ids_as_official() -> Result<
             supervisor_id.as_str(),
             "tool-bus-robot_v1",
             "tool-device-robot_v1",
+            "tool-joypad-robot_v1",
             "tool-log-robot_v1",
             "tool-telemetry-robot_v1",
         ]
@@ -416,7 +404,6 @@ fn path_overridden_simulators_use_the_same_provider_ids_as_official() -> Result<
 fn sim_launch_set_matches_checked_robot_participants_without_drivers() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let resolved = resolved_with_drive_components(&["left_drive"], true)?;
-    let extras = RobotManifestExtras::default();
     let controller_id = simulator_controller_provider_id("robot_v1");
     let checked = vec![
         service_participant("drive", Vec::new()),
@@ -435,7 +422,6 @@ fn sim_launch_set_matches_checked_robot_participants_without_drivers() -> Result
         &[CheckedRobotLaunchInput {
             project_root: temp.path(),
             resolved: &resolved,
-            manifest_extras: &extras,
             checked_participants: &sim_participants,
             substitutions: &substitutions,
             source_participants: &sources,
@@ -450,6 +436,7 @@ fn sim_launch_set_matches_checked_robot_participants_without_drivers() -> Result
             controller_id.as_str(),
             "tool-bus-robot_v1",
             "tool-device-robot_v1",
+            "tool-joypad-robot_v1",
             "tool-log-robot_v1",
             "tool-telemetry-robot_v1",
         ]
@@ -477,7 +464,6 @@ fn sim_plan_carries_both_supervisor_and_controller_under_distinct_ids() -> Resul
     resolved
         .simulators
         .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
-    let extras = RobotManifestExtras::default();
     let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
     let controller_id = simulator_controller_provider_id("robot_v1");
     let checked = vec![
@@ -505,7 +491,6 @@ fn sim_plan_carries_both_supervisor_and_controller_under_distinct_ids() -> Resul
         &[CheckedRobotLaunchInput {
             project_root: temp.path(),
             resolved: &resolved,
-            manifest_extras: &extras,
             checked_participants: &sim_participants,
             substitutions: &substitutions,
             source_participants: &[],
@@ -557,7 +542,6 @@ fn stage_simulation_for_robot_produces_a_webots_free_staged_world() -> Result<()
     resolved
         .simulators
         .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
-    let extras = RobotManifestExtras::default();
     let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
     let controller_id = simulator_controller_provider_id("robot_v1");
     let checked = vec![
@@ -585,7 +569,6 @@ fn stage_simulation_for_robot_produces_a_webots_free_staged_world() -> Result<()
         &[CheckedRobotLaunchInput {
             project_root: temp.path(),
             resolved: &resolved,
-            manifest_extras: &extras,
             checked_participants: &sim_participants,
             substitutions: &substitutions,
             source_participants: &[],
@@ -646,7 +629,6 @@ fn stage_simulation_for_robot_writes_world_with_supervisor_and_no_static_robot()
     resolved
         .simulators
         .push(simulator_runtime(SIMULATOR_CONTROLLER_ARTIFACT_NAME));
-    let extras = RobotManifestExtras::default();
     let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
     let controller_id = simulator_controller_provider_id("robot_v1");
     let checked = vec![
@@ -679,7 +661,6 @@ fn stage_simulation_for_robot_writes_world_with_supervisor_and_no_static_robot()
         &[CheckedRobotLaunchInput {
             project_root: temp.path(),
             resolved: &resolved,
-            manifest_extras: &extras,
             checked_participants: &sim_participants,
             substitutions: &[],
             source_participants: &[],
@@ -723,7 +704,6 @@ fn dry_run_output_shows_webots_supervisor_controller_and_ownership() -> Result<(
     resolved
         .simulators
         .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
-    let extras = RobotManifestExtras::default();
     let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
     let controller_id = simulator_controller_provider_id("robot_v1");
     let checked = vec![
@@ -756,7 +736,6 @@ fn dry_run_output_shows_webots_supervisor_controller_and_ownership() -> Result<(
         &[CheckedRobotLaunchInput {
             project_root: temp.path(),
             resolved: &resolved,
-            manifest_extras: &extras,
             checked_participants: &sim_participants,
             substitutions: &[],
             source_participants: &[],
@@ -776,7 +755,7 @@ fn dry_run_output_shows_webots_supervisor_controller_and_ownership() -> Result<(
 
     let output = build_dry_run_output(&plan);
 
-    assert_eq!(output.webots_app.site_id, WEBOTS_SITE_ID);
+    assert_eq!(output.webots_app.app_id, WEBOTS_APP_ID);
     assert_eq!(output.webots_app.launch_ownership, "cli_managed");
     assert!(
         output
@@ -830,14 +809,13 @@ fn real_sim_plan_with_component_names_missing_simulator_provider_still_succeeds(
     let _phoxal_home = ScratchPhoxalHome::new()?;
     let temp = tempfile::tempdir()?;
     write_robot_project_with_component(temp.path())?;
-    let suite_path = write_suite_with_driver(temp.path())?;
+    let suite_path = write_suite_with_robot_tools(temp.path())?;
 
     let plan = prepare(
         temp.path(),
         SimulateOptions {
             world: "test".to_string(),
             suite_source: Some(suite_path.display().to_string()),
-            overlays: vec!["dev".to_string()],
             ..SimulateOptions::default()
         },
     )?;
@@ -857,34 +835,9 @@ fn real_sim_plan_with_component_names_missing_simulator_provider_still_succeeds(
     Ok(())
 }
 
-#[test]
-fn custom_driver_metadata_unavailable_is_named() -> Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
-    let temp = tempfile::tempdir()?;
-    write_robot_project_with_custom_component(temp.path())?;
-    let suite_path = write_suite_with_driver(temp.path())?;
-
-    let error = prepare(
-        temp.path(),
-        SimulateOptions {
-            world: "test".to_string(),
-            suite_source: Some(suite_path.display().to_string()),
-            overlays: vec!["dev".to_string()],
-            ..SimulateOptions::default()
-        },
-    )
-    .expect_err("custom driver that cannot build host-side should fail");
-    let message = format!("{error:#}");
-    assert!(message.contains("DriverMetadataUnavailable"), "{message}");
-    assert!(message.contains("ddsm115"), "{message}");
-    assert!(message.contains("cfg(target_os = \"linux\")"), "{message}");
-    assert!(message.contains("inlined driver metadata"), "{message}");
-    Ok(())
-}
-
 fn write_robot_project(root: &Path) -> Result<()> {
     fs::write(root.join("robot.yaml"), minimal_robot_yaml())?;
-    write_suite_with_site_tools(root)?;
+    write_suite_with_robot_tools(root)?;
     fs::write(
         root.join("structure.urdf"),
         r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="base_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
@@ -894,25 +847,7 @@ fn write_robot_project(root: &Path) -> Result<()> {
         root.join("worlds/test.wbt"),
         "#VRML_SIM R2023b utf8\n\nWorldInfo {\n}\n",
     )?;
-    Ok(())
-}
-
-fn write_robot_project_with_custom_component(root: &Path) -> Result<()> {
-    fs::write(root.join("robot.yaml"), robot_yaml_with_custom_component())?;
-    fs::write(
-        root.join("robot.dev.yaml"),
-        robot_yaml_with_component_dev_overlay(),
-    )?;
-    write_suite_with_site_tools(root)?;
-    fs::write(
-        root.join("structure.urdf"),
-        r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="base_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
-    )?;
-    fs::create_dir_all(root.join("worlds"))?;
-    fs::write(
-        root.join("worlds/test.wbt"),
-        "#VRML_SIM R2023b utf8\n\nWorldInfo {\n}\n",
-    )?;
+    write_cargo_workspace(root)?;
     Ok(())
 }
 
@@ -936,18 +871,12 @@ robot:
     wheel_base_m: 0.5
   components: {}
 
-artifacts:
-  suite: suite.json
 "#
 }
 
 fn write_robot_project_with_component(root: &Path) -> Result<()> {
     fs::write(root.join("robot.yaml"), robot_yaml_with_component())?;
-    fs::write(
-        root.join("robot.dev.yaml"),
-        robot_yaml_with_component_dev_overlay(),
-    )?;
-    write_suite_with_site_tools(root)?;
+    write_suite_with_robot_tools(root)?;
     write_driver_crate(root, "ddsm115")?;
     fs::write(
         root.join("structure.urdf"),
@@ -958,6 +887,7 @@ fn write_robot_project_with_component(root: &Path) -> Result<()> {
         root.join("worlds/test.wbt"),
         "#VRML_SIM R2023b utf8\n\nWorldInfo {\n}\n",
     )?;
+    write_cargo_workspace(root)?;
     Ok(())
 }
 
@@ -985,31 +915,10 @@ robot:
       driver:
         connection: { type: can, bus: 0, node_id: 1 }
 
-artifacts:
-  suite: suite.json
 "#
 }
 
-/// Path pins are dev-overlay-only; `write_robot_project_with_component`
-/// pairs the base `robot.yaml` above with this overlay (loaded via
-/// `SimulateOptions.overlays: vec!["dev".into()]`).
-fn robot_yaml_with_component_dev_overlay() -> &'static str {
-    r#"artifacts:
-  pins:
-    phoxal/component-ddsm115:
-      path: components/ddsm115
-"#
-}
-
-fn robot_yaml_with_custom_component() -> &'static str {
-    robot_yaml_with_component()
-}
-
-fn write_suite_with_driver(root: &Path) -> Result<PathBuf> {
-    write_suite_with_site_tools(root)
-}
-
-fn write_suite_with_site_tools(root: &Path) -> Result<PathBuf> {
+fn write_suite_with_robot_tools(root: &Path) -> Result<PathBuf> {
     let path = root.join("suite.json");
     let suite = fixture_suite_for_tests(
         ["router", "bus", "joypad", "log", "telemetry", "device"]
@@ -1047,6 +956,64 @@ fn write_driver_crate(root: &Path, name: &str) -> Result<()> {
             "#[used]\n#[cfg_attr(target_os = \"macos\", unsafe(link_section = \"__DATA,__phoxal_meta\"))]\n#[cfg_attr(not(target_os = \"macos\"), unsafe(link_section = \".phoxal_api_meta\"))]\nstatic PHOXAL_API_META: [u8; {len}] = *b{json:?};\n\nfn main() {{}}\n"
         ),
     )?;
+    fs::write(
+        dir.join("component.yaml"),
+        "schema: component/v0\nstructure: structure.urdf\ncapabilities:\n  motor:\n    kind: motor\n    target: { kind: joint, id: wheel }\n    command: velocity\n    gear_ratio: 1.0\n",
+    )?;
+    fs::write(
+        dir.join("structure.urdf"),
+        "<robot name=\"component\"><link name=\"wheel\"/></robot>\n",
+    )?;
+    Ok(())
+}
+
+fn write_cargo_workspace(root: &Path) -> Result<()> {
+    fs::create_dir_all(root.join("src"))?;
+    fs::create_dir_all(root.join("train/phoxal/src"))?;
+    let mut members = vec!["\".\"".to_string()];
+    let components = root.join("components");
+    if components.is_dir() {
+        for entry in fs::read_dir(components)? {
+            let entry = entry?;
+            if entry.path().join("Cargo.toml").is_file() {
+                members.push(format!(
+                    "\"components/{}\"",
+                    entry.file_name().to_string_lossy()
+                ));
+            }
+        }
+    }
+    members.sort();
+    fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "robot-train-anchor"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+members = [{}]
+resolver = "2"
+
+[dependencies]
+phoxal = {{ path = "train/phoxal" }}
+"#,
+            members.join(", ")
+        ),
+    )?;
+    fs::write(root.join("src/lib.rs"), "")?;
+    fs::write(
+        root.join("train/phoxal/Cargo.toml"),
+        "[package]\nname = \"phoxal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )?;
+    fs::write(root.join("train/phoxal/src/lib.rs"), "")?;
+    let status = std::process::Command::new("cargo")
+        .arg("generate-lockfile")
+        .current_dir(root)
+        .status()?;
+    anyhow::ensure!(status.success(), "failed to generate fixture Cargo.lock");
     Ok(())
 }
 
@@ -1140,14 +1107,13 @@ robot:
         user_runtimes: Vec::new(),
         components: Vec::new(),
         tools: Vec::new(),
-        suite_profiles: Default::default(),
         path_overrides: Vec::new(),
     })
 }
 
 fn resolved_with_drive_components(instances: &[&str], include_user: bool) -> Result<ResolvedRobot> {
     let mut resolved = empty_resolved_robot("robot_v1")?;
-    add_site_tools(&mut resolved);
+    add_robot_tools(&mut resolved);
     resolved
         .platform_runtimes
         .push(platform_runtime("drive", Vec::new()));
@@ -1232,27 +1198,12 @@ fn simulator_runtime(name: &str) -> ResolvedPlatformRuntime {
     }
 }
 
-fn add_site_tools(resolved: &mut ResolvedRobot) {
+fn add_robot_tools(resolved: &mut ResolvedRobot) {
     resolved.tools.push(tool("tool-bus"));
-    resolved.tools.push(tool(SITE_TOOL_JOYPAD));
+    resolved.tools.push(tool(ROBOT_TOOL_JOYPAD));
     resolved.tools.push(tool("tool-log"));
     resolved.tools.push(tool("tool-telemetry"));
     resolved.tools.push(tool(ROBOT_TOOL_DEVICE));
-    let activations = resolved
-        .tools
-        .iter()
-        .map(|tool| ArtifactActivation {
-            package: tool.package.clone(),
-            scope: if tool.name == SITE_TOOL_JOYPAD {
-                ActivationScope::PerProject
-            } else {
-                ActivationScope::PerRobot
-            },
-            criticality: ActivationCriticality::Optional,
-        })
-        .collect::<Vec<_>>();
-    resolved.suite_profiles.native = activations.clone();
-    resolved.suite_profiles.webots = activations;
 }
 
 fn tool(name: &str) -> ResolvedTool {
@@ -1420,7 +1371,6 @@ fn stage_simulation_uses_project_store_and_symlinks_component_meshes() -> Result
     resolved
         .simulators
         .push(simulator_runtime(SIMULATOR_SUPERVISOR_ARTIFACT_NAME));
-    let extras = RobotManifestExtras::default();
     let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
     let controller_id = simulator_controller_provider_id("robot_v1");
     let checked = vec![
@@ -1448,7 +1398,6 @@ fn stage_simulation_uses_project_store_and_symlinks_component_meshes() -> Result
         &[CheckedRobotLaunchInput {
             project_root: temp.path(),
             resolved: &resolved,
-            manifest_extras: &extras,
             checked_participants: &sim_participants,
             substitutions: &substitutions,
             source_participants: &[],
@@ -1514,7 +1463,6 @@ fn stage_simulation_for_robot_wipes_previous_play_before_restaging() -> Result<(
     resolved
         .simulators
         .push(simulator_runtime(SIMULATOR_CONTROLLER_ARTIFACT_NAME));
-    let extras = RobotManifestExtras::default();
     let supervisor_id = SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string();
     let controller_id = simulator_controller_provider_id("robot_v1");
     let checked = vec![
@@ -1546,7 +1494,6 @@ fn stage_simulation_for_robot_wipes_previous_play_before_restaging() -> Result<(
         &[CheckedRobotLaunchInput {
             project_root: temp.path(),
             resolved: &resolved,
-            manifest_extras: &extras,
             checked_participants: &sim_participants,
             substitutions: &[],
             source_participants: &[],

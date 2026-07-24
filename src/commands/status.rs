@@ -9,7 +9,7 @@ use tokio::time::timeout;
 
 use crate::AppContext;
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
-use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot_with_extras};
+use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot};
 
 #[derive(Debug, Args)]
 pub struct Status {
@@ -79,10 +79,10 @@ async fn run_action(command: &StatusSubcommand, app: &AppContext) -> Result<()> 
 
 async fn inspect_localization(app: &AppContext, arg: &SafetyArg) -> Result<()> {
     let robot_path = discover_robot_yaml(app.project.root())?;
-    let loaded = load_robot_with_extras(&robot_path)?;
+    let robot = load_robot(&robot_path)?;
     let bus = Bus::open(BusConfig {
-        namespace: loaded.robot.robot.namespace,
-        robot_id: loaded.robot.robot.id,
+        namespace: robot.robot.namespace,
+        robot_id: robot.robot.id,
         participant: "phoxal-cli-localization-inspect".to_string(),
         incarnation: 0,
         connect_endpoints: vec![arg.connect.clone()],
@@ -106,10 +106,10 @@ async fn inspect_localization(app: &AppContext, arg: &SafetyArg) -> Result<()> {
 
 async fn inspect_motion(app: &AppContext, arg: &SafetyArg) -> Result<()> {
     let robot_path = discover_robot_yaml(app.project.root())?;
-    let loaded = load_robot_with_extras(&robot_path)?;
+    let robot = load_robot(&robot_path)?;
     let bus = Bus::open(BusConfig {
-        namespace: loaded.robot.robot.namespace,
-        robot_id: loaded.robot.robot.id,
+        namespace: robot.robot.namespace,
+        robot_id: robot.robot.id,
         participant: "phoxal-cli-motion-inspect".to_string(),
         incarnation: 0,
         connect_endpoints: vec![arg.connect.clone()],
@@ -142,10 +142,10 @@ async fn inspect_motion(app: &AppContext, arg: &SafetyArg) -> Result<()> {
 
 async fn inspect_safety(app: &AppContext, arg: &SafetyArg) -> Result<()> {
     let robot_path = discover_robot_yaml(app.project.root())?;
-    let loaded = load_robot_with_extras(&robot_path)?;
+    let robot = load_robot(&robot_path)?;
     let bus = Bus::open(BusConfig {
-        namespace: loaded.robot.robot.namespace,
-        robot_id: loaded.robot.robot.id,
+        namespace: robot.robot.namespace,
+        robot_id: robot.robot.id,
         participant: "phoxal-cli-safety-inspect".to_string(),
         incarnation: 0,
         connect_endpoints: vec![arg.connect.clone()],
@@ -186,10 +186,10 @@ async fn publish_estop(app: &AppContext, arg: &EmergencyStopArg, engaged: bool) 
             app.project.root().display()
         )
     })?;
-    let loaded = load_robot_with_extras(&robot_path)?;
+    let robot = load_robot(&robot_path)?;
     let bus = Bus::open(BusConfig {
-        namespace: loaded.robot.robot.namespace,
-        robot_id: loaded.robot.robot.id,
+        namespace: robot.robot.namespace,
+        robot_id: robot.robot.id,
         participant: "phoxal-cli-estop".to_string(),
         incarnation: 0,
         connect_endpoints: vec![arg.connect.clone()],

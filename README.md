@@ -28,8 +28,8 @@ phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build va
 
 | Command | What it does |
 |---|---|
-| `check` | Resolve `robot.yaml`, stage participants, extract their embedded metadata sections, and validate the graph against `phoxal::check`. `--service <name>` scopes user-service selection. `--strict` additionally fails on coherence warnings. |
-| `validate` | Lower-level `robot.yaml` structure and user-service phoxal-dependency checks that back `check`. |
+| `check` | Resolve `robot.yaml` and the locked Cargo workspace, stage every participant, extract embedded metadata, and validate the complete graph against `phoxal::check`. `--strict` additionally fails on coherence warnings. |
+| `validate` | Lower-level `robot.yaml` structure and Cargo workspace runtime-discovery checks that back `check`. |
 | `run` | Supervise the resolved host-native graph in the terminal UI. `--watch` recompiles an immutable whole-plan revision and reconciles only changed participants. |
 | `simulation run <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` creates a new plan revision for source or project-manifest edits and re-checks driver metadata/substitutions without launching drivers. |
 | `simulation join` | Reserved entry point for joining a running multi-robot simulation; currently reports that the workflow is not available yet. |
@@ -101,36 +101,42 @@ to remove text; `Enter` or `Esc` finishes editing and keeps the current text.
 The terminal title is `phoxal-cli <robot-id> - <namespace>` for the session
 lifetime.
 
-### Dev Path Overrides
+### Project runtimes
 
-Local artifact source overrides use exact provider-qualified package IDs under `artifacts.pins`. Paths that stay inside the project are allowed in the base `robot.yaml`; absolute paths and paths that escape the project are legal only in dev overlays such as `robot.dev.yaml`:
+The robot repository is a Cargo workspace. Its directory layout declares which
+workspace members are runnable:
 
-```yaml
-artifacts:
-  pins:
-    phoxal/service-drive:
-      path: ../framework/service/drive
-    phoxal/component-ddsm115:
-      path: ../framework/component/ddsm115
+```text
+services/    # each member has exactly one bin target
+tools/       # each member has exactly one bin target
+components/  # each member has zero or one bin target
 ```
 
-Load escaping overrides with `--env dev`. Base `robot.yaml` remains fail-closed for absolute or escaping `{ path: ... }` pins so production manifests stay suite/release based. Unknown or unused pin keys are errors.
+`cargo metadata --locked` discovers these members. A component with a bin target
+has a driver; a lib-only component carries assets without a driver. Its
+`component.yaml` must live in that crate or in exactly one direct dependency.
+Use normal Cargo path/git dependencies, thin wrapper crates, and `[patch]` for
+local or remote reuse. A workspace participant whose embedded identity matches
+an official runtime replaces the suite binary; the staged binary's embedded
+kind and identity remain authoritative.
 
 ## Artifact Suite
 
 `phoxal-cli` consumes the framework-generated `phoxal.suite/v1` attached to the
-exact locked train release. Suite v1 starts with framework train 0.38.0 and
-contains the framework-owned `native` and `webots` activation profiles. The CLI
-compiles each selected `per_project` activation once and each `per_robot`
-activation once per robot, mapping required/optional criticality onto its
-startup and runtime-failure policies. Legacy `phoxal.suite/v0` descriptors are
-rejected with the required train-update path rather than guessed or upgraded in
-place.
+exact locked train release. The suite is only the immutable byte inventory for
+official package, train, and target combinations. The CLI release owns the
+official Native runtime set; Webots adds its controller and supervisor. Every
+runtime is per robot and required, apart from the router's internal
+graph-recreation policy. Launch planning never consumes the suite's profile,
+scope, or criticality fields. An official package unknown to this CLI fails
+with an explicit instruction to update the CLI. Legacy `phoxal.suite/v0`
+descriptors are rejected rather than guessed or upgraded in place.
 
 For example:
-`https://github.com/phoxal/framework/releases/download/v0.38.0/suite.json`.
+`https://github.com/phoxal/framework/releases/download/v0.38.1/suite.json`.
 Local development may use `--suite <path>`, `PHOXAL_SUITE=<path>`, or
-`artifacts.suite`; every override must still declare the locked train version.
+the global `--suite` option; every override must still declare the locked train
+version.
 Use `--offline --suite <local-path>` (or the equivalent environment variables)
 to disable network access and resolve from that immutable local descriptor plus
 already verified vendored artifacts. Offline mode never fetches or reconstructs

@@ -30,21 +30,6 @@ robot:
         rgb: [localization]
         depth: [localization, mapping, traversability]
 
-artifacts:
-  pins:
-    phoxal/component-oak_d_lite:
-      git: https://github.com/phoxal/framework
-      rev: main
-      directory: component/oak_d_lite
-    phoxal/component-ddsm115:
-      git: https://github.com/phoxal/framework
-      rev: main
-      directory: component/ddsm115
-    phoxal/component-passive_caster:
-      path: ./components/passive_caster
-
 services:
-  mission_behavior:
-    path: ./runtimes/mission_behavior
-  inspection_policy:
-    path: ./runtimes/inspection_policy
+  mission_behavior: {}
+  inspection_policy: {}

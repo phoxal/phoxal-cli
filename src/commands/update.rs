@@ -10,9 +10,7 @@ use crate::AppContext;
 use crate::native_artifacts::ArtifactProgressReporter;
 use crate::resolver::resolve;
 use phoxal_cli_core::artifacts::NativeArtifactDescriptor;
-use phoxal_cli_core::project::resolver::{
-    ResolveOptions, discover_robot_yaml, load_robot_with_extras,
-};
+use phoxal_cli_core::project::resolver::{ResolveOptions, discover_robot_yaml, load_robot};
 
 #[derive(Debug, Args)]
 pub struct Update {
@@ -76,7 +74,7 @@ fn update(
 ) -> Result<UpdateSummary> {
     let robot_path = discover_robot_yaml(project_start)?;
     let project_root = robot_path.parent().context("robot.yaml has no parent")?;
-    let loaded = load_robot_with_extras(&robot_path)?;
+    let robot = load_robot(&robot_path)?;
     let locked = phoxal_cli_core::project::train::resolve_locked_train(project_root)?;
     if locked.is_published() && !phoxal_cli_core::project::suite::offline_from_env() {
         match phoxal_cli_core::project::train::inspect_registry_train(&locked.version) {
@@ -97,7 +95,7 @@ fn update(
     }
     update_locked_train(
         project_root,
-        &loaded,
+        &robot,
         suite_source,
         dry_run,
         ui,
@@ -107,35 +105,25 @@ fn update(
 
 fn update_locked_train(
     project_root: &Path,
-    loaded: &phoxal_cli_core::project::resolver::LoadedRobot,
+    robot: &phoxal::model::robot::RobotV0,
     suite_source: Option<String>,
     dry_run: bool,
     ui: &crate::Ui,
     locked_version: &str,
 ) -> Result<UpdateSummary> {
-    let robot_source = loaded.extras.suite_source.as_ref().map(|source| {
-        if source.is_absolute() {
-            source.clone()
-        } else {
-            project_root.join(source)
-        }
-    });
     let suite = phoxal_cli_core::project::suite::load_suite(
         phoxal_cli_core::project::suite::SuiteLoadOptions {
-            cli_source: suite_source
-                .or_else(|| robot_source.map(|path| path.display().to_string())),
+            cli_source: suite_source,
             offline: false,
         },
         locked_version,
     )?
     .context("update requires a reachable artifact suite; --offline cannot update")?;
     let resolved = resolve(
-        &loaded.robot,
+        robot,
         project_root,
         Some(&suite),
         ResolveOptions {
-            resolve_source_commits: false,
-            resolve_component_asset_commits: false,
             ..ResolveOptions::default()
         },
     )?;
@@ -157,11 +145,7 @@ fn update_locked_train(
                 old,
                 new: descriptor.version.clone(),
                 bytes: descriptor.size,
-                pinned: loaded
-                    .robot
-                    .artifacts
-                    .pins
-                    .contains_key(&descriptor.package_id),
+                pinned: false,
             }
         })
         .collect::<Vec<_>>();
@@ -190,13 +174,7 @@ fn update_locked_train(
         );
     }
 
-    let pins_skipped = loaded
-        .robot
-        .artifacts
-        .pins
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
+    let pins_skipped = Vec::new();
 
     if !dry_run {
         let _lock = crate::native_artifacts::ArtifactStoreLock::exclusive("update")?;
@@ -463,16 +441,36 @@ robot:
 "#,
         )?;
         fs::write(root.join("structure.urdf"), "<robot/>")?;
+        fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join("train/phoxal/src"))?;
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nphoxal = { path = \"train/phoxal\" }\n",
+        )?;
+        fs::write(root.join("src/lib.rs"), "")?;
+        fs::write(
+            root.join("train/phoxal/Cargo.toml"),
+            "[package]\nname = \"phoxal\"\nversion = \"0.36.0\"\nedition = \"2024\"\n",
+        )?;
+        fs::write(root.join("train/phoxal/src/lib.rs"), "")?;
+        anyhow::ensure!(
+            std::process::Command::new("cargo")
+                .arg("generate-lockfile")
+                .current_dir(&root)
+                .status()?
+                .success(),
+            "failed to generate fixture Cargo.lock"
+        );
         let suite_path = root.join("suite.json");
         fs::write(
             &suite_path,
             serde_json::to_vec(&fixture_suite_for_tests(Vec::new()))?,
         )?;
 
-        let loaded = load_robot_with_extras(&root.join("robot.yaml"))?;
+        let robot = load_robot(&root.join("robot.yaml"))?;
         let summary = update_locked_train(
             &root,
-            &loaded,
+            &robot,
             Some(suite_path.display().to_string()),
             true,
             &crate::Ui::from_env(),

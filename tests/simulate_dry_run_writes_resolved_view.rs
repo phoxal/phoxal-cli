@@ -34,22 +34,8 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
         }
         other => panic!("expected LaunchMode::Webots, got {other:?}"),
     }
-    // `fixture_suite_for_tests` activates the site-scoped infrastructure
-    // router and joypad declared by its Webots profile, while the remaining
-    // profile tools are robot-scoped participants.
-    let site_ids = plan
-        .plan
-        .site
-        .iter()
-        .map(|site| site.id.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        site_ids,
-        vec![
-            "infrastructure-router",
-            phoxal_cli_core::project::launch_plan::SITE_TOOL_JOYPAD,
-        ]
-    );
+    // Every resolved tool is now a required robot participant. The router
+    // remains the separately supervised graph root.
     assert_eq!(
         plan.plan.robots[0]
             .participants
@@ -64,6 +50,7 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
         vec![
             "tool-bus-testbot",
             "tool-device-testbot",
+            "tool-joypad-testbot",
             "tool-log-testbot",
             "tool-telemetry-testbot",
         ]
@@ -194,7 +181,6 @@ robot:
     wheel_base_m: 0.5
   components: {}
 
-artifacts: {}
 "#
 }
 

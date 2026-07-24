@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::git_artifact;
 use crate::native_artifacts;
 use phoxal_cli_core::artifacts::{NativeArtifactDescriptor, ProvisioningMode};
 use phoxal_cli_core::project::resolver::{
@@ -43,24 +42,12 @@ pub(crate) fn component_assets_dir(
         .transpose()
 }
 
-/// A component's `Git` source now routes through the general
-/// `crate::git_artifact` resolver (any `robot.yaml` `artifacts.pins` entry
-/// can be git-sourced, not just components; see `resolver::apply_path_pins`)
-/// instead of the old component-only `cache/components/` cache.
 fn resolved_component_package_dir(
     package: &ResolvedComponentPackage,
     project_root: &Path,
 ) -> Result<PathBuf> {
     match &package.source {
         ResolvedComponentSource::Path { path } => Ok(resolve_project_path(project_root, path)),
-        ResolvedComponentSource::Git {
-            git,
-            rev,
-            directory,
-        } => {
-            let repo_dir = git_artifact::ensure_git_artifact(git, rev)?;
-            git_artifact::subdir(repo_dir, directory.as_deref())
-        }
         ResolvedComponentSource::Suite => suite_component_package_dir(package),
     }
 }
@@ -78,17 +65,15 @@ fn suite_component_package_dir(package: &ResolvedComponentPackage) -> Result<Pat
     let Some(runtime) = &package.suite_runtime else {
         bail!(
             "component package {} resolves from the artifact suite but has no release asset for \
-             this target yet; it cannot be staged locally. Wait for it to publish, or pin \
-             artifacts.pins.{} to a path/git override.",
-            package.package,
+             this target yet; it cannot be staged locally. Wait for it to publish or add a \
+             components/ workspace crate.",
             package.package
         );
     };
     let descriptor = NativeArtifactDescriptor::from_runtime(runtime)?.ok_or_else(|| {
         anyhow!(
             "component package {} has no release asset for this target yet; it cannot be staged locally. \
-             Wait for it to publish, or pin artifacts.pins.{} to a path/git override.",
-            package.package,
+             Wait for it to publish or add a components/ workspace crate.",
             package.package
         )
     })?;

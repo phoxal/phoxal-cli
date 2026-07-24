@@ -1,7 +1,7 @@
 //! Webots process preparation and spawn-query serving.
 
 use super::{
-    SimPlan, WEBOTS_SITE_ID, stage_simulation_for_robot, stage_simulator_controller_binaries,
+    SimPlan, WEBOTS_APP_ID, stage_simulation_for_robot, stage_simulator_controller_binaries,
     webots_world,
 };
 use crate::supervisor::ParticipantSpec;
@@ -44,8 +44,8 @@ pub(crate) fn stage_and_prepare_webots_spec(
         staged.staged_world_path.display()
     ));
     let spec = ParticipantSpec {
-        key: ProcessKey::project(WEBOTS_SITE_ID),
-        id: WEBOTS_SITE_ID.to_string(),
+        key: ProcessKey::project(WEBOTS_APP_ID),
+        id: WEBOTS_APP_ID.to_string(),
         kind: ParticipantKind::Tool,
         executable: webots_path,
         args: webots_launch_args(&staged.staged_world_path),

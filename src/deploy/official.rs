@@ -81,14 +81,11 @@ pub(crate) fn stage_official_artifacts(
         }
         artifacts.insert(runtime.package.clone(), plan);
     }
-    // Every profile-selected tool stages the same way: locate its resolved
-    // entry and, unless it is a local path-pin override, plan its official
-    // binary.
-    let requested_tools = plan
-        .site
+    // Every CLI-catalog tool stages the same way.
+    let mut requested_tools = plan
+        .robots
         .iter()
-        .map(|site| site.id.as_str())
-        .chain(plan.robots.iter().flat_map(|robot| {
+        .flat_map(|robot| {
             robot.participants.iter().filter_map(|participant| {
                 matches!(
                     participant.execution,
@@ -96,8 +93,9 @@ pub(crate) fn stage_official_artifacts(
                 )
                 .then_some(participant.artifact_id.as_str())
             })
-        }))
+        })
         .collect::<BTreeSet<_>>();
+    requested_tools.insert(phoxal_cli_core::project::launch_plan::INFRASTRUCTURE_ROUTER);
     for tool_name in requested_tools {
         let tool = resolved
             .tools

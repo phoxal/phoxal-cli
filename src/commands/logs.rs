@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::AppContext;
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
-use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot_with_extras};
+use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot};
 use phoxal_cli_core::session::reconcile::{
     Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced,
 };
@@ -72,10 +72,10 @@ fn resolve_identity(
             let robot_path = discover_robot_yaml(project_start).with_context(|| {
                 format!("failed to find robot.yaml from {}", project_start.display())
             })?;
-            let loaded = load_robot_with_extras(&robot_path)?;
+            let robot = load_robot(&robot_path)?;
             Ok((
-                namespace.unwrap_or(loaded.robot.robot.namespace),
-                robot_id.unwrap_or(loaded.robot.robot.id),
+                namespace.unwrap_or(robot.robot.namespace),
+                robot_id.unwrap_or(robot.robot.id),
             ))
         }
     }

@@ -141,12 +141,11 @@ pub(crate) fn coherence_for_launch_plan(
                 .iter()
                 .find(|graph| graph.robot_id == robot.id)
                 .ok_or_else(|| anyhow!("robot {} has no checked contract graph", robot.id))?;
-            let mut ids = robot
+            let ids = robot
                 .participants
                 .iter()
                 .map(|participant| participant.launch.participant_id.as_str())
                 .collect::<std::collections::BTreeSet<_>>();
-            ids.extend(plan.site.iter().map(|site| site.id.as_str()));
             let graph_surfaces = graph
                 .surfaces
                 .iter()
@@ -224,9 +223,7 @@ impl CheckCmd {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let project_root = app.project.root().to_path_buf();
         let options = CheckOptions {
-            service: self.service.clone(),
             suite_source: app.suite_source.clone(),
-            overlays: self.env.clone(),
             target: self.target.clone(),
             strict: self.strict,
         };

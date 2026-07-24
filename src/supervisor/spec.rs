@@ -28,7 +28,7 @@ pub struct ParticipantSpec {
     pub note: Option<String>,
     /// Whether this participant is a checked Phoxal bus participant that
     /// declares its own Zenoh Liveliness token after setup (true for
-    /// essentially every spec - services, drivers, and site tools built on
+    /// essentially every spec - services, drivers, and robot tools built on
     /// the shared runner). `false` only for a process with no participant
     /// Liveliness token of its own:
     /// the router (readiness is a separate CLI-owned bus probe) and the Webots

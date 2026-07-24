@@ -6,7 +6,6 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 use crate::AppContext;
-use phoxal_cli_core::project::resolver::RobotManifestExtras;
 
 pub mod behavior;
 pub mod check;
@@ -28,27 +27,11 @@ pub mod validate;
 /// remote suite fresh (no on-disk cache of the fetch) unless an explicit
 /// local/URL source is given. Offline resolution requires an explicit local
 /// suite and uses only already-vendored artifacts.
-pub(crate) fn load_suite_for_robot(
-    app: &AppContext,
-    project_root: &std::path::Path,
-    manifest_extras: &RobotManifestExtras,
-) -> Result<Option<phoxal_cli_core::project::suite::Suite>> {
-    load_suite_for_robot_from_source(app.suite_source.clone(), project_root, manifest_extras)
-}
-
 pub(crate) fn load_suite_for_robot_from_source(
     suite_source: Option<String>,
     project_root: &std::path::Path,
-    manifest_extras: &RobotManifestExtras,
 ) -> Result<Option<phoxal_cli_core::project::suite::Suite>> {
-    let robot_source = manifest_extras.suite_source.as_ref().map(|source| {
-        if source.is_absolute() {
-            source.clone()
-        } else {
-            project_root.join(source)
-        }
-    });
-    let source = suite_source.or_else(|| robot_source.map(|path| path.display().to_string()));
+    let source = suite_source;
     #[cfg(test)]
     let locked_version = std::env::var("PHOXAL_TEST_LOCKED_TRAIN").ok().or_else(|| {
         source.as_ref().and_then(|source| {
@@ -177,14 +160,14 @@ pub enum RootCommand {
     #[command(
         about = "Check the robot graph's participants and config against phoxal::check.",
         long_about = "Check the robot graph's participants and config against phoxal::check.\n\n\
-                      Resolves robot.yaml, then reads each available participant's compiled-in contract metadata (official artifacts from the suite, host tools and locally built user services/component drivers from their own built binary) and validates the graph with phoxal::check. Contract compatibility is per-contract name identity (D1) - two participants naming the same version-qualified contract are compatible by construction, so there is no wire-shape hash to agree on. This still validates each user service's manifest config against its emitted JSON Schema. Official artifact readiness comes from the configured generated suite; git component commits resolve live unless pinned to a commit SHA in robot.yaml."
+                      Resolves robot.yaml and the Cargo workspace, then reads every participant's compiled-in contract metadata (official artifacts from the suite and workspace-built services, tools, and component drivers) and validates the graph with phoxal::check. Contract compatibility is per-contract name identity (D1) - two participants naming the same version-qualified contract are compatible by construction, so there is no wire-shape hash to agree on. This also validates each user service's manifest config against its emitted JSON Schema."
     )]
     Check(check::CheckCmd),
     // Preserved prototype for the parked behavior-orchestration design. Keep it
     // out of the supported command listing until that plan is rewritten.
     #[command(about = "Experimental behavior-orchestration prototype.", hide = true)]
     Behavior(behavior::Behavior),
-    #[command(about = "Validate robot.yaml structure and user-service phoxal dependencies.")]
+    #[command(about = "Validate robot.yaml structure and Cargo workspace runtime ownership.")]
     Validate(validate::Validate),
     #[command(about = "Simulate a robot in Webots (see `simulation run`/`simulation join`).")]
     Simulation(simulate::Simulation),

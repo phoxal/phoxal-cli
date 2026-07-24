@@ -78,7 +78,6 @@ pub(crate) fn stage_payload_metadata(
                     crate::component_driver::component_assets_dir(component, project_root)?
                 }
                 ResolvedComponentSource::Suite => locate_cached_component_assets_dir(assets)?,
-                ResolvedComponentSource::Git { .. } => None,
             },
         };
         let Some(source_dir) = source_dir else {

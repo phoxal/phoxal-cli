@@ -8,19 +8,14 @@ use crate::supervisor::BoardBackend;
 use crate::supervisor::ParticipantSpec;
 use crate::supervisor::ParticipantState;
 use crate::supervisor::ParticipantStatus;
-use crate::supervisor::default_connect_endpoint;
-use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use phoxal::participant::launch::env;
 use phoxal_cli_core::project::launch_plan::LaunchOwnership;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
-use phoxal_cli_core::project::launch_plan::SiteLaunch;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
-use phoxal_cli_core::project::suite::ArtifactKind;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::launch_env::{encode_participant_env, encode_tool_env};
 use phoxal_cli_core::session::stores::telemetry::RobotScope;
@@ -34,67 +29,6 @@ use std::time::Duration;
 pub(crate) enum DriverDecision {
     Launch,
     Degraded(String),
-}
-
-pub(crate) fn prepare_site_tools(
-    plan: &LaunchPlan,
-    resolved: &ResolvedRobot,
-    robot_root: &Path,
-    board: &BoardBackend,
-    specs: &mut Vec<ParticipantSpec>,
-    ui: &crate::Ui,
-) -> Result<()> {
-    let namespace = plan
-        .robots
-        .first()
-        .map(|robot| robot.namespace.as_str())
-        .unwrap_or("site");
-    let robot_id = plan
-        .robots
-        .first()
-        .map(|robot| robot.id.as_str())
-        .unwrap_or("site");
-
-    for site in &plan.site {
-        if site.kind == ArtifactKind::Infrastructure {
-            continue;
-        }
-        let robot = RobotKey::new(namespace, robot_id);
-        let key = ProcessKey::project(&site.id);
-        let status =
-            ParticipantStatus::new(&site.id, ParticipantKind::Tool, ParticipantState::Starting)
-                .with_local(site_tool_is_local(resolved, &site.id))
-                .with_scope(RobotScope {
-                    namespace: namespace.to_string(),
-                    robot_id: robot_id.to_string(),
-                });
-        board.upsert_process(key.clone(), status, site.startup_requirement);
-        match locate_tool_binary(resolved, &site.id, ui)? {
-            Some(path) => specs.push(ParticipantSpec {
-                key: key.clone(),
-                id: site.id.clone(),
-                kind: ParticipantKind::Tool,
-                executable: path,
-                args: Vec::new(),
-                cwd: None,
-                env: site_env(site, namespace, robot_id, robot_root)?,
-                shutdown_grace: Duration::from_secs(5),
-                process_group: true,
-                note: None,
-                bus_participant: true,
-                readiness: ParticipantSpec::exact_liveliness_template(robot, &site.id),
-                startup_requirement: site.startup_requirement,
-                runtime_failure: site.runtime_failure,
-                restart_policy: Default::default(),
-            }),
-            None => board.set_state(
-                &key,
-                ParticipantState::Failed,
-                Some(native_pending_tool_note(&site.id)),
-            ),
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn prepare_robot_participants(
@@ -447,48 +381,6 @@ pub(crate) fn spec_from_launch_record(
         runtime_failure: participant.runtime_failure,
         restart_policy: Default::default(),
     }))
-}
-
-pub(crate) fn site_env(
-    site: &SiteLaunch,
-    namespace: &str,
-    robot_id: &str,
-    robot_root: &Path,
-) -> Result<Vec<(String, String)>> {
-    let mut envs = vec![
-        (env::PARTICIPANT_ID.to_string(), site.id.clone()),
-        (env::NAMESPACE.to_string(), namespace.to_string()),
-        (env::ROBOT_ID.to_string(), robot_id.to_string()),
-    ];
-    envs.push((
-        env::ROBOT_ROOT.to_string(),
-        robot_root.display().to_string(),
-    ));
-    // A configless tool (`phoxal_config == Value::Null`)
-    // must run with `PHOXAL_CONFIG` ABSENT: a unit config (`type Config = ()`)
-    // fails to deserialize `{}` ("invalid type: map, expected unit"), and an
-    // absent var uses the runner's null/unit fallback.
-    if !site.phoxal_config.is_null() {
-        envs.push((
-            env::CONFIG.to_string(),
-            serde_json::to_string(&site.phoxal_config)
-                .with_context(|| format!("failed to encode PHOXAL_CONFIG for {}", site.id))?,
-        ));
-    }
-    envs.push((env::CONNECT.to_string(), default_connect_endpoint()));
-    Ok(envs)
-}
-
-/// Whether a tool is resolved from a local
-/// path-pin override rather than a fetched suite artifact. Best-effort:
-/// `false` if the tool is missing from `resolved.tools` (surfaced properly by
-/// `locate_tool_binary`'s own lookup instead).
-pub(crate) fn site_tool_is_local(resolved: &ResolvedRobot, name: &str) -> bool {
-    resolved
-        .tools
-        .iter()
-        .find(|tool| tool.name == name)
-        .is_some_and(|tool| tool.path_override.is_some())
 }
 
 pub(crate) fn locate_tool_binary(

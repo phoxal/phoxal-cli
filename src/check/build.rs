@@ -8,7 +8,7 @@ use phoxal::check as graph_check;
 use phoxal_cli_core::check::participant_metadata;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
-use phoxal_cli_core::project::tooling::cargo_binary_name;
+use phoxal_cli_core::project::tooling::{cargo_binary_name, cargo_package_name};
 use serde_json::Value;
 use std::path::Path;
 use std::path::PathBuf;
@@ -68,7 +68,8 @@ pub(crate) fn build_emit_apis_by_building(participant: &SourceParticipant) -> Re
         )
     })?;
     let binary_name = cargo_binary_name(&crate_dir, None)?;
-    let binary_path = build_and_locate_binary(&crate_dir, &binary_name)?;
+    let package_name = cargo_package_name(&crate_dir)?;
+    let binary_path = build_and_locate_binary(&crate_dir, &package_name, &binary_name)?;
     let meta =
         participant_metadata::extract_participant_metadata(&binary_path).with_context(|| {
             format!(
@@ -90,7 +91,11 @@ pub(crate) fn build_emit_apis_by_building(participant: &SourceParticipant) -> Re
 /// the *workspace-root* `target/`, not `<crate_dir>/target/`, so a fixed path
 /// would miss it. Cargo's own artifact messages are workspace-aware
 /// regardless of layout.
-pub(crate) fn build_and_locate_binary(crate_dir: &Path, binary_name: &str) -> Result<PathBuf> {
+pub(crate) fn build_and_locate_binary(
+    crate_dir: &Path,
+    package_name: &str,
+    binary_name: &str,
+) -> Result<PathBuf> {
     // `run_output` fully captures the child's stdout/stderr, so emit one
     // append-only status line before starting the captured build.
     let progress = crate::progress::status(format!(
@@ -103,12 +108,16 @@ pub(crate) fn build_and_locate_binary(crate_dir: &Path, binary_name: &str) -> Re
             "build",
             "--quiet",
             "--message-format=json",
+            "-p",
+            package_name,
             "--bin",
             binary_name,
         ],
         Some(crate_dir),
     )
-    .with_context(|| format!("failed to spawn `cargo build --bin {binary_name}`"));
+    .with_context(|| {
+        format!("failed to spawn `cargo build -p {package_name} --bin {binary_name}`")
+    });
     let output = match result {
         Ok(output) => output,
         Err(error) => {

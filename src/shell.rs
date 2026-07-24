@@ -103,24 +103,6 @@ fn wait_for_registered_child(
     }
 }
 
-pub fn run_status(
-    executable: &str,
-    args: impl IntoIterator<Item = impl AsRef<OsStr>>,
-    cwd: Option<&Path>,
-) -> Result<()> {
-    let output = run_output(executable, args, cwd)?;
-    if output.status.success() {
-        return Ok(());
-    }
-    bail!(
-        "`{}` failed with status {}\nstdout:\n{}\nstderr:\n{}",
-        executable,
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 pub fn run_stdout(
     executable: &str,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,

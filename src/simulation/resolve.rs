@@ -26,7 +26,6 @@ use phoxal_cli_core::project::launch_plan::build_launch_plan;
 use phoxal_cli_core::project::launch_plan::simulator_controller_provider_id;
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
-use phoxal_cli_core::project::resolver::RobotManifestExtras;
 use phoxal_cli_core::project::suite::Suite;
 use phoxal_cli_core::simulation::world;
 use std::collections::BTreeMap;
@@ -35,7 +34,7 @@ use std::path::Path;
 pub(crate) fn resolve_project(
     project_start: &Path,
     options: SimulateOptions,
-    mode: SimulateMode,
+    _mode: SimulateMode,
 ) -> Result<ResolvedSimulation> {
     let robot_path = phoxal_cli_core::project::resolver::discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
@@ -44,26 +43,15 @@ pub(crate) fn resolve_project(
         .context("robot.yaml did not have a parent directory")?
         .to_path_buf();
     let world_path = world::resolve_world(&project_root, &options.world)?;
-    let loaded = if options.overlays.is_empty() {
-        phoxal_cli_core::project::resolver::load_robot_with_extras(&robot_path)?
-    } else {
-        phoxal_cli_core::project::resolver::load_robot_with_extras_and_overlays(
-            &robot_path,
-            &options.overlays,
-        )?
-    };
-    let robot = loaded.robot;
-    let manifest_extras = loaded.extras;
+    let robot = phoxal_cli_core::project::resolver::load_robot(&robot_path)?;
     let suite = crate::commands::load_suite_for_robot_from_source(
         options.suite_source.clone(),
         &project_root,
-        &manifest_extras,
     )?;
 
-    // Always resolve live git component driver commits so driver metadata can
-    // be staged. Component asset git refs are resolved only for live simulate,
-    // where Webots world staging genuinely needs local asset files; dry-run
-    // reports the intended staged paths without fetching assets.
+    // Resolve Cargo-workspace component drivers so driver metadata can be
+    // staged. Live simulation also stages their crate-owned assets; dry-run
+    // reports the intended staged paths without copying assets.
     // The robot's own official artifacts (services + component drivers) resolve
     // for `--target` when set, so a Linux robot can be planned from a non-Linux
     // host; the simulator itself keeps the host target since Webots runs locally.
@@ -77,8 +65,6 @@ pub(crate) fn resolve_project(
         &project_root,
         suite.as_ref(),
         ResolveOptions {
-            resolve_source_commits: true,
-            resolve_component_asset_commits: mode == SimulateMode::Live,
             official_target_triple: official_target,
             ..ResolveOptions::default()
         },
@@ -88,7 +74,6 @@ pub(crate) fn resolve_project(
         project_root,
         world_path,
         resolved,
-        manifest_extras,
         suite,
     })
 }
@@ -106,43 +91,17 @@ pub(crate) fn build_checked_sim_launch_plan(
     project_root: &Path,
     world: &Path,
     resolved: &ResolvedRobot,
-    manifest_extras: &RobotManifestExtras,
     suite: Option<&Suite>,
 ) -> Result<(LaunchPlan, Vec<graph_check::ParticipantContractSurface>)> {
     let source_participants = sim_source_participants(project_root, resolved, suite)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
-    let active_tools =
-        resolved.active_profile_tools(phoxal_cli_core::project::resolver::ToolProfile::Webots);
-    // Metadata validation follows the exact selected suite profile. Tools
-    // outside that profile do not join the execution graph merely because
-    // their artifact exists in the train inventory.
-    let metadata_source_participants = source_participants
-        .iter()
-        .filter(|participant| {
-            active_tools.includes_named(
-                participant.kind == SourceParticipantKind::Tool,
-                &participant.name,
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let metadata_source_participants = source_participants.clone();
     // A Suite-sourced component driver is a platform ref here too (docs
     // #21), exactly like `check`/`run`/`deploy` - synthesized from suite
     // metadata rather than built from source. Only a Path/Git-overridden
     // driver crate reaches the `build` closure below.
-    let platform_refs = check_artifact_refs_from_resolved(resolved)
-        .into_iter()
-        .filter(|artifact| {
-            active_tools.includes_named(
-                artifact.kind == phoxal_cli_core::project::suite::ArtifactKind::Tool,
-                &artifact.name,
-            )
-        })
-        .collect::<Vec<_>>();
-    let tool_participants = tool_participants_from_resolved(resolved)?
-        .into_iter()
-        .filter(|tool| active_tools.contains(&tool.name))
-        .collect::<Vec<_>>();
+    let platform_refs = check_artifact_refs_from_resolved(resolved);
+    let tool_participants = tool_participants_from_resolved(resolved)?;
     let mut official_by_ref = resolved
         .platform_runtimes
         .iter()
@@ -159,7 +118,9 @@ pub(crate) fn build_checked_sim_launch_plan(
         &platform_refs,
         &tool_participants,
         &metadata_source_participants,
-        CheckGraphContext { manifest_extras },
+        CheckGraphContext {
+            robot: Some(&resolved.robot),
+        },
         |artifact_ref| {
             if let Some(runtime) = official_by_ref.get(artifact_ref) {
                 return extract_emit_apis_from_staged_runtime(runtime);
@@ -217,7 +178,6 @@ pub(crate) fn build_checked_sim_launch_plan(
         &[CheckedRobotLaunchInput {
             project_root,
             resolved,
-            manifest_extras,
             checked_participants: &sim_participants,
             substitutions: &substitutions,
             source_participants: &source_participants,

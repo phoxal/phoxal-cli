@@ -628,7 +628,6 @@ async fn watch_reconciles_environment_and_shutdown_policy_changes() -> Result<()
         2,
         LaunchPlan {
             mode: LaunchMode::Run,
-            site: Vec::new(),
             robots: Vec::new(),
         },
     )?;
@@ -1342,7 +1341,7 @@ async fn await_participants_ready_fails_immediately_on_explicit_terminal_failure
 #[tokio::test]
 async fn staged_startup_gates_the_next_stage_on_observed_readiness() -> Result<()> {
     let board = BoardBackend::new();
-    // Every real caller (`prepare_site_tools`/`prepare_robot_participants`)
+    // Every real participant preparation caller
     // upserts a `Starting` board entry BEFORE a spec ever reaches the
     // supervisor. Mirror that real contract for "one" only - "two"
     // deliberately stays un-upserted, so its absence from the board is
