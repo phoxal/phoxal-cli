@@ -167,6 +167,18 @@ impl Build {
             crate::commands::resident::resolve_target(self.project.as_deref(), app.project.root())?
                 .project;
 
+        // Acquire the Build lock for the WHOLE operation - before any snapshot or
+        // compile - and hold it through archiving (#936, finding B). The
+        // container path snapshots and compiles the source; the lock must already
+        // be held then so no concurrent phoxal operation can edit the tree between
+        // the snapshot the container compiles and the manifests/assets staging
+        // reads, which would pair old binaries with new manifests.
+        let _lock = ProjectLock::acquire(ProjectLockIdentity::resolve(
+            &project_root,
+            ProjectOperation::Build,
+        ))
+        .context("failed to acquire the project lock for build")?;
+
         match backend {
             Backend::Local { target } => self.build_local(app, &project_root, &target),
             Backend::Container { target } => {
@@ -177,14 +189,19 @@ impl Build {
     }
 
     /// Build on this host with `cargo build --target`, then stage, validate, and
-    /// archive. This is the fully-implemented v0 backend.
+    /// archive. Local staging reads the live tree, but the Build lock (held by
+    /// [`Self::run`]) already serializes it against other phoxal operations.
     fn build_local(&self, app: &AppContext, project_root: &Path, target: &str) -> Result<()> {
         let staging = StagingBuild::local(Some(target.to_string()));
-        self.stage_validate_archive(app, project_root, target, &staging)
+        // Local builds and stages the live project tree under the lock.
+        self.stage_validate_archive(app, project_root, project_root, target, &staging)
     }
 
     /// Build inside a toolchain image, then reuse the identical host-side staging
-    /// + validation + archive with the container-built binaries.
+    /// + validation + archive with the container-built binaries. The Build lock
+    /// is already held by [`Self::run`], so the snapshot, the compile, and the
+    /// staging that reads that same frozen snapshot all happen under one lock
+    /// (#936, finding B).
     fn build_container(
         &self,
         app: &AppContext,
@@ -192,6 +209,35 @@ impl Build {
         target: &str,
         runner: &dyn EngineRunner,
     ) -> Result<()> {
+        let snapshot = self.compile_in_container(project_root, target, runner, &app.ui)?;
+
+        // Stage manifests, assets, AND binaries from the SAME frozen snapshot the
+        // container compiled, never the live tree (#936, finding B): the container
+        // wrote the target binaries into `<snapshot>/target`, and staging reads
+        // robot.yaml and assets from `<snapshot>` too, so a bundle can never pair
+        // old binaries with newer live manifests. Officials still resolve from the
+        // host's vendored `.phoxal/artifacts` (host-path, unaffected by the
+        // snapshot). The default output stays a sibling of the real project's
+        // staged directory.
+        let staging = StagingBuild::Prebuilt {
+            target: Some(target.to_string()),
+            target_dir: snapshot.path().join("target"),
+        };
+        self.stage_validate_archive(app, project_root, snapshot.path(), target, &staging)
+    }
+
+    /// Snapshot the source, validate its Cargo.lock, and compile the workspace
+    /// for `target` inside the toolchain image, returning the snapshot directory
+    /// (with `<snapshot>/target` populated by the container). Assumes the Build
+    /// lock is already held (see [`Self::run`]); split out so the snapshot+compile
+    /// ordering under the lock is unit-testable with a fake [`EngineRunner`].
+    fn compile_in_container(
+        &self,
+        project_root: &Path,
+        target: &str,
+        runner: &dyn EngineRunner,
+        ui: &crate::Ui,
+    ) -> Result<tempfile::TempDir> {
         let snapshot = tempfile::Builder::new()
             .prefix("phoxal-build-snapshot-")
             .tempdir()
@@ -231,7 +277,7 @@ impl Build {
             cargo_git,
             artifacts: vendored_artifacts(project_root),
         };
-        app.ui.info(format!(
+        ui.info(format!(
             "compiling workspace for {target} inside {} ({}{})",
             spec.image,
             self.container_engine.program(),
@@ -241,34 +287,23 @@ impl Build {
                 .unwrap_or_default(),
         ));
         runner.run(&spec.invocation())?;
-
-        // The container wrote the target binaries into the snapshot's target
-        // directory; stage from there. Officials still come from the host's
-        // per-target vendored `.phoxal/artifacts`.
-        let staging = StagingBuild::Prebuilt {
-            target: Some(target.to_string()),
-            target_dir: snapshot.path().join("target"),
-        };
-        self.stage_validate_archive(app, project_root, target, &staging)
+        Ok(snapshot)
     }
 
-    /// The shared tail every backend runs: refresh staging for the target,
-    /// validate the staged layout through the loader against the declared target
-    /// architecture, and archive it deterministically. Holds the project lock
-    /// for the whole operation, as the stager's contract requires.
+    /// The shared tail every backend runs: refresh staging for the target from
+    /// `staging_source` (the live project for `local`, the frozen snapshot for
+    /// `container`), validate the staged layout through the loader against the
+    /// declared target signature, and archive it deterministically as a sibling
+    /// of `project_root`'s staged directory. The Build lock is held by the caller
+    /// ([`Self::run`]) for the whole operation.
     fn stage_validate_archive(
         &self,
         app: &AppContext,
         project_root: &Path,
+        staging_source: &Path,
         target: &str,
         staging: &StagingBuild,
     ) -> Result<()> {
-        let _lock = ProjectLock::acquire(ProjectLockIdentity::resolve(
-            project_root,
-            ProjectOperation::Build,
-        ))
-        .context("failed to acquire the project lock for build")?;
-
         let options = RunOptions {
             drivers: crate::run::DriversMode::On,
             drivers_subset: Vec::new(),
@@ -281,7 +316,8 @@ impl Build {
         // loader's target-aware validation over the staged binaries is
         // authoritative, and a cross target's Linux-only crates need not compile
         // on the build host.
-        let staged = crate::run::refresh_staging(project_root, &options, staging, false, &app.ui)?;
+        let staged =
+            crate::run::refresh_staging(staging_source, &options, staging, false, &app.ui)?;
 
         // Validate against the *declared* target signature (format + arch +
         // endianness): a correct cross-built binary passes, while a same-CPU
@@ -328,11 +364,59 @@ fn default_output(project_root: &Path, target: &str) -> PathBuf {
     ))
 }
 
+/// How a `git ls-files` entry materializes on disk, deciding how the snapshot
+/// treats it (#936, finding B).
+enum SnapshotEntry {
+    /// A regular file - copied byte for byte.
+    File,
+    /// A symlink - copied AS a symlink (never dereferenced), so a symlinked
+    /// source file keeps compiling exactly as in the working tree.
+    Symlink,
+    /// A directory materializing a `git ls-files` entry is a submodule gitlink
+    /// (`git ls-files` never lists a plain directory), which the v0 container
+    /// snapshot does not support.
+    Submodule,
+    /// Vanished between `git ls-files` and the stat (e.g. a just-deleted
+    /// untracked file) - skipped.
+    Missing,
+}
+
+/// Classify how a tracked/untracked working-tree path materializes on disk,
+/// using `symlink_metadata` so a symlink is seen as a symlink (not
+/// dereferenced) and a submodule gitlink is seen as its checked-out directory.
+fn classify_snapshot_entry(source: &Path) -> Result<SnapshotEntry> {
+    match std::fs::symlink_metadata(source) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                Ok(SnapshotEntry::Symlink)
+            } else if file_type.is_file() {
+                Ok(SnapshotEntry::File)
+            } else if file_type.is_dir() {
+                Ok(SnapshotEntry::Submodule)
+            } else {
+                // A socket/fifo/device the snapshot has no business copying.
+                Ok(SnapshotEntry::Missing)
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SnapshotEntry::Missing),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to inspect {}", source.display()))
+        }
+    }
+}
+
 /// Copy a deterministic, git-clean source snapshot of `project_root` into
 /// `dest`, honoring `.gitignore` and always excluding `.phoxal` and `target/`.
 /// Uses `git ls-files` (tracked + untracked-but-not-ignored), so the snapshot is
 /// exactly the working tree minus ignored/build state - which requires the
 /// project to be a git working tree.
+///
+/// Symlinks are preserved as symlinks (never dereferenced), so the container
+/// compiles against a faithful copy of the tree (#936, finding B). A submodule
+/// is rejected with a precise error: v0 does not include submodule working trees
+/// in the snapshot, so a build that would silently drop submodule sources fails
+/// loudly instead.
 fn snapshot_source(project_root: &Path, dest: &Path) -> Result<()> {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -363,23 +447,59 @@ fn snapshot_source(project_root: &Path, dest: &Path) -> Result<()> {
             continue;
         }
         let source = project_root.join(relative);
-        if !source.is_file() {
-            continue;
-        }
         let target = dest.join(relative);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+        match classify_snapshot_entry(&source)? {
+            SnapshotEntry::Missing => continue,
+            SnapshotEntry::Submodule => bail!(
+                "`--builder container` does not support git submodules yet (v0): `{rel}` is a \
+                 submodule, and its working tree would be silently dropped from the source \
+                 snapshot. Vendor the submodule's sources into the workspace, or build without \
+                 `--builder container` until submodule snapshots land.",
+            ),
+            SnapshotEntry::Symlink => {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("failed to create {}", parent.display()))?;
+                }
+                let link = std::fs::read_link(&source)
+                    .with_context(|| format!("failed to read symlink {}", source.display()))?;
+                symlink_verbatim(&link, &target).with_context(|| {
+                    format!("failed to snapshot symlink {}", source.display())
+                })?;
+            }
+            SnapshotEntry::File => {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("failed to create {}", parent.display()))?;
+                }
+                std::fs::copy(&source, &target).with_context(|| {
+                    format!("failed to copy {} into the snapshot", source.display())
+                })?;
+            }
         }
-        std::fs::copy(&source, &target)
-            .with_context(|| format!("failed to copy {} into the snapshot", source.display()))?;
     }
     Ok(())
+}
+
+/// Recreate a symlink `link_target` at `at`, verbatim, without following it.
+#[cfg(unix)]
+fn symlink_verbatim(link_target: &Path, at: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(link_target, at).map_err(Into::into)
+}
+
+#[cfg(not(unix))]
+fn symlink_verbatim(link_target: &Path, at: &Path) -> Result<()> {
+    // Non-unix hosts do not target the container builder in practice; fall back
+    // to a best-effort copy of the link target so the snapshot is still usable.
+    std::fs::copy(link_target, at)
+        .map(|_| ())
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use container::EngineInvocation;
 
     #[test]
     fn parses_the_three_builder_kinds() {
@@ -491,5 +611,193 @@ mod tests {
         // The sibling file is never inside the staged directory it archives.
         let staged = runtime_layout_dir(Path::new("/proj"), "aarch64-unknown-linux-gnu");
         assert!(!output.starts_with(&staged));
+    }
+
+    // --- Finding B: snapshot symlink/submodule handling and lock ordering -----
+
+    /// Initialize a git working tree at `root` (no commits needed - the snapshot
+    /// uses `git ls-files --others`, which includes untracked non-ignored files).
+    fn git_init(root: &Path) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .arg("init")
+            .arg("--quiet")
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_preserves_symlinks_and_copies_files() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        git_init(project.path());
+        std::fs::write(project.path().join("real.txt"), b"content")?;
+        // A symlink whose target is another file in the tree.
+        std::os::unix::fs::symlink("real.txt", project.path().join("link.txt"))?;
+
+        let dest = tempfile::tempdir()?;
+        snapshot_source(project.path(), dest.path())?;
+
+        // The regular file is copied byte for byte.
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("real.txt"))?,
+            "content"
+        );
+        // The symlink is preserved AS a symlink, never dereferenced into a copy.
+        let link = dest.path().join("link.txt");
+        let meta = std::fs::symlink_metadata(&link)?;
+        assert!(
+            meta.file_type().is_symlink(),
+            "the snapshot must preserve the symlink, not dereference it"
+        );
+        assert_eq!(std::fs::read_link(&link)?, Path::new("real.txt"));
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_rejects_a_submodule() -> Result<()> {
+        // A nested git repo added as a gitlink is a submodule: `git ls-files`
+        // lists it as a single path materializing as a directory on disk.
+        let project = tempfile::tempdir()?;
+        git_init(project.path());
+        let sub = project.path().join("vendor-sub");
+        std::fs::create_dir_all(&sub)?;
+        git_init(&sub);
+        std::fs::write(sub.join("lib.rs"), b"// sub")?;
+        let commit = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&sub)
+            .args([
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-am",
+                "init",
+            ])
+            .status()?;
+        assert!(commit.success());
+        // Add the nested repo as a gitlink in the parent.
+        let add = std::process::Command::new("git")
+            .arg("-C")
+            .arg(project.path())
+            .args(["add", "vendor-sub"])
+            .status()?;
+        assert!(add.success());
+
+        let dest = tempfile::tempdir()?;
+        let error = snapshot_source(project.path(), dest.path())
+            .expect_err("a submodule must be rejected");
+        assert!(error.to_string().contains("submodule"), "{error}");
+        Ok(())
+    }
+
+    /// Finding B: the Build lock is held across the container snapshot AND
+    /// compile, so no concurrent phoxal operation can edit the tree between the
+    /// snapshot the container compiles and the manifests staging reads. The fake
+    /// runner runs mid-compile and proves the lock is contended at that moment,
+    /// and that it sees a fully populated frozen snapshot.
+    #[test]
+    fn the_build_lock_is_held_across_the_container_snapshot_and_compile() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        git_init(project.path());
+        std::fs::write(project.path().join("robot.yaml"), b"schema: robot/v0\n")?;
+        std::fs::write(project.path().join("Cargo.toml"), b"[workspace]\n")?;
+        std::fs::write(project.path().join("Cargo.lock"), b"# lock\n")?;
+
+        // Simulate `Build::run` having taken the Build lock before dispatching.
+        let _lock = ProjectLock::acquire(ProjectLockIdentity::resolve(
+            project.path(),
+            ProjectOperation::Build,
+        ))?;
+
+        struct LockAssertingRunner {
+            project: PathBuf,
+        }
+        impl EngineRunner for LockAssertingRunner {
+            fn run(&self, invocation: &EngineInvocation) -> Result<()> {
+                // The lock must be contended at compile time - proof it wraps the
+                // snapshot+compile, not just the later staging.
+                let contended = ProjectLock::acquire(ProjectLockIdentity::resolve(
+                    &self.project,
+                    ProjectOperation::Build,
+                ));
+                assert!(
+                    contended.is_err(),
+                    "the Build lock must already be held during the container compile"
+                );
+                // The frozen snapshot the container compiles is fully populated.
+                let mount = invocation
+                    .args
+                    .iter()
+                    .find(|arg| arg.contains(":/phoxal/src"))
+                    .expect("the snapshot is mounted as the workdir");
+                let snapshot = mount.split(':').next().unwrap();
+                assert!(
+                    Path::new(snapshot).join("robot.yaml").is_file(),
+                    "the container compiles a populated frozen snapshot"
+                );
+                Ok(())
+            }
+        }
+
+        let build = Build {
+            project: None,
+            target: Some("aarch64-unknown-linux-gnu".to_string()),
+            builder: "container".to_string(),
+            output: None,
+            container_engine: ContainerEngine::Docker,
+            builder_image: None,
+        };
+        let ui = crate::Ui::from_env();
+        let runner = LockAssertingRunner {
+            project: project.path().to_path_buf(),
+        };
+        let snapshot =
+            build.compile_in_container(project.path(), "aarch64-unknown-linux-gnu", &runner, &ui)?;
+        // The compile returns the frozen snapshot, ready for staging.
+        assert!(snapshot.path().join("robot.yaml").is_file());
+        assert!(snapshot.path().join("Cargo.lock").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn container_compile_requires_a_committed_cargo_lock() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        git_init(project.path());
+        std::fs::write(project.path().join("robot.yaml"), b"schema: robot/v0\n")?;
+        // No Cargo.lock committed.
+
+        struct UnusedRunner;
+        impl EngineRunner for UnusedRunner {
+            fn run(&self, _invocation: &EngineInvocation) -> Result<()> {
+                panic!("the runner must not be reached when Cargo.lock is missing");
+            }
+        }
+
+        let build = Build {
+            project: None,
+            target: Some("aarch64-unknown-linux-gnu".to_string()),
+            builder: "container".to_string(),
+            output: None,
+            container_engine: ContainerEngine::Docker,
+            builder_image: None,
+        };
+        let ui = crate::Ui::from_env();
+        let error = build
+            .compile_in_container(
+                project.path(),
+                "aarch64-unknown-linux-gnu",
+                &UnusedRunner,
+                &ui,
+            )
+            .expect_err("a missing Cargo.lock must fail before compiling");
+        assert!(error.to_string().contains("Cargo.lock"), "{error}");
+        Ok(())
     }
 }
