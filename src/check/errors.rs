@@ -50,7 +50,7 @@ pub(super) fn format_problem(problem: &graph_check::Problem) -> String {
     match problem {
         graph_check::Problem::InvalidConfig { runtime_id, errors } => {
             format!(
-                "invalid config for user service {runtime_id}: {}",
+                "invalid config for user runtime {runtime_id}: {}",
                 errors.join("; ")
             )
         }

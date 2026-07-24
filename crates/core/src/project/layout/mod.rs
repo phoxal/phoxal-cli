@@ -379,31 +379,37 @@ fn official_short_name(official: &OfficialRuntime) -> String {
 ///   workspace crate overriding an official identity does so WITHOUT a
 ///   declaration.
 pub fn validate_runtime_declarations(robot: &phoxal::model::robot::v0::Robot) -> Result<()> {
-    let official_services = official_service_short_names();
-    let official_tools = official_tool_short_names();
-    for name in robot.services.keys() {
-        if robot.tools.contains_key(name) {
+    // Officials share ONE binary namespace across services and tools, so a
+    // declared name is checked against the WHOLE reserved catalog set, not just
+    // the map it appears in - `tools.drive` (drive is an official service) and
+    // `services.log` (log is an official tool) are both rejected (#950).
+    let official_kind = |name: &str| -> Option<&'static str> {
+        if official_service_short_names().contains(name) {
+            Some("service")
+        } else if official_tool_short_names().contains(name) {
+            Some("tool")
+        } else {
+            None
+        }
+    };
+    let declared = robot
+        .services
+        .keys()
+        .map(|name| ("services", name))
+        .chain(robot.tools.keys().map(|name| ("tools", name)));
+    for (map, name) in declared {
+        if map == "services" && robot.tools.contains_key(name) {
             bail!(
-                "robot.yaml declares '{name}' under both services and tools; the two maps share \
-                 one binary namespace, so a name may appear in only one"
+                "robot.yaml declares '{name}' under both services and tools; the two maps \
+                 share one binary namespace, so a name may appear in only one"
             );
         }
-        if official_services.contains(name.as_str()) {
+        if let Some(kind) = official_kind(name) {
             bail!(
-                "robot.yaml declares services.{name}, but '{name}' is an official service; \
+                "robot.yaml declares {map}.{name}, but '{name}' is an official {kind}; \
                  official runtimes are catalog-owned, always run, and take no robot.yaml \
-                 declaration (a services/{name} workspace crate overrides the official binary \
-                 without being declared)"
-            );
-        }
-    }
-    for name in robot.tools.keys() {
-        if official_tools.contains(name.as_str()) {
-            bail!(
-                "robot.yaml declares tools.{name}, but '{name}' is an official tool; official \
-                 runtimes are catalog-owned, always run, and take no robot.yaml declaration (a \
-                 tools/{name} workspace crate overrides the official binary without being \
-                 declared)"
+                 declaration (a workspace crate matching an official identity overrides its \
+                 binary without being declared)"
             );
         }
     }
@@ -442,6 +448,59 @@ fn official_service_short_names() -> BTreeSet<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn official_identities_are_rejected_in_either_map_across_namespaces() -> anyhow::Result<()> {
+        use phoxal::model::robot::v0::{Robot as RobotV0, UserService, UserTool};
+
+        let base = || -> RobotV0 {
+            RobotDocument::parse_from_string(
+                r#"schema: robot/v0
+robot:
+  id: bot
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: omnidirectional
+    actuators: []
+    encoders: []
+  components: {}
+"#,
+            )
+            .expect("minimal robot parses")
+            .into_v0()
+        };
+
+        // `tools.drive` - drive is an official SERVICE, rejected in the tools map.
+        let mut robot = base();
+        robot
+            .tools
+            .insert("drive".to_string(), UserTool { config: None });
+        let error = super::validate_runtime_declarations(&robot)
+            .expect_err("an official service name in tools: is rejected")
+            .to_string();
+        assert!(error.contains("official service"), "{error}");
+
+        // `services.log` - log is an official TOOL, rejected in the services map.
+        let mut robot = base();
+        robot
+            .services
+            .insert("log".to_string(), UserService { config: None });
+        let error = super::validate_runtime_declarations(&robot)
+            .expect_err("an official tool name in services: is rejected")
+            .to_string();
+        assert!(error.contains("official tool"), "{error}");
+
+        // A non-official user name in either map is accepted.
+        let mut robot = base();
+        robot
+            .tools
+            .insert("lidar-viz".to_string(), UserTool { config: None });
+        super::validate_runtime_declarations(&robot).expect("a user tool name is accepted");
+        Ok(())
+    }
+
     use super::*;
     use std::fs;
 

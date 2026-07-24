@@ -2,7 +2,7 @@
 //!
 //! The core [`RuntimeLayout::construct_plan`] derives the immutable launch plan
 //! from a staged runtime layout, plus the two validation inputs the bin crate
-//! owns the validators for: a config-schema pairing per user service (checked
+//! owns the validators for: a config-schema pairing per user runtime (checked
 //! with the jsonschema validator) and a contract surface per checked
 //! participant (checked with the API-coherence pass). This module is the thin
 //! glue that runs those two validators over the constructor's output and
@@ -40,7 +40,7 @@ pub fn validate_layout_plan(
     // the schema from its binary; validate the carried value directly, so
     // services and tools each validate their own declaration (#950).
     let mut config_problems = Vec::new();
-    for pairing in &constructed.user_service_configs {
+    for pairing in &constructed.user_runtime_configs {
         if let Some(problem) = crate::check::validate_user_runtime_config(
             &pairing.service_id,
             Some(&pairing.config_schema),

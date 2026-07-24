@@ -24,6 +24,10 @@ pub fn resolve(
     suite: Option<&Suite>,
     options: ResolveOptions,
 ) -> Result<ResolvedRobot> {
+    // Declaration invariants are the very first check (#950): an invalid
+    // workspace lock or an absent suite must not mask a dual/official
+    // declaration error.
+    phoxal_cli_core::project::layout::validate_runtime_declarations(robot)?;
     let suite = suite.context(
         "the locked framework train suite is required for resolution; restore network access or pass --suite <path> to the immutable suite.json",
     )?;
@@ -35,11 +39,6 @@ pub fn resolve(
         project.train.version,
         train
     );
-    // Declaration-only invariants come FIRST (#950): a dual-declared name or an
-    // official identity in either map fails before any workspace scanning, so
-    // the error names the declaration mistake rather than a downstream
-    // missing-crate symptom.
-    phoxal_cli_core::project::layout::validate_runtime_declarations(robot)?;
     let target = options
         .official_target_triple
         .clone()

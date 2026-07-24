@@ -17,7 +17,7 @@
 //!
 //! The jsonschema validator and the coherence enforcer both live in the bin
 //! crate, so this module does not run them. It returns the *inputs* they need -
-//! a config-schema/config pairing per user service and one contract surface per
+//! a config-schema/config pairing per user runtime and one contract surface per
 //! checked participant - and the bin-side "validate through the loader" entry
 //! runs `validate_user_service_config` and `coherence_for_launch_plan` over
 //! them. That keeps the crate seam clean: core owns the derivation, the bin
@@ -67,21 +67,22 @@ pub struct ConstructedPlan {
     /// simulation-managed participants contribute none, matching the coherence
     /// pass's own in-set filter.
     pub contract_surfaces: Vec<ParticipantContractSurface>,
-    /// One schema/service pairing per user service, so the bin can run its
+    /// One schema pairing per declared user runtime (service or tool), so the
+    /// bin can run its
     /// jsonschema validator (`validate_user_service_config`) against the config
     /// the compiled `robot.yaml` carries for that service.
-    pub user_service_configs: Vec<UserServiceConfig>,
+    pub user_runtime_configs: Vec<UserRuntimeConfig>,
 }
 
-/// A declared user runtime's embedded config schema paired with its identity,
-/// its AUTHORED config, and the robot.yaml map it was declared in, so the bin
-/// crate can validate the compiled declaration for it. Core produces the
-/// pairing; the bin owns the jsonschema dependency and runs the check. The
-/// config is carried here rather than re-looked-up by the validator, so user
-/// tools validate their real `tools.<id>.config` and not a phantom services
-/// lookup (#950).
+/// A declared user runtime's (service OR tool) embedded config schema paired
+/// with its identity, its AUTHORED config, and the robot.yaml map it was
+/// declared in, so the bin crate can validate the compiled declaration for it.
+/// Core produces the pairing; the bin owns the jsonschema dependency and runs
+/// the check. The config is carried here rather than re-looked-up by the
+/// validator, so a user tool validates its real `tools.<id>.config` and not a
+/// phantom services lookup (#950).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UserServiceConfig {
+pub struct UserRuntimeConfig {
     pub service_id: String,
     pub config_schema: serde_json::Value,
     /// The authored config from the compiled robot.yaml (`None` when omitted).
@@ -169,7 +170,7 @@ impl RuntimeLayout {
 
         let mut participants = Vec::new();
         let mut contract_surfaces = Vec::new();
-        let mut user_service_configs = Vec::new();
+        let mut user_runtime_configs = Vec::new();
 
         for required in self.required_runtimes(&options.drivers) {
             match required.kind {
@@ -249,7 +250,7 @@ impl RuntimeLayout {
                         participant_id: participant_id.clone(),
                         contracts: meta_contracts(&required.binary_name)?,
                     });
-                    user_service_configs.push(UserServiceConfig {
+                    user_runtime_configs.push(UserRuntimeConfig {
                         service_id: participant_id,
                         config_schema: config_schema(&required.binary_name)?,
                         config: required.config.clone(),
@@ -280,7 +281,7 @@ impl RuntimeLayout {
                     });
                     // The tool's config validates against its embedded schema
                     // through the same pairing user services use (#950).
-                    user_service_configs.push(UserServiceConfig {
+                    user_runtime_configs.push(UserRuntimeConfig {
                         service_id: participant_id,
                         config_schema: config_schema(&required.binary_name)?,
                         config: required.config.clone(),
@@ -345,7 +346,7 @@ impl RuntimeLayout {
         Ok(ConstructedPlan {
             plan,
             contract_surfaces,
-            user_service_configs,
+            user_runtime_configs,
         })
     }
 }
@@ -875,7 +876,7 @@ services:
         let constructed = RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())?;
 
         let mission = constructed
-            .user_service_configs
+            .user_runtime_configs
             .iter()
             .find(|config| config.service_id == "mission")
             .expect("mission config pairing surfaced");
@@ -883,8 +884,9 @@ services:
             mission.config_schema,
             serde_json::json!({"type":"object","properties":{"speed":{"type":"integer"}}})
         );
-        // Only user services are paired for config validation; officials are not.
-        assert_eq!(constructed.user_service_configs.len(), 1);
+        // Only user runtimes (here one user service) are paired for config
+        // validation; officials are not.
+        assert_eq!(constructed.user_runtime_configs.len(), 1);
         // A contract surface exists for the checked user service, keyed by its
         // plan participant id.
         assert!(
