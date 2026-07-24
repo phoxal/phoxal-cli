@@ -42,19 +42,65 @@ pub fn runtime_layout_dir(project_root: &Path, triple: &str) -> PathBuf {
 
 /// Mint the bounded observation identity shared by every per-robot
 /// `tool-device` launched by one canonical project supervisor.
+///
+/// The identity hashes the *logical* root - absolute and lexically normalized,
+/// but with symlinks left unresolved - never the `fs::canonicalize` real path.
+/// The production deployment (#930) is a stable symlink `/var/phoxal ->
+/// releases/<timestamp>/` that is retargeted on each activation; canonicalizing
+/// would fold the release timestamp into the identity, so every activation would
+/// mint a *new* device id and break observation continuity across releases.
+/// Hashing `/var/phoxal` as given keeps one identity across activations. The
+/// documented tradeoff: moving or copying the project directory to a genuinely
+/// different logical path is a different device, which is the correct and
+/// expected behavior for a relocated deployment.
 pub fn execution_device_id(project_root: &Path) -> Result<ExecutionDeviceId> {
-    let canonical = project_root.canonicalize().unwrap_or_else(|_| {
-        if project_root.is_absolute() {
-            project_root.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(project_root))
-                .unwrap_or_else(|_| project_root.to_path_buf())
-        }
-    });
-    let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
+    let logical = logical_root(project_root);
+    let digest = Sha256::digest(logical.as_os_str().as_encoded_bytes());
     ExecutionDeviceId::new(format!("project-{}", &hex::encode(digest)[..24]))
         .map_err(|error| anyhow!("failed to mint execution-device identity: {error}"))
+}
+
+/// The logical absolute root used for the device identity: a relative path is
+/// anchored at the current directory, then `.`/`..`/redundant-separator
+/// components are collapsed *lexically*. No filesystem lookup happens, so a
+/// symlink on the path (`/var/phoxal`) is preserved rather than resolved to its
+/// target - that symlink-independence is the whole point (see
+/// [`execution_device_id`]).
+fn logical_root(project_root: &Path) -> PathBuf {
+    let absolute = if project_root.is_absolute() {
+        project_root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(project_root))
+            .unwrap_or_else(|_| project_root.to_path_buf())
+    };
+    normalize_lexically(&absolute)
+}
+
+/// Collapse `.` and `..` components lexically, without touching the filesystem.
+/// `..` pops a preceding normal component; it is preserved when there is nothing
+/// to pop (a leading `..` on a relative remainder) so the result never silently
+/// climbs above the root prefix.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                } else {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -845,6 +891,44 @@ mod tests {
         assert!(
             first_identity.to_string().len()
                 <= phoxal::participant::launch::MAX_EXECUTION_DEVICE_ID_BYTES
+        );
+        Ok(())
+    }
+
+    /// The `/var/phoxal -> releases/<ts>/` deployment model (#930): the device
+    /// identity is taken from the *logical* symlink path, so retargeting the
+    /// symlink to a new release directory keeps the same identity - observation
+    /// continuity survives an activation. A genuinely different logical root is
+    /// still a different device.
+    #[cfg(unix)]
+    #[test]
+    fn execution_device_identity_is_stable_across_symlink_retargeting() -> anyhow::Result<()> {
+        let base = tempfile::tempdir()?;
+        let release_a = base.path().join("releases/a");
+        let release_b = base.path().join("releases/b");
+        std::fs::create_dir_all(&release_a)?;
+        std::fs::create_dir_all(&release_b)?;
+        let stable = base.path().join("phoxal");
+
+        std::os::unix::fs::symlink(&release_a, &stable)?;
+        let identity_a = execution_device_id(&stable)?;
+
+        // Retarget the stable symlink to a new release, exactly as an activation
+        // does. The logical path `<base>/phoxal` is unchanged, so the identity
+        // must not move.
+        std::fs::remove_file(&stable)?;
+        std::os::unix::fs::symlink(&release_b, &stable)?;
+        assert_eq!(
+            identity_a,
+            execution_device_id(&stable)?,
+            "retargeting the deployment symlink must preserve the device identity"
+        );
+
+        // The underlying release directories are genuinely different roots.
+        assert_ne!(
+            execution_device_id(&release_a)?,
+            execution_device_id(&release_b)?,
+            "distinct logical roots must be distinct devices"
         );
         Ok(())
     }
