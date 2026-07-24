@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
@@ -62,6 +62,48 @@ pub(crate) fn load_suite_for_robot_from_source(
         },
         &locked.version,
     )
+}
+
+/// The locked framework train version for `project_root`, honoring the test
+/// override so unit tests need no on-disk registry. This is the version the
+/// vendored suite and artifact blobs are keyed under.
+fn locked_train_version(project_root: &std::path::Path) -> Result<String> {
+    #[cfg(test)]
+    if let Ok(version) = std::env::var("PHOXAL_TEST_LOCKED_TRAIN") {
+        return Ok(version);
+    }
+    Ok(phoxal_cli_core::project::train::resolve_locked_train(project_root)?.version)
+}
+
+/// Load the suite the offline execution paths (`run`/`start`/`build`/`watch`)
+/// resolve against, strictly without touching the network (#936, finding 1).
+///
+/// An explicit *local* `--suite` path is honored as a dev/test override and read
+/// directly; an HTTPS `--suite` is rejected, because these paths never fetch -
+/// `phoxal update` is the only fetcher. With no override the persisted suite that
+/// `phoxal update` vendored for the locked train is read from `.phoxal/artifacts`,
+/// and its absence is an actionable "run `phoxal update`" error, never a fetch.
+pub(crate) fn load_vendored_suite_for_robot(
+    suite_source: Option<String>,
+    project_root: &std::path::Path,
+) -> Result<Option<phoxal_cli_core::project::suite::Suite>> {
+    if let Some(source) = &suite_source {
+        if source.starts_with("https://") || source.starts_with("http://") {
+            bail!(
+                "`run`/`start`/`build` never fetch a suite over the network; pass a local --suite path, or run `phoxal update` to vendor the locked train"
+            );
+        }
+        return Ok(Some(phoxal_cli_core::project::suite::read_suite_path(
+            std::path::Path::new(source),
+        )?));
+    }
+    let locked_version = locked_train_version(project_root)?;
+    let suite = crate::native_artifacts::load_vendored_suite(&locked_version)?.with_context(|| {
+        format!(
+            "the locked train {locked_version} suite is not vendored for this project; run `phoxal update`"
+        )
+    })?;
+    Ok(Some(suite))
 }
 
 /// Version string shared by the `--version` flag and the `version` subcommand,
@@ -273,6 +315,36 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_paths::test_support::ScratchPhoxalHome;
+
+    /// A cold vendored store (no `phoxal update` yet) makes the offline suite
+    /// loader fail with the actionable "run `phoxal update`" error, without ever
+    /// attempting a fetch (#936, finding 1).
+    #[test]
+    fn offline_suite_loader_points_a_cold_store_at_phoxal_update() {
+        let _scratch = ScratchPhoxalHome::new().expect("scratch home");
+        let root = crate::host_paths::project_root().expect("project root");
+
+        let error = load_vendored_suite_for_robot(None, &root)
+            .expect_err("a cold store has no vendored suite");
+        let message = format!("{error:#}");
+        assert!(message.contains("phoxal update"), "{message}");
+    }
+
+    /// The offline suite loader never fetches: an HTTPS `--suite` is rejected
+    /// outright rather than downloaded (#936, finding 1).
+    #[test]
+    fn offline_suite_loader_rejects_an_https_suite_source() {
+        let _scratch = ScratchPhoxalHome::new().expect("scratch home");
+        let root = crate::host_paths::project_root().expect("project root");
+
+        let error = load_vendored_suite_for_robot(
+            Some("https://example.com/suite.json".to_string()),
+            &root,
+        )
+        .expect_err("run/start/build never fetch a suite");
+        assert!(format!("{error:#}").contains("never fetch"), "{error:#}");
+    }
 
     #[test]
     fn version_summary_reports_cli_support_not_a_graph_wide_api_version() {

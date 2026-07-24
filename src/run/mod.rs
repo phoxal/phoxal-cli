@@ -27,11 +27,13 @@ pub(crate) use telemetry::{RobotFeedTarget, start_telemetry_feeds_at};
 mod prepare;
 pub(crate) use prepare::{prepare_layout_run_on_board, prepare_run_on_board, refresh_staging};
 mod report;
-pub(crate) use report::{DriverPolicy, driven_instances, report_launch_commands};
+pub(crate) use report::{
+    DriverPolicy, driven_instances, report_excluded_drivers, report_launch_commands,
+};
 mod participants;
 pub(crate) use participants::{
-    DriverDecision, build_layout_specs, prepare_robot_participants, source_dirs_by_participant,
-    spec_from_launch_record, stage_complete_bin_store,
+    DriverDecision, build_layout_specs, prepare_robot_participants, source_cwd,
+    source_dirs_by_participant, spec_from_launch_record, stage_complete_bin_store,
 };
 mod build;
 pub(crate) use build::{

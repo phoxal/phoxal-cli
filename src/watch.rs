@@ -507,10 +507,6 @@ fn specs_for_target(
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    // `--watch` is an interactive dev-loop feature; there is no `AppContext`
-    // this deep in the hot-reload swap path, so the terminal flag is
-    // recomputed fresh rather than threaded through the watch loop.
-    let ui = crate::Ui::from_env();
     // A watch rebuild re-stages every swapped binary into the same staged
     // runtime layout the live run executes from, so a hot-reloaded participant
     // is resolved from `bin/` exactly like the original launch (#936).
@@ -535,7 +531,7 @@ fn specs_for_target(
         })
     {
         if let Some(spec) =
-            spec_from_launch_record(participant, resolved, &source_dirs, &staged_root, &ui)?
+            spec_from_launch_record(participant, resolved, &source_dirs, &staged_root)?
         {
             specs.push(spec);
         }

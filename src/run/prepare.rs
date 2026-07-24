@@ -94,10 +94,20 @@ pub(crate) fn refresh_staging(
         .parent()
         .context("robot.yaml did not have a parent directory")?;
     let robot = load_robot(&robot_path)?;
-    let suite = crate::commands::load_suite_for_robot_from_source(
-        options.suite_source.clone(),
-        project_root,
-    )?;
+
+    // The driver policy is resolved from the parsed robot BEFORE any artifact or
+    // descriptor resolution (#936, finding 2): it must gate resolution itself, so
+    // an excluded driver is never resolved, checked for vendored presence, built,
+    // staged, required, inspected, or planned. It threads through both staging
+    // and plan construction from here.
+    let driver_policy = DriverPolicy::from_options(options, &crate::run::driven_instances(&robot))?;
+
+    // `run`/`start`/`build`/`watch` never touch the network (#936, finding 1):
+    // resolve against the suite `phoxal update` persisted into the vendored
+    // store, not a fresh fetch. A missing vendored suite fails with "run `phoxal
+    // update`".
+    let suite =
+        crate::commands::load_vendored_suite_for_robot(options.suite_source.clone(), project_root)?;
     // A cross `--target` resolves the suite's per-target official blobs (the
     // same per-target resolution `check --target` performs); a host pass leaves
     // both `None` so resolution targets the host triple.
@@ -111,15 +121,19 @@ pub(crate) fn refresh_staging(
             tool_target_triple: official_target,
         },
     )?;
-    let descriptors = phoxal_cli_core::artifacts::descriptors_for(&resolved, false, true)?;
-    crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
 
-    // The driver policy is resolved once, from the run options and the driven
-    // component instances the robot declares, and threads through both staging
-    // and plan construction (#936): an excluded driver is never built, staged,
-    // required, resolved, inspected, or planned.
-    let driver_policy =
-        DriverPolicy::from_options(options, &crate::run::driven_instances(&resolved.robot))?;
+    // Strict vendored-completeness in place of a download preflight (#936,
+    // findings 1 + 2): every required artifact, after filtering out the drivers
+    // the policy excludes, must already be present and digest-current in
+    // `.phoxal/artifacts`, else a precise "run `phoxal update`" error naming what
+    // is missing. Nothing here fetches; the vendored store is the only source.
+    let descriptors = phoxal_cli_core::artifacts::descriptors_for_drivers(
+        &resolved,
+        false,
+        true,
+        &driver_policy.selection(),
+    )?;
+    crate::native_artifacts::ensure_vendored_completeness(&descriptors)?;
 
     let staged_root = crate::stager::stage_runtime_layout(project_root, &resolved)
         .context("failed to stage the runtime layout")?;
@@ -199,6 +213,14 @@ pub(crate) fn prepare_run_on_board(
         "run",
     );
     register_router_process(&board);
+    // Explain any policy-excluded drivers as a session-level advisory: they are
+    // never plan participants, so this summary is the only signal an operator
+    // gets for why hardware rows are absent (#936, finding 8).
+    crate::run::report_excluded_drivers(
+        &staged.driver_policy,
+        &crate::run::driven_instances(&staged.resolved.robot),
+        ui,
+    );
 
     let mut specs = Vec::new();
     // The staging-side record of source crate directories the source-free plan
@@ -206,15 +228,31 @@ pub(crate) fn prepare_run_on_board(
     // crate directory (relative asset resolution) and is rebuilt there under
     // `--watch`. Execution identity always comes from the plan's `bin/` name.
     let source_dirs = crate::run::source_dirs_by_participant(&staged.source_participants);
-    crate::run::prepare_robot_participants(
+    // Single-pass execution (#936, finding 3): `refresh_staging` already built
+    // and staged every participant binary into `bin/`, and `validate_layout_plan`
+    // just validated that exact `bin/`. Build the specs by reading those
+    // already-validated bytes - the SAME path an extracted bundle takes - instead
+    // of re-resolving and rebuilding each participant. That second pass could
+    // rebuild between validation and launch and execute bytes that were never
+    // validated; there is now exactly one resolution+staging pass. Source-only
+    // metadata (the crate cwd) is carried through `source_cwd` without touching
+    // binary resolution.
+    let layout = RuntimeLayout::open(&staged.staged_root).with_context(|| {
+        format!(
+            "failed to open staged runtime layout {}",
+            staged.staged_root.display()
+        )
+    })?;
+    let cwd_for = |participant: &phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord| {
+        crate::run::source_cwd(participant, &staged.resolved, &source_dirs)
+    };
+    crate::run::build_layout_specs(
         &plan,
-        &staged.resolved,
-        &source_dirs,
-        &staged.staged_root,
+        &layout,
         &staged.driver_policy,
         &board,
         &mut specs,
-        ui,
+        &cwd_for,
     )?;
 
     // Resolve the router config from the STAGED layout, not the source tree:
@@ -293,7 +331,11 @@ pub(crate) fn prepare_layout_run_on_board(
     register_router_process(&board);
 
     let mut specs = Vec::new();
-    crate::run::build_layout_specs(&plan, &layout, &driver_policy, &board, &mut specs)?;
+    // An extracted bundle / staged layout has no source, so no participant has a
+    // crate cwd - the closure always yields `None` (#936, finding 3).
+    crate::run::build_layout_specs(&plan, &layout, &driver_policy, &board, &mut specs, &|_| {
+        None
+    })?;
 
     let router_config = crate::run::resolve_router_config(layout.robot(), layout_root)?;
     let robot_targets = super::RobotFeedTarget::from_plan(&plan);

@@ -152,6 +152,21 @@ impl DriverPolicy {
         }
     }
 
+    /// The driven component instances this policy excludes from the plan, each
+    /// with the operator-facing reason. The excluded drivers are never plan
+    /// participants (the plan constructor drops them, #936), so this is the only
+    /// place their absence is explained; [`report_excluded_drivers`] surfaces it
+    /// as a session-level informational summary (#936, finding 8).
+    pub(crate) fn excluded_drivers(&self, driven: &BTreeSet<String>) -> Vec<(String, String)> {
+        driven
+            .iter()
+            .filter_map(|id| match self.decision(id) {
+                DriverDecision::Degraded(reason) => Some((id.clone(), reason)),
+                DriverDecision::Launch => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn decision(&self, id: &str) -> DriverDecision {
         match self.mode {
             DriversMode::Off => DriverDecision::Degraded("drivers off".to_string()),
@@ -161,6 +176,28 @@ impl DriverPolicy {
             DriversMode::On => DriverDecision::Launch,
         }
     }
+}
+
+/// Emit a session-level informational summary of the drivers the policy excludes
+/// from the plan, so an operator understands why hardware rows are absent (#936,
+/// finding 8). The excluded drivers are deliberately NOT plan participants; this
+/// is a one-line advisory into the session diagnostics stream, nothing more. No
+/// output when the policy launches every driver.
+pub(crate) fn report_excluded_drivers(
+    policy: &DriverPolicy,
+    driven: &BTreeSet<String>,
+    ui: &crate::Ui,
+) {
+    let excluded = policy.excluded_drivers(driven);
+    if excluded.is_empty() {
+        return;
+    }
+    let list = excluded
+        .iter()
+        .map(|(id, reason)| format!("{id} ({reason})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ui.info(format!("drivers excluded by policy, not launched: {list}"));
 }
 
 /// The full set of driven component-instance ids from a compiled robot model.

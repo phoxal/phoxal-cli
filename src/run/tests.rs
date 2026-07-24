@@ -168,6 +168,72 @@ fn drivers_off_selects_no_drivers() -> Result<()> {
     Ok(())
 }
 
+/// The policy exposes the excluded driven instances with their reason, so the
+/// session can explain absent hardware rows even though excluded drivers are
+/// never plan participants (#936, finding 8).
+#[test]
+fn excluded_drivers_are_summarized_with_reasons() -> Result<()> {
+    let available = available_drivers(&["imu", "left_drive", "right_drive"]);
+
+    let off = DriverPolicy::from_options(
+        &RunOptions {
+            drivers: DriversMode::Off,
+            drivers_subset: Vec::new(),
+            suite_source: None,
+            watch: false,
+        },
+        &available,
+    )?;
+    let mut excluded = off.excluded_drivers(&available);
+    excluded.sort();
+    assert_eq!(
+        excluded,
+        vec![
+            ("imu".to_string(), "drivers off".to_string()),
+            ("left_drive".to_string(), "drivers off".to_string()),
+            ("right_drive".to_string(), "drivers off".to_string()),
+        ]
+    );
+
+    let subset = DriverPolicy::from_options(
+        &RunOptions {
+            drivers: DriversMode::On,
+            drivers_subset: vec!["imu".to_string()],
+            suite_source: None,
+            watch: false,
+        },
+        &available,
+    )?;
+    let mut excluded = subset.excluded_drivers(&available);
+    excluded.sort();
+    assert_eq!(
+        excluded,
+        vec![
+            (
+                "left_drive".to_string(),
+                "not selected by --driver".to_string()
+            ),
+            (
+                "right_drive".to_string(),
+                "not selected by --driver".to_string()
+            ),
+        ]
+    );
+
+    // Drivers fully on excludes nothing - no advisory is emitted.
+    let on = DriverPolicy::from_options(
+        &RunOptions {
+            drivers: DriversMode::On,
+            drivers_subset: Vec::new(),
+            suite_source: None,
+            watch: false,
+        },
+        &available,
+    )?;
+    assert!(on.excluded_drivers(&available).is_empty());
+    Ok(())
+}
+
 #[test]
 fn serial_device_missing_is_loud() {
     let missing = missing_device_path(&ConnectionConfig::Serial {

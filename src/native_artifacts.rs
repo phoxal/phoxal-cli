@@ -2,8 +2,8 @@ const SCOPE_DIGEST_FILE: &str = ".phoxal-sha256";
 
 mod preflight;
 pub(crate) use preflight::{
-    ArtifactProgressReporter, descriptors, prepare_descriptors_with_preflight, stage_runtime,
-    stage_tool,
+    ArtifactProgressReporter, descriptors, ensure_vendored_completeness,
+    prepare_descriptors_with_preflight, stage_runtime, stage_tool,
 };
 mod bundles;
 pub(crate) use bundles::stage_component_bundles_into_robot_root;
@@ -42,6 +42,8 @@ mod storage;
 pub(crate) use storage::{
     artifact_package_dir, descriptor_scope_label, validate_path_segment, write_file_atomic,
 };
+mod suite_store;
+pub(crate) use suite_store::{load_vendored_suite, persist_suite};
 
 #[cfg(test)]
 mod tests;

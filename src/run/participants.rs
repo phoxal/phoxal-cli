@@ -156,19 +156,28 @@ pub(crate) fn stage_complete_bin_store(
 
 /// Build the participant specs for a launch plan whose binaries already live in
 /// the staged layout's flat `bin/` store, resolving every executable directly
-/// from `bin/` with no source, Cargo, or resolved graph (#936). This is the
-/// execution-side spec builder the universal `run` uses for a staged runtime
-/// layout - a source project's `.phoxal/build/<triple>/` or an extracted
-/// `build.phoxal`. Board classification, component-driver launch gating (bench
-/// subset, macOS, missing device - the last read straight from the compiled
-/// `robot.yaml`), and readiness/env/policy encoding match the source path's
-/// [`prepare_robot_participants`]; only binary resolution differs.
+/// from `bin/` with no source, Cargo, or resolved graph (#936). This is the ONE
+/// execution-side spec builder for a staged runtime layout - a source project's
+/// `.phoxal/build/<triple>/` (after [`stage_complete_bin_store`] populated and
+/// [`crate::loader::validate_layout_plan`] validated it) or an extracted
+/// `build.phoxal`. Because it reads the already-validated `bin/` and never
+/// rebuilds, the executed bytes are exactly the validated bytes - there is no
+/// second resolve/rebuild pass that could diverge (#936, finding 3).
+///
+/// `cwd_for` supplies the source-only working directory the source-free plan no
+/// longer carries: the source run passes [`source_cwd`] so a participant built
+/// from local source runs from its crate directory, and an extracted-bundle run
+/// passes a closure returning `None` (a bundle has no source). Board
+/// classification, component-driver launch gating (bench subset, macOS, missing
+/// device - the last read straight from the compiled `robot.yaml`), and
+/// readiness/env/policy encoding are shared by both.
 pub(crate) fn build_layout_specs(
     plan: &LaunchPlan,
     layout: &RuntimeLayout,
     driver_policy: &DriverPolicy,
     board: &BoardBackend,
     specs: &mut Vec<ParticipantSpec>,
+    cwd_for: &dyn Fn(&ParticipantLaunchRecord) -> Option<PathBuf>,
 ) -> Result<()> {
     let bin_dir = layout.bin_dir();
     for robot in &plan.robots {
@@ -180,7 +189,22 @@ pub(crate) fn build_layout_specs(
         for participant in &robot.participants {
             let id = participant.launch.participant_id.clone();
             let key = ProcessKey::robot(robot_key.clone(), &id);
-            let (kind, local) = participant_kind(&participant.execution);
+            let (kind, base_local) = participant_kind(&participant.execution);
+            // Board-only staging provenance (#936, finding 10): a source-
+            // overridden official or tool runs from the project workspace, so it
+            // has a source cwd here even though its source-free `execution` is
+            // byte-identical to a vendored one. Reflect that on the board (local
+            // = runs from the robot's own code) WITHOUT touching the plan, which
+            // stays identical across origins. An extracted layout supplies no
+            // cwd, so its officials correctly stay origin-unknown (vendored).
+            let cwd = cwd_for(participant);
+            let source_overridden_official = cwd.is_some()
+                && matches!(
+                    participant.execution,
+                    ParticipantExecution::OfficialArtifact { .. }
+                        | ParticipantExecution::OfficialTool { .. }
+                );
+            let local = base_local || source_overridden_official;
             if participant.launch_ownership == LaunchOwnership::SimulationManaged {
                 let mut status = ParticipantStatus::new(&id, kind, ParticipantState::Starting)
                     .with_local(local)
@@ -205,6 +229,12 @@ pub(crate) fn build_layout_specs(
                     .with_scope(scope.clone()),
                 participant.startup_requirement,
             );
+            if source_overridden_official {
+                board.set_note(
+                    key.clone(),
+                    "source-override: built from the project workspace",
+                );
+            }
             if matches!(
                 participant.execution,
                 ParticipantExecution::ComponentDriver { .. }
@@ -242,7 +272,7 @@ pub(crate) fn build_layout_specs(
                 &robot_key,
                 kind,
                 executable,
-                None,
+                cwd,
             )?);
         }
     }
@@ -389,12 +419,15 @@ fn register_simulation_managed_participant(
 
 /// The board `ParticipantKind` plus whether the participant runs from local
 /// (user/robot-owned) code, for a participant's source-free `execution` (#936).
-/// The role alone decides both: officials and tools are framework binaries
+/// The role alone decides both here: officials and tools are framework binaries
 /// (`local = false`), user services and component drivers are the robot's own
-/// code (`local = true`). An official service the robot happens to override in
-/// its Cargo workspace still resolves to the one official `bin/` entry, so it
-/// is reported the same as a vendored one - the plan no longer distinguishes
-/// "overridden" from "vendored", because the layout it is built from cannot.
+/// code (`local = true`). An official the robot overrides in its Cargo workspace
+/// still resolves to the one official `bin/` entry, so the PLAN cannot and does
+/// not distinguish "overridden" from "vendored" - it stays byte-identical across
+/// origins. The board, however, refines this `local` bit from the source-side
+/// staging origin (a source cwd) so a source-overridden official is shown as
+/// local with a provenance note; an extracted layout has no such origin and its
+/// officials stay vendored (#936, finding 10). See [`build_layout_specs`].
 pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (ParticipantKind, bool) {
     match execution {
         ParticipantExecution::OfficialArtifact { .. } => (ParticipantKind::Service, false),
@@ -409,7 +442,6 @@ pub(crate) fn spec_from_launch_record(
     resolved: &ResolvedRobot,
     source_dirs: &BTreeMap<String, PathBuf>,
     staged_root: &Path,
-    ui: &crate::Ui,
 ) -> Result<Option<ParticipantSpec>> {
     if participant.launch_ownership == LaunchOwnership::SimulationManaged {
         return Ok(None);
@@ -419,10 +451,22 @@ pub(crate) fn spec_from_launch_record(
     // `ParticipantStatus` to mark `.with_local` on) - see the other
     // `participant_kind` call sites for where the bool is actually consumed.
     let (kind, _local) = participant_kind(&participant.execution);
-    let official_by_name = official_runtimes_by_name(resolved);
-    let source =
-        resolve_participant_source(participant, resolved, &official_by_name, source_dirs, ui)?;
-    let executable = stage_and_inspect(staged_root, participant, &source)?;
+    // Single-pass, like [`build_layout_specs`] (#936, finding 3): the watch
+    // recheck already re-staged the swapped crate into `bin/` through
+    // `refresh_staging` and re-validated that `bin/` through
+    // `validate_layout_plan`, so read the executable straight from the validated
+    // `bin/` store instead of re-resolving and rebuilding it. The activated bytes
+    // are exactly the validated bytes.
+    let executable = staged_root
+        .join(BIN_DIR)
+        .join(participant.execution.binary_name());
+    inspect_selected_binary(&executable).with_context(|| {
+        format!(
+            "failed to inspect staged runtime `{}` at {}",
+            participant.launch.participant_id,
+            executable.display()
+        )
+    })?;
     let cwd = source_cwd(participant, resolved, source_dirs);
     Ok(Some(participant_spec(
         participant,
@@ -432,6 +476,9 @@ pub(crate) fn spec_from_launch_record(
         cwd,
     )?))
 }
+
+/// The staged flat `bin/` directory name under a runtime layout root.
+const BIN_DIR: &str = "bin";
 
 /// Every official platform runtime the loader may need to resolve, keyed by its
 /// launch identity: the services and simulators in `platform_runtimes` plus the
@@ -548,7 +595,7 @@ fn stage_and_inspect(
 /// no crate context. The crate directory comes from the staging-side record
 /// (user services / workspace drivers) or the resolved graph's path override
 /// (overridden officials and tools).
-fn source_cwd(
+pub(crate) fn source_cwd(
     participant: &ParticipantLaunchRecord,
     resolved: &ResolvedRobot,
     source_dirs: &BTreeMap<String, PathBuf>,
@@ -809,7 +856,7 @@ services:
         )?;
         let board = BoardBackend::new();
         let mut specs = Vec::new();
-        build_layout_specs(&plan, &layout, &policy, &board, &mut specs)?;
+        build_layout_specs(&plan, &layout, &policy, &board, &mut specs, &|_| None)?;
 
         assert!(
             !specs.is_empty(),
@@ -832,6 +879,98 @@ services:
         assert!(
             specs.iter().any(|spec| spec.id == "mission"),
             "the user service `mission` must be launchable from the layout"
+        );
+        Ok(())
+    }
+
+    /// Board-only staging provenance (#936, finding 10): when the source path
+    /// supplies a cwd for an official (a source override), the board marks that
+    /// official `local` and carries a source-override note, while a vendored
+    /// official (no cwd) stays `local = false`. The launch plan is untouched
+    /// either way - only the board metadata differs.
+    #[test]
+    fn source_overridden_officials_are_marked_local_on_the_board() -> Result<()> {
+        use crate::run::{DriverPolicy, DriversMode, RunOptions};
+
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        std::fs::write(root.join("robot.yaml"), LAYOUT_ROBOT_YAML)?;
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin)?;
+
+        let layout = RuntimeLayout::open(root)?;
+        for required in layout.required_runtimes(
+            phoxal_cli_core::project::layout::RuntimeProfile::Native,
+            &DriverSelection::All,
+        ) {
+            if required.kind
+                == phoxal_cli_core::project::layout::RequiredRuntimeKind::Infrastructure
+            {
+                continue;
+            }
+            std::fs::write(
+                bin.join(&required.binary_name),
+                synthesize_binary(host_architecture()),
+            )?;
+        }
+
+        let plan = RuntimeLayout::construct_plan(
+            root,
+            &phoxal_cli_core::project::launch_plan::LaunchMode::Run,
+            &phoxal_cli_core::project::layout::PlanOptions::default(),
+        )?
+        .plan;
+        let policy = DriverPolicy::from_options(
+            &RunOptions {
+                drivers: DriversMode::On,
+                drivers_subset: Vec::new(),
+                suite_source: None,
+                watch: false,
+            },
+            &crate::run::driven_instances(layout.robot()),
+        )?;
+
+        // Pick one official artifact from the plan and pretend the project
+        // overrides it in its workspace (a source cwd).
+        let overridden = plan
+            .robots
+            .iter()
+            .flat_map(|robot| &robot.participants)
+            .find(|participant| {
+                matches!(
+                    participant.execution,
+                    ParticipantExecution::OfficialArtifact { .. }
+                )
+            })
+            .map(|participant| participant.launch.participant_id.clone())
+            .expect("the plan has at least one official artifact");
+        let overridden_cwd = overridden.clone();
+        let cwd_for = move |participant: &ParticipantLaunchRecord| {
+            (participant.launch.participant_id == overridden_cwd)
+                .then(|| root.join("services").join(&overridden_cwd))
+        };
+
+        let board = BoardBackend::new();
+        let mut specs = Vec::new();
+        build_layout_specs(&plan, &layout, &policy, &board, &mut specs, &cwd_for)?;
+
+        let snapshot = board.snapshot();
+        let key = ProcessKey::robot(RobotKey::new("dev", "robot_v1"), &overridden).to_string();
+        let status = snapshot
+            .participants
+            .get(&key)
+            .expect("the overridden official is on the board");
+        assert!(
+            status.local,
+            "a source-overridden official must be marked local on the board"
+        );
+        assert!(
+            status
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("source-override")),
+            "a source-overridden official must carry a provenance note: {:?}",
+            status.note
         );
         Ok(())
     }

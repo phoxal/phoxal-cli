@@ -184,6 +184,10 @@ fn update_locked_train(
             &descriptors,
             &progress,
         )?;
+        // Persist the fetched suite into the vendored store so `run`/`start`/
+        // `build`/`watch` resolve the locked train fully offline (#936, finding
+        // 1). `phoxal update` is the only path that fetches and vendors it.
+        crate::native_artifacts::persist_suite(&suite)?;
     }
 
     Ok(UpdateSummary {
