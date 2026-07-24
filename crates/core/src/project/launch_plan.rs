@@ -20,7 +20,8 @@ pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
 pub const INFRASTRUCTURE_ROUTER: &str = "infrastructure-router";
 pub const ROBOT_TOOL_JOYPAD: &str = "tool-joypad";
 pub const ROBOT_TOOL_DEVICE: &str = "tool-device";
-pub const RUNTIME_ROBOT_ROOT_RELATIVE: &str = ".phoxal/run/robot";
+/// Base directory holding one staged runtime layout per target triple.
+pub const RUNTIME_BUILD_ROOT_RELATIVE: &str = ".phoxal/build";
 pub const SIMULATOR_SUPERVISOR_PROVIDER_ID: &str = "simulator-webots-supervisor";
 pub const SIMULATOR_SUPERVISOR_ARTIFACT_NAME: &str = "webots-supervisor";
 pub const SIMULATOR_CONTROLLER_ARTIFACT_NAME: &str = "webots-controller";
@@ -28,6 +29,15 @@ pub const SIMULATOR_CONTROLLER_ARTIFACT_NAME: &str = "webots-controller";
 #[must_use]
 pub fn simulator_controller_provider_id(robot_id: &str) -> String {
     format!("simulator-webots-controller-{robot_id}")
+}
+
+/// The staged runtime layout directory for `triple` under `project_root`:
+/// `.phoxal/build/<triple>/`. `run` and live simulation stage and execute the
+/// host triple; `build` stages any target into the same shape. This is the one
+/// runtime-root the participant launch records point at.
+#[must_use]
+pub fn runtime_layout_dir(project_root: &Path, triple: &str) -> PathBuf {
+    project_root.join(RUNTIME_BUILD_ROOT_RELATIVE).join(triple)
 }
 
 /// Mint the bounded observation identity shared by every per-robot
@@ -364,7 +374,10 @@ fn build_robot_launch(
                 },
                 clock: ClockMode::Real,
                 config: None,
-                robot_root: Some(robot_root_for_mode(mode, input.project_root)),
+                robot_root: Some(runtime_layout_dir(
+                    input.project_root,
+                    &input.resolved.target,
+                )),
                 component_instance: None,
                 execution_device_id,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
@@ -516,18 +529,13 @@ fn participant_launch(
             .services
             .get(&checked.participant_id)
             .and_then(|service| service.config.clone()),
-        robot_root: Some(robot_root_for_mode(mode, input.project_root)),
+        robot_root: Some(runtime_layout_dir(
+            input.project_root,
+            &input.resolved.target,
+        )),
         component_instance,
         execution_device_id: None,
         shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
-    }
-}
-
-fn robot_root_for_mode(mode: &LaunchMode, project_root: &Path) -> PathBuf {
-    match mode {
-        LaunchMode::Run | LaunchMode::Webots { .. } => {
-            project_root.join(RUNTIME_ROBOT_ROOT_RELATIVE)
-        }
     }
 }
 
