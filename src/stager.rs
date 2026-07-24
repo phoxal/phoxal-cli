@@ -137,21 +137,21 @@ fn canonical_binary_name(participant: &ParticipantLaunchRecord) -> String {
 }
 
 /// Stage one launched CLI-managed participant's binary into the staged `bin/`
-/// under its canonical identity name, returning the executable the participant
-/// runs from: the flat `bin/` entry, or (macOS) the untouched `.app` bundle
-/// executable path. `source` is the built or vendored binary the plan
+/// under its canonical identity name, returning the flat `bin/` entry the
+/// participant runs from. `source` is the built or vendored binary the plan
 /// participant resolves to; `bin/` is a flat identity-keyed store, so one driver
 /// binary shared by several component instances is linked once under its
 /// component id, and a source-overridden official lands at the same name a
 /// vendored one would - the loader resolves both identically.
 ///
-/// No symlinks: the staged layout holds real file identities that keep working
-/// if `target/` is later cleaned. The contained macOS `.app` carve-out: a
-/// bundle-materialized executable keeps no flat `bin/` entry (flattening a
-/// bundle into one file would drop its `Contents/`); the loader tolerates that
-/// documented absence on macOS hosts and the supervisor's bundle
-/// materialization launches it from the bundle path instead. Native Linux
-/// runtime binaries - the real deployment target - are always flattened.
+/// No symlinks and no `.app` bundles: the staged layout holds real file
+/// identities that keep working if `target/` is later cleaned. Every
+/// participant, on every host, gets a flat `bin/` entry - a robot participant is
+/// always a plain executable (a cargo-built `target/` binary or a vendored flat
+/// artifact), never a macOS `.app` bundle. The only `.app` in the whole system
+/// is the Webots *application* on the `simulate` path, which is a CLI-managed
+/// host process outside the plan/layout contract entirely (its bundle is handled
+/// by the supervisor's `materialize_macos_app_binary`, never here).
 pub fn stage_participant_binary(
     staged_root: &Path,
     participant: &ParticipantLaunchRecord,
@@ -161,15 +161,12 @@ pub fn stage_participant_binary(
 }
 
 /// Stage one resolved source binary into the staged `bin/` under an explicit
-/// canonical name, returning the executable the participant runs from: the flat
-/// `bin/` entry, or (macOS) the untouched `.app` bundle executable path. This is
-/// the name-keyed core [`stage_participant_binary`] delegates to, and the entry
-/// point the layout-completing staging pass (#936) uses to link user services
-/// and component drivers into `bin/` before the loader constructs the plan.
+/// canonical name, returning the flat `bin/` entry the participant runs from.
+/// This is the name-keyed core [`stage_participant_binary`] delegates to, and
+/// the entry point the layout-completing staging pass (#936) uses to link user
+/// services and component drivers into `bin/` before the loader constructs the
+/// plan. Strict flat `bin/` on every host - see [`stage_participant_binary`].
 pub fn stage_named_binary(staged_root: &Path, binary_name: &str, source: &Path) -> Result<PathBuf> {
-    if macos_app_bundle_binary(source).is_some() {
-        return Ok(source.to_path_buf());
-    }
     let bin_dir = ensure_bin_dir(staged_root)?;
     let staged = bin_dir.join(binary_name);
     link_or_copy(source, &staged)?;
@@ -245,9 +242,7 @@ fn ensure_bin_dir(staged_root: &Path) -> Result<PathBuf> {
 }
 
 /// Ensure one official platform runtime (a service or simulator) has a canonical
-/// `bin/` entry, resolving it from a source override or the vendored store. The
-/// `.app`-bundle carve-out is preserved: a macOS bundle-materialized official is
-/// deliberately left without a flat `bin/` entry.
+/// flat `bin/` entry, resolving it from a source override or the vendored store.
 fn ensure_platform_staged(
     bin_dir: &Path,
     runtime: &ResolvedPlatformRuntime,
@@ -316,13 +311,10 @@ pub fn resolve_tool_source(
     resolve_vendored_binary(&descriptor)
 }
 
-/// Hardlink a resolved official binary into `bin/`, preserving the macOS
-/// `.app`-bundle carve-out: a bundle-materialized executable keeps no flat
-/// `bin/` entry (the loader tolerates the absence on macOS hosts).
+/// Hardlink a resolved official binary into its flat `bin/` entry. Every
+/// official, on every host, is a plain executable and is flattened - there is no
+/// `.app`-bundle carve-out (see [`stage_participant_binary`]).
 fn link_official_source(source: &Path, staged: &Path) -> Result<()> {
-    if macos_app_bundle_binary(source).is_some() {
-        return Ok(());
-    }
     link_or_copy(source, staged)
 }
 
@@ -373,14 +365,6 @@ fn copy_binary(source: &Path, dest: &Path) -> Result<()> {
     fs::set_permissions(dest, permissions)
         .with_context(|| format!("failed to set staged binary mode on {}", dest.display()))?;
     Ok(())
-}
-
-/// The `.app` bundle root when `executable` lives inside a macOS
-/// `Foo.app/Contents/MacOS/` bundle, else `None`.
-fn macos_app_bundle_binary(executable: &Path) -> Option<&Path> {
-    executable
-        .ancestors()
-        .find(|path| path.extension().is_some_and(|extension| extension == "app"))
 }
 
 fn stage_candidate(
@@ -915,8 +899,15 @@ robot:
         Ok(())
     }
 
+    /// Every participant, on every host - the darwin path included - gets a flat
+    /// `bin/` entry; there is no `.app`-bundle carve-out (#936, finding D). A
+    /// robot participant is always a plain executable (a cargo-built binary or a
+    /// vendored flat artifact - vendored darwin artifacts are flat files too), so
+    /// even a tool whose source lives under a `.app`-shaped path is flattened
+    /// into `bin/` under its canonical identity, and the loader resolves it
+    /// there with no host-specific tolerance.
     #[test]
-    fn macos_app_bundled_binaries_are_left_for_bundle_materialization() -> Result<()> {
+    fn a_participant_is_always_flattened_into_bin_even_on_darwin() -> Result<()> {
         let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
@@ -924,10 +915,12 @@ robot:
         let resolved = resolved_robot()?;
         let staged = stage_runtime_layout(project.path(), &resolved)?;
 
-        let bundle = project.path().join("Joypad.app/Contents/MacOS");
-        fs::create_dir_all(&bundle)?;
-        let bundled = bundle.join("joypad");
-        fs::write(&bundled, "MACHO")?;
+        // A plain source executable, as a vendored darwin tool artifact or a
+        // cargo-built binary always is - never a `.app` bundle.
+        let source_dir = project.path().join("target/debug");
+        fs::create_dir_all(&source_dir)?;
+        let source = source_dir.join("phoxal-tool-joypad");
+        fs::write(&source, "MACHO")?;
 
         let record = launch_record(
             "tool-joypad-robot_v1",
@@ -937,12 +930,11 @@ robot:
             },
             None,
         );
-        let executable = stage_participant_binary(&staged, &record, &bundled)?;
-        // Bundle-internal binaries are never flattened into bin/; the returned
-        // executable keeps pointing at the bundle for bundle materialization.
-        assert!(!staged.join("bin/joypad").exists());
-        assert!(!staged.join("bin/phoxal-tool-joypad").exists());
-        assert_eq!(executable, bundled);
+        let executable = stage_participant_binary(&staged, &record, &source)?;
+        // The flat `bin/` entry is created and returned - strict everywhere.
+        assert_eq!(executable, staged.join("bin/phoxal-tool-joypad"));
+        assert!(executable.is_file());
+        assert_eq!(fs::read_to_string(&executable)?, "MACHO");
         Ok(())
     }
 
