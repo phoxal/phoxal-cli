@@ -124,15 +124,13 @@ pub struct ResolvedComponent {
     pub instance: String,
     /// The logical component id (`component: <id>` in `robot.yaml`).
     pub source_name: String,
-    /// The resolved `component_assets` package. `Some` when an official
-    /// `phoxal/component-<id>` assets package resolved for this component.
-    /// `None` for a driverless (passive) component - e.g. a mechanical
-    /// mount like a caster wheel - whose assets package doesn't exist in
-    /// the suite; that's a valid configuration, not an error. A
-    /// component that declares a `driver:` block always has `Some` here
-    /// (a missing assets package for a driven component is still a hard
-    /// resolution failure).
-    pub assets: Option<ResolvedComponentPackage>,
+    /// The resolved `component_assets` package: the workspace assets crate
+    /// for a workspace component, or the official `phoxal/component-<id>`
+    /// assets package from the suite. Every component resolves its assets -
+    /// the one real driverless component (robot-v1's passive_caster) is a
+    /// workspace assets crate, and a component absent from both workspace and
+    /// suite is a resolution error, never a silent "assetless" (#936).
+    pub assets: ResolvedComponentPackage,
     /// The resolved `component_driver` package. Present only when the
     /// instance declares `driver` and a driver package resolves for this
     /// component; see [`ComponentDriverUnavailable`].

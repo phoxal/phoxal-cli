@@ -1188,7 +1188,7 @@ fn components_without_drivers_are_not_built() -> Result<()> {
         ResolvedComponent {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: Some(fixture_component_package(
+            assets: (fixture_component_package(
                 "phoxal/component-ddsm115",
                 phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
                 "components/ddsm115",
@@ -1203,7 +1203,7 @@ fn components_without_drivers_are_not_built() -> Result<()> {
         ResolvedComponent {
             instance: "caster".to_string(),
             source_name: "passive_caster".to_string(),
-            assets: Some(fixture_component_package(
+            assets: (fixture_component_package(
                 "phoxal/component-passive_caster",
                 phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
                 "components/passive_caster",
@@ -1259,7 +1259,7 @@ fn suite_component_driver_becomes_a_platform_ref_not_a_source_participant() -> R
     let resolved = resolved_with_components(vec![ResolvedComponent {
         instance: "left_drive".to_string(),
         source_name: "ddsm115".to_string(),
-        assets: Some(fixture_suite_component_package(
+        assets: (fixture_suite_component_package(
             "phoxal/component-ddsm115",
             phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
             "ddsm115",
@@ -1309,7 +1309,7 @@ fn n_instances_of_one_suite_driver_fetch_once_and_validate_as_n_graph_participan
         ResolvedComponent {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: Some(fixture_suite_component_package(
+            assets: (fixture_suite_component_package(
                 "phoxal/component-ddsm115",
                 phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
                 "ddsm115",
@@ -1324,7 +1324,7 @@ fn n_instances_of_one_suite_driver_fetch_once_and_validate_as_n_graph_participan
         ResolvedComponent {
             instance: "right_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: Some(fixture_suite_component_package(
+            assets: (fixture_suite_component_package(
                 "phoxal/component-ddsm115",
                 phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
                 "ddsm115",
@@ -1409,7 +1409,7 @@ fn driverless_suite_component_stages_assets_only_and_is_not_a_check_participant(
     let resolved = resolved_with_components(vec![ResolvedComponent {
         instance: "caster".to_string(),
         source_name: "passive_caster".to_string(),
-        assets: Some(fixture_suite_component_package(
+        assets: (fixture_suite_component_package(
             "phoxal/component-passive_caster",
             phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
             "passive_caster",

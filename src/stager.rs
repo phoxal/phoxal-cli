@@ -442,7 +442,7 @@ fn validate_candidate(
     );
 
     for component in &resolved.components {
-        if component.assets.is_some() {
+        {
             let component_file = candidate
                 .join("components")
                 .join(&component.source_name)
@@ -1094,7 +1094,7 @@ robot:
         resolved.components.push(ResolvedComponent {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: Some(ResolvedComponentPackage {
+            assets: (ResolvedComponentPackage {
                 package: "phoxal/component-ddsm115".to_string(),
                 kind: ArtifactKind::ComponentAssets,
                 source: ResolvedComponentSource::Path {

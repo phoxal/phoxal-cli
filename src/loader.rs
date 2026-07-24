@@ -16,7 +16,7 @@
 
 use anyhow::{Result, bail};
 use phoxal::check::Problem;
-use phoxal_cli_core::project::launch_plan::{LaunchMode, LaunchPlan};
+use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::layout::{LayoutInspection, PlanOptions, RuntimeLayout};
 use std::path::Path;
 
@@ -32,12 +32,10 @@ use std::path::Path;
 /// immutable plan the supervisor would launch from.
 pub fn validate_layout_plan(
     root: &Path,
-    mode: &LaunchMode,
     options: &PlanOptions,
     inspection: LayoutInspection,
 ) -> Result<LaunchPlan> {
-    let constructed =
-        RuntimeLayout::construct_plan_with_inspection(root, mode, options, inspection)?;
+    let constructed = RuntimeLayout::construct_plan_with_inspection(root, options, inspection)?;
     // The compiled `robot.yaml` carries each user service's authored config; the
     // constructor pairs it with the schema from the service's binary. Validate
     // through the same jsonschema check the graph pipeline uses.
@@ -190,12 +188,7 @@ services:
             &root,
             r#"{"type":"object","properties":{"speed":{"type":"integer"}}}"#,
         )?;
-        let plan = validate_layout_plan(
-            &root,
-            &LaunchMode::Run,
-            &PlanOptions::default(),
-            LayoutInspection::Host,
-        )?;
+        let plan = validate_layout_plan(&root, &PlanOptions::default(), LayoutInspection::Host)?;
         assert_eq!(plan.robots[0].id, "robot_v1");
         assert!(
             plan.robots[0]
@@ -215,14 +208,9 @@ services:
             &root,
             r#"{"type":"object","properties":{"speed":{"type":"string"}},"required":["speed"]}"#,
         )?;
-        let error = validate_layout_plan(
-            &root,
-            &LaunchMode::Run,
-            &PlanOptions::default(),
-            LayoutInspection::Host,
-        )
-        .expect_err("an invalid config must fail validation")
-        .to_string();
+        let error = validate_layout_plan(&root, &PlanOptions::default(), LayoutInspection::Host)
+            .expect_err("an invalid config must fail validation")
+            .to_string();
         assert!(error.contains("mission"), "{error}");
         assert!(error.contains("invalid user-service config"), "{error}");
         Ok(())
@@ -268,7 +256,6 @@ services:
         )?;
         let plan = validate_layout_plan(
             &root,
-            &LaunchMode::Run,
             &PlanOptions::default(),
             LayoutInspection::Target(elf_target(foreign)),
         )?;
@@ -294,7 +281,6 @@ services:
         // the binaries are the wrong arch for that declared target.
         let error = validate_layout_plan(
             &root,
-            &LaunchMode::Run,
             &PlanOptions::default(),
             LayoutInspection::Target(elf_target(
                 phoxal_cli_core::check::participant_metadata::host_architecture(),
@@ -307,13 +293,9 @@ services:
         // And the default host inspection likewise rejects a foreign bundle -
         // on a wrong arch (Linux host) or wrong container format (macOS host,
         // whose native format is Mach-O, not the staged ELF).
-        let host_error = validate_layout_plan(
-            &root,
-            &LaunchMode::Run,
-            &PlanOptions::default(),
-            LayoutInspection::Host,
-        )
-        .expect_err("host inspection must reject a foreign bundle");
+        let host_error =
+            validate_layout_plan(&root, &PlanOptions::default(), LayoutInspection::Host)
+                .expect_err("host inspection must reject a foreign bundle");
         let host_error = format!("{host_error:#}");
         assert!(
             host_error.contains("the selected target expects"),

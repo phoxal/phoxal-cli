@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use phoxal_cli::archive::{extract_build_archive, write_build_archive};
 use phoxal_cli::loader::validate_layout_plan;
 use phoxal_cli_core::check::participant_metadata::host_architecture;
-use phoxal_cli_core::project::launch_plan::{LaunchMode, LaunchPlan, PlanRevision};
+use phoxal_cli_core::project::launch_plan::{LaunchPlan, PlanRevision};
 use phoxal_cli_core::project::layout::{
     DriverSelection, LayoutInspection, PlanOptions, RequiredRuntimeKind, RuntimeLayout,
 };
@@ -139,7 +139,6 @@ fn source_build_extract_and_loader_validate_produce_the_same_plan() -> Result<()
     stage_layout(&staged_root, &fixture)?;
     let mut staged_plan = validate_layout_plan(
         &staged_root,
-        &LaunchMode::Run,
         &PlanOptions::default(),
         LayoutInspection::Host,
     )
@@ -169,7 +168,6 @@ fn source_build_extract_and_loader_validate_produce_the_same_plan() -> Result<()
     // suite, or network - and never touches `.phoxal/artifacts` (there is none).
     let mut extracted_plan = validate_layout_plan(
         &extracted_root,
-        &LaunchMode::Run,
         &PlanOptions::default(),
         LayoutInspection::Host,
     )

@@ -120,11 +120,9 @@ pub fn descriptors_for_drivers(
             .includes_instance(&component.instance)
             .then_some(component.driver.as_ref())
             .flatten();
-        let packages = driver.into_iter().chain(
-            include_component_assets
-                .then_some(component.assets.as_ref())
-                .flatten(),
-        );
+        let packages = driver
+            .into_iter()
+            .chain(include_component_assets.then_some(&component.assets));
         for package in packages {
             if let Some(runtime) = &package.suite_runtime
                 && let Some(descriptor) = NativeArtifactDescriptor::from_runtime(runtime)?
@@ -175,7 +173,13 @@ mod tests {
         ResolvedComponent {
             instance: instance.to_string(),
             source_name: package.rsplit('-').next().unwrap().to_string(),
-            assets: None,
+            assets: ResolvedComponentPackage {
+                package: "phoxal/component-fixture".to_string(),
+                kind: ArtifactKind::ComponentAssets,
+                source: ResolvedComponentSource::Suite,
+                path_override: None,
+                suite_runtime: None,
+            },
             driver: Some(ResolvedComponentPackage {
                 package: package.to_string(),
                 kind: ArtifactKind::ComponentDriver,

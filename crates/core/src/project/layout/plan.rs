@@ -25,7 +25,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use phoxal::check::ParticipantContractSurface;
 use phoxal::participant::launch::{
     BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ExecutionDeviceId, ParticipantLaunch,
@@ -94,10 +94,9 @@ impl RuntimeLayout {
     /// the bin crate); this returns their inputs on [`ConstructedPlan`].
     pub fn construct_plan(
         root: &std::path::Path,
-        mode: &LaunchMode,
         options: &PlanOptions,
     ) -> Result<ConstructedPlan> {
-        Self::construct_plan_with_inspection(root, mode, options, LayoutInspection::Host)
+        Self::construct_plan_with_inspection(root, options, LayoutInspection::Host)
     }
 
     /// [`Self::construct_plan`], inspecting each selected binary against the
@@ -106,12 +105,10 @@ impl RuntimeLayout {
     /// that will never execute on this host.
     pub fn construct_plan_with_inspection(
         root: &std::path::Path,
-        mode: &LaunchMode,
         options: &PlanOptions,
         inspection: LayoutInspection,
     ) -> Result<ConstructedPlan> {
         let layout = Self::open(root)?;
-        ensure_run_mode(mode)?;
         let required = layout.required_runtimes(&options.drivers);
         let mut selected = BTreeMap::new();
         for runtime in &required {
@@ -125,7 +122,7 @@ impl RuntimeLayout {
                 layout.inspect_for(runtime, inspection)?,
             );
         }
-        layout.construct_plan_from_selected(mode, options, &selected)
+        layout.construct_plan_from_selected(options, &selected)
     }
 
     /// Construct the launch plan from an already-inspected selected-binary set,
@@ -134,18 +131,16 @@ impl RuntimeLayout {
     /// them in a test) reuses the identical derivation.
     fn construct_plan_from_selected(
         &self,
-        mode: &LaunchMode,
         options: &PlanOptions,
         selected: &BTreeMap<String, SelectedBinary>,
     ) -> Result<ConstructedPlan> {
-        ensure_run_mode(mode)?;
         let robot_id = self.robot().robot.id.clone();
         let namespace = self.robot().robot.namespace.clone();
         let robot_root = self.root().to_path_buf();
-        let service_clock = match mode {
-            LaunchMode::Run => ClockMode::Real,
-            LaunchMode::Webots { .. } => ClockMode::Simulation,
-        };
+        // The constructor is structurally Run-only: simulation constructs its
+        // plan on the legacy resolved-robot path until #931 swaps it over,
+        // which reintroduces mode selection together with its real consumer.
+        let service_clock = ClockMode::Real;
 
         let meta_contracts = |binary_name: &str| -> Result<Vec<_>> {
             Ok(selected
@@ -287,16 +282,6 @@ impl RuntimeLayout {
                         });
                     }
                 }
-                RequiredRuntimeKind::Simulator => {
-                    // The Run required set never contains simulator runtimes
-                    // (the catalog's webots additions are not requested); the
-                    // layout constructor gains simulator participants together
-                    // with its simulation consumer in #931.
-                    bail!(
-                        "simulator runtime `{}` cannot be a member of a run layout plan",
-                        required.identity
-                    );
-                }
             }
         }
 
@@ -308,7 +293,7 @@ impl RuntimeLayout {
         });
 
         let plan = LaunchPlan {
-            mode: mode.clone(),
+            mode: LaunchMode::Run,
             robots: vec![RobotLaunch {
                 id: robot_id,
                 namespace,
@@ -321,20 +306,6 @@ impl RuntimeLayout {
             contract_surfaces,
             user_service_configs,
         })
-    }
-}
-
-/// The layout constructor serves `run`/`start`/`build` only. Simulation still
-/// constructs its plan on the legacy resolved-robot path; its layout swap is
-/// #931, which adds the webots profile together with its real consumer rather
-/// than carrying an untriggerable branch here (#936).
-fn ensure_run_mode(mode: &LaunchMode) -> Result<()> {
-    match mode {
-        LaunchMode::Run => Ok(()),
-        LaunchMode::Webots { .. } => bail!(
-            "the layout constructor builds run plans only; simulation plans are constructed by \
-             the simulation path until its layout swap lands (#931)"
-        ),
     }
 }
 
@@ -580,7 +551,13 @@ services:
         ResolvedComponent {
             instance: instance.to_string(),
             source_name: "ddsm115".to_string(),
-            assets: None,
+            assets: crate::project::resolver::ResolvedComponentPackage {
+                package: "phoxal/component-fixture".to_string(),
+                kind: crate::project::suite::ArtifactKind::ComponentAssets,
+                source: crate::project::resolver::ResolvedComponentSource::Suite,
+                path_override: None,
+                suite_runtime: None,
+            },
             driver: None,
             has_driver: true,
         }
@@ -670,8 +647,7 @@ services:
         )?;
 
         // The layout leg: read the same staged layout, source-free.
-        let constructed =
-            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())?;
+        let constructed = RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())?;
 
         assert_eq!(
             constructed.plan, legacy,
@@ -729,19 +705,14 @@ services:
         let staged_root = runtime_layout_dir(staged_project.path(), "triple");
         stage_layout(&staged_root, &[])?;
         let mut staged_plan =
-            RuntimeLayout::construct_plan(&staged_root, &LaunchMode::Run, &PlanOptions::default())?
-                .plan;
+            RuntimeLayout::construct_plan(&staged_root, &PlanOptions::default())?.plan;
 
         // "Extract the bundle" to an unrelated directory and construct again.
         let extracted = tempfile::tempdir()?;
         let extracted_root = extracted.path().join("build.phoxal.extracted");
         copy_dir(&staged_root, &extracted_root)?;
-        let mut extracted_plan = RuntimeLayout::construct_plan(
-            &extracted_root,
-            &LaunchMode::Run,
-            &PlanOptions::default(),
-        )?
-        .plan;
+        let mut extracted_plan =
+            RuntimeLayout::construct_plan(&extracted_root, &PlanOptions::default())?.plan;
 
         // Before normalization the deployment root genuinely differs, proving the
         // two constructions ran against distinct locations.
@@ -769,8 +740,7 @@ services:
         let project = tempfile::tempdir()?;
         let layout_root = runtime_layout_dir(project.path(), "triple");
         stage_layout(&layout_root, &[])?;
-        let constructed =
-            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())?;
+        let constructed = RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())?;
         let robot = &constructed.plan.robots[0];
 
         // Every catalog service is a planned participant, dormant or not - the
@@ -829,8 +799,7 @@ services:
         let project = tempfile::tempdir()?;
         let layout_root = runtime_layout_dir(project.path(), "triple");
         stage_layout(&layout_root, &[])?;
-        let constructed =
-            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())?;
+        let constructed = RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())?;
         let robot = &constructed.plan.robots[0];
 
         let drivers = robot
@@ -863,8 +832,7 @@ services:
         // The `mission` user-service binary carries a real object schema.
         let mission_meta = br#"{"participant_api":"Api","contracts":[],"config_schema":{"type":"object","properties":{"speed":{"type":"integer"}}}}"#;
         stage_layout(&layout_root, &[("mission", mission_meta)])?;
-        let constructed =
-            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())?;
+        let constructed = RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())?;
 
         let mission = constructed
             .user_service_configs
@@ -905,7 +873,7 @@ services:
         )?;
         let error = format!(
             "{:#}",
-            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())
+            RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())
                 .expect_err("a foreign-arch binary must fail construction")
         );
         assert!(error.contains("mission"), "{error}");
@@ -921,7 +889,7 @@ services:
         fs::remove_file(layout_root.join("bin/phoxal-service-drive"))?;
         let error = format!(
             "{:#}",
-            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())
+            RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())
                 .expect_err("a missing binary must fail construction")
         );
         assert!(error.contains("drive"), "{error}");
@@ -931,8 +899,8 @@ services:
 
     /// The regression the driver policy fixes (#936): `construct_plan` used to
     /// inspect every driver binary unconditionally, so a driven robot could not
-    /// run on a host whose driver binaries it cannot inspect (a macOS host, whose
-    /// component drivers are Linux-only). With drivers off the excluded driver is
+    /// run on a host whose driver binaries it cannot inspect (a bench host
+    /// missing that target's driver builds). With drivers off the excluded driver is
     /// never required, resolved, inspected, or planned - so a foreign-arch driver
     /// binary that hard-fails with drivers ON constructs cleanly with drivers OFF.
     #[test]
@@ -955,16 +923,15 @@ services:
         // construction hard-fails naming the driver identity.
         let on_error = format!(
             "{:#}",
-            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())
+            RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())
                 .expect_err("a foreign-arch driver binary must fail with drivers on")
         );
         assert!(on_error.contains("ddsm115"), "{on_error}");
 
         // Drivers off: no driver is required/resolved/inspected/planned, so the
-        // macOS-driven-robot scenario becomes runnable despite the foreign binary.
+        // bench-host scenario becomes runnable despite the foreign binary.
         let constructed = RuntimeLayout::construct_plan(
             &layout_root,
-            &LaunchMode::Run,
             &PlanOptions {
                 drivers: DriverSelection::None,
             },
@@ -992,7 +959,6 @@ services:
         stage_layout(&layout_root, &[])?;
         let constructed = RuntimeLayout::construct_plan(
             &layout_root,
-            &LaunchMode::Run,
             &PlanOptions {
                 drivers: DriverSelection::Only(["left_drive".to_string()].into_iter().collect()),
             },

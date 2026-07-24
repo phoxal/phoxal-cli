@@ -32,7 +32,7 @@ use container::{
     host_cargo_caches, platform_for_triple, require_platform_for_triple, vendored_artifacts,
 };
 use phoxal_cli_core::check::participant_metadata::expected_target_for_triple;
-use phoxal_cli_core::project::launch_plan::{LaunchMode, runtime_layout_dir};
+use phoxal_cli_core::project::launch_plan::runtime_layout_dir;
 use phoxal_cli_core::project::layout::LayoutInspection;
 
 #[derive(Debug, Args)]
@@ -340,7 +340,6 @@ impl Build {
             .context("cannot validate the staged runtime layout for the requested target")?;
         crate::loader::validate_layout_plan(
             &staged.staged_root,
-            &LaunchMode::Run,
             &staged.plan_options(),
             LayoutInspection::Target(expected_target),
         )

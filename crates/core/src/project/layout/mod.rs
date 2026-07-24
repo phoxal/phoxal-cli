@@ -69,8 +69,8 @@ impl LayoutInspection {
 /// its source: an excluded driver is never required, never resolved from
 /// `bin/`, never architecture-inspected, and never planned as a participant.
 /// That is what lets a driven robot run on a host whose driver binaries it
-/// cannot inspect (`--drivers off` on a macOS host, whose component drivers are
-/// Linux-only) without the plan constructor hard-failing on a foreign-arch
+/// cannot inspect (`--drivers off` on a bench host missing that target's
+/// driver binaries) without the plan constructor hard-failing on a foreign-arch
 /// driver binary. Selection is by component-instance id, matching the
 /// `--driver <ID>` vocabulary and the plan participant ids.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -107,7 +107,6 @@ pub enum RequiredRuntimeKind {
     OfficialService,
     OfficialTool,
     Infrastructure,
-    Simulator,
     UserService,
     ComponentDriver,
 }
@@ -217,7 +216,10 @@ impl RuntimeLayout {
                 ArtifactKind::Service => RequiredRuntimeKind::OfficialService,
                 ArtifactKind::Tool => RequiredRuntimeKind::OfficialTool,
                 ArtifactKind::Infrastructure => RequiredRuntimeKind::Infrastructure,
-                ArtifactKind::Simulator => RequiredRuntimeKind::Simulator,
+                // The catalog's native set carries no simulators; the webots
+                // additions are not requested here (see the doc above), so a
+                // simulator entry can never appear. Guard structurally anyway.
+                ArtifactKind::Simulator => continue,
                 // The catalog carries no component packages; assets/drivers are
                 // never members of the official runtime set.
                 ArtifactKind::ComponentAssets | ArtifactKind::ComponentDriver => continue,
@@ -445,12 +447,13 @@ services:
         let layout = RuntimeLayout::open(dir.path())?;
         let required = layout.required_runtimes(&DriverSelection::All);
 
-        // No simulator binaries in the Native profile.
+        // No simulator binaries in the required set (the kind vocabulary has
+        // no simulator member until #931 adds the simulation consumer).
         assert!(
             !required
                 .iter()
-                .any(|runtime| runtime.kind == RequiredRuntimeKind::Simulator),
-            "native profile must exclude simulator binaries"
+                .any(|runtime| runtime.identity.contains("webots")),
+            "the run required set must exclude simulator binaries"
         );
         // Every catalog service is required, each under its canonical bin name.
         let drive = required

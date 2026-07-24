@@ -111,6 +111,7 @@ pub fn resolve(
         &mut simulators,
         &mut components,
         &mut tools,
+        &options.drivers,
     )?;
 
     Ok(ResolvedRobot {
@@ -126,6 +127,7 @@ pub fn resolve(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_workspace_runtimes(
     robot: &Robot,
     project_root: &Path,
@@ -134,6 +136,7 @@ fn apply_workspace_runtimes(
     _simulators: &mut [ResolvedPlatformRuntime],
     components: &mut [ResolvedComponent],
     tools: &mut [ResolvedTool],
+    drivers: &phoxal_cli_core::project::layout::DriverSelection,
 ) -> Result<(Vec<ResolvedUserRuntime>, Vec<ResolvedPathOverride>)> {
     use phoxal_cli_core::project::train::WorkspaceRuntimeKind;
 
@@ -214,7 +217,7 @@ fn apply_workspace_runtimes(
                         .component_assets
                         .as_ref()
                         .context("component workspace runtime has no component assets")?;
-                    component.assets = Some(ResolvedComponentPackage {
+                    component.assets = ResolvedComponentPackage {
                         package: format!("workspace/component-{logical_name}"),
                         kind: ArtifactKind::ComponentAssets,
                         source: ResolvedComponentSource::Path {
@@ -222,7 +225,7 @@ fn apply_workspace_runtimes(
                         },
                         path_override: Some(assets_dir.clone()),
                         suite_runtime: None,
-                    });
+                    };
                     if runtime.binary_names.is_empty() {
                         anyhow::ensure!(
                             !component.has_driver,
@@ -236,15 +239,22 @@ fn apply_workspace_runtimes(
                             "components/{logical_name} has a bin target, but robot component instance {} has no driver connection",
                             component.instance
                         );
-                        component.driver = Some(ResolvedComponentPackage {
-                            package: format!("workspace/component-{logical_name}"),
-                            kind: ArtifactKind::ComponentDriver,
-                            source: ResolvedComponentSource::Path {
-                                path: runtime.crate_dir.clone(),
-                            },
-                            path_override: Some(runtime.crate_dir.clone()),
-                            suite_runtime: None,
-                        });
+                        // The driver policy gates resolution here too (#936):
+                        // an excluded workspace driver keeps `driver: None`, so
+                        // it never enters the source participants or the source
+                        // check and its crate is never built.
+                        component.driver =
+                            drivers.includes_instance(&component.instance).then(|| {
+                                ResolvedComponentPackage {
+                                    package: format!("workspace/component-{logical_name}"),
+                                    kind: ArtifactKind::ComponentDriver,
+                                    source: ResolvedComponentSource::Path {
+                                        path: runtime.crate_dir.clone(),
+                                    },
+                                    path_override: Some(runtime.crate_dir.clone()),
+                                    suite_runtime: None,
+                                }
+                            });
                     }
                 }
             }
@@ -504,7 +514,7 @@ fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<Resol
             components.push(ResolvedComponent {
                 instance: instance_name.clone(),
                 source_name: component_id.clone(),
-                assets: Some(ResolvedComponentPackage {
+                assets: ResolvedComponentPackage {
                     package: format!("workspace/component-{component_id}"),
                     kind: ArtifactKind::ComponentAssets,
                     source: ResolvedComponentSource::Path {
@@ -512,7 +522,7 @@ fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<Resol
                     },
                     path_override: Some(assets_dir.clone()),
                     suite_runtime: None,
-                }),
+                },
                 driver: (has_driver && context.drivers.includes_instance(instance_name)).then(
                     || ResolvedComponentPackage {
                         package: format!("workspace/component-{component_id}"),
@@ -535,15 +545,12 @@ fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<Resol
         // packages, unsupported targets, and malformed suite state behind a
         // silent "assetless" (#936). If genuinely assetless suite components
         // become real, the suite/catalog models that explicitly.
-        let assets = Some(
-            resolve_component_package(context, &package, ArtifactKind::ComponentAssets).map_err(
-                |err| {
-                    err.context(format!(
-                        "robot.components.{instance_name}.component '{component_id}' failed to resolve its component_assets package"
-                    ))
-                },
-            )?,
-        );
+        let assets = resolve_component_package(context, &package, ArtifactKind::ComponentAssets)
+            .map_err(|err| {
+                err.context(format!(
+                    "robot.components.{instance_name}.component '{component_id}' failed to resolve its component_assets package"
+                ))
+            })?;
 
         let driver = if has_driver && context.drivers.includes_instance(instance_name) {
             match resolve_component_package(context, &package, ArtifactKind::ComponentDriver) {
@@ -1205,11 +1212,110 @@ robot:
             &mut simulators,
             &mut components,
             &mut tools,
+            &phoxal_cli_core::project::layout::DriverSelection::All,
         )
         .unwrap_err()
         .to_string();
         assert!(error.contains("tools/custom"), "{error}");
         assert!(error.contains("make it a service"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn an_excluded_workspace_driver_is_not_reintroduced_after_resolution() -> anyhow::Result<()> {
+        use phoxal_cli_core::project::layout::DriverSelection;
+        use phoxal_cli_core::project::train::{WorkspaceRuntime, WorkspaceRuntimeKind};
+
+        // Round-3 finding 1 (#936): resolve_components leaves an excluded
+        // driver slot empty, but apply_workspace_runtimes used to re-set it
+        // unconditionally for a workspace driver crate - reintroducing the
+        // excluded driver into the source participants and the source check.
+        let robot = Robot::parse_from_string(
+            r#"schema: robot/v0
+robot:
+  id: bot
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: differential
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+  components:
+    left_drive:
+      component: ddsm115
+      mount_link: left_wheel_mount
+      driver:
+        connection: { type: can, bus: 0, node_id: 1 }
+"#,
+        )?;
+        let project = tempfile::tempdir()?;
+        let crate_dir = project.path().join("components/ddsm115");
+        std::fs::create_dir_all(&crate_dir)?;
+        let make_components = || {
+            vec![ResolvedComponent {
+                instance: "left_drive".to_string(),
+                source_name: "ddsm115".to_string(),
+                assets: ResolvedComponentPackage {
+                    package: "workspace/component-ddsm115".to_string(),
+                    kind: ArtifactKind::ComponentAssets,
+                    source: ResolvedComponentSource::Path {
+                        path: crate_dir.clone(),
+                    },
+                    path_override: Some(crate_dir.clone()),
+                    suite_runtime: None,
+                },
+                // resolve_components already left the excluded slot empty.
+                driver: None,
+                has_driver: true,
+            }]
+        };
+        let runtimes = vec![WorkspaceRuntime {
+            package: "ddsm115".to_string(),
+            crate_dir: crate_dir.clone(),
+            kind: WorkspaceRuntimeKind::Component,
+            binary_names: vec!["ddsm115".to_string()],
+            component_assets: Some(crate_dir.clone()),
+        }];
+
+        // Excluded: the workspace pass must NOT reintroduce the driver.
+        let mut components = make_components();
+        apply_workspace_runtimes(
+            &robot,
+            project.path(),
+            &runtimes,
+            &mut [],
+            &mut [],
+            &mut components,
+            &mut [],
+            &DriverSelection::None,
+        )?;
+        assert!(
+            components[0].driver.is_none(),
+            "an excluded workspace driver must stay unresolved"
+        );
+
+        // Included: the same pass resolves it from the workspace crate.
+        let mut components = make_components();
+        apply_workspace_runtimes(
+            &robot,
+            project.path(),
+            &runtimes,
+            &mut [],
+            &mut [],
+            &mut components,
+            &mut [],
+            &DriverSelection::All,
+        )?;
+        assert!(
+            components[0].driver.is_some(),
+            "a selected workspace driver resolves from its crate"
+        );
         Ok(())
     }
 
@@ -1269,6 +1375,7 @@ robot:
             &mut simulators,
             &mut components,
             &mut tools,
+            &phoxal_cli_core::project::layout::DriverSelection::All,
         )?;
         assert_eq!(
             tools[0].path_override.as_deref(),

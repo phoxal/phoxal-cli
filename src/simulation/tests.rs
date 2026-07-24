@@ -1136,17 +1136,15 @@ fn resolved_with_drive_components(instances: &[&str], include_user: bool) -> Res
         resolved.components.push(ResolvedComponent {
             instance: (*instance).to_string(),
             source_name: "ddsm115".to_string(),
-            assets: Some(
-                phoxal_cli_core::project::resolver::ResolvedComponentPackage {
-                    package: "phoxal/component-ddsm115".to_string(),
-                    kind: phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
-                    source: ResolvedComponentSource::Path {
-                        path: PathBuf::from("components/ddsm115"),
-                    },
-                    path_override: None,
-                    suite_runtime: None,
+            assets: phoxal_cli_core::project::resolver::ResolvedComponentPackage {
+                package: "phoxal/component-ddsm115".to_string(),
+                kind: phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
+                source: ResolvedComponentSource::Path {
+                    path: PathBuf::from("components/ddsm115"),
                 },
-            ),
+                path_override: None,
+                suite_runtime: None,
+            },
             driver: Some(
                 phoxal_cli_core::project::resolver::ResolvedComponentPackage {
                     package: "phoxal/component-ddsm115".to_string(),

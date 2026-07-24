@@ -18,15 +18,8 @@ pub fn stage_component_bundles_into_robot_root(
         if !staged.insert(component_id.clone()) {
             continue;
         }
-        let Some(source_dir) =
-            crate::component_driver::component_assets_dir(component, project_root).with_context(
-                || format!("failed to locate component assets for '{component_id}'"),
-            )?
-        else {
-            // Driverless (passive) component with no official assets
-            // package - nothing to stage.
-            continue;
-        };
+        let source_dir = crate::component_driver::component_assets_dir(component, project_root)
+            .with_context(|| format!("failed to locate component assets for '{component_id}'"))?;
         // Schema gate every referenced component document on the native path,
         // exactly as the simulation stager already does (#936, finding 5):
         // check the declared `component/vX` revision before strict parsing, then

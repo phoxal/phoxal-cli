@@ -13,7 +13,7 @@ use crate::simulation::{
 };
 use crate::supervisor::{BoardBackend, ParticipantSpec, SupervisorAction};
 use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind};
-use phoxal_cli_core::project::launch_plan::{LaunchMode, LaunchPlan, PlanContext};
+use phoxal_cli_core::project::launch_plan::{LaunchPlan, PlanContext};
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::tooling::hash_tree;
 use phoxal_cli_core::session::{ParticipantKind, human};
@@ -474,7 +474,6 @@ fn recheck_run_target(
     )?;
     let mut plan = crate::loader::validate_layout_plan(
         &staged.staged_root,
-        &LaunchMode::Run,
         &staged.plan_options(),
         phoxal_cli_core::project::layout::LayoutInspection::Host,
     )
@@ -795,7 +794,7 @@ mod tests {
             Instant::now(),
             Ok(WatchOutcome::Revision {
                 plan: LaunchPlan {
-                    mode: LaunchMode::Run,
+                    mode: phoxal_cli_core::project::launch_plan::LaunchMode::Run,
                     robots: Vec::new(),
                 },
                 specs: vec![spec],

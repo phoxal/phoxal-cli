@@ -25,7 +25,6 @@ use crate::supervisor::BoardBackend;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use phoxal_cli_core::project::launch_plan::LaunchMode;
 use phoxal_cli_core::project::launch_plan::PlanContext;
 use phoxal_cli_core::project::layout::RuntimeLayout;
 use phoxal_cli_core::project::resolver::ResolveOptions;
@@ -205,7 +204,6 @@ pub(crate) fn prepare_run_on_board(
     // from an extracted bundle of this layout.
     let plan = crate::loader::validate_layout_plan(
         &staged.staged_root,
-        &LaunchMode::Run,
         &plan_options,
         phoxal_cli_core::project::layout::LayoutInspection::Host,
     )
@@ -316,7 +314,6 @@ pub(crate) fn prepare_layout_run_on_board(
     };
     let plan = crate::loader::validate_layout_plan(
         layout_root,
-        &LaunchMode::Run,
         &plan_options,
         phoxal_cli_core::project::layout::LayoutInspection::Host,
     )

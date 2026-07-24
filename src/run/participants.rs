@@ -338,7 +338,7 @@ pub(crate) fn prepare_robot_participants(
                     .with_scope(scope.clone()),
                 participant.startup_requirement,
             );
-            // Component-driver launch gating (bench subset, macOS, missing
+            // Component-driver launch gating (bench subset, missing
             // device) is a board/policy decision that precedes any binary
             // resolution: a gated-out driver never needs its binary staged.
             if matches!(
@@ -818,7 +818,6 @@ services:
 
         let plan = RuntimeLayout::construct_plan(
             root,
-            &phoxal_cli_core::project::launch_plan::LaunchMode::Run,
             &phoxal_cli_core::project::layout::PlanOptions::default(),
         )?
         .plan;
@@ -879,7 +878,6 @@ services:
 
         let plan = RuntimeLayout::construct_plan(
             root,
-            &phoxal_cli_core::project::launch_plan::LaunchMode::Run,
             &phoxal_cli_core::project::layout::PlanOptions::default(),
         )?
         .plan;

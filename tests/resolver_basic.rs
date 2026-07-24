@@ -93,10 +93,7 @@ fn driverless_component_resolves_assets_only() -> anyhow::Result<()> {
     assert!(!left_drive.has_driver);
     assert!(left_drive.driver.is_none());
     assert_eq!(left_drive.source_name, "ddsm115");
-    let assets = left_drive
-        .assets
-        .as_ref()
-        .expect("ddsm115 assets package resolves from the suite");
+    let assets = &left_drive.assets;
     assert_eq!(assets.package, "phoxal/component-ddsm115");
     assert_eq!(
         assets.source,
@@ -121,14 +118,7 @@ fn component_with_driver_block_resolves_both_assets_and_driver() -> anyhow::Resu
         .expect("left_drive component resolved");
     assert!(left_drive.has_driver);
     assert_eq!(left_drive.source_name, "ddsm115");
-    assert_eq!(
-        left_drive
-            .assets
-            .as_ref()
-            .expect("ddsm115 assets package resolves from the suite")
-            .package,
-        "phoxal/component-ddsm115"
-    );
+    assert_eq!(left_drive.assets.package, "phoxal/component-ddsm115");
     let driver = left_drive.driver.as_ref().expect("driver package resolved");
     assert_eq!(driver.package, "phoxal/component-ddsm115");
 
@@ -190,7 +180,7 @@ fn suite_component_captures_the_release_asset_for_assets_and_driver() -> anyhow:
         .find(|component| component.instance == "left_drive")
         .expect("left_drive component resolved");
 
-    let assets = left_drive.assets.as_ref().expect("assets package resolved");
+    let assets = &left_drive.assets;
     assert_eq!(assets.source, ResolvedComponentSource::Suite);
     let assets_runtime = assets
         .suite_runtime
@@ -247,8 +237,6 @@ fn suite_component_with_no_release_asset_yet_still_resolves_with_none_runtime_sh
         .expect("left_drive component resolved");
     let runtime = left_drive
         .assets
-        .as_ref()
-        .expect("assets package resolved (the suite entry exists, just unpublished)")
         .suite_runtime
         .as_ref()
         .expect("suite_runtime is populated even with no release asset yet");
