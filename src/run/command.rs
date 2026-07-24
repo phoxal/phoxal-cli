@@ -505,6 +505,15 @@ pub(crate) async fn wait_for_required_readiness(
         match required_readiness(&snapshots.borrow_and_update().clone()) {
             Readiness::Ready => return Ok(()),
             Readiness::Failed(failures) => {
+                // A failure before any participant launched (e.g. plan
+                // construction rejecting the layout) reaches Failed with an
+                // empty process list; the resident logged the precise error.
+                if failures.is_empty() {
+                    bail!(
+                        "resident startup failed before any participant launched; see \
+                         .phoxal/supervisor.log in the project root for the exact error"
+                    )
+                }
                 bail!("resident startup failed: {}", failures.join(", "))
             }
             Readiness::Pending => {}
