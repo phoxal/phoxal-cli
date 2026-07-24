@@ -31,7 +31,7 @@ use container::{
     ContainerBuildSpec, ContainerEngine, EngineRunner, ProcessEngineRunner, default_builder_image,
     host_cargo_caches, platform_for_triple, require_platform_for_triple, vendored_artifacts,
 };
-use phoxal_cli_core::check::participant_metadata::architecture_for_triple;
+use phoxal_cli_core::check::participant_metadata::expected_target_for_triple;
 use phoxal_cli_core::project::launch_plan::{LaunchMode, runtime_layout_dir};
 use phoxal_cli_core::project::layout::LayoutInspection;
 
@@ -283,15 +283,19 @@ impl Build {
         // on the build host.
         let staged = crate::run::refresh_staging(project_root, &options, staging, false, &app.ui)?;
 
-        // Validate against the *declared* target architecture: a correct
-        // cross-built binary passes, a wrong-arch one for that target fails
-        // precisely. Native bundles exclude simulator-only binaries (the Native
-        // profile / LaunchMode::Run already enforces this).
+        // Validate against the *declared* target signature (format + arch +
+        // endianness): a correct cross-built binary passes, while a same-CPU
+        // wrong-OS (Mach-O for a Linux triple), wrong-arch, or wrong-endian
+        // binary fails precisely, and an unmappable triple is rejected outright.
+        // Native bundles exclude simulator-only binaries (the Native profile /
+        // LaunchMode::Run already enforces this).
+        let expected_target = expected_target_for_triple(target)
+            .context("cannot validate the staged runtime layout for the requested target")?;
         crate::loader::validate_layout_plan(
             &staged.staged_root,
             &LaunchMode::Run,
             &staged.plan_options(),
-            LayoutInspection::Target(architecture_for_triple(target)),
+            LayoutInspection::Target(expected_target),
         )
         .context("failed to validate the staged runtime layout for the target")?;
 

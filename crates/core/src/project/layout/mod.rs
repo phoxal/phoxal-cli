@@ -26,7 +26,7 @@ use super::catalog::{self, OfficialRuntime};
 use super::resolver::official_binary_name;
 use super::suite::ArtifactKind;
 use crate::check::participant_metadata::{
-    ParticipantMeta, host_architecture, inspect_selected_binary_for_arch,
+    ExpectedTarget, ParticipantMeta, expected_target_for_host, inspect_selected_binary_for_target,
 };
 use crate::schema::{DocumentKind, ensure_supported_revision};
 
@@ -37,28 +37,29 @@ pub use plan::PlanOptions;
 const ROBOT_FILE: &str = "robot.yaml";
 const BIN_DIR: &str = "bin";
 
-/// Which architecture the loader inspects selected binaries against (#936). An
-/// in-place `run`/`start` inspects against the host - a bundle only ever runs
+/// Which target signature the loader inspects selected binaries against (#936).
+/// An in-place `run`/`start` inspects against the host - a bundle only ever runs
 /// on the host it was staged/extracted for. `phoxal build --target <TRIPLE>`
 /// stages a foreign-target layout it will never execute here, so it inspects
-/// against the *declared* target architecture: a correct cross-compiled binary
-/// validates, while a wrong-arch binary for that target still fails precisely.
+/// against the *declared* target signature: a correct cross-compiled binary
+/// validates, while a wrong-format, wrong-arch, or wrong-endian binary for that
+/// target still fails precisely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LayoutInspection {
-    /// Inspect against the host architecture (in-place run/start).
+    /// Inspect against the host target signature (in-place run/start).
     #[default]
     Host,
-    /// Inspect against a declared `--target` architecture (cross build).
-    Target(object::Architecture),
+    /// Inspect against a declared `--target` signature (cross build).
+    Target(ExpectedTarget),
 }
 
 impl LayoutInspection {
-    /// The [`object::Architecture`] a selected binary is checked against.
+    /// The [`ExpectedTarget`] a selected binary is checked against.
     #[must_use]
-    pub fn architecture(self) -> object::Architecture {
+    pub fn expected_target(self) -> ExpectedTarget {
         match self {
-            Self::Host => host_architecture(),
-            Self::Target(arch) => arch,
+            Self::Host => expected_target_for_host(),
+            Self::Target(expected) => expected,
         }
     }
 }
@@ -320,7 +321,7 @@ impl RuntimeLayout {
         inspection: LayoutInspection,
     ) -> Result<SelectedBinary> {
         let path = self.resolve_binary(required)?;
-        let meta = inspect_selected_binary_for_arch(&path, inspection.architecture())
+        let meta = inspect_selected_binary_for_target(&path, &inspection.expected_target())
             .with_context(|| {
                 format!(
                     "failed to inspect required runtime `{}` at {}",

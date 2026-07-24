@@ -219,6 +219,8 @@ services:
         Ok(())
     }
 
+    use phoxal_cli_core::check::participant_metadata::ExpectedTarget;
+
     /// A concrete architecture that is never the host's, so a "foreign" layout
     /// can be staged and inspected deterministically on any runner.
     fn foreign_arch() -> object::Architecture {
@@ -231,8 +233,18 @@ services:
         }
     }
 
+    /// A little-endian ELF [`ExpectedTarget`] for `arch`, standing in for a Linux
+    /// cross target's declared signature.
+    fn elf_target(arch: object::Architecture) -> ExpectedTarget {
+        ExpectedTarget {
+            format: Some(object::BinaryFormat::Elf),
+            architecture: arch,
+            endianness: object::Endianness::Little,
+        }
+    }
+
     /// `phoxal build --target` inspects a cross bundle against its *declared*
-    /// target architecture, so a correct foreign-arch layout validates even
+    /// target signature, so a correct foreign-arch layout validates even
     /// though it will never execute on this host.
     #[test]
     fn target_inspection_accepts_a_declared_foreign_arch() -> anyhow::Result<()> {
@@ -248,7 +260,7 @@ services:
             &root,
             &LaunchMode::Run,
             &PlanOptions::default(),
-            LayoutInspection::Target(foreign),
+            LayoutInspection::Target(elf_target(foreign)),
         )?;
         assert_eq!(plan.robots[0].id, "robot_v1");
         Ok(())
@@ -273,15 +285,17 @@ services:
             &root,
             &LaunchMode::Run,
             &PlanOptions::default(),
-            LayoutInspection::Target(
+            LayoutInspection::Target(elf_target(
                 phoxal_cli_core::check::participant_metadata::host_architecture(),
-            ),
+            )),
         )
         .expect_err("a wrong-arch binary for the declared target must fail");
         // The precise arch diagnostic lives in the error's source chain.
         let error = format!("{error:#}");
         assert!(error.contains("built for"), "{error}");
-        // And the default host inspection likewise rejects a foreign bundle.
+        // And the default host inspection likewise rejects a foreign bundle -
+        // on a wrong arch (Linux host) or wrong container format (macOS host,
+        // whose native format is Mach-O, not the staged ELF).
         let host_error = validate_layout_plan(
             &root,
             &LaunchMode::Run,
@@ -290,7 +304,10 @@ services:
         )
         .expect_err("host inspection must reject a foreign bundle");
         let host_error = format!("{host_error:#}");
-        assert!(host_error.contains("built for"), "{host_error}");
+        assert!(
+            host_error.contains("the selected target expects"),
+            "{host_error}"
+        );
         Ok(())
     }
 }
