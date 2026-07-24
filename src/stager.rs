@@ -152,7 +152,7 @@ fn canonical_binary_name(participant: &ParticipantLaunchRecord) -> String {
 /// is the Webots *application* on the `simulate` path, which is a CLI-managed
 /// host process outside the plan/layout contract entirely (its bundle is handled
 /// by the supervisor's `materialize_macos_app_binary`, never here).
-pub fn stage_participant_binary(
+pub(crate) fn stage_participant_binary(
     staged_root: &Path,
     participant: &ParticipantLaunchRecord,
     source: &Path,
@@ -166,7 +166,11 @@ pub fn stage_participant_binary(
 /// the entry point the layout-completing staging pass (#936) uses to link user
 /// services and component drivers into `bin/` before the loader constructs the
 /// plan. Strict flat `bin/` on every host - see [`stage_participant_binary`].
-pub fn stage_named_binary(staged_root: &Path, binary_name: &str, source: &Path) -> Result<PathBuf> {
+pub(crate) fn stage_named_binary(
+    staged_root: &Path,
+    binary_name: &str,
+    source: &Path,
+) -> Result<PathBuf> {
     let bin_dir = ensure_bin_dir(staged_root)?;
     let staged = bin_dir.join(binary_name);
     link_or_copy(source, &staged)?;
@@ -322,7 +326,7 @@ fn link_official_source(source: &Path, staged: &Path) -> Result<()> {
 /// `.phoxal/artifacts` store, failing with a "run `phoxal update`" error and
 /// never touching the network when the store lacks it. Staging links from the
 /// vendored store only; it never fetches.
-pub fn resolve_vendored_binary(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
+pub(crate) fn resolve_vendored_binary(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
     let binary = crate::native_artifacts::artifact_binary_path(descriptor).with_context(|| {
         format!(
             "vendored artifact {} is not in the project artifact store; run `phoxal update`",

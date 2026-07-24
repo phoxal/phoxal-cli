@@ -135,7 +135,7 @@ impl RuntimeLayout {
     /// keyed by canonical `bin/` name. Split from [`Self::construct_plan`] so a
     /// caller that has already inspected the binaries (or wants to substitute
     /// them in a test) reuses the identical derivation.
-    pub fn construct_plan_from_selected(
+    fn construct_plan_from_selected(
         &self,
         mode: &LaunchMode,
         options: &PlanOptions,
