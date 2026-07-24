@@ -7,14 +7,6 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-use crate::check::{
-    CheckGraphContext, build_emit_apis_from_source, check_artifact_refs_from_resolved,
-    extract_emit_apis_from_staged_runtime, extract_emit_apis_from_staged_tool,
-    fetch_emit_apis_from_tool, run_check_with_context, source_participants_from_resolved,
-    tool_participants_from_resolved,
-};
-use crate::component_driver::component_driver_crate_dir;
-use crate::resolver::resolve;
 use crate::run::{RunOptions, spec_from_launch_record};
 use crate::simulation::{
     SimulateMode, SimulateOptions, build_checked_sim_launch_plan, resolve_project,
@@ -22,9 +14,7 @@ use crate::simulation::{
 use crate::supervisor::{BoardBackend, ParticipantSpec, SupervisorAction};
 use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind};
 use phoxal_cli_core::project::launch_plan::{LaunchMode, LaunchPlan, PlanContext};
-use phoxal_cli_core::project::resolver::{
-    ResolveOptions, ResolvedRobot, discover_robot_yaml, load_robot,
-};
+use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::tooling::hash_tree;
 use phoxal_cli_core::session::{ParticipantKind, human};
 
@@ -455,93 +445,22 @@ fn recheck_run_target(
     options: &RunOptions,
     target: &WatchTarget,
 ) -> Result<WatchOutcome> {
-    let robot_path = discover_robot_yaml(project_root)
-        .with_context(|| format!("failed to find robot.yaml from {}", project_root.display()))?;
-    let project_root = robot_path
-        .parent()
-        .context("robot.yaml did not have a parent directory")?;
-    let robot = load_robot(&robot_path)?;
-    let suite = crate::commands::load_suite_for_robot_from_source(
-        options.suite_source.clone(),
-        project_root,
-    )?;
-    let resolved = resolve(
-        &robot,
-        project_root,
-        suite.as_ref(),
-        ResolveOptions {
-            ..ResolveOptions::default()
-        },
-    )?;
-    // Every source participant rebuilds live on every recheck - there is no
-    // more disk cache to scope around (docs: `check::build_emit_apis_from_source`
-    // never caches), so a single changed crate simply triggers a full rebuild
-    // of the whole source graph rather than just the changed one.
-    let source_participants =
-        source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
-    let platform_refs = check_artifact_refs_from_resolved(&resolved);
-    let tool_participants = tool_participants_from_resolved(&resolved)?;
-    let mut official_by_ref = resolved
-        .platform_runtimes
-        .iter()
-        .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
-        .collect::<BTreeMap<_, _>>();
-    official_by_ref.extend(crate::check::component_driver_runtimes_by_ref(&resolved));
-    let tools_by_ref = resolved
-        .tools
-        .iter()
-        .map(|tool| (tool.asset.clone(), tool))
-        .collect::<BTreeMap<_, _>>();
-    let outcome = run_check_with_context(
-        &platform_refs,
-        &tool_participants,
-        &source_participants,
-        CheckGraphContext {
-            robot: Some(&robot),
-        },
-        |artifact_ref| {
-            if let Some(runtime) = official_by_ref.get(artifact_ref) {
-                return extract_emit_apis_from_staged_runtime(runtime);
-            }
-            if let Some(tool) = tools_by_ref.get(artifact_ref) {
-                return extract_emit_apis_from_staged_tool(tool);
-            }
-            Err(anyhow!(
-                "resolved official artifact {artifact_ref} is not in the suite"
-            ))
-        },
-        fetch_emit_apis_from_tool,
-        build_emit_apis_from_source,
-    )?;
-    crate::check::ensure_check_outcome_ok(&resolved.train, &outcome)?;
-    // Rebuild source, refresh the staged layout, then derive the plan from that
-    // layout alone - the same one execution path `run` uses (#936). The changed
-    // crate is rebuilt and re-staged into `bin/` before the loader inspects it,
-    // so the layout-derived plan and its coherence check see the fresh metadata.
+    // A hot-reload rebuilds and re-stages through the exact staging entry the
+    // live run used, then derives the plan from that layout alone - the one
+    // execution path (#936). The changed crate is rebuilt and re-staged into
+    // `bin/` (source-time check included) before the loader inspects it, so the
+    // layout-derived plan and its coherence check see the fresh metadata, and
+    // the identical driver policy is honored across restages.
     let ui = crate::Ui::from_env();
-    // The watch recheck honors the same driver policy the live run resolved, so a
-    // hot-reload restages and replans the identical driver set (#936).
-    let driver_policy = crate::run::DriverPolicy::from_options(
-        options,
-        &crate::run::driven_instances(&resolved.robot),
-    )?;
-    let plan_options = phoxal_cli_core::project::layout::PlanOptions {
-        drivers: driver_policy.selection(),
-    };
-    let staged_root = crate::stager::stage_runtime_layout(project_root, &resolved)
-        .context("failed to re-stage the runtime layout")?;
-    crate::run::stage_complete_bin_store(
-        &staged_root,
-        &resolved,
-        &source_participants,
-        &driver_policy.selection(),
-        &ui,
-    )?;
-    let mut plan =
-        crate::loader::validate_layout_plan(&staged_root, &LaunchMode::Run, &plan_options)
-            .context("failed to construct the launch plan from the staged runtime layout")?;
-    let mut specs = specs_for_target(&plan, &resolved, project_root, target)?;
-    let endpoint = crate::run::project_router_endpoint(project_root);
+    let staged = crate::run::refresh_staging(project_root, options, &ui)?;
+    let mut plan = crate::loader::validate_layout_plan(
+        &staged.staged_root,
+        &LaunchMode::Run,
+        &staged.plan_options(),
+    )
+    .context("failed to construct the launch plan from the staged runtime layout")?;
+    let mut specs = specs_for_target(&plan, &staged.resolved, &staged.project_root, target)?;
+    let endpoint = crate::run::project_router_endpoint(&staged.project_root);
     crate::run::apply_session_connect(&mut plan, &mut specs, &endpoint);
     Ok(WatchOutcome::Revision { plan, specs })
 }

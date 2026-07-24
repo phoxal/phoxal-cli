@@ -22,7 +22,7 @@ pub(crate) use stages::stages_for_run;
 mod telemetry;
 pub(crate) use telemetry::{RobotFeedTarget, start_telemetry_feeds_at};
 mod prepare;
-pub(crate) use prepare::{prepare_layout_run_on_board, prepare_run_on_board};
+pub(crate) use prepare::{prepare_layout_run_on_board, prepare_run_on_board, refresh_staging};
 mod report;
 pub(crate) use report::{DriverPolicy, driven_instances, report_launch_commands};
 mod participants;

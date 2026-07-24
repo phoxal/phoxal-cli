@@ -36,18 +36,54 @@ use phoxal_cli_core::session::{ProcessKey, StartupRequirement};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Prepare a run from a buildable source project: resolve the locked graph,
-/// prepare native artifacts, run the source-time check, refresh the staged
-/// runtime layout under `.phoxal/build/<triple>/` (including a complete `bin/`
-/// store), then construct and validate the launch plan from that staged layout.
-/// The plan and every executable come from the staged layout, never the resolved
-/// graph directly (#936) - the resolved graph is a staging-side input only.
-pub(crate) fn prepare_run_on_board(
+/// The output of one staging refresh over a buildable source project: the
+/// resolved graph and its source-participant records the staging step consumed,
+/// the resolved driver policy, and the staged runtime layout root every
+/// executable and the launch plan are then read from. Everything after staging -
+/// plan construction, spec building, `phoxal build`'s archive - reads only the
+/// staged layout; these fields are the staging-side inputs the source path still
+/// needs (crate directories for cwd/rebuild, the resolved graph for router
+/// config).
+pub(crate) struct StagedProject {
+    pub(crate) robot_path: std::path::PathBuf,
+    pub(crate) project_root: std::path::PathBuf,
+    pub(crate) resolved: ResolvedRobot,
+    pub(crate) source_participants: Vec<phoxal_cli_core::check::source::SourceParticipant>,
+    pub(crate) driver_policy: DriverPolicy,
+    /// The staged runtime layout root - `.phoxal/build/<host-triple>/`.
+    pub(crate) staged_root: std::path::PathBuf,
+}
+
+impl StagedProject {
+    /// The plan-construction options this refresh resolved, so `run`, `start`,
+    /// `watch`, and `build` all validate/construct the plan against the identical
+    /// driver policy the staging step honored.
+    pub(crate) fn plan_options(&self) -> phoxal_cli_core::project::layout::PlanOptions {
+        phoxal_cli_core::project::layout::PlanOptions {
+            drivers: self.driver_policy.selection(),
+        }
+    }
+}
+
+/// Refresh the host-triple staging for a buildable source project and return the
+/// staged layout plus the staging-side inputs (#936). This is the one staging
+/// entry `run`, `start`, `watch`, and `phoxal build` all share, so they build and
+/// stage identically before diverging on what they do with the staged layout:
+/// resolve the locked graph, prepare native artifacts, resolve the driver policy,
+/// stage the runtime layout under `.phoxal/build/<host-triple>/`, run the
+/// source-time check, and complete the flat `bin/` store. It never constructs the
+/// launch plan or touches the supervisor - the caller runs
+/// `loader::validate_layout_plan` over `staged_root` next.
+///
+/// The `build` slice reuses this per target triple; a foreign `--target` will
+/// thread its triple through the resolve/stage/`bin/`-completion steps so the
+/// same code cross-compiles the workspace crates and links the suite's per-target
+/// official blobs into `.phoxal/build/<triple>/`.
+pub(crate) fn refresh_staging(
     project_start: &Path,
-    options: RunOptions,
+    options: &RunOptions,
     ui: &crate::Ui,
-    board: BoardBackend,
-) -> Result<PreparedRun> {
+) -> Result<StagedProject> {
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
     let project_root = robot_path
@@ -66,18 +102,16 @@ pub(crate) fn prepare_run_on_board(
     )?;
     let descriptors = phoxal_cli_core::artifacts::descriptors_for(&resolved, false, true)?;
     crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
-    let staged_root = crate::stager::stage_runtime_layout(project_root, &resolved)
-        .context("failed to stage the runtime layout")?;
 
     // The driver policy is resolved once, from the run options and the driven
     // component instances the robot declares, and threads through both staging
     // and plan construction (#936): an excluded driver is never built, staged,
     // required, resolved, inspected, or planned.
     let driver_policy =
-        DriverPolicy::from_options(&options, &crate::run::driven_instances(&resolved.robot))?;
-    let plan_options = phoxal_cli_core::project::layout::PlanOptions {
-        drivers: driver_policy.selection(),
-    };
+        DriverPolicy::from_options(options, &crate::run::driven_instances(&resolved.robot))?;
+
+    let staged_root = crate::stager::stage_runtime_layout(project_root, &resolved)
+        .context("failed to stage the runtime layout")?;
 
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
@@ -98,15 +132,41 @@ pub(crate) fn prepare_run_on_board(
         ui,
     )?;
 
+    Ok(StagedProject {
+        // `project_root` borrows `robot_path`, so clone rather than move it.
+        robot_path: robot_path.clone(),
+        project_root: project_root.to_path_buf(),
+        resolved,
+        source_participants,
+        driver_policy,
+        staged_root,
+    })
+}
+
+/// Prepare a run from a buildable source project: refresh the staged runtime
+/// layout through the shared [`refresh_staging`] entry, then construct and
+/// validate the launch plan from that staged layout. The plan and every
+/// executable come from the staged layout, never the resolved graph directly
+/// (#936) - the resolved graph is a staging-side input only.
+pub(crate) fn prepare_run_on_board(
+    project_start: &Path,
+    options: RunOptions,
+    ui: &crate::Ui,
+    board: BoardBackend,
+) -> Result<PreparedRun> {
+    let staged = refresh_staging(project_start, &options, ui)?;
+    let plan_options = staged.plan_options();
+
     // The one execution path: construct and validate the launch plan from the
     // staged layout alone. Byte-identical, for the same robot, to a plan built
     // from an extracted bundle of this layout.
-    let plan = crate::loader::validate_layout_plan(&staged_root, &LaunchMode::Run, &plan_options)
-        .context("failed to construct the launch plan from the staged runtime layout")?;
+    let plan =
+        crate::loader::validate_layout_plan(&staged.staged_root, &LaunchMode::Run, &plan_options)
+            .context("failed to construct the launch plan from the staged runtime layout")?;
 
     board.configure(
-        project_root.display().to_string(),
-        resolved.train.clone(),
+        staged.project_root.display().to_string(),
+        staged.resolved.train.clone(),
         "run",
     );
     register_router_process(&board);
@@ -116,21 +176,29 @@ pub(crate) fn prepare_run_on_board(
     // no longer carries: a participant built from local source runs from its
     // crate directory (relative asset resolution) and is rebuilt there under
     // `--watch`. Execution identity always comes from the plan's `bin/` name.
-    let source_dirs = crate::run::source_dirs_by_participant(&source_participants);
+    let source_dirs = crate::run::source_dirs_by_participant(&staged.source_participants);
     crate::run::prepare_robot_participants(
         &plan,
-        &resolved,
+        &staged.resolved,
         &source_dirs,
-        &staged_root,
-        &driver_policy,
+        &staged.staged_root,
+        &staged.driver_policy,
         &board,
         &mut specs,
         ui,
     )?;
 
-    let router_config = crate::run::resolve_router_config(&resolved.robot, project_root)?;
+    let router_config =
+        crate::run::resolve_router_config(&staged.resolved.robot, &staged.project_root)?;
     let robot_targets = super::RobotFeedTarget::from_plan(&plan);
-    let project_root = project_root.to_path_buf();
+    let StagedProject {
+        robot_path,
+        project_root,
+        resolved,
+        source_participants,
+        staged_root,
+        ..
+    } = staged;
     let ctx = PlanContext {
         robot_path,
         project_root,
