@@ -24,6 +24,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod archive;
 pub mod check;
 pub mod commands;
 pub(crate) mod component_driver;

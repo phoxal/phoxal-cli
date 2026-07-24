@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::AppContext;
 
 pub mod behavior;
+pub mod build;
 pub mod check;
 pub mod doctor;
 pub mod init;
@@ -163,6 +164,13 @@ pub enum RootCommand {
                       Resolves robot.yaml and the Cargo workspace, then reads every participant's compiled-in contract metadata (official artifacts from the suite and workspace-built services, tools, and component drivers) and validates the graph with phoxal::check. Contract compatibility is per-contract name identity (D1) - two participants naming the same version-qualified contract are compatible by construction, so there is no wire-shape hash to agree on. This also validates each user service's manifest config against its emitted JSON Schema."
     )]
     Check(check::CheckCmd),
+    #[command(
+        about = "Stage a runtime layout for a target and archive it as build.phoxal.",
+        long_about = "Stage a runtime layout for a target and archive it as a deterministic build.phoxal.\n\n\
+                      `build` refreshes staging exactly as `run` would - but for the selected --target rather than the host - validates the staged layout through the shared loader against the declared target architecture (no execution), and archives the staged layout deterministically: identical contents always produce identical archive bytes. The default output is a sibling of the staged directory, <project>/.phoxal/build/<triple>.build.phoxal, and the path plus its sha256 are printed at the end.\n\n\
+                      `--builder` selects where compilation happens, never a different output: `local` (the default) compiles on this host with `cargo build --target` (a missing cross toolchain is an actionable `rustup target add` error - the CLI never installs toolchains); `container` compiles inside a per-target toolchain image (the image defines the target, so --target is required) and then reuses the identical host-side staging + archive; `ssh://user@host` is the remote builder, which lands in phase 11 (#930). Every backend produces the identical deterministic build.phoxal. Extract a bundle with `phoxal run <dir>` after `tar -xzf build.phoxal`, or plain `tar` - the archive is ordinary tar.gz."
+    )]
+    Build(build::Build),
     // Preserved prototype for the parked behavior-orchestration design. Keep it
     // out of the supported command listing until that plan is rewritten.
     #[command(about = "Experimental behavior-orchestration prototype.", hide = true)]
@@ -220,6 +228,7 @@ impl RootCommand {
         match self {
             Self::Init(command) => command.run(app).await,
             Self::Check(command) => command.run(app).await,
+            Self::Build(command) => command.run(app).await,
             Self::Behavior(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
             Self::Simulation(command) => command.run(app).await,
@@ -317,6 +326,74 @@ mod tests {
 
         let check = Cli::try_parse_from(["phoxal", "check"]).unwrap();
         assert!(!check.command.enters_interactive_session());
+    }
+
+    /// The `phoxal build` clap surface parses the full flag set: the project
+    /// positional, `--target`, `--builder` (local/container/ssh), `--output`,
+    /// `--container-engine`, and `--builder-image`.
+    #[test]
+    fn build_command_parses_its_full_flag_surface() {
+        let bare = Cli::try_parse_from(["phoxal", "build"]).expect("bare build should parse");
+        let RootCommand::Build(build) = bare.command else {
+            panic!("expected a build command");
+        };
+        assert_eq!(build.builder, "local");
+        assert!(build.target.is_none());
+        assert_eq!(
+            build.container_engine,
+            build::container::ContainerEngine::Docker
+        );
+
+        let full = Cli::try_parse_from([
+            "phoxal",
+            "build",
+            "project",
+            "--target",
+            "aarch64-unknown-linux-gnu",
+            "--builder",
+            "container",
+            "--output",
+            "out/bundle.build.phoxal",
+            "--container-engine",
+            "podman",
+            "--builder-image",
+            "ghcr.io/example/custom:latest",
+        ])
+        .expect("full build flags should parse");
+        let RootCommand::Build(build) = full.command else {
+            panic!("expected a build command");
+        };
+        assert_eq!(
+            build.project.as_deref(),
+            Some(std::path::Path::new("project"))
+        );
+        assert_eq!(build.target.as_deref(), Some("aarch64-unknown-linux-gnu"));
+        assert_eq!(build.builder, "container");
+        assert_eq!(
+            build.output.as_deref(),
+            Some(std::path::Path::new("out/bundle.build.phoxal"))
+        );
+        assert_eq!(
+            build.container_engine,
+            build::container::ContainerEngine::Podman
+        );
+        assert_eq!(
+            build.builder_image.as_deref(),
+            Some("ghcr.io/example/custom:latest")
+        );
+    }
+
+    /// An `ssh://` builder is accepted by clap (it is a free-form string) and
+    /// rejected only at run time; the value round-trips through parsing.
+    #[test]
+    fn build_command_accepts_the_ssh_builder_string() {
+        let cli =
+            Cli::try_parse_from(["phoxal", "build", "--builder", "ssh://dev@jetson-nano-orin"])
+                .expect("ssh builder string should parse");
+        let RootCommand::Build(build) = cli.command else {
+            panic!("expected a build command");
+        };
+        assert_eq!(build.builder, "ssh://dev@jetson-nano-orin");
     }
 
     /// `phoxal start` is headless: it never drives the interactive

@@ -1165,6 +1165,40 @@ robot:
         Ok(())
     }
 
+    /// `phoxal build --target <TRIPLE>` stages into `.phoxal/build/<triple>/` and
+    /// resolves the officials from the suite's per-target vendored blobs; when
+    /// those blobs are not vendored it fails with the "run `phoxal update`"
+    /// error, without ever touching the network - exactly like a host build.
+    #[test]
+    fn cross_target_official_store_points_at_phoxal_update_without_network() -> Result<()> {
+        let _scratch = ScratchPhoxalHome::new()?;
+        let project = tempfile::tempdir()?;
+        fs::create_dir_all(project.path().join("model"))?;
+        fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
+        let foreign = "aarch64-unknown-linux-gnu";
+        let mut resolved = resolved_robot()?;
+        resolved.target = foreign.to_string();
+        let mut drive = platform_runtime("drive", ArtifactKind::Service);
+        drive.target = Some(foreign.to_string());
+        resolved.platform_runtimes = vec![drive];
+
+        // Staging lands under the requested target triple, not the host.
+        let staged = stage_runtime_layout(project.path(), &resolved)?;
+        assert!(
+            staged.starts_with(project.path().join(".phoxal/build").join(foreign)),
+            "cross-target staging must land under .phoxal/build/{foreign}/: {}",
+            staged.display()
+        );
+
+        let error = stage_complete_official_store(&staged, &resolved, |_, name| {
+            panic!("no source override expected for {name}")
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("phoxal update"), "{error}");
+        Ok(())
+    }
+
     #[test]
     fn complete_store_errors_with_update_hint_for_a_missing_official() -> Result<()> {
         let _scratch = ScratchPhoxalHome::new()?;
