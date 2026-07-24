@@ -212,12 +212,23 @@ fn is_executable(_metadata: &fs::Metadata) -> bool {
 }
 
 /// Extract a `build.phoxal` at `archive` into `dest`, rejecting any entry whose
-/// path would escape `dest` (absolute paths or `..` traversal). Plain
-/// `tar -xzf` extracts the same bytes; this adds the escape guard, so a
-/// maliciously crafted bundle cannot write outside the destination.
+/// path would escape `dest`. Plain `tar -xzf` extracts the same bytes; this adds
+/// two layered escape guards so a maliciously crafted bundle - or a malicious
+/// pre-existing symlink in `dest` - cannot write outside the destination:
+///
+/// 1. **Lexical:** every entry path is validated relative with no `..`/root
+///    ([`safe_relative`]).
+/// 2. **Physical:** `dest` must be a newly created or already empty real
+///    directory (never a symlink), and every path component is created and
+///    checked with `symlink_metadata` during extraction - a symlinked ancestor
+///    or a symlinked final target is rejected, and the final file is opened with
+///    `O_NOFOLLOW` so a race that swaps in a symlink still cannot be followed.
+///
+/// The lexical guard alone is insufficient: `create_dir_all`/`open` follow
+/// symlink ancestors, so a `dest/foo` symlink pointing outside would let entry
+/// `foo/bar` write outside despite a clean lexical path (#936, finding E).
 pub fn extract_build_archive(archive: &Path, dest: &Path) -> Result<()> {
-    fs::create_dir_all(dest)
-        .with_context(|| format!("failed to create extraction directory {}", dest.display()))?;
+    ensure_fresh_destination(dest)?;
     let file =
         fs::File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
     let mut tar = Archive::new(GzDecoder::new(file));
@@ -236,15 +247,30 @@ pub fn extract_build_archive(archive: &Path, dest: &Path) -> Result<()> {
                 path.display()
             )
         })?;
-        let out = dest.join(&safe);
         if entry.header().entry_type().is_dir() {
-            fs::create_dir_all(&out)
-                .with_context(|| format!("failed to create {}", out.display()))?;
+            create_dirs_no_symlink(dest, &safe)?;
             continue;
         }
-        if let Some(parent) = out.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+        let out = if let Some(parent) = safe.parent() {
+            create_dirs_no_symlink(dest, parent)?.join(
+                safe.file_name()
+                    .context("archive file entry has no file name")?,
+            )
+        } else {
+            dest.join(&safe)
+        };
+        // Belt-and-suspenders: the final path must not already be a symlink
+        // (`dest` is empty and we create no symlinks, but a concurrent writer
+        // could race one in). The `O_NOFOLLOW` open below is the authoritative
+        // guard; this gives a clearer diagnostic.
+        if let Ok(meta) = fs::symlink_metadata(&out) {
+            if meta.file_type().is_symlink() {
+                bail!(
+                    "refusing to extract archive entry `{}`: {} is a symlink in the destination",
+                    safe.display(),
+                    out.display()
+                );
+            }
         }
         let mut data = Vec::new();
         entry
@@ -255,11 +281,89 @@ pub fn extract_build_archive(archive: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Require `dest` to be a fresh extraction root: a newly created directory, or an
+/// existing real directory that is empty. A symlink, a non-directory, or a
+/// non-empty directory is rejected - so extraction never inherits a pre-existing
+/// symlink an attacker planted inside `dest` (#936, finding E).
+fn ensure_fresh_destination(dest: &Path) -> Result<()> {
+    match fs::symlink_metadata(dest) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                bail!(
+                    "refusing to extract into {}: it is a symlink; extract into a new directory",
+                    dest.display()
+                );
+            }
+            if !metadata.is_dir() {
+                bail!(
+                    "refusing to extract into {}: it is not a directory; extract into a new, empty \
+                     directory",
+                    dest.display()
+                );
+            }
+            if fs::read_dir(dest)
+                .with_context(|| format!("failed to read {}", dest.display()))?
+                .next()
+                .is_some()
+            {
+                bail!(
+                    "refusing to extract into {}: it is not empty; extract into a new, empty \
+                     directory",
+                    dest.display()
+                );
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir_all(dest)
+            .with_context(|| format!("failed to create extraction directory {}", dest.display())),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to inspect {}", dest.display()))
+        }
+    }
+}
+
+/// Create every component of `relative` under `dest`, creating each real
+/// directory and rejecting any component that already exists as a symlink or a
+/// non-directory. Returns the resolved directory. This never follows a symlink,
+/// so a crafted archive cannot tunnel through one to write outside `dest`.
+fn create_dirs_no_symlink(dest: &Path, relative: &Path) -> Result<PathBuf> {
+    let mut current = dest.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => {
+                current.push(part);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) => {
+                        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                            bail!(
+                                "refusing to extract through {}: it is a symlink or a file in the \
+                                 destination path, not a real directory",
+                                current.display()
+                            );
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&current)
+                        .with_context(|| format!("failed to create {}", current.display()))?,
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("failed to inspect {}", current.display()));
+                    }
+                }
+            }
+            other => bail!("unexpected path component {other:?} while extracting"),
+        }
+    }
+    Ok(current)
+}
+
 #[cfg(unix)]
 fn write_with_mode(out: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
+    // Never write through a symlink: if `out` is (or races to become) a symlink,
+    // the open fails rather than following it outside the destination.
+    options.custom_flags(libc::O_NOFOLLOW);
     if let Some(mode) = mode {
         options.mode(mode);
     }
@@ -491,6 +595,98 @@ mod tests {
             !dir.path().join("escape").exists(),
             "the escaping file must not be written outside the destination"
         );
+    }
+
+    /// Finding E: a pre-existing symlinked ancestor in the destination cannot be
+    /// tunneled through - `create_dir_all`/`open` would have followed it, writing
+    /// outside `dest`. The empty-destination requirement plus per-component
+    /// symlink checks reject it.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_parent_in_the_destination_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = dir.path().join("build/triple");
+        stage_layout(&layout);
+        let out = dir.path().join("bundle.build.phoxal");
+        write_build_archive(&layout, &out).unwrap();
+
+        // The archive has a `model/` directory entry. Plant `dest/model` as a
+        // symlink pointing outside `dest` before extraction. Because `dest` must
+        // be empty, this is only reachable by racing it in - but the empty-dir
+        // requirement itself already rejects a non-empty dest, and the
+        // per-component check rejects the symlink. Prove both: a dest whose
+        // `model` is a symlink is non-empty AND symlinked.
+        let escape = dir.path().join("escape");
+        fs::create_dir_all(&escape).unwrap();
+        let dest = dir.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        std::os::unix::fs::symlink(&escape, dest.join("model")).unwrap();
+
+        let error = extract_build_archive(&out, &dest)
+            .expect_err("a symlinked parent in the destination must be rejected");
+        assert!(
+            error.to_string().contains("not empty") || error.to_string().contains("symlink"),
+            "{error}"
+        );
+        // Nothing was written through the symlink into the outside directory.
+        assert!(!escape.join("robot.urdf").exists());
+    }
+
+    /// Finding E: a symlinked final target is not followed - the file is not
+    /// written through it to the outside.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_final_target_is_rejected() {
+        // A single-entry archive writing `robot.yaml`.
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("one.tar.gz");
+        fs::write(&archive, raw_tar_gz("robot.yaml", b"schema: robot/v0\n")).unwrap();
+
+        // Extract once into a fresh dest to establish a normal baseline.
+        let good = dir.path().join("good");
+        extract_build_archive(&archive, &good).unwrap();
+        assert!(good.join("robot.yaml").is_file());
+
+        // Now a dest that is non-empty because `robot.yaml` is a symlink to an
+        // outside file: extraction refuses the non-empty/symlinked destination
+        // and never writes through the link.
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, b"original").unwrap();
+        let dest = dir.path().join("evil");
+        fs::create_dir_all(&dest).unwrap();
+        std::os::unix::fs::symlink(&outside, dest.join("robot.yaml")).unwrap();
+
+        let error = extract_build_archive(&archive, &dest)
+            .expect_err("a symlinked final target must be rejected");
+        assert!(
+            error.to_string().contains("not empty") || error.to_string().contains("symlink"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "original");
+    }
+
+    /// Finding E: a non-empty destination is rejected - extraction requires a
+    /// fresh (new or empty) directory so it never inherits planted state.
+    #[test]
+    fn a_non_empty_destination_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = dir.path().join("build/triple");
+        stage_layout(&layout);
+        let out = dir.path().join("bundle.build.phoxal");
+        write_build_archive(&layout, &out).unwrap();
+
+        let dest = dir.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("pre-existing"), b"stuff").unwrap();
+
+        let error = extract_build_archive(&out, &dest)
+            .expect_err("a non-empty destination must be rejected");
+        assert!(error.to_string().contains("not empty"), "{error}");
+
+        // A fresh, never-created destination extracts fine.
+        let fresh = dir.path().join("fresh");
+        extract_build_archive(&out, &fresh).unwrap();
+        assert!(fresh.join("robot.yaml").is_file());
     }
 
     #[test]
