@@ -848,6 +848,8 @@ robot:
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
+            user_tools: Vec::new(),
+            undeclared_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
             path_overrides: Vec::new(),

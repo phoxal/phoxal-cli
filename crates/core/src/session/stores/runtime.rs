@@ -249,7 +249,9 @@ fn artifact_ref_for_execution(execution: &ParticipantExecution) -> Option<String
 
 fn origin_for_execution(execution: &ParticipantExecution) -> RuntimeOrigin {
     match execution {
-        ParticipantExecution::UserService { .. } => RuntimeOrigin::UserService,
+        ParticipantExecution::UserService { .. } | ParticipantExecution::UserTool { .. } => {
+            RuntimeOrigin::UserService
+        }
         ParticipantExecution::OfficialArtifact { .. }
         | ParticipantExecution::OfficialTool { .. }
         | ParticipantExecution::ComponentDriver { .. } => RuntimeOrigin::Framework,

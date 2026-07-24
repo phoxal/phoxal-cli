@@ -77,11 +77,28 @@ pub(crate) fn build_emit_apis_by_building(participant: &SourceParticipant) -> Re
                 binary_path.display()
             )
         })?;
-    Ok(raw_emit_apis_from_extracted_metadata(
+    let mut raw = raw_emit_apis_from_extracted_metadata(
         expected_kind_for_source_participant(participant.kind),
         &participant.expected_artifact_id,
         meta,
-    ))
+    );
+    raw.participant_class = source_participant_class(participant.kind);
+    Ok(raw)
+}
+
+/// The participant class a source participant is checked under. Privilege is an
+/// OFFICIAL-tool property, not a directory property: an official `Tool` (a
+/// source override of an official tool) stays privileged, while a declared user
+/// tool - which shares the `tool` kind - is an ordinary CHECKED participant
+/// (#950), with its contracts in the coherence set and its config validated.
+/// Every non-tool kind is checked by default.
+pub(crate) fn source_participant_class(kind: SourceParticipantKind) -> String {
+    match kind {
+        SourceParticipantKind::Tool => {
+            crate::check::metadata::default_participant_class_for_kind("tool")
+        }
+        _ => crate::check::default_participant_class(),
+    }
 }
 
 /// Builds `binary_name` in `crate_dir` and locates its resulting executable

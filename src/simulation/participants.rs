@@ -152,6 +152,13 @@ pub(crate) fn sim_source_participants(
 ) -> Result<Vec<SourceParticipant>> {
     let mut participants =
         source_participants_from_resolved(project_root, resolved, component_driver_crate_dir)?;
+    // The legacy simulation leg does not launch user tools: its plan builder
+    // predates the declaration model, and its layout swap (#931) brings the
+    // user-tool producer with it. Filtering here keeps sim from building and
+    // then silently never launching a declared tool (#950).
+    participants.retain(|participant| {
+        participant.kind != phoxal_cli_core::check::source::SourceParticipantKind::UserTool
+    });
     participants.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(participants)
 }

@@ -171,6 +171,7 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
         },
         |_| bail!("no tools in this check fixture"),
         |source| match source.kind {
+            SourceParticipantKind::UserTool => Ok(launch_plan_raw_emit_apis("tool", &source.name)),
             SourceParticipantKind::UserService => {
                 Ok(launch_plan_raw_emit_apis("service", &source.name))
             }
@@ -279,6 +280,83 @@ fn launch_plan_raw_emit_apis(kind: &str, id: &str) -> RawEmitApis {
         required_contracts: Vec::new(),
         config_schema: None,
     }
+}
+
+#[test]
+fn a_user_tool_is_checked_and_its_config_is_validated() -> Result<()> {
+    // A declared user tool is an ordinary checked participant (#950): its
+    // embedded metadata must be kind `tool`, and its `tools.<id>.config` is
+    // validated against the emitted schema exactly like a user service.
+    let robot = Robot::parse_from_string(
+        r#"schema: robot/v0
+robot:
+  id: bot
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: omnidirectional
+    actuators: []
+    encoders: []
+  components: {}
+tools:
+  lidar-viz:
+    config:
+      port: 9000
+"#,
+    )?;
+    let source = vec![SourceParticipant::user_tool(
+        "lidar-viz",
+        std::path::PathBuf::from("tools/lidar-viz"),
+    )];
+
+    // The tool emits a schema requiring a STRING port; the authored 9000 is an
+    // integer, so the check must surface an InvalidConfig problem for it.
+    let build = |participant: &SourceParticipant| {
+        let mut raw = launch_plan_raw_emit_apis("tool", &participant.name);
+        raw.config_schema = Some(serde_json::json!({
+            "type": "object",
+            "properties": {"port": {"type": "string"}},
+            "required": ["port"],
+        }));
+        Ok(raw)
+    };
+    let outcome = run_check_with_context(
+        &[],
+        &[],
+        &source,
+        CheckGraphContext {
+            robot: Some(&robot),
+        },
+        |artifact_ref| bail!("unexpected official artifact {artifact_ref}"),
+        |_| bail!("no privileged tools in this fixture"),
+        build,
+    )?;
+    let problems = format!("{outcome:?}");
+    assert!(
+        problems.contains("lidar-viz") && problems.to_lowercase().contains("config"),
+        "user-tool config must be validated: {problems}"
+    );
+
+    // The kind gate rejects a user tool whose binary emits a non-tool kind.
+    let bad_kind = |participant: &SourceParticipant| {
+        Ok(launch_plan_raw_emit_apis("service", &participant.name))
+    };
+    let error = run_check_with_context(
+        &[],
+        &[],
+        &source,
+        CheckGraphContext {
+            robot: Some(&robot),
+        },
+        |artifact_ref| bail!("unexpected official artifact {artifact_ref}"),
+        |_| bail!("no privileged tools in this fixture"),
+        bad_kind,
+    )
+    .expect_err("a user tool emitting a non-tool kind must fail identity validation");
+    assert!(format!("{error:#}").contains("kind"), "{error:#}");
+    Ok(())
 }
 
 fn add_launch_plan_robot_tools(resolved: &mut ResolvedRobot) {
@@ -1900,6 +1978,8 @@ fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<Resolv
         platform_runtimes: Vec::new(),
         simulators: Vec::new(),
         user_runtimes: Vec::new(),
+        user_tools: Vec::new(),
+        undeclared_runtimes: Vec::new(),
         components,
         tools: Vec::new(),
         path_overrides: Vec::new(),

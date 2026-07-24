@@ -203,7 +203,7 @@ pub enum RootCommand {
     #[command(
         about = "Check the robot graph's participants and config against phoxal::check.",
         long_about = "Check the robot graph's participants and config against phoxal::check.\n\n\
-                      Resolves robot.yaml and the Cargo workspace, then reads every participant's compiled-in contract metadata (official artifacts from the suite and workspace-built services, tools, and component drivers) and validates the graph with phoxal::check. Contract compatibility is per-contract name identity (D1) - two participants naming the same version-qualified contract are compatible by construction, so there is no wire-shape hash to agree on. This also validates each user service's manifest config against its emitted JSON Schema."
+                      Resolves robot.yaml and the Cargo workspace, then reads every participant's compiled-in contract metadata (official artifacts from the suite and workspace-built services, tools, and component drivers) and validates the graph with phoxal::check. Contract compatibility is per-contract name identity (D1) - two participants naming the same version-qualified contract are compatible by construction, so there is no wire-shape hash to agree on. This also validates each user service's and user tool's manifest config against its emitted JSON Schema."
     )]
     Check(check::CheckCmd),
     #[command(

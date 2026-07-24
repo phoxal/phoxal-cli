@@ -2,7 +2,7 @@
 //!
 //! The core [`RuntimeLayout::construct_plan`] derives the immutable launch plan
 //! from a staged runtime layout, plus the two validation inputs the bin crate
-//! owns the validators for: a config-schema pairing per user service (checked
+//! owns the validators for: a config-schema pairing per declared user runtime (checked
 //! with the jsonschema validator) and a contract surface per checked
 //! participant (checked with the API-coherence pass). This module is the thin
 //! glue that runs those two validators over the constructor's output and
@@ -26,34 +26,33 @@ use std::path::Path;
 /// driven robot runs on a host whose driver binaries it cannot inspect once
 /// `--drivers off` is passed. `inspection` selects the architecture the selected
 /// binaries are checked against - the host for an in-place run/start, or a
-/// declared `--target` for a `phoxal build` cross bundle. Fails when a user
-/// service's compiled config does not match the schema embedded in its binary,
-/// or when the checked participants' API contracts are incoherent. Returns the
-/// immutable plan the supervisor would launch from.
+/// declared `--target` for a `phoxal build` cross bundle. Fails when a declared
+/// user runtime's (service or tool) compiled config does not match the schema
+/// embedded in its binary, or when the checked participants' API contracts are
+/// incoherent. Returns the immutable plan the supervisor would launch from.
 pub fn validate_layout_plan(
     root: &Path,
     options: &PlanOptions,
     inspection: LayoutInspection,
 ) -> Result<LaunchPlan> {
     let constructed = RuntimeLayout::construct_plan_with_inspection(root, options, inspection)?;
-    // The compiled `robot.yaml` carries each user service's authored config; the
-    // constructor pairs it with the schema from the service's binary. Validate
-    // through the same jsonschema check the graph pipeline uses.
-    let layout = RuntimeLayout::open(root)?;
-    let robot = layout.robot();
+    // The constructor pairs each declared user runtime's authored config with
+    // the schema from its binary; validate the carried value directly, so
+    // services and tools each validate their own declaration (#950).
     let mut config_problems = Vec::new();
-    for pairing in &constructed.user_service_configs {
-        if let Some(problem) = crate::check::validate_user_service_config(
-            &pairing.service_id,
+    for pairing in &constructed.user_runtime_configs {
+        if let Some(problem) = crate::check::validate_user_runtime_config(
+            &pairing.runtime_id,
             Some(&pairing.config_schema),
-            Some(robot),
+            pairing.config.as_ref(),
+            pairing.family,
         ) {
             config_problems.push(problem);
         }
     }
     if !config_problems.is_empty() {
         bail!(
-            "compiled robot.yaml has invalid user-service config:{}",
+            "compiled robot.yaml has invalid user runtime config:{}",
             format_config_problems(&config_problems)
         );
     }
@@ -212,7 +211,79 @@ services:
             .expect_err("an invalid config must fail validation")
             .to_string();
         assert!(error.contains("mission"), "{error}");
-        assert!(error.contains("invalid user-service config"), "{error}");
+        assert!(error.contains("invalid user runtime config"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_declared_user_tool_validates_its_own_config() -> anyhow::Result<()> {
+        // The tool's REAL `tools.<id>.config` is validated - not a phantom
+        // services lookup that would see null (#950 review finding 1).
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("build");
+        stage_layout_with_tool(
+            &root,
+            r#"{"type":"object","properties":{"port":{"type":"integer"}},"required":["port"]}"#,
+        )?;
+        let plan = validate_layout_plan(&root, &PlanOptions::default(), LayoutInspection::Host)?;
+        assert!(
+            plan.robots[0]
+                .participants
+                .iter()
+                .any(|participant| participant.launch.participant_id == "lidar-viz"),
+            "the declared user tool is a plan participant"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_invalid_user_tool_config_fails_naming_the_tools_map() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("build");
+        // The authored port is an integer; the schema demands a string.
+        stage_layout_with_tool(
+            &root,
+            r#"{"type":"object","properties":{"port":{"type":"string"}},"required":["port"]}"#,
+        )?;
+        let error = validate_layout_plan(&root, &PlanOptions::default(), LayoutInspection::Host)
+            .expect_err("an invalid tool config must fail validation")
+            .to_string();
+        assert!(error.contains("tools.lidar-viz.config"), "{error}");
+        Ok(())
+    }
+
+    /// Stage a layout whose robot.yaml also declares the `lidar-viz` user tool
+    /// with `config: {port: 9000}` and whose bin/ carries a binary for it
+    /// emitting `tool_schema` as its config schema.
+    fn stage_layout_with_tool(root: &PathBuf, tool_schema: &str) -> anyhow::Result<()> {
+        fs::create_dir_all(root)?;
+        let yaml = format!("{ROBOT_YAML}tools:\n  lidar-viz:\n    config:\n      port: 9000\n");
+        fs::write(root.join("robot.yaml"), yaml)?;
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin)?;
+        let layout = RuntimeLayout::open(root)?;
+        let format = phoxal_cli_core::check::participant_metadata::host_binary_format();
+        let arch = phoxal_cli_core::check::participant_metadata::host_architecture();
+        for required in layout.required_runtimes(&DriverSelection::All) {
+            if required.kind == RequiredRuntimeKind::Infrastructure {
+                continue;
+            }
+            let payload = match required.binary_name.as_str() {
+                "lidar-viz" => format!(
+                    r#"{{"participant_api":"Api","contracts":[],"config_schema":{tool_schema}}}"#
+                ),
+                "mission" => {
+                    r#"{"participant_api":"Api","contracts":[],"config_schema":{"type":"object"}}"#
+                        .to_string()
+                }
+                _ => r#"{"participant_api":"()","contracts":[],"config_schema":{"type":"null"}}"#
+                    .to_string(),
+            };
+            fs::write(
+                bin.join(&required.binary_name),
+                synthesize_binary_as(format, arch, payload.as_bytes()),
+            )?;
+        }
         Ok(())
     }
 

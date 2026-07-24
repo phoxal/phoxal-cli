@@ -38,6 +38,7 @@ pub(crate) fn launch_kind_label(execution: Option<&ParticipantExecution>) -> &'s
             | ParticipantExecution::OfficialTool { .. },
         ) => "official",
         Some(ParticipantExecution::UserService { .. }) => "user-service",
+        Some(ParticipantExecution::UserTool { .. }) => "user-tool",
         Some(ParticipantExecution::ComponentDriver { .. }) => "driver",
     }
 }
@@ -198,6 +199,32 @@ pub(crate) fn report_excluded_drivers(
         .collect::<Vec<_>>()
         .join(", ");
     ui.info(format!("drivers excluded by policy, not launched: {list}"));
+}
+
+/// Surface workspace runtime crates that are present but not declared in
+/// robot.yaml (#950): legal drift, not built or launched. One advisory line
+/// naming each crate and the map that would declare it, so authors notice a
+/// service or tool they forgot to declare. No output when there is no drift.
+pub(crate) fn report_undeclared_runtimes(
+    undeclared: &[phoxal_cli_core::project::resolver::UndeclaredRuntime],
+    ui: &crate::Ui,
+) {
+    if undeclared.is_empty() {
+        return;
+    }
+    let list = undeclared
+        .iter()
+        .map(|runtime| {
+            format!(
+                "{family}/{name} (declare it under `{map}:` in robot.yaml to run it)",
+                family = runtime.family,
+                name = runtime.name,
+                map = runtime.family
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    ui.warn(format!("undeclared workspace runtimes, not built: {list}"));
 }
 
 /// The full set of driven component-instance ids from a compiled robot model.

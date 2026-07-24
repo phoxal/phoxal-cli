@@ -109,23 +109,14 @@ pub fn stage_runtime_layout(project_root: &Path, resolved: &ResolvedRobot) -> Re
     Ok(target)
 }
 
-/// The compiled `robot/v0` manifest for the staged layout: the resolved robot
-/// with a *complete* service map. The compiled runtime has no Cargo graph to
-/// discover from, so every discovered user service (`services/<name>`) is
-/// enumerated even when the authored `robot.yaml` omitted it, carrying its
-/// final validated config (`None` when the author declared none). The `extends:`
-/// chain was already flattened by the framework loader
-/// (`Robot::read_from_path`), so the map already holds the resolved authored
-/// entries; this only fills in the discovery-only services.
+/// The compiled `robot/v0` manifest for the staged layout. Under the
+/// declaration model (#950) the authored `services:` and `tools:` maps are
+/// already complete - they select which discovered workspace runtimes belong
+/// to the robot - so compilation carries them verbatim (the `extends:` chain
+/// was already flattened by the framework loader); nothing is injected from
+/// discovery.
 fn compile_manifest(resolved: &ResolvedRobot) -> phoxal::model::robot::v0::Robot {
-    let mut compiled = resolved.robot.clone();
-    for runtime in &resolved.user_runtimes {
-        compiled
-            .services
-            .entry(runtime.name.clone())
-            .or_insert_with(|| phoxal::model::robot::v0::UserService { config: None });
-    }
-    compiled
+    resolved.robot.clone()
 }
 
 /// The canonical identity name one launched participant is stored under in
@@ -573,6 +564,8 @@ robot:
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
+            user_tools: Vec::new(),
+            undeclared_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
             path_overrides: Vec::new(),
@@ -660,19 +653,27 @@ robot:
     }
 
     #[test]
-    fn compiled_manifest_enumerates_services_the_authored_yaml_omitted() -> Result<()> {
+    fn compiled_manifest_carries_the_authored_declarations_verbatim() -> Result<()> {
         let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
 
         let mut resolved = resolved_robot()?;
-        // Authored config for one service; a second service discovered from the
-        // Cargo graph with no authored entry.
+        // The declaration model (#950): the authored maps are complete - one
+        // declared service (selected), one declared tool, and one discovered
+        // crate that is NOT declared and therefore never enters the compiled
+        // document.
         resolved.robot.services.insert(
             "mission".to_string(),
             phoxal::model::robot::v0::UserService {
                 config: Some(serde_json::json!({"speed": 1})),
+            },
+        );
+        resolved.robot.tools.insert(
+            "lidar-viz".to_string(),
+            phoxal::model::robot::v0::UserTool {
+                config: Some(serde_json::json!({"port": 9000})),
             },
         );
         resolved.user_runtimes.push(ResolvedUserRuntime {
@@ -680,27 +681,37 @@ robot:
             path: PathBuf::from("services/mission"),
             source_hash: "hash".to_string(),
         });
-        resolved.user_runtimes.push(ResolvedUserRuntime {
-            name: "telemetry".to_string(),
-            path: PathBuf::from("services/telemetry"),
+        resolved.user_tools.push(ResolvedUserRuntime {
+            name: "lidar-viz".to_string(),
+            path: PathBuf::from("tools/lidar-viz"),
             source_hash: "hash".to_string(),
         });
+        resolved
+            .undeclared_runtimes
+            .push(phoxal_cli_core::project::resolver::UndeclaredRuntime {
+                name: "telemetry".to_string(),
+                family: "services",
+            });
 
         let staged = stage_runtime_layout(project.path(), &resolved)?;
         let compiled = phoxal::model::robot::Robot::parse_from_dir(&staged)?
             .as_v0()
             .clone();
-        // Every discovered user service is present, authored config preserved,
-        // the discovery-only service defaulted to no config.
+        // The compiled document is the authored declarations verbatim: the
+        // undeclared discovered crate is absent, nothing is injected.
         assert_eq!(
             compiled.services.keys().collect::<Vec<_>>(),
-            vec!["mission", "telemetry"]
+            vec!["mission"]
         );
         assert_eq!(
             compiled.services["mission"].config,
             Some(serde_json::json!({"speed": 1}))
         );
-        assert_eq!(compiled.services["telemetry"].config, None);
+        assert_eq!(compiled.tools.keys().collect::<Vec<_>>(), vec!["lidar-viz"]);
+        assert_eq!(
+            compiled.tools["lidar-viz"].config,
+            Some(serde_json::json!({"port": 9000}))
+        );
         Ok(())
     }
 

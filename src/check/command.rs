@@ -90,6 +90,10 @@ pub(super) fn run(
     crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
     let platform_refs = check_artifact_refs_from_resolved(&resolved);
     ensure_suite_availability(&resolved)?;
+    // Declaration drift (#950): name every workspace runtime crate robot.yaml
+    // does not select, so authors catch a service or tool they forgot to
+    // declare at check time.
+    crate::run::report_undeclared_runtimes(&resolved.undeclared_runtimes, ui);
     let tool_participants = tool_participants_from_resolved(&resolved)?;
     let all_source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;

@@ -56,6 +56,14 @@ pub struct ResolvedRobot {
     pub platform_runtimes: Vec<ResolvedPlatformRuntime>,
     pub simulators: Vec<ResolvedPlatformRuntime>,
     pub user_runtimes: Vec<ResolvedUserRuntime>,
+    /// The declared additional user tools (`tools:` in robot.yaml) resolved to
+    /// their workspace crates (#950) - the tool analogue of `user_runtimes`.
+    pub user_tools: Vec<ResolvedUserRuntime>,
+    /// Workspace runtime crates present under `services/`/`tools/` but not
+    /// declared in robot.yaml (and not official-identity overrides). They are
+    /// not built or launched; `check` and the staging summary surface them as
+    /// drift diagnostics (#950).
+    pub undeclared_runtimes: Vec<UndeclaredRuntime>,
     pub components: Vec<ResolvedComponent>,
     pub tools: Vec<ResolvedTool>,
     pub path_overrides: Vec<ResolvedPathOverride>,
@@ -111,6 +119,17 @@ pub struct ResolvedUserRuntime {
     pub name: String,
     pub path: PathBuf,
     pub source_hash: String,
+}
+
+/// One workspace runtime crate that is present but not declared in robot.yaml
+/// (#950): legal, not built, surfaced as a drift diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndeclaredRuntime {
+    /// The crate's logical name (its directory name).
+    pub name: String,
+    /// "services" or "tools" - the directory family and the robot.yaml map the
+    /// crate would be declared in.
+    pub family: &'static str,
 }
 
 /// One resolved `robot.components.<instance>` entry: the logical component id

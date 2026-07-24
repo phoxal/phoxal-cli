@@ -25,6 +25,17 @@ impl SourceParticipant {
     }
 
     #[must_use]
+    pub fn user_tool(name: impl Into<String>, crate_dir: PathBuf) -> Self {
+        let name = name.into();
+        Self {
+            expected_artifact_id: name.clone(),
+            name,
+            crate_dir,
+            kind: SourceParticipantKind::UserTool,
+        }
+    }
+
+    #[must_use]
     pub fn component_driver(name: impl Into<String>, crate_dir: PathBuf) -> Self {
         let name = name.into();
         Self::component_driver_with_artifact_id(name.clone(), name, crate_dir)
@@ -89,6 +100,7 @@ impl SourceParticipant {
     pub fn kind_label(&self) -> &'static str {
         match self.kind {
             SourceParticipantKind::UserService => "user service",
+            SourceParticipantKind::UserTool => "user tool",
             SourceParticipantKind::OfficialService => "path-overridden official service",
             SourceParticipantKind::ComponentDriver => "component driver",
             SourceParticipantKind::Tool => "path-overridden tool",
@@ -114,6 +126,9 @@ impl SourceParticipant {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceParticipantKind {
     UserService,
+    /// A robot developer's own tool, declared under `tools:` in robot.yaml
+    /// with no suite counterpart (#950) - the tool analogue of `UserService`.
+    UserTool,
     OfficialService,
     ComponentDriver,
     Tool,
@@ -126,7 +141,7 @@ impl SourceParticipantKind {
         match self {
             Self::UserService | Self::OfficialService => ParticipantKind::Service,
             Self::ComponentDriver => ParticipantKind::Driver,
-            Self::Tool => ParticipantKind::Tool,
+            Self::Tool | Self::UserTool => ParticipantKind::Tool,
             Self::Simulator => ParticipantKind::Simulator,
         }
     }
@@ -137,7 +152,7 @@ impl SourceParticipantKind {
     /// why this is named `official`, not `local`.
     #[must_use]
     pub const fn official(self) -> bool {
-        !matches!(self, Self::UserService)
+        !matches!(self, Self::UserService | Self::UserTool)
     }
 }
 

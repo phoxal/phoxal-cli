@@ -213,6 +213,8 @@ robot:
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
+            user_tools: Vec::new(),
+            undeclared_runtimes: Vec::new(),
             components: vec![
                 driven_component("left_drive", "phoxal/component-left"),
                 driven_component("right_drive", "phoxal/component-right"),

@@ -110,6 +110,13 @@ fn collect_user_service_dependency_report(
     use phoxal_cli_core::project::train::WorkspaceRuntimeKind;
 
     let mut report = UserServiceDependencyReport::default();
+    // The declaration-only invariants first, matching resolution's ordering
+    // (#950): dual names and official identities fail before any workspace
+    // reasoning.
+    if let Err(error) = phoxal_cli_core::project::layout::validate_runtime_declarations(robot) {
+        report.problems.push(format!("{error:#}"));
+        return report;
+    }
     let project = match phoxal_cli_core::project::train::resolve_locked_project(robot_root) {
         Ok(project) => project,
         Err(error) => {
@@ -119,27 +126,43 @@ fn collect_user_service_dependency_report(
             return report;
         }
     };
-    let services = project
-        .runtimes
-        .iter()
-        .filter(|runtime| runtime.kind == WorkspaceRuntimeKind::Service)
-        .filter_map(|runtime| {
-            runtime
-                .crate_dir
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-        })
-        .collect::<std::collections::BTreeSet<_>>();
+    let discovered = |kind: WorkspaceRuntimeKind| {
+        project
+            .runtimes
+            .iter()
+            .filter(move |runtime| runtime.kind == kind)
+            .filter_map(|runtime| {
+                runtime
+                    .crate_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let services = discovered(WorkspaceRuntimeKind::Service);
+    let tool_crates = discovered(WorkspaceRuntimeKind::Tool);
     for service in &services {
-        report
-            .successes
-            .push(format!("Cargo workspace service '{service}' discovered"));
+        let note = if robot.services.contains_key(service) {
+            "declared"
+        } else {
+            "undeclared - not part of the robot"
+        };
+        report.successes.push(format!(
+            "Cargo workspace service '{service}' discovered ({note})"
+        ));
     }
     for configured in robot.services.keys() {
         if !services.contains(configured) {
             report.problems.push(format!(
-                "services.{configured}.config has no matching services/{configured} workspace crate"
+                "services.{configured} has no matching services/{configured} workspace crate"
+            ));
+        }
+    }
+    for configured in robot.tools.keys() {
+        if !tool_crates.contains(configured) {
+            report.problems.push(format!(
+                "tools.{configured} has no matching tools/{configured} workspace crate"
             ));
         }
     }
@@ -166,7 +189,11 @@ fn print_text_report(robot: &Robot, suite: Option<&phoxal_cli_core::project::sui
     }
     println!("services:");
     for name in robot.services.keys() {
-        println!("  - {name} (configuration)");
+        println!("  - {name} (declared)");
+    }
+    println!("tools:");
+    for name in robot.tools.keys() {
+        println!("  - {name} (declared)");
     }
     println!("components:");
     for (instance_name, instance) in &robot.robot.components {
@@ -200,7 +227,13 @@ fn print_json_report(
         "services": robot.services.keys().map(|name| {
             serde_json::json!({
                 "name": name,
-                "configured": true,
+                "declared": true,
+            })
+        }).collect::<Vec<_>>(),
+        "tools": robot.tools.keys().map(|name| {
+            serde_json::json!({
+                "name": name,
+                "declared": true,
             })
         }).collect::<Vec<_>>(),
         "components": robot.robot.components.iter().map(|(instance_name, instance)| {

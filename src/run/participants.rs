@@ -95,7 +95,9 @@ pub(crate) fn stage_complete_bin_store(
     // resolution for the official set), so they are skipped here.
     for participant in source_participants {
         let binary_name = match participant.kind {
-            SourceParticipantKind::UserService => participant.name.clone(),
+            SourceParticipantKind::UserService | SourceParticipantKind::UserTool => {
+                participant.name.clone()
+            }
             SourceParticipantKind::ComponentDriver => {
                 // An excluded driver instance is never built: its binary is not
                 // required, so force-building the crate would be wasted work the
@@ -410,6 +412,7 @@ pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (Participant
         ParticipantExecution::OfficialArtifact { .. } => (ParticipantKind::Service, false),
         ParticipantExecution::OfficialTool { .. } => (ParticipantKind::Tool, false),
         ParticipantExecution::UserService { .. } => (ParticipantKind::Service, true),
+        ParticipantExecution::UserTool { .. } => (ParticipantKind::Tool, true),
         ParticipantExecution::ComponentDriver { .. } => (ParticipantKind::Driver, true),
     }
 }
@@ -498,9 +501,9 @@ fn resolve_participant_source(
     let mut build_override =
         |crate_dir: &Path, name: &str| build_source_binary(crate_dir, name, ui, None);
     match &participant.execution {
-        ParticipantExecution::UserService { .. } => {
+        ParticipantExecution::UserService { .. } | ParticipantExecution::UserTool { .. } => {
             let crate_dir = source_dirs.get(id).ok_or_else(|| {
-                anyhow!("staged plan is missing the source crate directory for user service {id}")
+                anyhow!("staged plan is missing the source crate directory for user runtime {id}")
             })?;
             build_source_binary(crate_dir, id, ui, None)
         }
@@ -579,9 +582,9 @@ pub(crate) fn source_cwd(
 ) -> Option<PathBuf> {
     let id = &participant.launch.participant_id;
     match &participant.execution {
-        ParticipantExecution::UserService { .. } | ParticipantExecution::ComponentDriver { .. } => {
-            source_dirs.get(id).cloned()
-        }
+        ParticipantExecution::UserService { .. }
+        | ParticipantExecution::UserTool { .. }
+        | ParticipantExecution::ComponentDriver { .. } => source_dirs.get(id).cloned(),
         ParticipantExecution::OfficialArtifact { .. } => resolved
             .platform_runtimes
             .iter()

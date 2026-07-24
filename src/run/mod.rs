@@ -29,6 +29,7 @@ pub(crate) use prepare::{prepare_layout_run_on_board, prepare_run_on_board, refr
 mod report;
 pub(crate) use report::{
     DriverPolicy, driven_instances, report_excluded_drivers, report_launch_commands,
+    report_undeclared_runtimes,
 };
 mod participants;
 pub(crate) use participants::{

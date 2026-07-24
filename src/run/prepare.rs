@@ -168,6 +168,10 @@ pub(crate) fn refresh_staging(
         ui,
     )?;
 
+    // Declaration drift (#950) is warned from THIS shared path, so run,
+    // start, watch restaging, and build all surface it exactly once.
+    crate::run::report_undeclared_runtimes(&resolved.undeclared_runtimes, ui);
+
     Ok(StagedProject {
         // `project_root` borrows `robot_path`, so clone rather than move it.
         robot_path: robot_path.clone(),

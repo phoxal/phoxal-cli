@@ -337,6 +337,9 @@ pub enum ParticipantExecution {
     OfficialTool { binary_name: String },
     /// A user service, resolved from `bin/<binary_name>`.
     UserService { binary_name: String },
+    /// A declared additional user tool (`tools:` in robot.yaml, #950),
+    /// resolved from `bin/<binary_name>`.
+    UserTool { binary_name: String },
     /// A component driver - one binary serving every instance of a component
     /// id - resolved from `bin/<binary_name>`.
     ComponentDriver { binary_name: String },
@@ -352,6 +355,7 @@ impl ParticipantExecution {
             Self::OfficialArtifact { binary_name }
             | Self::OfficialTool { binary_name }
             | Self::UserService { binary_name }
+            | Self::UserTool { binary_name }
             | Self::ComponentDriver { binary_name } => binary_name,
         }
     }
@@ -584,6 +588,7 @@ fn participant_execution(
             SourceParticipantKind::UserService => ParticipantExecution::UserService {
                 binary_name: checked.artifact_id.clone(),
             },
+
             SourceParticipantKind::OfficialService => ParticipantExecution::OfficialArtifact {
                 binary_name: official_binary_name(ArtifactKind::Service, &checked.artifact_id),
             },
@@ -594,7 +599,12 @@ fn participant_execution(
             // above; tools never reach a robot-launch participant loop
             // (`is_robot_launch_participant` excludes `Tool`), so neither of
             // these source kinds is reachable here.
-            SourceParticipantKind::ComponentDriver | SourceParticipantKind::Tool => bail!(
+            // UserTool has no producer in this legacy (simulation-only) leg:
+            // the sim source set filters user tools until the #931 layout swap
+            // supplies their launch path.
+            SourceParticipantKind::ComponentDriver
+            | SourceParticipantKind::Tool
+            | SourceParticipantKind::UserTool => bail!(
                 "source participant {} of kind {:?} is not a launchable non-driver participant",
                 source.name,
                 source.kind
@@ -1085,6 +1095,8 @@ robot:
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
+            user_tools: Vec::new(),
+            undeclared_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
             path_overrides: Vec::new(),
