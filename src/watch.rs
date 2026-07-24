@@ -15,15 +15,13 @@ use crate::check::{
 };
 use crate::component_driver::component_driver_crate_dir;
 use crate::resolver::resolve;
-use crate::run::{DriverPolicy, RunOptions, spec_from_launch_record};
+use crate::run::{RunOptions, spec_from_launch_record};
 use crate::simulation::{
     SimulateMode, SimulateOptions, build_checked_sim_launch_plan, resolve_project,
 };
 use crate::supervisor::{BoardBackend, ParticipantSpec, SupervisorAction};
 use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind};
-use phoxal_cli_core::project::launch_plan::{
-    CheckedRobotLaunchInput, LaunchMode, LaunchPlan, PlanContext, build_launch_plan,
-};
+use phoxal_cli_core::project::launch_plan::{LaunchMode, LaunchPlan, PlanContext};
 use phoxal_cli_core::project::resolver::{
     ResolveOptions, ResolvedRobot, discover_robot_yaml, load_robot,
 };
@@ -481,7 +479,6 @@ fn recheck_run_target(
     // of the whole source graph rather than just the changed one.
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
-    let checked_source_participants = source_participants.clone();
     let platform_refs = check_artifact_refs_from_resolved(&resolved);
     let tool_participants = tool_participants_from_resolved(&resolved)?;
     let mut official_by_ref = resolved
@@ -498,7 +495,7 @@ fn recheck_run_target(
     let outcome = run_check_with_context(
         &platform_refs,
         &tool_participants,
-        &checked_source_participants,
+        &source_participants,
         CheckGraphContext {
             robot: Some(&robot),
         },
@@ -517,27 +514,16 @@ fn recheck_run_target(
         build_emit_apis_from_source,
     )?;
     crate::check::ensure_check_outcome_ok(&resolved.train, &outcome)?;
-    let mut plan = build_launch_plan(
-        LaunchMode::Run,
-        &[CheckedRobotLaunchInput {
-            project_root,
-            resolved: &resolved,
-            checked_participants: &outcome.checked_participants,
-            substitutions: &[],
-            source_participants: &checked_source_participants,
-        }],
-    )?;
-    let driver_policy = DriverPolicy::from_options(options, &plan)?;
-    let mut coherence_plan = plan.clone();
-    for robot in &mut coherence_plan.robots {
-        robot
-            .participants
-            .retain(|participant| driver_policy.launches(participant));
-    }
-    let coherence_graph =
-        crate::check::robot_contract_surfaces(&resolved.robot.robot.id, &outcome.contract_surfaces);
-    let coherence = crate::check::coherence_for_launch_plan(&coherence_plan, &[coherence_graph])?;
-    crate::check::enforce_coherence(crate::check::CoherenceVerb::Run, &coherence)?;
+    // Rebuild source, refresh the staged layout, then derive the plan from that
+    // layout alone - the same one execution path `run` uses (#936). The changed
+    // crate is rebuilt and re-staged into `bin/` before the loader inspects it,
+    // so the layout-derived plan and its coherence check see the fresh metadata.
+    let ui = crate::Ui::from_env();
+    let staged_root = crate::stager::stage_runtime_layout(project_root, &resolved)
+        .context("failed to re-stage the runtime layout")?;
+    crate::run::stage_complete_bin_store(&staged_root, &resolved, &source_participants, &ui)?;
+    let mut plan = crate::loader::validate_layout_plan(&staged_root, &LaunchMode::Run)
+        .context("failed to construct the launch plan from the staged runtime layout")?;
     let mut specs = specs_for_target(&plan, &resolved, project_root, target)?;
     let endpoint = crate::run::project_router_endpoint(project_root);
     crate::run::apply_session_connect(&mut plan, &mut specs, &endpoint);

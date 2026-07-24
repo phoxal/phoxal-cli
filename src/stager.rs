@@ -157,11 +157,21 @@ pub fn stage_participant_binary(
     participant: &ParticipantLaunchRecord,
     source: &Path,
 ) -> Result<PathBuf> {
+    stage_named_binary(staged_root, &canonical_binary_name(participant), source)
+}
+
+/// Stage one resolved source binary into the staged `bin/` under an explicit
+/// canonical name, returning the executable the participant runs from: the flat
+/// `bin/` entry, or (macOS) the untouched `.app` bundle executable path. This is
+/// the name-keyed core [`stage_participant_binary`] delegates to, and the entry
+/// point the layout-completing staging pass (#936) uses to link user services
+/// and component drivers into `bin/` before the loader constructs the plan.
+pub fn stage_named_binary(staged_root: &Path, binary_name: &str, source: &Path) -> Result<PathBuf> {
     if macos_app_bundle_binary(source).is_some() {
         return Ok(source.to_path_buf());
     }
     let bin_dir = ensure_bin_dir(staged_root)?;
-    let staged = bin_dir.join(canonical_binary_name(participant));
+    let staged = bin_dir.join(binary_name);
     link_or_copy(source, &staged)?;
     Ok(staged)
 }

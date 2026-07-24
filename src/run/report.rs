@@ -6,7 +6,6 @@ use anyhow::Result;
 use anyhow::bail;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
-use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
@@ -154,12 +153,5 @@ impl DriverPolicy {
             }
             DriversMode::On => DriverDecision::Launch,
         }
-    }
-
-    pub(crate) fn launches(&self, participant: &ParticipantLaunchRecord) -> bool {
-        !matches!(
-            participant.execution,
-            ParticipantExecution::ComponentDriver { .. }
-        ) || self.decision(&participant.launch.participant_id) == DriverDecision::Launch
     }
 }

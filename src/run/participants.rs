@@ -10,7 +10,7 @@
 //! knows about Cargo and the vendored artifact store; this module only reads
 //! what staging produced.
 
-use super::{DriverPolicy, build_source_binary, device_missing_note};
+use super::{DriverPolicy, build_source_binary, device_missing_note, missing_device_path};
 use crate::supervisor::BoardBackend;
 use crate::supervisor::ParticipantSpec;
 use crate::supervisor::ParticipantState;
@@ -19,17 +19,23 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use phoxal_cli_core::check::participant_metadata::inspect_selected_binary;
+use phoxal_cli_core::check::source::SourceParticipant;
+use phoxal_cli_core::check::source::SourceParticipantKind;
 use phoxal_cli_core::project::launch_plan::LaunchOwnership;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
+use phoxal_cli_core::project::layout::RuntimeLayout;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
+use phoxal_cli_core::project::resolver::official_binary_name;
+use phoxal_cli_core::project::suite::ArtifactKind;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::launch_env::{encode_participant_env, encode_tool_env};
 use phoxal_cli_core::session::stores::telemetry::RobotScope;
 use phoxal_cli_core::session::{ProcessKey, RobotKey, StartupRequirement};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -53,6 +59,186 @@ pub(crate) fn source_dirs_by_participant(
         .iter()
         .map(|participant| (participant.name.clone(), participant.crate_dir.clone()))
         .collect()
+}
+
+/// Populate the staged layout's flat `bin/` store with every binary the loader
+/// requires, so [`RuntimeLayout::construct_plan`] can inspect the complete set
+/// off-disk before any process launches (#936). This is the staging-side
+/// counterpart of the execution path: it is the only code that resolves source,
+/// keyed by the resolved graph (`ResolvedRobot`) and its source-participant
+/// records, never by a plan.
+///
+/// It links: every user service and workspace/path-overridden component driver,
+/// built from its crate; every suite-provided component driver, from the
+/// vendored store; and every official service, tool, and the infrastructure
+/// router, from the vendored store or a source override. After it runs, `bin/`
+/// is the complete lookup store an extracted bundle would carry - the loader
+/// resolves every required runtime from it with no source present.
+pub(crate) fn stage_complete_bin_store(
+    staged_root: &Path,
+    resolved: &ResolvedRobot,
+    source_participants: &[SourceParticipant],
+    ui: &crate::Ui,
+) -> Result<()> {
+    let mut staged_names = BTreeSet::new();
+    // Source-built user services and workspace/path-overridden component
+    // drivers. Official-service/tool/simulator source overrides are staged by
+    // `stage_complete_official_store` below (it owns the vendored-vs-override
+    // resolution for the official set), so they are skipped here.
+    for participant in source_participants {
+        let binary_name = match participant.kind {
+            SourceParticipantKind::UserService => participant.name.clone(),
+            SourceParticipantKind::ComponentDriver => official_binary_name(
+                ArtifactKind::ComponentDriver,
+                &participant.expected_artifact_id,
+            ),
+            SourceParticipantKind::OfficialService
+            | SourceParticipantKind::Tool
+            | SourceParticipantKind::Simulator => continue,
+        };
+        if !staged_names.insert(binary_name.clone()) {
+            continue;
+        }
+        let built = build_source_binary(&participant.crate_dir, &participant.name, ui)?;
+        crate::stager::stage_named_binary(staged_root, &binary_name, &built)?;
+    }
+    // Suite-provided component drivers: one binary per driven component id,
+    // resolved from the vendored store. A workspace/path-overridden driver for
+    // the same component id was already staged above (its binary name is in
+    // `staged_names`), so it is not re-linked here.
+    let mut build_override =
+        |crate_dir: &Path, name: &str| build_source_binary(crate_dir, name, ui);
+    for component in &resolved.components {
+        if !component.has_driver {
+            continue;
+        }
+        let binary_name =
+            official_binary_name(ArtifactKind::ComponentDriver, &component.source_name);
+        if !staged_names.insert(binary_name.clone()) {
+            continue;
+        }
+        let Some(runtime) = component
+            .driver
+            .as_ref()
+            .and_then(|driver| driver.suite_runtime.as_ref())
+        else {
+            continue;
+        };
+        let source = crate::stager::resolve_platform_source(runtime, &mut build_override)?;
+        crate::stager::stage_named_binary(staged_root, &binary_name, &source)?;
+    }
+    // Every official service, tool, and the infrastructure router.
+    crate::stager::stage_complete_official_store(staged_root, resolved, &mut build_override)
+        .context("failed to complete the staged bin store with the full official runtime set")?;
+    Ok(())
+}
+
+/// Build the participant specs for a launch plan whose binaries already live in
+/// the staged layout's flat `bin/` store, resolving every executable directly
+/// from `bin/` with no source, Cargo, or resolved graph (#936). This is the
+/// execution-side spec builder the universal `run` uses for a staged runtime
+/// layout - a source project's `.phoxal/build/<triple>/` or an extracted
+/// `build.phoxal`. Board classification, component-driver launch gating (bench
+/// subset, macOS, missing device - the last read straight from the compiled
+/// `robot.yaml`), and readiness/env/policy encoding match the source path's
+/// [`prepare_robot_participants`]; only binary resolution differs.
+pub(crate) fn build_layout_specs(
+    plan: &LaunchPlan,
+    layout: &RuntimeLayout,
+    driver_policy: &DriverPolicy,
+    board: &BoardBackend,
+    specs: &mut Vec<ParticipantSpec>,
+) -> Result<()> {
+    let bin_dir = layout.bin_dir();
+    for robot in &plan.robots {
+        let robot_key = RobotKey::new(&robot.namespace, &robot.id);
+        let scope = RobotScope {
+            namespace: robot.namespace.clone(),
+            robot_id: robot.id.clone(),
+        };
+        for participant in &robot.participants {
+            let id = participant.launch.participant_id.clone();
+            let key = ProcessKey::robot(robot_key.clone(), &id);
+            let (kind, local) = participant_kind(&participant.execution);
+            if participant.launch_ownership == LaunchOwnership::SimulationManaged {
+                let mut status = ParticipantStatus::new(&id, kind, ParticipantState::Starting)
+                    .with_local(local)
+                    .with_scope(scope.clone());
+                status.note = Some(
+                    "SimulationManaged: launched by Webots via the supervisor, not the CLI supervisor"
+                        .to_string(),
+                );
+                register_simulation_managed_participant(
+                    board,
+                    key,
+                    status,
+                    participant.launch.incarnation,
+                    participant.startup_requirement,
+                );
+                continue;
+            }
+            board.upsert_process(
+                key.clone(),
+                ParticipantStatus::new(&id, kind, ParticipantState::Starting)
+                    .with_local(local)
+                    .with_scope(scope.clone()),
+                participant.startup_requirement,
+            );
+            if matches!(
+                participant.execution,
+                ParticipantExecution::ComponentDriver { .. }
+            ) {
+                match driver_policy.decision(&id) {
+                    DriverDecision::Degraded(note) => {
+                        board.set_state(&key, ParticipantState::Degraded, Some(note));
+                        continue;
+                    }
+                    DriverDecision::Launch => {}
+                }
+                if cfg!(target_os = "macos") {
+                    board.set_state(
+                        &key,
+                        ParticipantState::Failed,
+                        Some("DriverUnsupported: component driver binaries are Linux-only on macOS (D21)".to_string()),
+                    );
+                    continue;
+                }
+                if let Some(note) = layout_device_missing_note(layout, &id) {
+                    board.set_state(&key, ParticipantState::Failed, Some(note));
+                    continue;
+                }
+            }
+            let executable = bin_dir.join(participant.execution.binary_name());
+            inspect_selected_binary(&executable).with_context(|| {
+                format!(
+                    "failed to inspect staged runtime `{}` at {}",
+                    id,
+                    executable.display()
+                )
+            })?;
+            specs.push(participant_spec(
+                participant,
+                &robot_key,
+                kind,
+                executable,
+                None,
+            )?);
+        }
+    }
+    Ok(())
+}
+
+/// The missing-device board note for a driver participant in a compiled
+/// `robot.yaml`, computed directly from the layout's robot model (no resolved
+/// graph). Mirrors [`device_missing_note`], which reads the same connection
+/// config off a `ResolvedRobot`.
+fn layout_device_missing_note(layout: &RuntimeLayout, participant_id: &str) -> Option<String> {
+    let component = layout.robot().robot.components.get(participant_id)?;
+    let driver = component.driver.as_ref()?;
+    let missing = missing_device_path(&driver.connection)?;
+    Some(format!(
+        "DeviceMissing: {missing} for driver {participant_id}"
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -531,5 +717,99 @@ mod tests {
             board.snapshot().participants[&key.to_string()].state,
             ParticipantState::Ready
         );
+    }
+
+    const LAYOUT_ROBOT_YAML: &str = r#"schema: robot/v0
+robot:
+  id: robot_v1
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: omnidirectional
+    actuators: []
+    encoders: []
+  components: {}
+services:
+  mission:
+    config:
+      speed: 1
+"#;
+
+    /// The layout execution path reads only the staged `bin/` store: every
+    /// participant's executable is the flat `bin/<binary_name>` entry, resolved
+    /// with no source, Cargo, resolved graph, or artifact store (#936). A staged
+    /// layout that carries a stray `.phoxal/artifacts` directory proves the
+    /// layout path never consults it.
+    #[test]
+    fn layout_specs_resolve_every_executable_from_bin_with_no_artifact_store() -> Result<()> {
+        use crate::run::{DriverPolicy, DriversMode, RunOptions};
+
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        std::fs::write(root.join("robot.yaml"), LAYOUT_ROBOT_YAML)?;
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin)?;
+        // A vendored artifact store the layout path must never touch: if it were
+        // consulted the run would depend on it, defeating the bundle guarantee.
+        std::fs::create_dir_all(root.join(".phoxal/artifacts"))?;
+
+        let layout = RuntimeLayout::open(root)?;
+        for required in
+            layout.required_runtimes(phoxal_cli_core::project::layout::RuntimeProfile::Native)
+        {
+            if required.kind
+                == phoxal_cli_core::project::layout::RequiredRuntimeKind::Infrastructure
+            {
+                continue;
+            }
+            std::fs::write(
+                bin.join(&required.binary_name),
+                synthesize_binary(host_architecture()),
+            )?;
+        }
+
+        let plan = RuntimeLayout::construct_plan(
+            root,
+            &phoxal_cli_core::project::launch_plan::LaunchMode::Run,
+        )?
+        .plan;
+        let policy = DriverPolicy::from_options(
+            &RunOptions {
+                drivers: DriversMode::On,
+                drivers_subset: Vec::new(),
+                suite_source: None,
+                watch: false,
+            },
+            &plan,
+        )?;
+        let board = BoardBackend::new();
+        let mut specs = Vec::new();
+        build_layout_specs(&plan, &layout, &policy, &board, &mut specs)?;
+
+        assert!(
+            !specs.is_empty(),
+            "the layout must produce launchable specs"
+        );
+        for spec in &specs {
+            assert!(
+                spec.executable.starts_with(&bin),
+                "every executable must resolve from bin/: {}",
+                spec.executable.display()
+            );
+            assert!(spec.executable.is_file(), "{}", spec.executable.display());
+            assert!(
+                spec.cwd.is_none(),
+                "a staged layout participant has no source crate cwd"
+            );
+        }
+        // The user service is present, proving the compiled robot.yaml's own
+        // services join the plan alongside the officials.
+        assert!(
+            specs.iter().any(|spec| spec.id == "mission"),
+            "the user service `mission` must be launchable from the layout"
+        );
+        Ok(())
     }
 }

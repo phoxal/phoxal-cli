@@ -135,8 +135,11 @@ pub(crate) async fn live_simulate_setup(
         crate::run::build_source_binary(crate_dir, name, &ui)
     })
     .context("failed to stage the infrastructure router into the simulation bin store")?;
+    let router_config =
+        crate::run::resolve_router_config(&sim.ctx.resolved.robot, &sim.ctx.project_root)?;
     let (router, connect) =
-        crate::run::start_infrastructure_router(&sim.ctx.resolved, &sim.ctx.project_root).await?;
+        crate::run::start_infrastructure_router(&staged_root, &sim.ctx.project_root, router_config)
+            .await?;
     board.set_router_status(format!("ready:{connect}"));
     board.set_state(
         phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),

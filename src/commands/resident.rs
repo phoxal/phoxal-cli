@@ -200,3 +200,30 @@ fn validate_entry(target: &ProjectTarget, running_entry: &str) -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// `attach`/`stop` are representation-agnostic: a staged runtime layout root
+    /// (an extracted `build.phoxal` or `.phoxal/build/<triple>/`) resolves to
+    /// itself as the project, so their socket/lock lookups reach
+    /// `<layout_root>/.phoxal/supervisor.sock` - the exact path a layout run's
+    /// resident binds (#936).
+    #[test]
+    fn resolve_target_reaches_a_layout_root_socket() -> Result<()> {
+        let layout = tempfile::tempdir()?;
+        fs::write(layout.path().join("robot.yaml"), "schema: robot/v0\n")?;
+        fs::create_dir_all(layout.path().join("bin"))?;
+
+        let target = resolve_target(Some(layout.path()), layout.path())?;
+        assert_eq!(target.project, layout.path().canonicalize()?);
+        assert!(target.requested_entry.is_none());
+        assert_eq!(
+            supervisor_socket_path(&target.project)?,
+            target.project.join(".phoxal/supervisor.sock")
+        );
+        Ok(())
+    }
+}

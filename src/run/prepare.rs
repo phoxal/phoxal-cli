@@ -1,6 +1,15 @@
 //! Prepare responsibilities for run.
+//!
+//! `run` is universal (#936): it prepares the same [`PreparedRun`] whether the
+//! root is a buildable source project or an already-staged runtime layout (an
+//! extracted `build.phoxal` or a `.phoxal/build/<triple>/` directory). Both end
+//! at the one execution path - [`RuntimeLayout::construct_plan`], surfaced here
+//! through `loader::validate_layout_plan` - which derives the launch graph from
+//! the staged layout alone. The two entry points differ only in the staging
+//! step before it: a source root resolves, checks, and stages; a layout root
+//! has nothing to build and runs in place.
 
-use super::{DriverPolicy, PreparedRun, RunOptions, prepare_robot_participants};
+use super::{DriverPolicy, PreparedRun, RunOptions};
 use crate::check::CheckGraphContext;
 use crate::check::build_emit_apis_from_source;
 use crate::check::check_artifact_refs_from_resolved;
@@ -16,17 +25,23 @@ use crate::supervisor::BoardBackend;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use phoxal_cli_core::project::launch_plan::CheckedRobotLaunchInput;
 use phoxal_cli_core::project::launch_plan::LaunchMode;
 use phoxal_cli_core::project::launch_plan::PlanContext;
-use phoxal_cli_core::project::launch_plan::build_launch_plan;
+use phoxal_cli_core::project::layout::RuntimeLayout;
 use phoxal_cli_core::project::resolver::ResolveOptions;
+use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::resolver::discover_robot_yaml;
 use phoxal_cli_core::project::resolver::load_robot;
 use phoxal_cli_core::session::{ProcessKey, StartupRequirement};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// Prepare a run from a buildable source project: resolve the locked graph,
+/// prepare native artifacts, run the source-time check, refresh the staged
+/// runtime layout under `.phoxal/build/<triple>/` (including a complete `bin/`
+/// store), then construct and validate the launch plan from that staged layout.
+/// The plan and every executable come from the staged layout, never the resolved
+/// graph directly (#936) - the resolved graph is a staging-side input only.
 pub(crate) fn prepare_run_on_board(
     project_start: &Path,
     options: RunOptions,
@@ -56,88 +71,38 @@ pub(crate) fn prepare_run_on_board(
 
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
-    let checked_source_participants = source_participants.clone();
-    let platform_refs = check_artifact_refs_from_resolved(&resolved);
-    let tool_participants = tool_participants_from_resolved(&resolved)?;
-    let mut official_by_ref = resolved
-        .platform_runtimes
-        .iter()
-        .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
-        .collect::<BTreeMap<_, _>>();
-    official_by_ref.extend(crate::check::component_driver_runtimes_by_ref(&resolved));
-    let tools_by_ref = resolved
-        .tools
-        .iter()
-        .map(|tool| (tool.asset.clone(), tool))
-        .collect::<BTreeMap<_, _>>();
-    let outcome = run_check_with_context(
-        &platform_refs,
-        &tool_participants,
-        &checked_source_participants,
-        CheckGraphContext {
-            robot: Some(&robot),
-        },
-        |artifact_ref| {
-            if let Some(runtime) = official_by_ref.get(artifact_ref) {
-                return extract_emit_apis_from_staged_runtime(runtime);
-            }
-            if let Some(tool) = tools_by_ref.get(artifact_ref) {
-                return extract_emit_apis_from_staged_tool(tool);
-            }
-            Err(anyhow!(
-                "resolved official artifact {artifact_ref} is not in the suite"
-            ))
-        },
-        fetch_emit_apis_from_tool,
-        build_emit_apis_from_source,
-    )?;
-    if !outcome.is_ok() {
-        crate::check::ensure_check_outcome_ok(&resolved.train, &outcome)?;
-    }
-    let plan = build_launch_plan(
-        LaunchMode::Run,
-        &[CheckedRobotLaunchInput {
-            project_root,
-            resolved: &resolved,
-            checked_participants: &outcome.checked_participants,
-            substitutions: &[],
-            source_participants: &checked_source_participants,
-        }],
-    )?;
+
+    // Source/staging-time validation: build every source participant (for its
+    // embedded metadata) and check the source graph before we stage and run.
+    // Execution-time validation is the loader's, over the staged layout below.
+    run_source_check(project_root, &robot, &resolved, &source_participants)?;
+
+    // Complete the staged `bin/` store so the loader can inspect every required
+    // runtime off-disk. This is the last step that consumes the resolved graph;
+    // everything after it reads only the staged layout.
+    crate::run::stage_complete_bin_store(&staged_root, &resolved, &source_participants, ui)?;
+
+    // The one execution path: construct and validate the launch plan from the
+    // staged layout alone. Byte-identical, for the same robot, to a plan built
+    // from an extracted bundle of this layout.
+    let plan = crate::loader::validate_layout_plan(&staged_root, &LaunchMode::Run)
+        .context("failed to construct the launch plan from the staged runtime layout")?;
+
     let driver_policy = DriverPolicy::from_options(&options, &plan)?;
-    let mut coherence_plan = plan.clone();
-    for robot in &mut coherence_plan.robots {
-        robot
-            .participants
-            .retain(|participant| driver_policy.launches(participant));
-    }
-    let coherence_graph =
-        crate::check::robot_contract_surfaces(&resolved.robot.robot.id, &outcome.contract_surfaces);
-    let coherence = crate::check::coherence_for_launch_plan(&coherence_plan, &[coherence_graph])?;
-    crate::check::enforce_coherence(crate::check::CoherenceVerb::Run, &coherence)?;
     board.configure(
         project_root.display().to_string(),
         resolved.train.clone(),
         "run",
     );
-    board.upsert_process(
-        ProcessKey::project("infrastructure-router"),
-        crate::supervisor::ParticipantStatus::new(
-            "infrastructure-router",
-            phoxal_cli_core::session::ParticipantKind::Tool,
-            crate::supervisor::ParticipantState::Starting,
-        ),
-        StartupRequirement::Required,
-    );
-    let mut specs = Vec::new();
+    register_router_process(&board);
 
-    // Resolve every launched participant's binary from the staged runtime
-    // layout's flat `bin/` store, staging each one there under its canonical
-    // identity and inspecting it (architecture + embedded metadata) off-disk.
-    // Execution consumes the staged layout, never the cargo target dir /
-    // artifact store directly (#936).
+    let mut specs = Vec::new();
+    // The staging-side record of source crate directories the source-free plan
+    // no longer carries: a participant built from local source runs from its
+    // crate directory (relative asset resolution) and is rebuilt there under
+    // `--watch`. Execution identity always comes from the plan's `bin/` name.
     let source_dirs = crate::run::source_dirs_by_participant(&source_participants);
-    prepare_robot_participants(
+    crate::run::prepare_robot_participants(
         &plan,
         &resolved,
         &source_dirs,
@@ -147,15 +112,8 @@ pub(crate) fn prepare_run_on_board(
         &mut specs,
         ui,
     )?;
-    // Complete `bin/` into the loader's full required store: every dormant
-    // catalog official plus the infrastructure router, none of which appears as
-    // an active plan participant. `bin/` is then the true complete lookup store
-    // an extracted bundle runs from with no source (#936/#945).
-    crate::stager::stage_complete_official_store(&staged_root, &resolved, |crate_dir, name| {
-        crate::run::build_source_binary(crate_dir, name, ui)
-    })
-    .context("failed to complete the staged bin store with the full official runtime set")?;
 
+    let router_config = crate::run::resolve_router_config(&resolved.robot, project_root)?;
     let robot_targets = super::RobotFeedTarget::from_plan(&plan);
     let project_root = project_root.to_path_buf();
     let ctx = PlanContext {
@@ -171,5 +129,140 @@ pub(crate) fn prepare_run_on_board(
         plan,
         board,
         specs,
+        staged_root,
+        router_config,
     })
+}
+
+/// Prepare a run from an already-staged runtime layout at `layout_root` - an
+/// extracted `build.phoxal` or a `.phoxal/build/<triple>/` directory. There is
+/// nothing to build, resolve, or fetch: the launch plan and every executable
+/// come from the layout's flat `bin/` store, so this needs no Cargo, suite,
+/// toolchain, or network, and never touches `.phoxal/artifacts`. Runtime state
+/// (`project.lock`, `supervisor.sock`, plans) is created at run time under
+/// `<layout_root>/.phoxal/`.
+pub(crate) fn prepare_layout_run_on_board(
+    layout_root: &Path,
+    options: RunOptions,
+    board: BoardBackend,
+) -> Result<PreparedRun> {
+    let layout = RuntimeLayout::open(layout_root).with_context(|| {
+        format!(
+            "failed to open staged runtime layout {}",
+            layout_root.display()
+        )
+    })?;
+    let plan = crate::loader::validate_layout_plan(layout_root, &LaunchMode::Run)
+        .context("failed to construct the launch plan from the staged runtime layout")?;
+
+    let driver_policy = DriverPolicy::from_options(&options, &plan)?;
+    board.configure(
+        layout_root.display().to_string(),
+        "staged".to_string(),
+        "run",
+    );
+    register_router_process(&board);
+
+    let mut specs = Vec::new();
+    crate::run::build_layout_specs(&plan, &layout, &driver_policy, &board, &mut specs)?;
+
+    let router_config = crate::run::resolve_router_config(layout.robot(), layout_root)?;
+    let robot_targets = super::RobotFeedTarget::from_plan(&plan);
+    let ctx = PlanContext {
+        robot_path: layout_root.join("robot.yaml"),
+        project_root: layout_root.to_path_buf(),
+        // A staged layout has no resolved source graph; this placeholder is
+        // never read on the layout path (`--watch`, the only consumer of
+        // `resolved`/`source_participants`, is rejected for a layout root).
+        resolved: placeholder_resolved(&layout),
+        source_participants: Vec::new(),
+    };
+
+    Ok(PreparedRun {
+        ctx,
+        robot_targets,
+        plan,
+        board,
+        specs,
+        staged_root: layout_root.to_path_buf(),
+        router_config,
+    })
+}
+
+fn register_router_process(board: &BoardBackend) {
+    board.upsert_process(
+        ProcessKey::project("infrastructure-router"),
+        crate::supervisor::ParticipantStatus::new(
+            "infrastructure-router",
+            phoxal_cli_core::session::ParticipantKind::Tool,
+            crate::supervisor::ParticipantState::Starting,
+        ),
+        StartupRequirement::Required,
+    );
+}
+
+/// A minimal `ResolvedRobot` carrying only the compiled robot model, for the
+/// `PlanContext` of a layout run. Its resolved graph is empty because a staged
+/// layout has none; the fields are never read on the layout path.
+fn placeholder_resolved(layout: &RuntimeLayout) -> ResolvedRobot {
+    ResolvedRobot {
+        robot: layout.robot().clone(),
+        train: "staged".to_string(),
+        target: crate::resolver::host_target_triple(),
+        platform_runtimes: Vec::new(),
+        simulators: Vec::new(),
+        user_runtimes: Vec::new(),
+        components: Vec::new(),
+        tools: Vec::new(),
+        path_overrides: Vec::new(),
+    }
+}
+
+/// The source-time graph check: build every source participant's binary for its
+/// embedded metadata and validate the source graph, failing the run if the
+/// train's check gate rejects it. This is a staging-side gate; the loader
+/// re-validates config and contract coherence over the staged layout.
+fn run_source_check(
+    project_root: &Path,
+    robot: &phoxal::model::robot::v0::Robot,
+    resolved: &ResolvedRobot,
+    source_participants: &[phoxal_cli_core::check::source::SourceParticipant],
+) -> Result<()> {
+    let platform_refs = check_artifact_refs_from_resolved(resolved);
+    let tool_participants = tool_participants_from_resolved(resolved)?;
+    let mut official_by_ref = resolved
+        .platform_runtimes
+        .iter()
+        .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
+        .collect::<BTreeMap<_, _>>();
+    official_by_ref.extend(crate::check::component_driver_runtimes_by_ref(resolved));
+    let tools_by_ref = resolved
+        .tools
+        .iter()
+        .map(|tool| (tool.asset.clone(), tool))
+        .collect::<BTreeMap<_, _>>();
+    let outcome = run_check_with_context(
+        &platform_refs,
+        &tool_participants,
+        source_participants,
+        CheckGraphContext { robot: Some(robot) },
+        |artifact_ref| {
+            if let Some(runtime) = official_by_ref.get(artifact_ref) {
+                return extract_emit_apis_from_staged_runtime(runtime);
+            }
+            if let Some(tool) = tools_by_ref.get(artifact_ref) {
+                return extract_emit_apis_from_staged_tool(tool);
+            }
+            Err(anyhow!(
+                "resolved official artifact {artifact_ref} is not in the suite"
+            ))
+        },
+        fetch_emit_apis_from_tool,
+        build_emit_apis_from_source,
+    )?;
+    let _ = project_root;
+    if !outcome.is_ok() {
+        crate::check::ensure_check_outcome_ok(&resolved.train, &outcome)?;
+    }
+    Ok(())
 }

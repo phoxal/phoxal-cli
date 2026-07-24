@@ -11,7 +11,7 @@ const ROUTER_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 mod router;
 pub(crate) use router::{
-    InfrastructureRouter, apply_session_connect, project_router_endpoint,
+    InfrastructureRouter, apply_session_connect, project_router_endpoint, resolve_router_config,
     start_infrastructure_router,
 };
 mod command;
@@ -22,15 +22,16 @@ pub(crate) use stages::stages_for_run;
 mod telemetry;
 pub(crate) use telemetry::{RobotFeedTarget, start_telemetry_feeds_at};
 mod prepare;
-pub(crate) use prepare::prepare_run_on_board;
+pub(crate) use prepare::{prepare_layout_run_on_board, prepare_run_on_board};
 mod report;
 pub(crate) use report::{DriverPolicy, report_launch_commands};
 mod participants;
 pub(crate) use participants::{
-    DriverDecision, prepare_robot_participants, source_dirs_by_participant, spec_from_launch_record,
+    DriverDecision, build_layout_specs, prepare_robot_participants, source_dirs_by_participant,
+    spec_from_launch_record, stage_complete_bin_store,
 };
 mod build;
-pub(crate) use build::{build_source_binary, device_missing_note};
+pub(crate) use build::{build_source_binary, device_missing_note, missing_device_path};
 
 #[cfg(test)]
 mod tests;

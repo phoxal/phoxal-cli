@@ -675,6 +675,79 @@ services:
         Ok(())
     }
 
+    /// Recursively copy a staged layout directory, standing in for extracting a
+    /// `build.phoxal` bundle to an arbitrary location.
+    fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+        fs::create_dir_all(to)?;
+        for entry in fs::read_dir(from)? {
+            let entry = entry?;
+            let target = to.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_dir(&entry.path(), &target)?;
+            } else {
+                fs::copy(entry.path(), &target)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Erase the two intentionally deployment-scoped fields so a plan can be
+    /// compared for structural (content-determined) identity across two
+    /// extraction locations: the layout root every participant runs from, and
+    /// the observation-device identity derived from it.
+    fn normalize_deployment_paths(plan: &mut LaunchPlan) {
+        for robot in &mut plan.robots {
+            for participant in &mut robot.participants {
+                participant.launch.robot_root = None;
+                participant.launch.execution_device_id = None;
+            }
+        }
+    }
+
+    /// The acceptance criterion the extracted bundle depends on: the launch graph
+    /// is determined by the staged layout's CONTENT (compiled `robot.yaml` plus
+    /// `bin/` metadata), not by where it lives. Staging a layout, then
+    /// "extracting" (copying) it to an arbitrary directory and constructing
+    /// again, yields the identical plan and content digest once the two
+    /// deliberately deployment-scoped fields - the layout root each participant
+    /// runs from and the observation-device identity derived from it - are
+    /// normalized. Nothing else is path-dependent, so a `build.phoxal` extracted
+    /// anywhere runs the same process graph its source staged.
+    #[test]
+    fn staged_and_extracted_layout_construct_identical_graphs() -> Result<()> {
+        let staged_project = tempfile::tempdir()?;
+        let staged_root = runtime_layout_dir(staged_project.path(), "triple");
+        stage_layout(&staged_root, &[])?;
+        let mut staged_plan = RuntimeLayout::construct_plan(&staged_root, &LaunchMode::Run)?.plan;
+
+        // "Extract the bundle" to an unrelated directory and construct again.
+        let extracted = tempfile::tempdir()?;
+        let extracted_root = extracted.path().join("build.phoxal.extracted");
+        copy_dir(&staged_root, &extracted_root)?;
+        let mut extracted_plan =
+            RuntimeLayout::construct_plan(&extracted_root, &LaunchMode::Run)?.plan;
+
+        // Before normalization the deployment root genuinely differs, proving the
+        // two constructions ran against distinct locations.
+        assert_ne!(
+            staged_plan, extracted_plan,
+            "the deployment root must differ before normalization"
+        );
+
+        normalize_deployment_paths(&mut staged_plan);
+        normalize_deployment_paths(&mut extracted_plan);
+        assert_eq!(
+            staged_plan, extracted_plan,
+            "the layout content, not its path, must determine the process graph"
+        );
+        assert_eq!(
+            PlanRevision::compile(1, staged_plan)?.digest,
+            PlanRevision::compile(1, extracted_plan)?.digest,
+            "content-identical plans must have identical content digests"
+        );
+        Ok(())
+    }
+
     #[test]
     fn dormant_officials_are_planned_and_no_source_path_leaks() -> Result<()> {
         let project = tempfile::tempdir()?;

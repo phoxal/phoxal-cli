@@ -2,8 +2,8 @@
 
 use super::RobotFeedTarget;
 use super::{
-    InfrastructureRouter, apply_session_connect, prepare_run_on_board, report_launch_commands,
-    stages_for_run, start_infrastructure_router,
+    InfrastructureRouter, apply_session_connect, prepare_layout_run_on_board, prepare_run_on_board,
+    report_launch_commands, stages_for_run, start_infrastructure_router,
 };
 use crate::AppContext;
 use crate::supervisor::BoardBackend;
@@ -21,7 +21,10 @@ use clap::Args;
 use clap::ValueEnum;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::PlanContext;
+use phoxal_cli_core::project::layout::RuntimeLayout;
+use phoxal_cli_core::project::train::resolve_locked_train;
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -77,6 +80,13 @@ pub(crate) struct PreparedRun {
     pub(crate) board: BoardBackend,
     pub(crate) specs: Vec<ParticipantSpec>,
     pub(crate) robot_targets: Vec<RobotFeedTarget>,
+    /// The staged runtime layout root the plan's `bin/` binaries (including the
+    /// infrastructure router) resolve from: `.phoxal/build/<triple>/` for a
+    /// source run, the layout root itself for a staged/bundle run.
+    pub(crate) staged_root: PathBuf,
+    /// The router's resolved config file, if the compiled `robot.yaml` declares
+    /// one.
+    pub(crate) router_config: Option<PathBuf>,
 }
 
 /// Resources assembled after preparation but before the controller enters
@@ -129,6 +139,16 @@ impl Run {
         }
         let target =
             crate::commands::resident::resolve_target(self.target.as_deref(), app.project.root())?;
+        // `--watch` is a source-only dev loop: a staged runtime layout (an
+        // extracted bundle or a `.phoxal/build/<triple>/` directory) has no
+        // source to rebuild. Reject it early with the cheap layout-shape check,
+        // before the resident spins up (#936).
+        if self.watch && is_layout_only_root(&target.project) {
+            bail!(
+                "`--watch` requires a buildable source project; {} is a staged runtime layout with no source to rebuild",
+                target.project.display()
+            );
+        }
         // SAFETY: command dispatch has not started worker threads for this run
         // yet; all project-local path helpers must agree on the selected root.
         unsafe {
@@ -241,7 +261,7 @@ impl Run {
         let prepare_board = board.clone();
         let prepare_options = options.clone();
         let prepared = match tokio::task::spawn_blocking(move || {
-            prepare_run_on_board(&prepare_root, prepare_options, &ui, prepare_board)
+            prepare_run(&prepare_root, prepare_options, &ui, prepare_board)
         })
         .await?
         {
@@ -301,6 +321,54 @@ impl Run {
         socket.close().await;
         outcome.map(|_| ())
     }
+}
+
+/// Prepare a run without classifying "source versus compiled" beyond routing to
+/// the right staging step (#936): a buildable source root refreshes staging and
+/// runs it; a staged runtime layout runs in place; anything else is a precise
+/// error. Both paths end at the same execution: the loader constructs the plan
+/// from the staged layout.
+fn prepare_run(
+    root: &Path,
+    options: RunOptions,
+    ui: &crate::Ui,
+    board: BoardBackend,
+) -> Result<PreparedRun> {
+    match classify_run_root(root)? {
+        RunRoot::Source => prepare_run_on_board(root, options, ui, board),
+        RunRoot::Layout => prepare_layout_run_on_board(root, options, board),
+    }
+}
+
+#[derive(Debug)]
+enum RunRoot {
+    Source,
+    Layout,
+}
+
+/// Classify a run root the way universal `run` does: a buildable source project
+/// (a Cargo train anchor resolves) is staged and run; an already-staged runtime
+/// layout (`robot.yaml` next to `bin/`, no source) runs in place; anything else
+/// is a precise error. There is no implicit `/var/phoxal` fallback.
+fn classify_run_root(root: &Path) -> Result<RunRoot> {
+    if resolve_locked_train(root).is_ok() {
+        return Ok(RunRoot::Source);
+    }
+    if RuntimeLayout::is_layout_root(root) {
+        return Ok(RunRoot::Layout);
+    }
+    bail!(
+        "{} is neither a buildable source project (no Cargo train anchor) nor a staged runtime layout (no robot.yaml next to bin/); run from a robot project or extract a build.phoxal bundle first",
+        root.display()
+    )
+}
+
+/// The cheap layout-shape check used before the resident starts: a `robot.yaml`
+/// next to a `bin/` store with no Cargo train anchor is a staged runtime layout
+/// (an extracted bundle or a `.phoxal/build/<triple>/` directory), not a source
+/// project. Avoids the `cargo metadata` call [`classify_run_root`] makes.
+fn is_layout_only_root(root: &Path) -> bool {
+    RuntimeLayout::is_layout_root(root) && !root.join("Cargo.toml").is_file()
 }
 
 const fn should_run_resident_in_process(
@@ -382,8 +450,12 @@ pub(crate) async fn live_run_setup(
         mpsc::Receiver<crate::supervisor::SupervisorAction>,
     )>,
 ) -> Result<LiveRunSetup> {
-    let (router, connect) =
-        start_infrastructure_router(&prepared.ctx.resolved, &prepared.ctx.project_root).await?;
+    let (router, connect) = start_infrastructure_router(
+        &prepared.staged_root,
+        &prepared.ctx.project_root,
+        prepared.router_config.clone(),
+    )
+    .await?;
     apply_session_connect(&mut prepared.plan, &mut prepared.specs, &connect);
     let revision =
         phoxal_cli_core::project::launch_plan::PlanRevision::compile(1, prepared.plan.clone())?;
@@ -483,5 +555,56 @@ mod resident_role_tests {
         assert!(should_run_resident_in_process(false, false, false));
         assert!(should_run_resident_in_process(false, true, true));
         assert!(!should_run_resident_in_process(true, true, false));
+    }
+}
+
+#[cfg(test)]
+mod run_root_tests {
+    use super::{RunRoot, classify_run_root, is_layout_only_root};
+    use std::fs;
+
+    /// A staged runtime layout: `robot.yaml` next to a `bin/` store, no Cargo
+    /// train anchor.
+    fn write_layout(root: &std::path::Path) {
+        fs::write(root.join("robot.yaml"), "schema: robot/v0\n").unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+    }
+
+    #[test]
+    fn layout_only_root_is_recognized_without_a_cargo_call() {
+        let layout = tempfile::tempdir().unwrap();
+        write_layout(layout.path());
+        assert!(is_layout_only_root(layout.path()));
+
+        // A source project also carrying a stray root `bin/` is not a layout
+        // root: its Cargo train anchor makes it buildable source.
+        let source = tempfile::tempdir().unwrap();
+        write_layout(source.path());
+        fs::write(source.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        assert!(!is_layout_only_root(source.path()));
+
+        // A bare directory is neither.
+        let bare = tempfile::tempdir().unwrap();
+        assert!(!is_layout_only_root(bare.path()));
+    }
+
+    #[test]
+    fn classify_routes_layout_and_rejects_neither() {
+        let layout = tempfile::tempdir().unwrap();
+        write_layout(layout.path());
+        assert!(matches!(
+            classify_run_root(layout.path()).unwrap(),
+            RunRoot::Layout
+        ));
+
+        // Neither a buildable source project nor a staged layout: a precise
+        // error, no implicit fallback.
+        let bare = tempfile::tempdir().unwrap();
+        let error = classify_run_root(bare.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("neither a buildable source project")
+                && error.contains("staged runtime layout"),
+            "{error}"
+        );
     }
 }
