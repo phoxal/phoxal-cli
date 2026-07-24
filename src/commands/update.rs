@@ -233,7 +233,7 @@ fn include_existing_target_scopes(
             }
             let blob = artifact.targets.get(&target).with_context(|| {
                 format!(
-                    "framework train {} has no {} blob for retained target {target}; update phoxal-cli or choose a supported target",
+                    "framework train {} has no {} blob for retained target {target}; update phoxal or choose a supported target",
                     suite.version, descriptor.package_id
                 )
             })?;

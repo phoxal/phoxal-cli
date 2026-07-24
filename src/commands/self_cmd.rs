@@ -32,7 +32,7 @@ pub struct SelfCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum SelfSubcommand {
-    #[command(about = "Upgrade this phoxal-cli executable.")]
+    #[command(about = "Upgrade this phoxal executable.")]
     Upgrade(Upgrade),
 }
 
@@ -175,7 +175,7 @@ fn run_upgrade(options: UpgradeOptions, ui: Ui) -> Result<UpgradeOutcome> {
         UpgradeAction::UpToDate => unreachable!("UpToDate returns earlier"),
     };
     ui.success(format!(
-        "{verb} phoxal-cli v{current_version} -> v{requested_version}"
+        "{verb} phoxal v{current_version} -> v{requested_version}"
     ));
     Ok(UpgradeOutcome {
         version_from: current_version.to_string(),
@@ -377,12 +377,12 @@ fn refuse_managed_install(path: &Path) -> Result<()> {
     let path = path.to_string_lossy();
     if path.contains("/.cargo/bin/") {
         bail!(
-            "refusing to self-upgrade cargo-installed phoxal-cli at {display}; reinstall with `cargo install --git https://github.com/phoxal/phoxal-cli`"
+            "refusing to self-upgrade cargo-installed phoxal at {display}; reinstall with `cargo install --git https://github.com/phoxal/phoxal-cli`"
         );
     }
     if path.contains("/Cellar/") || path.contains("/homebrew/") {
         bail!(
-            "refusing to self-upgrade Homebrew-managed phoxal-cli at {display}; use brew to upgrade or reinstall it"
+            "refusing to self-upgrade Homebrew-managed phoxal at {display}; use brew to upgrade or reinstall it"
         );
     }
     Ok(())

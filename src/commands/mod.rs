@@ -243,9 +243,9 @@ pub enum RootCommand {
     Doctor(doctor::Doctor),
     #[command(about = "Inspect the user-service suite.")]
     Service(service::Service),
-    #[command(about = "Print the phoxal-cli version and suite source defaults.")]
+    #[command(about = "Print the phoxal version and suite source defaults.")]
     Version(VersionArgs),
-    #[command(name = "self", about = "Manage this phoxal-cli installation.")]
+    #[command(name = "self", about = "Manage this phoxal installation.")]
     SelfCmd(self_cmd::SelfCmd),
 }
 

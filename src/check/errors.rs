@@ -30,7 +30,7 @@ pub(super) fn format_missing_images_error(train: &str, missing_images: &[String]
         message.push_str(image_ref);
     }
     message.push_str("\n\nFix:");
-    message.push_str("\n  - refresh or override the generated artifact suite with `phoxal-cli --suite <path> check`");
+    message.push_str("\n  - refresh or override the generated artifact suite with `phoxal --suite <path> check`");
     message.push_str("\n  - or use a framework train that publishes the required target artifacts");
     message
 }

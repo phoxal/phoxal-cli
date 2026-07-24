@@ -64,7 +64,7 @@ pub struct SimulationRun {
     pub target: Option<String>,
 }
 
-/// `phoxal-cli simulation join`: joins a running multi-robot simulation
+/// `phoxal simulation join`: joins a running multi-robot simulation
 /// session. Multi-robot join lands as its own slice - this is a stub that
 /// prints a clear "not available yet" message and exits 0 (it is not an
 /// error to ask for a feature that is on the roadmap but not yet wired up;
