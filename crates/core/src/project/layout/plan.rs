@@ -246,6 +246,35 @@ impl RuntimeLayout {
                         config_schema: config_schema(&required.binary_name)?,
                     });
                 }
+                RequiredRuntimeKind::UserTool => {
+                    let participant_id = required.identity.clone();
+                    participants.push(cli_managed_record(
+                        participant_id.clone(),
+                        ParticipantExecution::UserTool {
+                            binary_name: required.binary_name.clone(),
+                        },
+                        launch(
+                            &participant_id,
+                            &namespace,
+                            &robot_id,
+                            service_clock,
+                            required.config.clone(),
+                            &robot_root,
+                            None,
+                            None,
+                        ),
+                    ));
+                    contract_surfaces.push(ParticipantContractSurface {
+                        participant_id: participant_id.clone(),
+                        contracts: meta_contracts(&required.binary_name)?,
+                    });
+                    // The tool's config validates against its embedded schema
+                    // through the same pairing user services use (#950).
+                    user_service_configs.push(UserServiceConfig {
+                        service_id: participant_id,
+                        config_schema: config_schema(&required.binary_name)?,
+                    });
+                }
                 RequiredRuntimeKind::ComponentDriver => {
                     // One binary, N instances: every component instance whose
                     // component id matches this driver becomes its own graph
@@ -499,6 +528,8 @@ services:
                 path: PathBuf::from("services/mission"),
                 source_hash: "hash".to_string(),
             }],
+            user_tools: Vec::new(),
+            undeclared_runtimes: Vec::new(),
             components: vec![
                 driven_component("left_drive"),
                 driven_component("right_drive"),

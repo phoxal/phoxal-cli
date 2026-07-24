@@ -135,3 +135,12 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
+
+# TEMPORARY dev overlay for the #950 framework leg (tools declaration).
+# Dropped before this PR merges: the framework releases the new model first
+# and the pins above move to that version (see REPOSITORIES.md recovery mode).
+[patch.crates-io]
+phoxal = { path = "../../../../framework/.claude/worktrees/950-tools-declaration/phoxal" }
+phoxal-api = { path = "../../../../framework/.claude/worktrees/950-tools-declaration/phoxal-api" }
+phoxal-bus = { path = "../../../../framework/.claude/worktrees/950-tools-declaration/phoxal-bus" }
+phoxal-macros = { path = "../../../../framework/.claude/worktrees/950-tools-declaration/phoxal-macros" }

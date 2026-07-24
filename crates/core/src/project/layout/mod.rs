@@ -108,6 +108,8 @@ pub enum RequiredRuntimeKind {
     OfficialTool,
     Infrastructure,
     UserService,
+    /// A declared additional user tool (`tools:` in robot.yaml, #950).
+    UserTool,
     ComponentDriver,
 }
 
@@ -246,6 +248,18 @@ impl RuntimeLayout {
                 binary_name: name.clone(),
                 kind: RequiredRuntimeKind::UserService,
                 config: service.config.clone(),
+            });
+        }
+
+        // The tools declaration (#950): each declared additional user tool is
+        // required under its own identity, exactly like a user service.
+        // Resolution already rejects official identities in this map.
+        for (name, tool) in &self.robot.tools {
+            required.push(RequiredRuntime {
+                identity: name.clone(),
+                binary_name: name.clone(),
+                kind: RequiredRuntimeKind::UserTool,
+                config: tool.config.clone(),
             });
         }
 
@@ -407,6 +421,10 @@ services:
   drive:
     config:
       gain: 2
+tools:
+  lidar-viz:
+    config:
+      port: 9000
 "#;
 
     /// Synthesize an object file of a given architecture carrying the phoxal
@@ -483,6 +501,27 @@ services:
         assert_eq!(drivers.len(), 1, "one driver binary serves both instances");
         assert_eq!(drivers[0].identity, "ddsm115");
         assert_eq!(drivers[0].binary_name, "phoxal-component-ddsm115");
+        Ok(())
+    }
+
+    #[test]
+    fn declared_user_tools_are_required_under_their_identity() -> Result<()> {
+        let dir = write_layout(ROBOT_YAML)?;
+        let layout = RuntimeLayout::open(dir.path())?;
+        let required = layout.required_runtimes(&DriverSelection::All);
+        let tool = required
+            .iter()
+            .find(|runtime| runtime.identity == "lidar-viz")
+            .expect("declared user tool is required (#950)");
+        assert_eq!(tool.kind, RequiredRuntimeKind::UserTool);
+        assert_eq!(tool.binary_name, "lidar-viz");
+        assert_eq!(
+            tool.config
+                .as_ref()
+                .and_then(|config| config.get("port"))
+                .and_then(serde_json::Value::as_u64),
+            Some(9000)
+        );
         Ok(())
     }
 

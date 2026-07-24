@@ -171,6 +171,7 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
         },
         |_| bail!("no tools in this check fixture"),
         |source| match source.kind {
+            SourceParticipantKind::UserTool => unreachable!("fixture has no user tools"),
             SourceParticipantKind::UserService => {
                 Ok(launch_plan_raw_emit_apis("service", &source.name))
             }
@@ -1900,6 +1901,8 @@ fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<Resolv
         platform_runtimes: Vec::new(),
         simulators: Vec::new(),
         user_runtimes: Vec::new(),
+        user_tools: Vec::new(),
+        undeclared_runtimes: Vec::new(),
         components,
         tools: Vec::new(),
         path_overrides: Vec::new(),

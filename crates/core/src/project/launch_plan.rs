@@ -337,6 +337,9 @@ pub enum ParticipantExecution {
     OfficialTool { binary_name: String },
     /// A user service, resolved from `bin/<binary_name>`.
     UserService { binary_name: String },
+    /// A declared additional user tool (`tools:` in robot.yaml, #950),
+    /// resolved from `bin/<binary_name>`.
+    UserTool { binary_name: String },
     /// A component driver - one binary serving every instance of a component
     /// id - resolved from `bin/<binary_name>`.
     ComponentDriver { binary_name: String },
@@ -352,6 +355,7 @@ impl ParticipantExecution {
             Self::OfficialArtifact { binary_name }
             | Self::OfficialTool { binary_name }
             | Self::UserService { binary_name }
+            | Self::UserTool { binary_name }
             | Self::ComponentDriver { binary_name } => binary_name,
         }
     }
@@ -582,6 +586,9 @@ fn participant_execution(
     if let Some(source) = source {
         return Ok(match source.kind {
             SourceParticipantKind::UserService => ParticipantExecution::UserService {
+                binary_name: checked.artifact_id.clone(),
+            },
+            SourceParticipantKind::UserTool => ParticipantExecution::UserTool {
                 binary_name: checked.artifact_id.clone(),
             },
             SourceParticipantKind::OfficialService => ParticipantExecution::OfficialArtifact {
@@ -1085,6 +1092,8 @@ robot:
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
+            user_tools: Vec::new(),
+            undeclared_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
             path_overrides: Vec::new(),

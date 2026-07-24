@@ -172,6 +172,13 @@ pub(crate) fn source_participants_from_resolved(
         )
     }));
 
+    participants.extend(resolved.user_tools.iter().map(|runtime| {
+        SourceParticipant::user_tool(
+            runtime.name.clone(),
+            resolve_project_path(project_root, &runtime.path),
+        )
+    }));
+
     // A Suite-sourced driver is a first-class suite artifact, not a
     // build-from-source participant - it becomes a `PlatformArtifactRef`
     // instead (see `component_driver_platform_refs_from_resolved`), fetched

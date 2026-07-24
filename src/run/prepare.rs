@@ -223,6 +223,8 @@ pub(crate) fn prepare_run_on_board(
         &crate::run::driven_instances(&staged.resolved.robot),
         ui,
     );
+    // Declaration drift (#950): workspace crates not selected by robot.yaml.
+    crate::run::report_undeclared_runtimes(&staged.resolved.undeclared_runtimes, ui);
 
     let mut specs = Vec::new();
     // The staging-side record of source crate directories the source-free plan
