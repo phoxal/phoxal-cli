@@ -4,6 +4,15 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.23.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.23.0) - 2026-07-24
+
+
+### Added
+
+- Compile source projects into flat runtime roots and build.phoxal (phase 10) ([#186](https://github.com/phoxal/phoxal-cli/pull/186)) [**breaking**]
+- Declaration-driven user services and tools (phase 10B) ([#188](https://github.com/phoxal/phoxal-cli/pull/188)) [**breaking**]
+
+
 ## [0.22.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.22.1) - 2026-07-24
 
 
