@@ -25,7 +25,7 @@ pub(crate) fn stages_for_simulate(
     let mut infrastructure = Vec::new();
     let mut graph = Vec::new();
     for spec in specs {
-        if spec.id == WEBOTS_SITE_ID || spec.kind == ParticipantKind::Tool {
+        if spec.id == WEBOTS_APP_ID || spec.kind == ParticipantKind::Tool {
             infrastructure.push(spec);
         } else {
             graph.push(spec);
@@ -107,17 +107,24 @@ pub(crate) fn substitution_topic_summary(substitution: &SubstitutionRecord) -> S
     format!("component/{}/*", substitution.component_instance)
 }
 
-/// Site tool labels are derived straight from the resolved `LaunchPlan`, so
-/// profile-selected project tools such as the infrastructure router and joypad
-/// appear here alongside the Webots app itself. This function never needs
-/// `options` - it replaces the old `SimulatePlan::native_tools` stored field.
+/// Robot tool labels are derived straight from the resolved `LaunchPlan`.
+/// This function never needs a suite launch profile.
 pub(crate) fn native_tool_labels_from_plan(plan: &LaunchPlan) -> Vec<String> {
     let mut labels = plan
-        .site
+        .robots
         .iter()
-        .map(|site| site.id.clone())
+        .flat_map(|robot| robot.participants.iter())
+        .filter(|participant| {
+            matches!(
+                participant.execution,
+                phoxal_cli_core::project::launch_plan::ParticipantExecution::OfficialTool { .. }
+            )
+        })
+        .map(|participant| participant.artifact_id.clone())
         .collect::<Vec<_>>();
-    labels.push(WEBOTS_SITE_ID.to_string());
+    labels.sort();
+    labels.dedup();
+    labels.push(WEBOTS_APP_ID.to_string());
     labels
 }
 
@@ -125,4 +132,4 @@ pub(crate) fn native_tool_labels_from_plan(plan: &LaunchPlan) -> Vec<String> {
 /// Webots is the CLI's only simulator-side child (Part 5): the CLI launches
 /// it pointed at the staged world; everything downstream (the supervisor,
 /// each robot's controller) is Webots-spawned and SIMULATION-MANAGED instead.
-pub(crate) const WEBOTS_SITE_ID: &str = "webots";
+pub(crate) const WEBOTS_APP_ID: &str = "webots";

@@ -28,7 +28,7 @@ use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::resolver::discover_robot_yaml;
-use phoxal_cli_core::project::resolver::load_robot_with_extras;
+use phoxal_cli_core::project::resolver::load_robot;
 use phoxal_cli_core::project::suite::ArtifactKind;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -47,26 +47,16 @@ pub(crate) fn prepare_deploy(
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let loaded = if options.overlays.is_empty() {
-        load_robot_with_extras(&robot_path)?
-    } else {
-        phoxal_cli_core::project::resolver::load_robot_with_extras_and_overlays(
-            &robot_path,
-            &options.overlays,
-        )?
-    };
+    let robot = load_robot(&robot_path)?;
     let suite = crate::commands::load_suite_for_robot_from_source(
         options.suite_source.clone(),
         project_root,
-        &loaded.extras,
     )?;
     let mut resolved = resolve(
-        &loaded.robot,
+        &robot,
         project_root,
         suite.as_ref(),
         ResolveOptions {
-            resolve_source_commits: true,
-            resolve_component_asset_commits: false,
             official_target_triple: Some(target.official_triple.clone()),
             tool_target_triple: Some(target.official_triple.clone()),
         },
@@ -76,12 +66,10 @@ pub(crate) fn prepare_deploy(
     }
     if !options.dry_run {
         let mut host_resolved = resolve(
-            &loaded.robot,
+            &robot,
             project_root,
             suite.as_ref(),
             ResolveOptions {
-                resolve_source_commits: false,
-                resolve_component_asset_commits: false,
                 official_target_triple: Some(crate::resolver::host_target_triple()),
                 tool_target_triple: Some(crate::resolver::host_target_triple()),
             },
@@ -99,7 +87,7 @@ pub(crate) fn prepare_deploy(
             target,
             remote_user,
             ui,
-            &loaded,
+            &robot,
             robot_path.clone(),
             resolved,
             host_resolved,
@@ -111,7 +99,7 @@ pub(crate) fn prepare_deploy(
             target,
             remote_user,
             ui,
-            &loaded,
+            &robot,
             robot_path.clone(),
             resolved.clone(),
             resolved,
@@ -246,38 +234,22 @@ pub(crate) fn prepare_deploy_after_host_staging(
     target: TargetTriples,
     remote_user: &str,
     ui: &crate::Ui,
-    loaded: &phoxal_cli_core::project::resolver::LoadedRobot,
+    robot: &phoxal::model::robot::RobotV0,
     robot_path: PathBuf,
     resolved: ResolvedRobot,
     host_resolved: ResolvedRobot,
 ) -> Result<RenderedPayload> {
     let all_source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
-    let active_tools =
-        host_resolved.active_profile_tools(phoxal_cli_core::project::resolver::ToolProfile::Native);
     let checked_source_participants = all_source_participants
         .iter()
-        .filter(|participant| {
-            participant.kind != SourceParticipantKind::Simulator
-                && active_tools.includes_named(
-                    participant.kind == SourceParticipantKind::Tool,
-                    &participant.name,
-                )
-        })
+        .filter(|participant| participant.kind != SourceParticipantKind::Simulator)
         .cloned()
         .collect::<Vec<_>>();
     let coherence_source_participants = checked_source_participants.clone();
     ensure_no_native_c_source_dependencies(&checked_source_participants)?;
-    let platform_refs = check_artifact_refs_from_resolved(&host_resolved)
-        .into_iter()
-        .filter(|artifact| {
-            active_tools.includes_named(artifact.kind == ArtifactKind::Tool, &artifact.name)
-        })
-        .collect::<Vec<_>>();
-    let tool_participants = crate::check::tool_participants_from_resolved(&host_resolved)?
-        .into_iter()
-        .filter(|tool| active_tools.contains(&tool.name))
-        .collect::<Vec<_>>();
+    let platform_refs = check_artifact_refs_from_resolved(&host_resolved);
+    let tool_participants = crate::check::tool_participants_from_resolved(&host_resolved)?;
     let mut official_by_ref = host_resolved
         .platform_runtimes
         .iter()
@@ -295,9 +267,7 @@ pub(crate) fn prepare_deploy_after_host_staging(
         &platform_refs,
         &tool_participants,
         &coherence_source_participants,
-        CheckGraphContext {
-            manifest_extras: &loaded.extras,
-        },
+        CheckGraphContext { robot: Some(robot) },
         |artifact_ref| {
             if let Some(runtime) = official_by_ref.get(artifact_ref) {
                 return extract_emit_apis_from_staged_runtime(runtime);
@@ -319,7 +289,6 @@ pub(crate) fn prepare_deploy_after_host_staging(
         &[CheckedRobotLaunchInput {
             project_root,
             resolved: &resolved,
-            manifest_extras: &loaded.extras,
             checked_participants: &outcome.checked_participants,
             substitutions: &[],
             source_participants: &checked_source_participants,
@@ -339,7 +308,7 @@ pub(crate) fn prepare_deploy_after_host_staging(
     };
 
     render_payload(RenderPayloadInput {
-        robot: &loaded.robot,
+        robot,
         ctx: &ctx,
         plan: &plan,
         target,

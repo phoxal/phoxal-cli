@@ -13,7 +13,7 @@ use tokio::time::timeout;
 
 use crate::AppContext;
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
-use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot_with_extras};
+use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot};
 
 #[derive(Debug, Args)]
 pub struct Behavior {
@@ -172,10 +172,9 @@ impl Behavior {
 fn validate(app: &AppContext, args: &ValidateArgs) -> Result<()> {
     let root = explicit_root(app, args.robot.as_ref())?;
     let robot_path = discover_robot_yaml(&root)?;
-    let loaded = load_robot_with_extras(&robot_path)?;
+    let robot = load_robot(&robot_path)?;
     let suite = BehaviorCatalog::load(&root)?;
-    let configured = loaded
-        .robot
+    let configured = robot
         .behavior
         .as_ref()
         .map(|behavior| behavior.root.clone());
@@ -436,10 +435,10 @@ async fn open_bus(
     participant: &str,
 ) -> Result<(Bus, LogicalTime)> {
     let robot_path = discover_robot_yaml(app.project.root())?;
-    let loaded = load_robot_with_extras(&robot_path)?;
+    let robot = load_robot(&robot_path)?;
     let bus = Bus::open(BusConfig {
-        namespace: loaded.robot.robot.namespace,
-        robot_id: loaded.robot.robot.id,
+        namespace: robot.robot.namespace,
+        robot_id: robot.robot.id,
         participant: participant.to_string(),
         incarnation: 0,
         connect_endpoints: vec![connect.to_string()],

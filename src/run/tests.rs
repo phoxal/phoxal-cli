@@ -2,7 +2,6 @@
 
 use super::build::missing_device_path;
 use super::environment::env_key;
-use super::participants::site_env;
 use super::report::{
     LaunchCommandEntry, LaunchCommandReport, launch_kind_label, report_launch_commands_human,
 };
@@ -16,11 +15,9 @@ use phoxal::participant::launch::{
 };
 use phoxal_cli_core::project::launch_plan::{
     LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
-    SITE_TOOL_JOYPAD, SiteLaunch,
 };
-use phoxal_cli_core::project::suite::ArtifactKind;
 use phoxal_cli_core::session::{ParticipantKind, RuntimeFailurePolicy, StartupRequirement};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::supervisor::{ParticipantSpec, default_connect_endpoint};
 
@@ -56,74 +53,6 @@ fn human_launch_report_enters_the_active_session_diagnostics() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn configless_site_tool_omits_config_and_gets_connect() {
-    // A configless site tool (phoxal_config == Value::Null, e.g. joypad)
-    // must NOT receive PHOXAL_CONFIG - a unit config rejects `{}` - and, being
-    // a real bus client, MUST receive PHOXAL_CONNECT to reach the router bus.
-    let tool = SiteLaunch {
-        id: "tool-example".to_string(),
-        kind: ArtifactKind::Tool,
-        artifact_ref: "phoxal/tool-example@0.1.0".to_string(),
-        phoxal_config: serde_json::Value::Null,
-        startup_requirement: StartupRequirement::Optional,
-        runtime_failure: RuntimeFailurePolicy::KeepProjectDegraded,
-    };
-    let env = site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
-    assert!(
-        !env.iter().any(|(k, _)| k == env::CONFIG),
-        "configless tool must not get PHOXAL_CONFIG: {env:?}"
-    );
-    assert!(
-        env.iter().any(|(k, _)| k == env::CONNECT),
-        "observable bus tool must get PHOXAL_CONNECT: {env:?}"
-    );
-    assert!(
-        env.iter()
-            .any(|(key, value)| key == env::ROBOT_ROOT && value == "/tmp/robot"),
-        "project tools receive the compiled robot root generically: {env:?}"
-    );
-    assert!(
-        !env.iter().any(|(key, _)| key == env::CLOCK),
-        "tools must not receive a clock selection: {env:?}"
-    );
-}
-
-#[test]
-fn joypad_receives_the_compiled_robot_root() {
-    let tool = SiteLaunch {
-        id: SITE_TOOL_JOYPAD.to_string(),
-        kind: ArtifactKind::Tool,
-        artifact_ref: "phoxal/tool-joypad@0.1.0".to_string(),
-        phoxal_config: serde_json::Value::Null,
-        startup_requirement: StartupRequirement::Optional,
-        runtime_failure: RuntimeFailurePolicy::KeepProjectDegraded,
-    };
-    let env = site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
-    assert!(
-        env.iter()
-            .any(|(key, value)| key == env::ROBOT_ROOT && value == "/tmp/robot"),
-        "joypad needs the compiled robot model: {env:?}"
-    );
-}
-
-#[test]
-fn profile_selected_project_tools_use_the_clockless_launch_path() {
-    let tool = SiteLaunch {
-        id: "tool-example".to_string(),
-        kind: ArtifactKind::Tool,
-        artifact_ref: "phoxal/tool-example@0.1.0".to_string(),
-        phoxal_config: serde_json::Value::Null,
-        startup_requirement: StartupRequirement::Optional,
-        runtime_failure: RuntimeFailurePolicy::KeepProjectDegraded,
-    };
-    let env = site_env(&tool, "dev", "rover-01", Path::new("/tmp/robot")).expect("site_env");
-    assert!(
-        !env.iter().any(|(key, _)| key == env::CLOCK),
-        "project tools must not receive a clock selection: {env:?}"
-    );
-}
-
 fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRecord {
     ParticipantLaunchRecord {
         artifact_id: id.to_string(),
@@ -152,7 +81,6 @@ fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRe
 fn plan_with_drivers(ids: &[&str]) -> LaunchPlan {
     LaunchPlan {
         mode: LaunchMode::Run,
-        site: Vec::new(),
         robots: vec![phoxal_cli_core::project::launch_plan::RobotLaunch {
             id: "robot".to_string(),
             namespace: "dev".to_string(),
@@ -180,7 +108,6 @@ fn driver_subset_is_strict() -> Result<()> {
             drivers: DriversMode::On,
             drivers_subset: vec!["imu".to_string()],
             suite_source: None,
-            overlays: Vec::new(),
             watch: false,
         },
         &plan,
@@ -196,7 +123,6 @@ fn driver_subset_is_strict() -> Result<()> {
             drivers: DriversMode::On,
             drivers_subset: vec!["missing".to_string()],
             suite_source: None,
-            overlays: Vec::new(),
             watch: false,
         },
         &plan,
@@ -214,7 +140,6 @@ fn drivers_off_degrades_every_driver() -> Result<()> {
             drivers: DriversMode::Off,
             drivers_subset: Vec::new(),
             suite_source: None,
-            overlays: Vec::new(),
             watch: false,
         },
         &plan,
@@ -247,7 +172,7 @@ fn serial_device_missing_is_loud() {
 /// 1 kind consolidation) - see `launch_kind_label`'s docs.
 #[test]
 fn launch_kind_label_matches_the_operator_facing_strings() {
-    assert_eq!(launch_kind_label(None), "site-tool");
+    assert_eq!(launch_kind_label(None), "robot-tool");
     assert_eq!(
         launch_kind_label(Some(&ParticipantExecution::OfficialArtifact {
             artifact_ref: "phoxal/service-drive@1.0.0".to_string(),

@@ -33,7 +33,7 @@ mod report;
 pub(crate) use report::{report_plan_only, simulation_managed_participant_ids, webots_world};
 mod stages;
 pub(crate) use stages::{
-    WEBOTS_SITE_ID, native_tool_labels_from_plan, prepare_substitution_notes, stages_for_simulate,
+    WEBOTS_APP_ID, native_tool_labels_from_plan, prepare_substitution_notes, stages_for_simulate,
     substitution_lines,
 };
 mod webots;

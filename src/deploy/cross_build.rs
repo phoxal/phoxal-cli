@@ -6,7 +6,7 @@ use anyhow::Result;
 #[cfg(test)]
 use anyhow::anyhow;
 use anyhow::bail;
-use phoxal_cli_core::project::tooling::cargo_binary_name;
+use phoxal_cli_core::project::tooling::{cargo_binary_name, cargo_package_name};
 #[cfg(test)]
 use serde_json::Value;
 use std::path::Path;
@@ -27,6 +27,7 @@ pub(crate) fn cross_build_source_binary(
         )
     })?;
     let binary_name = cargo_binary_name(&crate_dir, Some(preferred_name))?;
+    let package_name = cargo_package_name(&crate_dir)?;
     let target_dir = crate::host_paths::deploy_dir()?.join("target").join(target);
     ui.info(format!(
         "cross-building {preferred_name} for {target} with cargo zigbuild --release"
@@ -39,6 +40,8 @@ pub(crate) fn cross_build_source_binary(
         .arg(target)
         .arg("--target-dir")
         .arg(&target_dir)
+        .arg("-p")
+        .arg(&package_name)
         .arg("--bin")
         .arg(&binary_name)
         .current_dir(&crate_dir)
@@ -82,12 +85,15 @@ pub(crate) fn cross_build_source_binary(
         )
     })?;
     let binary_name = cargo_binary_name(&crate_dir, Some(preferred_name))?;
+    let package_name = cargo_package_name(&crate_dir)?;
     ui.info(format!(
         "test-building deploy participant {preferred_name} with cargo build --release"
     ));
     let status = deploy_command("cargo")
         .arg("build")
         .arg("--release")
+        .arg("-p")
+        .arg(&package_name)
         .arg("--bin")
         .arg(&binary_name)
         .current_dir(&crate_dir)

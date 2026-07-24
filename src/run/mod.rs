@@ -27,8 +27,7 @@ mod report;
 pub(crate) use report::{DriverPolicy, report_launch_commands};
 mod participants;
 pub(crate) use participants::{
-    DriverDecision, locate_tool_binary, prepare_robot_participants, prepare_site_tools,
-    spec_from_launch_record,
+    DriverDecision, locate_tool_binary, prepare_robot_participants, spec_from_launch_record,
 };
 mod environment;
 pub(crate) use environment::{

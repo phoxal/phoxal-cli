@@ -11,8 +11,7 @@
 //! - `check` - collect each participant's compiled-in contract metadata
 //!   (extracted straight from its built binary's linker section, never by
 //!   executing it - [`participant_metadata`]) and validate it with the shared
-//!   [`phoxal::check`] graph core; git component commits resolve live unless
-//!   pinned to a commit SHA in `robot.yaml`.
+//!   [`phoxal::check`] graph core; Cargo.lock resolves all project source.
 //! - `simulation run <world>` - resolve and print or run the host-native simulation plan.
 //! - `deploy <user@host>` - render the checked launch plan into a native systemd
 //!   payload, sync it to the robot, restart `phoxal.target`, and report health.
@@ -33,7 +32,6 @@ pub mod commands;
 pub(crate) mod component_driver;
 pub(crate) mod context;
 pub mod deploy;
-pub(crate) mod git_artifact;
 pub(crate) mod host_doctor;
 pub mod host_paths;
 pub(crate) mod native_artifacts;

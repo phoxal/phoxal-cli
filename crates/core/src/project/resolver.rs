@@ -1,15 +1,11 @@
 //! Robot-manifest loading and terminal-independent resolution records.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal::model::robot::RobotV0 as Robot;
-use serde_json::Value;
 
-use super::suite::{ArtifactKind, SuiteProfiles};
-use super::tooling::resolve_project_path;
+use super::suite::ArtifactKind;
 
 const PHOXAL_PROVIDER: &str = "phoxal";
 const ROBOT_FILE: &str = "robot.yaml";
@@ -36,20 +32,8 @@ pub fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolveOptions {
-    /// Resolve git component `tag` → `commit`. A `tag` that is already a full
-    /// commit SHA resolves with no network; a tag/branch ref is resolved live
-    /// via `git ls-remote`. Flows that need to locate/stage component driver
-    /// sources (`check`, `run --watch`, simulate, `deploy`) set this;
-    /// metadata-only/update flows leave it off so they stay offline for git refs.
-    pub resolve_source_commits: bool,
-    /// Resolve git-backed `component_assets` refs to commits. Most commands do
-    /// not read non-local asset bundles while rendering plans/payload metadata,
-    /// so they leave this off to avoid staging-time network access; live
-    /// simulation turns it on because Webots world generation needs the asset
-    /// files locally.
-    pub resolve_component_asset_commits: bool,
     /// Override the official service/driver target triple. Deploy probes the
     /// robot arch and resolves suite assets for that Linux triple instead of
     /// the host.
@@ -57,17 +41,6 @@ pub struct ResolveOptions {
     /// Override native tool asset target triple. Host-native run/sim use the
     /// host triple; deploy ships robot-native tools.
     pub tool_target_triple: Option<String>,
-}
-
-impl Default for ResolveOptions {
-    fn default() -> Self {
-        Self {
-            resolve_source_commits: true,
-            resolve_component_asset_commits: true,
-            official_target_triple: None,
-            tool_target_triple: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,83 +53,7 @@ pub struct ResolvedRobot {
     pub user_runtimes: Vec<ResolvedUserRuntime>,
     pub components: Vec<ResolvedComponent>,
     pub tools: Vec<ResolvedTool>,
-    /// Framework-owned launch policy for this exact immutable train.
-    pub suite_profiles: SuiteProfiles,
     pub path_overrides: Vec<ResolvedPathOverride>,
-}
-
-/// Selects the framework-owned suite profile used by an execution leg.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolProfile {
-    Native,
-    Webots,
-}
-
-/// The tool artifact names activated by one exact suite profile.
-///
-/// Metadata/check callers use this boundary for source, official, and tool
-/// records alike so inventory presence cannot accidentally activate a tool.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActiveProfileTools {
-    names: BTreeSet<String>,
-}
-
-impl ActiveProfileTools {
-    #[must_use]
-    pub fn contains(&self, name: &str) -> bool {
-        self.names.contains(name)
-    }
-
-    #[must_use]
-    pub fn includes_named(&self, is_tool: bool, name: &str) -> bool {
-        !is_tool || self.contains(name)
-    }
-}
-
-impl ResolvedRobot {
-    #[must_use]
-    pub fn active_profile_tools(&self, profile: ToolProfile) -> ActiveProfileTools {
-        let activations = match profile {
-            ToolProfile::Native => &self.suite_profiles.native,
-            ToolProfile::Webots => &self.suite_profiles.webots,
-        };
-        let names = activations
-            .iter()
-            .filter_map(|activation| {
-                self.tools
-                    .iter()
-                    .find(|tool| tool.package == activation.package)
-                    .map(|tool| tool.name.clone())
-            })
-            .collect();
-        ActiveProfileTools { names }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct RobotManifestExtras {
-    pub suite_source: Option<PathBuf>,
-    pub user_runtimes: BTreeMap<String, UserRuntimeManifestExtras>,
-}
-
-impl RobotManifestExtras {
-    #[must_use]
-    pub fn user_runtime_config(&self, runtime_name: &str) -> Option<&Value> {
-        self.user_runtimes
-            .get(runtime_name)
-            .and_then(|runtime| runtime.config.as_ref())
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct UserRuntimeManifestExtras {
-    pub config: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct LoadedRobot {
-    pub robot: Robot,
-    pub extras: RobotManifestExtras,
 }
 
 /// One resolved official platform artifact (a service or a simulator). The
@@ -278,13 +175,6 @@ impl ResolvedComponentPackage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedComponentSource {
-    Git {
-        git: String,
-        rev: String,
-        /// Subdirectory within the repository holding the component
-        /// definition. `None` means the repository root.
-        directory: Option<PathBuf>,
-    },
     Path {
         path: PathBuf,
     },
@@ -295,7 +185,7 @@ pub enum ResolvedComponentSource {
 
 /// A resolved native artifact (`tool-bus`, `tool-log`, `tool-joypad`, or
 /// `infrastructure-router`). `name` is the short,
-/// launch-safe kind-qualified id used for participant/site ids, systemd unit
+/// launch-safe kind-qualified id used for participant ids, systemd unit
 /// names and env var keys; `package` is the
 /// canonical provider-qualified identity (`phoxal/tool-bus`) used for
 /// suite lookups and native-artifact provisioning.
@@ -400,137 +290,11 @@ pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
 }
 
 pub fn load_robot(path: &Path) -> Result<Robot> {
-    // Delegate to the extras-aware loader so EVERY command tolerates the
-    // `services.<name>.config` keys as a CLI-side side channel: they are
-    // stripped before the typed parse and threaded through
-    // `RobotManifestExtras`. Commands that don't need the extras just discard
-    // them.
-    load_robot_with_extras(path).map(|loaded| loaded.robot)
-}
-
-pub fn load_robot_with_extras(path: &Path) -> Result<LoadedRobot> {
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("failed to read robot file {}", path.display()))?;
-    let mut yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents)
-        .with_context(|| format!("failed to parse robot file {}", path.display()))?;
-    ensure_no_base_path_pins(&yaml, path)?;
-    parse_robot_value_with_extras(&mut yaml, path)
-}
-
-pub fn load_robot_with_extras_and_overlays(
-    path: &Path,
-    overlays: &[String],
-) -> Result<LoadedRobot> {
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("failed to read robot file {}", path.display()))?;
-    let mut yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents)
-        .with_context(|| format!("failed to parse robot file {}", path.display()))?;
-    ensure_no_base_path_pins(&yaml, path)?;
-
-    for overlay in overlays {
-        validate_overlay_name(overlay)?;
-        let overlay_path = path.with_file_name(format!("robot.{overlay}.yaml"));
-        let overlay_contents = fs::read_to_string(&overlay_path)
-            .with_context(|| format!("failed to read overlay {}", overlay_path.display()))?;
-        let overlay_yaml = serde_yaml::from_str::<serde_yaml::Value>(&overlay_contents)
-            .with_context(|| format!("failed to parse overlay {}", overlay_path.display()))?;
-        merge_yaml_overlay(&mut yaml, overlay_yaml, &mut Vec::new());
-    }
-
-    parse_robot_value_with_extras(&mut yaml, path)
-}
-
-fn ensure_no_base_path_pins(yaml: &serde_yaml::Value, path: &Path) -> Result<()> {
-    let Some(pins) = yaml
-        .as_mapping()
-        .and_then(|root| root.get("artifacts"))
-        .and_then(serde_yaml::Value::as_mapping)
-        .and_then(|artifacts| artifacts.get("pins"))
-        .and_then(serde_yaml::Value::as_mapping)
-    else {
-        return Ok(());
-    };
-
-    // A path pin whose target stays INSIDE the project (a robot-local component
-    // checked into the robot repo, e.g. `./components/passive_caster`) is
-    // permanent, reproducible robot content and is allowed in the base manifest.
-    // Only a path that ESCAPES the project (absolute, lexically climbing out
-    // with `..`, or resolving outside through a symlink) is a dev override and
-    // must live in a `robot.<env>.yaml` overlay so production manifests stay
-    // suite/release based.
-    let project_root = path.parent().unwrap_or_else(|| Path::new("."));
-    let escaping_pins = pins
-        .iter()
-        .filter_map(|(key, value)| {
-            let path_key = serde_yaml::Value::String("path".to_string());
-            let pin_path = value
-                .as_mapping()
-                .and_then(|mapping| mapping.get(&path_key))
-                .and_then(serde_yaml::Value::as_str)?;
-            path_pin_escapes_project(Path::new(pin_path), project_root)
-                .then(|| key.as_str().unwrap_or("<non-string>").to_string())
-        })
-        .collect::<Vec<_>>();
-    if escaping_pins.is_empty() {
-        return Ok(());
-    }
-    bail!(
-        "{path}: artifacts.pins path overrides that point outside the project are dev-overlay only; move {} to robot.<env>.yaml and load it with --env <env> (in-project component paths are allowed in the base manifest)",
-        escaping_pins.join(", "),
-        path = path.display()
-    )
-}
-
-/// Whether a pin `path` resolves outside the project root. Reject obvious lexical
-/// escapes first, then compare canonical paths when the target already exists so
-/// symlinks cannot carry a base-manifest pin outside the project. A missing target
-/// falls back to the lexical result so an in-project path may be created later.
-fn path_pin_escapes_project(pin_path: &Path, project_root: &Path) -> bool {
-    if path_pin_lexically_escapes_project(pin_path) {
-        return true;
-    }
-
-    let Ok(canonical_root) = project_root.canonicalize() else {
-        return false;
-    };
-    let resolved = resolve_project_path(project_root, pin_path);
-    let Ok(canonical_target) = resolved.canonicalize() else {
-        return false;
-    };
-    !canonical_target.starts_with(canonical_root)
-}
-
-fn path_pin_lexically_escapes_project(pin_path: &Path) -> bool {
-    use std::path::Component;
-    if pin_path.is_absolute() {
-        return true;
-    }
-    let mut depth: i32 = 0;
-    for component in pin_path.components() {
-        match component {
-            Component::ParentDir => {
-                depth -= 1;
-                if depth < 0 {
-                    return true;
-                }
-            }
-            Component::Normal(_) => depth += 1,
-            Component::CurDir => {}
-            // A rooted/prefix component means absolute-like; treat as escaping.
-            Component::RootDir | Component::Prefix(_) => return true,
-        }
-    }
-    false
-}
-
-fn parse_robot_value_with_extras(yaml: &mut serde_yaml::Value, path: &Path) -> Result<LoadedRobot> {
-    let (extras, _) = take_manifest_extras(yaml, path)?;
-    let sanitized = serde_yaml::to_string(&yaml)
-        .with_context(|| format!("failed to prepare {}", path.display()))?;
-    let robot = Robot::read_from_string(&sanitized)?;
+    let robot = phoxal::model::robot::Robot::read_from_path(path)
+        .with_context(|| format!("failed to read robot file {}", path.display()))?
+        .into_v0();
     validate_launch_participant_ids(&robot, path)?;
-
-    Ok(LoadedRobot { robot, extras })
+    Ok(robot)
 }
 
 fn validate_launch_participant_ids(robot: &Robot, path: &Path) -> Result<()> {
@@ -570,145 +334,12 @@ pub fn is_launch_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
-fn validate_overlay_name(name: &str) -> Result<()> {
-    if name.is_empty()
-        || name.contains('/')
-        || name.contains('\\')
-        || name == "."
-        || name == ".."
-        || name.chars().any(char::is_whitespace)
-    {
-        bail!(
-            "overlay name '{name}' is invalid; use a simple name such as `prod` for robot.prod.yaml"
-        );
-    }
-    Ok(())
-}
-
-fn merge_yaml_overlay(
-    base: &mut serde_yaml::Value,
-    overlay: serde_yaml::Value,
-    path: &mut Vec<String>,
-) {
-    if is_replace_whole_user_service_config(path) {
-        *base = overlay;
-        return;
-    }
-
-    match (base, overlay) {
-        (serde_yaml::Value::Mapping(base_map), serde_yaml::Value::Mapping(overlay_map)) => {
-            for (key, value) in overlay_map {
-                let pushed_path = if let Some(segment) = key.as_str().map(str::to_string) {
-                    path.push(segment);
-                    true
-                } else {
-                    false
-                };
-                if let Some(existing) = base_map.get_mut(&key) {
-                    merge_yaml_overlay(existing, value, path);
-                } else {
-                    base_map.insert(key, value);
-                }
-                if pushed_path {
-                    path.pop();
-                }
-            }
-        }
-        (base, overlay) => *base = overlay,
-    }
-}
-
-fn is_replace_whole_user_service_config(path: &[String]) -> bool {
-    path.len() == 3 && path[0] == "services" && path[2] == "config"
-}
-
-fn take_manifest_extras(
-    yaml: &mut serde_yaml::Value,
-    robot_path: &Path,
-) -> Result<(RobotManifestExtras, bool)> {
-    let mut extras = RobotManifestExtras::default();
-    let mut stripped_extras = false;
-
-    if let Some(root) = yaml.as_mapping_mut()
-        && let Some(artifacts) = root.get_mut("artifacts")
-        && let Some(artifacts) = artifacts.as_mapping_mut()
-        && let Some(suite) = artifacts.remove("suite")
-    {
-        extras.suite_source = Some(parse_suite_source_extra(&suite, robot_path)?);
-        stripped_extras = true;
-    }
-
-    let Some(services) = yaml
-        .as_mapping_mut()
-        .and_then(|mapping| mapping.get_mut("services"))
-        .and_then(serde_yaml::Value::as_mapping_mut)
-    else {
-        return Ok((extras, stripped_extras));
-    };
-
-    for (name, service) in services {
-        let Some(name) = name.as_str() else {
-            continue;
-        };
-        let Some(service) = service.as_mapping_mut() else {
-            continue;
-        };
-        let config = service.remove("config");
-        stripped_extras |= config.is_some();
-        let config = config
-            .map(|config| {
-                serde_json::to_value(config).with_context(|| {
-                    format!("services.{name}.config must be representable as JSON")
-                })
-            })
-            .transpose()?;
-
-        if config.is_some() {
-            extras
-                .user_runtimes
-                .insert(name.to_string(), UserRuntimeManifestExtras { config });
-        }
-    }
-
-    Ok((extras, stripped_extras))
-}
-
-fn parse_suite_source_extra(value: &serde_yaml::Value, robot_path: &Path) -> Result<PathBuf> {
-    let Some(source) = value.as_str() else {
-        bail!(
-            "artifacts.suite in {} must be a local path string",
-            robot_path.display()
-        );
-    };
-    if source.trim().is_empty() {
-        bail!(
-            "artifacts.suite in {} must not be empty",
-            robot_path.display()
-        );
-    }
-    Ok(PathBuf::from(source))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
 
     #[test]
-    fn active_profile_tools_filter_only_tool_records() {
-        let active = ActiveProfileTools {
-            names: ["bus".to_string()].into_iter().collect(),
-        };
-        assert!(active.contains("bus"));
-        assert!(!active.contains("log"));
-        assert!(active.includes_named(true, "bus"));
-        assert!(!active.includes_named(true, "log"));
-        assert!(active.includes_named(false, "any-service"));
-    }
-
-    #[test]
-    fn tool_emit_apis_id_strips_provider_and_site_tool_prefixes() {
+    fn tool_emit_apis_id_strips_provider_and_tool_prefixes() {
         assert_eq!(tool_emit_apis_id("phoxal/tool-router"), "router");
         assert_eq!(tool_emit_apis_id("tool-router"), "router");
         assert_eq!(tool_emit_apis_id("router"), "router");
@@ -738,68 +369,5 @@ mod tests {
             official_binary_name(ArtifactKind::Simulator, "webots-supervisor"),
             "phoxal-simulator-webots-supervisor"
         );
-    }
-
-    #[test]
-    fn in_project_path_pins_allowed_in_base_but_escaping_ones_rejected() {
-        let base = |pin: &str| {
-            serde_yaml::from_str::<serde_yaml::Value>(&format!(
-                "artifacts:\n  pins:\n    phoxal/component-local:\n      path: {pin}\n"
-            ))
-            .expect("test manifest should parse")
-        };
-        let manifest = Path::new("/proj/robot.yaml");
-        for allowed in ["./components/passive_caster", "components/x", "a/b/../c"] {
-            assert!(ensure_no_base_path_pins(&base(allowed), manifest).is_ok());
-        }
-        for escaping in ["../framework/service/drive", "/abs/path", "../../x"] {
-            assert!(ensure_no_base_path_pins(&base(escaping), manifest).is_err());
-        }
-    }
-
-    #[test]
-    fn path_pin_escape_detection_is_lexical() {
-        let project_root = Path::new("/proj");
-        assert!(!path_pin_escapes_project(
-            Path::new("./components/x"),
-            project_root
-        ));
-        assert!(!path_pin_escapes_project(
-            Path::new("a/b/../c"),
-            project_root
-        ));
-        assert!(path_pin_escapes_project(Path::new("../x"), project_root));
-        assert!(path_pin_escapes_project(
-            Path::new("a/../../x"),
-            project_root
-        ));
-        assert!(path_pin_escapes_project(Path::new("/abs"), project_root));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn base_path_pin_rejects_symlink_escape_and_allows_real_project_dir() -> anyhow::Result<()> {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir()?;
-        let project_root = temp.path().join("robot");
-        let components = project_root.join("components");
-        let local = components.join("local");
-        let outside = temp.path().join("outside");
-        std::fs::create_dir_all(&local)?;
-        std::fs::create_dir_all(&outside)?;
-        symlink(&outside, components.join("escaped"))?;
-        let manifest = project_root.join("robot.yaml");
-        let base = |pin: &str| {
-            serde_yaml::from_str::<serde_yaml::Value>(&format!(
-                "artifacts:\n  pins:\n    phoxal/component-local:\n      path: {pin}\n"
-            ))
-            .expect("test manifest should parse")
-        };
-        assert!(ensure_no_base_path_pins(&base("components/local"), &manifest).is_ok());
-        let error = ensure_no_base_path_pins(&base("components/escaped"), &manifest)
-            .expect_err("symlink outside the project must be rejected");
-        assert!(error.to_string().contains("dev-overlay only"), "{error:#}");
-        Ok(())
     }
 }

@@ -24,7 +24,7 @@ use crate::tui::state::LogSourceFilter;
 use crate::tui::state::{AppState, BusSort, CaseInsensitiveNeedle, NavigationLevel, Page};
 use crate::tui::view_model::{RuntimeGroup, SessionViewModel};
 #[cfg(test)]
-use phoxal_cli_core::project::launch_plan::SITE_TOOL_JOYPAD;
+use phoxal_cli_core::project::launch_plan::ROBOT_TOOL_JOYPAD;
 #[cfg(test)]
 use phoxal_cli_core::session::JoypadDevicesSample;
 use phoxal_cli_core::session::SessionMode;

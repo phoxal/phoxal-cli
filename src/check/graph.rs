@@ -11,7 +11,6 @@ use phoxal::check as graph_check;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
 use phoxal_cli_core::check::source::ToolParticipant;
-use phoxal_cli_core::project::resolver::RobotManifestExtras;
 use phoxal_cli_core::project::resolver::tool_emit_apis_id;
 use phoxal_cli_core::project::suite::ArtifactKind;
 
@@ -23,15 +22,12 @@ pub fn run_check(
     fetch_tool: impl FnMut(&ToolParticipant) -> Result<RawEmitApis>,
     build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
 ) -> Result<CheckOutcome> {
-    let manifest_extras = RobotManifestExtras::default();
     let platform_artifact_refs = service_platform_artifact_refs(resolved_platform_image_refs);
     run_check_with_context(
         &platform_artifact_refs,
         tool_participants,
         source_participants,
-        CheckGraphContext {
-            manifest_extras: &manifest_extras,
-        },
+        CheckGraphContext { robot: None },
         fetch,
         fetch_tool,
         build,
@@ -130,7 +126,7 @@ pub fn run_check_with_deployed_user_service_images(
         } else {
             // A suite component driver is fetched once but launched once
             // per instance that declares it - key each instance's graph
-            // membership by its own id, exactly like a path/git-overridden
+            // membership by its own id, exactly like a workspace-built
             // driver source participant does (see
             // `SourceParticipantKind::ComponentDriver` below).
             for instance in &artifact.instances {
@@ -163,7 +159,7 @@ pub fn run_check_with_deployed_user_service_images(
         if let Some(problem) = validate_user_service_config(
             &service.name,
             participant.config_schema.as_ref(),
-            context.manifest_extras,
+            context.robot,
         ) {
             config_problems.push(problem);
         }
@@ -223,7 +219,7 @@ pub fn run_check_with_deployed_user_service_images(
             && let Some(problem) = validate_user_service_config(
                 &participant.name,
                 participant_apis.config_schema.as_ref(),
-                context.manifest_extras,
+                context.robot,
             )
         {
             config_problems.push(problem);

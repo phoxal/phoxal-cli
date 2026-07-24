@@ -1,26 +1,21 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::shell;
 use anyhow::{Context, Result, anyhow, bail};
-use phoxal::model::robot::{
-    RobotV0 as Robot,
-    v0::{ArtifactPin, UserService},
-};
+use phoxal::model::robot::RobotV0 as Robot;
 pub use phoxal_cli_core::project::suite::host_target_triple;
 use phoxal_cli_core::project::suite::{
     ArtifactKind, Kind, Suite, artifacts_of_kind, select_artifact,
 };
-use phoxal_cli_core::project::tooling::{hash_tree, resolve_project_path};
+use phoxal_cli_core::project::tooling::hash_tree;
 
-/// The provider every official Phoxal package uses in its provider-qualified
-/// `artifacts.pins` / suite `package` identity (`phoxal/service-drive`, ...).
+/// The provider every official Phoxal package uses in suite identities.
 const PHOXAL_PROVIDER: &str = "phoxal";
 
 use phoxal_cli_core::project::resolver::{
     ComponentDriverUnavailable, ResolveOptions, ResolvedComponent, ResolvedComponentPackage,
     ResolvedComponentSource, ResolvedPathOverride, ResolvedPathOverrideKind,
     ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, ResolvedUserRuntime,
-    official_binary_name, tool_emit_apis_id,
+    official_binary_name,
 };
 
 pub fn resolve(
@@ -33,6 +28,13 @@ pub fn resolve(
         "the locked framework train suite is required for resolution; restore network access or pass --suite <path> to the immutable suite.json",
     )?;
     let train = suite.version.clone();
+    let project = phoxal_cli_core::project::train::resolve_locked_project(project_root)?;
+    anyhow::ensure!(
+        project.train.version == train,
+        "Cargo metadata selected framework train {}, but suite inventory is {}",
+        project.train.version,
+        train
+    );
     let target = options
         .official_target_triple
         .clone()
@@ -82,29 +84,16 @@ pub fn resolve(
         prefer_vendored,
     )?;
 
-    let user_runtimes = robot
-        .services
-        .iter()
-        .map(|(name, service)| resolve_user_runtime(project_root, name, service))
-        .collect::<Result<Vec<_>>>()?;
-
-    // Git ref → commit SHA resolution: when `resolve_source_commits` is set, a
-    // `rev` that is already a full commit SHA resolves with no network, while a
-    // tag/branch ref is resolved live via `git ls-remote`. Flows that never read
-    // Metadata-only/update flows leave component commit resolution off.
-    // Component assets have a separate gate because deploy/check/run do not
-    // read non-local asset bundles during planning/staging; live simulate does.
     let mut components = resolve_components(&ComponentResolveContext {
         robot,
         suite: Some(suite),
         train: &train,
         target: &target,
-        resolve_source_commits: options.resolve_source_commits,
-        resolve_component_asset_commits: options.resolve_component_asset_commits,
+        workspace_runtimes: &project.runtimes,
         prefer_vendored,
     })?;
     let mut tools = resolve_tools(robot, Some(suite), &train, &tool_target, prefer_vendored)?;
-    tools.extend(resolve_native_site_artifacts(
+    tools.extend(resolve_native_artifacts(
         robot,
         Some(suite),
         &train,
@@ -113,12 +102,10 @@ pub fn resolve(
         Kind::Infrastructure,
         ArtifactKind::Infrastructure,
     )?);
-    let path_overrides = apply_path_pins(
-        &PathPinContext {
-            robot,
-            project_root,
-            resolve_source_commits: options.resolve_source_commits,
-        },
+    let (user_runtimes, path_overrides) = apply_workspace_runtimes(
+        robot,
+        project_root,
+        &project.runtimes,
         &mut platform_runtimes,
         &mut simulators,
         &mut components,
@@ -134,223 +121,169 @@ pub fn resolve(
         user_runtimes,
         components,
         tools,
-        suite_profiles: suite.profiles.clone(),
         path_overrides,
     })
 }
 
-/// Apply every `artifacts.pins` `Path`/`Git` override to the resolved graph.
-/// `Path` pins resolve directly against `project_root`. `Git` pins resolve
-/// through the general [`crate::git_artifact`] resolver - the SAME one
-/// components use - EXCEPT for a key that belongs to a component: components
-/// resolve their own git pins earlier, inside [`resolve_component_package`],
-/// and stage them lazily at point-of-use
-/// (`component_driver::component_driver_crate_dir`/`component_assets_dir`),
-/// so this function skips those keys rather than eagerly cloning them a
-/// second time up front. For a non-component key, `resolve_source_commits`
-/// gates the same way it does for components: off leaves the pin unapplied
-/// rather than touching the network, on resolves the ref to
-/// a commit and clones/reuses the shallow checkout.
-/// The fixed (non-slice) inputs [`apply_path_pins`] needs, bundled so adding
-/// the output mode did not push it over clippy's argument-count lint - same
-/// pattern as [`ComponentResolveContext`].
-struct PathPinContext<'a> {
-    robot: &'a Robot,
-    project_root: &'a Path,
-    resolve_source_commits: bool,
-}
-
-fn apply_path_pins(
-    context: &PathPinContext<'_>,
+fn apply_workspace_runtimes(
+    robot: &Robot,
+    project_root: &Path,
+    runtimes: &[phoxal_cli_core::project::train::WorkspaceRuntime],
     platform_runtimes: &mut [ResolvedPlatformRuntime],
-    simulators: &mut [ResolvedPlatformRuntime],
+    _simulators: &mut [ResolvedPlatformRuntime],
     components: &mut [ResolvedComponent],
-    tools: &mut [ResolvedTool],
-) -> Result<Vec<ResolvedPathOverride>> {
+    tools: &mut Vec<ResolvedTool>,
+) -> Result<(Vec<ResolvedUserRuntime>, Vec<ResolvedPathOverride>)> {
+    use phoxal_cli_core::project::train::WorkspaceRuntimeKind;
+
+    let mut user_runtimes = Vec::new();
     let mut overrides = Vec::new();
-    for (key, pin) in &context.robot.artifacts.pins {
-        let path = match pin {
-            ArtifactPin::Path(pin) => resolve_project_path(context.project_root, &pin.path),
-            ArtifactPin::Git(pin) => {
-                if is_component_package_key(key, components) {
+    for runtime in runtimes {
+        let logical_name = runtime
+            .crate_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("runtime crate directory must have a UTF-8 name")?
+            .to_string();
+        let relative = runtime
+            .crate_dir
+            .strip_prefix(project_root)
+            .unwrap_or(&runtime.crate_dir)
+            .to_path_buf();
+        match runtime.kind {
+            WorkspaceRuntimeKind::Service => {
+                let official_package = format!("phoxal/service-{logical_name}");
+                if let Some(official) = platform_runtimes
+                    .iter_mut()
+                    .find(|entry| entry.package == official_package)
+                {
+                    apply_platform_runtime_path_override(official, &runtime.crate_dir);
+                    overrides.push(ResolvedPathOverride {
+                        key: official_package,
+                        kind: ResolvedPathOverrideKind::Service,
+                        artifact_name: logical_name,
+                        path: runtime.crate_dir.clone(),
+                    });
+                } else {
+                    user_runtimes.push(ResolvedUserRuntime {
+                        name: logical_name,
+                        path: relative,
+                        source_hash: hash_tree(&runtime.crate_dir)?,
+                    });
+                }
+            }
+            WorkspaceRuntimeKind::Tool => {
+                let official_package = format!("phoxal/tool-{logical_name}");
+                if let Some(official) = tools
+                    .iter_mut()
+                    .find(|entry| entry.package == official_package)
+                {
+                    official.path_override = Some(runtime.crate_dir.clone());
+                    official.asset = format!("path:{}", runtime.crate_dir.display());
+                    overrides.push(ResolvedPathOverride {
+                        key: official_package,
+                        kind: ResolvedPathOverrideKind::Tool,
+                        artifact_name: logical_name,
+                        path: runtime.crate_dir.clone(),
+                    });
+                } else {
+                    tools.push(ResolvedTool {
+                        kind: ArtifactKind::Tool,
+                        name: format!("tool-{logical_name}"),
+                        package: format!("user/tool-{logical_name}"),
+                        requested: "source".to_string(),
+                        resolved: "source".to_string(),
+                        repo: "workspace".to_string(),
+                        asset: format!("path:{}", runtime.crate_dir.display()),
+                        binary_name: runtime.binary_names[0].clone(),
+                        sha256: hash_tree(&runtime.crate_dir)?,
+                        url: None,
+                        size: None,
+                        published: true,
+                        path_override: Some(runtime.crate_dir.clone()),
+                        train: String::new(),
+                        target: String::new(),
+                    });
+                }
+            }
+            WorkspaceRuntimeKind::Component => {
+                let matching = components
+                    .iter_mut()
+                    .filter(|component| component.source_name == logical_name)
+                    .collect::<Vec<_>>();
+                if matching.is_empty() {
                     continue;
                 }
-                let Some(path) =
-                    resolve_git_artifact_pin_path(pin, context.resolve_source_commits)?
-                else {
-                    continue;
-                };
-                path
+                for component in matching {
+                    let assets_dir = runtime
+                        .component_assets
+                        .as_ref()
+                        .context("component workspace runtime has no component assets")?;
+                    component.assets = Some(ResolvedComponentPackage {
+                        package: format!("workspace/component-{logical_name}"),
+                        kind: ArtifactKind::ComponentAssets,
+                        source: ResolvedComponentSource::Path {
+                            path: assets_dir.clone(),
+                        },
+                        path_override: Some(assets_dir.clone()),
+                        suite_runtime: None,
+                    });
+                    if runtime.binary_names.is_empty() {
+                        anyhow::ensure!(
+                            !component.has_driver,
+                            "robot component instance {} declares a driver, but components/{logical_name} is lib-only",
+                            component.instance
+                        );
+                        component.driver = None;
+                    } else {
+                        anyhow::ensure!(
+                            component.has_driver,
+                            "components/{logical_name} has a bin target, but robot component instance {} has no driver connection",
+                            component.instance
+                        );
+                        component.driver = Some(ResolvedComponentPackage {
+                            package: format!("workspace/component-{logical_name}"),
+                            kind: ArtifactKind::ComponentDriver,
+                            source: ResolvedComponentSource::Path {
+                                path: runtime.crate_dir.clone(),
+                            },
+                            path_override: Some(runtime.crate_dir.clone()),
+                            suite_runtime: None,
+                        });
+                    }
+                }
             }
-        };
-        if apply_service_path_pin(key, &path, platform_runtimes, &mut overrides) {
-            continue;
         }
-        if apply_component_path_pin(key, &path, components, &mut overrides) {
-            continue;
-        }
-        if apply_tool_path_pin(key, &path, tools, &mut overrides) {
-            continue;
-        }
-        if apply_simulator_path_pin(key, &path, simulators, &mut overrides) {
-            continue;
-        }
-        bail!(
-            "{}",
-            unknown_path_pin_message(key, platform_runtimes, simulators, components, tools)
-        );
     }
+    let discovered_services = user_runtimes
+        .iter()
+        .map(|runtime| runtime.name.as_str())
+        .chain(
+            overrides
+                .iter()
+                .filter(|override_| override_.kind == ResolvedPathOverrideKind::Service)
+                .map(|override_| override_.artifact_name.as_str()),
+        )
+        .collect::<std::collections::BTreeSet<_>>();
+    let missing = robot
+        .services
+        .keys()
+        .filter(|name| !discovered_services.contains(name.as_str()))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "robot.yaml service configuration has no matching services/ workspace crate: {}",
+        missing
+            .into_iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     overrides.sort_by(|left, right| left.key.cmp(&right.key));
-    Ok(overrides)
+    Ok((user_runtimes, overrides))
 }
 
-fn is_component_package_key(key: &str, components: &[ResolvedComponent]) -> bool {
-    components.iter().any(|component| {
-        component
-            .assets
-            .as_ref()
-            .is_some_and(|assets| assets.package == key)
-            || component
-                .driver
-                .as_ref()
-                .is_some_and(|driver| driver.package == key)
-    })
-}
-
-/// Resolve a general (non-component) `Git` artifacts.pin to a local checkout
-/// directory: resolve `rev` to a commit (network-gated by
-/// `resolve_source_commits`, exactly like [`resolve_component_commit`]), then
-/// shallow-clone/reuse it via [`crate::git_artifact::ensure_git_artifact`].
-/// `None` when `resolve_source_commits` is off - the pin is left unapplied
-/// rather than touching the network (mirrors how an offline component git
-/// pin resolves with an empty commit instead of cloning).
-fn resolve_git_artifact_pin_path(
-    pin: &phoxal::model::robot::v0::ArtifactGitPin,
-    resolve_source_commits: bool,
-) -> Result<Option<PathBuf>> {
-    if !resolve_source_commits {
-        return Ok(None);
-    }
-    let commit = resolve_component_commit(&pin.git, &pin.rev)?;
-    let repo_dir = crate::git_artifact::ensure_git_artifact(&pin.git, &commit)?;
-    Ok(Some(crate::git_artifact::subdir(
-        repo_dir,
-        pin.directory.as_deref(),
-    )?))
-}
-
-fn apply_service_path_pin(
-    key: &str,
-    path: &Path,
-    platform_runtimes: &mut [ResolvedPlatformRuntime],
-    overrides: &mut Vec<ResolvedPathOverride>,
-) -> bool {
-    let Some(runtime) = platform_runtimes
-        .iter_mut()
-        .find(|runtime| runtime.kind == ArtifactKind::Service && runtime.package == key)
-    else {
-        return false;
-    };
-    apply_platform_runtime_path_override(runtime, path);
-    overrides.push(ResolvedPathOverride {
-        key: key.to_string(),
-        kind: ResolvedPathOverrideKind::Service,
-        artifact_name: runtime.name.clone(),
-        path: path.to_path_buf(),
-    });
-    true
-}
-
-fn apply_component_path_pin(
-    key: &str,
-    path: &Path,
-    components: &mut [ResolvedComponent],
-    overrides: &mut Vec<ResolvedPathOverride>,
-) -> bool {
-    let mut used = false;
-    for component in components.iter_mut() {
-        if let Some(assets) = component.assets.as_mut()
-            && assets.package == key
-        {
-            assets.path_override = Some(path.to_path_buf());
-            used = true;
-        }
-        if let Some(driver) = component.driver.as_mut()
-            && driver.package == key
-        {
-            driver.path_override = Some(path.to_path_buf());
-            used = true;
-        }
-    }
-    if used {
-        let kind = if key.ends_with("-driver") {
-            ResolvedPathOverrideKind::ComponentDriver
-        } else {
-            ResolvedPathOverrideKind::ComponentAssets
-        };
-        overrides.push(ResolvedPathOverride {
-            key: key.to_string(),
-            kind,
-            artifact_name: key.to_string(),
-            path: path.to_path_buf(),
-        });
-    }
-    used
-}
-
-fn apply_tool_path_pin(
-    key: &str,
-    path: &Path,
-    tools: &mut [ResolvedTool],
-    overrides: &mut Vec<ResolvedPathOverride>,
-) -> bool {
-    let Some(tool) = tools.iter_mut().find(|tool| tool.package == key) else {
-        return false;
-    };
-    tool.path_override = Some(path.to_path_buf());
-    tool.asset = format!("path:{}", path.display());
-    tool.sha256 = hash_tree(path).unwrap_or_default();
-    tool.url = None;
-    tool.size = None;
-    tool.published = true;
-    overrides.push(ResolvedPathOverride {
-        key: key.to_string(),
-        kind: if tool.kind == ArtifactKind::Infrastructure {
-            ResolvedPathOverrideKind::Infrastructure
-        } else {
-            ResolvedPathOverrideKind::Tool
-        },
-        artifact_name: tool_emit_apis_id(&tool.name).to_string(),
-        path: path.to_path_buf(),
-    });
-    true
-}
-
-fn apply_simulator_path_pin(
-    key: &str,
-    path: &Path,
-    simulators: &mut [ResolvedPlatformRuntime],
-    overrides: &mut Vec<ResolvedPathOverride>,
-) -> bool {
-    let Some(runtime) = simulators
-        .iter_mut()
-        .find(|runtime| runtime.kind == ArtifactKind::Simulator && runtime.package == key)
-    else {
-        return false;
-    };
-    apply_platform_runtime_path_override(runtime, path);
-    overrides.push(ResolvedPathOverride {
-        key: key.to_string(),
-        kind: ResolvedPathOverrideKind::Simulator,
-        artifact_name: runtime.name.clone(),
-        path: path.to_path_buf(),
-    });
-    true
-}
-
-/// Once a path override replaces a suite-resolved runtime, its suite
-/// metadata is moot: the participant's contracts/config come from building
-/// its source instead (`crate::check::source_participants_from_resolved`).
+/// Replace an official suite runtime with a Cargo workspace source package.
 fn apply_platform_runtime_path_override(runtime: &mut ResolvedPlatformRuntime, path: &Path) {
     runtime.path_override = Some(path.to_path_buf());
     runtime.artifact_ref = format!("path:{}", path.display());
@@ -359,66 +292,6 @@ fn apply_platform_runtime_path_override(runtime: &mut ResolvedPlatformRuntime, p
     runtime.size = None;
     runtime.published = true;
     runtime.published_triples = Vec::new();
-}
-
-fn unknown_path_pin_message(
-    key: &str,
-    platform_runtimes: &[ResolvedPlatformRuntime],
-    simulators: &[ResolvedPlatformRuntime],
-    components: &[ResolvedComponent],
-    tools: &[ResolvedTool],
-) -> String {
-    let used = used_path_pin_keys(platform_runtimes, simulators, components, tools);
-    let available = if used.is_empty() {
-        "<none>".to_string()
-    } else {
-        used.join(", ")
-    };
-    if is_provider_qualified_key(key) {
-        format!(
-            "unused artifact path pin '{key}': no package with that id is used by the resolved graph; available path-pin ids: {available}"
-        )
-    } else {
-        format!(
-            "unknown artifact path pin '{key}': pins must be provider-qualified package ids ('{PHOXAL_PROVIDER}/<name>'); available path-pin ids: {available}"
-        )
-    }
-}
-
-fn is_provider_qualified_key(key: &str) -> bool {
-    phoxal::model::robot::v0::is_provider_qualified_pin_key(key)
-}
-
-fn used_path_pin_keys(
-    platform_runtimes: &[ResolvedPlatformRuntime],
-    simulators: &[ResolvedPlatformRuntime],
-    components: &[ResolvedComponent],
-    tools: &[ResolvedTool],
-) -> Vec<String> {
-    let mut keys = Vec::new();
-    keys.extend(
-        platform_runtimes
-            .iter()
-            .filter(|runtime| runtime.kind == ArtifactKind::Service)
-            .map(|runtime| runtime.package.clone()),
-    );
-    keys.extend(
-        components
-            .iter()
-            .filter_map(|component| component.assets.as_ref())
-            .map(|assets| assets.package.clone()),
-    );
-    keys.extend(
-        components
-            .iter()
-            .filter_map(|component| component.driver.as_ref())
-            .map(|driver| driver.package.clone()),
-    );
-    keys.extend(tools.iter().map(|tool| tool.package.clone()));
-    keys.extend(simulators.iter().map(|simulator| simulator.package.clone()));
-    keys.sort();
-    keys.dedup();
-    keys
 }
 
 fn resolve_suite_entries(
@@ -506,7 +379,7 @@ struct ExpectedArtifact<'a> {
 }
 
 fn resolved_runtime_from_expected_package(
-    robot: &Robot,
+    _robot: &Robot,
     suite: &Suite,
     expected: ExpectedArtifact<'_>,
 ) -> Result<ResolvedPlatformRuntime> {
@@ -519,30 +392,7 @@ fn resolved_runtime_from_expected_package(
         assets,
         prefer_vendored,
     } = expected;
-    if matches!(
-        robot.artifacts.pins.get(package),
-        Some(ArtifactPin::Path(_) | ArtifactPin::Git(_))
-    ) {
-        return Ok(ResolvedPlatformRuntime {
-            name: name.to_string(),
-            package: package.to_string(),
-            kind,
-            version: "source".to_string(),
-            artifact_ref: format!("source:{package}"),
-            sha256: None,
-            url: None,
-            size: None,
-            published: true,
-            published_triples: Vec::new(),
-            path_override: None,
-            train: train.to_string(),
-            target: target.map(str::to_string),
-        });
-    }
-    if prefer_vendored
-        && !robot.artifacts.pins.contains_key(package)
-        && let Ok(runtime) = vendored_runtime(name, package, kind, train, target)
-    {
+    if prefer_vendored && let Ok(runtime) = vendored_runtime(name, package, kind, train, target) {
         return Ok(runtime);
     }
     let entry = if assets {
@@ -598,65 +448,8 @@ fn resolved_runtime_from_expected_package(
     })
 }
 
-/// Resolve a git `artifacts.pins` ref (component or general) to a concrete
-/// commit SHA.
-///
-/// A ref that is already a full 40-character commit SHA is an explicit pin and
-/// is returned as-is with no network access. Any other ref (a tag or branch
-/// name) is resolved live via `git ls-remote`; if the network is unavailable the
-/// failure is reported with an actionable fix.
-fn resolve_component_commit(url: &str, git_ref: &str) -> Result<String> {
-    if is_full_commit_sha(git_ref) {
-        return Ok(git_ref.to_string());
-    }
-    resolve_git_ref(url, git_ref).with_context(|| {
-        format!(
-            "could not resolve git ref '{git_ref}' from {url} without network access. \
-             Pin artifacts.pins.<package>.rev to an explicit commit SHA in robot.yaml, \
-             or run with network access so `git ls-remote` can resolve the ref."
-        )
-    })
-}
-
-pub(crate) fn is_full_commit_sha(value: &str) -> bool {
-    value.len() == 40 && value.chars().all(|byte| byte.is_ascii_hexdigit())
-}
-
-pub fn resolve_git_ref(url: &str, git_ref: &str) -> Result<String> {
-    let progress = crate::progress::status(format!("resolving git ref {git_ref} from {url}"));
-    let result = resolve_git_ref_inner(url, git_ref);
-    match &result {
-        Ok(_) => {}
-        Err(error) => progress.abandon_with_message(format!(
-            "failed to resolve git ref {git_ref} from {url}: {error:#}"
-        )),
-    }
-    result
-}
-
-fn resolve_git_ref_inner(url: &str, git_ref: &str) -> Result<String> {
-    let candidates = [
-        format!("refs/tags/{git_ref}^{{}}"),
-        format!("refs/tags/{git_ref}"),
-        format!("refs/heads/{git_ref}"),
-        git_ref.to_string(),
-    ];
-    for candidate in candidates {
-        let output = shell::run_stdout("git", ["ls-remote", url, candidate.as_str()], None)
-            .with_context(|| format!("failed to resolve git ref {git_ref} from {url}"))?;
-        if let Some(commit) = output
-            .split_whitespace()
-            .next()
-            .filter(|value| !value.is_empty())
-        {
-            return Ok(commit.to_string());
-        }
-    }
-    Err(anyhow!("git ref {git_ref} does not exist in {url}"))
-}
-
 /// Resolve a user-supplied `--target` selector to the full suite target
-/// triple official artifacts are suiteed under. Accepts the short arch aliases
+/// triple official artifacts are published under. Accepts the short arch aliases
 /// (`aarch64`/`arm64`, `x86_64`/`amd64`) or a full triple passed through as-is.
 /// Official artifacts publish gnu Linux assets, so a bare arch maps to the gnu
 /// triple; deploy owns the separate musl cross-build triple.
@@ -671,39 +464,10 @@ pub fn resolve_target_triple(selector: &str) -> Result<String> {
     })
 }
 
-fn resolve_user_runtime(
-    project_root: &Path,
-    name: &str,
-    service: &UserService,
-) -> Result<ResolvedUserRuntime> {
-    let runtime_dir = resolve_project_path(project_root, &service.path);
-    if !runtime_dir.is_dir() {
-        bail!(
-            "user service '{name}' source dir {} does not exist; user services must have an on-disk source directory to hash/build",
-            runtime_dir.display()
-        );
-    }
-    let source_hash = hash_tree(&runtime_dir).with_context(|| {
-        format!(
-            "failed to hash user service '{name}' source tree at {}",
-            runtime_dir.display()
-        )
-    })?;
-    Ok(ResolvedUserRuntime {
-        name: name.to_string(),
-        path: service.path.clone(),
-        source_hash,
-    })
-}
-
 /// Resolve every `robot.components.<instance>` entry from the flattened
 /// `phoxal/component-<id>` artifact. Its assets are used for every instance;
 /// its target blob is also used when the instance declares a `driver` block.
 ///
-/// Forks may replace either package slot via `artifacts.pins`; a pin with a
-/// `Git`/`Path` form resolves that package from the fork instead of the
-/// suite. `resolve_source_commits` gates live `git ls-remote` the same way
-/// it always has: metadata-only flows leave it off and skip this entirely.
 /// Shared resolution context for [`resolve_component_package`]: the pieces
 /// every component package slot (assets or driver) needs, bundled so the
 /// per-slot resolver stays under clippy's argument-count lint.
@@ -712,8 +476,7 @@ struct ComponentResolveContext<'a> {
     suite: Option<&'a Suite>,
     train: &'a str,
     target: &'a str,
-    resolve_source_commits: bool,
-    resolve_component_asset_commits: bool,
+    workspace_runtimes: &'a [phoxal_cli_core::project::train::WorkspaceRuntime],
     prefer_vendored: bool,
 }
 
@@ -725,11 +488,48 @@ fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<Resol
         let package = format!("{PHOXAL_PROVIDER}/component-{component_id}");
 
         let has_driver = instance.driver.is_some();
+        if let Some(runtime) = context.workspace_runtimes.iter().find(|runtime| {
+            runtime.kind == phoxal_cli_core::project::train::WorkspaceRuntimeKind::Component
+                && runtime.crate_dir.file_name().and_then(|name| name.to_str())
+                    == Some(component_id)
+        }) {
+            let assets_dir = runtime
+                .component_assets
+                .as_ref()
+                .context("component workspace runtime has no component assets")?;
+            anyhow::ensure!(
+                runtime.binary_names.is_empty() != has_driver,
+                "components/{component_id} bin target presence must match robot component instance {instance_name} driver presence"
+            );
+            components.push(ResolvedComponent {
+                instance: instance_name.clone(),
+                source_name: component_id.clone(),
+                assets: Some(ResolvedComponentPackage {
+                    package: format!("workspace/component-{component_id}"),
+                    kind: ArtifactKind::ComponentAssets,
+                    source: ResolvedComponentSource::Path {
+                        path: assets_dir.clone(),
+                    },
+                    path_override: Some(assets_dir.clone()),
+                    suite_runtime: None,
+                }),
+                driver: has_driver.then(|| ResolvedComponentPackage {
+                    package: format!("workspace/component-{component_id}"),
+                    kind: ArtifactKind::ComponentDriver,
+                    source: ResolvedComponentSource::Path {
+                        path: runtime.crate_dir.clone(),
+                    },
+                    path_override: Some(runtime.crate_dir.clone()),
+                    suite_runtime: None,
+                }),
+                has_driver,
+            });
+            continue;
+        }
         let assets = match resolve_component_package(
             context,
             &package,
             ArtifactKind::ComponentAssets,
-            context.resolve_component_asset_commits,
         ) {
             Ok(assets) => Some(assets),
             // A driverless (passive) component - a mechanical part like a
@@ -746,12 +546,7 @@ fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<Resol
         };
 
         let driver = if has_driver {
-            match resolve_component_package(
-                context,
-                &package,
-                ArtifactKind::ComponentDriver,
-                context.resolve_source_commits,
-            ) {
+            match resolve_component_package(context, &package, ArtifactKind::ComponentDriver) {
                 Ok(driver) => Some(driver),
                 Err(_) => {
                     return Err(ComponentDriverUnavailable {
@@ -777,13 +572,11 @@ fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<Resol
 }
 
 /// Resolve one component package slot (`component_assets` or
-/// `component_driver`) for `package`: an `artifacts.pins` entry takes
-/// precedence (`Git`/`Path` pin form), otherwise it resolves
-/// from the suite. A suite resolution also captures the matched entry's
+/// `component_driver`) for `package` from the suite. A suite resolution also captures the matched entry's
 /// built artifact for the needed scope (assets or the
 /// resolved target triple for drivers) into `suite_runtime`, exactly like a
 /// service/simulator captures `artifact_ref`/`sha256`/`published` - see
-/// [`resolved_runtime_from_artifact_entry`]. If the entry exists but has no
+/// [`resolved_runtime_from_expected_package`]. If the entry exists but has no
 /// built artifact for that scope yet (a metadata-only entry, or not yet
 /// published for this target), resolution still succeeds (the entry is real
 /// and versioned - a bare `check` on an older version must not hard-fail
@@ -794,14 +587,7 @@ fn resolve_component_package(
     context: &ComponentResolveContext<'_>,
     package: &str,
     kind: ArtifactKind,
-    resolve_git_ref: bool,
 ) -> Result<ResolvedComponentPackage> {
-    if let Some(pin @ (ArtifactPin::Path(_) | ArtifactPin::Git(_))) =
-        context.robot.artifacts.pins.get(package)
-    {
-        return resolve_pinned_component_package(package, kind, pin, resolve_git_ref);
-    }
-
     let (target, assets) = if kind == ArtifactKind::ComponentAssets {
         (None, true)
     } else {
@@ -835,44 +621,6 @@ fn resolve_component_package(
     })
 }
 
-fn resolve_pinned_component_package(
-    package: &str,
-    kind: ArtifactKind,
-    pin: &ArtifactPin,
-    resolve_git_ref: bool,
-) -> Result<ResolvedComponentPackage> {
-    let source = match pin {
-        ArtifactPin::Path(pin) => ResolvedComponentSource::Path {
-            path: pin.path.clone(),
-        },
-        ArtifactPin::Git(pin) => {
-            // Resolve the commit live. A `rev` that is already a full commit
-            // SHA needs no network; a tag/branch ref is resolved via
-            // `git ls-remote`. Flows that never read this package's local
-            // files leave `resolve_git_ref` off and skip this entirely.
-            let commit = if resolve_git_ref {
-                resolve_component_commit(&pin.git, &pin.rev)?
-            } else {
-                String::new()
-            };
-            ResolvedComponentSource::Git {
-                git: pin.git.clone(),
-                rev: commit,
-                directory: pin.directory.clone(),
-            }
-        }
-    };
-    Ok(ResolvedComponentPackage {
-        package: package.to_string(),
-        kind,
-        source,
-        path_override: None,
-        // Source pins deliberately bypass the suite and carry no suite
-        // runtime.
-        suite_runtime: None,
-    })
-}
-
 fn resolve_tools(
     robot: &Robot,
     suite: Option<&Suite>,
@@ -880,7 +628,7 @@ fn resolve_tools(
     target: &str,
     prefer_vendored: bool,
 ) -> Result<Vec<ResolvedTool>> {
-    resolve_native_site_artifacts(
+    resolve_native_artifacts(
         robot,
         suite,
         train,
@@ -892,8 +640,8 @@ fn resolve_tools(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resolve_native_site_artifacts(
-    robot: &Robot,
+fn resolve_native_artifacts(
+    _robot: &Robot,
     suite: Option<&Suite>,
     train: &str,
     target: &str,
@@ -909,30 +657,7 @@ fn resolve_native_site_artifacts(
         .map(|entry| {
             let package = entry.id.as_str();
             let artifact_name = short_name(package, suite_kind);
-            if matches!(
-                robot.artifacts.pins.get(package),
-                Some(ArtifactPin::Path(_) | ArtifactPin::Git(_))
-            ) {
-                return Ok(ResolvedTool {
-                    kind,
-                    name: format!("{}-{artifact_name}", kind.emit_apis_kind()),
-                    package: package.to_string(),
-                    requested: "source".to_string(),
-                    resolved: "source".to_string(),
-                    repo: "source".to_string(),
-                    asset: format!("source:{package}"),
-                    binary_name: official_binary_name(kind, &artifact_name),
-                    sha256: String::new(),
-                    url: None,
-                    size: None,
-                    published: true,
-                    path_override: None,
-                    train: train.to_string(),
-                    target: target.to_string(),
-                });
-            }
             if prefer_vendored
-                && !robot.artifacts.pins.contains_key(package)
                 && let Ok(runtime) =
                     vendored_runtime(&artifact_name, package, kind, train, Some(target))
             {
@@ -1014,11 +739,12 @@ fn join_errors(errors: Vec<phoxal::model::robot::ValidationError>) -> String {
 mod tests {
     use super::*;
     use crate::host_paths::test_support::ScratchPhoxalHome;
-    use phoxal_cli_core::project::resolver::{load_robot, load_robot_with_extras};
+    use phoxal_cli_core::project::resolver::load_robot;
     use phoxal_cli_core::project::suite::{
         fixture_component_assets_entry_for_tests, fixture_contract_for_tests,
         fixture_service_entry_for_tests, fixture_suite_for_tests,
     };
+    use std::path::PathBuf;
 
     fn test_suite() -> Suite {
         fixture_suite_for_tests(vec![
@@ -1036,47 +762,29 @@ mod tests {
         ])
     }
 
-    #[test]
-    fn resolve_without_source_commits_leaves_git_component_commits_empty() -> anyhow::Result<()> {
-        // Flows that never read component commits resolve
-        // with `resolve_source_commits: false` and must NOT run `git ls-remote`.
-        // A git component pin is resolved with an empty commit; if resolution
-        // tried to reach the network it would either hang or fail, so an empty
-        // commit proves no ls-remote was attempted.
-        let _phoxal_home = ScratchPhoxalHome::new()?;
-        let robot = Robot::parse_from_string(GIT_COMPONENT_ROBOT)?;
-        let suite = test_suite();
-        let resolved = resolve(
-            &robot,
-            std::path::Path::new("."),
-            Some(&suite),
-            ResolveOptions {
-                resolve_source_commits: false,
-                resolve_component_asset_commits: false,
-                ..ResolveOptions::default()
-            },
+    fn locked_project_root() -> anyhow::Result<tempfile::TempDir> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir_all(root.path().join("src"))?;
+        std::fs::create_dir_all(root.path().join("train/phoxal/src"))?;
+        std::fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nphoxal = { path = \"train/phoxal\" }\n",
         )?;
-
-        let git_component = resolved
-            .components
-            .iter()
-            .find(|component| component.source_name == "ddsm115")
-            .expect("ddsm115 component resolved");
-        match &git_component
-            .assets
-            .as_ref()
-            .expect("ddsm115 has a driver; assets must resolve")
-            .source
-        {
-            ResolvedComponentSource::Git { rev, .. } => {
-                assert!(
-                    rev.is_empty(),
-                    "offline resolve must leave the git commit empty (no ls-remote), got {rev:?}"
-                );
-            }
-            other => panic!("expected a git component source, got {other:?}"),
-        }
-        Ok(())
+        std::fs::write(root.path().join("src/lib.rs"), "")?;
+        std::fs::write(
+            root.path().join("train/phoxal/Cargo.toml"),
+            "[package]\nname = \"phoxal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )?;
+        std::fs::write(root.path().join("train/phoxal/src/lib.rs"), "")?;
+        anyhow::ensure!(
+            std::process::Command::new("cargo")
+                .arg("generate-lockfile")
+                .current_dir(root.path())
+                .status()?
+                .success(),
+            "failed to generate fixture Cargo.lock"
+        );
+        Ok(root)
     }
 
     #[test]
@@ -1115,13 +823,13 @@ robot:
     right_drive:
       component: ddsm115
       mount_link: right_wheel_mount
-artifacts: {}
 "#,
         )?;
         let suite = test_suite();
+        let project = locked_project_root()?;
         let resolved = resolve(
             &robot,
-            std::path::Path::new("."),
+            project.path(),
             Some(&suite),
             ResolveOptions::default(),
         )?;
@@ -1134,77 +842,6 @@ artifacts: {}
         assert_eq!(drive.version, suite.version);
         assert_eq!(drive.train, suite.version);
         assert!(drive.url.is_some(), "stale vendored state must not win");
-        Ok(())
-    }
-
-    const GIT_COMPONENT_ROBOT: &str = r#"schema: robot/v0
-robot:
-  id: testbot
-  namespace: test
-  motion_limits:
-    max_linear_speed_mps: 0.6
-    max_angular_speed_radps: 2.0
-  kinematic:
-    kind: differential
-    left_actuators: [left_drive.motor]
-    right_actuators: [right_drive.motor]
-    left_encoders: [left_drive.encoder]
-    right_encoders: [right_drive.encoder]
-    wheel_radius_m: 0.1
-    wheel_base_m: 0.5
-  components:
-    left_drive:
-      component: ddsm115
-      mount_link: left_wheel_mount
-    right_drive:
-      component: ddsm115
-      mount_link: right_wheel_mount
-artifacts:
-  pins:
-    phoxal/component-ddsm115:
-      git: https://github.com/phoxal/framework
-      rev: main
-      directory: component/ddsm115
-"#;
-
-    #[test]
-    fn explicit_commit_sha_tag_resolves_without_network() -> anyhow::Result<()> {
-        // A `rev` that is already a full commit SHA is an explicit pin: it must
-        // resolve with no network (no `git ls-remote`), so a live-resolution
-        // flow works offline when components are pinned to a SHA.
-        let _phoxal_home = ScratchPhoxalHome::new()?;
-        let sha = "0123456789abcdef0123456789abcdef01234567";
-        let robot = Robot::parse_from_string(
-            &GIT_COMPONENT_ROBOT.replace("rev: main", &format!("rev: {sha}")),
-        )?;
-        let suite = test_suite();
-        let resolved = resolve(
-            &robot,
-            std::path::Path::new("."),
-            Some(&suite),
-            ResolveOptions {
-                resolve_source_commits: true,
-                resolve_component_asset_commits: true,
-                ..ResolveOptions::default()
-            },
-        )?;
-
-        let git_component = resolved
-            .components
-            .iter()
-            .find(|component| component.source_name == "ddsm115")
-            .expect("ddsm115 component resolved");
-        match &git_component
-            .assets
-            .as_ref()
-            .expect("ddsm115 has a driver; assets must resolve")
-            .source
-        {
-            ResolvedComponentSource::Git { rev, .. } => {
-                assert_eq!(rev, sha);
-            }
-            other => panic!("expected a git component source, got {other:?}"),
-        }
         Ok(())
     }
 
@@ -1239,20 +876,18 @@ robot:
     front_caster:
       component: passive_caster
       mount_link: front_caster_mount
-artifacts: {}
 "#,
         )?;
         // `test_suite()` carries no `phoxal/component-passive_caster`
         // entry at all - exactly the "absent from snapshot" case the bug
         // report hit.
         let suite = test_suite();
+        let project = locked_project_root()?;
         let resolved = resolve(
             &robot,
-            std::path::Path::new("."),
+            project.path(),
             Some(&suite),
             ResolveOptions {
-                resolve_source_commits: false,
-                resolve_component_asset_commits: false,
                 ..ResolveOptions::default()
             },
         )?;
@@ -1302,17 +937,15 @@ robot:
       mount_link: left_wheel_mount
       driver:
         connection: { type: can, bus: 0, node_id: 1 }
-artifacts: {}
 "#,
         )?;
         let suite = test_suite();
+        let project = locked_project_root()?;
         let error = resolve(
             &robot,
-            std::path::Path::new("."),
+            project.path(),
             Some(&suite),
             ResolveOptions {
-                resolve_source_commits: false,
-                resolve_component_asset_commits: false,
                 ..ResolveOptions::default()
             },
         )
@@ -1336,26 +969,8 @@ artifacts: {}
     }
 
     #[test]
-    fn full_commit_sha_is_detected() {
-        assert!(is_full_commit_sha(
-            "0123456789abcdef0123456789abcdef01234567"
-        ));
-        assert!(!is_full_commit_sha("main"));
-        assert!(!is_full_commit_sha("v0.3.0"));
-        // 39 chars (too short) and a non-hex char are both rejected.
-        assert!(!is_full_commit_sha(
-            "0123456789abcdef0123456789abcdef0123456"
-        ));
-        assert!(!is_full_commit_sha(
-            "0123456789abcdef0123456789abcdef0123456z"
-        ));
-    }
-
-    #[test]
     fn load_robot_tolerates_user_service_config() -> anyhow::Result<()> {
-        // The CLI threads `services.<name>.config` through
-        // `RobotManifestExtras` as a side channel; `load_robot` must strip it
-        // so every command accepts a manifest that declares typed config.
+        // Service configuration is part of the typed robot model.
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("robot.yaml");
         std::fs::write(
@@ -1377,21 +992,18 @@ robot:
     wheel_base_m: 0.5
 services:
   brain:
-    path: runtimes/brain
     config:
       gain: 0.5
 "#,
         )?;
 
-        // Plain load_robot must parse it despite the config key the typed model
-        // does not know about.
         let robot = load_robot(&path)?;
         assert!(robot.services.contains_key("brain"));
-
-        let loaded = load_robot_with_extras(&path)?;
-        assert!(loaded.robot.services.contains_key("brain"));
         assert_eq!(
-            loaded.extras.user_runtime_config("brain"),
+            robot
+                .services
+                .get("brain")
+                .and_then(|service| service.config.as_ref()),
             Some(&serde_json::json!({ "gain": 0.5 }))
         );
 
@@ -1424,9 +1036,9 @@ router:
 "#,
         )?;
 
-        let loaded = load_robot_with_extras(&path)?;
+        let loaded = load_robot(&path)?;
         assert_eq!(
-            loaded.robot.router.config,
+            loaded.router.config,
             Some(PathBuf::from("config/router.json5"))
         );
         Ok(())
@@ -1458,14 +1070,12 @@ robot:
       component: ddsm115
       mount_link: left
 services:
-  mission-service:
-    path: runtimes/mission
-  left_drive:
-    path: runtimes/left_drive
+  mission-service: {}
+  left_drive: {}
 "#,
         )?;
 
-        let error = load_robot_with_extras(&path).expect_err("launch ids should be checked");
+        let error = load_robot(&path).expect_err("launch ids should be checked");
         let message = error.to_string();
         assert!(message.contains("mission-service"), "{message}");
         assert!(message.contains("collides"), "{message}");

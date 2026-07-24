@@ -19,7 +19,6 @@ impl Deploy {
             host: self.host.clone(),
             dry_run: self.dry_run,
             target: self.target.clone(),
-            overlays: self.env.clone(),
             suite_source: app.suite_source.clone(),
             health_timeout: Duration::from_secs(self.health_timeout_sec),
         };

@@ -286,7 +286,7 @@ fn tools_source_filter_renders_tool_logs() {
     let board = BoardSnapshot::default();
     let mut logs = LogStore::new();
     logs.record(RoutedLogLine {
-        participant: SITE_TOOL_JOYPAD.to_string(),
+        participant: ROBOT_TOOL_JOYPAD.to_string(),
         source: LogSource::Bus,
         severity: LogSeverity::Info,
         text: "joypad ready".to_string(),
@@ -970,9 +970,9 @@ fn motion_panel_stays_compact_when_input_state_is_stale() {
     };
     let mut board = BoardSnapshot::default();
     board.participants.insert(
-        SITE_TOOL_JOYPAD.to_string(),
+        ROBOT_TOOL_JOYPAD.to_string(),
         ParticipantStatus::new(
-            SITE_TOOL_JOYPAD,
+            ROBOT_TOOL_JOYPAD,
             ParticipantKind::Tool,
             ParticipantState::Ready,
         ),
@@ -1026,9 +1026,9 @@ fn simulation_pause_does_not_age_joypad_from_logical_clock() {
     };
     let mut board = BoardSnapshot::default();
     board.participants.insert(
-        SITE_TOOL_JOYPAD.to_string(),
+        ROBOT_TOOL_JOYPAD.to_string(),
         ParticipantStatus::new(
-            SITE_TOOL_JOYPAD,
+            ROBOT_TOOL_JOYPAD,
             ParticipantKind::Tool,
             ParticipantState::Ready,
         ),

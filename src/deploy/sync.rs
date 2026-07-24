@@ -9,7 +9,7 @@ use super::{
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use phoxal_cli_core::project::launch_plan::SITE_INFRASTRUCTURE_ROUTER;
+use phoxal_cli_core::project::launch_plan::INFRASTRUCTURE_ROUTER;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -378,7 +378,5 @@ pub(crate) fn participant_from_unit(unit: &str) -> Option<String> {
     unit.strip_prefix("phoxal-participant-")
         .and_then(|rest| rest.strip_suffix(".service"))
         .map(str::to_string)
-        .or_else(|| {
-            (unit == "phoxal-router.service").then(|| SITE_INFRASTRUCTURE_ROUTER.to_string())
-        })
+        .or_else(|| (unit == "phoxal-router.service").then(|| INFRASTRUCTURE_ROUTER.to_string()))
 }

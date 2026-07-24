@@ -1,7 +1,7 @@
 //! Human and structured simulation plan reporting.
 
 use super::{
-    SimPlan, WEBOTS_SITE_ID, native_tool_labels_from_plan,
+    SimPlan, WEBOTS_APP_ID, native_tool_labels_from_plan,
     simulator_participant_id_for_resolved_artifact, substitution_lines,
 };
 use crate::webots_stage_root;
@@ -32,12 +32,12 @@ pub(crate) fn report_plan_only(sim: &SimPlan) -> Result<()> {
     if let Ok(root) = webots_stage_root::root() {
         println!("staged simulation to {}", root.display());
     }
-    println!("site tools:");
+    println!("robot tools:");
     for tool in &output.native_tools {
         println!("  - {tool}");
     }
     println!(
-        "webots app (CLI-managed, id \"{WEBOTS_SITE_ID}\"): would launch pointed at staged world {}",
+        "webots app (CLI-managed, id \"{WEBOTS_APP_ID}\"): would launch pointed at staged world {}",
         output.webots_app.intended_staged_world_path.display()
     );
     if !output.simulator_artifacts.is_empty() {
@@ -83,7 +83,7 @@ pub(crate) fn build_dry_run_output(sim: &SimPlan) -> SimulateDryRunOutput {
         native_tools,
         substitutions,
         webots_app: WebotsAppSummary {
-            site_id: WEBOTS_SITE_ID.to_string(),
+            app_id: WEBOTS_APP_ID.to_string(),
             launch_ownership: "cli_managed".to_string(),
             intended_staged_world_path,
         },
@@ -118,7 +118,7 @@ pub(crate) struct SimulateDryRunOutput {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct WebotsAppSummary {
-    pub(crate) site_id: String,
+    pub(crate) app_id: String,
     pub(crate) launch_ownership: String,
     pub(crate) intended_staged_world_path: PathBuf,
 }

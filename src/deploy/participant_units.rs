@@ -142,6 +142,13 @@ pub(crate) struct UnitPrivileges {
 }
 
 pub(crate) fn unit_privileges(resolved: &ResolvedRobot, participant_id: &str) -> UnitPrivileges {
+    if participant_id.starts_with("tool-joypad-") {
+        return UnitPrivileges {
+            supplementary_groups: vec!["input".to_string()],
+            device_allow: vec!["/dev/input/*".to_string()],
+            capabilities: Vec::new(),
+        };
+    }
     let Some(component) = resolved.robot.robot.components.get(participant_id) else {
         return UnitPrivileges::default();
     };

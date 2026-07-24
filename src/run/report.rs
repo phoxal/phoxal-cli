@@ -25,14 +25,14 @@ pub(crate) struct LaunchCommandEntry {
 /// The pre-staged-startup launch-report `kind` string. The board's
 /// own `ParticipantKind` is the finer-grained shared
 /// `Tool`/`Service`/`Driver`/`Simulator` split plus a `local` bit (Part 1) -
-/// see `phoxal_cli_core::session::participant_kind`'s module docs. A site
-/// launch (the router, the
+/// see `phoxal_cli_core::session::participant_kind`'s module docs. A robot
+/// tool launch (the router, the
 /// joypad, the Webots app in `simulate`) has no `ParticipantExecution` of
-/// its own and is always `"site-tool"`; everything else follows the
+/// its own and is always `"robot-tool"`; everything else follows the
 /// compact operator-facing mapping.
 pub(crate) fn launch_kind_label(execution: Option<&ParticipantExecution>) -> &'static str {
     match execution {
-        None => "site-tool",
+        None => "robot-tool",
         Some(
             ParticipantExecution::OfficialArtifact { .. }
             | ParticipantExecution::OfficialTool { .. }

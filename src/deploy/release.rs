@@ -7,9 +7,9 @@ use super::{
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use phoxal_cli_core::project::launch_plan::INFRASTRUCTURE_ROUTER;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
-use phoxal_cli_core::project::launch_plan::SITE_INFRASTRUCTURE_ROUTER;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use serde_json::Value;
 use sha2::Digest;
@@ -27,7 +27,7 @@ pub(crate) fn release_record(
     official_plans: &BTreeMap<String, OfficialArtifactPlan>,
 ) -> Result<ReleaseRecord> {
     let mut artifacts = BTreeMap::<String, ReleaseArtifact>::new();
-    if let Some(router) = official_plans.get(SITE_INFRASTRUCTURE_ROUTER) {
+    if let Some(router) = official_plans.get(INFRASTRUCTURE_ROUTER) {
         artifacts.insert(
             router.artifact_id.clone(),
             release_official_artifact(router),

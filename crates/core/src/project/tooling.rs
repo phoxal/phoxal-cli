@@ -111,3 +111,17 @@ pub fn cargo_binary_name(crate_dir: &Path, preferred_name: Option<&str>) -> Resu
         .map(str::to_string)
         .ok_or_else(|| anyhow!("{} does not declare package.name", manifest_path.display()))
 }
+
+pub fn cargo_package_name(crate_dir: &Path) -> Result<String> {
+    let manifest_path = crate_dir.join("Cargo.toml");
+    let contents = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest = toml::from_str::<TomlValue>(&contents)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    manifest
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(TomlValue::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("{} does not declare package.name", manifest_path.display()))
+}

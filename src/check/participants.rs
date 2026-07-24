@@ -238,29 +238,6 @@ pub(crate) fn source_participants_from_resolved(
     Ok(participants)
 }
 
-pub(crate) fn ensure_user_service_exists(
-    resolved: &ResolvedRobot,
-    service_name: &str,
-) -> Result<()> {
-    if !resolved
-        .user_runtimes
-        .iter()
-        .any(|runtime| runtime.name == service_name)
-    {
-        let available = resolved
-            .user_runtimes
-            .iter()
-            .map(|runtime| runtime.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        if available.is_empty() {
-            bail!("user service '{service_name}' is not defined in services");
-        }
-        bail!("user service '{service_name}' is not defined in services; available: {available}");
-    }
-    Ok(())
-}
-
 pub(crate) fn ensure_suite_availability(resolved: &ResolvedRobot) -> Result<()> {
     let unavailable = resolved
         .platform_runtimes
@@ -290,7 +267,7 @@ pub(crate) fn ensure_suite_availability(resolved: &ResolvedRobot) -> Result<()> 
         }
     }
     message.push_str(
-        "\n\nFix: wait for the listed official artifacts to publish, pin artifacts.pins.<package> to a path/git override, or move the train with `cargo update -p phoxal`.",
+        "\n\nFix: wait for the listed official artifacts to publish, add a matching Cargo workspace override, or move the train with `cargo update -p phoxal`.",
     );
     bail!("{message}")
 }

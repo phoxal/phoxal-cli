@@ -1,6 +1,6 @@
 //! Immutable per-framework-train suite loading and integrity validation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -142,58 +142,7 @@ fn validate_suite(suite: &Suite) -> Result<()> {
                 .with_context(|| format!("invalid assets blob for {}", artifact.id))?;
         }
     }
-    validate_profile("native", &suite.profiles.native, suite)?;
-    validate_profile("webots", &suite.profiles.webots, suite)?;
-    let activated = suite
-        .profiles
-        .native
-        .iter()
-        .chain(&suite.profiles.webots)
-        .map(|activation| activation.package.as_str())
-        .collect::<BTreeSet<_>>();
-    for artifact in &suite.artifacts {
-        ensure!(
-            !matches!(artifact.kind, Kind::Tool | Kind::Infrastructure)
-                || activated.contains(artifact.id.as_str()),
-            "suite {} artifact {} is absent from every launch profile",
-            match artifact.kind {
-                Kind::Tool => "tool",
-                Kind::Infrastructure => "infrastructure",
-                _ => unreachable!(),
-            },
-            artifact.id
-        );
-    }
-    Ok(())
-}
-
-fn validate_profile(name: &str, profile: &[ArtifactActivation], suite: &Suite) -> Result<()> {
-    let artifacts = suite
-        .artifacts
-        .iter()
-        .map(|artifact| (artifact.id.as_str(), artifact.kind))
-        .collect::<BTreeMap<_, _>>();
-    let mut seen = BTreeSet::new();
-    for activation in profile {
-        ensure!(
-            seen.insert(activation.package.as_str()),
-            "suite profile {name} contains duplicate activation {}",
-            activation.package
-        );
-        let kind = artifacts
-            .get(activation.package.as_str())
-            .with_context(|| {
-                format!(
-                    "suite profile {name} activates missing artifact {}",
-                    activation.package
-                )
-            })?;
-        ensure!(
-            matches!(kind, Kind::Tool | Kind::Infrastructure),
-            "suite profile {name} activates non-launch-policy artifact {}",
-            activation.package
-        );
-    }
+    super::catalog::validate_suite_inventory(suite)?;
     Ok(())
 }
 

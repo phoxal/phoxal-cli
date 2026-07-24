@@ -2,8 +2,8 @@
 
 use super::RawEmitApis;
 use phoxal::check as graph_check;
+use phoxal::model::robot::RobotV0;
 use phoxal_cli_core::check::participant_metadata;
-use phoxal_cli_core::project::resolver::RobotManifestExtras;
 use serde_json::Value;
 
 pub(crate) fn contract_surface(
@@ -28,15 +28,15 @@ pub(crate) fn contract_surface(
 pub(crate) fn validate_user_service_config(
     service_id: &str,
     schema: Option<&Value>,
-    manifest_extras: &RobotManifestExtras,
+    robot: Option<&RobotV0>,
 ) -> Option<graph_check::Problem> {
     let schema = schema?;
     // An absent manifest config is `null`, not `{}`: a no-config service's
     // emitted schema requires null (so absent passes), while a service with a
     // real object schema still fails correctly as config-required-but-missing.
-    let config = manifest_extras
-        .user_runtime_config(service_id)
-        .cloned()
+    let config = robot
+        .and_then(|robot| robot.services.get(service_id))
+        .and_then(|service| service.config.clone())
         .unwrap_or(Value::Null);
     let errors = validate_json_schema(schema, &config, &format!("services.{service_id}.config"));
     if errors.is_empty() {

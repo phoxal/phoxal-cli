@@ -28,10 +28,6 @@ pub fn artifacts_dir() -> Result<PathBuf> {
     project_state_dir().map(|root| root.join("artifacts"))
 }
 
-pub fn git_artifacts_dir() -> Result<PathBuf> {
-    project_state_dir().map(|root| root.join("git"))
-}
-
 pub fn deploy_dir() -> Result<PathBuf> {
     project_state_dir().map(|root| root.join("build"))
 }

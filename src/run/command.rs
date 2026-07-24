@@ -54,12 +54,6 @@ pub struct Run {
         help = "Watch local source artifacts and hot-reload checked changes."
     )]
     pub watch: bool,
-    #[arg(
-        long = "env",
-        value_name = "ENV",
-        help = "Apply a robot.<env>.yaml overlay before running (repeatable). Path pins are only legal through overlays."
-    )]
-    pub env: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -73,7 +67,6 @@ pub struct RunOptions {
     pub drivers: DriversMode,
     pub drivers_subset: Vec<String>,
     pub suite_source: Option<String>,
-    pub overlays: Vec<String>,
     pub watch: bool,
 }
 
@@ -129,7 +122,6 @@ impl Run {
             drivers: self.drivers,
             drivers_subset: self.drivers_subset.clone(),
             suite_source: app.suite_source.clone(),
-            overlays: self.env.clone(),
             watch: self.watch,
         };
         if options.drivers == DriversMode::Off && !options.drivers_subset.is_empty() {
@@ -408,9 +400,8 @@ pub(crate) async fn live_run_setup(
         None,
     );
     ui.info(format!(
-        "launch plan resolved: {} robot(s), {} site tool(s)",
-        prepared.plan.robots.len(),
-        prepared.plan.site.len()
+        "launch plan resolved: {} robot(s)",
+        prepared.plan.robots.len()
     ));
     ui.info(format!("infrastructure router ready on {connect}"));
     report_launch_commands(&prepared.plan, &prepared.specs, &ui)?;

@@ -13,8 +13,8 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use phoxal::participant::launch::env;
+use phoxal_cli_core::project::launch_plan::INFRASTRUCTURE_ROUTER;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
-use phoxal_cli_core::project::launch_plan::SITE_INFRASTRUCTURE_ROUTER;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::tooling::resolve_project_path;
 use phoxal_cli_core::session::human;
@@ -269,7 +269,7 @@ pub(crate) async fn start_infrastructure_router(
     project_root: &Path,
     ui: &crate::Ui,
 ) -> Result<(InfrastructureRouter, String)> {
-    let binary = locate_tool_binary(resolved, SITE_INFRASTRUCTURE_ROUTER, ui)?
+    let binary = locate_tool_binary(resolved, INFRASTRUCTURE_ROUTER, ui)?
         .context("phoxal-infrastructure-router is not staged; run `phoxal update`")?;
     let config = resolved
         .robot

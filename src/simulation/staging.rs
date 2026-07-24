@@ -85,10 +85,9 @@ pub(crate) fn stage_simulation_for_robot(
             anyhow!(
                 "component instance '{}' (type '{}') has no resolved component_assets package; \
                  simulation needs its component.yaml/structure.urdf to stage the robot model. \
-                 Passive components without an official assets package cannot be simulated yet - \
-                 pin artifacts.pins.phoxal/component-{} to a path/git override that provides one.",
+                 Passive components without an official assets package need a matching \
+                 components/ workspace crate.",
                 component.instance,
-                component.source_name,
                 component.source_name
             )
         })?;

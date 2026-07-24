@@ -6,7 +6,7 @@ use anyhow::anyhow;
 use anyhow::bail;
 use phoxal::model::robot::v0::ConnectionConfig;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
-use phoxal_cli_core::project::tooling::cargo_binary_name;
+use phoxal_cli_core::project::tooling::{cargo_binary_name, cargo_package_name};
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
@@ -26,8 +26,9 @@ pub(crate) fn build_source_binary(
         )
     })?;
     let binary_name = cargo_binary_name(&crate_dir, Some(preferred_name))?;
+    let package_name = cargo_package_name(&crate_dir)?;
     ui.info(format!(
-        "building user participant {preferred_name} with cargo build --bin {binary_name}"
+        "building user participant {preferred_name} with cargo build -p {package_name} --bin {binary_name}"
     ));
     // Finding A3: a source participant only ever gets here when it genuinely
     // needs a fresh `cargo build` (path-overridden components/simulators, or
@@ -41,6 +42,8 @@ pub(crate) fn build_source_binary(
             let mut command = Command::new("cargo");
             command
                 .arg("build")
+                .arg("-p")
+                .arg(&package_name)
                 .arg("--bin")
                 .arg(&binary_name)
                 .current_dir(&crate_dir);

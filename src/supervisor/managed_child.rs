@@ -729,7 +729,6 @@ mod tests {
             1,
             LaunchPlan {
                 mode: LaunchMode::Run,
-                site: Vec::new(),
                 robots: Vec::new(),
             },
         )?;

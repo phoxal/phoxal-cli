@@ -67,8 +67,7 @@ mod env_units;
 pub(crate) use env_units::{render_env_files, render_units};
 mod participant_units;
 pub(crate) use participant_units::{
-    UnitPrivileges, participant_binary_name, participant_unit, participant_unit_name,
-    unit_privileges,
+    participant_binary_name, participant_unit, participant_unit_name, unit_privileges,
 };
 mod metadata;
 pub(crate) use metadata::{stage_payload_metadata, write_robot_yaml};

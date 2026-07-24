@@ -25,8 +25,7 @@ use phoxal_cli_core::project::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, LaunchPlan, PlanContext, build_launch_plan,
 };
 use phoxal_cli_core::project::resolver::{
-    ResolveOptions, ResolvedRobot, ToolProfile, discover_robot_yaml, load_robot_with_extras,
-    load_robot_with_extras_and_overlays,
+    ResolveOptions, ResolvedRobot, discover_robot_yaml, load_robot,
 };
 use phoxal_cli_core::project::tooling::hash_tree;
 use phoxal_cli_core::session::{ParticipantKind, human};
@@ -463,23 +462,16 @@ fn recheck_run_target(
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let loaded = if options.overlays.is_empty() {
-        load_robot_with_extras(&robot_path)?
-    } else {
-        load_robot_with_extras_and_overlays(&robot_path, &options.overlays)?
-    };
+    let robot = load_robot(&robot_path)?;
     let suite = crate::commands::load_suite_for_robot_from_source(
         options.suite_source.clone(),
         project_root,
-        &loaded.extras,
     )?;
     let resolved = resolve(
-        &loaded.robot,
+        &robot,
         project_root,
         suite.as_ref(),
         ResolveOptions {
-            resolve_source_commits: true,
-            resolve_component_asset_commits: false,
             ..ResolveOptions::default()
         },
     )?;
@@ -489,30 +481,9 @@ fn recheck_run_target(
     // of the whole source graph rather than just the changed one.
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
-    let active_tools = resolved.active_profile_tools(ToolProfile::Native);
-    let checked_source_participants = source_participants
-        .iter()
-        .filter(|participant| {
-            active_tools.includes_named(
-                participant.kind == phoxal_cli_core::check::source::SourceParticipantKind::Tool,
-                &participant.name,
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let platform_refs = check_artifact_refs_from_resolved(&resolved)
-        .into_iter()
-        .filter(|artifact| {
-            active_tools.includes_named(
-                artifact.kind == phoxal_cli_core::project::suite::ArtifactKind::Tool,
-                &artifact.name,
-            )
-        })
-        .collect::<Vec<_>>();
-    let tool_participants = tool_participants_from_resolved(&resolved)?
-        .into_iter()
-        .filter(|tool| active_tools.contains(&tool.name))
-        .collect::<Vec<_>>();
+    let checked_source_participants = source_participants.clone();
+    let platform_refs = check_artifact_refs_from_resolved(&resolved);
+    let tool_participants = tool_participants_from_resolved(&resolved)?;
     let mut official_by_ref = resolved
         .platform_runtimes
         .iter()
@@ -529,7 +500,7 @@ fn recheck_run_target(
         &tool_participants,
         &checked_source_participants,
         CheckGraphContext {
-            manifest_extras: &loaded.extras,
+            robot: Some(&robot),
         },
         |artifact_ref| {
             if let Some(runtime) = official_by_ref.get(artifact_ref) {
@@ -551,7 +522,6 @@ fn recheck_run_target(
         &[CheckedRobotLaunchInput {
             project_root,
             resolved: &resolved,
-            manifest_extras: &loaded.extras,
             checked_participants: &outcome.checked_participants,
             substitutions: &[],
             source_participants: &checked_source_participants,
@@ -587,7 +557,6 @@ fn recheck_sim_target(
         &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,
-        &resolved.manifest_extras,
         resolved.suite.as_ref(),
     )?;
     if target.kind == WatchTargetKind::Driver {
@@ -874,7 +843,6 @@ mod tests {
             Ok(WatchOutcome::Revision {
                 plan: LaunchPlan {
                     mode: LaunchMode::Run,
-                    site: Vec::new(),
                     robots: Vec::new(),
                 },
                 specs: vec![spec],
@@ -930,7 +898,6 @@ robot:
             user_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
-            suite_profiles: Default::default(),
             path_overrides: Vec::new(),
         }
     }

@@ -27,7 +27,6 @@ pub(crate) fn prepare_with_mode(
         &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,
-        &resolved.manifest_extras,
         resolved.suite.as_ref(),
     )?;
     // Finding A5: resolved once here, from the same `plan`/`contract_surfaces`

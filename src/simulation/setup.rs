@@ -91,7 +91,7 @@ pub(crate) async fn live_simulate_setup(
 
     let identity = ProjectLockIdentity::resolve(&sim.ctx.project_root, ProjectOperation::Run);
     let locks = LiveSimulationLocks::acquire(&crate::host_paths::simulator_lock_path()?, identity)?;
-    let runtime_root = crate::runtime_root::publish(&sim.ctx.project_root, &sim.ctx.resolved)
+    crate::runtime_root::publish(&sim.ctx.project_root, &sim.ctx.resolved)
         .context("failed to publish the simulation runtime robot root")?;
     ensure_active()?;
     let board = BoardBackend::new();
@@ -111,14 +111,6 @@ pub(crate) async fn live_simulate_setup(
     );
     let runtime_store = sim.runtime_store.clone();
     let mut specs = Vec::new();
-    crate::run::prepare_site_tools(
-        &sim.plan,
-        &sim.ctx.resolved,
-        &runtime_root,
-        &board,
-        &mut specs,
-        &ui,
-    )?;
     ensure_active()?;
     crate::run::prepare_robot_participants(
         &sim.plan,
@@ -155,9 +147,8 @@ pub(crate) async fn live_simulate_setup(
     crate::supervisor::materialize_plan_binaries(&sim.ctx.project_root, &revision, &mut specs)?;
 
     ui.info(format!(
-        "simulation launch plan resolved: {} robot(s), {} site tool(s)",
-        sim.plan.robots.len(),
-        sim.plan.site.len()
+        "simulation launch plan resolved: {} robot(s)",
+        sim.plan.robots.len()
     ));
     ui.info(format!("infrastructure router ready on {connect}"));
     crate::run::report_launch_commands(&sim.plan, &specs, &ui)?;
@@ -233,10 +224,10 @@ pub(crate) async fn live_simulate_setup(
     // already exists for the title telemetry - but device/runtime/
     // router/joypad each open their own bus connection, so those
     // stay Tui-gated.
-    let site_targets = crate::run::RobotFeedTarget::from_plan(&sim.plan);
+    let feed_targets = crate::run::RobotFeedTarget::from_plan(&sim.plan);
     if renders_tui {
         background_tasks.extend(crate::run::start_telemetry_feeds_at(
-            &site_targets,
+            &feed_targets,
             &telemetry,
             &connect,
             board.recovery_epoch_receiver(),
