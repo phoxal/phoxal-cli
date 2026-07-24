@@ -11,7 +11,7 @@ use phoxal::participant::launch::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::resolver::{ResolvedRobot, ResolvedTool};
+use super::resolver::{ResolvedRobot, official_binary_name};
 use super::suite::ArtifactKind;
 use crate::check::source::{SourceParticipant, SourceParticipantKind};
 use crate::session::{RuntimeFailurePolicy, StartupRequirement};
@@ -240,14 +240,51 @@ pub enum LaunchOwnership {
     SimulationManaged,
 }
 
+/// How a launched participant's binary is identified in the staged runtime
+/// layout. Re-keyed on the canonical flat-`bin/` file name (#936): a plan built
+/// from a staged layout carries no source path, so the same robot produces a
+/// byte-identical plan whether the layout was just staged from a source project
+/// or extracted from a `build.phoxal` bundle. The role classifies board kind,
+/// launch env, and telemetry; `binary_name` is the flat `bin/` lookup key the
+/// loader resolves.
+///
+/// Source-specific data - the Cargo crate directory a participant is rebuilt
+/// and run from under `--watch` - deliberately does NOT live here. An extracted
+/// bundle has no crate directories at all, so keeping them out of the execution
+/// identity is what makes source and bundle plans identical. The source-staging
+/// path recovers a crate directory from its own resolved graph
+/// (`ResolvedRobot`) and source-participant records when it needs to rebuild;
+/// the plan only ever names the `bin/` entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "execution", rename_all = "snake_case")]
 pub enum ParticipantExecution {
-    OfficialArtifact { artifact_ref: String },
-    OfficialTool { artifact_ref: String },
-    UserService { crate_dir: PathBuf },
-    SourceArtifact { kind: String, crate_dir: PathBuf },
-    ComponentDriver { crate_dir: PathBuf },
+    /// An official platform artifact - a service or a Webots simulator,
+    /// vendored or built from a workspace override - resolved from
+    /// `bin/<binary_name>`.
+    OfficialArtifact { binary_name: String },
+    /// A privileged official tool, vendored or overridden, resolved from
+    /// `bin/<binary_name>`.
+    OfficialTool { binary_name: String },
+    /// A user service, resolved from `bin/<binary_name>`.
+    UserService { binary_name: String },
+    /// A component driver - one binary serving every instance of a component
+    /// id - resolved from `bin/<binary_name>`.
+    ComponentDriver { binary_name: String },
+}
+
+impl ParticipantExecution {
+    /// The canonical flat-`bin/` file name this participant's binary is
+    /// resolved under. Identical across every path that produces the same
+    /// robot's plan, so it is the sole execution identity a layout needs.
+    #[must_use]
+    pub fn binary_name(&self) -> &str {
+        match self {
+            Self::OfficialArtifact { binary_name }
+            | Self::OfficialTool { binary_name }
+            | Self::UserService { binary_name }
+            | Self::ComponentDriver { binary_name } => binary_name,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,8 +325,11 @@ pub fn build_launch_plan(
     Ok(LaunchPlan { mode, robots })
 }
 
-fn tool_artifact_ref(tool: &ResolvedTool) -> String {
-    format!("{}@{}:{}", tool.repo, tool.resolved, tool.asset)
+/// The kind-stripped short name of an official tool artifact id
+/// (`tool-bus` -> `bus`), matching the CLI catalog's short name and so the
+/// canonical `bin/` binary the loader resolves the tool under.
+fn tool_short_name(artifact_id: &str) -> &str {
+    artifact_id.strip_prefix("tool-").unwrap_or(artifact_id)
 }
 
 fn build_robot_launch(
@@ -302,27 +342,19 @@ fn build_robot_launch(
         .iter()
         .map(|participant| (participant.name.as_str(), participant))
         .collect::<BTreeMap<_, _>>();
-    let mut official_artifacts = input
+    // The kind of every non-driver official the checked set can reference, so
+    // the plan can name each one's canonical `bin/` binary
+    // (`official_binary_name(kind, artifact_id)`). Suite-sourced component
+    // drivers are NOT included here: they carry `ComponentInstance` scope and
+    // are keyed uniformly by their component id through the driver branch of
+    // `participant_execution`, exactly like a workspace-built driver.
+    let official_kinds = input
         .resolved
         .platform_runtimes
         .iter()
         .chain(input.resolved.simulators.iter())
-        .map(|runtime| (runtime.name.as_str(), runtime.artifact_ref().to_string()))
+        .map(|runtime| (runtime.name.as_str(), runtime.kind))
         .collect::<BTreeMap<_, _>>();
-    // A Suite-sourced component driver is a first-class suite artifact
-    // too (docs #21): its `suite_runtime` projects onto the identical
-    // `ResolvedPlatformRuntime` shape a service/simulator resolves to, keyed
-    // here by the component id (`checked.artifact_id`) exactly like a
-    // service is keyed by its own name.
-    official_artifacts.extend(
-        input
-            .resolved
-            .components
-            .iter()
-            .filter_map(|component| component.driver.as_ref())
-            .filter_map(|driver| driver.suite_runtime.as_ref())
-            .map(|runtime| (runtime.name.as_str(), runtime.artifact_ref().to_string())),
-    );
 
     let mut participants = Vec::new();
     for checked in input
@@ -330,7 +362,7 @@ fn build_robot_launch(
         .iter()
         .filter(|participant| is_robot_launch_participant(mode, participant))
     {
-        let execution = participant_execution(checked, &source_participants, &official_artifacts)?;
+        let execution = participant_execution(checked, &source_participants, &official_kinds)?;
         let launch = participant_launch(mode, input, checked);
         let launch_ownership = launch_ownership(mode, checked);
         participants.push(ParticipantLaunchRecord {
@@ -351,19 +383,22 @@ fn build_robot_launch(
         let startup_requirement = StartupRequirement::Required;
         let runtime_failure = RuntimeFailurePolicy::StopProject;
         let execution_device_id = (tool.name == ROBOT_TOOL_DEVICE)
-            .then(|| execution_device_id(input.project_root))
+            .then(|| {
+                execution_device_id(&runtime_layout_dir(
+                    input.project_root,
+                    &input.resolved.target,
+                ))
+            })
             .transpose()?;
         participants.push(ParticipantLaunchRecord {
             artifact_id: tool.name.clone(),
-            execution: tool.path_override.as_ref().map_or_else(
-                || ParticipantExecution::OfficialTool {
-                    artifact_ref: tool_artifact_ref(tool),
-                },
-                |crate_dir| ParticipantExecution::SourceArtifact {
-                    kind: "tool".to_string(),
-                    crate_dir: crate_dir.clone(),
-                },
-            ),
+            // Vendored or workspace-overridden, a tool resolves to the one
+            // canonical `bin/` entry the loader names; whether it was rebuilt
+            // from a crate is recovered from the resolved graph at staging,
+            // never encoded in the source-free plan (#936).
+            execution: ParticipantExecution::OfficialTool {
+                binary_name: official_binary_name(ArtifactKind::Tool, tool_short_name(&tool.name)),
+            },
             launch: ParticipantLaunch {
                 participant_id: format!("{}-{}", tool.name, input.resolved.robot.robot.id),
                 incarnation: 0,
@@ -454,8 +489,17 @@ fn launch_ownership(
 fn participant_execution(
     checked: &graph_check::ParticipantApis,
     source_participants: &BTreeMap<&str, &SourceParticipant>,
-    official_artifacts: &BTreeMap<&str, String>,
+    official_kinds: &BTreeMap<&str, ArtifactKind>,
 ) -> Result<ParticipantExecution> {
+    // A component-instance-scoped participant is a driver: one binary named by
+    // its component id serves every instance, whether it is a workspace-built
+    // (source) driver or a suite-provided one. The layout cannot tell the two
+    // apart - both are `bin/phoxal-component-<id>` - so neither does the plan.
+    if let graph_check::ParticipantScope::ComponentInstance(_) = checked.scope {
+        return Ok(ParticipantExecution::ComponentDriver {
+            binary_name: official_binary_name(ArtifactKind::ComponentDriver, &checked.artifact_id),
+        });
+    }
     let source = source_participants
         .get(checked.participant_id.as_str())
         .or_else(|| {
@@ -468,28 +512,28 @@ fn participant_execution(
     if let Some(source) = source {
         return Ok(match source.kind {
             SourceParticipantKind::UserService => ParticipantExecution::UserService {
-                crate_dir: source.crate_dir.clone(),
+                binary_name: checked.artifact_id.clone(),
             },
-            SourceParticipantKind::OfficialService => ParticipantExecution::SourceArtifact {
-                kind: "service".to_string(),
-                crate_dir: source.crate_dir.clone(),
+            SourceParticipantKind::OfficialService => ParticipantExecution::OfficialArtifact {
+                binary_name: official_binary_name(ArtifactKind::Service, &checked.artifact_id),
             },
-            SourceParticipantKind::ComponentDriver => ParticipantExecution::ComponentDriver {
-                crate_dir: source.crate_dir.clone(),
+            SourceParticipantKind::Simulator => ParticipantExecution::OfficialArtifact {
+                binary_name: official_binary_name(ArtifactKind::Simulator, &checked.artifact_id),
             },
-            SourceParticipantKind::Tool => ParticipantExecution::SourceArtifact {
-                kind: "tool".to_string(),
-                crate_dir: source.crate_dir.clone(),
-            },
-            SourceParticipantKind::Simulator => ParticipantExecution::SourceArtifact {
-                kind: "simulator".to_string(),
-                crate_dir: source.crate_dir.clone(),
-            },
+            // Component drivers are handled by the component-instance branch
+            // above; tools never reach a robot-launch participant loop
+            // (`is_robot_launch_participant` excludes `Tool`), so neither of
+            // these source kinds is reachable here.
+            SourceParticipantKind::ComponentDriver | SourceParticipantKind::Tool => bail!(
+                "source participant {} of kind {:?} is not a launchable non-driver participant",
+                source.name,
+                source.kind
+            ),
         });
     }
-    if let Some(artifact_ref) = official_artifacts.get(checked.artifact_id.as_str()) {
+    if let Some(kind) = official_kinds.get(checked.artifact_id.as_str()) {
         return Ok(ParticipantExecution::OfficialArtifact {
-            artifact_ref: artifact_ref.clone(),
+            binary_name: official_binary_name(*kind, &checked.artifact_id),
         });
     }
     bail!(
@@ -627,7 +671,7 @@ fn simulator_participant_id(artifact_name: &str, robot_id: &str) -> Option<Strin
 mod tests {
     use std::path::Path;
 
-    use crate::project::resolver::{ResolvedRobot, ResolvedUserRuntime};
+    use crate::project::resolver::{ResolvedRobot, ResolvedTool, ResolvedUserRuntime};
     use crate::project::suite::ArtifactKind;
 
     use super::*;

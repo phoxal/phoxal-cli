@@ -28,6 +28,8 @@ use super::suite::ArtifactKind;
 use crate::check::participant_metadata::{ParticipantMeta, inspect_selected_binary};
 use crate::schema::{DocumentKind, ensure_supported_revision};
 
+pub mod plan;
+
 const ROBOT_FILE: &str = "robot.yaml";
 const BIN_DIR: &str = "bin";
 

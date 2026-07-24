@@ -35,8 +35,7 @@ pub(crate) fn launch_kind_label(execution: Option<&ParticipantExecution>) -> &'s
         None => "robot-tool",
         Some(
             ParticipantExecution::OfficialArtifact { .. }
-            | ParticipantExecution::OfficialTool { .. }
-            | ParticipantExecution::SourceArtifact { .. },
+            | ParticipantExecution::OfficialTool { .. },
         ) => "official",
         Some(ParticipantExecution::UserService { .. }) => "user-service",
         Some(ParticipantExecution::ComponentDriver { .. }) => "driver",

@@ -89,7 +89,7 @@ fn plan_with_drivers(ids: &[&str]) -> LaunchPlan {
                     participant(
                         id,
                         ParticipantExecution::ComponentDriver {
-                            crate_dir: PathBuf::from("/tmp/driver"),
+                            binary_name: "phoxal-component-ddsm115".to_string(),
                         },
                     )
                 })
@@ -168,27 +168,25 @@ fn launch_kind_label_matches_the_operator_facing_strings() {
     assert_eq!(launch_kind_label(None), "robot-tool");
     assert_eq!(
         launch_kind_label(Some(&ParticipantExecution::OfficialArtifact {
-            artifact_ref: "phoxal/service-drive@1.0.0".to_string(),
+            binary_name: "phoxal-service-drive".to_string(),
         })),
         "official"
     );
     assert_eq!(
-        launch_kind_label(Some(&ParticipantExecution::SourceArtifact {
-            kind: "service".to_string(),
-            crate_dir: PathBuf::from("/tmp/drive"),
+        launch_kind_label(Some(&ParticipantExecution::OfficialTool {
+            binary_name: "phoxal-tool-bus".to_string(),
         })),
-        "official",
-        "a locally source-overridden official artifact stayed bucketed as \"official\" pre-consolidation"
+        "official"
     );
     assert_eq!(
         launch_kind_label(Some(&ParticipantExecution::UserService {
-            crate_dir: PathBuf::from("/tmp/mission"),
+            binary_name: "mission".to_string(),
         })),
         "user-service"
     );
     assert_eq!(
         launch_kind_label(Some(&ParticipantExecution::ComponentDriver {
-            crate_dir: PathBuf::from("/tmp/ddsm115"),
+            binary_name: "phoxal-component-ddsm115".to_string(),
         })),
         "driver"
     );

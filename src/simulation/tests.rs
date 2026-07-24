@@ -378,9 +378,12 @@ fn path_overridden_simulators_use_the_same_provider_ids_as_official() -> Result<
             participant.launch_ownership,
             phoxal_cli_core::project::launch_plan::LaunchOwnership::SimulationManaged
         );
+        // A simulator participant - suite or workspace-overridden - resolves to
+        // its one canonical `bin/` simulator binary in the source-free plan
+        // (#936); the layout no longer distinguishes the two.
         assert!(matches!(
             &participant.execution,
-            phoxal_cli_core::project::launch_plan::ParticipantExecution::SourceArtifact { .. }
+            phoxal_cli_core::project::launch_plan::ParticipantExecution::OfficialArtifact { .. }
         ));
     }
 

@@ -40,9 +40,26 @@ pub(crate) enum DriverDecision {
     Degraded(String),
 }
 
+/// The staging-side record of source crate directories, keyed by launch
+/// participant id, that accompanies a plan built from a source project. The
+/// source-free plan (#936) never names a crate directory, so cargo rebuild and
+/// process cwd for the user services and workspace-built component drivers a
+/// source project owns are recovered from this map instead. It is empty for a
+/// plan built from an extracted bundle, which has no source at all.
+pub(crate) fn source_dirs_by_participant(
+    source_participants: &[phoxal_cli_core::check::source::SourceParticipant],
+) -> BTreeMap<String, PathBuf> {
+    source_participants
+        .iter()
+        .map(|participant| (participant.name.clone(), participant.crate_dir.clone()))
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_robot_participants(
     plan: &LaunchPlan,
     resolved: &ResolvedRobot,
+    source_dirs: &BTreeMap<String, PathBuf>,
     staged_root: &Path,
     driver_policy: &DriverPolicy,
     board: &BoardBackend,
@@ -126,9 +143,15 @@ pub(crate) fn prepare_robot_participants(
                     continue;
                 }
             }
-            let source = resolve_participant_source(participant, resolved, &official_by_name, ui)?;
+            let source = resolve_participant_source(
+                participant,
+                resolved,
+                &official_by_name,
+                source_dirs,
+                ui,
+            )?;
             let executable = stage_and_inspect(staged_root, participant, &source)?;
-            let cwd = source_cwd(&participant.execution);
+            let cwd = source_cwd(participant, resolved, source_dirs);
             specs.push(participant_spec(
                 participant,
                 &robot_key,
@@ -157,30 +180,19 @@ fn register_simulation_managed_participant(
     board.set_incarnation(&key, incarnation);
 }
 
-/// The board `ParticipantKind` plus whether the participant runs from a
-/// locally resolved directory, for a checked participant's `execution`.
-/// `SourceArtifact`'s own `kind: String` (`"tool"`/`"simulator"`/`"service"`,
-/// set by `launch_plan::participant_execution` from
-/// `check::SourceParticipantKind::shared_kind`) recovers the real role for a
-/// locally source-overridden official artifact - a Run-mode launch plan only
-/// ever contains Service and Driver participants (`Tool` and `Simulator`
-/// checked participants are excluded upstream by
-/// `launch_plan::is_robot_launch_participant`), so `"service"` is the only
-/// value seen here in practice, but Sim-mode plans reuse this same helper
-/// through `watch`, where a source-overridden simulator is possible.
+/// The board `ParticipantKind` plus whether the participant runs from local
+/// (user/robot-owned) code, for a participant's source-free `execution` (#936).
+/// The role alone decides both: officials and tools are framework binaries
+/// (`local = false`), user services and component drivers are the robot's own
+/// code (`local = true`). An official service the robot happens to override in
+/// its Cargo workspace still resolves to the one official `bin/` entry, so it
+/// is reported the same as a vendored one - the plan no longer distinguishes
+/// "overridden" from "vendored", because the layout it is built from cannot.
 pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (ParticipantKind, bool) {
     match execution {
         ParticipantExecution::OfficialArtifact { .. } => (ParticipantKind::Service, false),
         ParticipantExecution::OfficialTool { .. } => (ParticipantKind::Tool, false),
         ParticipantExecution::UserService { .. } => (ParticipantKind::Service, true),
-        ParticipantExecution::SourceArtifact { kind, .. } => {
-            let kind = match kind.as_str() {
-                "tool" => ParticipantKind::Tool,
-                "simulator" => ParticipantKind::Simulator,
-                _ => ParticipantKind::Service,
-            };
-            (kind, true)
-        }
         ParticipantExecution::ComponentDriver { .. } => (ParticipantKind::Driver, true),
     }
 }
@@ -188,6 +200,7 @@ pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (Participant
 pub(crate) fn spec_from_launch_record(
     participant: &ParticipantLaunchRecord,
     resolved: &ResolvedRobot,
+    source_dirs: &BTreeMap<String, PathBuf>,
     staged_root: &Path,
     ui: &crate::Ui,
 ) -> Result<Option<ParticipantSpec>> {
@@ -200,9 +213,10 @@ pub(crate) fn spec_from_launch_record(
     // `participant_kind` call sites for where the bool is actually consumed.
     let (kind, _local) = participant_kind(&participant.execution);
     let official_by_name = official_runtimes_by_name(resolved);
-    let source = resolve_participant_source(participant, resolved, &official_by_name, ui)?;
+    let source =
+        resolve_participant_source(participant, resolved, &official_by_name, source_dirs, ui)?;
     let executable = stage_and_inspect(staged_root, participant, &source)?;
-    let cwd = source_cwd(&participant.execution);
+    let cwd = source_cwd(participant, resolved, source_dirs);
     Ok(Some(participant_spec(
         participant,
         &robot,
@@ -233,25 +247,48 @@ fn official_runtimes_by_name(resolved: &ResolvedRobot) -> BTreeMap<&str, &Resolv
         .collect()
 }
 
-/// Resolve the binary one launched participant runs from: a source participant
-/// (user service, source-overridden official, component driver) builds through
-/// `cargo`; an official artifact or tool resolves from its source override or
-/// the vendored `.phoxal/artifacts` store. Every path hard-fails - there is no
-/// graceful `None`/pending note - naming the required identity.
+/// Resolve the binary one launched participant runs from, so it can be staged
+/// into the layout's `bin/`. The source-free plan (#936) names only the
+/// participant's role and `bin/` binary, so where its bytes come from is
+/// recovered here from the resolved graph and the staging-side `source_dirs`
+/// record: a user service and a workspace-built component driver build through
+/// `cargo` from their crate directory; an official artifact, tool, or
+/// suite-provided driver resolves from its own source override or the vendored
+/// `.phoxal/artifacts` store. Every path hard-fails - there is no graceful
+/// `None`/pending note - naming the required identity.
 fn resolve_participant_source(
     participant: &ParticipantLaunchRecord,
     resolved: &ResolvedRobot,
     official_by_name: &BTreeMap<&str, &ResolvedPlatformRuntime>,
+    source_dirs: &BTreeMap<String, PathBuf>,
     ui: &crate::Ui,
 ) -> Result<PathBuf> {
     let id = &participant.launch.participant_id;
     let mut build_override =
         |crate_dir: &Path, name: &str| build_source_binary(crate_dir, name, ui);
     match &participant.execution {
-        ParticipantExecution::UserService { crate_dir }
-        | ParticipantExecution::SourceArtifact { crate_dir, .. }
-        | ParticipantExecution::ComponentDriver { crate_dir } => {
+        ParticipantExecution::UserService { .. } => {
+            let crate_dir = source_dirs.get(id).ok_or_else(|| {
+                anyhow!("staged plan is missing the source crate directory for user service {id}")
+            })?;
             build_source_binary(crate_dir, id, ui)
+        }
+        ParticipantExecution::ComponentDriver { .. } => {
+            // A workspace-built driver has a crate directory in the staging
+            // record; a suite-provided one does not and resolves from the
+            // vendored store by its component id, exactly like a service.
+            if let Some(crate_dir) = source_dirs.get(id) {
+                return build_source_binary(crate_dir, id, ui);
+            }
+            let runtime = official_by_name
+                .get(participant.artifact_id.as_str())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "resolved graph is missing component driver {}",
+                        participant.artifact_id
+                    )
+                })?;
+            crate::stager::resolve_platform_source(runtime, &mut build_override)
         }
         ParticipantExecution::OfficialTool { .. } => {
             let tool = resolved
@@ -297,24 +334,40 @@ fn stage_and_inspect(
     Ok(staged)
 }
 
-/// The working directory a launched participant runs in: source participants
-/// keep their crate directory (relative asset paths resolve from there); an
-/// official runs from the layout with no crate context.
-fn source_cwd(execution: &ParticipantExecution) -> Option<PathBuf> {
-    match execution {
-        ParticipantExecution::UserService { crate_dir }
-        | ParticipantExecution::SourceArtifact { crate_dir, .. }
-        | ParticipantExecution::ComponentDriver { crate_dir } => Some(crate_dir.clone()),
-        ParticipantExecution::OfficialArtifact { .. }
-        | ParticipantExecution::OfficialTool { .. } => None,
+/// The working directory a launched participant runs in: a participant built
+/// from source (a user service, a workspace-built driver, or an official the
+/// robot overrides in its Cargo workspace) runs from its crate directory so
+/// relative asset paths resolve; a vendored official runs from the layout with
+/// no crate context. The crate directory comes from the staging-side record
+/// (user services / workspace drivers) or the resolved graph's path override
+/// (overridden officials and tools).
+fn source_cwd(
+    participant: &ParticipantLaunchRecord,
+    resolved: &ResolvedRobot,
+    source_dirs: &BTreeMap<String, PathBuf>,
+) -> Option<PathBuf> {
+    let id = &participant.launch.participant_id;
+    match &participant.execution {
+        ParticipantExecution::UserService { .. } | ParticipantExecution::ComponentDriver { .. } => {
+            source_dirs.get(id).cloned()
+        }
+        ParticipantExecution::OfficialArtifact { .. } => resolved
+            .platform_runtimes
+            .iter()
+            .find(|runtime| runtime.name == participant.artifact_id)
+            .and_then(|runtime| runtime.path_override.clone()),
+        ParticipantExecution::OfficialTool { .. } => resolved
+            .tools
+            .iter()
+            .find(|tool| tool.name == participant.artifact_id)
+            .and_then(|tool| tool.path_override.clone()),
     }
 }
 
 /// Whether a participant launches with tool env (privileged) rather than the
-/// bus-participant env: an official tool, or a source-overridden tool.
+/// bus-participant env: an official tool, vendored or overridden.
 fn is_tool_execution(execution: &ParticipantExecution) -> bool {
     matches!(execution, ParticipantExecution::OfficialTool { .. })
-        || matches!(execution, ParticipantExecution::SourceArtifact { kind, .. } if kind == "tool")
 }
 
 /// Assemble the `ParticipantSpec` the supervisor spawns: the staged executable
@@ -384,7 +437,7 @@ mod tests {
         ParticipantLaunchRecord {
             artifact_id: id.to_string(),
             execution: ParticipantExecution::UserService {
-                crate_dir: PathBuf::from("services").join(id),
+                binary_name: id.to_string(),
             },
             launch: ParticipantLaunch {
                 participant_id: id.to_string(),

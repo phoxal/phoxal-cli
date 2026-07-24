@@ -117,9 +117,11 @@ pub(crate) async fn live_simulate_setup(
     // uses, so `simulation webots run` reads an identity-keyed `bin/` exactly
     // like `run`. The Webots-managed supervisor/controllers are staged into the
     // world instead, so they are not resolved here.
+    let source_dirs = crate::run::source_dirs_by_participant(&sim.ctx.source_participants);
     crate::run::prepare_robot_participants(
         &sim.plan,
         &sim.ctx.resolved,
+        &source_dirs,
         &staged_root,
         &crate::run::DriverPolicy::drivers_off_for_sim(),
         &board,

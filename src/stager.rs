@@ -31,9 +31,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 
 use phoxal_cli_core::artifacts::NativeArtifactDescriptor;
-use phoxal_cli_core::project::launch_plan::{
-    ParticipantExecution, ParticipantLaunchRecord, runtime_layout_dir,
-};
+use phoxal_cli_core::project::launch_plan::{ParticipantLaunchRecord, runtime_layout_dir};
 use phoxal_cli_core::project::resolver::{
     ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, official_binary_name, tool_emit_apis_id,
 };
@@ -131,48 +129,11 @@ fn compile_manifest(resolved: &ResolvedRobot) -> phoxal::model::robot::v0::Robot
 }
 
 /// The canonical identity name one launched participant is stored under in
-/// `bin/`, matching the loader's derivation from the compiled `robot.yaml`.
+/// `bin/`. The source-free plan (#936) names each participant's `bin/` binary
+/// on its `execution` directly - the loader resolves the identical name from
+/// the compiled `robot.yaml` - so this is just that name.
 fn canonical_binary_name(participant: &ParticipantLaunchRecord) -> String {
-    // Component drivers (source- or suite-sourced) are scoped to a component
-    // instance and share one driver binary named by the component id, so every
-    // instance of the same component resolves to a single `bin/` entry.
-    if participant.launch.component_instance.is_some() {
-        return official_binary_name(ArtifactKind::ComponentDriver, &participant.artifact_id);
-    }
-    match &participant.execution {
-        // A user service is its own identity - the key it occupies in the
-        // compiled `robot.yaml` `services` map.
-        ParticipantExecution::UserService { .. } => participant.artifact_id.clone(),
-        ParticipantExecution::OfficialTool { .. } => official_binary_name(
-            ArtifactKind::Tool,
-            tool_short_name(&participant.artifact_id),
-        ),
-        ParticipantExecution::SourceArtifact { kind, .. } if kind == "tool" => {
-            official_binary_name(
-                ArtifactKind::Tool,
-                tool_short_name(&participant.artifact_id),
-            )
-        }
-        ParticipantExecution::SourceArtifact { kind, .. } if kind == "simulator" => {
-            official_binary_name(ArtifactKind::Simulator, &participant.artifact_id)
-        }
-        // An official service resolves to the same canonical service binary
-        // whether it is vendored (`OfficialArtifact`) or built from a workspace
-        // override (`SourceArtifact { kind: "service" }`).
-        ParticipantExecution::OfficialArtifact { .. }
-        | ParticipantExecution::SourceArtifact { .. } => {
-            official_binary_name(ArtifactKind::Service, &participant.artifact_id)
-        }
-        ParticipantExecution::ComponentDriver { .. } => {
-            official_binary_name(ArtifactKind::ComponentDriver, &participant.artifact_id)
-        }
-    }
-}
-
-/// The kind-stripped short name of an official tool artifact id
-/// (`tool-bus` -> `bus`), matching the loader's catalog short name.
-fn tool_short_name(artifact_id: &str) -> &str {
-    artifact_id.strip_prefix("tool-").unwrap_or(artifact_id)
+    participant.execution.binary_name().to_string()
 }
 
 /// Stage one launched CLI-managed participant's binary into the staged `bin/`
@@ -567,6 +528,7 @@ mod tests {
     use super::*;
     use crate::host_paths::test_support::ScratchPhoxalHome;
     use crate::resolver::host_target_triple;
+    use phoxal_cli_core::project::launch_plan::ParticipantExecution;
     use phoxal_cli_core::project::resolver::{
         ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource, ResolvedRobot,
         ResolvedUserRuntime,
@@ -789,7 +751,7 @@ robot:
             "mission",
             "mission",
             ParticipantExecution::UserService {
-                crate_dir: PathBuf::from("services/mission"),
+                binary_name: "mission".to_string(),
             },
             None,
         );
@@ -875,7 +837,7 @@ robot:
             "tool-joypad-robot_v1",
             "tool-joypad",
             ParticipantExecution::OfficialTool {
-                artifact_ref: "ref".to_string(),
+                binary_name: "phoxal-tool-joypad".to_string(),
             },
             None,
         );
@@ -890,26 +852,15 @@ robot:
 
     #[test]
     fn canonical_binary_names_are_identity_keyed_across_sources() {
-        // A vendored official service and a source-overridden one resolve to
-        // the SAME canonical bin/ name, so the loader matches them identically.
+        // The source-free plan (#936) names each participant's `bin/` binary on
+        // its execution, so `canonical_binary_name` is that name and the loader
+        // resolves the identical one from the compiled `robot.yaml`.
         assert_eq!(
             canonical_binary_name(&launch_record(
                 "drive",
                 "drive",
                 ParticipantExecution::OfficialArtifact {
-                    artifact_ref: "ref".to_string()
-                },
-                None,
-            )),
-            "phoxal-service-drive"
-        );
-        assert_eq!(
-            canonical_binary_name(&launch_record(
-                "drive",
-                "drive",
-                ParticipantExecution::SourceArtifact {
-                    kind: "service".to_string(),
-                    crate_dir: PathBuf::from("services/drive"),
+                    binary_name: "phoxal-service-drive".to_string()
                 },
                 None,
             )),
@@ -921,7 +872,7 @@ robot:
                 "mission",
                 "mission",
                 ParticipantExecution::UserService {
-                    crate_dir: PathBuf::from("services/mission"),
+                    binary_name: "mission".to_string(),
                 },
                 None,
             )),
@@ -933,7 +884,7 @@ robot:
                 "tool-bus-robot_v1",
                 "tool-bus",
                 ParticipantExecution::OfficialTool {
-                    artifact_ref: "ref".to_string()
+                    binary_name: "phoxal-tool-bus".to_string()
                 },
                 None,
             )),
@@ -941,28 +892,19 @@ robot:
         );
         // A component driver is named by its component id and shared across
         // every instance - whether built from source or resolved from the suite.
-        assert_eq!(
-            canonical_binary_name(&launch_record(
-                "left_drive",
-                "ddsm115",
-                ParticipantExecution::ComponentDriver {
-                    crate_dir: PathBuf::from("components/ddsm115"),
-                },
-                Some("left_drive"),
-            )),
-            "phoxal-component-ddsm115"
-        );
-        assert_eq!(
-            canonical_binary_name(&launch_record(
-                "right_drive",
-                "ddsm115",
-                ParticipantExecution::OfficialArtifact {
-                    artifact_ref: "ref".to_string()
-                },
-                Some("right_drive"),
-            )),
-            "phoxal-component-ddsm115"
-        );
+        for instance in ["left_drive", "right_drive"] {
+            assert_eq!(
+                canonical_binary_name(&launch_record(
+                    instance,
+                    "ddsm115",
+                    ParticipantExecution::ComponentDriver {
+                        binary_name: "phoxal-component-ddsm115".to_string(),
+                    },
+                    Some(instance),
+                )),
+                "phoxal-component-ddsm115"
+            );
+        }
     }
 
     #[test]
@@ -989,9 +931,8 @@ robot:
             &launch_record(
                 "drive",
                 "drive",
-                ParticipantExecution::SourceArtifact {
-                    kind: "service".to_string(),
-                    crate_dir: PathBuf::from("services/drive"),
+                ParticipantExecution::OfficialArtifact {
+                    binary_name: "phoxal-service-drive".to_string(),
                 },
                 None,
             ),
@@ -1007,7 +948,7 @@ robot:
                 "left_drive",
                 "ddsm115",
                 ParticipantExecution::ComponentDriver {
-                    crate_dir: PathBuf::from("components/ddsm115"),
+                    binary_name: "phoxal-component-ddsm115".to_string(),
                 },
                 Some("left_drive"),
             ),
@@ -1019,7 +960,7 @@ robot:
                 "right_drive",
                 "ddsm115",
                 ParticipantExecution::ComponentDriver {
-                    crate_dir: PathBuf::from("components/ddsm115"),
+                    binary_name: "phoxal-component-ddsm115".to_string(),
                 },
                 Some("right_drive"),
             ),

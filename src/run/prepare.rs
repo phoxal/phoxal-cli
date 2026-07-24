@@ -136,9 +136,11 @@ pub(crate) fn prepare_run_on_board(
     // identity and inspecting it (architecture + embedded metadata) off-disk.
     // Execution consumes the staged layout, never the cargo target dir /
     // artifact store directly (#936).
+    let source_dirs = crate::run::source_dirs_by_participant(&source_participants);
     prepare_robot_participants(
         &plan,
         &resolved,
+        &source_dirs,
         &staged_root,
         &driver_policy,
         &board,

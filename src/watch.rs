@@ -587,6 +587,15 @@ fn specs_for_target(
     // runtime layout the live run executes from, so a hot-reloaded participant
     // is resolved from `bin/` exactly like the original launch (#936).
     let staged_root = crate::stager::layout_path(project_root, resolved);
+    // The staging-side record of source crate directories the source-free plan
+    // no longer carries (#936): a hot-reloaded user service or workspace driver
+    // is rebuilt from here, exactly like the original staging pass.
+    let source_participants = crate::check::source_participants_from_resolved(
+        project_root,
+        resolved,
+        crate::component_driver::component_driver_crate_dir,
+    )?;
+    let source_dirs = crate::run::source_dirs_by_participant(&source_participants);
     let mut specs = Vec::new();
     for participant in plan
         .robots
@@ -597,7 +606,9 @@ fn specs_for_target(
                 || wanted.contains(participant.launch.participant_id.as_str())
         })
     {
-        if let Some(spec) = spec_from_launch_record(participant, resolved, &staged_root, &ui)? {
+        if let Some(spec) =
+            spec_from_launch_record(participant, resolved, &source_dirs, &staged_root, &ui)?
+        {
             specs.push(spec);
         }
     }

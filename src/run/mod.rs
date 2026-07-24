@@ -27,7 +27,7 @@ mod report;
 pub(crate) use report::{DriverPolicy, report_launch_commands};
 mod participants;
 pub(crate) use participants::{
-    DriverDecision, prepare_robot_participants, spec_from_launch_record,
+    DriverDecision, prepare_robot_participants, source_dirs_by_participant, spec_from_launch_record,
 };
 mod build;
 pub(crate) use build::{build_source_binary, device_missing_note};

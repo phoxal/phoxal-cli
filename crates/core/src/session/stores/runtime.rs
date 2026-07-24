@@ -241,19 +241,10 @@ impl RuntimeStore {
 }
 
 fn artifact_ref_for_execution(execution: &ParticipantExecution) -> Option<String> {
-    match execution {
-        ParticipantExecution::OfficialArtifact { artifact_ref }
-        | ParticipantExecution::OfficialTool { artifact_ref } => Some(artifact_ref.clone()),
-        ParticipantExecution::UserService { crate_dir } => {
-            Some(format!("local user service: {}", crate_dir.display()))
-        }
-        ParticipantExecution::SourceArtifact { kind, crate_dir } => {
-            Some(format!("local {kind} source: {}", crate_dir.display()))
-        }
-        ParticipantExecution::ComponentDriver { crate_dir } => {
-            Some(format!("local component driver: {}", crate_dir.display()))
-        }
-    }
+    // The plan is source-free (#936): a participant is identified by the flat
+    // `bin/` binary it resolves to, so the runtime store's "artifact ref" is
+    // that canonical binary name rather than a suite ref or a crate path.
+    Some(format!("bin/{}", execution.binary_name()))
 }
 
 fn origin_for_execution(execution: &ParticipantExecution) -> RuntimeOrigin {
@@ -261,7 +252,6 @@ fn origin_for_execution(execution: &ParticipantExecution) -> RuntimeOrigin {
         ParticipantExecution::UserService { .. } => RuntimeOrigin::UserService,
         ParticipantExecution::OfficialArtifact { .. }
         | ParticipantExecution::OfficialTool { .. }
-        | ParticipantExecution::SourceArtifact { .. }
         | ParticipantExecution::ComponentDriver { .. } => RuntimeOrigin::Framework,
     }
 }
