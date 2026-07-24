@@ -30,6 +30,8 @@ use crate::schema::{DocumentKind, ensure_supported_revision};
 
 pub mod plan;
 
+pub use plan::PlanOptions;
+
 const ROBOT_FILE: &str = "robot.yaml";
 const BIN_DIR: &str = "bin";
 
@@ -40,6 +42,40 @@ const BIN_DIR: &str = "bin";
 pub enum RuntimeProfile {
     Native,
     Webots,
+}
+
+/// Which component drivers the run policy keeps in the required set (#936). The
+/// `--drivers off` / `--driver <ID>` options on `run` gate the required set at
+/// its source: an excluded driver is never required, never resolved from
+/// `bin/`, never architecture-inspected, and never planned as a participant.
+/// That is what lets a driven robot run on a host whose driver binaries it
+/// cannot inspect (`--drivers off` on a macOS host, whose component drivers are
+/// Linux-only) without the plan constructor hard-failing on a foreign-arch
+/// driver binary. Selection is by component-instance id, matching the
+/// `--driver <ID>` vocabulary and the plan participant ids.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DriverSelection {
+    /// Every driven component instance is required (drivers on, no subset).
+    #[default]
+    All,
+    /// Only these component-instance ids are required (drivers on, a
+    /// `--driver <ID>` subset). A driver binary is required if at least one of
+    /// its instances is selected; the unselected instances are not planned.
+    Only(BTreeSet<String>),
+    /// No component drivers are required (drivers off).
+    None,
+}
+
+impl DriverSelection {
+    /// Whether the component instance `instance` is kept by this selection.
+    #[must_use]
+    pub fn includes_instance(&self, instance: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(set) => set.contains(instance),
+            Self::None => false,
+        }
+    }
 }
 
 /// The role a required runtime plays. Drives board classification and which
@@ -142,9 +178,15 @@ impl RuntimeLayout {
     /// the CLI-internal catalog (simulator binaries excluded from `Native`);
     /// the user-service set is every `services` entry that is not an official
     /// service; component drivers are one per driven component id (a single
-    /// driver binary serves every instance of that component id).
+    /// driver binary serves every instance of that component id), gated by
+    /// `drivers`: a driver whose every instance is excluded is not required, so
+    /// it is never resolved or inspected (#936).
     #[must_use]
-    pub fn required_runtimes(&self, profile: RuntimeProfile) -> Vec<RequiredRuntime> {
+    pub fn required_runtimes(
+        &self,
+        profile: RuntimeProfile,
+        drivers: &DriverSelection,
+    ) -> Vec<RequiredRuntime> {
         let mut required = Vec::new();
         let official_services = official_service_short_names();
 
@@ -185,8 +227,16 @@ impl RuntimeLayout {
         }
 
         let mut seen_driver_ids = BTreeSet::new();
-        for component in self.robot.robot.components.values() {
+        for (instance, component) in &self.robot.robot.components {
             if component.driver.is_none() {
+                continue;
+            }
+            // The policy gates the required set: an instance the run excludes
+            // (drivers off, or not named in a `--driver` subset) does not pull
+            // its driver binary into resolution/inspection. A driver binary is
+            // still required if any other instance of the same component id is
+            // selected.
+            if !drivers.includes_instance(instance) {
                 continue;
             }
             if !seen_driver_ids.insert(component.component.clone()) {
@@ -355,7 +405,7 @@ services:
     fn native_required_set_derives_officials_users_and_deduped_drivers() -> Result<()> {
         let dir = write_layout(ROBOT_YAML)?;
         let layout = RuntimeLayout::open(dir.path())?;
-        let required = layout.required_runtimes(RuntimeProfile::Native);
+        let required = layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All);
 
         // No simulator binaries in the Native profile.
         assert!(
@@ -399,8 +449,10 @@ services:
     fn webots_profile_adds_simulator_runtimes() -> Result<()> {
         let dir = write_layout(ROBOT_YAML)?;
         let layout = RuntimeLayout::open(dir.path())?;
-        let native = layout.required_runtimes(RuntimeProfile::Native).len();
-        let webots = layout.required_runtimes(RuntimeProfile::Webots);
+        let native = layout
+            .required_runtimes(RuntimeProfile::Native, &DriverSelection::All)
+            .len();
+        let webots = layout.required_runtimes(RuntimeProfile::Webots, &DriverSelection::All);
         assert!(webots.len() > native);
         assert!(
             webots
@@ -420,7 +472,7 @@ services:
         write_bin(dir.path(), "leftover-tool", b"not even an object file")?;
 
         let layout = RuntimeLayout::open(dir.path())?;
-        let required = layout.required_runtimes(RuntimeProfile::Native);
+        let required = layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All);
         let mission = required
             .iter()
             .find(|runtime| runtime.identity == "mission")
@@ -436,7 +488,7 @@ services:
     fn a_missing_selected_binary_fails_naming_the_identity() -> Result<()> {
         let dir = write_layout(ROBOT_YAML)?;
         let layout = RuntimeLayout::open(dir.path())?;
-        let required = layout.required_runtimes(RuntimeProfile::Native);
+        let required = layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All);
         let drive = required
             .iter()
             .find(|runtime| runtime.identity == "drive")
@@ -459,7 +511,7 @@ services:
         write_bin(dir.path(), "mission", &synthesize_binary(foreign, b"{}"))?;
 
         let layout = RuntimeLayout::open(dir.path())?;
-        let required = layout.required_runtimes(RuntimeProfile::Native);
+        let required = layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All);
         let mission = required
             .iter()
             .find(|runtime| runtime.identity == "mission")
@@ -481,7 +533,7 @@ services:
             &synthesize_binary(host_architecture(), payload),
         )?;
         let layout = RuntimeLayout::open(dir.path())?;
-        let required = layout.required_runtimes(RuntimeProfile::Native);
+        let required = layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All);
         let mission = required
             .iter()
             .find(|runtime| runtime.identity == "mission")

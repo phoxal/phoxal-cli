@@ -25,6 +25,7 @@ use phoxal_cli_core::project::launch_plan::LaunchOwnership;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
+use phoxal_cli_core::project::layout::DriverSelection;
 use phoxal_cli_core::project::layout::RuntimeLayout;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
@@ -74,10 +75,16 @@ pub(crate) fn source_dirs_by_participant(
 /// router, from the vendored store or a source override. After it runs, `bin/`
 /// is the complete lookup store an extracted bundle would carry - the loader
 /// resolves every required runtime from it with no source present.
+///
+/// `drivers` gates the component-driver work exactly as the plan constructor
+/// does (#936): a driver the run excludes (drivers off, or an instance outside a
+/// `--driver` subset) is not built or linked here, so `--drivers off` never
+/// force-builds a driver crate the run will not launch.
 pub(crate) fn stage_complete_bin_store(
     staged_root: &Path,
     resolved: &ResolvedRobot,
     source_participants: &[SourceParticipant],
+    drivers: &DriverSelection,
     ui: &crate::Ui,
 ) -> Result<()> {
     let mut staged_names = BTreeSet::new();
@@ -88,10 +95,18 @@ pub(crate) fn stage_complete_bin_store(
     for participant in source_participants {
         let binary_name = match participant.kind {
             SourceParticipantKind::UserService => participant.name.clone(),
-            SourceParticipantKind::ComponentDriver => official_binary_name(
-                ArtifactKind::ComponentDriver,
-                &participant.expected_artifact_id,
-            ),
+            SourceParticipantKind::ComponentDriver => {
+                // An excluded driver instance is never built: its binary is not
+                // required, so force-building the crate would be wasted work the
+                // run will not launch (and, on a foreign host, may not compile).
+                if !drivers.includes_instance(&participant.name) {
+                    continue;
+                }
+                official_binary_name(
+                    ArtifactKind::ComponentDriver,
+                    &participant.expected_artifact_id,
+                )
+            }
             SourceParticipantKind::OfficialService
             | SourceParticipantKind::Tool
             | SourceParticipantKind::Simulator => continue,
@@ -110,6 +125,11 @@ pub(crate) fn stage_complete_bin_store(
         |crate_dir: &Path, name: &str| build_source_binary(crate_dir, name, ui);
     for component in &resolved.components {
         if !component.has_driver {
+            continue;
+        }
+        // Skip a driver whose instance the policy excludes; a sibling instance
+        // that is selected still stages the shared binary through its own row.
+        if !drivers.includes_instance(&component.instance) {
             continue;
         }
         let binary_name =
@@ -756,9 +776,10 @@ services:
         std::fs::create_dir_all(root.join(".phoxal/artifacts"))?;
 
         let layout = RuntimeLayout::open(root)?;
-        for required in
-            layout.required_runtimes(phoxal_cli_core::project::layout::RuntimeProfile::Native)
-        {
+        for required in layout.required_runtimes(
+            phoxal_cli_core::project::layout::RuntimeProfile::Native,
+            &DriverSelection::All,
+        ) {
             if required.kind
                 == phoxal_cli_core::project::layout::RequiredRuntimeKind::Infrastructure
             {
@@ -773,6 +794,7 @@ services:
         let plan = RuntimeLayout::construct_plan(
             root,
             &phoxal_cli_core::project::launch_plan::LaunchMode::Run,
+            &phoxal_cli_core::project::layout::PlanOptions::default(),
         )?
         .plan;
         let policy = DriverPolicy::from_options(
@@ -782,7 +804,7 @@ services:
                 suite_source: None,
                 watch: false,
             },
-            &plan,
+            &crate::run::driven_instances(layout.robot()),
         )?;
         let board = BoardBackend::new();
         let mut specs = Vec::new();

@@ -17,16 +17,23 @@
 use anyhow::{Result, bail};
 use phoxal::check::Problem;
 use phoxal_cli_core::project::launch_plan::{LaunchMode, LaunchPlan};
-use phoxal_cli_core::project::layout::RuntimeLayout;
+use phoxal_cli_core::project::layout::{PlanOptions, RuntimeLayout};
 use std::path::Path;
 
 /// Construct and validate the launch plan for a staged runtime layout at
-/// `root`, without supervising it. Fails when a user service's compiled config
-/// does not match the schema embedded in its binary, or when the checked
+/// `root`, without supervising it. `options` carries the driver policy (#936):
+/// an excluded driver is never required, resolved, inspected, or planned, so a
+/// driven robot runs on a host whose driver binaries it cannot inspect once
+/// `--drivers off` is passed. Fails when a user service's compiled config does
+/// not match the schema embedded in its binary, or when the checked
 /// participants' API contracts are incoherent. Returns the immutable plan the
 /// supervisor would launch from.
-pub fn validate_layout_plan(root: &Path, mode: &LaunchMode) -> Result<LaunchPlan> {
-    let constructed = RuntimeLayout::construct_plan(root, mode)?;
+pub fn validate_layout_plan(
+    root: &Path,
+    mode: &LaunchMode,
+    options: &PlanOptions,
+) -> Result<LaunchPlan> {
+    let constructed = RuntimeLayout::construct_plan(root, mode, options)?;
     // The compiled `robot.yaml` carries each user service's authored config; the
     // constructor pairs it with the schema from the service's binary. Validate
     // through the same jsonschema check the graph pipeline uses.
@@ -82,7 +89,9 @@ fn format_config_problems(problems: &[Problem]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_cli_core::project::layout::{RequiredRuntimeKind, RuntimeProfile};
+    use phoxal_cli_core::project::layout::{
+        DriverSelection, PlanOptions, RequiredRuntimeKind, RuntimeProfile,
+    };
     use std::fs;
     use std::path::PathBuf;
 
@@ -126,7 +135,7 @@ services:
         let bin = root.join("bin");
         fs::create_dir_all(&bin)?;
         let layout = RuntimeLayout::open(root)?;
-        for required in layout.required_runtimes(RuntimeProfile::Native) {
+        for required in layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All) {
             if required.kind == RequiredRuntimeKind::Infrastructure {
                 continue;
             }
@@ -155,7 +164,7 @@ services:
             &root,
             r#"{"type":"object","properties":{"speed":{"type":"integer"}}}"#,
         )?;
-        let plan = validate_layout_plan(&root, &LaunchMode::Run)?;
+        let plan = validate_layout_plan(&root, &LaunchMode::Run, &PlanOptions::default())?;
         assert_eq!(plan.robots[0].id, "robot_v1");
         assert!(
             plan.robots[0]
@@ -175,7 +184,7 @@ services:
             &root,
             r#"{"type":"object","properties":{"speed":{"type":"string"}},"required":["speed"]}"#,
         )?;
-        let error = validate_layout_plan(&root, &LaunchMode::Run)
+        let error = validate_layout_plan(&root, &LaunchMode::Run, &PlanOptions::default())
             .expect_err("an invalid config must fail validation")
             .to_string();
         assert!(error.contains("mission"), "{error}");

@@ -6,6 +6,7 @@ use anyhow::Result;
 use anyhow::bail;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
+use phoxal_cli_core::project::layout::DriverSelection;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
@@ -108,27 +109,21 @@ impl DriverPolicy {
         }
     }
 
-    pub(crate) fn from_options(options: &RunOptions, plan: &LaunchPlan) -> Result<Self> {
-        let available = plan
-            .robots
-            .iter()
-            .flat_map(|robot| &robot.participants)
-            .filter(|participant| {
-                matches!(
-                    participant.execution,
-                    ParticipantExecution::ComponentDriver { .. }
-                )
-            })
-            .map(|participant| participant.launch.participant_id.clone())
-            .collect::<BTreeSet<_>>();
+    /// Build the driver policy from the run options, validating a `--driver`
+    /// subset against `available` - the full set of driven component-instance
+    /// ids from the robot model. This must validate against every driven
+    /// instance, not the constructed plan: the plan already has excluded drivers
+    /// removed (#936), so an unknown id would otherwise be reported against an
+    /// empty or narrowed list.
+    pub(crate) fn from_options(options: &RunOptions, available: &BTreeSet<String>) -> Result<Self> {
         let subset = options
             .drivers_subset
             .iter()
             .cloned()
             .collect::<BTreeSet<_>>();
-        let unknown = subset.difference(&available).cloned().collect::<Vec<_>>();
+        let unknown = subset.difference(available).cloned().collect::<Vec<_>>();
         if !unknown.is_empty() {
-            let available = available.into_iter().collect::<Vec<_>>().join(", ");
+            let available = available.iter().cloned().collect::<Vec<_>>().join(", ");
             bail!(
                 "unknown driver id(s): {}; available drivers: {}",
                 unknown.join(", "),
@@ -145,6 +140,18 @@ impl DriverPolicy {
         })
     }
 
+    /// The core plan-construction selection this policy maps onto: `run`/`start`
+    /// feed it into [`RuntimeLayout::construct_plan`](phoxal_cli_core::project::layout::RuntimeLayout::construct_plan)
+    /// and [`stage_complete_bin_store`](super::stage_complete_bin_store) so an
+    /// excluded driver is never required, resolved, inspected, staged, or planned.
+    pub(crate) fn selection(&self) -> DriverSelection {
+        match self.mode {
+            DriversMode::Off => DriverSelection::None,
+            DriversMode::On if self.subset.is_empty() => DriverSelection::All,
+            DriversMode::On => DriverSelection::Only(self.subset.clone()),
+        }
+    }
+
     pub(crate) fn decision(&self, id: &str) -> DriverDecision {
         match self.mode {
             DriversMode::Off => DriverDecision::Degraded("drivers off".to_string()),
@@ -154,4 +161,17 @@ impl DriverPolicy {
             DriversMode::On => DriverDecision::Launch,
         }
     }
+}
+
+/// The full set of driven component-instance ids from a compiled robot model.
+/// A `--driver` subset is validated against this - not the constructed plan,
+/// which already drops the drivers the policy excludes (#936).
+pub(crate) fn driven_instances(robot: &phoxal::model::robot::v0::Robot) -> BTreeSet<String> {
+    robot
+        .robot
+        .components
+        .iter()
+        .filter(|(_, component)| component.driver.is_some())
+        .map(|(instance, _)| instance.clone())
+        .collect()
 }

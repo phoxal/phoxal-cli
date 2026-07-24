@@ -69,6 +69,16 @@ pub(crate) fn prepare_run_on_board(
     let staged_root = crate::stager::stage_runtime_layout(project_root, &resolved)
         .context("failed to stage the runtime layout")?;
 
+    // The driver policy is resolved once, from the run options and the driven
+    // component instances the robot declares, and threads through both staging
+    // and plan construction (#936): an excluded driver is never built, staged,
+    // required, resolved, inspected, or planned.
+    let driver_policy =
+        DriverPolicy::from_options(&options, &crate::run::driven_instances(&resolved.robot))?;
+    let plan_options = phoxal_cli_core::project::layout::PlanOptions {
+        drivers: driver_policy.selection(),
+    };
+
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
 
@@ -80,15 +90,20 @@ pub(crate) fn prepare_run_on_board(
     // Complete the staged `bin/` store so the loader can inspect every required
     // runtime off-disk. This is the last step that consumes the resolved graph;
     // everything after it reads only the staged layout.
-    crate::run::stage_complete_bin_store(&staged_root, &resolved, &source_participants, ui)?;
+    crate::run::stage_complete_bin_store(
+        &staged_root,
+        &resolved,
+        &source_participants,
+        &driver_policy.selection(),
+        ui,
+    )?;
 
     // The one execution path: construct and validate the launch plan from the
     // staged layout alone. Byte-identical, for the same robot, to a plan built
     // from an extracted bundle of this layout.
-    let plan = crate::loader::validate_layout_plan(&staged_root, &LaunchMode::Run)
+    let plan = crate::loader::validate_layout_plan(&staged_root, &LaunchMode::Run, &plan_options)
         .context("failed to construct the launch plan from the staged runtime layout")?;
 
-    let driver_policy = DriverPolicy::from_options(&options, &plan)?;
     board.configure(
         project_root.display().to_string(),
         resolved.train.clone(),
@@ -152,10 +167,18 @@ pub(crate) fn prepare_layout_run_on_board(
             layout_root.display()
         )
     })?;
-    let plan = crate::loader::validate_layout_plan(layout_root, &LaunchMode::Run)
+
+    // The same driver policy the source path applies, so `--drivers off` runs an
+    // extracted bundle on a host whose driver binaries it cannot inspect (#936):
+    // excluded drivers are not required, resolved, inspected, or planned.
+    let driver_policy =
+        DriverPolicy::from_options(&options, &crate::run::driven_instances(layout.robot()))?;
+    let plan_options = phoxal_cli_core::project::layout::PlanOptions {
+        drivers: driver_policy.selection(),
+    };
+    let plan = crate::loader::validate_layout_plan(layout_root, &LaunchMode::Run, &plan_options)
         .context("failed to construct the launch plan from the staged runtime layout")?;
 
-    let driver_policy = DriverPolicy::from_options(&options, &plan)?;
     board.configure(
         layout_root.display().to_string(),
         "staged".to_string(),

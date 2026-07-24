@@ -37,8 +37,19 @@ use super::super::launch_plan::{
     SIMULATOR_SUPERVISOR_ARTIFACT_NAME, SIMULATOR_SUPERVISOR_PROVIDER_ID, execution_device_id,
     simulator_controller_provider_id,
 };
-use super::{RequiredRuntimeKind, RuntimeLayout, RuntimeProfile, SelectedBinary};
+use super::{DriverSelection, RequiredRuntimeKind, RuntimeLayout, RuntimeProfile, SelectedBinary};
 use crate::session::{RuntimeFailurePolicy, StartupRequirement};
+
+/// The non-`(layout, mode)` inputs the plan constructor is parameterized on, so
+/// the derived launch plan stays a pure function of `(layout, mode, options)`
+/// (#936). Today this carries only the driver policy; the run/start commands map
+/// their `--drivers`/`--driver` options onto it, and `build` stages every driver
+/// with [`DriverSelection::All`].
+#[derive(Debug, Clone, Default)]
+pub struct PlanOptions {
+    /// Which component drivers are kept in the required set and planned.
+    pub drivers: DriverSelection,
+}
 
 /// The complete launch graph a staged layout derives, plus the two validation
 /// inputs the bin-side "validate through the loader" entry runs its own
@@ -81,10 +92,14 @@ impl RuntimeLayout {
     ///
     /// The jsonschema and coherence checks are the caller's to run (they live in
     /// the bin crate); this returns their inputs on [`ConstructedPlan`].
-    pub fn construct_plan(root: &std::path::Path, mode: &LaunchMode) -> Result<ConstructedPlan> {
+    pub fn construct_plan(
+        root: &std::path::Path,
+        mode: &LaunchMode,
+        options: &PlanOptions,
+    ) -> Result<ConstructedPlan> {
         let layout = Self::open(root)?;
         let profile = profile_for(mode);
-        let required = layout.required_runtimes(profile);
+        let required = layout.required_runtimes(profile, &options.drivers);
         let mut selected = BTreeMap::new();
         for runtime in &required {
             // Infrastructure (the router) is resolved by the CLI itself and is
@@ -94,7 +109,7 @@ impl RuntimeLayout {
             }
             selected.insert(runtime.binary_name.clone(), layout.inspect(runtime)?);
         }
-        layout.construct_plan_from_selected(mode, &selected)
+        layout.construct_plan_from_selected(mode, options, &selected)
     }
 
     /// Construct the launch plan from an already-inspected selected-binary set,
@@ -104,6 +119,7 @@ impl RuntimeLayout {
     pub fn construct_plan_from_selected(
         &self,
         mode: &LaunchMode,
+        options: &PlanOptions,
         selected: &BTreeMap<String, SelectedBinary>,
     ) -> Result<ConstructedPlan> {
         let profile = profile_for(mode);
@@ -136,7 +152,7 @@ impl RuntimeLayout {
         let mut contract_surfaces = Vec::new();
         let mut user_service_configs = Vec::new();
 
-        for required in self.required_runtimes(profile) {
+        for required in self.required_runtimes(profile, &options.drivers) {
             match required.kind {
                 // The router is CLI-resolved infrastructure, never a plan
                 // participant (it is registered as a project-scoped process by
@@ -230,8 +246,14 @@ impl RuntimeLayout {
                     // One binary, N instances: every component instance whose
                     // component id matches this driver becomes its own graph
                     // node, all sharing the one `bin/` binary and its contracts.
+                    // An instance the policy excludes (a `--driver` subset that
+                    // names only some instances) is not planned, even though its
+                    // sibling instance kept the shared driver binary required.
                     for (instance, component) in &self.robot().robot.components {
                         if component.driver.is_none() || component.component != required.identity {
+                            continue;
+                        }
+                        if !options.drivers.includes_instance(instance) {
                             continue;
                         }
                         participants.push(cli_managed_record(
@@ -471,7 +493,7 @@ services:
         let bin = root.join("bin");
         fs::create_dir_all(&bin)?;
         let layout = RuntimeLayout::open(root)?;
-        for required in layout.required_runtimes(RuntimeProfile::Native) {
+        for required in layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All) {
             if required.kind == RequiredRuntimeKind::Infrastructure {
                 continue;
             }
@@ -661,7 +683,8 @@ services:
         )?;
 
         // The layout leg: read the same staged layout, source-free.
-        let constructed = RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run)?;
+        let constructed =
+            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())?;
 
         assert_eq!(
             constructed.plan, legacy,
@@ -718,14 +741,20 @@ services:
         let staged_project = tempfile::tempdir()?;
         let staged_root = runtime_layout_dir(staged_project.path(), "triple");
         stage_layout(&staged_root, &[])?;
-        let mut staged_plan = RuntimeLayout::construct_plan(&staged_root, &LaunchMode::Run)?.plan;
+        let mut staged_plan =
+            RuntimeLayout::construct_plan(&staged_root, &LaunchMode::Run, &PlanOptions::default())?
+                .plan;
 
         // "Extract the bundle" to an unrelated directory and construct again.
         let extracted = tempfile::tempdir()?;
         let extracted_root = extracted.path().join("build.phoxal.extracted");
         copy_dir(&staged_root, &extracted_root)?;
-        let mut extracted_plan =
-            RuntimeLayout::construct_plan(&extracted_root, &LaunchMode::Run)?.plan;
+        let mut extracted_plan = RuntimeLayout::construct_plan(
+            &extracted_root,
+            &LaunchMode::Run,
+            &PlanOptions::default(),
+        )?
+        .plan;
 
         // Before normalization the deployment root genuinely differs, proving the
         // two constructions ran against distinct locations.
@@ -753,7 +782,8 @@ services:
         let project = tempfile::tempdir()?;
         let layout_root = runtime_layout_dir(project.path(), "triple");
         stage_layout(&layout_root, &[])?;
-        let constructed = RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run)?;
+        let constructed =
+            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())?;
         let robot = &constructed.plan.robots[0];
 
         // Every catalog service is a planned participant, dormant or not - the
@@ -812,7 +842,8 @@ services:
         let project = tempfile::tempdir()?;
         let layout_root = runtime_layout_dir(project.path(), "triple");
         stage_layout(&layout_root, &[])?;
-        let constructed = RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run)?;
+        let constructed =
+            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())?;
         let robot = &constructed.plan.robots[0];
 
         let drivers = robot
@@ -845,7 +876,8 @@ services:
         // The `mission` user-service binary carries a real object schema.
         let mission_meta = br#"{"participant_api":"Api","contracts":[],"config_schema":{"type":"object","properties":{"speed":{"type":"integer"}}}}"#;
         stage_layout(&layout_root, &[("mission", mission_meta)])?;
-        let constructed = RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run)?;
+        let constructed =
+            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())?;
 
         let mission = constructed
             .user_service_configs
@@ -879,7 +911,7 @@ services:
         fs::create_dir_all(&bin)?;
         let layout = RuntimeLayout::open(&layout_root)?;
         // Stage every Webots-profile binary (adds the two simulators).
-        for required in layout.required_runtimes(RuntimeProfile::Webots) {
+        for required in layout.required_runtimes(RuntimeProfile::Webots, &DriverSelection::All) {
             if required.kind == RequiredRuntimeKind::Infrastructure {
                 continue;
             }
@@ -888,7 +920,8 @@ services:
         let mode = LaunchMode::Webots {
             world: PathBuf::from("worlds/default.wbt"),
         };
-        let constructed = RuntimeLayout::construct_plan(&layout_root, &mode)?;
+        let constructed =
+            RuntimeLayout::construct_plan(&layout_root, &mode, &PlanOptions::default())?;
         let robot = &constructed.plan.robots[0];
 
         let simulators = robot
@@ -931,7 +964,7 @@ services:
         )?;
         let error = format!(
             "{:#}",
-            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run)
+            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())
                 .expect_err("a foreign-arch binary must fail construction")
         );
         assert!(error.contains("mission"), "{error}");
@@ -947,11 +980,98 @@ services:
         fs::remove_file(layout_root.join("bin/phoxal-service-drive"))?;
         let error = format!(
             "{:#}",
-            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run)
+            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())
                 .expect_err("a missing binary must fail construction")
         );
         assert!(error.contains("drive"), "{error}");
         assert!(error.contains("phoxal-service-drive"), "{error}");
+        Ok(())
+    }
+
+    /// The regression the driver policy fixes (#936): `construct_plan` used to
+    /// inspect every driver binary unconditionally, so a driven robot could not
+    /// run on a host whose driver binaries it cannot inspect (a macOS host, whose
+    /// component drivers are Linux-only). With drivers off the excluded driver is
+    /// never required, resolved, inspected, or planned - so a foreign-arch driver
+    /// binary that hard-fails with drivers ON constructs cleanly with drivers OFF.
+    #[test]
+    fn drivers_off_excludes_drivers_and_never_inspects_them() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let layout_root = runtime_layout_dir(project.path(), "triple");
+        stage_layout(&layout_root, &[])?;
+        // A foreign-architecture driver binary: inspection would hard-fail.
+        let foreign = if host_architecture() == object::Architecture::X86_64 {
+            object::Architecture::Aarch64
+        } else {
+            object::Architecture::X86_64
+        };
+        fs::write(
+            layout_root.join("bin/phoxal-component-ddsm115"),
+            synthesize_binary_for(foreign, NO_META),
+        )?;
+
+        // Drivers on: the foreign driver binary is required and inspected, so
+        // construction hard-fails naming the driver identity.
+        let on_error = format!(
+            "{:#}",
+            RuntimeLayout::construct_plan(&layout_root, &LaunchMode::Run, &PlanOptions::default())
+                .expect_err("a foreign-arch driver binary must fail with drivers on")
+        );
+        assert!(on_error.contains("ddsm115"), "{on_error}");
+
+        // Drivers off: no driver is required/resolved/inspected/planned, so the
+        // macOS-driven-robot scenario becomes runnable despite the foreign binary.
+        let constructed = RuntimeLayout::construct_plan(
+            &layout_root,
+            &LaunchMode::Run,
+            &PlanOptions {
+                drivers: DriverSelection::None,
+            },
+        )?;
+        assert!(
+            !constructed.plan.robots[0]
+                .participants
+                .iter()
+                .any(|participant| matches!(
+                    participant.execution,
+                    ParticipantExecution::ComponentDriver { .. }
+                )),
+            "drivers off must exclude every component driver from the plan"
+        );
+        Ok(())
+    }
+
+    /// A `--driver <ID>` subset keeps the shared driver binary required (so it is
+    /// still inspected once) but plans only the named component instances; the
+    /// unselected sibling instance is not planned.
+    #[test]
+    fn a_driver_subset_plans_only_the_selected_instances() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let layout_root = runtime_layout_dir(project.path(), "triple");
+        stage_layout(&layout_root, &[])?;
+        let constructed = RuntimeLayout::construct_plan(
+            &layout_root,
+            &LaunchMode::Run,
+            &PlanOptions {
+                drivers: DriverSelection::Only(["left_drive".to_string()].into_iter().collect()),
+            },
+        )?;
+        let drivers = constructed.plan.robots[0]
+            .participants
+            .iter()
+            .filter(|participant| {
+                matches!(
+                    participant.execution,
+                    ParticipantExecution::ComponentDriver { .. }
+                )
+            })
+            .map(|participant| participant.launch.participant_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drivers,
+            vec!["left_drive".to_string()],
+            "only the selected instance is planned, though both share one binary"
+        );
         Ok(())
     }
 }

@@ -99,9 +99,15 @@ fn plan_with_drivers(ids: &[&str]) -> LaunchPlan {
     }
 }
 
+/// The driver instances a robot declares, the set a `--driver` subset is
+/// validated against (the plan already drops excluded drivers, #936).
+fn available_drivers(ids: &[&str]) -> std::collections::BTreeSet<String> {
+    ids.iter().map(|id| (*id).to_string()).collect()
+}
+
 #[test]
 fn driver_subset_is_strict() -> Result<()> {
-    let plan = plan_with_drivers(&["imu", "left_drive"]);
+    let available = available_drivers(&["imu", "left_drive"]);
     let policy = DriverPolicy::from_options(
         &RunOptions {
             drivers: DriversMode::On,
@@ -109,12 +115,17 @@ fn driver_subset_is_strict() -> Result<()> {
             suite_source: None,
             watch: false,
         },
-        &plan,
+        &available,
     )?;
     assert_eq!(policy.decision("imu"), DriverDecision::Launch);
     assert_eq!(
         policy.decision("left_drive"),
         DriverDecision::Degraded("not selected by --driver".to_string())
+    );
+    // The subset maps onto the core plan selection, which keeps only `imu`.
+    assert_eq!(
+        policy.selection(),
+        phoxal_cli_core::project::layout::DriverSelection::Only(available_drivers(&["imu"]))
     );
 
     let err = DriverPolicy::from_options(
@@ -124,16 +135,18 @@ fn driver_subset_is_strict() -> Result<()> {
             suite_source: None,
             watch: false,
         },
-        &plan,
+        &available,
     )
     .expect_err("unknown drivers must fail");
     assert!(err.to_string().contains("unknown driver id"));
+    // The error names the real available drivers, not the narrowed plan set.
+    assert!(err.to_string().contains("imu"), "{err}");
+    assert!(err.to_string().contains("left_drive"), "{err}");
     Ok(())
 }
 
 #[test]
-fn drivers_off_degrades_every_driver() -> Result<()> {
-    let plan = plan_with_drivers(&["imu"]);
+fn drivers_off_selects_no_drivers() -> Result<()> {
     let policy = DriverPolicy::from_options(
         &RunOptions {
             drivers: DriversMode::Off,
@@ -141,11 +154,16 @@ fn drivers_off_degrades_every_driver() -> Result<()> {
             suite_source: None,
             watch: false,
         },
-        &plan,
+        &available_drivers(&["imu"]),
     )?;
     assert_eq!(
         policy.decision("imu"),
         DriverDecision::Degraded("drivers off".to_string())
+    );
+    // Drivers off maps onto the core selection that plans no component drivers.
+    assert_eq!(
+        policy.selection(),
+        phoxal_cli_core::project::layout::DriverSelection::None
     );
     Ok(())
 }

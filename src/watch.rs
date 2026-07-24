@@ -519,11 +519,27 @@ fn recheck_run_target(
     // crate is rebuilt and re-staged into `bin/` before the loader inspects it,
     // so the layout-derived plan and its coherence check see the fresh metadata.
     let ui = crate::Ui::from_env();
+    // The watch recheck honors the same driver policy the live run resolved, so a
+    // hot-reload restages and replans the identical driver set (#936).
+    let driver_policy = crate::run::DriverPolicy::from_options(
+        options,
+        &crate::run::driven_instances(&resolved.robot),
+    )?;
+    let plan_options = phoxal_cli_core::project::layout::PlanOptions {
+        drivers: driver_policy.selection(),
+    };
     let staged_root = crate::stager::stage_runtime_layout(project_root, &resolved)
         .context("failed to re-stage the runtime layout")?;
-    crate::run::stage_complete_bin_store(&staged_root, &resolved, &source_participants, &ui)?;
-    let mut plan = crate::loader::validate_layout_plan(&staged_root, &LaunchMode::Run)
-        .context("failed to construct the launch plan from the staged runtime layout")?;
+    crate::run::stage_complete_bin_store(
+        &staged_root,
+        &resolved,
+        &source_participants,
+        &driver_policy.selection(),
+        &ui,
+    )?;
+    let mut plan =
+        crate::loader::validate_layout_plan(&staged_root, &LaunchMode::Run, &plan_options)
+            .context("failed to construct the launch plan from the staged runtime layout")?;
     let mut specs = specs_for_target(&plan, &resolved, project_root, target)?;
     let endpoint = crate::run::project_router_endpoint(project_root);
     crate::run::apply_session_connect(&mut plan, &mut specs, &endpoint);
