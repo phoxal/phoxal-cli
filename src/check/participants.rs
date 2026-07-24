@@ -60,7 +60,7 @@ pub(crate) fn platform_artifact_refs_from_resolved(
 /// `phoxal/component-ddsm115`). A Path/Git-sourced driver is a source
 /// participant instead (see `source_participants_from_resolved`) and is not
 /// included here. Reused by every command that validates the graph like a
-/// service (`check`, `run`, `deploy`); `simulate` also fetches through this
+/// service (`check`, `run`); `simulate` also fetches through this
 /// same function but discards a driver participant from its final launch set
 /// after validating its contracts (drivers are sim-substituted, never
 /// launched).

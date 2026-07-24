@@ -3,7 +3,7 @@
 //! `phoxal-cli` is the tool a robot developer runs from a robot project. It
 //! reads `robot.yaml`, resolves the graph against a verified generated artifact
 //! suite ([`suite`]) when official artifacts are needed, and drives the
-//! local develop/simulate/deploy loop. Official services, drivers, tools, and
+//! local develop/simulate loop. Official services, drivers, tools, and
 //! simulators come from the configured suite or local development overrides.
 //!
 //! The command surface (see [`commands`]) is:
@@ -13,9 +13,6 @@
 //!   executing it - [`participant_metadata`]) and validate it with the shared
 //!   [`phoxal::check`] graph core; Cargo.lock resolves all project source.
 //! - `simulation run <world>` - resolve and print or run the host-native simulation plan.
-//! - `deploy <user@host>` - render the checked launch plan into a native systemd
-//!   payload, sync it to the robot, restart `phoxal.target`, and report health.
-//!   Prints the v0 pre-stable warning.
 //! - `service suite` - print official services from the configured artifact suite.
 //! - `update` - resolve heads and atomically update the project-vendored set.
 //! - `doctor` - check host prerequisites; `self upgrade` - update the CLI.
@@ -31,7 +28,6 @@ pub mod check;
 pub mod commands;
 pub(crate) mod component_driver;
 pub(crate) mod context;
-pub mod deploy;
 pub(crate) mod host_doctor;
 pub mod host_paths;
 pub(crate) mod native_artifacts;

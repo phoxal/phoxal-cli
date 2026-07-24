@@ -51,7 +51,6 @@ pub fn execution_device_id(project_root: &Path) -> Result<ExecutionDeviceId> {
 #[serde(rename_all = "lowercase")]
 pub enum LaunchMode {
     Run,
-    Deploy,
     /// Simulate under Webots, carrying the resolved `.wbt` world path the
     /// plan was built for. Replaces the old data-less `Sim` variant plus the
     /// `SimulatePlan::world_path` field it used to take a detour through -
@@ -68,8 +67,7 @@ pub enum LaunchMode {
 /// `LaunchPlan` - never persisted to disk. Replaces the fields the old
 /// `SimulatePlan` wrapper re-declared next to its own `LaunchPlan`
 /// (`resolved`/`project_root`/`source_participants`/`robot_path`), and the
-/// matching re-declarations in `run`'s `PreparedRun`, `deploy`'s
-/// `RenderPayloadInput`, and the `watch` configs.
+/// matching re-declarations in `run`'s `PreparedRun` and the `watch` configs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanContext {
     pub robot_path: PathBuf,
@@ -271,18 +269,6 @@ pub fn build_launch_plan(
 ) -> Result<LaunchPlan> {
     if robots.is_empty() {
         bail!("LaunchPlan requires at least one robot");
-    }
-    if matches!(mode, LaunchMode::Deploy) && robots.len() != 1 {
-        bail!("deploy LaunchPlan must contain exactly one robot");
-    }
-    if matches!(mode, LaunchMode::Deploy)
-        && robots
-            .iter()
-            .any(|robot| robot.resolved.robot.router.config.is_some())
-    {
-        bail!(
-            "deploy does not yet stage router.config; remove it for the default loopback router or run locally"
-        );
     }
     let robots = robots
         .iter()
@@ -521,7 +507,7 @@ fn participant_launch(
         // policy and their controllerArgs never render this value, so launch
         // planning needs no simulator-kind exception.
         clock: match mode {
-            LaunchMode::Run | LaunchMode::Deploy => ClockMode::Real,
+            LaunchMode::Run => ClockMode::Real,
             LaunchMode::Webots { .. } => ClockMode::Simulation,
         },
         config: input
@@ -542,13 +528,6 @@ fn robot_root_for_mode(mode: &LaunchMode, project_root: &Path) -> PathBuf {
         LaunchMode::Run | LaunchMode::Webots { .. } => {
             project_root.join(RUNTIME_ROBOT_ROOT_RELATIVE)
         }
-        // The deployed robot root is the active generation symlink, not the
-        // flat `/opt/phoxal` - robot.yaml, structure.urdf, and phoxal-release.json
-        // are staged per-generation under `/opt/phoxal/active/` (see deploy's
-        // ACTIVE_ROOT), so a participant reading `$PHOXAL_ROBOT_ROOT/robot.yaml`
-        // must resolve through `active`. Pointing at `/opt/phoxal` makes every
-        // participant fail with "failed to read robot file /opt/phoxal/robot.yaml".
-        LaunchMode::Deploy => PathBuf::from("/opt/phoxal/active"),
     }
 }
 
@@ -657,7 +636,9 @@ mod tests {
         let changed_plan = PlanRevision::compile(
             3,
             LaunchPlan {
-                mode: LaunchMode::Deploy,
+                mode: LaunchMode::Webots {
+                    world: PathBuf::from("/tmp/world.wbt"),
+                },
                 robots: Vec::new(),
             },
         )?;
@@ -750,34 +731,6 @@ mod tests {
     }
 
     #[test]
-    fn deploy_plan_rejects_multiple_robots() -> anyhow::Result<()> {
-        let robot = empty_resolved_robot("robot_a")?;
-        let inputs = [
-            empty_checked_input(Path::new("/tmp/a"), &robot),
-            empty_checked_input(Path::new("/tmp/b"), &robot),
-        ];
-        let error =
-            build_launch_plan(LaunchMode::Deploy, &inputs).expect_err("deploy is one robot");
-        assert!(error.to_string().contains("exactly one robot"), "{error:#}");
-        Ok(())
-    }
-
-    #[test]
-    fn deploy_plan_rejects_unstaged_router_config() -> anyhow::Result<()> {
-        let mut robot = empty_resolved_robot("robot_a")?;
-        robot.robot.router.config = Some(PathBuf::from("router.json5"));
-        let inputs = [empty_checked_input(Path::new("/tmp/a"), &robot)];
-        let error = build_launch_plan(LaunchMode::Deploy, &inputs)
-            .expect_err("deploy must not silently ignore router.config");
-        assert!(
-            error
-                .to_string()
-                .contains("does not yet stage router.config")
-        );
-        Ok(())
-    }
-
-    #[test]
     fn run_robot_tools_have_unique_participant_ids_per_robot() -> anyhow::Result<()> {
         let mut robot_a = empty_resolved_robot("robot_a")?;
         let mut robot_b = empty_resolved_robot("robot_b")?;
@@ -842,20 +795,6 @@ mod tests {
                 <= phoxal::participant::launch::MAX_EXECUTION_DEVICE_ID_BYTES
         );
         Ok(())
-    }
-
-    #[test]
-    fn deploy_robot_root_is_the_active_generation() {
-        // Regression: deployed participants read robot.yaml/structure.urdf via
-        // `$PHOXAL_ROBOT_ROOT`, and those files are staged per-generation under
-        // `/opt/phoxal/active/` (the transactional-release symlink). Pointing the
-        // root at the flat `/opt/phoxal` made every participant on a real robot
-        // die with "failed to read robot file /opt/phoxal/robot.yaml". It must
-        // resolve through the active generation, matching deploy's ACTIVE_ROOT.
-        assert_eq!(
-            robot_root_for_mode(&LaunchMode::Deploy, Path::new("/tmp/project")),
-            PathBuf::from("/opt/phoxal/active"),
-        );
     }
 
     #[test]

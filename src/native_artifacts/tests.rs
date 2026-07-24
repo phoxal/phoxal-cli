@@ -146,7 +146,7 @@ fn failed_multi_package_refresh_preserves_every_active_scope_and_link() -> Resul
 fn local_identity_is_validated_and_filesystem_safe() -> Result<()> {
     // Matches `filesystem_safe_package_name` used everywhere else in the
     // system, so a package maps to the same on-disk name in the store, the
-    // resolver, the deploy install plan, and the framework's release tags.
+    // resolver, and the framework's release tags.
     assert_eq!(
         package_storage_key("phoxal/service-drive")?,
         ("phoxal".to_string(), "service-drive".to_string())

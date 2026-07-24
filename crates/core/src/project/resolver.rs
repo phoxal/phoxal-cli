@@ -34,12 +34,12 @@ pub fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolveOptions {
-    /// Override the official service/driver target triple. Deploy probes the
-    /// robot arch and resolves suite assets for that Linux triple instead of
-    /// the host.
+    /// Override the official service/driver target triple. `check --target`
+    /// resolves suite assets for that Linux triple instead of the host, so a
+    /// robot graph can be validated from a non-Linux host.
     pub official_target_triple: Option<String>,
     /// Override native tool asset target triple. Host-native run/sim use the
-    /// host triple; deploy ships robot-native tools.
+    /// host triple; an explicit target resolves robot-native tools instead.
     pub tool_target_triple: Option<String>,
 }
 

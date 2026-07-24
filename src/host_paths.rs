@@ -28,10 +28,6 @@ pub fn artifacts_dir() -> Result<PathBuf> {
     project_state_dir().map(|root| root.join("artifacts"))
 }
 
-pub fn deploy_dir() -> Result<PathBuf> {
-    project_state_dir().map(|root| root.join("build"))
-}
-
 pub fn webots_dir() -> Result<PathBuf> {
     project_state_dir().map(|root| root.join("webots"))
 }

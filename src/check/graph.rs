@@ -1,9 +1,9 @@
 //! Graph responsibilities for check.
 
 use super::{
-    CheckGraphContext, CheckOutcome, CheckParticipants, MissingImageError, PlatformArtifactRef,
-    RawEmitApis, contract_surface, validate_artifact_identity, validate_service_artifact_identity,
-    validate_source_artifact_identity, validate_user_service_config,
+    CheckGraphContext, CheckOutcome, MissingImageError, PlatformArtifactRef, RawEmitApis,
+    contract_surface, validate_artifact_identity, validate_source_artifact_identity,
+    validate_user_service_config,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -34,29 +34,6 @@ pub fn run_check(
     )
 }
 
-pub fn run_check_with_context(
-    resolved_platform_artifact_refs: &[PlatformArtifactRef],
-    tool_participants: &[ToolParticipant],
-    source_participants: &[SourceParticipant],
-    context: CheckGraphContext<'_>,
-    fetch: impl FnMut(&str) -> Result<RawEmitApis>,
-    fetch_tool: impl FnMut(&ToolParticipant) -> Result<RawEmitApis>,
-    build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
-) -> Result<CheckOutcome> {
-    run_check_with_deployed_user_service_images(
-        CheckParticipants {
-            platform_artifact_refs: resolved_platform_artifact_refs,
-            user_service_images: &[],
-            tool_participants,
-            source_participants,
-        },
-        context,
-        fetch,
-        fetch_tool,
-        build,
-    )
-}
-
 pub(super) fn service_platform_artifact_refs(
     resolved_platform_image_refs: &[(String, String)],
 ) -> Vec<PlatformArtifactRef> {
@@ -71,8 +48,10 @@ pub(super) fn service_platform_artifact_refs(
         .collect()
 }
 
-pub fn run_check_with_deployed_user_service_images(
-    inputs: CheckParticipants<'_>,
+pub fn run_check_with_context(
+    resolved_platform_artifact_refs: &[PlatformArtifactRef],
+    tool_participants: &[ToolParticipant],
+    source_participants: &[SourceParticipant],
     context: CheckGraphContext<'_>,
     mut fetch: impl FnMut(&str) -> Result<RawEmitApis>,
     mut fetch_tool: impl FnMut(&ToolParticipant) -> Result<RawEmitApis>,
@@ -83,7 +62,7 @@ pub fn run_check_with_deployed_user_service_images(
     let mut contract_surfaces = Vec::new();
     let mut config_problems = Vec::new();
 
-    for artifact in inputs.platform_artifact_refs {
+    for artifact in resolved_platform_artifact_refs {
         let image_ref = &artifact.artifact_ref;
         let raw = match fetch(image_ref) {
             Ok(raw) => raw,
@@ -140,33 +119,7 @@ pub fn run_check_with_deployed_user_service_images(
         }
     }
 
-    for service in inputs.user_service_images {
-        let raw = fetch(&service.image_ref).with_context(|| {
-            format!(
-                "failed to obtain emit-apis for user service {} ({})",
-                service.name, service.image_ref
-            )
-        })?;
-        validate_service_artifact_identity("user service", &service.name, &raw)?;
-        let participant =
-            graph_check::ParticipantApis::try_from(raw.clone()).with_context(|| {
-                format!(
-                    "failed to interpret emit-apis for user service {} ({})",
-                    service.name, service.image_ref
-                )
-            })?;
-        contract_surfaces.push(contract_surface(&raw, service.name.clone()));
-        if let Some(problem) = validate_user_service_config(
-            &service.name,
-            participant.config_schema.as_ref(),
-            context.robot,
-        ) {
-            config_problems.push(problem);
-        }
-        participants.push(participant);
-    }
-
-    for tool in inputs.tool_participants {
+    for tool in tool_participants {
         let raw = fetch_tool(tool).with_context(|| {
             format!(
                 "failed to obtain emit-apis for tool {} ({})",
@@ -188,7 +141,7 @@ pub fn run_check_with_deployed_user_service_images(
         participants.push(participant);
     }
 
-    for participant in inputs.source_participants {
+    for participant in source_participants {
         let raw = build(participant).with_context(|| {
             format!(
                 "failed to obtain emit-apis for {} {} ({})",

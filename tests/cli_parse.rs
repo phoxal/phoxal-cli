@@ -67,7 +67,6 @@ fn message_format_is_removed_from_every_former_surface() {
             "--message-format",
             "json",
         ],
-        vec!["phoxal", "deploy", "--message-format", "json"],
         vec!["phoxal", "update", "--message-format", "json"],
         vec!["phoxal", "status", "--message-format", "json", "safety"],
         vec!["phoxal", "service", "suite", "--message-format", "json"],
@@ -94,7 +93,8 @@ fn removed_command_surfaces_stay_removed() {
         vec!["phoxal", "simulation", "run", "default", "--pull"],
         vec!["phoxal", "check", "--pull"],
         vec!["phoxal", "validate", "--allow-user-service-drift"],
-        vec!["phoxal", "deploy", "build"],
+        vec!["phoxal", "deploy", "robot@192.168.1.50"],
+        vec!["phoxal", "deploy", "--dry-run", "--target", "aarch64"],
         vec!["phoxal", "robot", "new", "rover"],
         vec!["phoxal", "robot"],
         vec!["phoxal", "pull"],
@@ -198,23 +198,7 @@ fn parses_check_strict_and_rejects_removed_service_scope() {
 }
 
 #[test]
-fn parses_deploy_and_update() {
-    let cli = Cli::try_parse_from(["phoxal", "deploy", "robot@192.168.1.50"])
-        .expect("deploy command should parse");
-    let RootCommand::Deploy(command) = cli.command else {
-        panic!("expected deploy command");
-    };
-    assert_eq!(command.host.as_deref(), Some("robot@192.168.1.50"));
-    assert!(Cli::try_parse_from(["phoxal", "deploy", "--env", "prod"]).is_err());
-
-    let cli = Cli::try_parse_from(["phoxal", "deploy", "--dry-run", "--target", "aarch64"])
-        .expect("deploy dry-run should parse");
-    let RootCommand::Deploy(command) = cli.command else {
-        panic!("expected deploy command");
-    };
-    assert!(command.dry_run);
-    assert_eq!(command.target.as_deref(), Some("aarch64"));
-
+fn parses_update() {
     assert!(Cli::try_parse_from(["phoxal", "update", "--dry-run"]).is_ok());
     assert!(Cli::try_parse_from(["phoxal", "--plain", "check"]).is_err());
     assert!(Cli::try_parse_from(["phoxal", "check", "--plain"]).is_err());

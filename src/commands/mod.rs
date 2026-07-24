@@ -9,7 +9,6 @@ use crate::AppContext;
 
 pub mod behavior;
 pub mod check;
-pub mod deploy;
 pub mod doctor;
 pub mod init;
 pub mod logs;
@@ -123,9 +122,9 @@ impl VersionArgs {
 #[command(
     name = "phoxal",
     version = long_version(),
-    about = "Build, check, simulate, and deploy Phoxal robot projects.",
-    long_about = "Build, check, simulate, and deploy Phoxal robot projects.\n\n\
-                  phoxal reads robot.yaml, resolves the graph against a verified generated artifact suite when official native artifacts are needed, and drives the develop/simulate/deploy loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `check`, `simulate`, and `deploy --dry-run --target aarch64`."
+    about = "Build, check, and simulate Phoxal robot projects.",
+    long_about = "Build, check, and simulate Phoxal robot projects.\n\n\
+                  phoxal reads robot.yaml, resolves the graph against a verified generated artifact suite when official native artifacts are needed, and drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `check` and `simulate`."
 )]
 pub struct Cli {
     #[arg(
@@ -181,8 +180,6 @@ pub enum RootCommand {
     Logs(logs::Logs),
     #[command(about = "Inspect live robot state through typed bus contracts.")]
     Status(status::Status),
-    #[command(about = "Deploy the checked graph as a native systemd payload.")]
-    Deploy(deploy::Deploy),
     #[command(about = "Verify the locked train suite and atomically refresh cached artifacts.")]
     Update(update::Update),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
@@ -224,7 +221,6 @@ impl RootCommand {
             Self::Stop(command) => command.run(app).await,
             Self::Logs(command) => command.run(app).await,
             Self::Status(command) => command.run(app).await,
-            Self::Deploy(command) => command.run(app).await,
             Self::Update(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
             Self::Service(command) => command.run(app).await,

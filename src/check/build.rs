@@ -162,14 +162,6 @@ pub(crate) fn build_and_locate_binary(
     )
 }
 
-pub(crate) fn validate_service_artifact_identity(
-    label: &str,
-    expected_id: &str,
-    raw: &RawEmitApis,
-) -> Result<()> {
-    validate_artifact_identity(label, expected_id, "service", raw)
-}
-
 pub(crate) fn validate_source_artifact_identity(
     participant: &SourceParticipant,
     raw: &RawEmitApis,

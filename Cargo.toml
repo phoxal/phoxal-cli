@@ -62,7 +62,6 @@ phoxal-cli-client = { path = "crates/client" }
 phoxal-cli-core = { path = "crates/core" }
 phoxal-cli-ui = { path = "crates/ui" }
 ratatui = "0.29"
-zeroize = "1.9.0"
 
 
 [workspace.lints.rust]
@@ -125,7 +124,6 @@ toml = { workspace = true }
 urdf-rs = { workspace = true }
 webots-proto = { workspace = true }
 jsonschema = { version = "0.46.6", default-features = false }
-zeroize = { workspace = true }
 object = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }

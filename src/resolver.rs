@@ -452,7 +452,7 @@ fn resolved_runtime_from_expected_package(
 /// triple official artifacts are published under. Accepts the short arch aliases
 /// (`aarch64`/`arm64`, `x86_64`/`amd64`) or a full triple passed through as-is.
 /// Official artifacts publish gnu Linux assets, so a bare arch maps to the gnu
-/// triple; deploy owns the separate musl cross-build triple.
+/// triple.
 pub fn resolve_target_triple(selector: &str) -> Result<String> {
     Ok(match selector {
         "aarch64" | "arm64" => "aarch64-unknown-linux-gnu".to_string(),
