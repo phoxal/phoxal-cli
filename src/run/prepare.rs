@@ -51,8 +51,8 @@ pub(crate) fn prepare_run_on_board(
     )?;
     let descriptors = phoxal_cli_core::artifacts::descriptors_for(&resolved, false, true)?;
     crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
-    crate::runtime_root::publish(project_root, &resolved)
-        .context("failed to publish the runtime robot root")?;
+    let staged_root = crate::stager::stage_runtime_layout(project_root, &resolved)
+        .context("failed to stage the runtime layout")?;
 
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
@@ -140,6 +140,11 @@ pub(crate) fn prepare_run_on_board(
         &mut specs,
         ui,
     )?;
+    // Flatten every planned binary into the staged `bin/` and repoint each spec
+    // at it, so execution consumes the staged runtime layout rather than the
+    // cargo target dir / artifact store directly.
+    crate::stager::link_runtime_binaries(&staged_root, &mut specs)
+        .context("failed to link planned binaries into the staged bin store")?;
 
     let robot_targets = super::RobotFeedTarget::from_plan(&plan);
     let project_root = project_root.to_path_buf();

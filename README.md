@@ -217,7 +217,7 @@ scripts/live-simulate-gate.sh --live     # full live run (needs Webots)
 ```
 
 The smoke phase runs `simulation run default --dry-run` to resolve and report the
-planned local launch without writing `.phoxal/run` or a release directory. It
+planned local launch without staging `.phoxal/build` or a release directory. It
 needs no daemon of any kind. The `--live` phase additionally requires Webots on
 `PATH`; run `phoxal update` first, then it runs `simulation run default` so you can confirm the router,
 Webots, host tools, and bus connectivity. Until native release assets publish,
@@ -235,7 +235,7 @@ diagnostics rather than as missing static suite entries.
 <project>/.phoxal/artifacts/<provider>/<package>/active                                 Atomic selected-version symlink.
 <project>/.phoxal/git/              Git-pinned checkouts.
 <project>/.phoxal/webots/           Webots staging.
-<project>/.phoxal/run/robot/        Atomic resolved robot root shared by `run` and live simulation.
+<project>/.phoxal/build/<triple>/   Staged runtime layout (compiled robot.yaml + flat bin/ + assets) per target, shared by `run` and live simulation.
 ```
 
 To reset all generated project state while no Phoxal command is active, delete

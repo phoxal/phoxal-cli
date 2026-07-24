@@ -420,8 +420,10 @@ pub(crate) fn locate_tool_binary(
     else {
         return Ok(None);
     };
-    let cache = crate::native_artifacts::artifact_binary_path(&descriptor)?;
-    Ok(cache.is_file().then_some(cache))
+    // Vendored-store resolution lives in the stager and never touches the
+    // network; a store miss falls through to `None` so the caller reports the
+    // "run `phoxal update`" board note rather than hard-failing the run.
+    Ok(crate::stager::resolve_vendored_binary(&descriptor).ok())
 }
 
 pub(crate) fn locate_official_binary(
@@ -446,8 +448,10 @@ pub(crate) fn locate_official_binary(
         && let Some(descriptor) =
             phoxal_cli_core::artifacts::NativeArtifactDescriptor::from_runtime(runtime)?
     {
-        let binary = crate::native_artifacts::artifact_binary_path(&descriptor)?;
-        return Ok(binary.is_file().then_some(binary));
+        // Vendored-store resolution lives in the stager and never touches the
+        // network; a store miss falls through to `None` so the caller reports
+        // the "run `phoxal update`" board note rather than hard-failing.
+        return Ok(crate::stager::resolve_vendored_binary(&descriptor).ok());
     }
     // No env override, and no resolved runtime to derive a native-artifact
     // descriptor from (a path-overridden or otherwise non-suite runtime) -

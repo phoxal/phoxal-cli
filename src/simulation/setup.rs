@@ -91,8 +91,8 @@ pub(crate) async fn live_simulate_setup(
 
     let identity = ProjectLockIdentity::resolve(&sim.ctx.project_root, ProjectOperation::Run);
     let locks = LiveSimulationLocks::acquire(&crate::host_paths::simulator_lock_path()?, identity)?;
-    crate::runtime_root::publish(&sim.ctx.project_root, &sim.ctx.resolved)
-        .context("failed to publish the simulation runtime robot root")?;
+    crate::stager::stage_runtime_layout(&sim.ctx.project_root, &sim.ctx.resolved)
+        .context("failed to stage the simulation runtime layout")?;
     ensure_active()?;
     let board = BoardBackend::new();
     board.configure(
