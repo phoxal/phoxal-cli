@@ -823,6 +823,47 @@ mod tests {
     };
     use std::path::PathBuf;
 
+    #[test]
+    fn an_invalid_declaration_fails_before_the_suite_check() -> anyhow::Result<()> {
+        // The declaration validator is the first operation in `resolve` (#950):
+        // an official identity in a map must fail with the declaration error
+        // even when the suite is absent (which would otherwise be the first
+        // failure) - proving the ordering, not just the presence, of the check.
+        let _phoxal_home = ScratchPhoxalHome::new()?;
+        let robot = Robot::parse_from_string(
+            r#"schema: robot/v0
+robot:
+  id: bot
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: omnidirectional
+    actuators: []
+    encoders: []
+  components: {}
+tools:
+  drive: {}
+"#,
+        )?;
+        let error = resolve(
+            &robot,
+            std::path::Path::new("."),
+            None,
+            ResolveOptions {
+                ..ResolveOptions::default()
+            },
+        )
+        .expect_err("an official identity in tools: must fail resolution");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("official service"),
+            "the declaration error must win over the absent-suite error: {message}"
+        );
+        Ok(())
+    }
+
     fn test_suite() -> Suite {
         fixture_suite_for_tests(vec![
             fixture_service_entry_for_tests(

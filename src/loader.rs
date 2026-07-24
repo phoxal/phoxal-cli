@@ -2,7 +2,7 @@
 //!
 //! The core [`RuntimeLayout::construct_plan`] derives the immutable launch plan
 //! from a staged runtime layout, plus the two validation inputs the bin crate
-//! owns the validators for: a config-schema pairing per user runtime (checked
+//! owns the validators for: a config-schema pairing per declared user runtime (checked
 //! with the jsonschema validator) and a contract surface per checked
 //! participant (checked with the API-coherence pass). This module is the thin
 //! glue that runs those two validators over the constructor's output and
@@ -26,10 +26,10 @@ use std::path::Path;
 /// driven robot runs on a host whose driver binaries it cannot inspect once
 /// `--drivers off` is passed. `inspection` selects the architecture the selected
 /// binaries are checked against - the host for an in-place run/start, or a
-/// declared `--target` for a `phoxal build` cross bundle. Fails when a user
-/// service's compiled config does not match the schema embedded in its binary,
-/// or when the checked participants' API contracts are incoherent. Returns the
-/// immutable plan the supervisor would launch from.
+/// declared `--target` for a `phoxal build` cross bundle. Fails when a declared
+/// user runtime's (service or tool) compiled config does not match the schema
+/// embedded in its binary, or when the checked participants' API contracts are
+/// incoherent. Returns the immutable plan the supervisor would launch from.
 pub fn validate_layout_plan(
     root: &Path,
     options: &PlanOptions,
@@ -42,7 +42,7 @@ pub fn validate_layout_plan(
     let mut config_problems = Vec::new();
     for pairing in &constructed.user_runtime_configs {
         if let Some(problem) = crate::check::validate_user_runtime_config(
-            &pairing.service_id,
+            &pairing.runtime_id,
             Some(&pairing.config_schema),
             pairing.config.as_ref(),
             pairing.family,

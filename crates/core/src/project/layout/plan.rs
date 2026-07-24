@@ -17,7 +17,7 @@
 //!
 //! The jsonschema validator and the coherence enforcer both live in the bin
 //! crate, so this module does not run them. It returns the *inputs* they need -
-//! a config-schema/config pairing per user runtime and one contract surface per
+//! a config-schema/config pairing per declared user runtime and one contract surface per
 //! checked participant - and the bin-side "validate through the loader" entry
 //! runs `validate_user_service_config` and `coherence_for_launch_plan` over
 //! them. That keeps the crate seam clean: core owns the derivation, the bin
@@ -68,9 +68,8 @@ pub struct ConstructedPlan {
     /// pass's own in-set filter.
     pub contract_surfaces: Vec<ParticipantContractSurface>,
     /// One schema pairing per declared user runtime (service or tool), so the
-    /// bin can run its
-    /// jsonschema validator (`validate_user_service_config`) against the config
-    /// the compiled `robot.yaml` carries for that service.
+    /// bin can run its jsonschema validator (`validate_user_runtime_config`)
+    /// against the config the compiled `robot.yaml` carries for that runtime.
     pub user_runtime_configs: Vec<UserRuntimeConfig>,
 }
 
@@ -83,7 +82,7 @@ pub struct ConstructedPlan {
 /// phantom services lookup (#950).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRuntimeConfig {
-    pub service_id: String,
+    pub runtime_id: String,
     pub config_schema: serde_json::Value,
     /// The authored config from the compiled robot.yaml (`None` when omitted).
     pub config: Option<serde_json::Value>,
@@ -251,7 +250,7 @@ impl RuntimeLayout {
                         contracts: meta_contracts(&required.binary_name)?,
                     });
                     user_runtime_configs.push(UserRuntimeConfig {
-                        service_id: participant_id,
+                        runtime_id: participant_id,
                         config_schema: config_schema(&required.binary_name)?,
                         config: required.config.clone(),
                         family: "services",
@@ -282,7 +281,7 @@ impl RuntimeLayout {
                     // The tool's config validates against its embedded schema
                     // through the same pairing user services use (#950).
                     user_runtime_configs.push(UserRuntimeConfig {
-                        service_id: participant_id,
+                        runtime_id: participant_id,
                         config_schema: config_schema(&required.binary_name)?,
                         config: required.config.clone(),
                         family: "tools",
@@ -878,7 +877,7 @@ services:
         let mission = constructed
             .user_runtime_configs
             .iter()
-            .find(|config| config.service_id == "mission")
+            .find(|config| config.runtime_id == "mission")
             .expect("mission config pairing surfaced");
         assert_eq!(
             mission.config_schema,

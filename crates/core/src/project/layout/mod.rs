@@ -208,10 +208,11 @@ impl RuntimeLayout {
     /// The runtimes the compiled layout requires. The official set comes from
     /// the CLI-internal catalog (simulator binaries excluded from `Native`);
     /// the user-service set is every `services` entry that is not an official
-    /// service; component drivers are one per driven component id (a single
-    /// driver binary serves every instance of that component id), gated by
-    /// `drivers`: a driver whose every instance is excluded is not required, so
-    /// it is never resolved or inspected (#936).
+    /// service; the user-tool set is every `tools` entry (#950); component
+    /// drivers are one per driven component id (a single driver binary serves
+    /// every instance of that component id), gated by `drivers`: a driver whose
+    /// every instance is excluded is not required, so it is never resolved or
+    /// inspected (#936).
     #[must_use]
     pub fn required_runtimes(&self, drivers: &DriverSelection) -> Vec<RequiredRuntime> {
         let mut required = Vec::new();
