@@ -75,12 +75,16 @@ pub fn resolve(
         &target,
         prefer_vendored,
     )?;
+    // Simulator artifacts execute HOST-side (under Webots, which only exists
+    // for host platforms) - never on a device target. Resolving them for a
+    // requested `--target` device triple would fail spuriously (no such blob)
+    // even though a native bundle excludes simulators entirely (#936).
     let mut simulators = resolve_suite_entries(
         robot,
         suite,
         Kind::Simulator,
         ArtifactKind::Simulator,
-        &tool_target,
+        &host_target_triple(),
         prefer_vendored,
     )?;
 
