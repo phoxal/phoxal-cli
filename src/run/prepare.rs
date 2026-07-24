@@ -75,13 +75,17 @@ impl StagedProject {
 /// launch plan or touches the supervisor - the caller runs
 /// `loader::validate_layout_plan` over `staged_root` next.
 ///
-/// The `build` slice reuses this per target triple; a foreign `--target` will
-/// thread its triple through the resolve/stage/`bin/`-completion steps so the
-/// same code cross-compiles the workspace crates and links the suite's per-target
-/// official blobs into `.phoxal/build/<triple>/`.
+/// `build` reuses this per target triple: `build` is a
+/// [`StagingBuild`](crate::run::StagingBuild) carrying the requested `--target`,
+/// which threads through the resolve/stage/`bin/`-completion steps so the same
+/// code cross-compiles (or reuses container-built) workspace crates and links
+/// the suite's per-target official blobs into `.phoxal/build/<triple>/`. `run`,
+/// `start`, and `watch` pass `StagingBuild::local(None)` for a host-native pass.
 pub(crate) fn refresh_staging(
     project_start: &Path,
     options: &RunOptions,
+    build: &crate::run::StagingBuild,
+    check_source: bool,
     ui: &crate::Ui,
 ) -> Result<StagedProject> {
     let robot_path = discover_robot_yaml(project_start)
@@ -94,11 +98,18 @@ pub(crate) fn refresh_staging(
         options.suite_source.clone(),
         project_root,
     )?;
+    // A cross `--target` resolves the suite's per-target official blobs (the
+    // same per-target resolution `check --target` performs); a host pass leaves
+    // both `None` so resolution targets the host triple.
+    let official_target = build.target().map(str::to_string);
     let resolved = resolve(
         &robot,
         project_root,
         suite.as_ref(),
-        ResolveOptions::default(),
+        ResolveOptions {
+            official_target_triple: official_target.clone(),
+            tool_target_triple: official_target,
+        },
     )?;
     let descriptors = phoxal_cli_core::artifacts::descriptors_for(&resolved, false, true)?;
     crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, Some(ui))?;
@@ -119,7 +130,14 @@ pub(crate) fn refresh_staging(
     // Source/staging-time validation: build every source participant (for its
     // embedded metadata) and check the source graph before we stage and run.
     // Execution-time validation is the loader's, over the staged layout below.
-    run_source_check(project_root, &robot, &resolved, &source_participants)?;
+    //
+    // `phoxal build` skips this host-native pass (`check_source == false`): a
+    // cross or container target's Linux-only crates need not compile on the
+    // build host, and the loader's target-aware validation over the staged
+    // (cross-built) binaries is the authoritative check for a bundle (#936).
+    if check_source {
+        run_source_check(project_root, &robot, &resolved, &source_participants)?;
+    }
 
     // Complete the staged `bin/` store so the loader can inspect every required
     // runtime off-disk. This is the last step that consumes the resolved graph;
@@ -129,6 +147,7 @@ pub(crate) fn refresh_staging(
         &resolved,
         &source_participants,
         &driver_policy.selection(),
+        build,
         ui,
     )?;
 
@@ -154,15 +173,25 @@ pub(crate) fn prepare_run_on_board(
     ui: &crate::Ui,
     board: BoardBackend,
 ) -> Result<PreparedRun> {
-    let staged = refresh_staging(project_start, &options, ui)?;
+    let staged = refresh_staging(
+        project_start,
+        &options,
+        &crate::run::StagingBuild::local(None),
+        true,
+        ui,
+    )?;
     let plan_options = staged.plan_options();
 
     // The one execution path: construct and validate the launch plan from the
     // staged layout alone. Byte-identical, for the same robot, to a plan built
     // from an extracted bundle of this layout.
-    let plan =
-        crate::loader::validate_layout_plan(&staged.staged_root, &LaunchMode::Run, &plan_options)
-            .context("failed to construct the launch plan from the staged runtime layout")?;
+    let plan = crate::loader::validate_layout_plan(
+        &staged.staged_root,
+        &LaunchMode::Run,
+        &plan_options,
+        phoxal_cli_core::project::layout::LayoutInspection::Host,
+    )
+    .context("failed to construct the launch plan from the staged runtime layout")?;
 
     board.configure(
         staged.project_root.display().to_string(),
@@ -244,8 +273,13 @@ pub(crate) fn prepare_layout_run_on_board(
     let plan_options = phoxal_cli_core::project::layout::PlanOptions {
         drivers: driver_policy.selection(),
     };
-    let plan = crate::loader::validate_layout_plan(layout_root, &LaunchMode::Run, &plan_options)
-        .context("failed to construct the launch plan from the staged runtime layout")?;
+    let plan = crate::loader::validate_layout_plan(
+        layout_root,
+        &LaunchMode::Run,
+        &plan_options,
+        phoxal_cli_core::project::layout::LayoutInspection::Host,
+    )
+    .context("failed to construct the launch plan from the staged runtime layout")?;
 
     board.configure(
         layout_root.display().to_string(),

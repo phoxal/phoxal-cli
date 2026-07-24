@@ -34,7 +34,9 @@ pub(crate) use participants::{
     spec_from_launch_record, stage_complete_bin_store,
 };
 mod build;
-pub(crate) use build::{build_source_binary, device_missing_note, missing_device_path};
+pub(crate) use build::{
+    StagingBuild, build_source_binary, device_missing_note, missing_device_path,
+};
 
 #[cfg(test)]
 mod tests;

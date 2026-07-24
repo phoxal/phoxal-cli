@@ -33,13 +33,15 @@ pub(crate) fn stage_simulator_controller_binaries(
             let _env_guard = webots_home
                 .as_ref()
                 .map(|home| WebotsHomeEnvGuard::set(home));
-            crate::run::build_source_binary(crate_dir, &preferred_name, ui).with_context(|| {
-                format!(
-                    "failed to build path-overridden simulator '{}' from {}",
-                    runtime.name,
-                    crate_dir.display()
-                )
-            })?
+            crate::run::build_source_binary(crate_dir, &preferred_name, ui, None).with_context(
+                || {
+                    format!(
+                        "failed to build path-overridden simulator '{}' from {}",
+                        runtime.name,
+                        crate_dir.display()
+                    )
+                },
+            )?
         } else {
             provisioned_official_simulator_binary(runtime)?
         };

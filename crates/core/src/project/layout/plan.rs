@@ -37,7 +37,10 @@ use super::super::launch_plan::{
     SIMULATOR_SUPERVISOR_ARTIFACT_NAME, SIMULATOR_SUPERVISOR_PROVIDER_ID, execution_device_id,
     simulator_controller_provider_id,
 };
-use super::{DriverSelection, RequiredRuntimeKind, RuntimeLayout, RuntimeProfile, SelectedBinary};
+use super::{
+    DriverSelection, LayoutInspection, RequiredRuntimeKind, RuntimeLayout, RuntimeProfile,
+    SelectedBinary,
+};
 use crate::session::{RuntimeFailurePolicy, StartupRequirement};
 
 /// The non-`(layout, mode)` inputs the plan constructor is parameterized on, so
@@ -97,6 +100,19 @@ impl RuntimeLayout {
         mode: &LaunchMode,
         options: &PlanOptions,
     ) -> Result<ConstructedPlan> {
+        Self::construct_plan_with_inspection(root, mode, options, LayoutInspection::Host)
+    }
+
+    /// [`Self::construct_plan`], inspecting each selected binary against the
+    /// architecture `inspection` selects (#936): the host for an in-place
+    /// run/start, or a declared `--target` for a `phoxal build` cross bundle
+    /// that will never execute on this host.
+    pub fn construct_plan_with_inspection(
+        root: &std::path::Path,
+        mode: &LaunchMode,
+        options: &PlanOptions,
+        inspection: LayoutInspection,
+    ) -> Result<ConstructedPlan> {
         let layout = Self::open(root)?;
         let profile = profile_for(mode);
         let required = layout.required_runtimes(profile, &options.drivers);
@@ -107,7 +123,10 @@ impl RuntimeLayout {
             if runtime.kind == RequiredRuntimeKind::Infrastructure {
                 continue;
             }
-            selected.insert(runtime.binary_name.clone(), layout.inspect(runtime)?);
+            selected.insert(
+                runtime.binary_name.clone(),
+                layout.inspect_for(runtime, inspection)?,
+            );
         }
         layout.construct_plan_from_selected(mode, options, &selected)
     }

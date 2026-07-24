@@ -85,6 +85,7 @@ pub(crate) fn stage_complete_bin_store(
     resolved: &ResolvedRobot,
     source_participants: &[SourceParticipant],
     drivers: &DriverSelection,
+    build: &crate::run::StagingBuild,
     ui: &crate::Ui,
 ) -> Result<()> {
     let mut staged_names = BTreeSet::new();
@@ -114,7 +115,7 @@ pub(crate) fn stage_complete_bin_store(
         if !staged_names.insert(binary_name.clone()) {
             continue;
         }
-        let built = build_source_binary(&participant.crate_dir, &participant.name, ui)?;
+        let built = build.build_user_binary(&participant.crate_dir, &participant.name, ui)?;
         crate::stager::stage_named_binary(staged_root, &binary_name, &built)?;
     }
     // Suite-provided component drivers: one binary per driven component id,
@@ -122,7 +123,7 @@ pub(crate) fn stage_complete_bin_store(
     // the same component id was already staged above (its binary name is in
     // `staged_names`), so it is not re-linked here.
     let mut build_override =
-        |crate_dir: &Path, name: &str| build_source_binary(crate_dir, name, ui);
+        |crate_dir: &Path, name: &str| build.build_user_binary(crate_dir, name, ui);
     for component in &resolved.components {
         if !component.has_driver {
             continue;
@@ -471,20 +472,20 @@ fn resolve_participant_source(
 ) -> Result<PathBuf> {
     let id = &participant.launch.participant_id;
     let mut build_override =
-        |crate_dir: &Path, name: &str| build_source_binary(crate_dir, name, ui);
+        |crate_dir: &Path, name: &str| build_source_binary(crate_dir, name, ui, None);
     match &participant.execution {
         ParticipantExecution::UserService { .. } => {
             let crate_dir = source_dirs.get(id).ok_or_else(|| {
                 anyhow!("staged plan is missing the source crate directory for user service {id}")
             })?;
-            build_source_binary(crate_dir, id, ui)
+            build_source_binary(crate_dir, id, ui, None)
         }
         ParticipantExecution::ComponentDriver { .. } => {
             // A workspace-built driver has a crate directory in the staging
             // record; a suite-provided one does not and resolves from the
             // vendored store by its component id, exactly like a service.
             if let Some(crate_dir) = source_dirs.get(id) {
-                return build_source_binary(crate_dir, id, ui);
+                return build_source_binary(crate_dir, id, ui, None);
             }
             let runtime = official_by_name
                 .get(participant.artifact_id.as_str())

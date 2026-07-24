@@ -452,11 +452,18 @@ fn recheck_run_target(
     // layout-derived plan and its coherence check see the fresh metadata, and
     // the identical driver policy is honored across restages.
     let ui = crate::Ui::from_env();
-    let staged = crate::run::refresh_staging(project_root, options, &ui)?;
+    let staged = crate::run::refresh_staging(
+        project_root,
+        options,
+        &crate::run::StagingBuild::local(None),
+        true,
+        &ui,
+    )?;
     let mut plan = crate::loader::validate_layout_plan(
         &staged.staged_root,
         &LaunchMode::Run,
         &staged.plan_options(),
+        phoxal_cli_core::project::layout::LayoutInspection::Host,
     )
     .context("failed to construct the launch plan from the staged runtime layout")?;
     let mut specs = specs_for_target(&plan, &staged.resolved, &staged.project_root, target)?;

@@ -132,7 +132,7 @@ pub(crate) async fn live_simulate_setup(
     // official; stage it there before starting it (the remaining simulation
     // runtime set is staged through the simulation-managed route, #931).
     crate::stager::stage_router_binary(&staged_root, &sim.ctx.resolved, |crate_dir, name| {
-        crate::run::build_source_binary(crate_dir, name, &ui)
+        crate::run::build_source_binary(crate_dir, name, &ui, None)
     })
     .context("failed to stage the infrastructure router into the simulation bin store")?;
     let router_config =

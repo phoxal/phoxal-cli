@@ -86,21 +86,63 @@ pub fn extract_participant_metadata(binary_path: &Path) -> Result<ParticipantMet
 /// disables the arch gate rather than rejecting every binary.
 #[must_use]
 pub fn host_architecture() -> object::Architecture {
-    match std::env::consts::ARCH {
+    architecture_for_token(std::env::consts::ARCH)
+}
+
+/// Map an architecture token to its [`object::Architecture`]. The token is a
+/// `std::env::consts::ARCH` value or the leading component of a Rust target
+/// triple (`aarch64-unknown-linux-gnu` yields `aarch64`). Unknown/exotic tokens
+/// map to [`object::Architecture::Unknown`], which compares equal to nothing and
+/// so disables the arch gate rather than rejecting every binary.
+fn architecture_for_token(token: &str) -> object::Architecture {
+    match token {
         "x86_64" => object::Architecture::X86_64,
-        "x86" => object::Architecture::I386,
-        "aarch64" => object::Architecture::Aarch64,
-        "arm" => object::Architecture::Arm,
-        "riscv64" => object::Architecture::Riscv64,
-        "riscv32" => object::Architecture::Riscv32,
-        "powerpc64" => object::Architecture::PowerPc64,
+        "x86" | "i386" | "i586" | "i686" => object::Architecture::I386,
+        "aarch64" | "arm64" => object::Architecture::Aarch64,
+        "arm" | "armv7" | "armv7a" | "armv6" | "thumbv7neon" => object::Architecture::Arm,
+        "riscv64" | "riscv64gc" => object::Architecture::Riscv64,
+        "riscv32" | "riscv32gc" | "riscv32imac" | "riscv32imc" => object::Architecture::Riscv32,
+        "powerpc64" | "powerpc64le" => object::Architecture::PowerPc64,
         "powerpc" => object::Architecture::PowerPc,
         "s390x" => object::Architecture::S390x,
         "loongarch64" => object::Architecture::LoongArch64,
-        "mips64" => object::Architecture::Mips64,
-        "mips" => object::Architecture::Mips,
+        "mips64" | "mips64el" => object::Architecture::Mips64,
+        "mips" | "mipsel" => object::Architecture::Mips,
         _ => object::Architecture::Unknown,
     }
+}
+
+/// The [`object::Architecture`] a Rust target triple compiles for, taken from
+/// its leading component. `phoxal build --target <TRIPLE>` uses this to inspect
+/// a cross-compiled bundle against its *declared* target architecture rather
+/// than the host's, so a foreign-but-correct bundle validates while a
+/// wrong-arch binary for the declared target still fails.
+#[must_use]
+pub fn architecture_for_triple(triple: &str) -> object::Architecture {
+    architecture_for_token(triple.split('-').next().unwrap_or(""))
+}
+
+/// Fails when `object_bytes` is an object file built for an architecture other
+/// than `expected`, so a wrong-architecture binary is rejected at inspection
+/// with a precise diagnostic rather than crashing later with an exec-format
+/// error. Reads and parses only; never executes the binary. When `expected` is
+/// [`object::Architecture::Unknown`] the gate is skipped (returns `Ok`) rather
+/// than rejecting a binary it cannot reason about.
+pub fn ensure_architecture(
+    object_bytes: &[u8],
+    describe: &str,
+    expected: object::Architecture,
+) -> Result<()> {
+    let file = object::File::parse(object_bytes)
+        .with_context(|| format!("{describe} is not a recognized object file (ELF/Mach-O/...)"))?;
+    let binary = file.architecture();
+    if expected == object::Architecture::Unknown || binary == expected {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{describe} is built for {binary:?}, but the selected target expects {expected:?}; \
+         stage or build a runtime layout for the {expected:?} architecture before running it"
+    )
 }
 
 /// Fails when `object_bytes` is an object file built for an architecture this
@@ -111,28 +153,30 @@ pub fn host_architecture() -> object::Architecture {
 /// the host architecture is not one this mapping knows, the gate is skipped
 /// (returns `Ok`) rather than rejecting a binary it cannot reason about.
 pub fn ensure_host_architecture(object_bytes: &[u8], describe: &str) -> Result<()> {
-    let file = object::File::parse(object_bytes)
-        .with_context(|| format!("{describe} is not a recognized object file (ELF/Mach-O/...)"))?;
-    let host = host_architecture();
-    let binary = file.architecture();
-    if host == object::Architecture::Unknown || binary == host {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "{describe} is built for {binary:?}, but this host runs {host:?}; \
-         stage or build a runtime layout for the host architecture before running it"
-    )
+    ensure_architecture(object_bytes, describe, host_architecture())
+}
+
+/// Reads `binary_path`, verifies it is built for `expected`, and returns its
+/// embedded participant metadata - the two off-disk inspections a layout run
+/// performs on a selected binary, in one read. [`inspect_selected_binary`] is
+/// the host-architecture variant used by an in-place run; `phoxal build
+/// --target` passes the declared target's architecture instead.
+pub fn inspect_selected_binary_for_arch(
+    binary_path: &Path,
+    expected: object::Architecture,
+) -> Result<ParticipantMeta> {
+    let data = fs::read(binary_path)
+        .with_context(|| format!("failed to read {}", binary_path.display()))?;
+    let describe = binary_path.display().to_string();
+    ensure_architecture(&data, &describe, expected)?;
+    extract_participant_metadata_from_bytes(&data, &describe)
 }
 
 /// Reads `binary_path`, verifies it is executable on the host architecture,
 /// and returns its embedded participant metadata - the two off-disk
 /// inspections a layout run performs on a selected binary, in one read.
 pub fn inspect_selected_binary(binary_path: &Path) -> Result<ParticipantMeta> {
-    let data = fs::read(binary_path)
-        .with_context(|| format!("failed to read {}", binary_path.display()))?;
-    let describe = binary_path.display().to_string();
-    ensure_host_architecture(&data, &describe)?;
-    extract_participant_metadata_from_bytes(&data, &describe)
+    inspect_selected_binary_for_arch(binary_path, host_architecture())
 }
 
 #[cfg(test)]
