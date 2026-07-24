@@ -29,10 +29,6 @@ mod participants;
 pub(crate) use participants::{
     DriverDecision, prepare_robot_participants, spec_from_launch_record,
 };
-mod environment;
-pub(crate) use environment::{
-    env_path_override, native_pending_official_note, native_pending_tool_note,
-};
 mod build;
 pub(crate) use build::{build_source_binary, device_missing_note};
 

@@ -112,23 +112,20 @@ pub(crate) async fn live_simulate_setup(
     let runtime_store = sim.runtime_store.clone();
     let mut specs = Vec::new();
     ensure_active()?;
+    // Resolve the CLI-managed simulation participants (services and tools) from
+    // the staged `bin/` under the same canonical identity names a native run
+    // uses, so `simulation webots run` reads an identity-keyed `bin/` exactly
+    // like `run`. The Webots-managed supervisor/controllers are staged into the
+    // world instead, so they are not resolved here.
     crate::run::prepare_robot_participants(
         &sim.plan,
         &sim.ctx.resolved,
-        &sim.ctx.project_root,
+        &staged_root,
         &crate::run::DriverPolicy::drivers_off_for_sim(),
         &board,
         &mut specs,
         &ui,
     )?;
-    // Populate the staged `bin/` for the CLI-managed simulation participants
-    // (services and tools) under the same canonical identity names a native run
-    // uses, so `simulation webots run` reads an identity-keyed `bin/` exactly
-    // like `run`. The Webots-managed supervisor/controllers are staged into the
-    // world instead, so they are not linked here.
-    let bin_names = crate::stager::canonical_bin_names(&sim.plan);
-    crate::stager::link_runtime_binaries(&staged_root, &mut specs, &bin_names)
-        .context("failed to link planned binaries into the staged simulation bin store")?;
     // The router launches from the staged `bin/` entry like every other
     // official; stage it there before starting it (the remaining simulation
     // runtime set is staged through the simulation-managed route, #931).

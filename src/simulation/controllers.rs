@@ -105,7 +105,7 @@ pub(crate) fn webots_controller_name_for_simulator_artifact(
 
 /// Obtain the cached native-artifact binary path for a SUITE (non
 /// path-overridden) simulator runtime, mirroring how
-/// `crate::run::locate_official_binary` resolves every other official
+/// `crate::stager::resolve_platform_source` resolves every other official
 /// artifact. Errors clearly rather than leaving the controller silently
 /// unstaged when the artifact was never vendored into the project store.
 pub(crate) fn provisioned_official_simulator_binary(

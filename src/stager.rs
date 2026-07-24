@@ -25,7 +25,6 @@
 //! present - the universal staged-root loader - is the next slice; `run` still
 //! requires a source project root today.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -33,14 +32,12 @@ use anyhow::{Context, Result, ensure};
 
 use phoxal_cli_core::artifacts::NativeArtifactDescriptor;
 use phoxal_cli_core::project::launch_plan::{
-    LaunchPlan, ParticipantExecution, ParticipantLaunchRecord, runtime_layout_dir,
+    ParticipantExecution, ParticipantLaunchRecord, runtime_layout_dir,
 };
 use phoxal_cli_core::project::resolver::{
     ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, official_binary_name, tool_emit_apis_id,
 };
 use phoxal_cli_core::project::suite::ArtifactKind;
-
-use crate::supervisor::ParticipantSpec;
 
 const PREVIOUS_LAYOUT_SUFFIX: &str = ".previous";
 const BEHAVIORS_DIR: &str = "behaviors";
@@ -59,7 +56,8 @@ pub fn layout_path(project_root: &Path, resolved: &ResolvedRobot) -> PathBuf {
 /// caller owns the project run lock for the whole operation, so no participant
 /// observes the brief exchange between the previous complete layout and the
 /// newly validated candidate. `bin/` is created empty; callers that execute the
-/// layout populate it with [`link_runtime_binaries`].
+/// layout populate it with [`stage_participant_binary`] and
+/// [`stage_complete_official_store`].
 pub fn stage_runtime_layout(project_root: &Path, resolved: &ResolvedRobot) -> Result<PathBuf> {
     let build_dir =
         project_root.join(phoxal_cli_core::project::launch_plan::RUNTIME_BUILD_ROOT_RELATIVE);
@@ -132,28 +130,6 @@ fn compile_manifest(resolved: &ResolvedRobot) -> phoxal::model::robot::v0::Robot
     compiled
 }
 
-/// The canonical `bin/` file name every launched participant is staged under,
-/// keyed by its launch participant id. `bin/` is an identity-keyed lookup
-/// store: an official service built from a Cargo workspace override lands at the
-/// SAME `bin/` name a vendored one would, so the loader's
-/// [`RuntimeLayout::resolve_binary`](phoxal_cli_core::project::layout::RuntimeLayout::resolve_binary)
-/// matches source-built and vendored binaries identically. The names computed
-/// here are exactly the ones the loader derives from the compiled `robot.yaml`
-/// and the CLI catalog.
-#[must_use]
-pub fn canonical_bin_names(plan: &LaunchPlan) -> BTreeMap<String, String> {
-    plan.robots
-        .iter()
-        .flat_map(|robot| robot.participants.iter())
-        .map(|participant| {
-            (
-                participant.launch.participant_id.clone(),
-                canonical_binary_name(participant),
-            )
-        })
-        .collect()
-}
-
 /// The canonical identity name one launched participant is stored under in
 /// `bin/`, matching the loader's derivation from the compiled `robot.yaml`.
 fn canonical_binary_name(participant: &ParticipantLaunchRecord) -> String {
@@ -199,48 +175,34 @@ fn tool_short_name(artifact_id: &str) -> &str {
     artifact_id.strip_prefix("tool-").unwrap_or(artifact_id)
 }
 
-/// Hardlink (with a cross-filesystem copy fallback) every planned binary into
-/// the staged `bin/` under its canonical identity name (from `names`, keyed by
-/// participant id), then repoint each spec's `executable` at its staged entry.
-/// `bin/` is a flat identity-keyed store: one canonical file per binary, so one
-/// driver binary shared by several component instances is linked once, and a
-/// source-overridden official lands at the same name the vendored one would.
-/// `bin/` is cleared and recreated every pass, so it can never go stale. No
-/// symlinks: the staged layout holds real file identities that keep working if
-/// `target/` is later cleaned.
+/// Stage one launched CLI-managed participant's binary into the staged `bin/`
+/// under its canonical identity name, returning the executable the participant
+/// runs from: the flat `bin/` entry, or (macOS) the untouched `.app` bundle
+/// executable path. `source` is the built or vendored binary the plan
+/// participant resolves to; `bin/` is a flat identity-keyed store, so one driver
+/// binary shared by several component instances is linked once under its
+/// component id, and a source-overridden official lands at the same name a
+/// vendored one would - the loader resolves both identically.
 ///
-/// macOS `.app`-bundled executables are left untouched (still pointing into
-/// their bundle) so the supervisor's `.app` materialization keeps working;
-/// flattening a bundle into one `bin/` file would drop its `Contents/`. Native
-/// Linux runtime binaries - the real deployment target - are always flattened.
-pub fn link_runtime_binaries(
+/// No symlinks: the staged layout holds real file identities that keep working
+/// if `target/` is later cleaned. The contained macOS `.app` carve-out: a
+/// bundle-materialized executable keeps no flat `bin/` entry (flattening a
+/// bundle into one file would drop its `Contents/`); the loader tolerates that
+/// documented absence on macOS hosts and the supervisor's bundle
+/// materialization launches it from the bundle path instead. Native Linux
+/// runtime binaries - the real deployment target - are always flattened.
+pub fn stage_participant_binary(
     staged_root: &Path,
-    specs: &mut [ParticipantSpec],
-    names: &BTreeMap<String, String>,
-) -> Result<()> {
-    let bin_dir = staged_root.join(BIN_DIR);
-    remove_if_present(&bin_dir)?;
-    fs::create_dir_all(&bin_dir)
-        .with_context(|| format!("failed to create staged bin store {}", bin_dir.display()))?;
-
-    for spec in specs {
-        if macos_app_bundle_binary(&spec.executable).is_some() {
-            continue;
-        }
-        if !spec.executable.is_file() {
-            continue;
-        }
-        let canonical = names.get(&spec.id).with_context(|| {
-            format!(
-                "no canonical bin/ name for launched participant `{}`",
-                spec.id
-            )
-        })?;
-        let staged = bin_dir.join(canonical);
-        link_or_copy(&spec.executable, &staged)?;
-        spec.executable = staged;
+    participant: &ParticipantLaunchRecord,
+    source: &Path,
+) -> Result<PathBuf> {
+    if macos_app_bundle_binary(source).is_some() {
+        return Ok(source.to_path_buf());
     }
-    Ok(())
+    let bin_dir = ensure_bin_dir(staged_root)?;
+    let staged = bin_dir.join(canonical_binary_name(participant));
+    link_or_copy(source, &staged)?;
+    Ok(staged)
 }
 
 /// The canonical `bin/` path the infrastructure router is staged under. The
@@ -256,7 +218,7 @@ pub fn staged_router_binary(staged_root: &Path) -> PathBuf {
 
 /// Complete the staged `bin/` into the loader's full required lookup store.
 ///
-/// [`link_runtime_binaries`] only links the officials that appear as active
+/// [`stage_participant_binary`] only stages the officials that appear as active
 /// plan participants, but the loader
 /// ([`required_runtimes`](phoxal_cli_core::project::layout::RuntimeLayout::required_runtimes))
 /// requires *every* catalog official plus the infrastructure router: per #945
@@ -266,8 +228,8 @@ pub fn staged_router_binary(staged_root: &Path) -> PathBuf {
 /// canonical identity names the loader resolves against, so `bin/` is the true
 /// complete store an extracted bundle can be executed from with no source.
 ///
-/// Entries already present (a referenced official, or a source override linked
-/// by [`link_runtime_binaries`]) are left in place. A source-overridden dormant
+/// Entries already present (a referenced official, or a source override staged
+/// by [`stage_participant_binary`]) are left in place. A source-overridden dormant
 /// official is built through `build_override`; every other missing official is
 /// linked from the vendored `.phoxal/artifacts` store, and a store miss fails
 /// with the "run `phoxal update`" error without ever touching the network.
@@ -320,22 +282,11 @@ fn ensure_platform_staged(
     runtime: &ResolvedPlatformRuntime,
     build_override: &mut impl FnMut(&Path, &str) -> Result<PathBuf>,
 ) -> Result<()> {
-    let canonical = official_binary_name(runtime.kind, &runtime.name);
-    let staged = bin_dir.join(&canonical);
+    let staged = bin_dir.join(official_binary_name(runtime.kind, &runtime.name));
     if staged.is_file() {
         return Ok(());
     }
-    let source = if let Some(crate_dir) = &runtime.path_override {
-        build_override(crate_dir, &runtime.name)?
-    } else {
-        let descriptor = NativeArtifactDescriptor::from_runtime(runtime)?.with_context(|| {
-            format!(
-                "official runtime {} has no vendored artifact to stage; run `phoxal update`",
-                runtime.package
-            )
-        })?;
-        resolve_vendored_binary(&descriptor)?
-    };
+    let source = resolve_platform_source(runtime, build_override)?;
     link_official_source(&source, &staged)
 }
 
@@ -350,18 +301,48 @@ fn ensure_tool_staged(
     if staged.is_file() {
         return Ok(());
     }
-    let source = if let Some(crate_dir) = &tool.path_override {
-        build_override(crate_dir, tool_emit_apis_id(&tool.name))?
-    } else {
-        let descriptor = NativeArtifactDescriptor::from_tool(tool)?.with_context(|| {
-            format!(
-                "official runtime {} has no vendored artifact to stage; run `phoxal update`",
-                tool.package
-            )
-        })?;
-        resolve_vendored_binary(&descriptor)?
-    };
+    let source = resolve_tool_source(tool, build_override)?;
     link_official_source(&source, &staged)
+}
+
+/// Resolve the source binary for one official platform runtime (a service,
+/// simulator, or suite-sourced component driver): its source override built
+/// through `build_override`, or the vendored artifact from `.phoxal/artifacts`.
+/// Hard-fails on a store miss ("run `phoxal update`") and never touches the
+/// network - the loader-driven execution path resolves every official binary
+/// this way, no env-var fallbacks.
+pub fn resolve_platform_source(
+    runtime: &ResolvedPlatformRuntime,
+    build_override: &mut impl FnMut(&Path, &str) -> Result<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(crate_dir) = &runtime.path_override {
+        return build_override(crate_dir, &runtime.name);
+    }
+    let descriptor = NativeArtifactDescriptor::from_runtime(runtime)?.with_context(|| {
+        format!(
+            "official runtime {} has no vendored artifact to stage; run `phoxal update`",
+            runtime.package
+        )
+    })?;
+    resolve_vendored_binary(&descriptor)
+}
+
+/// Resolve the source binary for one official tool (or the infrastructure
+/// router), the tool counterpart of [`resolve_platform_source`].
+pub fn resolve_tool_source(
+    tool: &ResolvedTool,
+    build_override: &mut impl FnMut(&Path, &str) -> Result<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(crate_dir) = &tool.path_override {
+        return build_override(crate_dir, tool_emit_apis_id(&tool.name));
+    }
+    let descriptor = NativeArtifactDescriptor::from_tool(tool)?.with_context(|| {
+        format!(
+            "official runtime {} has no vendored artifact to stage; run `phoxal update`",
+            tool.package
+        )
+    })?;
+    resolve_vendored_binary(&descriptor)
 }
 
 /// Hardlink a resolved official binary into `bin/`, preserving the macOS
@@ -591,9 +572,7 @@ mod tests {
         ResolvedUserRuntime,
     };
     use phoxal_cli_core::project::suite::ArtifactKind;
-    use phoxal_cli_core::session::{ParticipantKind, ProcessKey, RobotKey};
     use std::os::unix::fs::MetadataExt;
-    use std::time::Duration;
 
     fn resolved_robot() -> Result<ResolvedRobot> {
         let yaml = r#"schema: robot/v0
@@ -621,13 +600,6 @@ robot:
             tools: Vec::new(),
             path_overrides: Vec::new(),
         })
-    }
-
-    fn name_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(id, name)| ((*id).to_string(), (*name).to_string()))
-            .collect()
     }
 
     fn launch_record(
@@ -660,27 +632,6 @@ robot:
             launch_ownership: Default::default(),
             startup_requirement: phoxal_cli_core::session::StartupRequirement::Required,
             runtime_failure: phoxal_cli_core::session::RuntimeFailurePolicy::StopProject,
-        }
-    }
-
-    fn spec(name: &str, executable: PathBuf) -> ParticipantSpec {
-        let robot = RobotKey::new("dev", "robot_v1");
-        ParticipantSpec {
-            key: ProcessKey::robot(robot.clone(), name),
-            id: name.to_string(),
-            kind: ParticipantKind::Service,
-            executable,
-            args: Vec::new(),
-            cwd: None,
-            env: Vec::new(),
-            shutdown_grace: Duration::from_millis(0),
-            process_group: true,
-            note: None,
-            bus_participant: true,
-            readiness: ParticipantSpec::exact_liveliness_template(robot, name),
-            startup_requirement: phoxal_cli_core::session::StartupRequirement::Required,
-            runtime_failure: phoxal_cli_core::session::RuntimeFailurePolicy::StopProject,
-            restart_policy: Default::default(),
         }
     }
 
@@ -820,7 +771,7 @@ robot:
     }
 
     #[test]
-    fn links_binaries_into_a_flat_bin_store_by_hardlink_identity() -> Result<()> {
+    fn stages_a_participant_binary_into_a_flat_bin_store_by_hardlink_identity() -> Result<()> {
         let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
@@ -834,13 +785,19 @@ robot:
         let built = target_dir.join("mission");
         fs::write(&built, "ELF")?;
 
-        let mut specs = vec![spec("mission", built.clone())];
-        link_runtime_binaries(&staged, &mut specs, &name_map(&[("mission", "mission")]))?;
+        let record = launch_record(
+            "mission",
+            "mission",
+            ParticipantExecution::UserService {
+                crate_dir: PathBuf::from("services/mission"),
+            },
+            None,
+        );
+        let staged_bin = stage_participant_binary(&staged, &record, &built)?;
 
-        let staged_bin = staged.join("bin/mission");
+        // The returned path is the flat store entry, not the cargo target path.
+        assert_eq!(staged_bin, staged.join("bin/mission"));
         assert!(staged_bin.is_file());
-        // Repointed at the flat store, not the cargo target path.
-        assert_eq!(specs[0].executable, staged_bin);
         // Hardlink identity: same inode as the built artifact.
         assert_eq!(
             fs::metadata(&built)?.ino(),
@@ -851,13 +808,9 @@ robot:
         // A refresh after the artifact changes relinks - bin/ never goes stale.
         fs::remove_file(&built)?;
         fs::write(&built, "ELF-v2")?;
-        let mut specs = vec![spec("mission", built.clone())];
-        link_runtime_binaries(&staged, &mut specs, &name_map(&[("mission", "mission")]))?;
-        assert_eq!(fs::read_to_string(staged.join("bin/mission"))?, "ELF-v2");
-        assert_eq!(
-            fs::metadata(&built)?.ino(),
-            fs::metadata(staged.join("bin/mission"))?.ino()
-        );
+        let refreshed = stage_participant_binary(&staged, &record, &built)?;
+        assert_eq!(fs::read_to_string(&refreshed)?, "ELF-v2");
+        assert_eq!(fs::metadata(&built)?.ino(), fs::metadata(&refreshed)?.ino());
         Ok(())
     }
 
@@ -918,16 +871,20 @@ robot:
         let bundled = bundle.join("joypad");
         fs::write(&bundled, "MACHO")?;
 
-        let mut specs = vec![spec("tool-joypad", bundled.clone())];
-        link_runtime_binaries(
-            &staged,
-            &mut specs,
-            &name_map(&[("tool-joypad", "phoxal-tool-joypad")]),
-        )?;
-        // Bundle-internal binaries are never flattened into bin/.
+        let record = launch_record(
+            "tool-joypad-robot_v1",
+            "tool-joypad",
+            ParticipantExecution::OfficialTool {
+                artifact_ref: "ref".to_string(),
+            },
+            None,
+        );
+        let executable = stage_participant_binary(&staged, &record, &bundled)?;
+        // Bundle-internal binaries are never flattened into bin/; the returned
+        // executable keeps pointing at the bundle for bundle materialization.
         assert!(!staged.join("bin/joypad").exists());
         assert!(!staged.join("bin/phoxal-tool-joypad").exists());
-        assert_eq!(specs[0].executable, bundled);
+        assert_eq!(executable, bundled);
         Ok(())
     }
 
@@ -1009,7 +966,7 @@ robot:
     }
 
     #[test]
-    fn links_officials_and_shared_drivers_under_canonical_identity_names() -> Result<()> {
+    fn stages_officials_and_shared_drivers_under_canonical_identity_names() -> Result<()> {
         let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
@@ -1026,51 +983,53 @@ robot:
         let driver = target_dir.join("ddsm115-driver");
         fs::write(&driver, "DDSM")?;
 
-        let mut specs = vec![
-            spec("drive", drive.clone()),
-            spec("left_drive", driver.clone()),
-            spec("right_drive", driver.clone()),
-        ];
-        link_runtime_binaries(
-            &staged,
-            &mut specs,
-            &name_map(&[
-                ("drive", "phoxal-service-drive"),
-                ("left_drive", "phoxal-component-ddsm115"),
-                ("right_drive", "phoxal-component-ddsm115"),
-            ]),
-        )?;
-
         // The source-overridden official lands at the vendored canonical name.
-        let staged_drive = staged.join("bin/phoxal-service-drive");
+        let staged_drive = stage_participant_binary(
+            &staged,
+            &launch_record(
+                "drive",
+                "drive",
+                ParticipantExecution::SourceArtifact {
+                    kind: "service".to_string(),
+                    crate_dir: PathBuf::from("services/drive"),
+                },
+                None,
+            ),
+            &drive,
+        )?;
+        assert_eq!(staged_drive, staged.join("bin/phoxal-service-drive"));
         assert!(staged_drive.is_file());
-        assert_eq!(specs[0].executable, staged_drive);
-        // One driver binary, one bin/ entry, both instance specs repointed at it.
+
+        // One driver binary, one bin/ entry, both instances resolve to it.
+        let left = stage_participant_binary(
+            &staged,
+            &launch_record(
+                "left_drive",
+                "ddsm115",
+                ParticipantExecution::ComponentDriver {
+                    crate_dir: PathBuf::from("components/ddsm115"),
+                },
+                Some("left_drive"),
+            ),
+            &driver,
+        )?;
+        let right = stage_participant_binary(
+            &staged,
+            &launch_record(
+                "right_drive",
+                "ddsm115",
+                ParticipantExecution::ComponentDriver {
+                    crate_dir: PathBuf::from("components/ddsm115"),
+                },
+                Some("right_drive"),
+            ),
+            &driver,
+        )?;
         let shared = staged.join("bin/phoxal-component-ddsm115");
+        assert_eq!(left, shared);
+        assert_eq!(right, shared);
         assert!(shared.is_file());
-        assert_eq!(specs[1].executable, shared);
-        assert_eq!(specs[2].executable, shared);
         assert_eq!(fs::metadata(&driver)?.ino(), fs::metadata(&shared)?.ino());
-        Ok(())
-    }
-
-    #[test]
-    fn linking_a_participant_absent_from_the_name_map_is_an_error() -> Result<()> {
-        let _scratch = ScratchPhoxalHome::new()?;
-        let project = tempfile::tempdir()?;
-        fs::create_dir_all(project.path().join("model"))?;
-        fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
-        let resolved = resolved_robot()?;
-        let staged = stage_runtime_layout(project.path(), &resolved)?;
-
-        let built = project.path().join("target/debug/mission");
-        fs::create_dir_all(built.parent().unwrap())?;
-        fs::write(&built, "ELF")?;
-        let mut specs = vec![spec("mission", built)];
-        let error = link_runtime_binaries(&staged, &mut specs, &name_map(&[]))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("mission"), "{error}");
         Ok(())
     }
 

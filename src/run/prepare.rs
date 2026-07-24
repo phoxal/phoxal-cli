@@ -131,23 +131,20 @@ pub(crate) fn prepare_run_on_board(
     );
     let mut specs = Vec::new();
 
+    // Resolve every launched participant's binary from the staged runtime
+    // layout's flat `bin/` store, staging each one there under its canonical
+    // identity and inspecting it (architecture + embedded metadata) off-disk.
+    // Execution consumes the staged layout, never the cargo target dir /
+    // artifact store directly (#936).
     prepare_robot_participants(
         &plan,
         &resolved,
-        project_root,
+        &staged_root,
         &driver_policy,
         &board,
         &mut specs,
         ui,
     )?;
-    // Flatten every planned binary into the staged `bin/` under its canonical
-    // identity name and repoint each spec at it, so execution consumes the
-    // staged runtime layout (an identity-keyed lookup store) rather than the
-    // cargo target dir / artifact store directly. The names are derived from the
-    // plan participants and are exactly what the loader resolves against.
-    let bin_names = crate::stager::canonical_bin_names(&plan);
-    crate::stager::link_runtime_binaries(&staged_root, &mut specs, &bin_names)
-        .context("failed to link planned binaries into the staged bin store")?;
     // Complete `bin/` into the loader's full required store: every dormant
     // catalog official plus the infrastructure router, none of which appears as
     // an active plan participant. `bin/` is then the true complete lookup store

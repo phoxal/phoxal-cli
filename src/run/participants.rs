@@ -1,15 +1,24 @@
 //! Participants responsibilities for run.
+//!
+//! Execution resolves every participant binary from the staged runtime layout's
+//! flat `bin/` store and inspects it off-disk (host-architecture check plus
+//! embedded metadata) before it is ever spawned. There is no cargo-target /
+//! vendored-store lookup and no graceful "pending" board note at launch: a
+//! participant whose binary the staging step could not produce, or whose staged
+//! binary is built for a foreign architecture, is a HARD startup failure naming
+//! the required identity (#936). Staging (`crate::stager`) is the only code that
+//! knows about Cargo and the vendored artifact store; this module only reads
+//! what staging produced.
 
-use super::{
-    DriverPolicy, build_source_binary, device_missing_note, env_path_override,
-    native_pending_official_note, native_pending_tool_note,
-};
+use super::{DriverPolicy, build_source_binary, device_missing_note};
 use crate::supervisor::BoardBackend;
 use crate::supervisor::ParticipantSpec;
 use crate::supervisor::ParticipantState;
 use crate::supervisor::ParticipantStatus;
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use phoxal_cli_core::check::participant_metadata::inspect_selected_binary;
 use phoxal_cli_core::project::launch_plan::LaunchOwnership;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
@@ -34,17 +43,13 @@ pub(crate) enum DriverDecision {
 pub(crate) fn prepare_robot_participants(
     plan: &LaunchPlan,
     resolved: &ResolvedRobot,
-    _project_root: &Path,
+    staged_root: &Path,
     driver_policy: &DriverPolicy,
     board: &BoardBackend,
     specs: &mut Vec<ParticipantSpec>,
     ui: &crate::Ui,
 ) -> Result<()> {
-    let official_by_name = resolved
-        .platform_runtimes
-        .iter()
-        .map(|runtime| (runtime.name.as_str(), runtime))
-        .collect::<BTreeMap<_, _>>();
+    let official_by_name = official_runtimes_by_name(resolved);
     for robot in &plan.robots {
         let robot_key = RobotKey::new(&robot.namespace, &robot.id);
         let scope = RobotScope {
@@ -94,172 +99,43 @@ pub(crate) fn prepare_robot_participants(
                     .with_scope(scope.clone()),
                 participant.startup_requirement,
             );
-            match &participant.execution {
-                ParticipantExecution::OfficialTool { .. } => {
-                    match locate_tool_binary(resolved, &participant.artifact_id, ui)? {
-                        Some(path) => specs.push(ParticipantSpec {
-                            key: key.clone(),
-                            id,
-                            kind,
-                            executable: path,
-                            args: Vec::new(),
-                            cwd: None,
-                            env: encode_tool_env(&participant.launch)?.spawn_env(),
-                            shutdown_grace: Duration::from_millis(
-                                participant.launch.shutdown_grace_ms,
-                            ),
-                            process_group: true,
-                            note: None,
-                            bus_participant: true,
-                            readiness: ParticipantSpec::exact_liveliness_template(
-                                robot_key.clone(),
-                                &participant.launch.participant_id,
-                            ),
-                            startup_requirement: participant.startup_requirement,
-                            runtime_failure: participant.runtime_failure,
-                            restart_policy: Default::default(),
-                        }),
-                        None => board.set_state(
-                            &key,
-                            ParticipantState::Failed,
-                            Some(native_pending_tool_note(&participant.artifact_id)),
-                        ),
-                    }
-                }
-                ParticipantExecution::OfficialArtifact { .. } => {
-                    let runtime = official_by_name
-                        .get(participant.artifact_id.as_str())
-                        .copied();
-                    match locate_official_binary(runtime, &participant.artifact_id)? {
-                        Some(path) => specs.push(ParticipantSpec {
-                            key: key.clone(),
-                            id,
-                            kind,
-                            executable: path,
-                            args: Vec::new(),
-                            cwd: None,
-                            env: encode_participant_env(&participant.launch)?.spawn_env(),
-                            shutdown_grace: Duration::from_millis(
-                                participant.launch.shutdown_grace_ms,
-                            ),
-                            process_group: true,
-                            note: None,
-                            bus_participant: true,
-                            readiness: ParticipantSpec::exact_liveliness_template(
-                                robot_key.clone(),
-                                &participant.launch.participant_id,
-                            ),
-                            startup_requirement: participant.startup_requirement,
-                            runtime_failure: participant.runtime_failure,
-                            restart_policy: Default::default(),
-                        }),
-                        None => board.set_state(
-                            &key,
-                            ParticipantState::Failed,
-                            Some(native_pending_official_note(
-                                runtime,
-                                &participant.artifact_id,
-                            )),
-                        ),
-                    }
-                }
-                ParticipantExecution::UserService { crate_dir } => {
-                    let binary = build_source_binary(crate_dir, &id, ui)?;
-                    specs.push(ParticipantSpec {
-                        key: key.clone(),
-                        id,
-                        kind,
-                        executable: binary,
-                        args: Vec::new(),
-                        cwd: Some(crate_dir.clone()),
-                        env: encode_participant_env(&participant.launch)?.spawn_env(),
-                        shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
-                        process_group: true,
-                        note: None,
-                        bus_participant: true,
-                        readiness: ParticipantSpec::exact_liveliness_template(
-                            robot_key.clone(),
-                            &participant.launch.participant_id,
-                        ),
-                        startup_requirement: participant.startup_requirement,
-                        runtime_failure: participant.runtime_failure,
-                        restart_policy: Default::default(),
-                    });
-                }
-                ParticipantExecution::SourceArtifact {
-                    kind: artifact_kind,
-                    crate_dir,
-                } => {
-                    let binary = build_source_binary(crate_dir, &id, ui)?;
-                    let env = if artifact_kind == "tool" {
-                        encode_tool_env(&participant.launch)?
-                    } else {
-                        encode_participant_env(&participant.launch)?
-                    };
-                    specs.push(ParticipantSpec {
-                        key: key.clone(),
-                        id,
-                        kind,
-                        executable: binary,
-                        args: Vec::new(),
-                        cwd: Some(crate_dir.clone()),
-                        env: env.spawn_env(),
-                        shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
-                        process_group: true,
-                        note: None,
-                        bus_participant: true,
-                        readiness: ParticipantSpec::exact_liveliness_template(
-                            robot_key.clone(),
-                            &participant.launch.participant_id,
-                        ),
-                        startup_requirement: participant.startup_requirement,
-                        runtime_failure: participant.runtime_failure,
-                        restart_policy: Default::default(),
-                    });
-                }
-                ParticipantExecution::ComponentDriver { crate_dir } => {
-                    match driver_policy.decision(&id) {
-                        DriverDecision::Degraded(note) => {
-                            board.set_state(&key, ParticipantState::Degraded, Some(note));
-                            continue;
-                        }
-                        DriverDecision::Launch => {}
-                    }
-                    if cfg!(target_os = "macos") {
-                        board.set_state(
-                            &key,
-                            ParticipantState::Failed,
-                            Some("DriverUnsupported: component driver binaries are Linux-only on macOS (D21)".to_string()),
-                        );
+            // Component-driver launch gating (bench subset, macOS, missing
+            // device) is a board/policy decision that precedes any binary
+            // resolution: a gated-out driver never needs its binary staged.
+            if matches!(
+                participant.execution,
+                ParticipantExecution::ComponentDriver { .. }
+            ) {
+                match driver_policy.decision(&id) {
+                    DriverDecision::Degraded(note) => {
+                        board.set_state(&key, ParticipantState::Degraded, Some(note));
                         continue;
                     }
-                    if let Some(note) = device_missing_note(resolved, &id) {
-                        board.set_state(&key, ParticipantState::Failed, Some(note));
-                        continue;
-                    }
-                    let binary = build_source_binary(crate_dir, &id, ui)?;
-                    specs.push(ParticipantSpec {
-                        key: key.clone(),
-                        id,
-                        kind,
-                        executable: binary,
-                        args: Vec::new(),
-                        cwd: Some(crate_dir.clone()),
-                        env: encode_participant_env(&participant.launch)?.spawn_env(),
-                        shutdown_grace: Duration::from_millis(participant.launch.shutdown_grace_ms),
-                        process_group: true,
-                        note: None,
-                        bus_participant: true,
-                        readiness: ParticipantSpec::exact_liveliness_template(
-                            robot_key.clone(),
-                            &participant.launch.participant_id,
-                        ),
-                        startup_requirement: participant.startup_requirement,
-                        runtime_failure: participant.runtime_failure,
-                        restart_policy: Default::default(),
-                    });
+                    DriverDecision::Launch => {}
+                }
+                if cfg!(target_os = "macos") {
+                    board.set_state(
+                        &key,
+                        ParticipantState::Failed,
+                        Some("DriverUnsupported: component driver binaries are Linux-only on macOS (D21)".to_string()),
+                    );
+                    continue;
+                }
+                if let Some(note) = device_missing_note(resolved, &id) {
+                    board.set_state(&key, ParticipantState::Failed, Some(note));
+                    continue;
                 }
             }
+            let source = resolve_participant_source(participant, resolved, &official_by_name, ui)?;
+            let executable = stage_and_inspect(staged_root, participant, &source)?;
+            let cwd = source_cwd(&participant.execution);
+            specs.push(participant_spec(
+                participant,
+                &robot_key,
+                kind,
+                executable,
+                cwd,
+            )?);
         }
     }
     Ok(())
@@ -312,60 +188,155 @@ pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (Participant
 pub(crate) fn spec_from_launch_record(
     participant: &ParticipantLaunchRecord,
     resolved: &ResolvedRobot,
+    staged_root: &Path,
     ui: &crate::Ui,
 ) -> Result<Option<ParticipantSpec>> {
     if participant.launch_ownership == LaunchOwnership::SimulationManaged {
         return Ok(None);
     }
-    let id = participant.launch.participant_id.clone();
     let robot = RobotKey::new(&participant.launch.namespace, &participant.launch.robot_id);
     // `_local`: this function only builds a `ParticipantSpec` (no
     // `ParticipantStatus` to mark `.with_local` on) - see the other
     // `participant_kind` call sites for where the bool is actually consumed.
     let (kind, _local) = participant_kind(&participant.execution);
-    let is_tool = match &participant.execution {
-        ParticipantExecution::OfficialTool { .. } => true,
-        ParticipantExecution::SourceArtifact { kind, .. } => kind == "tool",
-        _ => false,
-    };
-    let (binary, cwd) = match &participant.execution {
+    let official_by_name = official_runtimes_by_name(resolved);
+    let source = resolve_participant_source(participant, resolved, &official_by_name, ui)?;
+    let executable = stage_and_inspect(staged_root, participant, &source)?;
+    let cwd = source_cwd(&participant.execution);
+    Ok(Some(participant_spec(
+        participant,
+        &robot,
+        kind,
+        executable,
+        cwd,
+    )?))
+}
+
+/// Every official platform runtime the loader may need to resolve, keyed by its
+/// launch identity: the services and simulators in `platform_runtimes` plus the
+/// suite-sourced component drivers carried on `components[].driver.suite_runtime`
+/// (a suite driver projects onto the same `ResolvedPlatformRuntime` shape and is
+/// keyed by its component id). Source-sourced drivers are not here - they build
+/// from their crate through the source-execution path.
+fn official_runtimes_by_name(resolved: &ResolvedRobot) -> BTreeMap<&str, &ResolvedPlatformRuntime> {
+    resolved
+        .platform_runtimes
+        .iter()
+        .chain(
+            resolved
+                .components
+                .iter()
+                .filter_map(|component| component.driver.as_ref())
+                .filter_map(|driver| driver.suite_runtime.as_ref()),
+        )
+        .map(|runtime| (runtime.name.as_str(), runtime))
+        .collect()
+}
+
+/// Resolve the binary one launched participant runs from: a source participant
+/// (user service, source-overridden official, component driver) builds through
+/// `cargo`; an official artifact or tool resolves from its source override or
+/// the vendored `.phoxal/artifacts` store. Every path hard-fails - there is no
+/// graceful `None`/pending note - naming the required identity.
+fn resolve_participant_source(
+    participant: &ParticipantLaunchRecord,
+    resolved: &ResolvedRobot,
+    official_by_name: &BTreeMap<&str, &ResolvedPlatformRuntime>,
+    ui: &crate::Ui,
+) -> Result<PathBuf> {
+    let id = &participant.launch.participant_id;
+    let mut build_override =
+        |crate_dir: &Path, name: &str| build_source_binary(crate_dir, name, ui);
+    match &participant.execution {
         ParticipantExecution::UserService { crate_dir }
         | ParticipantExecution::SourceArtifact { crate_dir, .. }
-        | ParticipantExecution::ComponentDriver { crate_dir } => (
-            build_source_binary(crate_dir, &id, ui)?,
-            Some(crate_dir.clone()),
-        ),
-        ParticipantExecution::OfficialTool { .. } => (
-            locate_tool_binary(resolved, &participant.artifact_id, ui)?
-                .ok_or_else(|| anyhow!(native_pending_tool_note(&participant.artifact_id)))?,
-            None,
-        ),
-        ParticipantExecution::OfficialArtifact { .. } => {
-            let runtime = resolved
-                .platform_runtimes
-                .iter()
-                .find(|runtime| runtime.name == participant.artifact_id);
-            (
-                locate_official_binary(runtime, &participant.artifact_id)?.ok_or_else(|| {
-                    anyhow!(native_pending_official_note(
-                        runtime,
-                        &participant.artifact_id
-                    ))
-                })?,
-                None,
-            )
+        | ParticipantExecution::ComponentDriver { crate_dir } => {
+            build_source_binary(crate_dir, id, ui)
         }
-    };
-    let env = if is_tool {
+        ParticipantExecution::OfficialTool { .. } => {
+            let tool = resolved
+                .tools
+                .iter()
+                .find(|tool| tool.name == participant.artifact_id)
+                .ok_or_else(|| {
+                    anyhow!("resolved graph is missing tool {}", participant.artifact_id)
+                })?;
+            crate::stager::resolve_tool_source(tool, &mut build_override)
+        }
+        ParticipantExecution::OfficialArtifact { .. } => {
+            let runtime = official_by_name
+                .get(participant.artifact_id.as_str())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "resolved graph is missing official artifact {}",
+                        participant.artifact_id
+                    )
+                })?;
+            crate::stager::resolve_platform_source(runtime, &mut build_override)
+        }
+    }
+}
+
+/// Stage one participant's resolved source binary into the layout's flat `bin/`
+/// and inspect the staged entry off-disk: verify it is executable on the host
+/// architecture and read its embedded metadata, never running it. A missing or
+/// foreign-architecture binary is a hard startup failure naming the identity.
+fn stage_and_inspect(
+    staged_root: &Path,
+    participant: &ParticipantLaunchRecord,
+    source: &Path,
+) -> Result<PathBuf> {
+    let staged = crate::stager::stage_participant_binary(staged_root, participant, source)?;
+    inspect_selected_binary(&staged).with_context(|| {
+        format!(
+            "failed to inspect staged runtime `{}` at {}",
+            participant.launch.participant_id,
+            staged.display()
+        )
+    })?;
+    Ok(staged)
+}
+
+/// The working directory a launched participant runs in: source participants
+/// keep their crate directory (relative asset paths resolve from there); an
+/// official runs from the layout with no crate context.
+fn source_cwd(execution: &ParticipantExecution) -> Option<PathBuf> {
+    match execution {
+        ParticipantExecution::UserService { crate_dir }
+        | ParticipantExecution::SourceArtifact { crate_dir, .. }
+        | ParticipantExecution::ComponentDriver { crate_dir } => Some(crate_dir.clone()),
+        ParticipantExecution::OfficialArtifact { .. }
+        | ParticipantExecution::OfficialTool { .. } => None,
+    }
+}
+
+/// Whether a participant launches with tool env (privileged) rather than the
+/// bus-participant env: an official tool, or a source-overridden tool.
+fn is_tool_execution(execution: &ParticipantExecution) -> bool {
+    matches!(execution, ParticipantExecution::OfficialTool { .. })
+        || matches!(execution, ParticipantExecution::SourceArtifact { kind, .. } if kind == "tool")
+}
+
+/// Assemble the `ParticipantSpec` the supervisor spawns: the staged executable
+/// plus the launch env/readiness/policies carried by the plan record.
+fn participant_spec(
+    participant: &ParticipantLaunchRecord,
+    robot_key: &RobotKey,
+    kind: ParticipantKind,
+    executable: PathBuf,
+    cwd: Option<PathBuf>,
+) -> Result<ParticipantSpec> {
+    let id = participant.launch.participant_id.clone();
+    let env = if is_tool_execution(&participant.execution) {
         encode_tool_env(&participant.launch)?
     } else {
         encode_participant_env(&participant.launch)?
     };
-    Ok(Some(ParticipantSpec {
-        key: ProcessKey::robot(robot.clone(), &id),
+    Ok(ParticipantSpec {
+        key: ProcessKey::robot(robot_key.clone(), &id),
         id,
         kind,
-        executable: binary,
+        executable,
         args: Vec::new(),
         cwd,
         env: env.spawn_env(),
@@ -374,96 +345,108 @@ pub(crate) fn spec_from_launch_record(
         note: None,
         bus_participant: true,
         readiness: ParticipantSpec::exact_liveliness_template(
-            robot,
+            robot_key.clone(),
             &participant.launch.participant_id,
         ),
         startup_requirement: participant.startup_requirement,
         runtime_failure: participant.runtime_failure,
         restart_policy: Default::default(),
-    }))
-}
-
-pub(crate) fn locate_tool_binary(
-    resolved: &ResolvedRobot,
-    name: &str,
-    ui: &crate::Ui,
-) -> Result<Option<PathBuf>> {
-    let tool = resolved
-        .tools
-        .iter()
-        .find(|tool| tool.name == name)
-        .ok_or_else(|| anyhow!("resolved graph is missing tool {name}"))?;
-    if let Some(path) = &tool.path_override {
-        return Ok(Some(build_source_binary(path, name, ui)?));
-    }
-    if let Some(path) = env_path_override("PHOXAL_ARTIFACT", name) {
-        return Ok(Some(path));
-    }
-    if let Some(path) = env_path_override("PHOXAL_TOOL", name) {
-        return Ok(Some(path));
-    }
-    if let Ok(dir) = std::env::var("PHOXAL_ARTIFACT_DIR") {
-        let path = PathBuf::from(dir).join(&tool.binary_name);
-        if path.is_file() {
-            return Ok(Some(path));
-        }
-    }
-    if let Ok(dir) = std::env::var("PHOXAL_TOOL_DIR") {
-        for name in [&tool.name, &tool.binary_name] {
-            let path = PathBuf::from(&dir).join(name);
-            if path.is_file() {
-                return Ok(Some(path));
-            }
-        }
-    }
-    let Some(descriptor) = phoxal_cli_core::artifacts::NativeArtifactDescriptor::from_tool(tool)?
-    else {
-        return Ok(None);
-    };
-    // Vendored-store resolution lives in the stager and never touches the
-    // network; a store miss falls through to `None` so the caller reports the
-    // "run `phoxal update`" board note rather than hard-failing the run.
-    Ok(crate::stager::resolve_vendored_binary(&descriptor).ok())
-}
-
-pub(crate) fn locate_official_binary(
-    runtime: Option<&ResolvedPlatformRuntime>,
-    participant_id: &str,
-) -> Result<Option<PathBuf>> {
-    if let Some(path) = env_path_override("PHOXAL_ARTIFACT", participant_id) {
-        return Ok(Some(path));
-    }
-    let binary_name = runtime
-        .map(|runtime| {
-            phoxal_cli_core::project::resolver::official_binary_name(runtime.kind, &runtime.name)
-        })
-        .unwrap_or_else(|| participant_id.to_string());
-    if let Ok(dir) = std::env::var("PHOXAL_ARTIFACT_DIR") {
-        let path = PathBuf::from(dir).join(&binary_name);
-        if path.is_file() {
-            return Ok(Some(path));
-        }
-    }
-    if let Some(runtime) = runtime
-        && let Some(descriptor) =
-            phoxal_cli_core::artifacts::NativeArtifactDescriptor::from_runtime(runtime)?
-    {
-        // Vendored-store resolution lives in the stager and never touches the
-        // network; a store miss falls through to `None` so the caller reports
-        // the "run `phoxal update`" board note rather than hard-failing.
-        return Ok(crate::stager::resolve_vendored_binary(&descriptor).ok());
-    }
-    // No env override, and no resolved runtime to derive a native-artifact
-    // descriptor from (a path-overridden or otherwise non-suite runtime) -
-    // the project-local store has no other identity from which to find this
-    // participant's binary.
-    Ok(None)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phoxal::participant::launch::{
+        BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
+    };
+    use phoxal_cli_core::check::participant_metadata::host_architecture;
+    use phoxal_cli_core::session::RuntimeFailurePolicy;
     use phoxal_cli_core::session::{ParticipantInstanceKey, ParticipantKind};
+
+    /// Synthesize an ELF of a given architecture carrying the phoxal metadata
+    /// section, so `stage_and_inspect` is exercised against real object shapes
+    /// without building a binary (mirrors the loader's own test synthesis).
+    fn synthesize_binary(arch: object::Architecture) -> Vec<u8> {
+        use object::write::Object;
+        let mut obj = Object::new(object::BinaryFormat::Elf, arch, object::Endianness::Little);
+        let section = obj.add_section(
+            Vec::new(),
+            b".phoxal_api_meta".to_vec(),
+            object::SectionKind::ReadOnlyData,
+        );
+        let payload = br#"{"participant_api":"()","contracts":[],"config_schema":{"type":"null"}}"#;
+        obj.append_section_data(section, payload, 1);
+        obj.write().expect("synthesize object file")
+    }
+
+    fn user_service_record(id: &str) -> ParticipantLaunchRecord {
+        ParticipantLaunchRecord {
+            artifact_id: id.to_string(),
+            execution: ParticipantExecution::UserService {
+                crate_dir: PathBuf::from("services").join(id),
+            },
+            launch: ParticipantLaunch {
+                participant_id: id.to_string(),
+                incarnation: 0,
+                namespace: "dev".to_string(),
+                robot_id: "robot_v1".to_string(),
+                bus: BusProfile {
+                    connect_endpoints: Vec::new(),
+                },
+                clock: ClockMode::Real,
+                config: None,
+                robot_root: None,
+                component_instance: None,
+                execution_device_id: None,
+                shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
+            },
+            launch_ownership: LaunchOwnership::CliManaged,
+            startup_requirement: StartupRequirement::Required,
+            runtime_failure: RuntimeFailurePolicy::StopProject,
+        }
+    }
+
+    #[test]
+    fn a_staged_participant_binary_resolves_from_bin_under_the_layout() -> Result<()> {
+        let staged = tempfile::tempdir()?;
+        let source = tempfile::tempdir()?;
+        let src_bin = source.path().join("mission");
+        std::fs::write(&src_bin, synthesize_binary(host_architecture()))?;
+
+        let record = user_service_record("mission");
+        let executable = stage_and_inspect(staged.path(), &record, &src_bin)?;
+
+        // The launched executable is the flat `bin/` entry under the layout,
+        // not the source binary the staging step resolved.
+        assert_eq!(executable, staged.path().join("bin/mission"));
+        assert!(executable.starts_with(staged.path().join("bin")));
+        assert!(executable.is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn a_foreign_arch_staged_binary_fails_precisely_naming_the_identity() -> Result<()> {
+        let staged = tempfile::tempdir()?;
+        let source = tempfile::tempdir()?;
+        let src_bin = source.path().join("mission");
+        let foreign = if host_architecture() == object::Architecture::X86_64 {
+            object::Architecture::Aarch64
+        } else {
+            object::Architecture::X86_64
+        };
+        std::fs::write(&src_bin, synthesize_binary(foreign))?;
+
+        let record = user_service_record("mission");
+        let error = format!(
+            "{:#}",
+            stage_and_inspect(staged.path(), &record, &src_bin)
+                .expect_err("a foreign-arch staged binary must be rejected")
+        );
+        assert!(error.contains("mission"), "{error}");
+        assert!(error.contains("built for"), "{error}");
+        Ok(())
+    }
 
     #[test]
     fn simulation_managed_readiness_accepts_its_exact_unmanaged_incarnation() {

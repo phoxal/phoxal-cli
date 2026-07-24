@@ -538,7 +538,7 @@ fn recheck_run_target(
         crate::check::robot_contract_surfaces(&resolved.robot.robot.id, &outcome.contract_surfaces);
     let coherence = crate::check::coherence_for_launch_plan(&coherence_plan, &[coherence_graph])?;
     crate::check::enforce_coherence(crate::check::CoherenceVerb::Run, &coherence)?;
-    let mut specs = specs_for_target(&plan, &resolved, target)?;
+    let mut specs = specs_for_target(&plan, &resolved, project_root, target)?;
     let endpoint = crate::run::project_router_endpoint(project_root);
     crate::run::apply_session_connect(&mut plan, &mut specs, &endpoint);
     Ok(WatchOutcome::Revision { plan, specs })
@@ -562,7 +562,7 @@ fn recheck_sim_target(
     if target.kind == WatchTargetKind::Driver {
         return Ok(WatchOutcome::MetadataOnly);
     }
-    let mut specs = specs_for_target(&plan, &resolved.resolved, target)?;
+    let mut specs = specs_for_target(&plan, &resolved.resolved, &resolved.project_root, target)?;
     let endpoint = crate::run::project_router_endpoint(project_root);
     crate::run::apply_session_connect(&mut plan, &mut specs, &endpoint);
     Ok(WatchOutcome::Revision { plan, specs })
@@ -571,6 +571,7 @@ fn recheck_sim_target(
 fn specs_for_target(
     plan: &LaunchPlan,
     resolved: &ResolvedRobot,
+    project_root: &Path,
     target: &WatchTarget,
 ) -> Result<Vec<ParticipantSpec>> {
     let wanted = target
@@ -582,6 +583,10 @@ fn specs_for_target(
     // this deep in the hot-reload swap path, so the terminal flag is
     // recomputed fresh rather than threaded through the watch loop.
     let ui = crate::Ui::from_env();
+    // A watch rebuild re-stages every swapped binary into the same staged
+    // runtime layout the live run executes from, so a hot-reloaded participant
+    // is resolved from `bin/` exactly like the original launch (#936).
+    let staged_root = crate::stager::layout_path(project_root, resolved);
     let mut specs = Vec::new();
     for participant in plan
         .robots
@@ -592,7 +597,7 @@ fn specs_for_target(
                 || wanted.contains(participant.launch.participant_id.as_str())
         })
     {
-        if let Some(spec) = spec_from_launch_record(participant, resolved, &ui)? {
+        if let Some(spec) = spec_from_launch_record(participant, resolved, &staged_root, &ui)? {
             specs.push(spec);
         }
     }

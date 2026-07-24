@@ -1,7 +1,6 @@
 //! Tests for this module.
 
 use super::build::missing_device_path;
-use super::environment::env_key;
 use super::report::{
     LaunchCommandEntry, LaunchCommandReport, launch_kind_label, report_launch_commands_human,
 };
@@ -149,12 +148,6 @@ fn drivers_off_degrades_every_driver() -> Result<()> {
         DriverDecision::Degraded("drivers off".to_string())
     );
     Ok(())
-}
-
-#[test]
-fn path_override_env_key_is_stable() {
-    assert_eq!(env_key("tool-router"), "TOOL_ROUTER");
-    assert_eq!(env_key("left_drive"), "LEFT_DRIVE");
 }
 
 #[test]
