@@ -42,7 +42,7 @@ pub struct RawEmitApis {
     pub config_schema: Option<Value>,
 }
 
-fn default_participant_class() -> String {
+pub(crate) fn default_participant_class() -> String {
     "checked".to_string()
 }
 
@@ -91,7 +91,9 @@ pub(crate) use participants::{
 mod graph;
 pub use graph::{run_check, run_check_with_context};
 mod config;
-pub(crate) use config::{contract_surface, validate_user_service_config};
+pub(crate) use config::{
+    contract_surface, validate_user_runtime_config, validate_user_service_config,
+};
 mod metadata;
 pub(crate) use metadata::{
     extract_emit_apis_from_staged_runtime, extract_emit_apis_from_staged_tool,

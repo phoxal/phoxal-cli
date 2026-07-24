@@ -588,9 +588,7 @@ fn participant_execution(
             SourceParticipantKind::UserService => ParticipantExecution::UserService {
                 binary_name: checked.artifact_id.clone(),
             },
-            SourceParticipantKind::UserTool => ParticipantExecution::UserTool {
-                binary_name: checked.artifact_id.clone(),
-            },
+
             SourceParticipantKind::OfficialService => ParticipantExecution::OfficialArtifact {
                 binary_name: official_binary_name(ArtifactKind::Service, &checked.artifact_id),
             },
@@ -601,7 +599,12 @@ fn participant_execution(
             // above; tools never reach a robot-launch participant loop
             // (`is_robot_launch_participant` excludes `Tool`), so neither of
             // these source kinds is reachable here.
-            SourceParticipantKind::ComponentDriver | SourceParticipantKind::Tool => bail!(
+            // UserTool has no producer in this legacy (simulation-only) leg:
+            // the sim source set filters user tools until the #931 layout swap
+            // supplies their launch path.
+            SourceParticipantKind::ComponentDriver
+            | SourceParticipantKind::Tool
+            | SourceParticipantKind::UserTool => bail!(
                 "source participant {} of kind {:?} is not a launchable non-driver participant",
                 source.name,
                 source.kind

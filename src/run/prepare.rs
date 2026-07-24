@@ -168,6 +168,10 @@ pub(crate) fn refresh_staging(
         ui,
     )?;
 
+    // Declaration drift (#950) is warned from THIS shared path, so run,
+    // start, watch restaging, and build all surface it exactly once.
+    crate::run::report_undeclared_runtimes(&resolved.undeclared_runtimes, ui);
+
     Ok(StagedProject {
         // `project_root` borrows `robot_path`, so clone rather than move it.
         robot_path: robot_path.clone(),
@@ -223,8 +227,6 @@ pub(crate) fn prepare_run_on_board(
         &crate::run::driven_instances(&staged.resolved.robot),
         ui,
     );
-    // Declaration drift (#950): workspace crates not selected by robot.yaml.
-    crate::run::report_undeclared_runtimes(&staged.resolved.undeclared_runtimes, ui);
 
     let mut specs = Vec::new();
     // The staging-side record of source crate directories the source-free plan

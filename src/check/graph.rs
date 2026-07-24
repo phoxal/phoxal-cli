@@ -176,6 +176,18 @@ pub fn run_check_with_context(
             )
         {
             config_problems.push(problem);
+        } else if participant.kind == SourceParticipantKind::UserTool
+            && let Some(problem) = crate::check::validate_user_runtime_config(
+                &participant.name,
+                participant_apis.config_schema.as_ref(),
+                context
+                    .robot
+                    .and_then(|robot| robot.tools.get(&participant.name))
+                    .and_then(|tool| tool.config.as_ref()),
+                "tools",
+            )
+        {
+            config_problems.push(problem);
         }
         let surface_participant_id = if participant.kind == SourceParticipantKind::Tool {
             participant.name.clone()

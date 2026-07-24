@@ -166,6 +166,10 @@ impl RuntimeLayout {
     pub fn open(root: &Path) -> Result<Self> {
         let robot_path = root.join(ROBOT_FILE);
         ensure_supported_revision(&robot_path, DocumentKind::Robot)?;
+        // Declaration invariants are re-checked here, not only at source
+        // resolution: an extracted bundle is untrusted input, and a hand-edited
+        // `tools:`/`services:` map naming an official identity or a dual name
+        // must fail before the required set is derived (#950).
         let robot = RobotDocument::parse_from_dir(root)
             .with_context(|| {
                 format!(
@@ -174,6 +178,12 @@ impl RuntimeLayout {
                 )
             })?
             .into_v0();
+        validate_runtime_declarations(&robot).with_context(|| {
+            format!(
+                "compiled robot.yaml in staged runtime layout {} declares an invalid runtime set",
+                root.display()
+            )
+        })?;
         Ok(Self {
             root: root.to_path_buf(),
             robot,
@@ -226,16 +236,14 @@ impl RuntimeLayout {
                 // never members of the official runtime set.
                 ArtifactKind::ComponentAssets | ArtifactKind::ComponentDriver => continue,
             };
-            let config = self
-                .robot
-                .services
-                .get(&short)
-                .and_then(|service| service.config.clone());
+            // Official runtimes take no configuration from robot.yaml (#950):
+            // the declaration maps are user-only, and `open` rejected any
+            // official identity declared in them.
             required.push(RequiredRuntime {
                 identity: short.clone(),
                 binary_name: official_binary_name(official.kind, &short),
                 kind,
-                config,
+                config: None,
             });
         }
 
@@ -359,6 +367,63 @@ fn official_short_name(official: &OfficialRuntime) -> String {
         .to_string()
 }
 
+/// Validate the runtime declaration maps of a `robot/v0` document against the
+/// CLI catalog (#950), shared by source resolution (which runs it FIRST, before
+/// any workspace scanning) and by [`RuntimeLayout::open`] (so a hand-edited
+/// bundle cannot smuggle a forbidden declaration past the loader):
+///
+/// - a name may be declared under `services:` or `tools:`, never both (one
+///   binary namespace);
+/// - official identities are never declared - official runtimes are
+///   catalog-owned, always run, and take no configuration from robot.yaml. A
+///   workspace crate overriding an official identity does so WITHOUT a
+///   declaration.
+pub fn validate_runtime_declarations(robot: &phoxal::model::robot::v0::Robot) -> Result<()> {
+    let official_services = official_service_short_names();
+    let official_tools = official_tool_short_names();
+    for name in robot.services.keys() {
+        if robot.tools.contains_key(name) {
+            bail!(
+                "robot.yaml declares '{name}' under both services and tools; the two maps share \
+                 one binary namespace, so a name may appear in only one"
+            );
+        }
+        if official_services.contains(name.as_str()) {
+            bail!(
+                "robot.yaml declares services.{name}, but '{name}' is an official service; \
+                 official runtimes are catalog-owned, always run, and take no robot.yaml \
+                 declaration (a services/{name} workspace crate overrides the official binary \
+                 without being declared)"
+            );
+        }
+    }
+    for name in robot.tools.keys() {
+        if official_tools.contains(name.as_str()) {
+            bail!(
+                "robot.yaml declares tools.{name}, but '{name}' is an official tool; official \
+                 runtimes are catalog-owned, always run, and take no robot.yaml declaration (a \
+                 tools/{name} workspace crate overrides the official binary without being \
+                 declared)"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The short names of every official tool in the CLI catalog.
+fn official_tool_short_names() -> BTreeSet<&'static str> {
+    catalog::NATIVE
+        .iter()
+        .filter(|official| official.kind == ArtifactKind::Tool)
+        .map(|official| {
+            official
+                .package
+                .strip_prefix("phoxal/tool-")
+                .unwrap_or(official.package)
+        })
+        .collect()
+}
+
 /// The short names of every official service in the CLI catalog, so the loader
 /// can tell an official-service config entry from a user service in the
 /// compiled `robot.yaml` `services` map.
@@ -418,9 +483,6 @@ services:
   mission:
     config:
       speed: 1
-  drive:
-    config:
-      gain: 2
 tools:
   lidar-viz:
     config:
@@ -473,14 +535,15 @@ tools:
                 .any(|runtime| runtime.identity.contains("webots")),
             "the run required set must exclude simulator binaries"
         );
-        // Every catalog service is required, each under its canonical bin name.
+        // Every catalog service is required, each under its canonical bin
+        // name, and officials take NO configuration from robot.yaml (#950).
         let drive = required
             .iter()
             .find(|runtime| runtime.identity == "drive")
             .expect("official service `drive` is required");
         assert_eq!(drive.binary_name, "phoxal-service-drive");
         assert_eq!(drive.kind, RequiredRuntimeKind::OfficialService);
-        assert_eq!(drive.config, Some(serde_json::json!({"gain": 2})));
+        assert_eq!(drive.config, None);
 
         // The user service is required under its identity, and is NOT confused
         // with an official service.
@@ -501,6 +564,32 @@ tools:
         assert_eq!(drivers.len(), 1, "one driver binary serves both instances");
         assert_eq!(drivers[0].identity, "ddsm115");
         assert_eq!(drivers[0].binary_name, "phoxal-component-ddsm115");
+        Ok(())
+    }
+
+    #[test]
+    fn a_hand_edited_bundle_declaring_official_or_dual_names_is_rejected() -> Result<()> {
+        // The loader re-validates declarations (#950): an extracted bundle is
+        // untrusted input.
+        let official = ROBOT_YAML.replace(
+            "tools:\n  lidar-viz:\n    config:\n      port: 9000\n",
+            "tools:\n  log: {}\n",
+        );
+        let dir = write_layout(&official)?;
+        let error = RuntimeLayout::open(dir.path())
+            .expect_err("an official identity in tools: must be rejected")
+            .to_string();
+        assert!(error.contains("invalid runtime set"), "{error}");
+
+        let dual = ROBOT_YAML.replace(
+            "tools:\n  lidar-viz:\n    config:\n      port: 9000\n",
+            "tools:\n  mission: {}\n",
+        );
+        let dir = write_layout(&dual)?;
+        let error = RuntimeLayout::open(dir.path())
+            .expect_err("a dual services/tools name must be rejected")
+            .to_string();
+        assert!(error.contains("invalid runtime set"), "{error}");
         Ok(())
     }
 

@@ -35,6 +35,11 @@ pub fn resolve(
         project.train.version,
         train
     );
+    // Declaration-only invariants come FIRST (#950): a dual-declared name or an
+    // official identity in either map fails before any workspace scanning, so
+    // the error names the declaration mistake rather than a downstream
+    // missing-crate symptom.
+    phoxal_cli_core::project::layout::validate_runtime_declarations(robot)?;
     let target = options
         .official_target_triple
         .clone()

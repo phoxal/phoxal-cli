@@ -30,20 +30,33 @@ pub(crate) fn validate_user_service_config(
     schema: Option<&Value>,
     robot: Option<&RobotV0>,
 ) -> Option<graph_check::Problem> {
-    let schema = schema?;
     // An absent manifest config is `null`, not `{}`: a no-config service's
     // emitted schema requires null (so absent passes), while a service with a
     // real object schema still fails correctly as config-required-but-missing.
     let config = robot
         .and_then(|robot| robot.services.get(service_id))
-        .and_then(|service| service.config.clone())
-        .unwrap_or(Value::Null);
-    let errors = validate_json_schema(schema, &config, &format!("services.{service_id}.config"));
+        .and_then(|service| service.config.clone());
+    validate_user_runtime_config(service_id, schema, config.as_ref(), "services")
+}
+
+/// Validate one declared user runtime's authored config against its embedded
+/// schema, with the declaring map (`services`/`tools`) in the diagnostic path.
+/// The config VALUE is passed in, never re-looked-up, so tool declarations
+/// validate their real `tools.<id>.config` (#950).
+pub(crate) fn validate_user_runtime_config(
+    runtime_id: &str,
+    schema: Option<&Value>,
+    config: Option<&Value>,
+    family: &str,
+) -> Option<graph_check::Problem> {
+    let schema = schema?;
+    let config = config.cloned().unwrap_or(Value::Null);
+    let errors = validate_json_schema(schema, &config, &format!("{family}.{runtime_id}.config"));
     if errors.is_empty() {
         None
     } else {
         Some(graph_check::Problem::InvalidConfig {
-            runtime_id: service_id.to_string(),
+            runtime_id: runtime_id.to_string(),
             errors,
         })
     }

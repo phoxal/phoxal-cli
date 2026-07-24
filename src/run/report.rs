@@ -224,7 +224,7 @@ pub(crate) fn report_undeclared_runtimes(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    ui.info(format!("undeclared workspace runtimes, not built: {list}"));
+    ui.warn(format!("undeclared workspace runtimes, not built: {list}"));
 }
 
 /// The full set of driven component-instance ids from a compiled robot model.

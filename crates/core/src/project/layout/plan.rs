@@ -73,13 +73,21 @@ pub struct ConstructedPlan {
     pub user_service_configs: Vec<UserServiceConfig>,
 }
 
-/// A user service's embedded config schema paired with its identity, so the bin
-/// crate can validate the compiled `robot.yaml`'s config for it. Core produces
-/// the pairing; the bin owns the jsonschema dependency and runs the check.
+/// A declared user runtime's embedded config schema paired with its identity,
+/// its AUTHORED config, and the robot.yaml map it was declared in, so the bin
+/// crate can validate the compiled declaration for it. Core produces the
+/// pairing; the bin owns the jsonschema dependency and runs the check. The
+/// config is carried here rather than re-looked-up by the validator, so user
+/// tools validate their real `tools.<id>.config` and not a phantom services
+/// lookup (#950).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserServiceConfig {
     pub service_id: String,
     pub config_schema: serde_json::Value,
+    /// The authored config from the compiled robot.yaml (`None` when omitted).
+    pub config: Option<serde_json::Value>,
+    /// "services" or "tools" - the declaring map, for diagnostics.
+    pub family: &'static str,
 }
 
 impl RuntimeLayout {
@@ -244,6 +252,8 @@ impl RuntimeLayout {
                     user_service_configs.push(UserServiceConfig {
                         service_id: participant_id,
                         config_schema: config_schema(&required.binary_name)?,
+                        config: required.config.clone(),
+                        family: "services",
                     });
                 }
                 RequiredRuntimeKind::UserTool => {
@@ -273,6 +283,8 @@ impl RuntimeLayout {
                     user_service_configs.push(UserServiceConfig {
                         service_id: participant_id,
                         config_schema: config_schema(&required.binary_name)?,
+                        config: required.config.clone(),
+                        family: "tools",
                     });
                 }
                 RequiredRuntimeKind::ComponentDriver => {
@@ -435,9 +447,6 @@ robot:
       component: caster
       mount_link: base
 services:
-  drive:
-    config:
-      gain: 2
   mission:
     config:
       speed: 1

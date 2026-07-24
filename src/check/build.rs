@@ -77,11 +77,18 @@ pub(crate) fn build_emit_apis_by_building(participant: &SourceParticipant) -> Re
                 binary_path.display()
             )
         })?;
-    Ok(raw_emit_apis_from_extracted_metadata(
+    let mut raw = raw_emit_apis_from_extracted_metadata(
         expected_kind_for_source_participant(participant.kind),
         &participant.expected_artifact_id,
         meta,
-    ))
+    );
+    if participant.kind == SourceParticipantKind::UserTool {
+        // Privilege is an OFFICIAL-tool property, not a directory property: a
+        // declared user tool is an ordinary checked participant (#950), with
+        // its contracts in the coherence set and its config validated.
+        raw.participant_class = crate::check::default_participant_class();
+    }
+    Ok(raw)
 }
 
 /// Builds `binary_name` in `crate_dir` and locates its resulting executable
