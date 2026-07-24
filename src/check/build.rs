@@ -106,6 +106,7 @@ pub(crate) fn build_and_locate_binary(
         "cargo",
         [
             "build",
+            "--locked",
             "--quiet",
             "--message-format=json",
             "-p",

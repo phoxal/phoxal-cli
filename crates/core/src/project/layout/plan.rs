@@ -33,13 +33,10 @@ use phoxal::participant::launch::{
 
 use super::super::launch_plan::{
     DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution,
-    ParticipantLaunchRecord, ROBOT_TOOL_DEVICE, RobotLaunch, SIMULATOR_CONTROLLER_ARTIFACT_NAME,
-    SIMULATOR_SUPERVISOR_ARTIFACT_NAME, SIMULATOR_SUPERVISOR_PROVIDER_ID, execution_device_id,
-    simulator_controller_provider_id,
+    ParticipantLaunchRecord, ROBOT_TOOL_DEVICE, RobotLaunch, execution_device_id,
 };
 use super::{
-    DriverSelection, LayoutInspection, RequiredRuntimeKind, RuntimeLayout, RuntimeProfile,
-    SelectedBinary,
+    DriverSelection, LayoutInspection, RequiredRuntimeKind, RuntimeLayout, SelectedBinary,
 };
 use crate::session::{RuntimeFailurePolicy, StartupRequirement};
 
@@ -114,8 +111,8 @@ impl RuntimeLayout {
         inspection: LayoutInspection,
     ) -> Result<ConstructedPlan> {
         let layout = Self::open(root)?;
-        let profile = profile_for(mode);
-        let required = layout.required_runtimes(profile, &options.drivers);
+        ensure_run_mode(mode)?;
+        let required = layout.required_runtimes(&options.drivers);
         let mut selected = BTreeMap::new();
         for runtime in &required {
             // Infrastructure (the router) is resolved by the CLI itself and is
@@ -141,7 +138,7 @@ impl RuntimeLayout {
         options: &PlanOptions,
         selected: &BTreeMap<String, SelectedBinary>,
     ) -> Result<ConstructedPlan> {
-        let profile = profile_for(mode);
+        ensure_run_mode(mode)?;
         let robot_id = self.robot().robot.id.clone();
         let namespace = self.robot().robot.namespace.clone();
         let robot_root = self.root().to_path_buf();
@@ -171,7 +168,7 @@ impl RuntimeLayout {
         let mut contract_surfaces = Vec::new();
         let mut user_service_configs = Vec::new();
 
-        for required in self.required_runtimes(profile, &options.drivers) {
+        for required in self.required_runtimes(&options.drivers) {
             match required.kind {
                 // The router is CLI-resolved infrastructure, never a plan
                 // participant (it is registered as a project-scoped process by
@@ -255,13 +252,6 @@ impl RuntimeLayout {
                     });
                 }
                 RequiredRuntimeKind::ComponentDriver => {
-                    // Under Webots a component driver is not launched - the
-                    // simulator stands in for it - so the driver contributes no
-                    // participant, matching the resolved-robot leg's
-                    // `is_robot_launch_participant`.
-                    if profile == RuntimeProfile::Webots {
-                        continue;
-                    }
                     // One binary, N instances: every component instance whose
                     // component id matches this driver becomes its own graph
                     // node, all sharing the one `bin/` binary and its contracts.
@@ -298,37 +288,14 @@ impl RuntimeLayout {
                     }
                 }
                 RequiredRuntimeKind::Simulator => {
-                    // Simulator participants exist only under Webots and are
-                    // owned by the simulator, not the CLI supervisor: they still
-                    // satisfy the graph proof and appear on the board, but the
-                    // supervisor never spawns them.
-                    let Some(participant_id) =
-                        simulator_participant_id(&required.identity, &robot_id)
-                    else {
-                        bail!(
-                            "unknown simulator runtime `{}` has no launch identity",
-                            required.identity
-                        );
-                    };
-                    participants.push(ParticipantLaunchRecord {
-                        artifact_id: required.identity.clone(),
-                        execution: ParticipantExecution::OfficialArtifact {
-                            binary_name: required.binary_name.clone(),
-                        },
-                        launch: launch(
-                            &participant_id,
-                            &namespace,
-                            &robot_id,
-                            ClockMode::Simulation,
-                            None,
-                            &robot_root,
-                            None,
-                            None,
-                        ),
-                        launch_ownership: LaunchOwnership::SimulationManaged,
-                        startup_requirement: StartupRequirement::Required,
-                        runtime_failure: RuntimeFailurePolicy::StopProject,
-                    });
+                    // The Run required set never contains simulator runtimes
+                    // (the catalog's webots additions are not requested); the
+                    // layout constructor gains simulator participants together
+                    // with its simulation consumer in #931.
+                    bail!(
+                        "simulator runtime `{}` cannot be a member of a run layout plan",
+                        required.identity
+                    );
                 }
             }
         }
@@ -357,21 +324,17 @@ impl RuntimeLayout {
     }
 }
 
-fn profile_for(mode: &LaunchMode) -> RuntimeProfile {
+/// The layout constructor serves `run`/`start`/`build` only. Simulation still
+/// constructs its plan on the legacy resolved-robot path; its layout swap is
+/// #931, which adds the webots profile together with its real consumer rather
+/// than carrying an untriggerable branch here (#936).
+fn ensure_run_mode(mode: &LaunchMode) -> Result<()> {
     match mode {
-        LaunchMode::Run => RuntimeProfile::Native,
-        LaunchMode::Webots { .. } => RuntimeProfile::Webots,
-    }
-}
-
-/// The Webots launch identity for a simulator artifact, matching the
-/// resolved-robot leg's `simulator_participant_id`: the shared supervisor id,
-/// or this robot's own controller id.
-fn simulator_participant_id(identity: &str, robot_id: &str) -> Option<String> {
-    match identity {
-        SIMULATOR_SUPERVISOR_ARTIFACT_NAME => Some(SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string()),
-        SIMULATOR_CONTROLLER_ARTIFACT_NAME => Some(simulator_controller_provider_id(robot_id)),
-        _ => None,
+        LaunchMode::Run => Ok(()),
+        LaunchMode::Webots { .. } => bail!(
+            "the layout constructor builds run plans only; simulation plans are constructed by \
+             the simulation path until its layout swap lands (#931)"
+        ),
     }
 }
 
@@ -435,7 +398,7 @@ mod tests {
         ResolvedUserRuntime, official_binary_name,
     };
     use super::super::super::suite::ArtifactKind;
-    use super::super::{RuntimeLayout, RuntimeProfile};
+    use super::super::RuntimeLayout;
     use super::*;
     use crate::check::participant_metadata::host_architecture;
     use crate::check::source::SourceParticipant;
@@ -489,10 +452,15 @@ services:
 
     fn synthesize_binary_for(arch: object::Architecture, payload: &[u8]) -> Vec<u8> {
         use object::write::Object;
-        let mut obj = Object::new(object::BinaryFormat::Elf, arch, object::Endianness::Little);
+        let format = crate::check::participant_metadata::host_binary_format();
+        let (segment, name): (&[u8], &[u8]) = match format {
+            object::BinaryFormat::MachO => (b"__DATA", b"__phoxal_meta"),
+            _ => (b"", b".phoxal_api_meta"),
+        };
+        let mut obj = Object::new(format, arch, object::Endianness::Little);
         let section = obj.add_section(
-            Vec::new(),
-            b".phoxal_api_meta".to_vec(),
+            segment.to_vec(),
+            name.to_vec(),
             object::SectionKind::ReadOnlyData,
         );
         obj.append_section_data(section, payload, 1);
@@ -512,7 +480,7 @@ services:
         let bin = root.join("bin");
         fs::create_dir_all(&bin)?;
         let layout = RuntimeLayout::open(root)?;
-        for required in layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All) {
+        for required in layout.required_runtimes(&DriverSelection::All) {
             if required.kind == RequiredRuntimeKind::Infrastructure {
                 continue;
             }
@@ -916,52 +884,6 @@ services:
                 .contract_surfaces
                 .iter()
                 .any(|surface| surface.participant_id == "mission")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn webots_profile_adds_simulator_participants() -> Result<()> {
-        let project = tempfile::tempdir()?;
-        let layout_root = runtime_layout_dir(project.path(), "triple");
-        fs::create_dir_all(&layout_root)?;
-        fs::write(layout_root.join("robot.yaml"), ROBOT_YAML)?;
-        let bin = layout_root.join("bin");
-        fs::create_dir_all(&bin)?;
-        let layout = RuntimeLayout::open(&layout_root)?;
-        // Stage every Webots-profile binary (adds the two simulators).
-        for required in layout.required_runtimes(RuntimeProfile::Webots, &DriverSelection::All) {
-            if required.kind == RequiredRuntimeKind::Infrastructure {
-                continue;
-            }
-            fs::write(bin.join(&required.binary_name), synthesize_binary(NO_META))?;
-        }
-        let mode = LaunchMode::Webots {
-            world: PathBuf::from("worlds/default.wbt"),
-        };
-        let constructed =
-            RuntimeLayout::construct_plan(&layout_root, &mode, &PlanOptions::default())?;
-        let robot = &constructed.plan.robots[0];
-
-        let simulators = robot
-            .participants
-            .iter()
-            .filter(|participant| {
-                participant.launch_ownership == LaunchOwnership::SimulationManaged
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            !simulators.is_empty(),
-            "the Webots profile must add simulator participants"
-        );
-        // Under Webots the component driver is not launched - the simulator
-        // stands in for it.
-        assert!(
-            !robot.participants.iter().any(|participant| matches!(
-                participant.execution,
-                ParticipantExecution::ComponentDriver { .. }
-            )),
-            "component drivers are not launched under Webots"
         );
         Ok(())
     }

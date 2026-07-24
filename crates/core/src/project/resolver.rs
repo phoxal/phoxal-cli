@@ -41,6 +41,11 @@ pub struct ResolveOptions {
     /// Override native tool asset target triple. Host-native run/sim use the
     /// host triple; an explicit target resolves robot-native tools instead.
     pub tool_target_triple: Option<String>,
+    /// The component-driver instances resolution may resolve driver binaries
+    /// for. `run`'s driver policy threads through here so an excluded driver is
+    /// never resolved - not even to select its suite target artifact (#936).
+    /// Everything except `run`/`start`/`watch` staging resolves `All`.
+    pub drivers: crate::project::layout::DriverSelection,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -4,6 +4,7 @@ use super::{
     SimPlan, WEBOTS_APP_ID, stage_simulation_for_robot, stage_simulator_controller_binaries,
     webots_world,
 };
+use crate::simulation::command::sim_source;
 use crate::supervisor::ParticipantSpec;
 use crate::supervisor::wait_for_endpoint;
 use crate::webots_stage_root;
@@ -28,9 +29,13 @@ pub(crate) fn stage_and_prepare_webots_spec(
     sim: &SimPlan,
 ) -> Result<(ParticipantSpec, Vec<RobotSpawn>)> {
     let world = webots_world(&sim.plan.mode);
-    let staged =
-        stage_simulation_for_robot(&sim.ctx.project_root, world, &sim.ctx.resolved, &sim.plan)?;
-    stage_simulator_controller_binaries(&sim.ctx.resolved, ui)?;
+    let staged = stage_simulation_for_robot(
+        &sim.ctx.project_root,
+        world,
+        &sim_source(sim).resolved,
+        &sim.plan,
+    )?;
+    stage_simulator_controller_binaries(&sim_source(sim).resolved, ui)?;
     let webots_path = crate::host_doctor::webots_executable_path()
         .map_err(|error| anyhow!("{error}"))
         .context("failed to locate the Webots executable for live simulate")?;

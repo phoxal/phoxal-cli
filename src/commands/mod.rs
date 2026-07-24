@@ -182,14 +182,14 @@ pub struct Cli {
         env = phoxal_cli_core::project::suite::SUITE_SOURCE_ENV,
         global = true,
         value_name = "PATH_OR_HTTPS_URL",
-        help = "Artifact suite override. Local paths are read directly; HTTPS sources (including the default) are always fetched fresh - there is no on-disk cache of this fetch."
+        help = "Artifact suite override. Local paths are read directly. run/start/build/watch reject HTTPS values and otherwise use the suite `phoxal update` persisted into .phoxal/artifacts; check/validate/service/simulate fetch HTTPS sources fresh."
     )]
     pub suite_source: Option<String>,
     #[arg(
         long,
         env = phoxal_cli_core::project::suite::OFFLINE_ENV,
         global = true,
-        help = "Disable network access. Resolution requires --suite <local-path> and uses only project-vendored artifacts."
+        help = "Disable network access. Fetching commands then require --suite <local-path>; run/start/build/watch are always offline, using the vendored suite and artifacts from `phoxal update`."
     )]
     pub offline: bool,
     #[command(subcommand)]
@@ -210,7 +210,7 @@ pub enum RootCommand {
         about = "Stage a runtime layout for a target and archive it as build.phoxal.",
         long_about = "Stage a runtime layout for a target and archive it as a deterministic build.phoxal.\n\n\
                       `build` refreshes staging exactly as `run` would - but for the selected --target rather than the host - validates the staged layout through the shared loader against the declared target architecture (no execution), and archives the staged layout deterministically: identical contents always produce identical archive bytes. The default output is a sibling of the staged directory, <project>/.phoxal/build/<triple>.build.phoxal, and the path plus its sha256 are printed at the end.\n\n\
-                      `--builder` selects where compilation happens, never a different output: `local` (the default) compiles on this host with `cargo build --target` (a missing cross toolchain is an actionable `rustup target add` error - the CLI never installs toolchains); `container` compiles inside a per-target toolchain image (the image defines the target, so --target is required) and then reuses the identical host-side staging + archive; `ssh://user@host` is the remote builder, which lands in phase 11 (#930). Every backend produces the identical deterministic build.phoxal. Extract a bundle with `phoxal run <dir>` after `tar -xzf build.phoxal`, or plain `tar` - the archive is ordinary tar.gz."
+                      `--builder` selects where compilation happens, never a different output: `local` (the default) compiles on this host with `cargo build --target` (a missing cross toolchain is an actionable `rustup target add` error - the CLI never installs toolchains); `container` compiles natively inside the pinned official rust image for the target platform (without --target it targets this host's architecture on linux-gnu; --builder-image overrides the image) and then reuses the identical host-side staging + archive; `ssh://user@host` is the remote builder, which lands in phase 11 (#930). Every backend produces the identical deterministic build.phoxal. Extract a bundle with `phoxal run <dir>` after `tar -xzf build.phoxal`, or plain `tar` - the archive is ordinary tar.gz."
     )]
     Build(build::Build),
     // Preserved prototype for the parked behavior-orchestration design. Keep it

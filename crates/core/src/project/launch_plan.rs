@@ -128,8 +128,32 @@ pub enum LaunchMode {
 pub struct PlanContext {
     pub robot_path: PathBuf,
     pub project_root: PathBuf,
+    /// The resolved source graph and its source-participant records - present
+    /// only when the plan was prepared from a source project. A layout run (an
+    /// extracted `build.phoxal` or a staged `.phoxal/build/<triple>/` root) has
+    /// no source, so this is `None` there; consumers that need source state
+    /// (watch, simulation) go through [`PlanContext::source`] instead of
+    /// reading a fabricated graph (#936).
+    pub source: Option<PlanSource>,
+}
+
+/// The source-only half of a [`PlanContext`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanSource {
     pub resolved: ResolvedRobot,
     pub source_participants: Vec<SourceParticipant>,
+}
+
+impl PlanContext {
+    /// Checked access to the source graph; fails with an actionable error when
+    /// the plan came from a staged layout, which carries no source.
+    pub fn source(&self) -> anyhow::Result<&PlanSource> {
+        self.source.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "this operation requires a source project; the running plan came from a staged runtime layout, which carries no source graph"
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

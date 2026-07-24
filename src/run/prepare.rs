@@ -119,6 +119,10 @@ pub(crate) fn refresh_staging(
         ResolveOptions {
             official_target_triple: official_target.clone(),
             tool_target_triple: official_target,
+            // Finding 1 (#936): the driver policy gates resolution itself - an
+            // excluded driver is not resolved, so it cannot fail artifact
+            // selection, enter the source check, or be built.
+            drivers: driver_policy.selection(),
         },
     )?;
 
@@ -246,14 +250,7 @@ pub(crate) fn prepare_run_on_board(
     let cwd_for = |participant: &phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord| {
         crate::run::source_cwd(participant, &staged.resolved, &source_dirs)
     };
-    crate::run::build_layout_specs(
-        &plan,
-        &layout,
-        &staged.driver_policy,
-        &board,
-        &mut specs,
-        &cwd_for,
-    )?;
+    crate::run::build_layout_specs(&plan, &layout, &board, &mut specs, &cwd_for)?;
 
     // Resolve the router config from the STAGED layout, not the source tree:
     // staging copies `router.config` into the layout under its relative path, so
@@ -273,8 +270,10 @@ pub(crate) fn prepare_run_on_board(
     let ctx = PlanContext {
         robot_path,
         project_root,
-        resolved,
-        source_participants,
+        source: Some(phoxal_cli_core::project::launch_plan::PlanSource {
+            resolved,
+            source_participants,
+        }),
     };
 
     Ok(PreparedRun {
@@ -333,20 +332,17 @@ pub(crate) fn prepare_layout_run_on_board(
     let mut specs = Vec::new();
     // An extracted bundle / staged layout has no source, so no participant has a
     // crate cwd - the closure always yields `None` (#936, finding 3).
-    crate::run::build_layout_specs(&plan, &layout, &driver_policy, &board, &mut specs, &|_| {
-        None
-    })?;
+    crate::run::build_layout_specs(&plan, &layout, &board, &mut specs, &|_| None)?;
 
     let router_config = crate::run::resolve_router_config(layout.robot(), layout_root)?;
     let robot_targets = super::RobotFeedTarget::from_plan(&plan);
     let ctx = PlanContext {
         robot_path: layout_root.join("robot.yaml"),
         project_root: layout_root.to_path_buf(),
-        // A staged layout has no resolved source graph; this placeholder is
-        // never read on the layout path (`--watch`, the only consumer of
-        // `resolved`/`source_participants`, is rejected for a layout root).
-        resolved: placeholder_resolved(&layout),
-        source_participants: Vec::new(),
+        // A staged layout has no resolved source graph; source-needing
+        // consumers (`--watch`, simulation) go through `PlanContext::source`,
+        // which fails with an actionable error on this path.
+        source: None,
     };
 
     Ok(PreparedRun {
@@ -370,23 +366,6 @@ fn register_router_process(board: &BoardBackend) {
         ),
         StartupRequirement::Required,
     );
-}
-
-/// A minimal `ResolvedRobot` carrying only the compiled robot model, for the
-/// `PlanContext` of a layout run. Its resolved graph is empty because a staged
-/// layout has none; the fields are never read on the layout path.
-fn placeholder_resolved(layout: &RuntimeLayout) -> ResolvedRobot {
-    ResolvedRobot {
-        robot: layout.robot().clone(),
-        train: "staged".to_string(),
-        target: crate::resolver::host_target_triple(),
-        platform_runtimes: Vec::new(),
-        simulators: Vec::new(),
-        user_runtimes: Vec::new(),
-        components: Vec::new(),
-        tools: Vec::new(),
-        path_overrides: Vec::new(),
-    }
 }
 
 /// The source-time graph check: build every source participant's binary for its

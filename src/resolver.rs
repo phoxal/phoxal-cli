@@ -91,6 +91,7 @@ pub fn resolve(
         target: &target,
         workspace_runtimes: &project.runtimes,
         prefer_vendored,
+        drivers: &options.drivers,
     })?;
     let mut tools = resolve_tools(robot, Some(suite), &train, &tool_target, prefer_vendored)?;
     tools.extend(resolve_native_artifacts(
@@ -472,6 +473,11 @@ struct ComponentResolveContext<'a> {
     target: &'a str,
     workspace_runtimes: &'a [phoxal_cli_core::project::train::WorkspaceRuntime],
     prefer_vendored: bool,
+    /// Driver instances resolution may resolve binaries for (#936): an
+    /// excluded instance keeps its declared `has_driver` but gets no resolved
+    /// driver slot, so nothing downstream selects, fetches, builds, or checks
+    /// its driver binary.
+    drivers: &'a phoxal_cli_core::project::layout::DriverSelection,
 }
 
 fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<ResolvedComponent>> {
@@ -507,39 +513,39 @@ fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<Resol
                     path_override: Some(assets_dir.clone()),
                     suite_runtime: None,
                 }),
-                driver: has_driver.then(|| ResolvedComponentPackage {
-                    package: format!("workspace/component-{component_id}"),
-                    kind: ArtifactKind::ComponentDriver,
-                    source: ResolvedComponentSource::Path {
-                        path: runtime.crate_dir.clone(),
+                driver: (has_driver && context.drivers.includes_instance(instance_name)).then(
+                    || ResolvedComponentPackage {
+                        package: format!("workspace/component-{component_id}"),
+                        kind: ArtifactKind::ComponentDriver,
+                        source: ResolvedComponentSource::Path {
+                            path: runtime.crate_dir.clone(),
+                        },
+                        path_override: Some(runtime.crate_dir.clone()),
+                        suite_runtime: None,
                     },
-                    path_override: Some(runtime.crate_dir.clone()),
-                    suite_runtime: None,
-                }),
+                ),
                 has_driver,
             });
             continue;
         }
-        let assets = match resolve_component_package(
-            context,
-            &package,
-            ArtifactKind::ComponentAssets,
-        ) {
-            Ok(assets) => Some(assets),
-            // A driverless (passive) component - a mechanical part like a
-            // caster wheel - has no official `component_assets` package to
-            // resolve; that's valid, not an error. A component with a
-            // driver still needs its assets, so that case keeps the
-            // existing hard-fail.
-            Err(_) if !has_driver => None,
-            Err(err) => {
-                return Err(err.context(format!(
-                    "robot.components.{instance_name}.component '{component_id}' failed to resolve its component_assets package"
-                )));
-            }
-        };
+        // Every component outside the workspace must resolve its assets
+        // package - driverless included. The old driverless `Err -> None`
+        // swallow had no real producer (the one real driverless component,
+        // robot-v1's passive_caster, is a workspace crate) and hid unknown
+        // packages, unsupported targets, and malformed suite state behind a
+        // silent "assetless" (#936). If genuinely assetless suite components
+        // become real, the suite/catalog models that explicitly.
+        let assets = Some(
+            resolve_component_package(context, &package, ArtifactKind::ComponentAssets).map_err(
+                |err| {
+                    err.context(format!(
+                        "robot.components.{instance_name}.component '{component_id}' failed to resolve its component_assets package"
+                    ))
+                },
+            )?,
+        );
 
-        let driver = if has_driver {
+        let driver = if has_driver && context.drivers.includes_instance(instance_name) {
             match resolve_component_package(context, &package, ArtifactKind::ComponentDriver) {
                 Ok(driver) => Some(driver),
                 Err(_) => {
@@ -840,15 +846,16 @@ robot:
     }
 
     #[test]
-    fn driverless_component_with_no_official_assets_package_resolves_with_none_assets()
-    -> anyhow::Result<()> {
-        // A passive mechanical component (e.g. robot-v1's `front_caster`,
-        // `component: passive_caster`) declares no `driver:` block and has
-        // no official `phoxal/component-<id>` assets package in the suite
-        // at all - that's a valid, real-world configuration. Resolution
-        // must succeed with `assets: None`, not hard-fail (this was the
-        // reported bug: `check` failed with "expected package
-        // phoxal/component-passive_caster is absent from snapshot ...").
+    fn driverless_component_absent_from_workspace_and_suite_fails_precisely() -> anyhow::Result<()>
+    {
+        // Since #945, the real driverless component (robot-v1's
+        // `passive_caster`) is a workspace assets crate and resolves through
+        // the workspace branch. A driverless component with NO workspace crate
+        // and NO suite package has no real producer - it is a typo or a
+        // missing crate - so resolution fails naming the package instead of
+        // silently treating the component as assetless (#936: the old
+        // `Err -> None` swallow also hid unsupported targets and malformed
+        // suite state).
         let _phoxal_home = ScratchPhoxalHome::new()?;
         let robot = Robot::parse_from_string(
             r#"schema: robot/v0
@@ -872,32 +879,24 @@ robot:
       mount_link: front_caster_mount
 "#,
         )?;
-        // `test_suite()` carries no `phoxal/component-passive_caster`
-        // entry at all - exactly the "absent from snapshot" case the bug
-        // report hit.
+        // `test_suite()` carries no `phoxal/component-passive_caster` entry,
+        // and the fixture workspace has no `components/passive_caster` crate.
         let suite = test_suite();
         let project = locked_project_root()?;
-        let resolved = resolve(
+        let error = resolve(
             &robot,
             project.path(),
             Some(&suite),
             ResolveOptions {
                 ..ResolveOptions::default()
             },
-        )?;
+        )
+        .expect_err("a component with no workspace crate and no suite package must fail");
 
-        let caster = resolved
-            .components
-            .iter()
-            .find(|component| component.instance == "front_caster")
-            .expect("front_caster component resolved");
-        assert!(!caster.has_driver);
-        assert!(caster.driver.is_none());
+        let message = format!("{error:#}");
         assert!(
-            caster.assets.is_none(),
-            "a driverless component with no official assets package must resolve with \
-             assets: None, got {:?}",
-            caster.assets
+            message.contains("front_caster") && message.contains("component_assets"),
+            "the error must name the instance and the missing assets package, got: {message}"
         );
         Ok(())
     }

@@ -20,7 +20,6 @@ pub enum ProjectOperation {
     Run,
     Build,
     Update,
-    Install,
 }
 
 impl std::fmt::Display for ProjectOperation {
@@ -29,7 +28,6 @@ impl std::fmt::Display for ProjectOperation {
             Self::Run => "run",
             Self::Build => "build",
             Self::Update => "update",
-            Self::Install => "install",
         })
     }
 }

@@ -750,8 +750,10 @@ fn dry_run_output_shows_webots_supervisor_controller_and_ownership() -> Result<(
         ctx: PlanContext {
             robot_path: temp.path().join("robot.yaml"),
             project_root: temp.path().to_path_buf(),
-            resolved,
-            source_participants: Vec::new(),
+            source: Some(phoxal_cli_core::project::launch_plan::PlanSource {
+                resolved,
+                source_participants: Vec::new(),
+            }),
         },
         runtime_store: phoxal_cli_core::session::stores::runtime::RuntimeStore::new(),
     };

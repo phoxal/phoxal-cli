@@ -45,8 +45,10 @@ pub(crate) fn prepare_with_mode(
         ctx: PlanContext {
             robot_path: resolved.robot_path,
             project_root: resolved.project_root,
-            resolved: resolved.resolved,
-            source_participants,
+            source: Some(phoxal_cli_core::project::launch_plan::PlanSource {
+                resolved: resolved.resolved,
+                source_participants,
+            }),
         },
         runtime_store,
     })

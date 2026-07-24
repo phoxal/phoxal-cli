@@ -166,8 +166,11 @@ fn locate_prebuilt_binary(
     target: Option<&str>,
 ) -> Result<PathBuf> {
     let binary_name = cargo_binary_name(crate_dir, Some(preferred_name))?;
-    let cross = target.filter(|triple| *triple != crate::resolver::host_target_triple());
-    let path = debug_binary_path(target_dir, cross, &binary_name);
+    // The container always compiles with an explicit `--target <triple>`, so
+    // its output is always under `target/<triple>/debug` - including when the
+    // triple equals the CLI host triple (a Linux host building its own arch in
+    // a container). Never collapse to the implicit `target/debug` here (#936).
+    let path = debug_binary_path(target_dir, target, &binary_name);
     if !path.is_file() {
         bail!(
             "container build did not produce the binary for `{preferred_name}` (expected {}); \

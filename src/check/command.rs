@@ -83,6 +83,7 @@ pub(super) fn run(
         ResolveOptions {
             official_target_triple: target_triple.clone(),
             tool_target_triple: target_triple,
+            ..ResolveOptions::default()
         },
     )?;
     let descriptors = phoxal_cli_core::artifacts::descriptors_for(&resolved, false, false)?;

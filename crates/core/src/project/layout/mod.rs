@@ -64,15 +64,6 @@ impl LayoutInspection {
     }
 }
 
-/// Which official runtimes the layout requires. `Native` excludes the
-/// simulator-only binaries; `Webots` adds them (they are launched by the
-/// simulator, not by the CLI supervisor).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeProfile {
-    Native,
-    Webots,
-}
-
 /// Which component drivers the run policy keeps in the required set (#936). The
 /// `--drivers off` / `--driver <ID>` options on `run` gate the required set at
 /// its source: an excluded driver is never required, never resolved from
@@ -211,15 +202,16 @@ impl RuntimeLayout {
     /// `drivers`: a driver whose every instance is excluded is not required, so
     /// it is never resolved or inspected (#936).
     #[must_use]
-    pub fn required_runtimes(
-        &self,
-        profile: RuntimeProfile,
-        drivers: &DriverSelection,
-    ) -> Vec<RequiredRuntime> {
+    pub fn required_runtimes(&self, drivers: &DriverSelection) -> Vec<RequiredRuntime> {
         let mut required = Vec::new();
         let official_services = official_service_short_names();
 
-        for official in catalog::for_webots(profile == RuntimeProfile::Webots) {
+        // Native official set only: the layout constructor serves `run`/
+        // `start`/`build`, which exclude simulator binaries. Simulation still
+        // constructs its plan on the legacy resolved-robot path; its layout
+        // swap is #931, which reintroduces the webots profile WITH its real
+        // consumer.
+        for official in catalog::for_webots(false) {
             let short = official_short_name(official);
             let kind = match official.kind {
                 ArtifactKind::Service => RequiredRuntimeKind::OfficialService,
@@ -420,10 +412,15 @@ services:
     /// without building a binary.
     fn synthesize_binary(arch: object::Architecture, payload: &[u8]) -> Vec<u8> {
         use object::write::Object;
-        let mut obj = Object::new(object::BinaryFormat::Elf, arch, object::Endianness::Little);
+        let format = crate::check::participant_metadata::host_binary_format();
+        let (segment, name): (&[u8], &[u8]) = match format {
+            object::BinaryFormat::MachO => (b"__DATA", b"__phoxal_meta"),
+            _ => (b"", b".phoxal_api_meta"),
+        };
+        let mut obj = Object::new(format, arch, object::Endianness::Little);
         let section = obj.add_section(
-            Vec::new(),
-            b".phoxal_api_meta".to_vec(),
+            segment.to_vec(),
+            name.to_vec(),
             object::SectionKind::ReadOnlyData,
         );
         obj.append_section_data(section, payload, 1);
@@ -446,7 +443,7 @@ services:
     fn native_required_set_derives_officials_users_and_deduped_drivers() -> Result<()> {
         let dir = write_layout(ROBOT_YAML)?;
         let layout = RuntimeLayout::open(dir.path())?;
-        let required = layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All);
+        let required = layout.required_runtimes(&DriverSelection::All);
 
         // No simulator binaries in the Native profile.
         assert!(
@@ -487,24 +484,6 @@ services:
     }
 
     #[test]
-    fn webots_profile_adds_simulator_runtimes() -> Result<()> {
-        let dir = write_layout(ROBOT_YAML)?;
-        let layout = RuntimeLayout::open(dir.path())?;
-        let native = layout
-            .required_runtimes(RuntimeProfile::Native, &DriverSelection::All)
-            .len();
-        let webots = layout.required_runtimes(RuntimeProfile::Webots, &DriverSelection::All);
-        assert!(webots.len() > native);
-        assert!(
-            webots
-                .iter()
-                .any(|runtime| runtime.kind == RequiredRuntimeKind::Simulator),
-            "webots profile must add simulator runtimes"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn resolves_selected_binaries_and_ignores_extra_files() -> Result<()> {
         let dir = write_layout(ROBOT_YAML)?;
         let host_binary = synthesize_binary(host_architecture(), b"{}");
@@ -513,7 +492,7 @@ services:
         write_bin(dir.path(), "leftover-tool", b"not even an object file")?;
 
         let layout = RuntimeLayout::open(dir.path())?;
-        let required = layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All);
+        let required = layout.required_runtimes(&DriverSelection::All);
         let mission = required
             .iter()
             .find(|runtime| runtime.identity == "mission")
@@ -529,7 +508,7 @@ services:
     fn a_missing_selected_binary_fails_naming_the_identity() -> Result<()> {
         let dir = write_layout(ROBOT_YAML)?;
         let layout = RuntimeLayout::open(dir.path())?;
-        let required = layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All);
+        let required = layout.required_runtimes(&DriverSelection::All);
         let drive = required
             .iter()
             .find(|runtime| runtime.identity == "drive")
@@ -552,7 +531,7 @@ services:
         write_bin(dir.path(), "mission", &synthesize_binary(foreign, b"{}"))?;
 
         let layout = RuntimeLayout::open(dir.path())?;
-        let required = layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All);
+        let required = layout.required_runtimes(&DriverSelection::All);
         let mission = required
             .iter()
             .find(|runtime| runtime.identity == "mission")
@@ -574,7 +553,7 @@ services:
             &synthesize_binary(host_architecture(), payload),
         )?;
         let layout = RuntimeLayout::open(dir.path())?;
-        let required = layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All);
+        let required = layout.required_runtimes(&DriverSelection::All);
         let mission = required
             .iter()
             .find(|runtime| runtime.identity == "mission")

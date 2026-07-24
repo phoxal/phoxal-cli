@@ -166,6 +166,14 @@ impl Build {
         let project_root =
             crate::commands::resident::resolve_target(self.project.as_deref(), app.project.root())?
                 .project;
+        // Scope every project-rooted path (vendored suite, artifact store and
+        // its lock, staging) to the RESOLVED project, exactly as `run`/`start`
+        // do (#936, finding 3): without this, `phoxal build /path/to/B` run
+        // from project A would compile B while loading A's vendored
+        // suite/artifacts.
+        unsafe {
+            std::env::set_var(crate::host_paths::PROJECT_ROOT_ENV, &project_root);
+        }
 
         // Acquire the Build lock for the WHOLE operation - before any snapshot or
         // compile - and hold it through archiving (#936, finding B). The
@@ -338,18 +346,87 @@ impl Build {
         )
         .context("failed to validate the staged runtime layout for the target")?;
 
+        // The container path staged under the frozen snapshot, which is
+        // deleted when the snapshot guard drops. Publish the validated staged
+        // root into the real project's `.phoxal/build/<triple>/` so every
+        // backend leaves the same persistent staged runtime layout the command
+        // reports and the docs promise (#936); the archive is then written
+        // from that published root.
+        let staged_root = if staged.staged_root.starts_with(project_root) {
+            staged.staged_root.clone()
+        } else {
+            publish_staged_root(project_root, target, &staged.staged_root)?
+        };
+
         let output = self
             .output
             .clone()
             .unwrap_or_else(|| default_output(project_root, target));
-        let digest = crate::archive::write_build_archive(&staged.staged_root, &output)
+        let digest = crate::archive::write_build_archive(&staged_root, &output)
             .context("failed to write the deterministic build.phoxal")?;
 
-        app.ui.info(format!("staged runtime layout for {target}"));
+        app.ui.info(format!(
+            "staged runtime layout at {}",
+            staged_root.display()
+        ));
         println!("{}", output.display());
         println!("sha256:{digest}");
         Ok(())
     }
+}
+
+/// Copy a validated staged runtime layout produced outside the project (the
+/// container snapshot) into the project's real `.phoxal/build/<triple>/`,
+/// replacing any previous layout via the same candidate-then-rename swap the
+/// stager uses, so a crashed publish never leaves a half-written layout.
+fn publish_staged_root(project_root: &Path, target: &str, source: &Path) -> Result<PathBuf> {
+    let destination = runtime_layout_dir(project_root, target);
+    let parent = destination
+        .parent()
+        .context("staged runtime layout has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    let candidate = tempfile::Builder::new()
+        .prefix(&format!(".{target}-candidate-"))
+        .tempdir_in(parent)
+        .with_context(|| {
+            format!(
+                "failed to create a layout candidate in {}",
+                parent.display()
+            )
+        })?;
+    crate::stager::copy_tree_into(source, candidate.path()).with_context(|| {
+        format!(
+            "failed to copy the container-staged layout {} into the project",
+            source.display()
+        )
+    })?;
+    let candidate = candidate.keep();
+    let previous = parent.join(format!(".{target}-previous"));
+    let _ = std::fs::remove_dir_all(&previous);
+    let had_previous = std::fs::symlink_metadata(&destination).is_ok();
+    if had_previous {
+        std::fs::rename(&destination, &previous).with_context(|| {
+            format!(
+                "failed to move previous layout {} aside",
+                destination.display()
+            )
+        })?;
+    }
+    if let Err(error) = std::fs::rename(&candidate, &destination) {
+        if had_previous {
+            let _ = std::fs::rename(&previous, &destination);
+        }
+        let _ = std::fs::remove_dir_all(&candidate);
+        return Err(error).with_context(|| {
+            format!(
+                "failed to publish the staged layout {}",
+                destination.display()
+            )
+        });
+    }
+    let _ = std::fs::remove_dir_all(&previous);
+    Ok(destination)
 }
 
 /// The default bundle path: a sibling of the staged directory,
@@ -464,6 +541,12 @@ fn snapshot_source(project_root: &Path, dest: &Path) -> Result<()> {
                 }
                 let link = std::fs::read_link(&source)
                     .with_context(|| format!("failed to read symlink {}", source.display()))?;
+                // A symlink escaping the project root would let post-compile
+                // staging read LIVE or external content through the "frozen"
+                // snapshot (host-side `fs::copy` follows links), so the frozen
+                // guarantee would be a fiction for that asset (#936). Only
+                // project-internal links are preserved.
+                ensure_snapshot_link_contained(project_root, relative, &link)?;
                 symlink_verbatim(&link, &target)
                     .with_context(|| format!("failed to snapshot symlink {}", source.display()))?;
             }
@@ -481,19 +564,58 @@ fn snapshot_source(project_root: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Reject a tracked symlink whose target escapes the project root. `rel` is the
+/// symlink's project-relative path; `link` is its literal target. An absolute
+/// target is always an escape; a relative one is resolved lexically against the
+/// link's parent directory and must stay inside the project.
+fn ensure_snapshot_link_contained(project_root: &Path, rel: &Path, link: &Path) -> Result<()> {
+    let escapes = if link.is_absolute() {
+        true
+    } else {
+        let mut depth: i64 = rel.components().count() as i64 - 1;
+        let mut escaped = false;
+        for component in link.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    depth -= 1;
+                    if depth < 0 {
+                        escaped = true;
+                        break;
+                    }
+                }
+                std::path::Component::CurDir => {}
+                _ => depth += 1,
+            }
+        }
+        escaped
+    };
+    if escapes {
+        bail!(
+            "`--builder container` cannot snapshot `{}`: it is a symlink to `{}`, which escapes              the project root {}. The frozen snapshot can only preserve project-internal links;              move the linked content into the project, or replace the link with the real file.",
+            rel.display(),
+            link.display(),
+            project_root.display()
+        );
+    }
+    Ok(())
+}
+
 /// Recreate a symlink `link_target` at `at`, verbatim, without following it.
 #[cfg(unix)]
 fn symlink_verbatim(link_target: &Path, at: &Path) -> Result<()> {
     std::os::unix::fs::symlink(link_target, at).map_err(Into::into)
 }
 
+/// The CLI and framework publish no non-unix complete-runtime target, so there
+/// is no real producer for a non-unix snapshot symlink; refusing is honest,
+/// where the old "best-effort copy" was both speculative and incorrect (it
+/// resolved relative targets against the process cwd) (#936).
 #[cfg(not(unix))]
-fn symlink_verbatim(link_target: &Path, at: &Path) -> Result<()> {
-    // Non-unix hosts do not target the container builder in practice; fall back
-    // to a best-effort copy of the link target so the snapshot is still usable.
-    std::fs::copy(link_target, at)
-        .map(|_| ())
-        .map_err(Into::into)
+fn symlink_verbatim(_link_target: &Path, at: &Path) -> Result<()> {
+    bail!(
+        "cannot snapshot the symlink at {}: symlink-preserving snapshots are not supported on          this platform",
+        at.display()
+    )
 }
 
 #[cfg(test)]

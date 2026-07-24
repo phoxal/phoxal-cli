@@ -93,9 +93,7 @@ fn format_config_problems(problems: &[Problem]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_cli_core::project::layout::{
-        DriverSelection, PlanOptions, RequiredRuntimeKind, RuntimeProfile,
-    };
+    use phoxal_cli_core::project::layout::{DriverSelection, PlanOptions, RequiredRuntimeKind};
     use std::fs;
     use std::path::PathBuf;
 
@@ -117,12 +115,20 @@ services:
       speed: 1
 "#;
 
-    fn synthesize_binary_for(arch: object::Architecture, payload: &[u8]) -> Vec<u8> {
+    fn synthesize_binary_as(
+        format: object::BinaryFormat,
+        arch: object::Architecture,
+        payload: &[u8],
+    ) -> Vec<u8> {
         use object::write::Object;
-        let mut obj = Object::new(object::BinaryFormat::Elf, arch, object::Endianness::Little);
+        let (segment, name): (&[u8], &[u8]) = match format {
+            object::BinaryFormat::MachO => (b"__DATA", b"__phoxal_meta"),
+            _ => (b"", b".phoxal_api_meta"),
+        };
+        let mut obj = Object::new(format, arch, object::Endianness::Little);
         let section = obj.add_section(
-            Vec::new(),
-            b".phoxal_api_meta".to_vec(),
+            segment.to_vec(),
+            name.to_vec(),
             object::SectionKind::ReadOnlyData,
         );
         obj.append_section_data(section, payload, 1);
@@ -136,15 +142,18 @@ services:
         stage_layout_for(
             root,
             mission_schema,
+            phoxal_cli_core::check::participant_metadata::host_binary_format(),
             phoxal_cli_core::check::participant_metadata::host_architecture(),
         )
     }
 
-    /// [`stage_layout`], synthesizing every binary for `arch` so a cross-target
-    /// bundle can be staged and inspected on any host.
+    /// [`stage_layout`], synthesizing every binary as `format`/`arch` so both a
+    /// host layout and a declared-cross-target (ELF) bundle can be staged and
+    /// inspected on any host.
     fn stage_layout_for(
         root: &PathBuf,
         mission_schema: &str,
+        format: object::BinaryFormat,
         arch: object::Architecture,
     ) -> anyhow::Result<()> {
         fs::create_dir_all(root)?;
@@ -152,7 +161,7 @@ services:
         let bin = root.join("bin");
         fs::create_dir_all(&bin)?;
         let layout = RuntimeLayout::open(root)?;
-        for required in layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All) {
+        for required in layout.required_runtimes(&DriverSelection::All) {
             if required.kind == RequiredRuntimeKind::Infrastructure {
                 continue;
             }
@@ -166,7 +175,7 @@ services:
             };
             fs::write(
                 bin.join(&required.binary_name),
-                synthesize_binary_for(arch, payload.as_bytes()),
+                synthesize_binary_as(format, arch, payload.as_bytes()),
             )?;
         }
         Ok(())
@@ -237,7 +246,7 @@ services:
     /// cross target's declared signature.
     fn elf_target(arch: object::Architecture) -> ExpectedTarget {
         ExpectedTarget {
-            format: Some(object::BinaryFormat::Elf),
+            format: object::BinaryFormat::Elf,
             architecture: arch,
             endianness: object::Endianness::Little,
         }
@@ -254,6 +263,7 @@ services:
         stage_layout_for(
             &root,
             r#"{"type":"object","properties":{"speed":{"type":"integer"}}}"#,
+            object::BinaryFormat::Elf,
             foreign,
         )?;
         let plan = validate_layout_plan(
@@ -277,6 +287,7 @@ services:
         stage_layout_for(
             &root,
             r#"{"type":"object","properties":{"speed":{"type":"integer"}}}"#,
+            object::BinaryFormat::Elf,
             foreign,
         )?;
         // Declaring the host architecture for a foreign-built layout must fail:

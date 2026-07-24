@@ -491,6 +491,13 @@ fn copy_optional_dir_preserving_path(
     copy_dir_recursive(&source, &candidate.join(relative))
 }
 
+/// Copy a directory tree into `dest` (files and directories; permissions
+/// preserved by `fs::copy`). Shared with `phoxal build`'s container path, which
+/// publishes the snapshot-staged layout into the real project (#936).
+pub(crate) fn copy_tree_into(source: &Path, dest: &Path) -> Result<()> {
+    copy_dir_recursive(source, dest)
+}
+
 fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest).with_context(|| format!("failed to create {}", dest.display()))?;
     for entry in

@@ -113,6 +113,15 @@ pub struct SimPlan {
     pub runtime_store: phoxal_cli_core::session::stores::runtime::RuntimeStore,
 }
 
+/// Simulation always prepares from a source project, so its `PlanContext`
+/// always carries the source graph; this is the one checked unwrap (#936).
+pub(crate) fn sim_source(sim: &SimPlan) -> &phoxal_cli_core::project::launch_plan::PlanSource {
+    sim.ctx
+        .source
+        .as_ref()
+        .expect("simulation always prepares from a source project")
+}
+
 pub(crate) struct ResolvedSimulation {
     pub(crate) robot_path: PathBuf,
     pub(crate) project_root: PathBuf,

@@ -24,7 +24,6 @@ use phoxal_cli_core::check::participant_metadata::host_architecture;
 use phoxal_cli_core::project::launch_plan::{LaunchMode, LaunchPlan, PlanRevision};
 use phoxal_cli_core::project::layout::{
     DriverSelection, LayoutInspection, PlanOptions, RequiredRuntimeKind, RuntimeLayout,
-    RuntimeProfile,
 };
 
 /// A minimal, complete `robot/v0` compiled document: no components, one user
@@ -76,14 +75,15 @@ fn build_api_fixture() -> Result<PathBuf> {
 /// otherwise supply.
 fn synthesize_official() -> Vec<u8> {
     use object::write::Object;
-    let mut obj = Object::new(
-        object::BinaryFormat::Elf,
-        host_architecture(),
-        object::Endianness::Little,
-    );
+    let format = phoxal_cli_core::check::participant_metadata::host_binary_format();
+    let (segment, name): (&[u8], &[u8]) = match format {
+        object::BinaryFormat::MachO => (b"__DATA", b"__phoxal_meta"),
+        _ => (b"", b".phoxal_api_meta"),
+    };
+    let mut obj = Object::new(format, host_architecture(), object::Endianness::Little);
     let section = obj.add_section(
-        Vec::new(),
-        b".phoxal_api_meta".to_vec(),
+        segment.to_vec(),
+        name.to_vec(),
         object::SectionKind::ReadOnlyData,
     );
     obj.append_section_data(
@@ -103,7 +103,7 @@ fn stage_layout(root: &Path, fixture: &Path) -> Result<()> {
     let bin = root.join("bin");
     fs::create_dir_all(&bin)?;
     let layout = RuntimeLayout::open(root)?;
-    for required in layout.required_runtimes(RuntimeProfile::Native, &DriverSelection::All) {
+    for required in layout.required_runtimes(&DriverSelection::All) {
         if required.kind == RequiredRuntimeKind::Infrastructure {
             continue;
         }

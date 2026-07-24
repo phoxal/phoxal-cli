@@ -91,10 +91,17 @@ pub(crate) struct SimWatchConfig {
 }
 
 pub(crate) fn spawn_run_watch(config: RunWatchConfig) -> JoinHandle<()> {
+    // Watch is spawned only for source runs (`--watch` is rejected on layout
+    // roots before this point), so the source graph is always present.
+    let source = config
+        .ctx
+        .source
+        .as_ref()
+        .expect("--watch runs only on source projects");
     let mut targets = watch_targets_from_sources(
         WatchMode::Run,
-        &config.ctx.resolved,
-        &config.ctx.source_participants,
+        &source.resolved,
+        &source.source_participants,
         &config.live_ids,
     );
     targets.push(plan_input_target(
@@ -112,10 +119,16 @@ pub(crate) fn spawn_run_watch(config: RunWatchConfig) -> JoinHandle<()> {
 }
 
 pub(crate) fn spawn_sim_watch(config: SimWatchConfig) -> JoinHandle<()> {
+    // Simulation always prepares from a source project.
+    let source = config
+        .ctx
+        .source
+        .as_ref()
+        .expect("simulation always prepares from a source project");
     let mut targets = watch_targets_from_sources(
         WatchMode::Sim,
-        &config.ctx.resolved,
-        &config.ctx.source_participants,
+        &source.resolved,
+        &source.source_participants,
         &config.live_ids,
     );
     targets.push(plan_input_target(

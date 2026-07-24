@@ -168,13 +168,13 @@ pub(crate) fn stage_complete_bin_store(
 /// longer carries: the source run passes [`source_cwd`] so a participant built
 /// from local source runs from its crate directory, and an extracted-bundle run
 /// passes a closure returning `None` (a bundle has no source). Board
-/// classification, component-driver launch gating (bench subset, macOS, missing
-/// device - the last read straight from the compiled `robot.yaml`), and
-/// readiness/env/policy encoding are shared by both.
+/// classification, the component-driver missing-device check (read straight
+/// from the compiled `robot.yaml`), and readiness/env/policy encoding are
+/// shared by both. Driver policy needs no gate here: the plan constructor
+/// already excluded non-selected drivers, so every driver in the plan launches.
 pub(crate) fn build_layout_specs(
     plan: &LaunchPlan,
     layout: &RuntimeLayout,
-    driver_policy: &DriverPolicy,
     board: &BoardBackend,
     specs: &mut Vec<ParticipantSpec>,
     cwd_for: &dyn Fn(&ParticipantLaunchRecord) -> Option<PathBuf>,
@@ -239,21 +239,6 @@ pub(crate) fn build_layout_specs(
                 participant.execution,
                 ParticipantExecution::ComponentDriver { .. }
             ) {
-                match driver_policy.decision(&id) {
-                    DriverDecision::Degraded(note) => {
-                        board.set_state(&key, ParticipantState::Degraded, Some(note));
-                        continue;
-                    }
-                    DriverDecision::Launch => {}
-                }
-                if cfg!(target_os = "macos") {
-                    board.set_state(
-                        &key,
-                        ParticipantState::Failed,
-                        Some("DriverUnsupported: component driver binaries are Linux-only on macOS (D21)".to_string()),
-                    );
-                    continue;
-                }
                 if let Some(note) = layout_device_missing_note(layout, &id) {
                     board.set_state(&key, ParticipantState::Failed, Some(note));
                     continue;
@@ -366,14 +351,6 @@ pub(crate) fn prepare_robot_participants(
                         continue;
                     }
                     DriverDecision::Launch => {}
-                }
-                if cfg!(target_os = "macos") {
-                    board.set_state(
-                        &key,
-                        ParticipantState::Failed,
-                        Some("DriverUnsupported: component driver binaries are Linux-only on macOS (D21)".to_string()),
-                    );
-                    continue;
                 }
                 if let Some(note) = device_missing_note(resolved, &id) {
                     board.set_state(&key, ParticipantState::Failed, Some(note));
@@ -671,15 +648,20 @@ mod tests {
     use phoxal_cli_core::session::RuntimeFailurePolicy;
     use phoxal_cli_core::session::{ParticipantInstanceKey, ParticipantKind};
 
-    /// Synthesize an ELF of a given architecture carrying the phoxal metadata
-    /// section, so `stage_and_inspect` is exercised against real object shapes
-    /// without building a binary (mirrors the loader's own test synthesis).
+    /// Synthesize a host-format object of a given architecture carrying the
+    /// phoxal metadata section, so inspection is exercised against real object
+    /// shapes without building a binary (mirrors the loader's own synthesis).
     fn synthesize_binary(arch: object::Architecture) -> Vec<u8> {
         use object::write::Object;
-        let mut obj = Object::new(object::BinaryFormat::Elf, arch, object::Endianness::Little);
+        let format = phoxal_cli_core::check::participant_metadata::host_binary_format();
+        let (segment, name): (&[u8], &[u8]) = match format {
+            object::BinaryFormat::MachO => (b"__DATA", b"__phoxal_meta"),
+            _ => (b"", b".phoxal_api_meta"),
+        };
+        let mut obj = Object::new(format, arch, object::Endianness::Little);
         let section = obj.add_section(
-            Vec::new(),
-            b".phoxal_api_meta".to_vec(),
+            segment.to_vec(),
+            name.to_vec(),
             object::SectionKind::ReadOnlyData,
         );
         let payload = br#"{"participant_api":"()","contracts":[],"config_schema":{"type":"null"}}"#;
@@ -812,8 +794,6 @@ services:
     /// layout path never consults it.
     #[test]
     fn layout_specs_resolve_every_executable_from_bin_with_no_artifact_store() -> Result<()> {
-        use crate::run::{DriverPolicy, DriversMode, RunOptions};
-
         let dir = tempfile::tempdir()?;
         let root = dir.path();
         std::fs::write(root.join("robot.yaml"), LAYOUT_ROBOT_YAML)?;
@@ -824,10 +804,7 @@ services:
         std::fs::create_dir_all(root.join(".phoxal/artifacts"))?;
 
         let layout = RuntimeLayout::open(root)?;
-        for required in layout.required_runtimes(
-            phoxal_cli_core::project::layout::RuntimeProfile::Native,
-            &DriverSelection::All,
-        ) {
+        for required in layout.required_runtimes(&DriverSelection::All) {
             if required.kind
                 == phoxal_cli_core::project::layout::RequiredRuntimeKind::Infrastructure
             {
@@ -845,18 +822,9 @@ services:
             &phoxal_cli_core::project::layout::PlanOptions::default(),
         )?
         .plan;
-        let policy = DriverPolicy::from_options(
-            &RunOptions {
-                drivers: DriversMode::On,
-                drivers_subset: Vec::new(),
-                suite_source: None,
-                watch: false,
-            },
-            &crate::run::driven_instances(layout.robot()),
-        )?;
         let board = BoardBackend::new();
         let mut specs = Vec::new();
-        build_layout_specs(&plan, &layout, &policy, &board, &mut specs, &|_| None)?;
+        build_layout_specs(&plan, &layout, &board, &mut specs, &|_| None)?;
 
         assert!(
             !specs.is_empty(),
@@ -890,8 +858,6 @@ services:
     /// either way - only the board metadata differs.
     #[test]
     fn source_overridden_officials_are_marked_local_on_the_board() -> Result<()> {
-        use crate::run::{DriverPolicy, DriversMode, RunOptions};
-
         let dir = tempfile::tempdir()?;
         let root = dir.path();
         std::fs::write(root.join("robot.yaml"), LAYOUT_ROBOT_YAML)?;
@@ -899,10 +865,7 @@ services:
         std::fs::create_dir_all(&bin)?;
 
         let layout = RuntimeLayout::open(root)?;
-        for required in layout.required_runtimes(
-            phoxal_cli_core::project::layout::RuntimeProfile::Native,
-            &DriverSelection::All,
-        ) {
+        for required in layout.required_runtimes(&DriverSelection::All) {
             if required.kind
                 == phoxal_cli_core::project::layout::RequiredRuntimeKind::Infrastructure
             {
@@ -920,16 +883,6 @@ services:
             &phoxal_cli_core::project::layout::PlanOptions::default(),
         )?
         .plan;
-        let policy = DriverPolicy::from_options(
-            &RunOptions {
-                drivers: DriversMode::On,
-                drivers_subset: Vec::new(),
-                suite_source: None,
-                watch: false,
-            },
-            &crate::run::driven_instances(layout.robot()),
-        )?;
-
         // Pick one official artifact from the plan and pretend the project
         // overrides it in its workspace (a source cwd).
         let overridden = plan
@@ -952,7 +905,7 @@ services:
 
         let board = BoardBackend::new();
         let mut specs = Vec::new();
-        build_layout_specs(&plan, &layout, &policy, &board, &mut specs, &cwd_for)?;
+        build_layout_specs(&plan, &layout, &board, &mut specs, &cwd_for)?;
 
         let snapshot = board.snapshot();
         let key = ProcessKey::robot(RobotKey::new("dev", "robot_v1"), &overridden).to_string();

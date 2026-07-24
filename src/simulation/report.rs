@@ -4,6 +4,7 @@ use super::{
     SimPlan, WEBOTS_APP_ID, native_tool_labels_from_plan,
     simulator_participant_id_for_resolved_artifact, substitution_lines,
 };
+use crate::simulation::command::sim_source;
 use crate::webots_stage_root;
 use anyhow::Result;
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
@@ -16,12 +17,12 @@ use std::path::PathBuf;
 
 pub(crate) fn report_plan_only(sim: &SimPlan) -> Result<()> {
     let output = build_dry_run_output(sim);
-    println!("framework train: {}", sim.ctx.resolved.train);
+    println!("framework train: {}", sim_source(sim).resolved.train);
     println!(
         "official services ({}):",
-        sim.ctx.resolved.platform_runtimes.len()
+        sim_source(sim).resolved.platform_runtimes.len()
     );
-    for runtime in &sim.ctx.resolved.platform_runtimes {
+    for runtime in &sim_source(sim).resolved.platform_runtimes {
         println!("  - {} -> {}", runtime.name, runtime.artifact_ref());
     }
     println!("world: {}", output.world_path.display());
@@ -69,17 +70,17 @@ pub(crate) fn report_plan_only(sim: &SimPlan) -> Result<()> {
 /// anything - the path is computed, not written.
 pub(crate) fn build_dry_run_output(sim: &SimPlan) -> SimulateDryRunOutput {
     let substitutions = substitution_lines(&sim.plan);
-    let simulator_artifacts = simulator_artifact_lines(&sim.ctx.resolved);
+    let simulator_artifacts = simulator_artifact_lines(&sim_source(sim).resolved);
     let simulation_managed = simulation_managed_lines(&sim.plan);
     let world_path = webots_world(&sim.plan.mode).to_path_buf();
     let intended_staged_world_path = intended_staged_world_path(&world_path);
     let native_tools = native_tool_labels_from_plan(&sim.plan);
     SimulateDryRunOutput {
         mode: "dry-run",
-        train: sim.ctx.resolved.train.clone(),
+        train: sim_source(sim).resolved.train.clone(),
         world_path,
         bus_connect: DEFAULT_ROUTER_CONNECT.to_string(),
-        platform_service_count: sim.ctx.resolved.platform_runtimes.len(),
+        platform_service_count: sim_source(sim).resolved.platform_runtimes.len(),
         native_tools,
         substitutions,
         webots_app: WebotsAppSummary {

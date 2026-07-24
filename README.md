@@ -191,8 +191,10 @@ See [`.github/workflows/release-plz.yml`](.github/workflows/release-plz.yml),
 ### Build from Source
 
 ```sh
-cargo install --git https://github.com/phoxal/phoxal-cli
+cargo install --git https://github.com/phoxal/phoxal-cli --bin phoxal
 ```
+
+The shipped binary is `phoxal`; the package keeps the `phoxal-cli` name.
 
 ## Simulate
 
@@ -210,10 +212,10 @@ Example: `phoxal simulation run default` finds `worlds/default.wbt` in the proje
 ## Live Split-Recovery Gate
 
 `scripts/live-simulate-gate.sh` is the split-recovery smoke gate for
-the separated repos. The D5 native artifact path now resolves official service
-and driver metadata from the generated artifact suite; published native
-release assets are still pending. For local development, generate a metadata
-suite from the framework checkout and pass it with `--suite` or `PHOXAL_SUITE`.
+the separated repos. Official service and driver binaries resolve from the
+framework's published artifact suite; run `phoxal update` once to vendor the
+locked train (or pass a locally generated suite with `--suite` /
+`PHOXAL_SUITE` when developing against an unreleased framework).
 
 ```sh
 # from the phoxal-cli checkout; ROBOT_DIR defaults to the framework hello-rover example
@@ -225,16 +227,14 @@ The smoke phase runs `simulation run default --dry-run` to resolve and report th
 planned local launch without staging `.phoxal/build` or a release directory. It
 needs no daemon of any kind. The `--live` phase additionally requires Webots on
 `PATH`; run `phoxal update` first, then it runs `simulation run default` so you can confirm the router,
-Webots, host tools, and bus connectivity. Until native release assets publish,
-official-service launch failures should surface as suite or native-pending
-diagnostics rather than as missing static suite entries.
+Webots, host tools, and bus connectivity.
 
 ## Host layout
 
 ```text
 ~/.phoxal/simulator.lock            Host-global simulation lease.
 
-<project>/.phoxal/project.lock      Permanent per-project operation authority for run, update, and install.
+<project>/.phoxal/project.lock      Permanent per-project operation authority for run, build, and update.
 <project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/targets/<target>/  Unpacked target artifacts.
 <project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/assets/             Unpacked component assets.
 <project>/.phoxal/artifacts/<provider>/<package>/active                                 Atomic selected-version symlink.

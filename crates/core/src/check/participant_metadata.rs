@@ -86,6 +86,22 @@ pub fn host_architecture() -> object::Architecture {
     architecture_for_token(std::env::consts::ARCH)
 }
 
+/// The object container format binaries for THIS host use: Mach-O on Apple
+/// hosts, PE on Windows, ELF elsewhere. Host layout validation checks it
+/// explicitly (#936): deferring format to the OS exec would let a
+/// same-CPU foreign-OS bundle (an aarch64 Linux bundle on an Apple Silicon
+/// host) validate and then crash at spawn with an exec-format error.
+#[must_use]
+pub fn host_binary_format() -> object::BinaryFormat {
+    if cfg!(target_os = "macos") {
+        object::BinaryFormat::MachO
+    } else if cfg!(target_os = "windows") {
+        object::BinaryFormat::Pe
+    } else {
+        object::BinaryFormat::Elf
+    }
+}
+
 /// Map an architecture token to its [`object::Architecture`]. The token is a
 /// `std::env::consts::ARCH` value or the leading component of a Rust target
 /// triple (`aarch64-unknown-linux-gnu` yields `aarch64`). Unknown/exotic tokens
@@ -150,15 +166,9 @@ fn format_for_triple(triple: &str) -> Option<object::BinaryFormat> {
 /// wrong-OS binary (a Mach-O x86_64 offered for `x86_64-unknown-linux-gnu`) and
 /// a wrong-endian binary, which a CPU-only check would wave through.
 ///
-/// `format` is `None` only for the host in-place signature: a binary run in
-/// place is exec'd by this OS, which rejects a wrong-format binary itself, and
-/// the staged host binaries are host-format by construction - so the host path
-/// checks arch + endianness and lets the OS own format. A declared `--target`
-/// build never execs its bundle here, so it always carries `Some(format)` and
-/// the format is checked explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExpectedTarget {
-    pub format: Option<object::BinaryFormat>,
+    pub format: object::BinaryFormat,
     pub architecture: object::Architecture,
     pub endianness: object::Endianness,
 }
@@ -180,7 +190,7 @@ pub fn expected_target_for_triple(triple: &str) -> Result<ExpectedTarget> {
             if architecture != object::Architecture::Unknown =>
         {
             Ok(ExpectedTarget {
-                format: Some(format),
+                format,
                 architecture,
                 endianness,
             })
@@ -197,10 +207,9 @@ pub fn expected_target_for_triple(triple: &str) -> Result<ExpectedTarget> {
 /// The [`ExpectedTarget`] for the host this CLI process runs on, from
 /// `std::env::consts` and the host's native endianness. Used by an in-place
 /// `run`/`start`: a staged/extracted layout only ever runs on the host it was
-/// prepared for, so its selected binaries must match the host signature. An
-/// exotic host arch this mapping does not know yields an `Unknown` architecture;
-/// [`ensure_target`] then skips the gate rather than rejecting every binary,
-/// keeping the CLI usable on an unrecognized host.
+/// prepared for, so its selected binaries must match the host signature -
+/// format included, so a same-CPU foreign-OS bundle fails at inspection with a
+/// precise diagnostic instead of an exec-format crash (#936).
 #[must_use]
 pub fn expected_target_for_host() -> ExpectedTarget {
     let endianness = if cfg!(target_endian = "big") {
@@ -209,8 +218,7 @@ pub fn expected_target_for_host() -> ExpectedTarget {
         object::Endianness::Little
     };
     ExpectedTarget {
-        // The OS enforces container format at exec for an in-place run.
-        format: None,
+        format: host_binary_format(),
         architecture: host_architecture(),
         endianness,
     }
@@ -220,27 +228,30 @@ pub fn expected_target_for_host() -> ExpectedTarget {
 /// architecture, and endianness, so a wrong-format (Mach-O for a Linux target),
 /// wrong-arch, or wrong-endian binary is rejected at inspection with a precise
 /// diagnostic rather than crashing later with an exec-format error. Reads and
-/// parses only; never executes the binary. When `expected.architecture` is
-/// [`object::Architecture::Unknown`] the whole gate is skipped (returns `Ok`) -
-/// the only path that produces an `Unknown` arch is the host on an exotic
-/// machine, and the target path rejects unmappable triples up front.
+/// parses only; never executes the binary. An [`object::Architecture::Unknown`]
+/// expectation (an exotic host this mapping does not know) is a precise error,
+/// not a skipped gate: no supported CLI/framework release target can produce a
+/// complete layout for such a host, so validating nothing would only defer the
+/// failure to spawn time (#936).
 pub fn ensure_target(object_bytes: &[u8], describe: &str, expected: &ExpectedTarget) -> Result<()> {
     if expected.architecture == object::Architecture::Unknown {
-        return Ok(());
+        anyhow::bail!(
+            "cannot validate {describe}: this host's CPU architecture ({}) is not one the CLI can              authoritatively inspect binaries for, and no supported release target produces a              runtime layout for it",
+            std::env::consts::ARCH
+        );
     }
     let file = object::File::parse(object_bytes)
         .with_context(|| format!("{describe} is not a recognized object file (ELF/Mach-O/...)"))?;
     let format = file.format();
     let architecture = file.architecture();
     let endianness = file.endianness();
-    if let Some(expected_format) = expected.format {
-        if format != expected_format {
-            anyhow::bail!(
-                "{describe} is a {format:?} object file, but the selected target expects \
-                 {expected_format:?}; stage or build a runtime layout for the target platform \
-                 before running it"
-            );
-        }
+    if format != expected.format {
+        anyhow::bail!(
+            "{describe} is a {format:?} object file, but the selected target expects \
+             {expected_format:?}; stage or build a runtime layout for the target platform \
+             before running it",
+            expected_format = expected.format
+        );
     }
     if architecture != expected.architecture {
         anyhow::bail!(
@@ -478,35 +489,37 @@ mod tests {
     #[test]
     fn host_target_binary_passes_and_a_foreign_arch_binary_is_rejected() -> Result<()> {
         let host = expected_target_for_host();
-        // Skip on an exotic host arch this mapping does not know: the gate is
-        // deliberately disabled there, so there is nothing to assert.
-        if host.architecture == object::Architecture::Unknown {
-            return Ok(());
-        }
         // Pick a concrete arch that is NOT the host's, so the assertion holds
-        // on any runner. The host path checks arch + endianness (the OS owns
-        // format at exec), so ELF synthesis is fine regardless of host OS.
+        // on any runner. The host path validates format too (#936), so the
+        // synthetic host object must use the host's own container format and
+        // section naming.
         let foreign = if host.architecture == object::Architecture::X86_64 {
             object::Architecture::Aarch64
         } else {
             object::Architecture::X86_64
         };
+        let (section, segment): (&[u8], &[u8]) = match host.format {
+            object::BinaryFormat::MachO => (b"__phoxal_meta", b"__DATA"),
+            _ => (b".phoxal_api_meta", b""),
+        };
         let host_object = synthesize_object_endian(
-            object::BinaryFormat::Elf,
+            host.format,
             host.architecture,
             host.endianness,
-            b".phoxal_api_meta",
-            b"",
+            section,
+            segment,
             b"payload",
         );
         ensure_host_target(&host_object, "synthetic host object")?;
 
+        // Host format, foreign CPU: the arch gate (not the format gate) must
+        // reject it.
         let foreign_object = synthesize_object_endian(
-            object::BinaryFormat::Elf,
+            host.format,
             foreign,
             host.endianness,
-            b".phoxal_api_meta",
-            b"",
+            section,
+            segment,
             b"payload",
         );
         let error = ensure_host_target(&foreign_object, "bin/phoxal-service-drive")
@@ -523,7 +536,7 @@ mod tests {
     #[test]
     fn a_same_cpu_wrong_os_binary_is_rejected() -> Result<()> {
         let linux = expected_target_for_triple("x86_64-unknown-linux-gnu")?;
-        assert_eq!(linux.format, Some(object::BinaryFormat::Elf));
+        assert_eq!(linux.format, object::BinaryFormat::Elf);
         // Right CPU, wrong container format (Mach-O, an Apple binary).
         let macho = synthesize_object(
             object::BinaryFormat::MachO,
