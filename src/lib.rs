@@ -30,6 +30,7 @@ pub(crate) mod component_driver;
 pub(crate) mod context;
 pub(crate) mod host_doctor;
 pub mod host_paths;
+pub mod loader;
 pub(crate) mod native_artifacts;
 pub(crate) mod progress;
 pub(crate) mod resident;
