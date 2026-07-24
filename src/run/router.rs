@@ -1,6 +1,6 @@
 //! Router responsibilities for run.
 
-use super::{ROUTER_READY_TIMEOUT, locate_tool_binary};
+use super::ROUTER_READY_TIMEOUT;
 use crate::supervisor::BoardBackend;
 use crate::supervisor::ManagedChild;
 use crate::supervisor::ParticipantSpec;
@@ -13,9 +13,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use phoxal::participant::launch::env;
-use phoxal_cli_core::project::launch_plan::INFRASTRUCTURE_ROUTER;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
-use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::tooling::resolve_project_path;
 use phoxal_cli_core::session::human;
 use std::collections::{BTreeSet, VecDeque};
@@ -264,19 +262,21 @@ fn recovery_rows(
     (spawned, wait_only)
 }
 
-pub(crate) async fn start_infrastructure_router(
-    resolved: &ResolvedRobot,
-    project_root: &Path,
-    ui: &crate::Ui,
-) -> Result<(InfrastructureRouter, String)> {
-    let binary = locate_tool_binary(resolved, INFRASTRUCTURE_ROUTER, ui)?
-        .context("phoxal-infrastructure-router is not staged; run `phoxal update`")?;
-    let config = resolved
-        .robot
+/// Resolve the router's optional config file against `root`, verifying it
+/// exists. `root` is always the staged runtime-layout root - a source run passes
+/// `.phoxal/build/<triple>/` and a staged/bundle run passes its layout root -
+/// because staging copies `router.config` into the layout under its relative
+/// path (#936, finding 4), so every mode resolves the same staged asset and an
+/// extracted `build.phoxal` carries its own router config.
+pub(crate) fn resolve_router_config(
+    robot: &phoxal::model::robot::v0::Robot,
+    root: &Path,
+) -> Result<Option<PathBuf>> {
+    let config = robot
         .router
         .config
         .as_ref()
-        .map(|config| resolve_project_path(project_root, config));
+        .map(|config| resolve_project_path(root, config));
     if let Some(config) = &config {
         anyhow::ensure!(
             config.is_file(),
@@ -284,6 +284,26 @@ pub(crate) async fn start_infrastructure_router(
             config.display()
         );
     }
+    Ok(config)
+}
+
+pub(crate) async fn start_infrastructure_router(
+    staged_root: &Path,
+    project_root: &Path,
+    config: Option<PathBuf>,
+) -> Result<(InfrastructureRouter, String)> {
+    // The router is resolved through the staged layout's flat `bin/` store,
+    // exactly like every other official runtime - staging links it there from
+    // the vendored store (or a source override) via
+    // `stager::stage_complete_official_store` / `stage_router_binary`. A staged
+    // or bundle run passes its layout root as `staged_root`; a source run passes
+    // `.phoxal/build/<triple>/`.
+    let binary = crate::stager::staged_router_binary(staged_root);
+    anyhow::ensure!(
+        binary.is_file(),
+        "phoxal-infrastructure-router is not staged at {}; run `phoxal update`",
+        binary.display()
+    );
     let launch = RouterLaunch { binary, config };
     std::fs::create_dir_all(project_root.join(".phoxal"))?;
     let endpoint = project_router_endpoint(project_root);

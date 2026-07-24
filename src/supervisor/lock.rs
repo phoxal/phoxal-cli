@@ -18,18 +18,16 @@ pub struct ProjectLockIdentity {
 #[serde(rename_all = "snake_case")]
 pub enum ProjectOperation {
     Run,
+    Build,
     Update,
-    Install,
-    DeployMaterialization,
 }
 
 impl std::fmt::Display for ProjectOperation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Run => "run",
+            Self::Build => "build",
             Self::Update => "update",
-            Self::Install => "install",
-            Self::DeployMaterialization => "deploy_materialization",
         })
     }
 }

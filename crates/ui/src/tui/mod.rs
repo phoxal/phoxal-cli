@@ -247,10 +247,7 @@ fn needs_full_clear(event: &Event) -> bool {
 }
 
 fn terminal_title(title: &TitleInfo) -> String {
-    sanitize_terminal_text(&format!(
-        "phoxal-cli - {} - {}",
-        title.robot, title.namespace
-    ))
+    sanitize_terminal_text(&format!("phoxal - {} - {}", title.robot, title.namespace))
 }
 
 #[cfg(test)]
@@ -324,12 +321,9 @@ mod tests {
 
     #[test]
     fn terminal_title_names_the_robot_and_namespace() {
-        assert_eq!(terminal_title(&title()), "phoxal-cli - rover-01 - dev");
+        assert_eq!(terminal_title(&title()), "phoxal - rover-01 - dev");
         let mut unsafe_title = title();
         unsafe_title.robot = "rover\u{7}spoof".to_string();
-        assert_eq!(
-            terminal_title(&unsafe_title),
-            "phoxal-cli - rover spoof - dev"
-        );
+        assert_eq!(terminal_title(&unsafe_title), "phoxal - rover spoof - dev");
     }
 }

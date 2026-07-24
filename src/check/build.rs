@@ -106,6 +106,7 @@ pub(crate) fn build_and_locate_binary(
         "cargo",
         [
             "build",
+            "--locked",
             "--quiet",
             "--message-format=json",
             "-p",
@@ -160,14 +161,6 @@ pub(crate) fn build_and_locate_binary(
         "cargo build for `{binary_name}` in {} did not report an executable path",
         crate_dir.display()
     )
-}
-
-pub(crate) fn validate_service_artifact_identity(
-    label: &str,
-    expected_id: &str,
-    raw: &RawEmitApis,
-) -> Result<()> {
-    validate_artifact_identity(label, expected_id, "service", raw)
 }
 
 pub(crate) fn validate_source_artifact_identity(

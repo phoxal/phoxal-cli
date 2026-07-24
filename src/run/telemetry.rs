@@ -62,11 +62,8 @@ impl RobotFeedTarget {
 }
 
 fn runtime_telemetry_candidate(execution: &ParticipantExecution) -> bool {
-    match execution {
-        ParticipantExecution::OfficialTool { .. } => false,
-        ParticipantExecution::SourceArtifact { kind, .. } if kind == "tool" => false,
-        _ => true,
-    }
+    // Every bus participant fans out runtime telemetry; privileged tools do not.
+    !matches!(execution, ParticipantExecution::OfficialTool { .. })
 }
 
 /// Start the optional session-scoped telemetry feeds for a running graph.
@@ -126,27 +123,23 @@ pub(crate) fn start_telemetry_feeds_at(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
 
     #[test]
-    fn runtime_snapshot_fanout_excludes_official_and_overridden_tools() {
+    fn runtime_snapshot_fanout_excludes_tools_but_includes_services() {
         assert!(!runtime_telemetry_candidate(
             &ParticipantExecution::OfficialTool {
-                artifact_ref: "tool-telemetry@0.1.5".to_string(),
-            }
-        ));
-        assert!(!runtime_telemetry_candidate(
-            &ParticipantExecution::SourceArtifact {
-                kind: "tool".to_string(),
-                crate_dir: PathBuf::from("tool/telemetry"),
+                binary_name: "phoxal-tool-telemetry".to_string(),
             }
         ));
         assert!(runtime_telemetry_candidate(
-            &ParticipantExecution::SourceArtifact {
-                kind: "service".to_string(),
-                crate_dir: PathBuf::from("service/map"),
+            &ParticipantExecution::UserService {
+                binary_name: "map".to_string(),
+            }
+        ));
+        assert!(runtime_telemetry_candidate(
+            &ParticipantExecution::OfficialArtifact {
+                binary_name: "phoxal-service-drive".to_string(),
             }
         ));
     }

@@ -2,4 +2,7 @@
 
 pub mod descriptor;
 
-pub use descriptor::{NativeArtifactDescriptor, ProvisioningMode, descriptors, descriptors_for};
+pub use descriptor::{
+    NativeArtifactDescriptor, ProvisioningMode, descriptors, descriptors_for,
+    descriptors_for_drivers,
+};

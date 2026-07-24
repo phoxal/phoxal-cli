@@ -12,9 +12,9 @@
 #   PREFIX               install prefix (default: /usr/local, falls back to
 #                        ~/.local when not writable)
 #
-# Asset naming contract (shared with `phoxal-cli self upgrade`):
-#   archive   phoxal-cli-<version-no-v>-<target>.tar.gz
-#   binary    phoxal-cli-<target>            (inside the archive)
+# Asset naming contract (shared with `phoxal self upgrade`):
+#   archive   phoxal-<version-no-v>-<target>.tar.gz
+#   binary    phoxal-<target>                (inside the archive)
 #   checksum  <archive>.sha256               ("<hex>  <archive>")
 
 set -eu
@@ -139,7 +139,7 @@ version=$(resolve_version)
 info "${version}"
 
 version_without_v=${version#v}
-asset="phoxal-cli-${version_without_v}-${target}.tar.gz"
+asset="phoxal-${version_without_v}-${target}.tar.gz"
 url="${RELEASES}/download/${version}/${asset}"
 
 tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/phoxal-cli.XXXXXX")
@@ -167,8 +167,8 @@ fi
 
 step "Installing"
 tar -xzf "$archive" -C "$tmpdir"
-binary="$tmpdir/phoxal-cli-${target}"
-[ -f "$binary" ] || fail "release archive did not contain phoxal-cli-${target}"
+binary="$tmpdir/phoxal-${target}"
+[ -f "$binary" ] || fail "release archive did not contain phoxal-${target}"
 
 prefix=${PREFIX:-/usr/local}
 install_dir="$prefix/bin"
@@ -178,13 +178,13 @@ if ! { mkdir -p "$install_dir" 2>/dev/null && [ -w "$install_dir" ]; }; then
     info "$prefix/bin is not writable; using $install_dir"
 fi
 
-destination="$install_dir/phoxal-cli"
+destination="$install_dir/phoxal"
 cp "$binary" "$destination" || fail "could not install to $destination"
 chmod 755 "$destination" || fail "could not chmod $destination"
 info "$destination"
 
 printf '%s\n' "" >&2
-printf '%s\n' "${green}${bold}✓${reset} ${bold}phoxal-cli ${version} installed${reset}" >&2
+printf '%s\n' "${green}${bold}✓${reset} ${bold}phoxal ${version} installed${reset}" >&2
 
 case ":$PATH:" in
     *":$install_dir:"*) ;;
@@ -197,6 +197,6 @@ esac
 
 printf '%s\n' "" >&2
 printf '%s\n' "  Get started:" >&2
-printf '%s\n' "    ${cyan}phoxal-cli --version${reset}" >&2
-printf '%s\n' "    ${cyan}phoxal-cli doctor${reset}" >&2
+printf '%s\n' "    ${cyan}phoxal --version${reset}" >&2
+printf '%s\n' "    ${cyan}phoxal doctor${reset}" >&2
 printf '%s\n' "" >&2

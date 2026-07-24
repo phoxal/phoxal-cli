@@ -1,7 +1,8 @@
 # phoxal-cli
 
-Consumer CLI for the Phoxal robot framework.
-You run it from a robot project: it reads `robot.yaml`, resolves the graph against a verified generated artifact suite when official artifacts are needed, and drives the develop, simulate, and deploy loop.
+Consumer CLI for the Phoxal robot framework. The repository is `phoxal-cli`; the
+installed executable is `phoxal`.
+You run it from a robot project: it reads `robot.yaml`, resolves the graph against a verified generated artifact suite when official artifacts are needed, and drives the develop and simulate loop.
 It owns the resolver and `robot.yaml` discovery. Every robot project has a root
 Cargo anchor package and committed `Cargo.lock`; the exact resolved `phoxal`
 package selects the framework train. The git-ignored `.phoxal/` tree is only an
@@ -14,30 +15,31 @@ artifact transport cache and never selects compatibility.
 # fixture/ robots for a working starting point).
 cd rover
 
-phoxal-cli check                  # validate the graph's participants + config via phoxal::check
-phoxal-cli service suite          # print official services from the configured artifact suite
-phoxal-cli run --watch            # supervise the graph and hot-swap checked local edits
-phoxal-cli simulation run default # resolve and report the simulation launch plan
-phoxal-cli logs -f                # stream participant bus logs from a reachable robot
-phoxal-cli status safety          # inspect the latest safety state over the robot bus
+phoxal check                  # validate the graph's participants + config via phoxal::check
+phoxal service suite          # print official services from the configured artifact suite
+phoxal run                    # stage what is stale and supervise the graph (--watch to hot-swap edits)
+phoxal start                  # run the graph headless (the robot-instance verb; no TUI)
+phoxal build                  # stage a runtime layout and archive it as build.phoxal
+phoxal simulation run default # resolve and report the simulation launch plan
+phoxal logs -f                # stream participant bus logs from a reachable robot
+phoxal status safety          # inspect the latest safety state over the robot bus
 
-phoxal-cli update                 # verify, activate, and prune project-local artifacts
-phoxal-cli deploy robot@host      # build, render, sync, restart, and report systemd health
-phoxal-cli deploy --dry-run --target aarch64  # hostless render + cross-build validation
+phoxal update                 # verify, activate, and prune project-local artifacts
 ```
 
 | Command | What it does |
 |---|---|
 | `check` | Resolve `robot.yaml` and the locked Cargo workspace, stage every participant, extract embedded metadata, and validate the complete graph against `phoxal::check`. `--strict` additionally fails on coherence warnings. |
 | `validate` | Lower-level `robot.yaml` structure and Cargo workspace runtime-discovery checks that back `check`. |
-| `run` | Supervise the resolved host-native graph in the terminal UI. `--watch` recompiles an immutable whole-plan revision and reconciles only changed participants. |
+| `run [ROOT]` | Universal launch: build what is stale and run what is staged. On a source project it refreshes the host-triple staging under `.phoxal/build/<host-triple>/` (cargo-build stale crates, link the locked train's vendored officials, flatten `robot.yaml`, stage assets), then supervises the graph in the terminal UI; on an already-staged root or an extracted `build.phoxal` the build step is a no-op and the identical execution path runs it. `--watch` recompiles an immutable whole-plan revision and reconciles only changed participants. `run`/`start`/`build` never touch the network - a missing vendored artifact fails with "run `phoxal update`". |
+| `start [ROOT]` | The headless robot-instance verb `phoxal.service` uses. Same pipeline as `run` without the TUI: interactively it returns after required readiness; under systemd (`NOTIFY_SOCKET` present) it stays the foreground `sd_notify` resident. |
+| `build [PROJECT]` | Stage a runtime layout for a target and archive it as a deterministic `build.phoxal` (identical contents produce identical bytes). `--target <TRIPLE>` selects the target (defaults to the builder's native triple). `--builder local` (default) compiles on this host; `--builder container` compiles inside the pinned official Docker `rust` image, selecting the container platform from the target arch so compilation is native (`--container-engine docker\|podman`, `--builder-image` to override the image - use `rust:1.88-bullseye` for older-glibc devices like the jetson L4T r36); `--builder ssh://user@host` is reserved for a later phase. Default output is `<project>/.phoxal/build/<triple>.build.phoxal`, a sibling of the staged directory. |
 | `simulation run <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` creates a new plan revision for source or project-manifest edits and re-checks driver metadata/substitutions without launching drivers. |
 | `simulation join` | Reserved entry point for joining a running multi-robot simulation; currently reports that the workflow is not available yet. |
 | `logs [participant]` | Stream participant bus log events from a reachable robot. `-f`/`--follow` keeps streaming; omit `participant` for every participant. |
 | `status <safety|motion|localization>` | Inspect the latest domain state over the robot bus. `engage-estop` and `reset-estop` publish the robot-wide software emergency-stop request. |
 | `service suite` | Print official services from the configured artifact suite. |
 | `update` | Fetch and verify the immutable suite for the locked train, atomically retarget cached artifacts, and prune inactive cached versions after successful activation. Supports `--dry-run`; use `cargo update -p phoxal` to change trains. |
-| `deploy <user@host>` | Probe the robot arch, resolve/check the graph, cross-build local source artifacts for musl, render native systemd units/env/release record, sync to `/opt/phoxal` and `/etc/systemd/system`, restart `phoxal.target`, and report systemd readiness. Prints the v0 pre-stable warning. `--dry-run --target <arch>` renders hostless for validation. |
 | `doctor` | Check host prerequisites (Webots, Rust toolchain) without changing anything. |
 | `version` | Print the CLI version, wire codec, and participant metadata section names. |
 | `self upgrade` | Update the CLI binary itself. |
@@ -98,7 +100,7 @@ live following so the new failure is visible immediately.
 While editing a Logs or Bus filter, results update as you type. Use `Backspace`
 to remove text; `Enter` or `Esc` finishes editing and keeps the current text.
 
-The terminal title is `phoxal-cli <robot-id> - <namespace>` for the session
+The terminal title is `phoxal <robot-id> - <namespace>` for the session
 lifetime.
 
 ### Project runtimes
@@ -122,7 +124,7 @@ kind and identity remain authoritative.
 
 ## Artifact Suite
 
-`phoxal-cli` consumes the framework-generated `phoxal.suite/v1` attached to the
+`phoxal` consumes the framework-generated `phoxal.suite/v1` attached to the
 exact locked train release. The suite is only the immutable byte inventory for
 official package, train, and target combinations. The CLI release owns the
 official Native runtime set; Webots adds its controller and supervisor. Every
@@ -162,7 +164,7 @@ curl -fsSL https://phoxal.com/install.sh | PHOXAL_CLI_VERSION=v0.4.0 sh
 To update an existing install to the latest release:
 
 ```sh
-phoxal-cli self upgrade
+phoxal self upgrade
 ```
 
 ## Releasing
@@ -189,13 +191,15 @@ See [`.github/workflows/release-plz.yml`](.github/workflows/release-plz.yml),
 ### Build from Source
 
 ```sh
-cargo install --git https://github.com/phoxal/phoxal-cli
+cargo install --git https://github.com/phoxal/phoxal-cli --bin phoxal
 ```
+
+The shipped binary is `phoxal`; the package keeps the `phoxal-cli` name.
 
 ## Simulate
 
 ```sh
-phoxal-cli simulation run <world>
+phoxal simulation run <world>
 ```
 
 `<world>` resolves to a `.wbt` file in this order:
@@ -203,15 +207,15 @@ phoxal-cli simulation run <world>
 1. `<project>/worlds/<world>.wbt`
 2. `<project>/<world>` (path-as-given, e.g. `worlds/foo.wbt`)
 
-Example: `phoxal-cli simulation run default` finds `worlds/default.wbt` in the project.
+Example: `phoxal simulation run default` finds `worlds/default.wbt` in the project.
 
 ## Live Split-Recovery Gate
 
 `scripts/live-simulate-gate.sh` is the split-recovery smoke gate for
-the separated repos. The D5 native artifact path now resolves official service
-and driver metadata from the generated artifact suite; published native
-release assets are still pending. For local development, generate a metadata
-suite from the framework checkout and pass it with `--suite` or `PHOXAL_SUITE`.
+the separated repos. Official service and driver binaries resolve from the
+framework's published artifact suite; run `phoxal update` once to vendor the
+locked train (or pass a locally generated suite with `--suite` /
+`PHOXAL_SUITE` when developing against an unreleased framework).
 
 ```sh
 # from the phoxal-cli checkout; ROBOT_DIR defaults to the framework hello-rover example
@@ -220,30 +224,27 @@ scripts/live-simulate-gate.sh --live     # full live run (needs Webots)
 ```
 
 The smoke phase runs `simulation run default --dry-run` to resolve and report the
-planned local launch without writing `.phoxal/run` or a release directory. It
+planned local launch without staging `.phoxal/build` or a release directory. It
 needs no daemon of any kind. The `--live` phase additionally requires Webots on
 `PATH`; run `phoxal update` first, then it runs `simulation run default` so you can confirm the router,
-Webots, host tools, and bus connectivity. Until native release assets publish,
-official-service launch failures should surface as suite or native-pending
-diagnostics rather than as missing static suite entries.
+Webots, host tools, and bus connectivity.
 
 ## Host layout
 
 ```text
 ~/.phoxal/simulator.lock            Host-global simulation lease.
 
-<project>/.phoxal/project.lock      Permanent per-project operation authority for run, update, install, and deploy materialization.
+<project>/.phoxal/project.lock      Permanent per-project operation authority for run, build, and update.
 <project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/targets/<target>/  Unpacked target artifacts.
 <project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/assets/             Unpacked component assets.
 <project>/.phoxal/artifacts/<provider>/<package>/active                                 Atomic selected-version symlink.
 <project>/.phoxal/git/              Git-pinned checkouts.
-<project>/.phoxal/build/            Cross-build state.
 <project>/.phoxal/webots/           Webots staging.
-<project>/.phoxal/run/robot/        Atomic resolved robot root shared by `run` and live simulation.
+<project>/.phoxal/build/<triple>/   Staged runtime layout (compiled robot.yaml + flat bin/ + assets) per target, shared by `run` and live simulation.
 ```
 
 To reset all generated project state while no Phoxal command is active, delete
-`<project>/.phoxal/`. Deleting it during `run`, simulation, deploy, or update is
+`<project>/.phoxal/`. Deleting it during `run`, simulation, or update is
 unsupported because that bypasses the CLI's active locks. Do not delete
 `~/.phoxal/` while a simulation is active because it contains the host-global
 simulator lease. The project lock inode is intentionally permanent; its

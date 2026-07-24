@@ -1,7 +1,6 @@
 //! Tests for this module.
 
 use super::build::missing_device_path;
-use super::environment::env_key;
 use super::report::{
     LaunchCommandEntry, LaunchCommandReport, launch_kind_label, report_launch_commands_human,
 };
@@ -90,7 +89,7 @@ fn plan_with_drivers(ids: &[&str]) -> LaunchPlan {
                     participant(
                         id,
                         ParticipantExecution::ComponentDriver {
-                            crate_dir: PathBuf::from("/tmp/driver"),
+                            binary_name: "phoxal-component-ddsm115".to_string(),
                         },
                     )
                 })
@@ -100,9 +99,15 @@ fn plan_with_drivers(ids: &[&str]) -> LaunchPlan {
     }
 }
 
+/// The driver instances a robot declares, the set a `--driver` subset is
+/// validated against (the plan already drops excluded drivers, #936).
+fn available_drivers(ids: &[&str]) -> std::collections::BTreeSet<String> {
+    ids.iter().map(|id| (*id).to_string()).collect()
+}
+
 #[test]
 fn driver_subset_is_strict() -> Result<()> {
-    let plan = plan_with_drivers(&["imu", "left_drive"]);
+    let available = available_drivers(&["imu", "left_drive"]);
     let policy = DriverPolicy::from_options(
         &RunOptions {
             drivers: DriversMode::On,
@@ -110,12 +115,17 @@ fn driver_subset_is_strict() -> Result<()> {
             suite_source: None,
             watch: false,
         },
-        &plan,
+        &available,
     )?;
     assert_eq!(policy.decision("imu"), DriverDecision::Launch);
     assert_eq!(
         policy.decision("left_drive"),
         DriverDecision::Degraded("not selected by --driver".to_string())
+    );
+    // The subset maps onto the core plan selection, which keeps only `imu`.
+    assert_eq!(
+        policy.selection(),
+        phoxal_cli_core::project::layout::DriverSelection::Only(available_drivers(&["imu"]))
     );
 
     let err = DriverPolicy::from_options(
@@ -125,16 +135,18 @@ fn driver_subset_is_strict() -> Result<()> {
             suite_source: None,
             watch: false,
         },
-        &plan,
+        &available,
     )
     .expect_err("unknown drivers must fail");
     assert!(err.to_string().contains("unknown driver id"));
+    // The error names the real available drivers, not the narrowed plan set.
+    assert!(err.to_string().contains("imu"), "{err}");
+    assert!(err.to_string().contains("left_drive"), "{err}");
     Ok(())
 }
 
 #[test]
-fn drivers_off_degrades_every_driver() -> Result<()> {
-    let plan = plan_with_drivers(&["imu"]);
+fn drivers_off_selects_no_drivers() -> Result<()> {
     let policy = DriverPolicy::from_options(
         &RunOptions {
             drivers: DriversMode::Off,
@@ -142,19 +154,84 @@ fn drivers_off_degrades_every_driver() -> Result<()> {
             suite_source: None,
             watch: false,
         },
-        &plan,
+        &available_drivers(&["imu"]),
     )?;
     assert_eq!(
         policy.decision("imu"),
         DriverDecision::Degraded("drivers off".to_string())
     );
+    // Drivers off maps onto the core selection that plans no component drivers.
+    assert_eq!(
+        policy.selection(),
+        phoxal_cli_core::project::layout::DriverSelection::None
+    );
     Ok(())
 }
 
+/// The policy exposes the excluded driven instances with their reason, so the
+/// session can explain absent hardware rows even though excluded drivers are
+/// never plan participants (#936, finding 8).
 #[test]
-fn path_override_env_key_is_stable() {
-    assert_eq!(env_key("tool-router"), "TOOL_ROUTER");
-    assert_eq!(env_key("left_drive"), "LEFT_DRIVE");
+fn excluded_drivers_are_summarized_with_reasons() -> Result<()> {
+    let available = available_drivers(&["imu", "left_drive", "right_drive"]);
+
+    let off = DriverPolicy::from_options(
+        &RunOptions {
+            drivers: DriversMode::Off,
+            drivers_subset: Vec::new(),
+            suite_source: None,
+            watch: false,
+        },
+        &available,
+    )?;
+    let mut excluded = off.excluded_drivers(&available);
+    excluded.sort();
+    assert_eq!(
+        excluded,
+        vec![
+            ("imu".to_string(), "drivers off".to_string()),
+            ("left_drive".to_string(), "drivers off".to_string()),
+            ("right_drive".to_string(), "drivers off".to_string()),
+        ]
+    );
+
+    let subset = DriverPolicy::from_options(
+        &RunOptions {
+            drivers: DriversMode::On,
+            drivers_subset: vec!["imu".to_string()],
+            suite_source: None,
+            watch: false,
+        },
+        &available,
+    )?;
+    let mut excluded = subset.excluded_drivers(&available);
+    excluded.sort();
+    assert_eq!(
+        excluded,
+        vec![
+            (
+                "left_drive".to_string(),
+                "not selected by --driver".to_string()
+            ),
+            (
+                "right_drive".to_string(),
+                "not selected by --driver".to_string()
+            ),
+        ]
+    );
+
+    // Drivers fully on excludes nothing - no advisory is emitted.
+    let on = DriverPolicy::from_options(
+        &RunOptions {
+            drivers: DriversMode::On,
+            drivers_subset: Vec::new(),
+            suite_source: None,
+            watch: false,
+        },
+        &available,
+    )?;
+    assert!(on.excluded_drivers(&available).is_empty());
+    Ok(())
 }
 
 #[test]
@@ -175,27 +252,25 @@ fn launch_kind_label_matches_the_operator_facing_strings() {
     assert_eq!(launch_kind_label(None), "robot-tool");
     assert_eq!(
         launch_kind_label(Some(&ParticipantExecution::OfficialArtifact {
-            artifact_ref: "phoxal/service-drive@1.0.0".to_string(),
+            binary_name: "phoxal-service-drive".to_string(),
         })),
         "official"
     );
     assert_eq!(
-        launch_kind_label(Some(&ParticipantExecution::SourceArtifact {
-            kind: "service".to_string(),
-            crate_dir: PathBuf::from("/tmp/drive"),
+        launch_kind_label(Some(&ParticipantExecution::OfficialTool {
+            binary_name: "phoxal-tool-bus".to_string(),
         })),
-        "official",
-        "a locally source-overridden official artifact stayed bucketed as \"official\" pre-consolidation"
+        "official"
     );
     assert_eq!(
         launch_kind_label(Some(&ParticipantExecution::UserService {
-            crate_dir: PathBuf::from("/tmp/mission"),
+            binary_name: "mission".to_string(),
         })),
         "user-service"
     );
     assert_eq!(
         launch_kind_label(Some(&ParticipantExecution::ComponentDriver {
-            crate_dir: PathBuf::from("/tmp/ddsm115"),
+            binary_name: "phoxal-component-ddsm115".to_string(),
         })),
         "driver"
     );

@@ -81,7 +81,7 @@ pub(super) fn draw_header(
         frame.render_widget(
             Paragraph::new(lines).block(shell_block(
                 theme,
-                &format!("phoxal-cli {}", env!("CARGO_PKG_VERSION")),
+                &format!("phoxal {}", env!("CARGO_PKG_VERSION")),
             )),
             area,
         );
@@ -99,7 +99,7 @@ pub(super) fn draw_header(
     frame.render_widget(
         Paragraph::new(header_identity_lines(theme, title, sections[0].width)).block(shell_block(
             theme,
-            &format!("phoxal-cli {}", env!("CARGO_PKG_VERSION")),
+            &format!("phoxal {}", env!("CARGO_PKG_VERSION")),
         )),
         sections[0],
     );

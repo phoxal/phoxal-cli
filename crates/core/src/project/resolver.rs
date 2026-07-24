@@ -34,13 +34,18 @@ pub fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolveOptions {
-    /// Override the official service/driver target triple. Deploy probes the
-    /// robot arch and resolves suite assets for that Linux triple instead of
-    /// the host.
+    /// Override the official service/driver target triple. `check --target`
+    /// resolves suite assets for that Linux triple instead of the host, so a
+    /// robot graph can be validated from a non-Linux host.
     pub official_target_triple: Option<String>,
     /// Override native tool asset target triple. Host-native run/sim use the
-    /// host triple; deploy ships robot-native tools.
+    /// host triple; an explicit target resolves robot-native tools instead.
     pub tool_target_triple: Option<String>,
+    /// The component-driver instances resolution may resolve driver binaries
+    /// for. `run`'s driver policy threads through here so an excluded driver is
+    /// never resolved - not even to select its suite target artifact (#936).
+    /// Everything except `run`/`start`/`watch` staging resolves `All`.
+    pub drivers: crate::project::layout::DriverSelection,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,15 +124,13 @@ pub struct ResolvedComponent {
     pub instance: String,
     /// The logical component id (`component: <id>` in `robot.yaml`).
     pub source_name: String,
-    /// The resolved `component_assets` package. `Some` when an official
-    /// `phoxal/component-<id>` assets package resolved for this component.
-    /// `None` for a driverless (passive) component - e.g. a mechanical
-    /// mount like a caster wheel - whose assets package doesn't exist in
-    /// the suite; that's a valid configuration, not an error. A
-    /// component that declares a `driver:` block always has `Some` here
-    /// (a missing assets package for a driven component is still a hard
-    /// resolution failure).
-    pub assets: Option<ResolvedComponentPackage>,
+    /// The resolved `component_assets` package: the workspace assets crate
+    /// for a workspace component, or the official `phoxal/component-<id>`
+    /// assets package from the suite. Every component resolves its assets -
+    /// the one real driverless component (robot-v1's passive_caster) is a
+    /// workspace assets crate, and a component absent from both workspace and
+    /// suite is a resolution error, never a silent "assetless" (#936).
+    pub assets: ResolvedComponentPackage,
     /// The resolved `component_driver` package. Present only when the
     /// instance declares `driver` and a driver package resolves for this
     /// component; see [`ComponentDriverUnavailable`].
@@ -290,6 +293,7 @@ pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
 }
 
 pub fn load_robot(path: &Path) -> Result<Robot> {
+    crate::schema::ensure_supported_revision(path, crate::schema::DocumentKind::Robot)?;
     let robot = phoxal::model::robot::Robot::read_from_path(path)
         .with_context(|| format!("failed to read robot file {}", path.display()))?
         .into_v0();
@@ -353,6 +357,22 @@ mod tests {
             official_binary_name(ArtifactKind::ComponentDriver, "ddsm115"),
             "phoxal-component-ddsm115"
         );
+    }
+
+    #[test]
+    fn load_robot_gates_an_unsupported_schema_revision_before_parsing() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join(ROBOT_FILE);
+        std::fs::write(
+            &path,
+            "schema: robot/v1\nrobot:\n  id: rover\n  namespace: dev\n",
+        )?;
+        let error = load_robot(&path).expect_err("robot/v1 must be gated");
+        let message = format!("{error:#}");
+        assert!(message.contains("robot/v1"), "{message}");
+        assert!(message.contains("Update phoxal-cli"), "{message}");
+        assert!(!message.contains("unknown variant"), "{message}");
+        Ok(())
     }
 
     #[test]

@@ -78,6 +78,231 @@ pub fn extract_participant_metadata(binary_path: &Path) -> Result<ParticipantMet
     extract_participant_metadata_from_bytes(&data, &binary_path.display().to_string())
 }
 
+/// The [`object::Architecture`] this CLI process runs on, mapped from
+/// [`std::env::consts::ARCH`]. Unknown/exotic host arches map to
+/// [`object::Architecture::Unknown`].
+#[must_use]
+pub fn host_architecture() -> object::Architecture {
+    architecture_for_token(std::env::consts::ARCH)
+}
+
+/// The object container format binaries for THIS host use: Mach-O on Apple
+/// hosts, PE on Windows, ELF elsewhere. Host layout validation checks it
+/// explicitly (#936): deferring format to the OS exec would let a
+/// same-CPU foreign-OS bundle (an aarch64 Linux bundle on an Apple Silicon
+/// host) validate and then crash at spawn with an exec-format error.
+#[must_use]
+pub fn host_binary_format() -> object::BinaryFormat {
+    if cfg!(target_os = "macos") {
+        object::BinaryFormat::MachO
+    } else if cfg!(target_os = "windows") {
+        object::BinaryFormat::Pe
+    } else {
+        object::BinaryFormat::Elf
+    }
+}
+
+/// Map an architecture token to its [`object::Architecture`]. The token is a
+/// `std::env::consts::ARCH` value or the leading component of a Rust target
+/// triple (`aarch64-unknown-linux-gnu` yields `aarch64`). Unknown/exotic tokens
+/// map to [`object::Architecture::Unknown`].
+fn architecture_for_token(token: &str) -> object::Architecture {
+    match token {
+        "x86_64" => object::Architecture::X86_64,
+        "x86" | "i386" | "i586" | "i686" => object::Architecture::I386,
+        "aarch64" | "arm64" => object::Architecture::Aarch64,
+        "arm" | "armv7" | "armv7a" | "armv6" | "thumbv7neon" => object::Architecture::Arm,
+        "riscv64" | "riscv64gc" => object::Architecture::Riscv64,
+        "riscv32" | "riscv32gc" | "riscv32imac" | "riscv32imc" => object::Architecture::Riscv32,
+        "powerpc64" | "powerpc64le" => object::Architecture::PowerPc64,
+        "powerpc" => object::Architecture::PowerPc,
+        "s390x" => object::Architecture::S390x,
+        "loongarch64" => object::Architecture::LoongArch64,
+        "mips64" | "mips64el" => object::Architecture::Mips64,
+        "mips" | "mipsel" => object::Architecture::Mips,
+        _ => object::Architecture::Unknown,
+    }
+}
+
+/// The endianness a target-triple arch token compiles for. Every arch phoxal
+/// targets is little-endian except the classic big-endian families, which are
+/// listed explicitly so an `*el`/`le` little-endian variant is not misread as
+/// big. Returns `None` for a token whose endianness this mapping cannot
+/// authoritatively decide, which forces [`expected_target_for_triple`] to reject
+/// the triple rather than guess.
+fn endianness_for_token(token: &str) -> Option<object::Endianness> {
+    match token {
+        // Unambiguously little-endian.
+        "x86_64" | "x86" | "i386" | "i586" | "i686" | "aarch64" | "arm" | "armv7" | "armv7a"
+        | "armv6" | "thumbv7neon" | "riscv64" | "riscv64gc" | "riscv32" | "riscv32gc"
+        | "riscv32imac" | "riscv32imc" | "loongarch64" | "powerpc64le" | "mips64el" | "mipsel" => {
+            Some(object::Endianness::Little)
+        }
+        // Classic big-endian families.
+        "powerpc64" | "powerpc" | "s390x" | "mips64" | "mips" => Some(object::Endianness::Big),
+        _ => None,
+    }
+}
+
+/// The object [`object::BinaryFormat`] the OS component of a Rust target triple
+/// produces: Linux triples are ELF, Apple triples Mach-O, Windows triples PE.
+/// Returns `None` for an OS this mapping cannot decide, forcing
+/// [`expected_target_for_triple`] to reject the triple.
+fn format_for_triple(triple: &str) -> Option<object::BinaryFormat> {
+    if triple.contains("-linux-") || triple.ends_with("-linux") {
+        Some(object::BinaryFormat::Elf)
+    } else if triple.contains("-apple-") || triple.contains("-darwin") {
+        Some(object::BinaryFormat::MachO)
+    } else if triple.contains("-windows-") || triple.contains("-pc-windows") {
+        Some(object::BinaryFormat::Pe)
+    } else {
+        None
+    }
+}
+
+/// The authoritative object-file signature a binary for a declared target must
+/// have: its container format (ELF/Mach-O/PE, from the triple's OS), its CPU
+/// architecture, and its endianness. Validating all three rejects a same-CPU
+/// wrong-OS binary (a Mach-O x86_64 offered for `x86_64-unknown-linux-gnu`) and
+/// a wrong-endian binary, which a CPU-only check would wave through.
+///
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpectedTarget {
+    pub format: object::BinaryFormat,
+    pub architecture: object::Architecture,
+    pub endianness: object::Endianness,
+}
+
+/// The [`ExpectedTarget`] a Rust target triple compiles for. `phoxal build
+/// --target <TRIPLE>` inspects a cross-compiled bundle against this rather than
+/// the host's, so a foreign-but-correct bundle validates while a wrong-format,
+/// wrong-arch, or wrong-endian binary for the declared target still fails. A
+/// triple this validator cannot authoritatively map (unknown OS, arch, or
+/// endianness) is REJECTED with a precise "cannot validate target" error rather
+/// than silently passing every binary.
+pub fn expected_target_for_triple(triple: &str) -> Result<ExpectedTarget> {
+    let arch_token = triple.split('-').next().unwrap_or("");
+    let format = format_for_triple(triple);
+    let architecture = architecture_for_token(arch_token);
+    let endianness = endianness_for_token(arch_token);
+    match (format, architecture, endianness) {
+        (Some(format), architecture, Some(endianness))
+            if architecture != object::Architecture::Unknown =>
+        {
+            Ok(ExpectedTarget {
+                format,
+                architecture,
+                endianness,
+            })
+        }
+        _ => anyhow::bail!(
+            "cannot validate target `{triple}`: the CLI cannot authoritatively map its object-file \
+             format, CPU architecture, and endianness, so it refuses to inspect a bundle for it \
+             rather than pass a possibly incompatible binary. Build for a supported triple (e.g. \
+             aarch64-unknown-linux-gnu or x86_64-unknown-linux-gnu)."
+        ),
+    }
+}
+
+/// The [`ExpectedTarget`] for the host this CLI process runs on, from
+/// `std::env::consts` and the host's native endianness. Used by an in-place
+/// `run`/`start`: a staged/extracted layout only ever runs on the host it was
+/// prepared for, so its selected binaries must match the host signature -
+/// format included, so a same-CPU foreign-OS bundle fails at inspection with a
+/// precise diagnostic instead of an exec-format crash (#936).
+#[must_use]
+pub fn expected_target_for_host() -> ExpectedTarget {
+    let endianness = if cfg!(target_endian = "big") {
+        object::Endianness::Big
+    } else {
+        object::Endianness::Little
+    };
+    ExpectedTarget {
+        format: host_binary_format(),
+        architecture: host_architecture(),
+        endianness,
+    }
+}
+
+/// Fails when `object_bytes` is not an object file matching `expected`'s format,
+/// architecture, and endianness, so a wrong-format (Mach-O for a Linux target),
+/// wrong-arch, or wrong-endian binary is rejected at inspection with a precise
+/// diagnostic rather than crashing later with an exec-format error. Reads and
+/// parses only; never executes the binary. An [`object::Architecture::Unknown`]
+/// expectation (an exotic host this mapping does not know) is a precise error,
+/// not a skipped gate: no supported CLI/framework release target can produce a
+/// complete layout for such a host, so validating nothing would only defer the
+/// failure to spawn time (#936).
+pub fn ensure_target(object_bytes: &[u8], describe: &str, expected: &ExpectedTarget) -> Result<()> {
+    if expected.architecture == object::Architecture::Unknown {
+        anyhow::bail!(
+            "cannot validate {describe}: this host's CPU architecture ({}) is not one the CLI can              authoritatively inspect binaries for, and no supported release target produces a              runtime layout for it",
+            std::env::consts::ARCH
+        );
+    }
+    let file = object::File::parse(object_bytes)
+        .with_context(|| format!("{describe} is not a recognized object file (ELF/Mach-O/...)"))?;
+    let format = file.format();
+    let architecture = file.architecture();
+    let endianness = file.endianness();
+    if format != expected.format {
+        anyhow::bail!(
+            "{describe} is a {format:?} object file, but the selected target expects \
+             {expected_format:?}; stage or build a runtime layout for the target platform \
+             before running it",
+            expected_format = expected.format
+        );
+    }
+    if architecture != expected.architecture {
+        anyhow::bail!(
+            "{describe} is built for {architecture:?}, but the selected target expects \
+             {expected_arch:?}; stage or build a runtime layout for the {expected_arch:?} \
+             architecture before running it",
+            expected_arch = expected.architecture
+        );
+    }
+    if endianness != expected.endianness {
+        anyhow::bail!(
+            "{describe} is {endianness:?}-endian, but the selected target expects \
+             {expected_endian:?}-endian; stage or build a runtime layout for the target platform \
+             before running it",
+            expected_endian = expected.endianness
+        );
+    }
+    Ok(())
+}
+
+/// Fails when `object_bytes` does not match the host target signature, so a
+/// foreign binary (a Mach-O offered on a Linux host, or an
+/// `aarch64-unknown-linux-gnu` bundle unpacked on an `x86_64` host) is rejected
+/// at inspection with a precise diagnostic. Reads and parses only.
+pub fn ensure_host_target(object_bytes: &[u8], describe: &str) -> Result<()> {
+    ensure_target(object_bytes, describe, &expected_target_for_host())
+}
+
+/// Reads `binary_path`, verifies it matches the `expected` target signature, and
+/// returns its embedded participant metadata - the two off-disk inspections a
+/// layout run performs on a selected binary, in one read.
+/// [`inspect_selected_binary`] is the host variant used by an in-place run;
+/// `phoxal build --target` passes the declared target's signature instead.
+pub fn inspect_selected_binary_for_target(
+    binary_path: &Path,
+    expected: &ExpectedTarget,
+) -> Result<ParticipantMeta> {
+    let data = fs::read(binary_path)
+        .with_context(|| format!("failed to read {}", binary_path.display()))?;
+    let describe = binary_path.display().to_string();
+    ensure_target(&data, &describe, expected)?;
+    extract_participant_metadata_from_bytes(&data, &describe)
+}
+
+/// Reads `binary_path`, verifies it matches the host target signature, and
+/// returns its embedded participant metadata - the two off-disk inspections a
+/// layout run performs on a selected binary, in one read.
+pub fn inspect_selected_binary(binary_path: &Path) -> Result<ParticipantMeta> {
+    inspect_selected_binary_for_target(binary_path, &expected_target_for_host())
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;
@@ -143,22 +368,22 @@ mod tests {
     /// A privileged tool defaults to `Api = ()`, so it never derives
     /// `#[derive(phoxal::Api)]` and its binary carries no metadata section at
     /// all - a valid, expected shape (zero contracts and a no-config schema), not
-    /// an extraction error. Proven end-to-end against `phoxal-cli`'s own compiled
-    /// binary, which has no participant attribute.
+    /// an extraction error. Proven end-to-end against the CLI's own compiled
+    /// `phoxal` binary, which has no participant attribute.
     #[test]
     fn a_real_binary_with_no_section_parses_as_zero_contracts() -> Result<()> {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let status = Command::new("cargo")
-            .args(["build", "--quiet", "--bin", "phoxal-cli"])
+            .args(["build", "--quiet", "--bin", "phoxal"])
             .current_dir(&manifest_dir)
             .status()
-            .context("failed to spawn cargo build for phoxal-cli")?;
-        assert!(status.success(), "cargo build --bin phoxal-cli failed");
+            .context("failed to spawn cargo build for the phoxal binary")?;
+        assert!(status.success(), "cargo build --bin phoxal failed");
 
         let binary_path = manifest_dir
             .join("target")
             .join("debug")
-            .join(format!("phoxal-cli{}", std::env::consts::EXE_SUFFIX));
+            .join(format!("phoxal{}", std::env::consts::EXE_SUFFIX));
         assert!(
             binary_path.is_file(),
             "expected built binary at {}",
@@ -194,8 +419,28 @@ mod tests {
         segment_name: &[u8],
         payload: &[u8],
     ) -> Vec<u8> {
+        synthesize_object_endian(
+            format,
+            arch,
+            object::Endianness::Little,
+            section_name,
+            segment_name,
+            payload,
+        )
+    }
+
+    /// [`synthesize_object`] with an explicit endianness, so a wrong-endian
+    /// binary can be produced for the endianness gate.
+    fn synthesize_object_endian(
+        format: object::BinaryFormat,
+        arch: object::Architecture,
+        endianness: object::Endianness,
+        section_name: &[u8],
+        segment_name: &[u8],
+        payload: &[u8],
+    ) -> Vec<u8> {
         use object::write::Object;
-        let mut obj = Object::new(format, arch, object::Endianness::Little);
+        let mut obj = Object::new(format, arch, endianness);
         let section = obj.add_section(
             segment_name.to_vec(),
             section_name.to_vec(),
@@ -239,6 +484,128 @@ mod tests {
             extract_participant_metadata_from_bytes(&macho, "synthetic x86_64 Mach-O")?;
         assert_eq!(from_macho.contracts, expected);
         Ok(())
+    }
+
+    #[test]
+    fn host_target_binary_passes_and_a_foreign_arch_binary_is_rejected() -> Result<()> {
+        let host = expected_target_for_host();
+        // Pick a concrete arch that is NOT the host's, so the assertion holds
+        // on any runner. The host path validates format too (#936), so the
+        // synthetic host object must use the host's own container format and
+        // section naming.
+        let foreign = if host.architecture == object::Architecture::X86_64 {
+            object::Architecture::Aarch64
+        } else {
+            object::Architecture::X86_64
+        };
+        let (section, segment): (&[u8], &[u8]) = match host.format {
+            object::BinaryFormat::MachO => (b"__phoxal_meta", b"__DATA"),
+            _ => (b".phoxal_api_meta", b""),
+        };
+        let host_object = synthesize_object_endian(
+            host.format,
+            host.architecture,
+            host.endianness,
+            section,
+            segment,
+            b"payload",
+        );
+        ensure_host_target(&host_object, "synthetic host object")?;
+
+        // Host format, foreign CPU: the arch gate (not the format gate) must
+        // reject it.
+        let foreign_object = synthesize_object_endian(
+            host.format,
+            foreign,
+            host.endianness,
+            section,
+            segment,
+            b"payload",
+        );
+        let error = ensure_host_target(&foreign_object, "bin/phoxal-service-drive")
+            .expect_err("a foreign-arch binary must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("bin/phoxal-service-drive"), "{message}");
+        assert!(message.contains("built for"), "{message}");
+        Ok(())
+    }
+
+    /// Finding C: a same-CPU wrong-OS binary (a Mach-O x86_64 offered for
+    /// `x86_64-unknown-linux-gnu`) is rejected on the container format, not
+    /// waved through by a CPU-only check.
+    #[test]
+    fn a_same_cpu_wrong_os_binary_is_rejected() -> Result<()> {
+        let linux = expected_target_for_triple("x86_64-unknown-linux-gnu")?;
+        assert_eq!(linux.format, object::BinaryFormat::Elf);
+        // Right CPU, wrong container format (Mach-O, an Apple binary).
+        let macho = synthesize_object(
+            object::BinaryFormat::MachO,
+            object::Architecture::X86_64,
+            b"__phoxal_meta",
+            b"__DATA",
+            b"payload",
+        );
+        let error = ensure_target(&macho, "bin/phoxal-service-drive", &linux)
+            .expect_err("a Mach-O binary for a Linux target must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("MachO"), "{message}");
+        assert!(message.contains("Elf"), "{message}");
+        Ok(())
+    }
+
+    /// Finding C: a wrong-endian binary is rejected against the declared target's
+    /// endianness.
+    #[test]
+    fn a_wrong_endian_binary_is_rejected() -> Result<()> {
+        // s390x is authoritatively big-endian; a little-endian s390x object is
+        // therefore wrong for the declared target.
+        let s390x = expected_target_for_triple("s390x-unknown-linux-gnu")?;
+        assert_eq!(s390x.endianness, object::Endianness::Big);
+        let little = synthesize_object_endian(
+            object::BinaryFormat::Elf,
+            object::Architecture::S390x,
+            object::Endianness::Little,
+            b".phoxal_api_meta",
+            b"",
+            b"payload",
+        );
+        let error = ensure_target(&little, "bin/phoxal-service-drive", &s390x)
+            .expect_err("a wrong-endian binary must be rejected");
+        assert!(error.to_string().contains("endian"), "{error}");
+
+        // The matching big-endian object passes.
+        let big = synthesize_object_endian(
+            object::BinaryFormat::Elf,
+            object::Architecture::S390x,
+            object::Endianness::Big,
+            b".phoxal_api_meta",
+            b"",
+            b"payload",
+        );
+        ensure_target(&big, "bin/phoxal-service-drive", &s390x)?;
+        Ok(())
+    }
+
+    /// Finding C: a triple the validator cannot authoritatively map is rejected
+    /// outright with a "cannot validate target" error rather than silently
+    /// passing every binary (the old CPU-only gate disabled itself on Unknown).
+    #[test]
+    fn an_unmappable_triple_is_rejected() {
+        for triple in [
+            "sparc64-unknown-linux-gnu", // arch not mapped
+            "x86_64-unknown-haiku",      // OS not mapped
+            "not-a-triple",              // nonsense
+        ] {
+            let error = expected_target_for_triple(triple)
+                .expect_err("an unmappable triple must be rejected");
+            assert!(
+                error.to_string().contains("cannot validate target"),
+                "{triple}: {error}"
+            );
+        }
+        // The supported officials still map cleanly.
+        assert!(expected_target_for_triple("aarch64-unknown-linux-gnu").is_ok());
+        assert!(expected_target_for_triple("x86_64-unknown-linux-gnu").is_ok());
     }
 
     #[test]

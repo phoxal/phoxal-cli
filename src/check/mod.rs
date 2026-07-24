@@ -5,9 +5,6 @@ use serde_json::Value;
 
 use phoxal::model::robot::RobotV0;
 use phoxal_cli_core::check::participant_metadata;
-use phoxal_cli_core::check::source::{
-    SourceParticipant, ToolParticipant, UserServiceImageParticipant,
-};
 
 #[derive(Debug, Args)]
 pub struct CheckCmd {
@@ -68,14 +65,6 @@ pub struct CheckGraphContext<'a> {
     pub robot: Option<&'a RobotV0>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct CheckParticipants<'a> {
-    pub platform_artifact_refs: &'a [PlatformArtifactRef],
-    pub user_service_images: &'a [UserServiceImageParticipant],
-    pub tool_participants: &'a [ToolParticipant],
-    pub source_participants: &'a [SourceParticipant],
-}
-
 impl CheckOutcome {
     #[must_use]
     pub fn is_ok(&self) -> bool {
@@ -100,7 +89,7 @@ pub(crate) use participants::{
     source_participants_from_resolved, tool_participants_from_resolved,
 };
 mod graph;
-pub use graph::{run_check, run_check_with_context, run_check_with_deployed_user_service_images};
+pub use graph::{run_check, run_check_with_context};
 mod config;
 pub(crate) use config::{contract_surface, validate_user_service_config};
 mod metadata;
@@ -113,7 +102,7 @@ mod build;
 pub(crate) use build::build_emit_apis_by_building;
 pub(crate) use build::{
     build_emit_apis_from_source, build_emit_apis_from_source_for_check, validate_artifact_identity,
-    validate_service_artifact_identity, validate_source_artifact_identity,
+    validate_source_artifact_identity,
 };
 mod errors;
 pub use errors::MissingImageError;

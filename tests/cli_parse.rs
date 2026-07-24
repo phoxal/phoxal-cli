@@ -8,7 +8,7 @@ fn clap_definition_is_valid() {
 
 #[test]
 fn parses_behavior_validation_and_test_surface() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "behavior", "validate"])
+    let cli = Cli::try_parse_from(["phoxal", "behavior", "validate"])
         .expect("behavior validate should parse");
     let RootCommand::Behavior(command) = cli.command else {
         panic!("expected behavior command");
@@ -19,7 +19,7 @@ fn parses_behavior_validation_and_test_surface() {
     ));
 
     let cli = Cli::try_parse_from([
-        "phoxal-cli",
+        "phoxal",
         "behavior",
         "test",
         "navigation.return_to_dock",
@@ -42,7 +42,7 @@ fn parses_behavior_validation_and_test_surface() {
 
 #[test]
 fn parses_self_upgrade_with_normalized_version() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "self", "upgrade", "--version", "v0.4.0"])
+    let cli = Cli::try_parse_from(["phoxal", "self", "upgrade", "--version", "v0.4.0"])
         .expect("self upgrade command should parse");
     let RootCommand::SelfCmd(command) = cli.command else {
         panic!("expected self command");
@@ -57,29 +57,22 @@ fn parses_self_upgrade_with_normalized_version() {
 #[test]
 fn message_format_is_removed_from_every_former_surface() {
     for args in [
-        vec!["phoxal-cli", "check", "--message-format", "json"],
-        vec!["phoxal-cli", "run", "--message-format", "json"],
+        vec!["phoxal", "check", "--message-format", "json"],
+        vec!["phoxal", "run", "--message-format", "json"],
         vec![
-            "phoxal-cli",
+            "phoxal",
             "simulation",
             "run",
             "default",
             "--message-format",
             "json",
         ],
-        vec!["phoxal-cli", "deploy", "--message-format", "json"],
-        vec!["phoxal-cli", "update", "--message-format", "json"],
-        vec!["phoxal-cli", "status", "--message-format", "json", "safety"],
-        vec!["phoxal-cli", "service", "suite", "--message-format", "json"],
-        vec!["phoxal-cli", "version", "--message-format", "json"],
-        vec!["phoxal-cli", "self", "upgrade", "--message-format", "json"],
-        vec![
-            "phoxal-cli",
-            "behavior",
-            "validate",
-            "--message-format",
-            "json",
-        ],
+        vec!["phoxal", "update", "--message-format", "json"],
+        vec!["phoxal", "status", "--message-format", "json", "safety"],
+        vec!["phoxal", "service", "suite", "--message-format", "json"],
+        vec!["phoxal", "version", "--message-format", "json"],
+        vec!["phoxal", "self", "upgrade", "--message-format", "json"],
+        vec!["phoxal", "behavior", "validate", "--message-format", "json"],
     ] {
         assert!(
             Cli::try_parse_from(args.clone()).is_err(),
@@ -91,22 +84,23 @@ fn message_format_is_removed_from_every_former_surface() {
 #[test]
 fn removed_command_surfaces_stay_removed() {
     for args in [
-        vec!["phoxal-cli", "service", "add", "avoid_obstacles"],
-        vec!["phoxal-cli", "service", "run", "avoid_obstacles"],
-        vec!["phoxal-cli", "runtime", "add", "avoid_obstacles"],
-        vec!["phoxal-cli", "check", "--runtime", "avoid_obstacles"],
-        vec!["phoxal-cli", "simulate", "default"],
-        vec!["phoxal-cli", "simulation", "default"],
-        vec!["phoxal-cli", "simulation", "run", "default", "--pull"],
-        vec!["phoxal-cli", "check", "--pull"],
-        vec!["phoxal-cli", "validate", "--allow-user-service-drift"],
-        vec!["phoxal-cli", "deploy", "build"],
-        vec!["phoxal-cli", "robot", "new", "rover"],
-        vec!["phoxal-cli", "robot"],
-        vec!["phoxal-cli", "pull"],
-        vec!["phoxal-cli", "outdated"],
-        vec!["phoxal-cli", "cache"],
-        vec!["phoxal-cli", "cache", "clean"],
+        vec!["phoxal", "service", "add", "avoid_obstacles"],
+        vec!["phoxal", "service", "run", "avoid_obstacles"],
+        vec!["phoxal", "runtime", "add", "avoid_obstacles"],
+        vec!["phoxal", "check", "--runtime", "avoid_obstacles"],
+        vec!["phoxal", "simulate", "default"],
+        vec!["phoxal", "simulation", "default"],
+        vec!["phoxal", "simulation", "run", "default", "--pull"],
+        vec!["phoxal", "check", "--pull"],
+        vec!["phoxal", "validate", "--allow-user-service-drift"],
+        vec!["phoxal", "deploy", "robot@192.168.1.50"],
+        vec!["phoxal", "deploy", "--dry-run", "--target", "aarch64"],
+        vec!["phoxal", "robot", "new", "rover"],
+        vec!["phoxal", "robot"],
+        vec!["phoxal", "pull"],
+        vec!["phoxal", "outdated"],
+        vec!["phoxal", "cache"],
+        vec!["phoxal", "cache", "clean"],
     ] {
         assert!(Cli::try_parse_from(args).is_err());
     }
@@ -114,15 +108,14 @@ fn removed_command_surfaces_stay_removed() {
 
 #[test]
 fn parses_watch_and_simulation_join_and_rejects_removed_overlays() {
-    let cli =
-        Cli::try_parse_from(["phoxal-cli", "run", "--watch"]).expect("run watch should parse");
+    let cli = Cli::try_parse_from(["phoxal", "run", "--watch"]).expect("run watch should parse");
     let RootCommand::Run(run) = cli.command else {
         panic!("expected run command");
     };
     assert!(run.watch);
-    assert!(Cli::try_parse_from(["phoxal-cli", "run", "--env", "dev"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal", "run", "--env", "dev"]).is_err());
 
-    let cli = Cli::try_parse_from(["phoxal-cli", "simulation", "run", "default", "--watch"])
+    let cli = Cli::try_parse_from(["phoxal", "simulation", "run", "default", "--watch"])
         .expect("simulation run watch should parse");
     let RootCommand::Simulation(simulation) = cli.command else {
         panic!("expected simulation command");
@@ -132,11 +125,10 @@ fn parses_watch_and_simulation_join_and_rejects_removed_overlays() {
     };
     assert!(run.watch);
     assert!(
-        Cli::try_parse_from(["phoxal-cli", "simulation", "run", "default", "--env", "dev",])
-            .is_err()
+        Cli::try_parse_from(["phoxal", "simulation", "run", "default", "--env", "dev",]).is_err()
     );
 
-    let cli = Cli::try_parse_from(["phoxal-cli", "simulation", "join"])
+    let cli = Cli::try_parse_from(["phoxal", "simulation", "join"])
         .expect("simulation join should parse");
     let RootCommand::Simulation(simulation) = cli.command else {
         panic!("expected simulation command");
@@ -148,12 +140,41 @@ fn parses_watch_and_simulation_join_and_rejects_removed_overlays() {
 }
 
 #[test]
+fn parses_start_and_rejects_interactive_flags() {
+    let cli = Cli::try_parse_from(["phoxal", "start"]).expect("start should parse");
+    assert!(matches!(cli.command, RootCommand::Start(_)));
+
+    let cli = Cli::try_parse_from(["phoxal", "start", "/var/phoxal"])
+        .expect("start with an explicit root should parse");
+    let RootCommand::Start(start) = cli.command else {
+        panic!("expected start command");
+    };
+    assert_eq!(
+        start.target.as_deref(),
+        Some(std::path::Path::new("/var/phoxal"))
+    );
+
+    // `start` is headless: no `--watch`, no `run`-only driver/detach flags.
+    for rejected in [
+        vec!["phoxal", "start", "--watch"],
+        vec!["phoxal", "start", "-d"],
+        vec!["phoxal", "start", "--drivers", "off"],
+        vec!["phoxal", "start", "--driver", "left_drive"],
+    ] {
+        assert!(
+            Cli::try_parse_from(rejected.clone()).is_err(),
+            "start unexpectedly accepted {rejected:?}"
+        );
+    }
+}
+
+#[test]
 fn parses_bus_backed_status_commands() {
-    assert!(Cli::try_parse_from(["phoxal-cli", "status"]).is_err());
-    assert!(Cli::try_parse_from(["phoxal-cli", "status", "release", "mission"]).is_err());
-    assert!(Cli::try_parse_from(["phoxal-cli", "status", "resume", "mission"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal", "status"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal", "status", "release", "mission"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal", "status", "resume", "mission"]).is_err());
     let cli = Cli::try_parse_from([
-        "phoxal-cli",
+        "phoxal",
         "status",
         "engage-estop",
         "--connect",
@@ -168,7 +189,7 @@ fn parses_bus_backed_status_commands() {
     };
     assert_eq!(arg.connect, "tcp/robot:7447");
 
-    let cli = Cli::try_parse_from(["phoxal-cli", "status", "reset-estop"])
+    let cli = Cli::try_parse_from(["phoxal", "status", "reset-estop"])
         .expect("status reset-estop should parse");
     let RootCommand::Status(command) = cli.command else {
         panic!("expected status command");
@@ -179,14 +200,8 @@ fn parses_bus_backed_status_commands() {
     ));
 
     for domain in ["safety", "motion", "localization"] {
-        let cli = Cli::try_parse_from([
-            "phoxal-cli",
-            "status",
-            domain,
-            "--connect",
-            "tcp/robot:7447",
-        ])
-        .unwrap_or_else(|error| panic!("status {domain} should parse: {error}"));
+        let cli = Cli::try_parse_from(["phoxal", "status", domain, "--connect", "tcp/robot:7447"])
+            .unwrap_or_else(|error| panic!("status {domain} should parse: {error}"));
         let RootCommand::Status(command) = cli.command else {
             panic!("expected status command for {domain}");
         };
@@ -202,36 +217,20 @@ fn parses_bus_backed_status_commands() {
 
 #[test]
 fn parses_check_strict_and_rejects_removed_service_scope() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "check", "--strict"])
-        .expect("check command should parse");
+    let cli =
+        Cli::try_parse_from(["phoxal", "check", "--strict"]).expect("check command should parse");
     let RootCommand::Check(command) = cli.command else {
         panic!("expected check command");
     };
     assert!(command.strict);
-    assert!(Cli::try_parse_from(["phoxal-cli", "check", "--service", "avoid_obstacles",]).is_err());
+    assert!(Cli::try_parse_from(["phoxal", "check", "--service", "avoid_obstacles",]).is_err());
 }
 
 #[test]
-fn parses_deploy_and_update() {
-    let cli = Cli::try_parse_from(["phoxal-cli", "deploy", "robot@192.168.1.50"])
-        .expect("deploy command should parse");
-    let RootCommand::Deploy(command) = cli.command else {
-        panic!("expected deploy command");
-    };
-    assert_eq!(command.host.as_deref(), Some("robot@192.168.1.50"));
-    assert!(Cli::try_parse_from(["phoxal-cli", "deploy", "--env", "prod"]).is_err());
-
-    let cli = Cli::try_parse_from(["phoxal-cli", "deploy", "--dry-run", "--target", "aarch64"])
-        .expect("deploy dry-run should parse");
-    let RootCommand::Deploy(command) = cli.command else {
-        panic!("expected deploy command");
-    };
-    assert!(command.dry_run);
-    assert_eq!(command.target.as_deref(), Some("aarch64"));
-
-    assert!(Cli::try_parse_from(["phoxal-cli", "update", "--dry-run"]).is_ok());
-    assert!(Cli::try_parse_from(["phoxal-cli", "--plain", "check"]).is_err());
-    assert!(Cli::try_parse_from(["phoxal-cli", "check", "--plain"]).is_err());
-    assert!(Cli::try_parse_from(["phoxal-cli", "--quiet", "check"]).is_err());
-    assert!(Cli::try_parse_from(["phoxal-cli", "--welcome", "check"]).is_err());
+fn parses_update() {
+    assert!(Cli::try_parse_from(["phoxal", "update", "--dry-run"]).is_ok());
+    assert!(Cli::try_parse_from(["phoxal", "--plain", "check"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal", "check", "--plain"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal", "--quiet", "check"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal", "--welcome", "check"]).is_err());
 }

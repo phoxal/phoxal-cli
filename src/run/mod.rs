@@ -11,30 +11,34 @@ const ROUTER_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 mod router;
 pub(crate) use router::{
-    InfrastructureRouter, apply_session_connect, project_router_endpoint,
+    InfrastructureRouter, apply_session_connect, project_router_endpoint, resolve_router_config,
     start_infrastructure_router,
 };
 mod command;
-pub(crate) use command::{AbortTasks, PreparedRun};
+pub(crate) use command::{
+    AbortTasks, PreparedRun, connect_to_detached_resident, run_resident_supervision,
+    wait_for_required_readiness,
+};
 pub use command::{DriversMode, Run, RunOptions};
 mod stages;
 pub(crate) use stages::stages_for_run;
 mod telemetry;
 pub(crate) use telemetry::{RobotFeedTarget, start_telemetry_feeds_at};
 mod prepare;
-pub(crate) use prepare::prepare_run_on_board;
+pub(crate) use prepare::{prepare_layout_run_on_board, prepare_run_on_board, refresh_staging};
 mod report;
-pub(crate) use report::{DriverPolicy, report_launch_commands};
+pub(crate) use report::{
+    DriverPolicy, driven_instances, report_excluded_drivers, report_launch_commands,
+};
 mod participants;
 pub(crate) use participants::{
-    DriverDecision, locate_tool_binary, prepare_robot_participants, spec_from_launch_record,
-};
-mod environment;
-pub(crate) use environment::{
-    env_path_override, native_pending_official_note, native_pending_tool_note,
+    DriverDecision, build_layout_specs, prepare_robot_participants, source_cwd,
+    source_dirs_by_participant, spec_from_launch_record, stage_complete_bin_store,
 };
 mod build;
-pub(crate) use build::{build_source_binary, device_missing_note};
+pub(crate) use build::{
+    StagingBuild, build_source_binary, device_missing_note, missing_device_path,
+};
 
 #[cfg(test)]
 mod tests;

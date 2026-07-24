@@ -8,7 +8,7 @@ use super::*;
 use anyhow::{Result, anyhow, bail};
 use graph_check::{ParticipantClass, Problem};
 use phoxal::model::robot::v0::Robot;
-use phoxal_cli_core::check::source::SourceParticipantKind;
+use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind, ToolParticipant};
 use phoxal_cli_core::project::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_DEVICE, ROBOT_TOOL_JOYPAD, SubstitutionRecord,
     build_launch_plan,
@@ -66,11 +66,7 @@ fn assert_severity_matrix(diagnostics: &[RobotCoherenceDiagnostic], coherent: bo
         coherence_disposition(CoherenceVerb::Check, true, diagnostics),
         hard
     );
-    for verb in [
-        CoherenceVerb::Deploy,
-        CoherenceVerb::Run,
-        CoherenceVerb::Simulate,
-    ] {
+    for verb in [CoherenceVerb::Run, CoherenceVerb::Simulate] {
         assert_eq!(coherence_disposition(verb, false, diagnostics), hard);
     }
 }
@@ -618,53 +614,6 @@ fn privileged_tools_are_exempt_from_topology() -> Result<()> {
     )?;
 
     assert!(outcome.report.problems.is_empty());
-    Ok(())
-}
-
-#[test]
-fn deployed_user_service_images_are_checked_from_image_refs() -> Result<()> {
-    let user_images = vec![UserServiceImageParticipant {
-        name: "avoid".to_string(),
-        image_ref: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            .to_string(),
-    }];
-    let sources = vec![SourceParticipant::component_driver_with_artifact_id(
-        "left_drive".to_string(),
-        "ddsm115".to_string(),
-        PathBuf::from("/fake/project/components/ddsm115"),
-    )];
-
-    let mut fetched_images = Vec::new();
-    let mut built_sources = Vec::new();
-    let outcome = run_check_with_deployed_user_service_images(
-        CheckParticipants {
-            platform_artifact_refs: &[],
-            user_service_images: &user_images,
-            tool_participants: &[],
-            source_participants: &sources,
-        },
-        CheckGraphContext { robot: None },
-        |image_ref| {
-            fetched_images.push(image_ref.to_string());
-            Ok(raw("avoid", "v1", &[]))
-        },
-        |_| bail!("no tools should be fetched"),
-        |participant| {
-            let dir = participant.crate_dir.as_path();
-            built_sources.push(dir.to_path_buf());
-            Ok(raw_kind("driver", "ddsm115", "v1", &[]))
-        },
-    )?;
-
-    assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
-    assert_eq!(
-        fetched_images,
-        vec!["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
-    );
-    assert_eq!(
-        built_sources,
-        vec![PathBuf::from("/fake/project/components/ddsm115")]
-    );
     Ok(())
 }
 
@@ -1239,7 +1188,7 @@ fn components_without_drivers_are_not_built() -> Result<()> {
         ResolvedComponent {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: Some(fixture_component_package(
+            assets: (fixture_component_package(
                 "phoxal/component-ddsm115",
                 phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
                 "components/ddsm115",
@@ -1254,7 +1203,7 @@ fn components_without_drivers_are_not_built() -> Result<()> {
         ResolvedComponent {
             instance: "caster".to_string(),
             source_name: "passive_caster".to_string(),
-            assets: Some(fixture_component_package(
+            assets: (fixture_component_package(
                 "phoxal/component-passive_caster",
                 phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
                 "components/passive_caster",
@@ -1310,7 +1259,7 @@ fn suite_component_driver_becomes_a_platform_ref_not_a_source_participant() -> R
     let resolved = resolved_with_components(vec![ResolvedComponent {
         instance: "left_drive".to_string(),
         source_name: "ddsm115".to_string(),
-        assets: Some(fixture_suite_component_package(
+        assets: (fixture_suite_component_package(
             "phoxal/component-ddsm115",
             phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
             "ddsm115",
@@ -1360,7 +1309,7 @@ fn n_instances_of_one_suite_driver_fetch_once_and_validate_as_n_graph_participan
         ResolvedComponent {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: Some(fixture_suite_component_package(
+            assets: (fixture_suite_component_package(
                 "phoxal/component-ddsm115",
                 phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
                 "ddsm115",
@@ -1375,7 +1324,7 @@ fn n_instances_of_one_suite_driver_fetch_once_and_validate_as_n_graph_participan
         ResolvedComponent {
             instance: "right_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: Some(fixture_suite_component_package(
+            assets: (fixture_suite_component_package(
                 "phoxal/component-ddsm115",
                 phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
                 "ddsm115",
@@ -1460,7 +1409,7 @@ fn driverless_suite_component_stages_assets_only_and_is_not_a_check_participant(
     let resolved = resolved_with_components(vec![ResolvedComponent {
         instance: "caster".to_string(),
         source_name: "passive_caster".to_string(),
-        assets: Some(fixture_suite_component_package(
+        assets: (fixture_suite_component_package(
             "phoxal/component-passive_caster",
             phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
             "passive_caster",

@@ -55,7 +55,10 @@ fn simulate_dry_run_resolves_without_writing_local_launch_directories() -> anyho
             "tool-telemetry-testbot",
         ]
     );
-    assert_eq!(plan.ctx.resolved.platform_runtimes.len(), 0);
+    assert_eq!(
+        plan.ctx.source().unwrap().resolved.platform_runtimes.len(),
+        0
+    );
 
     Ok(())
 }

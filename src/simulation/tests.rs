@@ -378,9 +378,12 @@ fn path_overridden_simulators_use_the_same_provider_ids_as_official() -> Result<
             participant.launch_ownership,
             phoxal_cli_core::project::launch_plan::LaunchOwnership::SimulationManaged
         );
+        // A simulator participant - suite or workspace-overridden - resolves to
+        // its one canonical `bin/` simulator binary in the source-free plan
+        // (#936); the layout no longer distinguishes the two.
         assert!(matches!(
             &participant.execution,
-            phoxal_cli_core::project::launch_plan::ParticipantExecution::SourceArtifact { .. }
+            phoxal_cli_core::project::launch_plan::ParticipantExecution::OfficialArtifact { .. }
         ));
     }
 
@@ -747,8 +750,10 @@ fn dry_run_output_shows_webots_supervisor_controller_and_ownership() -> Result<(
         ctx: PlanContext {
             robot_path: temp.path().join("robot.yaml"),
             project_root: temp.path().to_path_buf(),
-            resolved,
-            source_participants: Vec::new(),
+            source: Some(phoxal_cli_core::project::launch_plan::PlanSource {
+                resolved,
+                source_participants: Vec::new(),
+            }),
         },
         runtime_store: phoxal_cli_core::session::stores::runtime::RuntimeStore::new(),
     };
@@ -1131,17 +1136,15 @@ fn resolved_with_drive_components(instances: &[&str], include_user: bool) -> Res
         resolved.components.push(ResolvedComponent {
             instance: (*instance).to_string(),
             source_name: "ddsm115".to_string(),
-            assets: Some(
-                phoxal_cli_core::project::resolver::ResolvedComponentPackage {
-                    package: "phoxal/component-ddsm115".to_string(),
-                    kind: phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
-                    source: ResolvedComponentSource::Path {
-                        path: PathBuf::from("components/ddsm115"),
-                    },
-                    path_override: None,
-                    suite_runtime: None,
+            assets: phoxal_cli_core::project::resolver::ResolvedComponentPackage {
+                package: "phoxal/component-ddsm115".to_string(),
+                kind: phoxal_cli_core::project::suite::ArtifactKind::ComponentAssets,
+                source: ResolvedComponentSource::Path {
+                    path: PathBuf::from("components/ddsm115"),
                 },
-            ),
+                path_override: None,
+                suite_runtime: None,
+            },
             driver: Some(
                 phoxal_cli_core::project::resolver::ResolvedComponentPackage {
                     package: "phoxal/component-ddsm115".to_string(),
@@ -1243,6 +1246,17 @@ fn write_fake_simulator_crate(dir: &Path, bin_name: &str) -> Result<()> {
         dir.join("src/main.rs"),
         "fn main() {\n    println!(\"fake simulator binary\");\n}\n",
     )?;
+    // Staging now builds with `cargo build --locked` (#936, finding 7), so the
+    // stand-in crate needs a committed lockfile exactly like a real project.
+    anyhow::ensure!(
+        std::process::Command::new("cargo")
+            .arg("generate-lockfile")
+            .current_dir(dir)
+            .status()?
+            .success(),
+        "failed to generate fixture Cargo.lock in {}",
+        dir.display()
+    );
     Ok(())
 }
 

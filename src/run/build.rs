@@ -13,11 +13,71 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Build one source participant while routing captured output through the session.
+/// How a staging pass produces the workspace user/driver crate binaries it
+/// links into the runtime layout's flat `bin/` store (#936).
+///
+/// `run`, `start`, `watch`, and a host `phoxal build` use [`StagingBuild::Local`],
+/// a `cargo build` on this host, optionally cross-compiling to a `--target`.
+/// The `container` builder compiles the workspace inside a toolchain image first
+/// and then reuses the identical host-side staging with
+/// [`StagingBuild::Prebuilt`], which points the same lookup at the binaries the
+/// container already produced under a mounted target directory. Both feed
+/// `stage_complete_bin_store`, so the layout, validation, and archive are one
+/// shared implementation regardless of where compilation happened.
+#[derive(Debug, Clone)]
+pub(crate) enum StagingBuild {
+    /// Build user/driver crates on this host with `cargo build`, cross-compiling
+    /// to `target` when it is set and differs from the host.
+    Local { target: Option<String> },
+    /// Reuse binaries already built (by the container builder) under
+    /// `target_dir` - the cargo target directory of the container's snapshot -
+    /// for `target`. No cargo runs on the host for these.
+    Prebuilt {
+        target: Option<String>,
+        target_dir: PathBuf,
+    },
+}
+
+impl StagingBuild {
+    /// A host build for the given cross target (`None` = host triple).
+    pub(crate) fn local(target: Option<String>) -> Self {
+        Self::Local { target }
+    }
+
+    /// The requested target triple, or `None` for a host-native staging pass.
+    pub(crate) fn target(&self) -> Option<&str> {
+        match self {
+            Self::Local { target } | Self::Prebuilt { target, .. } => target.as_deref(),
+        }
+    }
+
+    /// Produce one workspace user/driver crate binary for this staging pass.
+    pub(crate) fn build_user_binary(
+        &self,
+        crate_dir: &Path,
+        preferred_name: &str,
+        ui: &crate::Ui,
+    ) -> Result<PathBuf> {
+        match self {
+            Self::Local { target } => {
+                build_source_binary(crate_dir, preferred_name, ui, target.as_deref())
+            }
+            Self::Prebuilt { target, target_dir } => {
+                locate_prebuilt_binary(crate_dir, preferred_name, target_dir, target.as_deref())
+            }
+        }
+    }
+}
+
+/// Build one source participant while routing captured output through the
+/// session. `target` cross-compiles with `cargo build --target <TRIPLE>` when it
+/// is set and differs from the host; a missing cross toolchain fails with an
+/// actionable `rustup target add` error rather than an opaque cargo failure.
 pub(crate) fn build_source_binary(
     crate_dir: &Path,
     preferred_name: &str,
     ui: &crate::Ui,
+    target: Option<&str>,
 ) -> Result<PathBuf> {
     let crate_dir = crate_dir.canonicalize().with_context(|| {
         format!(
@@ -27,8 +87,21 @@ pub(crate) fn build_source_binary(
     })?;
     let binary_name = cargo_binary_name(&crate_dir, Some(preferred_name))?;
     let package_name = cargo_package_name(&crate_dir)?;
+    // Only cross-compile when the target genuinely differs from the host: an
+    // explicit `--target <host-triple>` reuses the plain `target/debug` output
+    // exactly as `run` does, so a host `build` and a `run` share the incremental
+    // cache instead of a redundant `target/<host-triple>/debug`.
+    let cross = target.filter(|triple| *triple != crate::resolver::host_target_triple());
+    if let Some(triple) = cross {
+        ensure_cross_toolchain(triple)?;
+    }
+    let cargo_target_flag = cross.map(str::to_string);
     ui.info(format!(
-        "building user participant {preferred_name} with cargo build -p {package_name} --bin {binary_name}"
+        "building user participant {preferred_name} with cargo build -p {package_name} --bin {binary_name}{}",
+        cargo_target_flag
+            .as_deref()
+            .map(|triple| format!(" --target {triple}"))
+            .unwrap_or_default()
     ));
     // Finding A3: a source participant only ever gets here when it genuinely
     // needs a fresh `cargo build` (path-overridden components/simulators, or
@@ -40,13 +113,25 @@ pub(crate) fn build_source_binary(
         format!("Building {preferred_name}"),
         || {
             let mut command = Command::new("cargo");
+            // `--locked` pins the build to the committed `Cargo.lock`: staging
+            // is reproducible and cargo never silently rewrites the lock, so a
+            // stale or missing lock is a hard, actionable error instead of a
+            // quiet resolve. We deliberately do NOT add `--offline` here: #936's
+            // strict-offline guarantee governs the suite/artifact store (which
+            // has `phoxal update` to pre-vendor it), not the crate registry -
+            // there is no phoxal-level pre-fetch for Cargo dependencies, so a
+            // first build in a fresh checkout must still be able to fetch them.
             command
                 .arg("build")
+                .arg("--locked")
                 .arg("-p")
                 .arg(&package_name)
                 .arg("--bin")
                 .arg(&binary_name)
                 .current_dir(&crate_dir);
+            if let Some(triple) = cross {
+                command.arg("--target").arg(triple);
+            }
             let status = ui.command_status_captured(&mut command).with_context(|| {
                 format!(
                     "failed to start cargo build for participant {preferred_name} in {}",
@@ -55,22 +140,93 @@ pub(crate) fn build_source_binary(
             })?;
             if !status.success() {
                 bail!(
-                    "cargo build failed for participant {preferred_name} in {} with status {status}",
+                    "cargo build (--locked) failed for participant {preferred_name} in {} with status {status}; \
+                     if this is a lockfile mismatch, run `cargo update` (or `cargo generate-lockfile`) in the project and commit the result",
                     crate_dir.display()
                 );
             }
             Ok(())
         },
     )?;
-    Ok(cargo_target_dir(&crate_dir)?
-        .join("debug")
-        .join(binary_name_with_suffix(&binary_name)))
+    Ok(debug_binary_path(
+        &cargo_target_dir(&crate_dir)?,
+        cross,
+        &binary_name,
+    ))
+}
+
+/// Resolve a user/driver crate binary the container builder already compiled
+/// into `target_dir` (the container snapshot's cargo target directory), for the
+/// same `target` a host build would have used. No cargo runs here - the binary
+/// must already exist, so a missing one is a precise error naming it.
+fn locate_prebuilt_binary(
+    crate_dir: &Path,
+    preferred_name: &str,
+    target_dir: &Path,
+    target: Option<&str>,
+) -> Result<PathBuf> {
+    let binary_name = cargo_binary_name(crate_dir, Some(preferred_name))?;
+    // The container always compiles with an explicit `--target <triple>`, so
+    // its output is always under `target/<triple>/debug` - including when the
+    // triple equals the CLI host triple (a Linux host building its own arch in
+    // a container). Never collapse to the implicit `target/debug` here (#936).
+    let path = debug_binary_path(target_dir, target, &binary_name);
+    if !path.is_file() {
+        bail!(
+            "container build did not produce the binary for `{preferred_name}` (expected {}); \
+             the in-container `cargo build --target` may have failed",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+/// The `debug` build output path for `binary_name` under `target_dir`, in the
+/// `<triple>/debug/` subtree when cross-compiling and plain `debug/` otherwise.
+fn debug_binary_path(target_dir: &Path, cross: Option<&str>, binary_name: &str) -> PathBuf {
+    let debug = match cross {
+        Some(triple) => target_dir.join(triple).join("debug"),
+        None => target_dir.join("debug"),
+    };
+    debug.join(binary_name_with_suffix(binary_name))
+}
+
+/// Fail with an actionable error when the cross target's standard library is not
+/// installed, naming the exact `rustup target add` command. The CLI never
+/// installs toolchains (#936); this only turns an opaque later cargo failure
+/// into a precise instruction. If `rustup` is not on PATH the check is skipped -
+/// a non-rustup toolchain may still have the target - and cargo reports any real
+/// gap itself.
+fn ensure_cross_toolchain(triple: &str) -> Result<()> {
+    let output = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output();
+    let Ok(output) = output else {
+        // No rustup on PATH: let the build proceed and cargo surface any gap.
+        return Ok(());
+    };
+    if !output.status.success() {
+        return Ok(());
+    }
+    let installed = String::from_utf8_lossy(&output.stdout);
+    if installed.lines().any(|line| line.trim() == triple) {
+        return Ok(());
+    }
+    bail!(
+        "the Rust standard library for target `{triple}` is not installed; \
+         install it with `rustup target add {triple}` (the CLI never installs toolchains), \
+         or use `--builder container` to compile inside a toolchain image"
+    )
 }
 
 pub(crate) fn cargo_target_dir(crate_dir: &Path) -> Result<PathBuf> {
+    // `--locked` keeps metadata reads on the committed `Cargo.lock` too, so
+    // resolving the target directory never triggers a lock rewrite or a
+    // registry resolve (see the `cargo build` invocation above for why
+    // `--offline` is intentionally not added).
     let output = crate::shell::run_stdout(
         "cargo",
-        ["metadata", "--format-version", "1", "--no-deps"],
+        ["metadata", "--format-version", "1", "--no-deps", "--locked"],
         Some(crate_dir),
     )?;
     let json: Value = serde_json::from_str(&output).context("cargo metadata was not JSON")?;
@@ -151,4 +307,44 @@ pub(crate) fn usb_missing(vendor_id: Option<u16>, product_id: Option<u16>) -> Op
         }
     }
     Some(format!("usb {wanted_vendor}:{wanted_product}"))
+}
+
+#[cfg(test)]
+mod prebuilt_tests {
+    use super::*;
+
+    /// The container always compiles with an explicit `--target`, so the
+    /// prebuilt lookup must read `target/<triple>/debug` even when the triple
+    /// equals the CLI host triple - a Linux host container-building its own
+    /// arch previously collapsed to `target/debug` and missed the binary
+    /// (#936, round-2 finding 2).
+    #[test]
+    fn prebuilt_lookup_uses_the_explicit_target_dir_for_the_host_triple() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let crate_dir = dir.path().join("svc");
+        std::fs::create_dir_all(&crate_dir)?;
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = \"svc\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )?;
+        let host = crate::resolver::host_target_triple();
+        let target_dir = dir.path().join("target");
+        let debug = target_dir.join(&host).join("debug");
+        std::fs::create_dir_all(&debug)?;
+        std::fs::write(debug.join(binary_name_with_suffix("svc")), b"bin")?;
+
+        let found = locate_prebuilt_binary(&crate_dir, "svc", &target_dir, Some(&host))?;
+        assert_eq!(found, debug.join(binary_name_with_suffix("svc")));
+
+        // The implicit `target/debug` location must NOT satisfy the lookup.
+        std::fs::remove_file(debug.join(binary_name_with_suffix("svc")))?;
+        let plain = target_dir.join("debug");
+        std::fs::create_dir_all(&plain)?;
+        std::fs::write(plain.join(binary_name_with_suffix("svc")), b"bin")?;
+        assert!(
+            locate_prebuilt_binary(&crate_dir, "svc", &target_dir, Some(&host)).is_err(),
+            "the prebuilt lookup must never collapse to the implicit target/debug"
+        );
+        Ok(())
+    }
 }

@@ -62,7 +62,6 @@ phoxal-cli-client = { path = "crates/client" }
 phoxal-cli-core = { path = "crates/core" }
 phoxal-cli-ui = { path = "crates/ui" }
 ratatui = "0.29"
-zeroize = "1.9.0"
 
 
 [workspace.lints.rust]
@@ -82,6 +81,12 @@ description.workspace = true
 documentation.workspace = true
 homepage.workspace = true
 repository.workspace = true
+
+# The shipped executable is `phoxal`; the package stays `phoxal-cli` because the
+# crate name `phoxal` is taken by the framework on crates.io.
+[[bin]]
+name = "phoxal"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
@@ -119,7 +124,6 @@ toml = { workspace = true }
 urdf-rs = { workspace = true }
 webots-proto = { workspace = true }
 jsonschema = { version = "0.46.6", default-features = false }
-zeroize = { workspace = true }
 object = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }

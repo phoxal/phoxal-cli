@@ -97,7 +97,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
     let metadata_source_participants = source_participants.clone();
     // A Suite-sourced component driver is a platform ref here too (docs
-    // #21), exactly like `check`/`run`/`deploy` - synthesized from suite
+    // #21), exactly like `check`/`run` - synthesized from suite
     // metadata rather than built from source. Only a Path/Git-overridden
     // driver crate reaches the `build` closure below.
     let platform_refs = check_artifact_refs_from_resolved(resolved);

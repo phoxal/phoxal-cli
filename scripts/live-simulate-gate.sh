@@ -3,7 +3,7 @@
 #
 # Proves the separated repos still resolve together:
 #
-#   robot.yaml -> phoxal-cli -> live resolution (native artifact suite, git
+#   robot.yaml -> phoxal -> live resolution (native artifact suite, git
 #             component commits, host tools) -> dry-run launch report
 #
 # There is NO lockfile: every run resolves live. Production reproducibility
@@ -13,8 +13,8 @@
 # Two phases:
 #
 #   Smoke (default):
-#     1. phoxal-cli simulation run default --dry-run (live resolve + no writes)
-#     2. assert no .phoxal/run or .phoxal/webots directory was generated
+#     1. phoxal simulation run default --dry-run (live resolve + no writes)
+#     2. assert no .phoxal/build or .phoxal/webots directory was generated
 #
 #   Live (--live):
 #     launch the full staged Webots simulation and supervise it until Ctrl-C.
@@ -56,22 +56,22 @@ fail() { printf "${red}FAIL${reset} %s\n" "$1" >&2; exit 1; }
   || fail "no robot.yaml in ${robot_dir} (pass ROBOT_DIR; expected framework/examples/hello-rover)"
 robot_dir="$(cd "${robot_dir}" && pwd)"
 
-CLI_BIN="${CLI_REPO}/target/debug/phoxal-cli"
+CLI_BIN="${CLI_REPO}/target/debug/phoxal"
 if [[ ! -x "${CLI_BIN}" ]]; then
-  step "building phoxal-cli"
+  step "building phoxal"
   (cd "${CLI_REPO}" && cargo build --quiet -p phoxal-cli) || fail "phoxal-cli build failed"
 fi
 
 # --- 1. live dry-run (resolve, no launch-directory writes) ------------------
 
-step "Gate -- hello-rover: phoxal-cli simulation run ${WORLD} --dry-run (live resolve)"
-if ! (cd "${robot_dir}" && rm -rf .phoxal/run .phoxal/webots \
+step "Gate -- hello-rover: phoxal simulation run ${WORLD} --dry-run (live resolve)"
+if ! (cd "${robot_dir}" && rm -rf .phoxal/build .phoxal/webots \
         && "${CLI_BIN}" simulation run "${WORLD}" --dry-run >/dev/null); then
   fail "simulation run ${WORLD} --dry-run failed (live resolution, or missing world
   ${WORLD}.wbt). If a git component ref cannot be resolved offline, pin it to a
   commit SHA in robot.yaml or run with network access."
 fi
-[[ ! -e "${robot_dir}/.phoxal/run" ]] || fail "dry-run wrote .phoxal/run"
+[[ ! -e "${robot_dir}/.phoxal/build" ]] || fail "dry-run wrote .phoxal/build"
 [[ ! -e "${robot_dir}/.phoxal/webots" ]] || fail "dry-run wrote .phoxal/webots"
 ok "dry-run resolved without local launch-directory writes"
 
@@ -88,7 +88,7 @@ fi
 
 # --- 2. live gate ----------------------------------------------------------
 
-step "Gate -- hello-rover: phoxal-cli simulation run ${WORLD} (Ctrl-C after inspection)"
+step "Gate -- hello-rover: phoxal simulation run ${WORLD} (Ctrl-C after inspection)"
 if ! (cd "${robot_dir}" && "${CLI_BIN}" simulation run "${WORLD}"); then
   fail "simulation run ${WORLD} failed"
 fi

@@ -64,7 +64,7 @@ pub struct SimulationRun {
     pub target: Option<String>,
 }
 
-/// `phoxal-cli simulation join`: joins a running multi-robot simulation
+/// `phoxal simulation join`: joins a running multi-robot simulation
 /// session. Multi-robot join lands as its own slice - this is a stub that
 /// prints a clear "not available yet" message and exits 0 (it is not an
 /// error to ask for a feature that is on the roadmap but not yet wired up;
@@ -111,6 +111,15 @@ pub struct SimPlan {
     /// contract surfaces - see `phoxal_cli_core::session::stores::runtime::RuntimeStore`'s
     /// own docs.
     pub runtime_store: phoxal_cli_core::session::stores::runtime::RuntimeStore,
+}
+
+/// Simulation always prepares from a source project, so its `PlanContext`
+/// always carries the source graph; this is the one checked unwrap (#936).
+pub(crate) fn sim_source(sim: &SimPlan) -> &phoxal_cli_core::project::launch_plan::PlanSource {
+    sim.ctx
+        .source
+        .as_ref()
+        .expect("simulation always prepares from a source project")
 }
 
 pub(crate) struct ResolvedSimulation {

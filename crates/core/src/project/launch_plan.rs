@@ -11,7 +11,7 @@ use phoxal::participant::launch::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::resolver::{ResolvedRobot, ResolvedTool};
+use super::resolver::{ResolvedRobot, official_binary_name};
 use super::suite::ArtifactKind;
 use crate::check::source::{SourceParticipant, SourceParticipantKind};
 use crate::session::{RuntimeFailurePolicy, StartupRequirement};
@@ -20,7 +20,8 @@ pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
 pub const INFRASTRUCTURE_ROUTER: &str = "infrastructure-router";
 pub const ROBOT_TOOL_JOYPAD: &str = "tool-joypad";
 pub const ROBOT_TOOL_DEVICE: &str = "tool-device";
-pub const RUNTIME_ROBOT_ROOT_RELATIVE: &str = ".phoxal/run/robot";
+/// Base directory holding one staged runtime layout per target triple.
+pub const RUNTIME_BUILD_ROOT_RELATIVE: &str = ".phoxal/build";
 pub const SIMULATOR_SUPERVISOR_PROVIDER_ID: &str = "simulator-webots-supervisor";
 pub const SIMULATOR_SUPERVISOR_ARTIFACT_NAME: &str = "webots-supervisor";
 pub const SIMULATOR_CONTROLLER_ARTIFACT_NAME: &str = "webots-controller";
@@ -30,28 +31,82 @@ pub fn simulator_controller_provider_id(robot_id: &str) -> String {
     format!("simulator-webots-controller-{robot_id}")
 }
 
+/// The staged runtime layout directory for `triple` under `project_root`:
+/// `.phoxal/build/<triple>/`. `run` and live simulation stage and execute the
+/// host triple; `build` stages any target into the same shape. This is the one
+/// runtime-root the participant launch records point at.
+#[must_use]
+pub fn runtime_layout_dir(project_root: &Path, triple: &str) -> PathBuf {
+    project_root.join(RUNTIME_BUILD_ROOT_RELATIVE).join(triple)
+}
+
 /// Mint the bounded observation identity shared by every per-robot
 /// `tool-device` launched by one canonical project supervisor.
+///
+/// The identity hashes the *logical* root - absolute and lexically normalized,
+/// but with symlinks left unresolved - never the `fs::canonicalize` real path.
+/// The production deployment (#930) is a stable symlink `/var/phoxal ->
+/// releases/<timestamp>/` that is retargeted on each activation; canonicalizing
+/// would fold the release timestamp into the identity, so every activation would
+/// mint a *new* device id and break observation continuity across releases.
+/// Hashing `/var/phoxal` as given keeps one identity across activations. The
+/// documented tradeoff: moving or copying the project directory to a genuinely
+/// different logical path is a different device, which is the correct and
+/// expected behavior for a relocated deployment.
 pub fn execution_device_id(project_root: &Path) -> Result<ExecutionDeviceId> {
-    let canonical = project_root.canonicalize().unwrap_or_else(|_| {
-        if project_root.is_absolute() {
-            project_root.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(project_root))
-                .unwrap_or_else(|_| project_root.to_path_buf())
-        }
-    });
-    let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
+    let logical = logical_root(project_root);
+    let digest = Sha256::digest(logical.as_os_str().as_encoded_bytes());
     ExecutionDeviceId::new(format!("project-{}", &hex::encode(digest)[..24]))
         .map_err(|error| anyhow!("failed to mint execution-device identity: {error}"))
+}
+
+/// The logical absolute root used for the device identity: a relative path is
+/// anchored at the current directory, then `.`/`..`/redundant-separator
+/// components are collapsed *lexically*. No filesystem lookup happens, so a
+/// symlink on the path (`/var/phoxal`) is preserved rather than resolved to its
+/// target - that symlink-independence is the whole point (see
+/// [`execution_device_id`]).
+fn logical_root(project_root: &Path) -> PathBuf {
+    let absolute = if project_root.is_absolute() {
+        project_root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(project_root))
+            .unwrap_or_else(|_| project_root.to_path_buf())
+    };
+    normalize_lexically(&absolute)
+}
+
+/// Collapse `.` and `..` components lexically, without touching the filesystem.
+/// `..` pops a preceding normal component; it is preserved when there is nothing
+/// to pop (a leading `..` on a relative remainder) so the result never silently
+/// climbs above the root prefix.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                } else {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LaunchMode {
     Run,
-    Deploy,
     /// Simulate under Webots, carrying the resolved `.wbt` world path the
     /// plan was built for. Replaces the old data-less `Sim` variant plus the
     /// `SimulatePlan::world_path` field it used to take a detour through -
@@ -68,14 +123,37 @@ pub enum LaunchMode {
 /// `LaunchPlan` - never persisted to disk. Replaces the fields the old
 /// `SimulatePlan` wrapper re-declared next to its own `LaunchPlan`
 /// (`resolved`/`project_root`/`source_participants`/`robot_path`), and the
-/// matching re-declarations in `run`'s `PreparedRun`, `deploy`'s
-/// `RenderPayloadInput`, and the `watch` configs.
+/// matching re-declarations in `run`'s `PreparedRun` and the `watch` configs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanContext {
     pub robot_path: PathBuf,
     pub project_root: PathBuf,
+    /// The resolved source graph and its source-participant records - present
+    /// only when the plan was prepared from a source project. A layout run (an
+    /// extracted `build.phoxal` or a staged `.phoxal/build/<triple>/` root) has
+    /// no source, so this is `None` there; consumers that need source state
+    /// (watch, simulation) go through [`PlanContext::source`] instead of
+    /// reading a fabricated graph (#936).
+    pub source: Option<PlanSource>,
+}
+
+/// The source-only half of a [`PlanContext`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanSource {
     pub resolved: ResolvedRobot,
     pub source_participants: Vec<SourceParticipant>,
+}
+
+impl PlanContext {
+    /// Checked access to the source graph; fails with an actionable error when
+    /// the plan came from a staged layout, which carries no source.
+    pub fn source(&self) -> anyhow::Result<&PlanSource> {
+        self.source.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "this operation requires a source project; the running plan came from a staged runtime layout, which carries no source graph"
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -232,14 +310,51 @@ pub enum LaunchOwnership {
     SimulationManaged,
 }
 
+/// How a launched participant's binary is identified in the staged runtime
+/// layout. Re-keyed on the canonical flat-`bin/` file name (#936): a plan built
+/// from a staged layout carries no source path, so the same robot produces a
+/// byte-identical plan whether the layout was just staged from a source project
+/// or extracted from a `build.phoxal` bundle. The role classifies board kind,
+/// launch env, and telemetry; `binary_name` is the flat `bin/` lookup key the
+/// loader resolves.
+///
+/// Source-specific data - the Cargo crate directory a participant is rebuilt
+/// and run from under `--watch` - deliberately does NOT live here. An extracted
+/// bundle has no crate directories at all, so keeping them out of the execution
+/// identity is what makes source and bundle plans identical. The source-staging
+/// path recovers a crate directory from its own resolved graph
+/// (`ResolvedRobot`) and source-participant records when it needs to rebuild;
+/// the plan only ever names the `bin/` entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "execution", rename_all = "snake_case")]
 pub enum ParticipantExecution {
-    OfficialArtifact { artifact_ref: String },
-    OfficialTool { artifact_ref: String },
-    UserService { crate_dir: PathBuf },
-    SourceArtifact { kind: String, crate_dir: PathBuf },
-    ComponentDriver { crate_dir: PathBuf },
+    /// An official platform artifact - a service or a Webots simulator,
+    /// vendored or built from a workspace override - resolved from
+    /// `bin/<binary_name>`.
+    OfficialArtifact { binary_name: String },
+    /// A privileged official tool, vendored or overridden, resolved from
+    /// `bin/<binary_name>`.
+    OfficialTool { binary_name: String },
+    /// A user service, resolved from `bin/<binary_name>`.
+    UserService { binary_name: String },
+    /// A component driver - one binary serving every instance of a component
+    /// id - resolved from `bin/<binary_name>`.
+    ComponentDriver { binary_name: String },
+}
+
+impl ParticipantExecution {
+    /// The canonical flat-`bin/` file name this participant's binary is
+    /// resolved under. Identical across every path that produces the same
+    /// robot's plan, so it is the sole execution identity a layout needs.
+    #[must_use]
+    pub fn binary_name(&self) -> &str {
+        match self {
+            Self::OfficialArtifact { binary_name }
+            | Self::OfficialTool { binary_name }
+            | Self::UserService { binary_name }
+            | Self::ComponentDriver { binary_name } => binary_name,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,18 +387,6 @@ pub fn build_launch_plan(
     if robots.is_empty() {
         bail!("LaunchPlan requires at least one robot");
     }
-    if matches!(mode, LaunchMode::Deploy) && robots.len() != 1 {
-        bail!("deploy LaunchPlan must contain exactly one robot");
-    }
-    if matches!(mode, LaunchMode::Deploy)
-        && robots
-            .iter()
-            .any(|robot| robot.resolved.robot.router.config.is_some())
-    {
-        bail!(
-            "deploy does not yet stage router.config; remove it for the default loopback router or run locally"
-        );
-    }
     let robots = robots
         .iter()
         .map(|robot| build_robot_launch(&mode, robot))
@@ -292,8 +395,11 @@ pub fn build_launch_plan(
     Ok(LaunchPlan { mode, robots })
 }
 
-fn tool_artifact_ref(tool: &ResolvedTool) -> String {
-    format!("{}@{}:{}", tool.repo, tool.resolved, tool.asset)
+/// The kind-stripped short name of an official tool artifact id
+/// (`tool-bus` -> `bus`), matching the CLI catalog's short name and so the
+/// canonical `bin/` binary the loader resolves the tool under.
+fn tool_short_name(artifact_id: &str) -> &str {
+    artifact_id.strip_prefix("tool-").unwrap_or(artifact_id)
 }
 
 fn build_robot_launch(
@@ -306,27 +412,19 @@ fn build_robot_launch(
         .iter()
         .map(|participant| (participant.name.as_str(), participant))
         .collect::<BTreeMap<_, _>>();
-    let mut official_artifacts = input
+    // The kind of every non-driver official the checked set can reference, so
+    // the plan can name each one's canonical `bin/` binary
+    // (`official_binary_name(kind, artifact_id)`). Suite-sourced component
+    // drivers are NOT included here: they carry `ComponentInstance` scope and
+    // are keyed uniformly by their component id through the driver branch of
+    // `participant_execution`, exactly like a workspace-built driver.
+    let official_kinds = input
         .resolved
         .platform_runtimes
         .iter()
         .chain(input.resolved.simulators.iter())
-        .map(|runtime| (runtime.name.as_str(), runtime.artifact_ref().to_string()))
+        .map(|runtime| (runtime.name.as_str(), runtime.kind))
         .collect::<BTreeMap<_, _>>();
-    // A Suite-sourced component driver is a first-class suite artifact
-    // too (docs #21): its `suite_runtime` projects onto the identical
-    // `ResolvedPlatformRuntime` shape a service/simulator resolves to, keyed
-    // here by the component id (`checked.artifact_id`) exactly like a
-    // service is keyed by its own name.
-    official_artifacts.extend(
-        input
-            .resolved
-            .components
-            .iter()
-            .filter_map(|component| component.driver.as_ref())
-            .filter_map(|driver| driver.suite_runtime.as_ref())
-            .map(|runtime| (runtime.name.as_str(), runtime.artifact_ref().to_string())),
-    );
 
     let mut participants = Vec::new();
     for checked in input
@@ -334,7 +432,7 @@ fn build_robot_launch(
         .iter()
         .filter(|participant| is_robot_launch_participant(mode, participant))
     {
-        let execution = participant_execution(checked, &source_participants, &official_artifacts)?;
+        let execution = participant_execution(checked, &source_participants, &official_kinds)?;
         let launch = participant_launch(mode, input, checked);
         let launch_ownership = launch_ownership(mode, checked);
         participants.push(ParticipantLaunchRecord {
@@ -355,19 +453,22 @@ fn build_robot_launch(
         let startup_requirement = StartupRequirement::Required;
         let runtime_failure = RuntimeFailurePolicy::StopProject;
         let execution_device_id = (tool.name == ROBOT_TOOL_DEVICE)
-            .then(|| execution_device_id(input.project_root))
+            .then(|| {
+                execution_device_id(&runtime_layout_dir(
+                    input.project_root,
+                    &input.resolved.target,
+                ))
+            })
             .transpose()?;
         participants.push(ParticipantLaunchRecord {
             artifact_id: tool.name.clone(),
-            execution: tool.path_override.as_ref().map_or_else(
-                || ParticipantExecution::OfficialTool {
-                    artifact_ref: tool_artifact_ref(tool),
-                },
-                |crate_dir| ParticipantExecution::SourceArtifact {
-                    kind: "tool".to_string(),
-                    crate_dir: crate_dir.clone(),
-                },
-            ),
+            // Vendored or workspace-overridden, a tool resolves to the one
+            // canonical `bin/` entry the loader names; whether it was rebuilt
+            // from a crate is recovered from the resolved graph at staging,
+            // never encoded in the source-free plan (#936).
+            execution: ParticipantExecution::OfficialTool {
+                binary_name: official_binary_name(ArtifactKind::Tool, tool_short_name(&tool.name)),
+            },
             launch: ParticipantLaunch {
                 participant_id: format!("{}-{}", tool.name, input.resolved.robot.robot.id),
                 incarnation: 0,
@@ -378,7 +479,10 @@ fn build_robot_launch(
                 },
                 clock: ClockMode::Real,
                 config: None,
-                robot_root: Some(robot_root_for_mode(mode, input.project_root)),
+                robot_root: Some(runtime_layout_dir(
+                    input.project_root,
+                    &input.resolved.target,
+                )),
                 component_instance: None,
                 execution_device_id,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
@@ -455,8 +559,17 @@ fn launch_ownership(
 fn participant_execution(
     checked: &graph_check::ParticipantApis,
     source_participants: &BTreeMap<&str, &SourceParticipant>,
-    official_artifacts: &BTreeMap<&str, String>,
+    official_kinds: &BTreeMap<&str, ArtifactKind>,
 ) -> Result<ParticipantExecution> {
+    // A component-instance-scoped participant is a driver: one binary named by
+    // its component id serves every instance, whether it is a workspace-built
+    // (source) driver or a suite-provided one. The layout cannot tell the two
+    // apart - both are `bin/phoxal-component-<id>` - so neither does the plan.
+    if let graph_check::ParticipantScope::ComponentInstance(_) = checked.scope {
+        return Ok(ParticipantExecution::ComponentDriver {
+            binary_name: official_binary_name(ArtifactKind::ComponentDriver, &checked.artifact_id),
+        });
+    }
     let source = source_participants
         .get(checked.participant_id.as_str())
         .or_else(|| {
@@ -469,28 +582,28 @@ fn participant_execution(
     if let Some(source) = source {
         return Ok(match source.kind {
             SourceParticipantKind::UserService => ParticipantExecution::UserService {
-                crate_dir: source.crate_dir.clone(),
+                binary_name: checked.artifact_id.clone(),
             },
-            SourceParticipantKind::OfficialService => ParticipantExecution::SourceArtifact {
-                kind: "service".to_string(),
-                crate_dir: source.crate_dir.clone(),
+            SourceParticipantKind::OfficialService => ParticipantExecution::OfficialArtifact {
+                binary_name: official_binary_name(ArtifactKind::Service, &checked.artifact_id),
             },
-            SourceParticipantKind::ComponentDriver => ParticipantExecution::ComponentDriver {
-                crate_dir: source.crate_dir.clone(),
+            SourceParticipantKind::Simulator => ParticipantExecution::OfficialArtifact {
+                binary_name: official_binary_name(ArtifactKind::Simulator, &checked.artifact_id),
             },
-            SourceParticipantKind::Tool => ParticipantExecution::SourceArtifact {
-                kind: "tool".to_string(),
-                crate_dir: source.crate_dir.clone(),
-            },
-            SourceParticipantKind::Simulator => ParticipantExecution::SourceArtifact {
-                kind: "simulator".to_string(),
-                crate_dir: source.crate_dir.clone(),
-            },
+            // Component drivers are handled by the component-instance branch
+            // above; tools never reach a robot-launch participant loop
+            // (`is_robot_launch_participant` excludes `Tool`), so neither of
+            // these source kinds is reachable here.
+            SourceParticipantKind::ComponentDriver | SourceParticipantKind::Tool => bail!(
+                "source participant {} of kind {:?} is not a launchable non-driver participant",
+                source.name,
+                source.kind
+            ),
         });
     }
-    if let Some(artifact_ref) = official_artifacts.get(checked.artifact_id.as_str()) {
+    if let Some(kind) = official_kinds.get(checked.artifact_id.as_str()) {
         return Ok(ParticipantExecution::OfficialArtifact {
-            artifact_ref: artifact_ref.clone(),
+            binary_name: official_binary_name(*kind, &checked.artifact_id),
         });
     }
     bail!(
@@ -521,7 +634,7 @@ fn participant_launch(
         // policy and their controllerArgs never render this value, so launch
         // planning needs no simulator-kind exception.
         clock: match mode {
-            LaunchMode::Run | LaunchMode::Deploy => ClockMode::Real,
+            LaunchMode::Run => ClockMode::Real,
             LaunchMode::Webots { .. } => ClockMode::Simulation,
         },
         config: input
@@ -530,25 +643,13 @@ fn participant_launch(
             .services
             .get(&checked.participant_id)
             .and_then(|service| service.config.clone()),
-        robot_root: Some(robot_root_for_mode(mode, input.project_root)),
+        robot_root: Some(runtime_layout_dir(
+            input.project_root,
+            &input.resolved.target,
+        )),
         component_instance,
         execution_device_id: None,
         shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
-    }
-}
-
-fn robot_root_for_mode(mode: &LaunchMode, project_root: &Path) -> PathBuf {
-    match mode {
-        LaunchMode::Run | LaunchMode::Webots { .. } => {
-            project_root.join(RUNTIME_ROBOT_ROOT_RELATIVE)
-        }
-        // The deployed robot root is the active generation symlink, not the
-        // flat `/opt/phoxal` - robot.yaml, structure.urdf, and phoxal-release.json
-        // are staged per-generation under `/opt/phoxal/active/` (see deploy's
-        // ACTIVE_ROOT), so a participant reading `$PHOXAL_ROBOT_ROOT/robot.yaml`
-        // must resolve through `active`. Pointing at `/opt/phoxal` makes every
-        // participant fail with "failed to read robot file /opt/phoxal/robot.yaml".
-        LaunchMode::Deploy => PathBuf::from("/opt/phoxal/active"),
     }
 }
 
@@ -640,7 +741,7 @@ fn simulator_participant_id(artifact_name: &str, robot_id: &str) -> Option<Strin
 mod tests {
     use std::path::Path;
 
-    use crate::project::resolver::{ResolvedRobot, ResolvedUserRuntime};
+    use crate::project::resolver::{ResolvedRobot, ResolvedTool, ResolvedUserRuntime};
     use crate::project::suite::ArtifactKind;
 
     use super::*;
@@ -657,7 +758,9 @@ mod tests {
         let changed_plan = PlanRevision::compile(
             3,
             LaunchPlan {
-                mode: LaunchMode::Deploy,
+                mode: LaunchMode::Webots {
+                    world: PathBuf::from("/tmp/world.wbt"),
+                },
                 robots: Vec::new(),
             },
         )?;
@@ -750,34 +853,6 @@ mod tests {
     }
 
     #[test]
-    fn deploy_plan_rejects_multiple_robots() -> anyhow::Result<()> {
-        let robot = empty_resolved_robot("robot_a")?;
-        let inputs = [
-            empty_checked_input(Path::new("/tmp/a"), &robot),
-            empty_checked_input(Path::new("/tmp/b"), &robot),
-        ];
-        let error =
-            build_launch_plan(LaunchMode::Deploy, &inputs).expect_err("deploy is one robot");
-        assert!(error.to_string().contains("exactly one robot"), "{error:#}");
-        Ok(())
-    }
-
-    #[test]
-    fn deploy_plan_rejects_unstaged_router_config() -> anyhow::Result<()> {
-        let mut robot = empty_resolved_robot("robot_a")?;
-        robot.robot.router.config = Some(PathBuf::from("router.json5"));
-        let inputs = [empty_checked_input(Path::new("/tmp/a"), &robot)];
-        let error = build_launch_plan(LaunchMode::Deploy, &inputs)
-            .expect_err("deploy must not silently ignore router.config");
-        assert!(
-            error
-                .to_string()
-                .contains("does not yet stage router.config")
-        );
-        Ok(())
-    }
-
-    #[test]
     fn run_robot_tools_have_unique_participant_ids_per_robot() -> anyhow::Result<()> {
         let mut robot_a = empty_resolved_robot("robot_a")?;
         let mut robot_b = empty_resolved_robot("robot_b")?;
@@ -844,18 +919,42 @@ mod tests {
         Ok(())
     }
 
+    /// The `/var/phoxal -> releases/<ts>/` deployment model (#930): the device
+    /// identity is taken from the *logical* symlink path, so retargeting the
+    /// symlink to a new release directory keeps the same identity - observation
+    /// continuity survives an activation. A genuinely different logical root is
+    /// still a different device.
+    #[cfg(unix)]
     #[test]
-    fn deploy_robot_root_is_the_active_generation() {
-        // Regression: deployed participants read robot.yaml/structure.urdf via
-        // `$PHOXAL_ROBOT_ROOT`, and those files are staged per-generation under
-        // `/opt/phoxal/active/` (the transactional-release symlink). Pointing the
-        // root at the flat `/opt/phoxal` made every participant on a real robot
-        // die with "failed to read robot file /opt/phoxal/robot.yaml". It must
-        // resolve through the active generation, matching deploy's ACTIVE_ROOT.
+    fn execution_device_identity_is_stable_across_symlink_retargeting() -> anyhow::Result<()> {
+        let base = tempfile::tempdir()?;
+        let release_a = base.path().join("releases/a");
+        let release_b = base.path().join("releases/b");
+        std::fs::create_dir_all(&release_a)?;
+        std::fs::create_dir_all(&release_b)?;
+        let stable = base.path().join("phoxal");
+
+        std::os::unix::fs::symlink(&release_a, &stable)?;
+        let identity_a = execution_device_id(&stable)?;
+
+        // Retarget the stable symlink to a new release, exactly as an activation
+        // does. The logical path `<base>/phoxal` is unchanged, so the identity
+        // must not move.
+        std::fs::remove_file(&stable)?;
+        std::os::unix::fs::symlink(&release_b, &stable)?;
         assert_eq!(
-            robot_root_for_mode(&LaunchMode::Deploy, Path::new("/tmp/project")),
-            PathBuf::from("/opt/phoxal/active"),
+            identity_a,
+            execution_device_id(&stable)?,
+            "retargeting the deployment symlink must preserve the device identity"
         );
+
+        // The underlying release directories are genuinely different roots.
+        assert_ne!(
+            execution_device_id(&release_a)?,
+            execution_device_id(&release_b)?,
+            "distinct logical roots must be distinct devices"
+        );
+        Ok(())
     }
 
     #[test]

@@ -28,7 +28,11 @@ pub fn artifacts_dir() -> Result<PathBuf> {
     project_state_dir().map(|root| root.join("artifacts"))
 }
 
-pub fn deploy_dir() -> Result<PathBuf> {
+/// Base directory holding the staged runtime layouts, one subdirectory per
+/// target triple (`.phoxal/build/<triple>/`). Written by the stager for `run`
+/// and live simulation; never runtime state (project.lock, supervisor.sock,
+/// and plans stay directly under `.phoxal/`).
+pub fn build_dir() -> Result<PathBuf> {
     project_state_dir().map(|root| root.join("build"))
 }
 

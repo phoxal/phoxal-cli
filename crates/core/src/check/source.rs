@@ -146,9 +146,3 @@ pub struct ToolParticipant {
     pub name: String,
     pub binary_path: PathBuf,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UserServiceImageParticipant {
-    pub name: String,
-    pub image_ref: String,
-}

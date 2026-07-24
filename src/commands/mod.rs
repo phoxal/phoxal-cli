@@ -1,15 +1,15 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 use crate::AppContext;
 
 pub mod behavior;
+pub mod build;
 pub mod check;
-pub mod deploy;
 pub mod doctor;
 pub mod init;
 pub mod logs;
@@ -18,6 +18,7 @@ pub mod run;
 pub mod self_cmd;
 pub mod service;
 pub mod simulate;
+pub mod start;
 pub mod status;
 pub mod update;
 pub mod validate;
@@ -61,6 +62,48 @@ pub(crate) fn load_suite_for_robot_from_source(
         },
         &locked.version,
     )
+}
+
+/// The locked framework train version for `project_root`, honoring the test
+/// override so unit tests need no on-disk registry. This is the version the
+/// vendored suite and artifact blobs are keyed under.
+fn locked_train_version(project_root: &std::path::Path) -> Result<String> {
+    #[cfg(test)]
+    if let Ok(version) = std::env::var("PHOXAL_TEST_LOCKED_TRAIN") {
+        return Ok(version);
+    }
+    Ok(phoxal_cli_core::project::train::resolve_locked_train(project_root)?.version)
+}
+
+/// Load the suite the offline execution paths (`run`/`start`/`build`/`watch`)
+/// resolve against, strictly without touching the network (#936, finding 1).
+///
+/// An explicit *local* `--suite` path is honored as a dev/test override and read
+/// directly; an HTTPS `--suite` is rejected, because these paths never fetch -
+/// `phoxal update` is the only fetcher. With no override the persisted suite that
+/// `phoxal update` vendored for the locked train is read from `.phoxal/artifacts`,
+/// and its absence is an actionable "run `phoxal update`" error, never a fetch.
+pub(crate) fn load_vendored_suite_for_robot(
+    suite_source: Option<String>,
+    project_root: &std::path::Path,
+) -> Result<Option<phoxal_cli_core::project::suite::Suite>> {
+    if let Some(source) = &suite_source {
+        if source.starts_with("https://") || source.starts_with("http://") {
+            bail!(
+                "`run`/`start`/`build` never fetch a suite over the network; pass a local --suite path, or run `phoxal update` to vendor the locked train"
+            );
+        }
+        return Ok(Some(phoxal_cli_core::project::suite::read_suite_path(
+            std::path::Path::new(source),
+        )?));
+    }
+    let locked_version = locked_train_version(project_root)?;
+    let suite = crate::native_artifacts::load_vendored_suite(&locked_version)?.with_context(|| {
+        format!(
+            "the locked train {locked_version} suite is not vendored for this project; run `phoxal update`"
+        )
+    })?;
+    Ok(Some(suite))
 }
 
 /// Version string shared by the `--version` flag and the `version` subcommand,
@@ -107,7 +150,7 @@ pub fn version_summary() -> VersionSummary {
 
 impl VersionArgs {
     pub fn run(&self) -> Result<()> {
-        println!("phoxal-cli {}", long_version());
+        println!("phoxal {}", long_version());
         println!(
             "default suite URL: the immutable suite attached to the Cargo.lock-selected framework release"
         );
@@ -121,11 +164,11 @@ impl VersionArgs {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "phoxal-cli",
+    name = "phoxal",
     version = long_version(),
-    about = "Build, check, simulate, and deploy Phoxal robot projects.",
-    long_about = "Build, check, simulate, and deploy Phoxal robot projects.\n\n\
-                  phoxal-cli reads robot.yaml, resolves the graph against a verified generated artifact suite when official native artifacts are needed, and drives the develop/simulate/deploy loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `check`, `simulate`, and `deploy --dry-run --target aarch64`."
+    about = "Build, check, and simulate Phoxal robot projects.",
+    long_about = "Build, check, and simulate Phoxal robot projects.\n\n\
+                  phoxal reads robot.yaml, resolves the graph against a verified generated artifact suite when official native artifacts are needed, and drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `check` and `simulate`."
 )]
 pub struct Cli {
     #[arg(
@@ -139,14 +182,14 @@ pub struct Cli {
         env = phoxal_cli_core::project::suite::SUITE_SOURCE_ENV,
         global = true,
         value_name = "PATH_OR_HTTPS_URL",
-        help = "Artifact suite override. Local paths are read directly; HTTPS sources (including the default) are always fetched fresh - there is no on-disk cache of this fetch."
+        help = "Artifact suite override. Local paths are read directly. run/start/build/watch reject HTTPS values and otherwise use the suite `phoxal update` persisted into .phoxal/artifacts; check/validate/service/simulate fetch HTTPS sources fresh."
     )]
     pub suite_source: Option<String>,
     #[arg(
         long,
         env = phoxal_cli_core::project::suite::OFFLINE_ENV,
         global = true,
-        help = "Disable network access. Resolution requires --suite <local-path> and uses only project-vendored artifacts."
+        help = "Disable network access. Fetching commands then require --suite <local-path>; run/start/build/watch are always offline, using the vendored suite and artifacts from `phoxal update`."
     )]
     pub offline: bool,
     #[command(subcommand)]
@@ -163,6 +206,13 @@ pub enum RootCommand {
                       Resolves robot.yaml and the Cargo workspace, then reads every participant's compiled-in contract metadata (official artifacts from the suite and workspace-built services, tools, and component drivers) and validates the graph with phoxal::check. Contract compatibility is per-contract name identity (D1) - two participants naming the same version-qualified contract are compatible by construction, so there is no wire-shape hash to agree on. This also validates each user service's manifest config against its emitted JSON Schema."
     )]
     Check(check::CheckCmd),
+    #[command(
+        about = "Stage a runtime layout for a target and archive it as build.phoxal.",
+        long_about = "Stage a runtime layout for a target and archive it as a deterministic build.phoxal.\n\n\
+                      `build` refreshes staging exactly as `run` would - but for the selected --target rather than the host - validates the staged layout through the shared loader against the declared target architecture (no execution), and archives the staged layout deterministically: identical contents always produce identical archive bytes. The default output is a sibling of the staged directory, <project>/.phoxal/build/<triple>.build.phoxal, and the path plus its sha256 are printed at the end.\n\n\
+                      `--builder` selects where compilation happens, never a different output: `local` (the default) compiles on this host with `cargo build --target` (a missing cross toolchain is an actionable `rustup target add` error - the CLI never installs toolchains); `container` compiles natively inside the pinned official rust image for the target platform (without --target it targets this host's architecture on linux-gnu; --builder-image overrides the image) and then reuses the identical host-side staging + archive; `ssh://user@host` is the remote builder, which lands in phase 11 (#930). Every backend produces the identical deterministic build.phoxal. Extract a bundle with `phoxal run <dir>` after `tar -xzf build.phoxal`, or plain `tar` - the archive is ordinary tar.gz."
+    )]
+    Build(build::Build),
     // Preserved prototype for the parked behavior-orchestration design. Keep it
     // out of the supported command listing until that plan is rewritten.
     #[command(about = "Experimental behavior-orchestration prototype.", hide = true)]
@@ -173,6 +223,12 @@ pub enum RootCommand {
     Simulation(simulate::Simulation),
     #[command(about = "Run the resolved robot graph with the host-native supervisor.")]
     Run(run::Run),
+    #[command(
+        about = "Run a robot instance headless (no TUI); the systemd-facing verb.",
+        long_about = "Run a robot instance headless, with no terminal UI - the verb `phoxal.service` invokes.\n\n\
+                      Uses the same universal pipeline as `run`: it classifies the root, refreshes staging when it is a buildable source project, and supervises the staged runtime layout. Invoked interactively it behaves like `run -d` - it detaches the resident supervisor, returns once required participants are ready, and prints how to attach or stop. Invoked under systemd (`Type=notify`) it stays the in-process foreground resident, signalling `READY=1` after readiness and pinging the watchdog while it runs."
+    )]
+    Start(start::Start),
     #[command(about = "Attach a thin terminal client to a running project supervisor.")]
     Attach(resident::Attach),
     #[command(about = "Orderly stop a running project supervisor.")]
@@ -181,17 +237,15 @@ pub enum RootCommand {
     Logs(logs::Logs),
     #[command(about = "Inspect live robot state through typed bus contracts.")]
     Status(status::Status),
-    #[command(about = "Deploy the checked graph as a native systemd payload.")]
-    Deploy(deploy::Deploy),
     #[command(about = "Verify the locked train suite and atomically refresh cached artifacts.")]
     Update(update::Update),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
     #[command(about = "Inspect the user-service suite.")]
     Service(service::Service),
-    #[command(about = "Print the phoxal-cli version and suite source defaults.")]
+    #[command(about = "Print the phoxal version and suite source defaults.")]
     Version(VersionArgs),
-    #[command(name = "self", about = "Manage this phoxal-cli installation.")]
+    #[command(name = "self", about = "Manage this phoxal installation.")]
     SelfCmd(self_cmd::SelfCmd),
 }
 
@@ -216,15 +270,16 @@ impl RootCommand {
         match self {
             Self::Init(command) => command.run(app).await,
             Self::Check(command) => command.run(app).await,
+            Self::Build(command) => command.run(app).await,
             Self::Behavior(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
             Self::Simulation(command) => command.run(app).await,
             Self::Run(command) => command.run(app).await,
+            Self::Start(command) => command.run(app).await,
             Self::Attach(command) => command.run(app).await,
             Self::Stop(command) => command.run(app).await,
             Self::Logs(command) => command.run(app).await,
             Self::Status(command) => command.run(app).await,
-            Self::Deploy(command) => command.run(app).await,
             Self::Update(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
             Self::Service(command) => command.run(app).await,
@@ -260,6 +315,36 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_paths::test_support::ScratchPhoxalHome;
+
+    /// A cold vendored store (no `phoxal update` yet) makes the offline suite
+    /// loader fail with the actionable "run `phoxal update`" error, without ever
+    /// attempting a fetch (#936, finding 1).
+    #[test]
+    fn offline_suite_loader_points_a_cold_store_at_phoxal_update() {
+        let _scratch = ScratchPhoxalHome::new().expect("scratch home");
+        let root = crate::host_paths::project_root().expect("project root");
+
+        let error = load_vendored_suite_for_robot(None, &root)
+            .expect_err("a cold store has no vendored suite");
+        let message = format!("{error:#}");
+        assert!(message.contains("phoxal update"), "{message}");
+    }
+
+    /// The offline suite loader never fetches: an HTTPS `--suite` is rejected
+    /// outright rather than downloaded (#936, finding 1).
+    #[test]
+    fn offline_suite_loader_rejects_an_https_suite_source() {
+        let _scratch = ScratchPhoxalHome::new().expect("scratch home");
+        let root = crate::host_paths::project_root().expect("project root");
+
+        let error = load_vendored_suite_for_robot(
+            Some("https://example.com/suite.json".to_string()),
+            &root,
+        )
+        .expect_err("run/start/build never fetch a suite");
+        assert!(format!("{error:#}").contains("never fetch"), "{error:#}");
+    }
 
     #[test]
     fn version_summary_reports_cli_support_not_a_graph_wide_api_version() {
@@ -295,23 +380,103 @@ mod tests {
     /// terminal. Dry-run and join commands never build a session controller.
     #[test]
     fn enters_interactive_session_covers_run_and_live_simulate_only() {
-        let run = Cli::try_parse_from(["phoxal-cli", "run"]).unwrap();
+        let run = Cli::try_parse_from(["phoxal", "run"]).unwrap();
         assert!(run.command.enters_interactive_session());
 
-        let simulate_live = Cli::try_parse_from(["phoxal-cli", "simulation", "run", "default"])
+        let simulate_live = Cli::try_parse_from(["phoxal", "simulation", "run", "default"])
             .expect("simulation run should parse");
         assert!(simulate_live.command.enters_interactive_session());
 
         let simulate_dry_run =
-            Cli::try_parse_from(["phoxal-cli", "simulation", "run", "default", "--dry-run"])
+            Cli::try_parse_from(["phoxal", "simulation", "run", "default", "--dry-run"])
                 .expect("simulation run --dry-run should parse");
         assert!(!simulate_dry_run.command.enters_interactive_session());
 
-        let simulate_join = Cli::try_parse_from(["phoxal-cli", "simulation", "join"])
+        let simulate_join = Cli::try_parse_from(["phoxal", "simulation", "join"])
             .expect("simulation join should parse");
         assert!(!simulate_join.command.enters_interactive_session());
 
-        let check = Cli::try_parse_from(["phoxal-cli", "check"]).unwrap();
+        let check = Cli::try_parse_from(["phoxal", "check"]).unwrap();
         assert!(!check.command.enters_interactive_session());
+    }
+
+    /// The `phoxal build` clap surface parses the full flag set: the project
+    /// positional, `--target`, `--builder` (local/container/ssh), `--output`,
+    /// `--container-engine`, and `--builder-image`.
+    #[test]
+    fn build_command_parses_its_full_flag_surface() {
+        let bare = Cli::try_parse_from(["phoxal", "build"]).expect("bare build should parse");
+        let RootCommand::Build(build) = bare.command else {
+            panic!("expected a build command");
+        };
+        assert_eq!(build.builder, "local");
+        assert!(build.target.is_none());
+        assert_eq!(
+            build.container_engine,
+            build::container::ContainerEngine::Docker
+        );
+
+        let full = Cli::try_parse_from([
+            "phoxal",
+            "build",
+            "project",
+            "--target",
+            "aarch64-unknown-linux-gnu",
+            "--builder",
+            "container",
+            "--output",
+            "out/bundle.build.phoxal",
+            "--container-engine",
+            "podman",
+            "--builder-image",
+            "ghcr.io/example/custom:latest",
+        ])
+        .expect("full build flags should parse");
+        let RootCommand::Build(build) = full.command else {
+            panic!("expected a build command");
+        };
+        assert_eq!(
+            build.project.as_deref(),
+            Some(std::path::Path::new("project"))
+        );
+        assert_eq!(build.target.as_deref(), Some("aarch64-unknown-linux-gnu"));
+        assert_eq!(build.builder, "container");
+        assert_eq!(
+            build.output.as_deref(),
+            Some(std::path::Path::new("out/bundle.build.phoxal"))
+        );
+        assert_eq!(
+            build.container_engine,
+            build::container::ContainerEngine::Podman
+        );
+        assert_eq!(
+            build.builder_image.as_deref(),
+            Some("ghcr.io/example/custom:latest")
+        );
+    }
+
+    /// An `ssh://` builder is accepted by clap (it is a free-form string) and
+    /// rejected only at run time; the value round-trips through parsing.
+    #[test]
+    fn build_command_accepts_the_ssh_builder_string() {
+        let cli =
+            Cli::try_parse_from(["phoxal", "build", "--builder", "ssh://dev@jetson-nano-orin"])
+                .expect("ssh builder string should parse");
+        let RootCommand::Build(build) = cli.command else {
+            panic!("expected a build command");
+        };
+        assert_eq!(build.builder, "ssh://dev@jetson-nano-orin");
+    }
+
+    /// `phoxal start` is headless: it never drives the interactive
+    /// `SessionController`/TUI, so it must never be classified as an interactive
+    /// session (that classification is exactly what mounts the TUI for `run`).
+    #[test]
+    fn start_is_headless_and_never_enters_the_interactive_session() {
+        let start = Cli::try_parse_from(["phoxal", "start"]).expect("start should parse");
+        assert!(!start.command.enters_interactive_session());
+        let start = Cli::try_parse_from(["phoxal", "start", "/var/phoxal"])
+            .expect("start with a root should parse");
+        assert!(!start.command.enters_interactive_session());
     }
 }

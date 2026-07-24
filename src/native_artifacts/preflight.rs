@@ -116,6 +116,37 @@ pub fn prepare_descriptors_with_preflight(
     )
 }
 
+/// Strictly validate that every artifact `descriptors` requires is already
+/// vendored and digest-current in the project-local `.phoxal/artifacts` store,
+/// without touching the network (#936, finding 1). This replaces the download
+/// preflight on the `run`/`start`/`build`/`watch` execution paths: those paths
+/// never fetch, so a missing or stale artifact is a hard, actionable error that
+/// names what is absent and points at `phoxal update`, rather than a silent
+/// download. Descriptors with no URL (source overrides, asset-only entries) are
+/// resolved elsewhere and are not part of the vendored-blob completeness set.
+pub(crate) fn ensure_vendored_completeness(descriptors: &[NativeArtifactDescriptor]) -> Result<()> {
+    let missing = descriptors
+        .iter()
+        .filter(|descriptor| should_prepare_descriptor(descriptor))
+        .filter(|descriptor| !descriptor_is_current(descriptor))
+        .map(|descriptor| {
+            format!(
+                "{} [{}] {}",
+                descriptor.package_id,
+                descriptor.target.as_deref().unwrap_or("assets"),
+                descriptor.version
+            )
+        })
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the locked train's artifacts are not fully vendored for this project; run `phoxal update` to fetch them. Missing or stale: {}",
+        missing.join(", ")
+    );
+}
+
 pub(crate) fn should_prepare_descriptor(descriptor: &NativeArtifactDescriptor) -> bool {
     if descriptor.url.is_empty() {
         return false;
@@ -151,4 +182,51 @@ pub(crate) fn free_disk_bytes(path: &Path) -> Result<u64> {
 #[cfg(not(unix))]
 pub(crate) fn free_disk_bytes(_path: &Path) -> Result<u64> {
     bail!("free-disk reporting is unavailable on this platform")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host_paths::test_support::ScratchPhoxalHome;
+    use phoxal_cli_core::project::suite::ArtifactKind;
+
+    fn descriptor(url: &str, sha: &str) -> NativeArtifactDescriptor {
+        NativeArtifactDescriptor {
+            package_id: "phoxal/service-drive".to_string(),
+            kind: ArtifactKind::Service,
+            name: "drive".to_string(),
+            version: "0.1.0".to_string(),
+            url: url.to_string(),
+            sha256: sha.to_string(),
+            size: 0,
+            binary_name: "phoxal-service-drive".to_string(),
+            target: Some(crate::resolver::host_target_triple()),
+        }
+    }
+
+    /// A required artifact that is not vendored fails the completeness check with
+    /// the actionable "run `phoxal update`" error - and, because the check is
+    /// filesystem-only, it never attempts a fetch: the URL points at an
+    /// unroutable address, so any connection attempt would hang/time out rather
+    /// than return the update error immediately (#936, finding 1).
+    #[test]
+    fn cold_store_completeness_points_at_phoxal_update_without_network() {
+        let _scratch = ScratchPhoxalHome::new().unwrap();
+        let cold = descriptor("https://10.255.255.1/drive.tar.gz", &"a".repeat(64));
+        let error = ensure_vendored_completeness(std::slice::from_ref(&cold))
+            .expect_err("a cold store must fail completeness");
+        let message = format!("{error:#}");
+        assert!(message.contains("phoxal update"), "{message}");
+        assert!(message.contains("phoxal/service-drive"), "{message}");
+    }
+
+    /// Descriptors with no vendored blob (a source override or asset-only entry)
+    /// are resolved elsewhere and never block completeness.
+    #[test]
+    fn source_override_descriptors_are_not_required_to_be_vendored() {
+        let _scratch = ScratchPhoxalHome::new().unwrap();
+        let no_url = descriptor("", "");
+        ensure_vendored_completeness(std::slice::from_ref(&no_url))
+            .expect("no-url descriptors are not part of the vendored set");
+    }
 }
