@@ -132,7 +132,7 @@ fn apply_workspace_runtimes(
     platform_runtimes: &mut [ResolvedPlatformRuntime],
     _simulators: &mut [ResolvedPlatformRuntime],
     components: &mut [ResolvedComponent],
-    tools: &mut Vec<ResolvedTool>,
+    tools: &mut [ResolvedTool],
 ) -> Result<(Vec<ResolvedUserRuntime>, Vec<ResolvedPathOverride>)> {
     use phoxal_cli_core::project::train::WorkspaceRuntimeKind;
 
@@ -174,37 +174,31 @@ fn apply_workspace_runtimes(
             }
             WorkspaceRuntimeKind::Tool => {
                 let official_package = format!("phoxal/tool-{logical_name}");
-                if let Some(official) = tools
+                // A `tools/` workspace crate whose name matches an official
+                // tool identity still overrides that official binary. A crate
+                // that matches NO official identity is a precise authoring
+                // error: additional (non-official) user tools were removed from
+                // the runtime model (#936). User code in the graph is user
+                // services plus component drivers, period.
+                let Some(official) = tools
                     .iter_mut()
                     .find(|entry| entry.package == official_package)
-                {
-                    official.path_override = Some(runtime.crate_dir.clone());
-                    official.asset = format!("path:{}", runtime.crate_dir.display());
-                    overrides.push(ResolvedPathOverride {
-                        key: official_package,
-                        kind: ResolvedPathOverrideKind::Tool,
-                        artifact_name: logical_name,
-                        path: runtime.crate_dir.clone(),
-                    });
-                } else {
-                    tools.push(ResolvedTool {
-                        kind: ArtifactKind::Tool,
-                        name: format!("tool-{logical_name}"),
-                        package: format!("user/tool-{logical_name}"),
-                        requested: "source".to_string(),
-                        resolved: "source".to_string(),
-                        repo: "workspace".to_string(),
-                        asset: format!("path:{}", runtime.crate_dir.display()),
-                        binary_name: runtime.binary_names[0].clone(),
-                        sha256: hash_tree(&runtime.crate_dir)?,
-                        url: None,
-                        size: None,
-                        published: true,
-                        path_override: Some(runtime.crate_dir.clone()),
-                        train: String::new(),
-                        target: String::new(),
-                    });
-                }
+                else {
+                    bail!(
+                        "workspace crate tools/{logical_name} matches no official tool identity; \
+                         additional user tools are not part of the runtime model - make it a \
+                         service instead (move it to services/{logical_name} and declare it \
+                         under `services:` in robot.yaml)"
+                    );
+                };
+                official.path_override = Some(runtime.crate_dir.clone());
+                official.asset = format!("path:{}", runtime.crate_dir.display());
+                overrides.push(ResolvedPathOverride {
+                    key: official_package,
+                    kind: ResolvedPathOverrideKind::Tool,
+                    artifact_name: logical_name,
+                    path: runtime.crate_dir.clone(),
+                });
             }
             WorkspaceRuntimeKind::Component => {
                 let matching = components
@@ -1101,5 +1095,125 @@ services:
         };
 
         assert_eq!(runtime.artifact_ref(), "service-asset:v1-stable");
+    }
+
+    #[test]
+    fn unmatched_tools_crate_is_a_precise_make_it_a_service_error() -> anyhow::Result<()> {
+        use phoxal_cli_core::project::train::{WorkspaceRuntime, WorkspaceRuntimeKind};
+
+        // A `tools/` workspace crate that matches NO official tool identity is a
+        // resolve-time error telling the author to make it a service - additional
+        // user tools are no longer part of the runtime model (#936).
+        let robot = Robot::parse_from_string(
+            r#"schema: robot/v0
+robot:
+  id: bot
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: omnidirectional
+    actuators: []
+    encoders: []
+  components: {}
+"#,
+        )?;
+        let project = tempfile::tempdir()?;
+        let runtimes = vec![WorkspaceRuntime {
+            package: "custom".to_string(),
+            crate_dir: project.path().join("tools/custom"),
+            kind: WorkspaceRuntimeKind::Tool,
+            binary_names: vec!["custom".to_string()],
+            component_assets: None,
+        }];
+        let mut platform_runtimes = Vec::new();
+        let mut simulators = Vec::new();
+        let mut components = Vec::new();
+        let mut tools = Vec::new();
+        let error = apply_workspace_runtimes(
+            &robot,
+            project.path(),
+            &runtimes,
+            &mut platform_runtimes,
+            &mut simulators,
+            &mut components,
+            &mut tools,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("tools/custom"), "{error}");
+        assert!(error.contains("make it a service"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn tools_crate_matching_an_official_identity_still_overrides_it() -> anyhow::Result<()> {
+        use phoxal_cli_core::project::train::{WorkspaceRuntime, WorkspaceRuntimeKind};
+
+        let robot = Robot::parse_from_string(
+            r#"schema: robot/v0
+robot:
+  id: bot
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: omnidirectional
+    actuators: []
+    encoders: []
+  components: {}
+"#,
+        )?;
+        let project = tempfile::tempdir()?;
+        let runtimes = vec![WorkspaceRuntime {
+            package: "joypad".to_string(),
+            crate_dir: project.path().join("tools/joypad"),
+            kind: WorkspaceRuntimeKind::Tool,
+            binary_names: vec!["joypad".to_string()],
+            component_assets: None,
+        }];
+        let mut platform_runtimes = Vec::new();
+        let mut simulators = Vec::new();
+        let mut components = Vec::new();
+        // An official `phoxal/tool-joypad` is present in the resolved set.
+        let mut tools = vec![ResolvedTool {
+            kind: ArtifactKind::Tool,
+            name: "tool-joypad".to_string(),
+            package: "phoxal/tool-joypad".to_string(),
+            requested: "0.1.0".to_string(),
+            resolved: "0.1.0".to_string(),
+            repo: "phoxal/framework".to_string(),
+            asset: "joypad-0.1.0.tar.gz".to_string(),
+            binary_name: "phoxal-tool-joypad".to_string(),
+            sha256: "0".repeat(64),
+            url: None,
+            size: None,
+            published: true,
+            path_override: None,
+            train: "0.36.0".to_string(),
+            target: host_target_triple(),
+        }];
+        let (_user_runtimes, overrides) = apply_workspace_runtimes(
+            &robot,
+            project.path(),
+            &runtimes,
+            &mut platform_runtimes,
+            &mut simulators,
+            &mut components,
+            &mut tools,
+        )?;
+        assert_eq!(
+            tools[0].path_override.as_deref(),
+            Some(runtimes[0].crate_dir.as_path())
+        );
+        assert!(
+            overrides
+                .iter()
+                .any(|override_| override_.key == "phoxal/tool-joypad"),
+            "official tool override must be recorded"
+        );
+        Ok(())
     }
 }
