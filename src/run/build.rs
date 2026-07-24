@@ -113,8 +113,17 @@ pub(crate) fn build_source_binary(
         format!("Building {preferred_name}"),
         || {
             let mut command = Command::new("cargo");
+            // `--locked` pins the build to the committed `Cargo.lock`: staging
+            // is reproducible and cargo never silently rewrites the lock, so a
+            // stale or missing lock is a hard, actionable error instead of a
+            // quiet resolve. We deliberately do NOT add `--offline` here: #936's
+            // strict-offline guarantee governs the suite/artifact store (which
+            // has `phoxal update` to pre-vendor it), not the crate registry -
+            // there is no phoxal-level pre-fetch for Cargo dependencies, so a
+            // first build in a fresh checkout must still be able to fetch them.
             command
                 .arg("build")
+                .arg("--locked")
                 .arg("-p")
                 .arg(&package_name)
                 .arg("--bin")
@@ -131,7 +140,8 @@ pub(crate) fn build_source_binary(
             })?;
             if !status.success() {
                 bail!(
-                    "cargo build failed for participant {preferred_name} in {} with status {status}",
+                    "cargo build (--locked) failed for participant {preferred_name} in {} with status {status}; \
+                     if this is a lockfile mismatch, run `cargo update` (or `cargo generate-lockfile`) in the project and commit the result",
                     crate_dir.display()
                 );
             }
@@ -207,9 +217,13 @@ fn ensure_cross_toolchain(triple: &str) -> Result<()> {
 }
 
 pub(crate) fn cargo_target_dir(crate_dir: &Path) -> Result<PathBuf> {
+    // `--locked` keeps metadata reads on the committed `Cargo.lock` too, so
+    // resolving the target directory never triggers a lock rewrite or a
+    // registry resolve (see the `cargo build` invocation above for why
+    // `--offline` is intentionally not added).
     let output = crate::shell::run_stdout(
         "cargo",
-        ["metadata", "--format-version", "1", "--no-deps"],
+        ["metadata", "--format-version", "1", "--no-deps", "--locked"],
         Some(crate_dir),
     )?;
     let json: Value = serde_json::from_str(&output).context("cargo metadata was not JSON")?;

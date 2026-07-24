@@ -1246,6 +1246,17 @@ fn write_fake_simulator_crate(dir: &Path, bin_name: &str) -> Result<()> {
         dir.join("src/main.rs"),
         "fn main() {\n    println!(\"fake simulator binary\");\n}\n",
     )?;
+    // Staging now builds with `cargo build --locked` (#936, finding 7), so the
+    // stand-in crate needs a committed lockfile exactly like a real project.
+    anyhow::ensure!(
+        std::process::Command::new("cargo")
+            .arg("generate-lockfile")
+            .current_dir(dir)
+            .status()?
+            .success(),
+        "failed to generate fixture Cargo.lock in {}",
+        dir.display()
+    );
     Ok(())
 }
 
