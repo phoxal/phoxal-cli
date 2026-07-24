@@ -9,6 +9,7 @@ pub mod artifacts;
 pub mod check;
 pub mod deploy;
 pub mod project;
+pub mod schema;
 pub mod session;
 pub mod simulation;
 

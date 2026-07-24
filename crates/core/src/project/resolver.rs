@@ -290,6 +290,7 @@ pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
 }
 
 pub fn load_robot(path: &Path) -> Result<Robot> {
+    crate::schema::ensure_supported_revision(path, crate::schema::DocumentKind::Robot)?;
     let robot = phoxal::model::robot::Robot::read_from_path(path)
         .with_context(|| format!("failed to read robot file {}", path.display()))?
         .into_v0();
@@ -353,6 +354,22 @@ mod tests {
             official_binary_name(ArtifactKind::ComponentDriver, "ddsm115"),
             "phoxal-component-ddsm115"
         );
+    }
+
+    #[test]
+    fn load_robot_gates_an_unsupported_schema_revision_before_parsing() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join(ROBOT_FILE);
+        std::fs::write(
+            &path,
+            "schema: robot/v1\nrobot:\n  id: rover\n  namespace: dev\n",
+        )?;
+        let error = load_robot(&path).expect_err("robot/v1 must be gated");
+        let message = format!("{error:#}");
+        assert!(message.contains("robot/v1"), "{message}");
+        assert!(message.contains("Update phoxal-cli"), "{message}");
+        assert!(!message.contains("unknown variant"), "{message}");
+        Ok(())
     }
 
     #[test]

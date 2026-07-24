@@ -91,6 +91,10 @@ pub(crate) fn stage_simulation_for_robot(
                 component.source_name
             )
         })?;
+        phoxal_cli_core::schema::ensure_supported_revision(
+            &crate_dir.join("component.yaml"),
+            phoxal_cli_core::schema::DocumentKind::Component,
+        )?;
         let component_model = phoxal::model::component::Component::read_from_dir(&crate_dir)
             .with_context(|| {
                 format!(
