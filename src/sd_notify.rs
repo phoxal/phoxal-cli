@@ -81,12 +81,21 @@ impl SdNotify {
         let addr_len = (offset + needed) as libc::socklen_t;
 
         // SAFETY: a standard unbound datagram socket; the returned fd transfers
-        // once into the OwnedFd.
-        let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0) };
+        // once into the OwnedFd. `SOCK_CLOEXEC` closes the fd atomically at
+        // socket creation on platforms that support it (Linux/Android), so it
+        // never leaks across a concurrent `exec` (the supervisor spawns
+        // participants); macOS lacks the flag on `socket`, so `set_cloexec`
+        // below sets `FD_CLOEXEC` portably right after creation.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let sock_type = libc::SOCK_DGRAM | libc::SOCK_CLOEXEC;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let sock_type = libc::SOCK_DGRAM;
+        let raw = unsafe { libc::socket(libc::AF_UNIX, sock_type, 0) };
         if raw < 0 {
             return Err(std::io::Error::last_os_error()).context("create sd_notify socket");
         }
         let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        set_cloexec(&fd).context("set FD_CLOEXEC on the sd_notify socket")?;
         Ok(Self {
             fd,
             addr,
@@ -131,6 +140,28 @@ impl SdNotify {
     }
 }
 
+/// Set `FD_CLOEXEC` on `fd` so it is closed on every `exec`. This is the
+/// portable path (it works on macOS, which cannot request `SOCK_CLOEXEC` on
+/// `socket`); on Linux the socket already carries the flag from creation and
+/// this is a cheap idempotent confirmation. Without it the notify datagram
+/// socket would leak into every participant the supervisor spawns.
+fn set_cloexec(fd: &OwnedFd) -> Result<()> {
+    let raw = fd.as_raw_fd();
+    // SAFETY: `raw` is a live fd owned by `fd` for the duration of the call.
+    let flags = unsafe { libc::fcntl(raw, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error()).context("read fd flags");
+    }
+    if flags & libc::FD_CLOEXEC == libc::FD_CLOEXEC {
+        return Ok(());
+    }
+    // SAFETY: same live fd; setting the close-on-exec bit is side-effect free.
+    if unsafe { libc::fcntl(raw, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error()).context("set fd flags");
+    }
+    Ok(())
+}
+
 /// The watchdog ping interval from the current environment: half of
 /// `WATCHDOG_USEC`, but only when `WATCHDOG_PID` is unset or names this process.
 fn watchdog_ping_interval_from_env() -> Option<Duration> {
@@ -169,6 +200,26 @@ mod tests {
             Some(Duration::from_micros(1))
         );
         assert_eq!(watchdog_ping_interval_from_usec(0), None);
+    }
+
+    /// The notify socket must never leak into a participant the supervisor
+    /// `exec`s: it carries `FD_CLOEXEC` right after creation, on every platform.
+    #[test]
+    fn notify_socket_is_close_on_exec() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("notify.sock");
+        let _receiver = UnixDatagram::bind(&path)?;
+
+        let notify = SdNotify::connect(path.as_os_str())?;
+        // SAFETY: the fd is owned and live for the duration of the call.
+        let flags = unsafe { libc::fcntl(notify.fd.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0, "fcntl(F_GETFD) failed");
+        assert_eq!(
+            flags & libc::FD_CLOEXEC,
+            libc::FD_CLOEXEC,
+            "the sd_notify socket must be close-on-exec"
+        );
+        Ok(())
     }
 
     #[test]
