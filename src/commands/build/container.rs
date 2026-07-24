@@ -1,22 +1,45 @@
 //! The container builder engine seam (#936).
 //!
 //! `phoxal build --builder container` compiles the workspace user/driver crates
-//! inside a per-target toolchain image, then hands the built binaries back to the
-//! same host-side staging + validation + deterministic archiving every other
-//! builder uses. The container is only a compilation environment: it mounts a
-//! deterministic source snapshot, the host's Cargo registry/git caches, and the
-//! vendored `.phoxal/artifacts`, runs one `cargo build --workspace --target`
-//! inside the image, and never produces a Docker/OCI image.
+//! inside a pinned official Docker `rust` image, then hands the built binaries
+//! back to the same host-side staging + validation + deterministic archiving
+//! every other builder uses. The container is only a compilation environment: it
+//! mounts a deterministic source snapshot, the host's Cargo registry/git caches,
+//! and the vendored `.phoxal/artifacts`, runs one
+//! `cargo build --workspace --locked --target` inside the image, and never
+//! produces a Docker/OCI image.
 //!
-//! The engine invocation is behind a small seam - [`EngineInvocation`] captures
-//! exactly the argv, and [`EngineRunner`] executes it - so unit tests assert the
-//! command construction (mounts, image ref, env, cargo args) without a container
-//! engine installed. The real runner shells out to `docker`/`podman`.
+//! ## Default image strategy (human-decided 2026-07-24)
+//!
+//! The default image is the pinned official Docker Hub `rust` image
+//! ([`DEFAULT_BUILDER_IMAGE`]), NOT a `cross-rs` per-target image. The cross-rs
+//! images ship no Rust toolchain of their own - the `cross` tool bind-mounts the
+//! host's Linux toolchain into them, which is structurally impossible from a
+//! macOS host. The official `rust` image carries a complete toolchain, so
+//! compilation is **native inside the container**: we select the container's
+//! CPU architecture with the engine's `--platform` flag (derived from the target
+//! triple's arch) and run `cargo build --target <triple>` where the triple
+//! matches that platform. No cross toolchain is ever involved - on Apple Silicon
+//! an `aarch64` target builds at native speed inside a `linux/arm64` container.
+//!
+//! **glibc note.** The image's glibc must be **<=** the target device's glibc, or
+//! binaries built against a newer glibc fail to load on the device. The default
+//! `rust:1.88-bookworm` ships glibc 2.36; a jetson L4T r36 device has glibc 2.35,
+//! so for that device pin an older-glibc variant with `--builder-image`
+//! (`rust:1.88-bullseye`, glibc 2.31). The pin also satisfies the workspace MSRV
+//! (Rust 1.85). `--builder-image` overrides the default entirely - a user-provided
+//! image owns its own toolchain and glibc.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+
+/// The default toolchain image: a pinned official Docker Hub `rust` image. The
+/// `bookworm` variant ships glibc 2.36; for older devices (e.g. jetson L4T r36,
+/// glibc 2.35) override with `--builder-image rust:1.88-bullseye` (glibc 2.31).
+/// The `1.88` pin satisfies the workspace MSRV (1.85). See the module docs.
+pub const DEFAULT_BUILDER_IMAGE: &str = "rust:1.88-bookworm";
 
 /// The container engine that runs the toolchain image. The engine name is not
 /// domain vocabulary - it only selects which CLI drives the image.
@@ -38,22 +61,55 @@ impl ContainerEngine {
     }
 }
 
-/// The default toolchain image for `target`: the cross-rs maintained per-target
-/// image. We reuse cross's images without adopting the `cross` tool itself; any
-/// custom image overrides this via `--builder-image`.
+/// The default toolchain image: the pinned official Docker `rust` image. Unlike a
+/// cross-rs per-target image this carries a full toolchain, so the container
+/// compiles natively for the platform [`platform_for_triple`] selects.
 #[must_use]
-pub fn default_builder_image(target: &str) -> String {
-    format!("ghcr.io/cross-rs/{target}:latest")
+pub fn default_builder_image() -> &'static str {
+    DEFAULT_BUILDER_IMAGE
 }
 
-/// Everything one container cross-build needs: the engine, image, target triple,
-/// the host source snapshot mounted as the workdir, and the read-through caches.
-/// All paths are host paths; [`Self::invocation`] renders them into engine mount
-/// arguments.
+/// The OCI `--platform` value for a target triple's architecture: the container
+/// runs on that CPU architecture so compilation is native. Only the two
+/// architectures the official `rust` image publishes are supported; any other
+/// arch yields `None`, and the default-image path rejects it with a precise
+/// error (a custom `--builder-image` may still own an exotic toolchain).
+#[must_use]
+pub fn platform_for_triple(triple: &str) -> Option<&'static str> {
+    match triple.split('-').next().unwrap_or("") {
+        "aarch64" | "arm64" => Some("linux/arm64"),
+        "x86_64" | "amd64" => Some("linux/amd64"),
+        _ => None,
+    }
+}
+
+/// Resolve the engine `--platform` for a default-image container build, rejecting
+/// an architecture the official `rust` image does not publish. Used only for the
+/// default image; a user-supplied `--builder-image` skips this (it owns its
+/// toolchain), passing `--platform` only when the arch is one we can map.
+pub fn require_platform_for_triple(triple: &str) -> Result<&'static str> {
+    platform_for_triple(triple).with_context(|| {
+        format!(
+            "`--builder container` cannot select a container platform for target `{triple}`: the \
+             default `{DEFAULT_BUILDER_IMAGE}` image only publishes linux/amd64 (x86_64) and \
+             linux/arm64 (aarch64). Cross-build to one of those triples, or pass a custom \
+             `--builder-image` that carries the toolchain for `{triple}`."
+        )
+    })
+}
+
+/// Everything one container build needs: the engine, image, the container
+/// platform (arch), target triple, the host source snapshot mounted as the
+/// workdir, and the read-through caches. All paths are host paths;
+/// [`Self::invocation`] renders them into engine arguments.
 #[derive(Debug, Clone)]
 pub struct ContainerBuildSpec {
     pub engine: ContainerEngine,
     pub image: String,
+    /// The OCI `--platform` the container runs on (e.g. `linux/arm64`), so
+    /// compilation is native. `None` only for a custom image whose architecture
+    /// we cannot map; the default image always resolves one.
+    pub platform: Option<String>,
     pub target: String,
     /// Host directory holding the deterministic source snapshot; mounted at
     /// [`CONTAINER_WORKDIR`] and used as the cargo working directory.
@@ -85,17 +141,23 @@ pub struct EngineInvocation {
 impl ContainerBuildSpec {
     /// Render the engine invocation that compiles the workspace for the target
     /// inside the image. The container runs, as a compilation environment only,
-    /// `cargo build --workspace --target <triple>` against the mounted snapshot.
+    /// `cargo build --workspace --locked --target <triple>` against the mounted
+    /// snapshot, on the [`Self::platform`] architecture so compilation is native.
     #[must_use]
     pub fn invocation(&self) -> EngineInvocation {
-        let mut args = vec![
-            "run".to_string(),
-            "--rm".to_string(),
+        let mut args = vec!["run".to_string(), "--rm".to_string()];
+        // Select the container CPU architecture so the toolchain builds natively
+        // for the target; the emitted `--target` triple matches this platform.
+        if let Some(platform) = &self.platform {
+            args.push("--platform".to_string());
+            args.push(platform.clone());
+        }
+        args.extend([
             "-w".to_string(),
             CONTAINER_WORKDIR.to_string(),
             "-v".to_string(),
             format!("{}:{}", self.snapshot.display(), CONTAINER_WORKDIR),
-        ];
+        ]);
         if let Some(registry) = &self.cargo_registry {
             args.push("-v".to_string());
             args.push(format!(
@@ -124,6 +186,7 @@ impl ContainerBuildSpec {
             "cargo".to_string(),
             "build".to_string(),
             "--workspace".to_string(),
+            "--locked".to_string(),
             "--target".to_string(),
             self.target.clone(),
         ]);
@@ -204,7 +267,8 @@ mod tests {
     fn spec() -> ContainerBuildSpec {
         ContainerBuildSpec {
             engine: ContainerEngine::Docker,
-            image: default_builder_image("aarch64-unknown-linux-gnu"),
+            image: default_builder_image().to_string(),
+            platform: Some("linux/arm64".to_string()),
             target: "aarch64-unknown-linux-gnu".to_string(),
             snapshot: PathBuf::from("/tmp/snapshot"),
             cargo_registry: Some(PathBuf::from("/home/dev/.cargo/registry")),
@@ -214,11 +278,25 @@ mod tests {
     }
 
     #[test]
-    fn default_image_is_the_cross_rs_per_target_image() {
+    fn default_image_is_the_pinned_official_rust_image() {
+        assert_eq!(default_builder_image(), "rust:1.88-bookworm");
+    }
+
+    #[test]
+    fn platform_maps_the_two_published_arches_and_rejects_others() {
         assert_eq!(
-            default_builder_image("aarch64-unknown-linux-gnu"),
-            "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:latest"
+            platform_for_triple("aarch64-unknown-linux-gnu"),
+            Some("linux/arm64")
         );
+        assert_eq!(
+            platform_for_triple("x86_64-unknown-linux-gnu"),
+            Some("linux/amd64")
+        );
+        // A triple the official rust image does not publish is unmappable.
+        assert_eq!(platform_for_triple("riscv64gc-unknown-linux-gnu"), None);
+        let error = require_platform_for_triple("riscv64gc-unknown-linux-gnu")
+            .expect_err("an unmappable arch must be rejected for the default image");
+        assert!(error.to_string().contains("cannot select a container platform"), "{error}");
     }
 
     #[test]
@@ -229,13 +307,15 @@ mod tests {
     }
 
     #[test]
-    fn invocation_mounts_snapshot_caches_and_artifacts_then_builds_the_target() {
+    fn invocation_selects_platform_mounts_and_builds_the_target_locked() {
         let invocation = spec().invocation();
         assert_eq!(invocation.program, "docker");
         let joined = invocation.args.join(" ");
 
-        // The container runs, is removed after, and works in the snapshot.
+        // The container runs, is removed after, on the target's native platform,
+        // and works in the snapshot.
         assert!(joined.contains("run --rm"), "{joined}");
+        assert!(joined.contains("--platform linux/arm64"), "{joined}");
         assert!(
             joined.contains(&format!("-w {CONTAINER_WORKDIR}")),
             "{joined}"
@@ -260,13 +340,11 @@ mod tests {
             joined.contains(&format!("/proj/.phoxal/artifacts:{CONTAINER_ARTIFACTS}:ro")),
             "{joined}"
         );
-        // The image ref precedes the cargo command.
+        // The pinned official rust image precedes the cargo command.
+        assert!(joined.contains("rust:1.88-bookworm"), "{joined}");
+        // Native compilation for the target, with the locked lockfile enforced.
         assert!(
-            joined.contains("ghcr.io/cross-rs/aarch64-unknown-linux-gnu:latest"),
-            "{joined}"
-        );
-        assert!(
-            joined.contains("cargo build --workspace --target aarch64-unknown-linux-gnu"),
+            joined.contains("cargo build --workspace --locked --target aarch64-unknown-linux-gnu"),
             "{joined}"
         );
     }
@@ -290,7 +368,18 @@ mod tests {
         assert!(!joined.contains("artifacts"), "{joined}");
         // The snapshot mount and cargo build survive.
         assert!(joined.contains(CONTAINER_WORKDIR), "{joined}");
-        assert!(joined.contains("cargo build --workspace"), "{joined}");
+        assert!(joined.contains("cargo build --workspace --locked"), "{joined}");
+    }
+
+    #[test]
+    fn a_custom_image_without_a_mappable_platform_omits_the_flag() {
+        let mut spec = spec();
+        spec.image = "my-registry/exotic-toolchain:latest".to_string();
+        spec.platform = None;
+        let joined = spec.invocation().args.join(" ");
+        assert!(!joined.contains("--platform"), "{joined}");
+        assert!(joined.contains("my-registry/exotic-toolchain:latest"), "{joined}");
+        assert!(joined.contains("cargo build --workspace --locked"), "{joined}");
     }
 
     /// A fake runner proves the orchestration seam: command construction is
@@ -315,13 +404,32 @@ mod tests {
         assert_eq!(runner.recorded.into_inner(), Some(invocation));
     }
 
-    /// Real-engine smoke: run a trivial command in the default cross-rs image to
-    /// prove the [`ProcessEngineRunner`] wiring drives docker end to end.
-    /// Ignored by default - it needs a working docker with network to pull the
-    /// image, so it is opt-in (`cargo test -- --ignored real_docker`).
+    /// Real-engine proof: compile a minimal cargo crate inside the default
+    /// `rust` image for a native platform, proving the [`ProcessEngineRunner`]
+    /// wiring drives docker end to end AND that the default image actually
+    /// carries a working Rust toolchain (the whole point of the 2026-07-24
+    /// image-strategy change). Ignored by default - it needs a working docker
+    /// with network to pull the image, so it is opt-in
+    /// (`cargo test -- --ignored real_docker`).
     #[test]
-    #[ignore = "requires a working docker engine and network to pull the cross-rs image"]
-    fn real_docker_runs_a_container_command() {
+    #[ignore = "requires a working docker engine and network to pull the rust image"]
+    fn real_docker_compiles_a_minimal_crate_in_the_default_image() {
+        let snapshot = tempfile::tempdir().expect("snapshot dir");
+        std::fs::write(
+            snapshot.path().join("Cargo.toml"),
+            "[package]\nname = \"c\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(snapshot.path().join("src")).unwrap();
+        std::fs::write(snapshot.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        // Build natively for the host's container platform (no cross needed).
+        let platform = platform_for_triple(std::env::consts::ARCH).unwrap_or("linux/amd64");
+        let target = if platform == "linux/arm64" {
+            "aarch64-unknown-linux-gnu"
+        } else {
+            "x86_64-unknown-linux-gnu"
+        };
         let ui = crate::Ui::from_env();
         let runner = ProcessEngineRunner { ui: &ui };
         let invocation = EngineInvocation {
@@ -329,12 +437,21 @@ mod tests {
             args: vec![
                 "run".to_string(),
                 "--rm".to_string(),
-                default_builder_image("aarch64-unknown-linux-gnu"),
-                "true".to_string(),
+                "--platform".to_string(),
+                platform.to_string(),
+                "-w".to_string(),
+                CONTAINER_WORKDIR.to_string(),
+                "-v".to_string(),
+                format!("{}:{}", snapshot.path().display(), CONTAINER_WORKDIR),
+                default_builder_image().to_string(),
+                "cargo".to_string(),
+                "build".to_string(),
+                "--target".to_string(),
+                target.to_string(),
             ],
         };
         runner
             .run(&invocation)
-            .expect("docker should run the toolchain image");
+            .expect("the default rust image should compile a minimal crate natively");
     }
 }

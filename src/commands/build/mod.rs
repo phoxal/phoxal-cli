@@ -29,7 +29,7 @@ use crate::run::{RunOptions, StagingBuild};
 use crate::supervisor::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 use container::{
     ContainerBuildSpec, ContainerEngine, EngineRunner, ProcessEngineRunner, default_builder_image,
-    host_cargo_caches, vendored_artifacts,
+    host_cargo_caches, platform_for_triple, require_platform_for_triple, vendored_artifacts,
 };
 use phoxal_cli_core::check::participant_metadata::architecture_for_triple;
 use phoxal_cli_core::project::launch_plan::{LaunchMode, runtime_layout_dir};
@@ -45,7 +45,7 @@ pub struct Build {
     #[arg(
         long,
         value_name = "TRIPLE",
-        help = "Rust target triple to build for (e.g. aarch64-unknown-linux-gnu). Defaults to the builder's native triple. `--builder container` requires this - the image defines the target."
+        help = "Rust target triple to build for (e.g. aarch64-unknown-linux-gnu). Defaults to the builder's native triple: the host for `local`, and the host-architecture linux-gnu triple for `container`."
     )]
     pub target: Option<String>,
     #[arg(
@@ -71,7 +71,7 @@ pub struct Build {
     #[arg(
         long,
         value_name = "REF",
-        help = "Override the container toolchain image. Defaults to ghcr.io/cross-rs/<target>."
+        help = "Override the container toolchain image. Defaults to the pinned official rust:1.88-bookworm image (native compilation for the target's platform). For older-glibc devices (e.g. jetson L4T r36) pass rust:1.88-bullseye."
     )]
     pub builder_image: Option<String>,
 }
@@ -126,25 +126,29 @@ enum Backend {
     Container { target: String },
 }
 
+/// The host-architecture linux-gnu triple - the container builder's "native
+/// triple" default when no `--target` is given (2026-07-24 decision). The
+/// container compiles natively for the host's CPU architecture under Linux; the
+/// artifacts target Linux devices, never the macOS/Windows host itself.
+fn host_linux_gnu_triple() -> String {
+    let arch = std::env::consts::ARCH;
+    format!("{arch}-unknown-linux-gnu")
+}
+
 /// Decide the backend from a parsed `--builder` and an already-resolved explicit
 /// `--target`. `local` defaults its target to the host triple; `container`
-/// requires an explicit target (the image defines it); `ssh://` is rejected as
-/// a phase-11 feature.
+/// defaults to the host-architecture linux-gnu triple (native compilation inside
+/// the image); `ssh://` is rejected as a phase-11 feature.
 fn select_backend(builder: BuilderKind, explicit_target: Option<String>) -> Result<Backend> {
     match builder {
         BuilderKind::Local => Ok(Backend::Local {
             target: explicit_target.unwrap_or_else(crate::resolver::host_target_triple),
         }),
-        BuilderKind::Container => {
-            let Some(target) = explicit_target else {
-                bail!(
-                    "`--builder container` requires an explicit --target (the image defines the \
-                     target); e.g. `phoxal build --builder container --target \
-                     aarch64-unknown-linux-gnu`"
-                );
-            };
-            Ok(Backend::Container { target })
-        }
+        BuilderKind::Container => Ok(Backend::Container {
+            // No `--target`: build for the host architecture under Linux inside
+            // the container - the builder's native triple.
+            target: explicit_target.unwrap_or_else(host_linux_gnu_triple),
+        }),
         BuilderKind::Ssh(host) => bail!(
             "remote builders land in phase 11 (#930); `--builder ssh://{host}` is not available \
              yet. Use `--builder container --target <TRIPLE>` to cross-build locally, or run \
@@ -194,14 +198,33 @@ impl Build {
             .context("failed to create a source snapshot directory")?;
         snapshot_source(project_root, snapshot.path())?;
 
-        let image = self
-            .builder_image
-            .clone()
-            .unwrap_or_else(|| default_builder_image(target));
+        // The container build enforces `--locked`, so the snapshot must carry a
+        // committed Cargo.lock. `snapshot_source` copies the tracked working tree
+        // via `git ls-files`, so a missing lockfile means it was never committed.
+        if !snapshot.path().join("Cargo.lock").is_file() {
+            bail!(
+                "`--builder container` compiles with `--locked`, but the source snapshot has no \
+                 Cargo.lock (it is not committed to the git working tree). Run `cargo \
+                 generate-lockfile` and commit Cargo.lock, then retry."
+            );
+        }
+
+        // The default image is the pinned official rust image with the container
+        // platform derived from the target arch; a custom `--builder-image` owns
+        // its own toolchain, so we only pass `--platform` when the arch is one we
+        // can map.
+        let (image, platform) = match &self.builder_image {
+            Some(custom) => (custom.clone(), platform_for_triple(target).map(str::to_string)),
+            None => (
+                default_builder_image().to_string(),
+                Some(require_platform_for_triple(target)?.to_string()),
+            ),
+        };
         let (cargo_registry, cargo_git) = host_cargo_caches();
         let spec = ContainerBuildSpec {
             engine: self.container_engine,
             image,
+            platform,
             target: target.to_string(),
             snapshot: snapshot.path().to_path_buf(),
             cargo_registry,
@@ -209,9 +232,13 @@ impl Build {
             artifacts: vendored_artifacts(project_root),
         };
         app.ui.info(format!(
-            "compiling workspace for {target} inside {} ({})",
+            "compiling workspace for {target} inside {} ({}{})",
             spec.image,
-            self.container_engine.program()
+            self.container_engine.program(),
+            spec.platform
+                .as_deref()
+                .map(|platform| format!(", {platform}"))
+                .unwrap_or_default(),
         ));
         runner.run(&spec.invocation())?;
 
@@ -411,13 +438,17 @@ mod tests {
     }
 
     #[test]
-    fn container_backend_requires_an_explicit_target() {
-        let error = select_backend(BuilderKind::Container, None)
-            .expect_err("container without a target must fail");
-        assert!(
-            error.to_string().contains("requires an explicit --target"),
-            "{error}"
+    fn container_backend_defaults_target_to_the_host_linux_gnu_triple() {
+        // No `--target`: the container's native triple is the host architecture
+        // under Linux (2026-07-24 decision), never the macOS/Windows host triple.
+        let backend = select_backend(BuilderKind::Container, None).unwrap();
+        assert_eq!(
+            backend,
+            Backend::Container {
+                target: host_linux_gnu_triple()
+            }
         );
+        assert!(host_linux_gnu_triple().ends_with("-unknown-linux-gnu"));
 
         let ok = select_backend(
             BuilderKind::Container,
