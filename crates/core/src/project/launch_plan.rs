@@ -725,6 +725,37 @@ fn expected_checked_participant_ids(
 
 #[cfg(test)]
 mod tests {
+    /// #952 section B, the rows the supervisor owns: a new run is a new
+    /// execution and a new origin, while a resident that was handed one adopts
+    /// exactly that execution rather than minting its own.
+    ///
+    /// The origin is always minted locally, even on adoption: it is this
+    /// host's boot-clock anchor, and only the process that supervises the run
+    /// can take it.
+    #[test]
+    fn a_new_run_mints_a_fresh_identity_and_an_adopted_one_is_kept_exactly() {
+        let first = RunIdentity::mint_or_adopt(None);
+        let second = RunIdentity::mint_or_adopt(None);
+        assert_ne!(
+            first.execution(),
+            second.execution(),
+            "supervisor restart, new run, and rollback are each a new execution"
+        );
+        assert_ne!(
+            first.origin().timeline(),
+            second.origin().timeline(),
+            "a new run is a new world history too"
+        );
+
+        let launcher = phoxal::bus::ExecutionId::mint();
+        let adopted = RunIdentity::mint_or_adopt(Some(launcher));
+        assert_eq!(
+            adopted.execution(),
+            launcher,
+            "a detached resident adopts the launcher's run, it does not start its own"
+        );
+    }
+
     use std::path::Path;
 
     use crate::project::resolver::{
