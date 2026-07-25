@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.24.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.24.0) - 2026-07-25
+
+
+### Added
+
+- Install immutable runtime releases ([#189](https://github.com/phoxal/phoxal-cli/pull/189)) [**breaking**]
+
+
 ## [0.23.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.23.0) - 2026-07-24
 
 
