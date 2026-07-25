@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::{IncarnationId, ProcessKey, ProcessScope, SupervisorSnapshotV0};
 
 pub const SUPERVISOR_PROTOCOL_VERSION: u16 = 0;
-pub const MAX_SUPERVISED_PROCESSES: usize = 39;
+pub const MAX_SUPERVISED_PROCESSES: usize = 40;
 pub const MAX_PROCESS_FAILURE_DETAIL_BYTES: usize = 4 * 1024;
 pub const MAX_PROCESS_STDERR_TAIL_BYTES: usize = 32 * 1024;
 pub const MAX_ARTIFACT_ID_BYTES: usize = 1024;
@@ -252,11 +252,16 @@ mod tests {
 
     #[test]
     fn maximum_graph_fits_and_one_more_process_is_rejected() {
+        assert_eq!(MAX_SUPERVISED_PROCESSES, 40);
         validate_snapshot_capacity(MAX_SUPERVISED_PROCESSES).unwrap();
         assert!(validate_snapshot_capacity(MAX_SUPERVISED_PROCESSES + 1).is_err());
         assert!(
             worst_case_snapshot_bytes(MAX_SUPERVISED_PROCESSES).unwrap()
                 <= MAX_SNAPSHOT_FRAME_BYTES
+        );
+        assert!(
+            worst_case_snapshot_bytes(MAX_SUPERVISED_PROCESSES + 1).unwrap()
+                > MAX_SNAPSHOT_FRAME_BYTES
         );
     }
 

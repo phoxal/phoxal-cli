@@ -808,6 +808,55 @@ mod tests {
     }
 
     #[test]
+    fn reference_graph_process_count_fits_protocol_v0() {
+        let participant = |index: usize| ParticipantLaunchRecord {
+            artifact_id: format!("artifact-{index}"),
+            execution: ParticipantExecution::UserService {
+                binary_name: format!("participant-{index}"),
+            },
+            launch: ParticipantLaunch {
+                participant_id: format!("participant-{index}"),
+                incarnation: 0,
+                namespace: "dev".to_string(),
+                robot_id: "robot-v1".to_string(),
+                bus: BusProfile {
+                    connect_endpoints: vec![DEFAULT_ROUTER_CONNECT.to_string()],
+                },
+                clock: ClockMode::Real,
+                config: None,
+                robot_root: Some(PathBuf::from("/var/phoxal")),
+                component_instance: None,
+                execution_device_id: None,
+                shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
+            },
+            launch_ownership: LaunchOwnership::CliManaged,
+            startup_requirement: StartupRequirement::Required,
+            runtime_failure: RuntimeFailurePolicy::StopProject,
+        };
+        let plan = |participant_count: usize| LaunchPlan {
+            mode: LaunchMode::Run,
+            robots: vec![RobotLaunch {
+                id: "robot-v1".to_string(),
+                namespace: "dev".to_string(),
+                participants: (0..participant_count).map(participant).collect(),
+                substitutions: Vec::new(),
+            }],
+        };
+
+        // Thirty-six participants plus the router and three bounded
+        // supervisor-owned helpers is the 40-process reference graph.
+        PlanRevision::compile(1, plan(36)).expect("reference graph should fit protocol v0");
+        let error =
+            PlanRevision::compile(1, plan(37)).expect_err("41 processes must remain bounded");
+        assert!(
+            error
+                .to_string()
+                .contains("protocol v0 supports at most 40"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn launch_plan_covers_per_robot_tools_and_user_service_config() -> anyhow::Result<()> {
         let mut resolved = empty_resolved_robot("robot_v1")?;
         add_robot_tools(&mut resolved);
