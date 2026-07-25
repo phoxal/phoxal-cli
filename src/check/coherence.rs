@@ -167,7 +167,6 @@ pub(super) fn coherence_is_ok(diagnostics: &[RobotCoherenceDiagnostic]) -> bool 
 pub(crate) enum CoherenceVerb {
     Check,
     Run,
-    Simulate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

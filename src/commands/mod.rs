@@ -77,7 +77,7 @@ fn locked_train_version(project_root: &std::path::Path) -> Result<String> {
     Ok(phoxal_cli_core::project::train::resolve_locked_train(project_root)?.version)
 }
 
-/// Load the suite the offline execution paths (`run`/`start`/`build`/`watch`)
+/// Load the suite the offline execution paths (`run`/`start`/`build`)
 /// resolve against, strictly without touching the network (#936, finding 1).
 ///
 /// An explicit *local* `--suite` path is honored as a dev/test override and read
@@ -184,14 +184,14 @@ pub struct Cli {
         env = phoxal_cli_core::project::suite::SUITE_SOURCE_ENV,
         global = true,
         value_name = "PATH_OR_HTTPS_URL",
-        help = "Artifact suite override. Local paths are read directly. run/start/build/watch reject HTTPS values and otherwise use the suite `phoxal update` persisted into .phoxal/artifacts; check/validate/service/simulate fetch HTTPS sources fresh."
+        help = "Artifact suite override. Local paths are read directly. run/start/build reject HTTPS values and otherwise use the suite `phoxal update` persisted into .phoxal/artifacts; check/validate/service/simulate fetch HTTPS sources fresh."
     )]
     pub suite_source: Option<String>,
     #[arg(
         long,
         env = phoxal_cli_core::project::suite::OFFLINE_ENV,
         global = true,
-        help = "Disable network access. Fetching commands then require --suite <local-path>; run/start/build/watch are always offline, using the vendored suite and artifacts from `phoxal update`."
+        help = "Disable network access. Fetching commands then require --suite <local-path>; run/start/build are always offline, using the vendored suite and artifacts from `phoxal update`."
     )]
     pub offline: bool,
     #[command(subcommand)]
@@ -227,7 +227,7 @@ pub enum RootCommand {
     Behavior(behavior::Behavior),
     #[command(about = "Validate robot.yaml structure and Cargo workspace runtime ownership.")]
     Validate(validate::Validate),
-    #[command(about = "Simulate a robot in Webots (see `simulation run`/`simulation join`).")]
+    #[command(about = "Simulate a robot with `simulation webots run`.")]
     Simulation(simulate::Simulation),
     #[command(about = "Run the resolved robot graph with the host-native supervisor.")]
     Run(run::Run),
@@ -259,17 +259,16 @@ pub enum RootCommand {
 
 impl RootCommand {
     /// Whether this invocation drives a [`crate::session::controller::SessionController`]-owned
-    /// interactive session (`run`, or `simulation run` without `--dry-run`).
-    /// `simulation join` (a stub, no session) and `simulation run --dry-run`
-    /// (report-only, no controller) are excluded.
+    /// interactive session (`run` or foreground `simulation webots run`).
     fn enters_interactive_session(&self) -> bool {
         match self {
             Self::Run(run) => !run.detach,
             Self::Attach(_) => true,
-            Self::Simulation(command) => matches!(
-                &command.command,
-                simulate::SimulationSubcommand::Run(run) if !run.dry_run
-            ),
+            Self::Simulation(command) => match &command.command {
+                simulate::SimulationSubcommand::Webots(webots) => match &webots.command {
+                    simulate::WebotsSubcommand::Run(run) => !run.detach,
+                },
+            },
             _ => false,
         }
     }
@@ -307,7 +306,7 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
         && !matches!(cli.command, RootCommand::Run(_))
     {
         bail!(
-            "interactive `run` and `simulation run` sessions require a terminal; run this command in a TTY"
+            "interactive `run` and `simulation webots run` sessions require a terminal; run this command in a TTY"
         );
     }
     let output = crate::session::output::OutputContext::compute(terminal);
@@ -388,24 +387,27 @@ mod tests {
     }
 
     /// `enters_interactive_session` decides whether dispatch must require a
-    /// terminal. Dry-run and join commands never build a session controller.
+    /// terminal. Detached Webots sessions and finite commands do not.
     #[test]
     fn enters_interactive_session_covers_run_and_live_simulate_only() {
         let run = Cli::try_parse_from(["phoxal", "run"]).unwrap();
         assert!(run.command.enters_interactive_session());
 
-        let simulate_live = Cli::try_parse_from(["phoxal", "simulation", "run", "default"])
-            .expect("simulation run should parse");
+        let simulate_live =
+            Cli::try_parse_from(["phoxal", "simulation", "webots", "run", "default"])
+                .expect("simulation webots run should parse");
         assert!(simulate_live.command.enters_interactive_session());
 
-        let simulate_dry_run =
-            Cli::try_parse_from(["phoxal", "simulation", "run", "default", "--dry-run"])
-                .expect("simulation run --dry-run should parse");
-        assert!(!simulate_dry_run.command.enters_interactive_session());
-
-        let simulate_join = Cli::try_parse_from(["phoxal", "simulation", "join"])
-            .expect("simulation join should parse");
-        assert!(!simulate_join.command.enters_interactive_session());
+        let simulate_detached = Cli::try_parse_from([
+            "phoxal",
+            "simulation",
+            "webots",
+            "run",
+            "default",
+            "--detach",
+        ])
+        .expect("detached simulation webots run should parse");
+        assert!(!simulate_detached.command.enters_interactive_session());
 
         let check = Cli::try_parse_from(["phoxal", "check"]).unwrap();
         assert!(!check.command.enters_interactive_session());

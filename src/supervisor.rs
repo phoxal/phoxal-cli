@@ -45,23 +45,20 @@ pub(crate) use managed_child::create_cloexec_pipe;
 pub(crate) use managed_child::materialize_plan_binaries;
 pub use managed_child::maybe_run_guardian;
 mod output;
-pub(crate) use output::{
-    READER_JOIN_BUDGET, join_reader, requested_stop_exit_is_clean, spawn_output_reader,
-};
+pub(crate) use output::{join_reader, requested_stop_exit_is_clean, spawn_output_reader};
 mod stages;
 #[cfg(test)]
 pub(crate) use stages::await_participants_ready;
 pub(crate) use stages::{
     SupervisionStage, await_stage_ready, emit_event, maybe_emit_startup_outcome,
-    orderly_shutdown_budget, spawn_until_pending,
+    spawn_until_pending,
 };
 mod r#loop;
 pub(crate) use r#loop::supervise_until_shutdown;
 mod signals;
 pub(crate) use signals::{
-    ensure_process_group_stopped, force_kill_supervised_process_groups, kill_child_process_group,
-    send_process_group_signal, send_process_group_terminate, send_process_signal, send_terminate,
-    stop_child,
+    ensure_process_group_stopped, kill_child_process_group, send_process_group_signal,
+    send_process_group_terminate, send_process_signal, send_terminate, stop_child,
 };
 mod lock;
 pub(crate) use lock::{ProjectLock, ProjectLockIdentity, ProjectLockStatus, ProjectOperation};

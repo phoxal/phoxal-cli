@@ -2,7 +2,7 @@
 //!
 //! `phoxal-cli` is the tool a robot developer runs from a robot project. It
 //! reads `robot.yaml`, resolves the graph against a verified generated artifact
-//! suite ([`suite`]) when official artifacts are needed, and drives the
+//! suite (`suite`) when official artifacts are needed, and drives the
 //! local develop/simulate loop. Official services, drivers, tools, and
 //! simulators come from the configured suite or local development overrides.
 //!
@@ -10,9 +10,9 @@
 //!
 //! - `check` - collect each participant's compiled-in contract metadata
 //!   (extracted straight from its built binary's linker section, never by
-//!   executing it - [`participant_metadata`]) and validate it with the shared
+//!   executing it - `participant_metadata`) and validate it with the shared
 //!   [`phoxal::check`] graph core; Cargo.lock resolves all project source.
-//! - `simulation run <world>` - resolve and print or run the host-native simulation plan.
+//! - `simulation webots run <world>` - stage and run a Webots simulation.
 //! - `service suite` - print official services from the configured artifact suite.
 //! - `update` - resolve heads and atomically update the project-vendored set.
 //! - `doctor` - check host prerequisites; `self upgrade` - update the CLI.
@@ -48,7 +48,6 @@ pub(crate) mod stager;
 pub(crate) mod supervisor;
 pub(crate) mod telemetry;
 pub(crate) mod ui;
-pub(crate) mod watch;
 pub(crate) mod webots_stage_root;
 pub(crate) mod webots_staging;
 

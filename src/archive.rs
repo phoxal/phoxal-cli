@@ -222,7 +222,7 @@ fn is_executable(_metadata: &fs::Metadata) -> bool {
 /// pre-existing symlink in `dest` - cannot write outside the destination:
 ///
 /// 1. **Lexical:** every entry path is validated relative with no `..`/root
-///    ([`safe_relative`]).
+///    (`safe_relative`).
 /// 2. **Physical:** `dest` must be a newly created or already empty real
 ///    directory (never a symlink), and every path component is created and
 ///    checked with `symlink_metadata` during extraction - a symlinked ancestor

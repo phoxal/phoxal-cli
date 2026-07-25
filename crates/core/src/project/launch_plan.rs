@@ -22,8 +22,6 @@ pub const ROBOT_TOOL_JOYPAD: &str = "tool-joypad";
 pub const ROBOT_TOOL_DEVICE: &str = "tool-device";
 /// Base directory holding one staged runtime layout per target triple.
 pub const RUNTIME_BUILD_ROOT_RELATIVE: &str = ".phoxal/build";
-pub const SIMULATOR_SUPERVISOR_PROVIDER_ID: &str = "simulator-webots-supervisor";
-pub const SIMULATOR_SUPERVISOR_ARTIFACT_NAME: &str = "webots-supervisor";
 pub const SIMULATOR_CONTROLLER_ARTIFACT_NAME: &str = "webots-controller";
 
 #[must_use]
@@ -123,7 +121,7 @@ pub enum LaunchMode {
 /// `LaunchPlan` - never persisted to disk. Replaces the fields the old
 /// `SimulatePlan` wrapper re-declared next to its own `LaunchPlan`
 /// (`resolved`/`project_root`/`source_participants`/`robot_path`), and the
-/// matching re-declarations in `run`'s `PreparedRun` and the `watch` configs.
+/// matching re-declarations in `run`'s `PreparedRun`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanContext {
     pub robot_path: PathBuf,
@@ -132,7 +130,7 @@ pub struct PlanContext {
     /// only when the plan was prepared from a source project. A layout run (an
     /// extracted `build.phoxal` or a staged `.phoxal/build/<triple>/` root) has
     /// no source, so this is `None` there; consumers that need source state
-    /// (watch, simulation) go through [`PlanContext::source`] instead of
+    /// (such as simulation) go through [`PlanContext::source`] instead of
     /// reading a fabricated graph (#936).
     pub source: Option<PlanSource>,
 }
@@ -304,25 +302,8 @@ pub struct ParticipantLaunchRecord {
     pub artifact_id: String,
     pub execution: ParticipantExecution,
     pub launch: ParticipantLaunch,
-    #[serde(default)]
-    pub launch_ownership: LaunchOwnership,
     pub startup_requirement: StartupRequirement,
     pub runtime_failure: RuntimeFailurePolicy,
-}
-
-/// Who owns a participant's process lifecycle. Orthogonal to `participant_kind`:
-/// most participants are `CliManaged` (the CLI supervisor spawns, restarts, and
-/// tears them down). A `SimulationManaged` participant still satisfies the
-/// graph proof and appears on the board via bus presence/logs (D23), but the
-/// CLI supervisor never spawns or restarts it - Webots (via the supervisor)
-/// owns its lifecycle. Both the Webots supervisor and each robot's controller
-/// are `SimulationManaged` in `Webots` mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LaunchOwnership {
-    #[default]
-    CliManaged,
-    SimulationManaged,
 }
 
 /// How a launched participant's binary is identified in the staged runtime
@@ -334,7 +315,7 @@ pub enum LaunchOwnership {
 /// loader resolves.
 ///
 /// Source-specific data - the Cargo crate directory a participant is rebuilt
-/// and run from under `--watch` - deliberately does NOT live here. An extracted
+/// and run from mutable source state - deliberately does NOT live here. An extracted
 /// bundle has no crate directories at all, so keeping them out of the execution
 /// identity is what makes source and bundle plans identical. The source-staging
 /// path recovers a crate directory from its own resolved graph
@@ -449,16 +430,14 @@ fn build_robot_launch(
     for checked in input
         .checked_participants
         .iter()
-        .filter(|participant| is_robot_launch_participant(mode, participant))
+        .filter(|participant| is_robot_launch_participant(mode, participant, &source_participants))
     {
         let execution = participant_execution(checked, &source_participants, &official_kinds)?;
         let launch = participant_launch(mode, input, checked);
-        let launch_ownership = launch_ownership(mode, checked);
         participants.push(ParticipantLaunchRecord {
             artifact_id: checked.artifact_id.clone(),
             execution,
             launch,
-            launch_ownership,
             startup_requirement: StartupRequirement::Required,
             runtime_failure: RuntimeFailurePolicy::StopProject,
         });
@@ -506,7 +485,6 @@ fn build_robot_launch(
                 execution_device_id,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
-            launch_ownership: LaunchOwnership::CliManaged,
             startup_requirement,
             runtime_failure,
         });
@@ -529,22 +507,21 @@ fn build_robot_launch(
 fn is_robot_launch_participant(
     mode: &LaunchMode,
     participant: &graph_check::ParticipantApis,
+    source_participants: &BTreeMap<&str, &SourceParticipant>,
 ) -> bool {
     if !participant.participant_class.is_checked() {
         return false;
     }
     if participant.participant_kind == graph_check::ParticipantKind::Tool {
-        return false;
+        return source_participants
+            .get(participant.participant_id.as_str())
+            .is_some_and(|source| source.kind == SourceParticipantKind::UserTool);
     }
     if participant.participant_kind == graph_check::ParticipantKind::Simulator {
-        // Simulator participants (the Webots supervisor + each robot's
-        // controller) are launched by Webots itself, never by the CLI
-        // supervisor - but in Webots mode they still need a launch record for
-        // board presence and controllerArgs/spawn-descriptor rendering (Part
-        // 3/4). Outside Webots mode a simulator participant never appears in
-        // the checked set at all (substitutions are sim-only), so this only
-        // takes effect for Webots.
-        return matches!(mode, LaunchMode::Webots { .. });
+        // Webots owns its controller process. Simulator artifacts participate
+        // in compile-time graph validation and content staging, never in the
+        // resident launch plan or supervisor registry.
+        return false;
     }
     if matches!(mode, LaunchMode::Webots { .. })
         && matches!(
@@ -555,24 +532,6 @@ fn is_robot_launch_participant(
         return false;
     }
     true
-}
-
-/// Which launch-ownership a checked participant gets in this plan. Simulator
-/// participants (the Webots supervisor and each robot's controller) are
-/// `SimulationManaged` in `Webots` mode - the CLI supervisor never spawns or
-/// restarts them, Webots does. Every other participant (services, user
-/// runtimes, component drivers) is `CliManaged`.
-fn launch_ownership(
-    mode: &LaunchMode,
-    participant: &graph_check::ParticipantApis,
-) -> LaunchOwnership {
-    if matches!(mode, LaunchMode::Webots { .. })
-        && participant.participant_kind == graph_check::ParticipantKind::Simulator
-    {
-        LaunchOwnership::SimulationManaged
-    } else {
-        LaunchOwnership::CliManaged
-    }
 }
 
 fn participant_execution(
@@ -610,16 +569,12 @@ fn participant_execution(
             SourceParticipantKind::Simulator => ParticipantExecution::OfficialArtifact {
                 binary_name: official_binary_name(ArtifactKind::Simulator, &checked.artifact_id),
             },
+            SourceParticipantKind::UserTool => ParticipantExecution::UserTool {
+                binary_name: checked.artifact_id.clone(),
+            },
             // Component drivers are handled by the component-instance branch
-            // above; tools never reach a robot-launch participant loop
-            // (`is_robot_launch_participant` excludes `Tool`), so neither of
-            // these source kinds is reachable here.
-            // UserTool has no producer in this legacy (simulation-only) leg:
-            // the sim source set filters user tools until the #931 layout swap
-            // supplies their launch path.
-            SourceParticipantKind::ComponentDriver
-            | SourceParticipantKind::Tool
-            | SourceParticipantKind::UserTool => bail!(
+            // above; official tools are supplied by `resolved.tools`.
+            SourceParticipantKind::ComponentDriver | SourceParticipantKind::Tool => bail!(
                 "source participant {} of kind {:?} is not a launchable non-driver participant",
                 source.name,
                 source.kind
@@ -667,7 +622,15 @@ fn participant_launch(
             .robot
             .services
             .get(&checked.participant_id)
-            .and_then(|service| service.config.clone()),
+            .and_then(|service| service.config.clone())
+            .or_else(|| {
+                input
+                    .resolved
+                    .robot
+                    .tools
+                    .get(&checked.participant_id)
+                    .and_then(|tool| tool.config.clone())
+            }),
         robot_root: Some(runtime_layout_dir(
             input.project_root,
             &input.resolved.target,
@@ -680,10 +643,15 @@ fn participant_launch(
 
 fn ensure_launch_set_parity(mode: &LaunchMode, input: &CheckedRobotLaunchInput<'_>) -> Result<()> {
     let expected = expected_checked_participant_ids(mode, input.resolved);
+    let source_participants = input
+        .source_participants
+        .iter()
+        .map(|participant| (participant.name.as_str(), participant))
+        .collect::<BTreeMap<_, _>>();
     let checked = input
         .checked_participants
         .iter()
-        .filter(|participant| is_robot_launch_participant(mode, participant))
+        .filter(|participant| is_robot_launch_participant(mode, participant, &source_participants))
         .map(|participant| participant.participant_id.clone())
         .collect::<BTreeSet<_>>();
 
@@ -728,9 +696,13 @@ fn expected_checked_participant_ids(
             .iter()
             .map(|runtime| runtime.name.clone()),
     );
-    if matches!(mode, LaunchMode::Webots { .. }) {
-        expected.extend(expected_simulator_participant_ids(resolved));
-    } else {
+    expected.extend(
+        resolved
+            .user_tools
+            .iter()
+            .map(|runtime| runtime.name.clone()),
+    );
+    if !matches!(mode, LaunchMode::Webots { .. }) {
         expected.extend(
             resolved
                 .components
@@ -742,31 +714,14 @@ fn expected_checked_participant_ids(
     expected
 }
 
-/// The participant ids the Webots launch set must carry for the resolved
-/// simulator artifacts (the Webots supervisor plus this robot's controller),
-/// using the same world-scoped/robot-scoped id scheme
-/// the simulation participant projection assigns.
-fn expected_simulator_participant_ids(resolved: &ResolvedRobot) -> BTreeSet<String> {
-    resolved
-        .simulators
-        .iter()
-        .filter_map(|runtime| simulator_participant_id(&runtime.name, &resolved.robot.robot.id))
-        .collect()
-}
-
-fn simulator_participant_id(artifact_name: &str, robot_id: &str) -> Option<String> {
-    match artifact_name {
-        SIMULATOR_SUPERVISOR_ARTIFACT_NAME => Some(SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string()),
-        SIMULATOR_CONTROLLER_ARTIFACT_NAME => Some(simulator_controller_provider_id(robot_id)),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use crate::project::resolver::{ResolvedRobot, ResolvedTool, ResolvedUserRuntime};
+    use crate::project::resolver::{
+        ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
+        ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, ResolvedUserRuntime,
+    };
     use crate::project::suite::ArtifactKind;
 
     use super::*;
@@ -829,7 +784,6 @@ mod tests {
                 execution_device_id: None,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
-            launch_ownership: LaunchOwnership::CliManaged,
             startup_requirement: StartupRequirement::Required,
             runtime_failure: RuntimeFailurePolicy::StopProject,
         };
@@ -922,6 +876,127 @@ mod tests {
                 .get(phoxal::participant::launch::env::CONFIG)
                 .map(String::as_str),
             Some(r#"{"message":"line\nquoted \"value\""}"#)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn webots_plan_keeps_declared_user_tools_in_the_resident_graph() -> anyhow::Result<()> {
+        let mut resolved = empty_resolved_robot("robot_v1")?;
+        resolved.simulators.push(platform_runtime(
+            "webots-controller",
+            ArtifactKind::Simulator,
+        ));
+        resolved.user_tools.push(ResolvedUserRuntime {
+            name: "console".to_string(),
+            path: PathBuf::from("tools/console"),
+            source_hash: "hash".to_string(),
+        });
+        resolved.robot.tools.insert(
+            "console".to_string(),
+            phoxal::model::robot::v0::UserTool {
+                config: Some(serde_json::json!({"rate": 20})),
+            },
+        );
+        let sources = vec![SourceParticipant::user_tool(
+            "console",
+            PathBuf::from("/tmp/console"),
+        )];
+        let mut tool = participant("console", "console", graph_check::ParticipantScope::Graph);
+        tool.participant_kind = graph_check::ParticipantKind::Tool;
+        let controller_id = simulator_controller_provider_id("robot_v1");
+        let mut controller = participant(
+            &controller_id,
+            SIMULATOR_CONTROLLER_ARTIFACT_NAME,
+            graph_check::ParticipantScope::Graph,
+        );
+        controller.participant_kind = graph_check::ParticipantKind::Simulator;
+        let checked = [tool, controller];
+        let plan = build_launch_plan(
+            LaunchMode::Webots {
+                world: PathBuf::from("/tmp/default.wbt"),
+            },
+            &[CheckedRobotLaunchInput {
+                project_root: Path::new("/tmp/robot"),
+                resolved: &resolved,
+                checked_participants: &checked,
+                substitutions: &[],
+                source_participants: &sources,
+            }],
+        )?;
+
+        assert_eq!(
+            plan.robots[0].participants.len(),
+            1,
+            "the Webots controller is compile-time metadata, never a resident process"
+        );
+        let console = &plan.robots[0].participants[0];
+        assert_eq!(
+            console.execution,
+            ParticipantExecution::UserTool {
+                binary_name: "console".to_string()
+            }
+        );
+        assert_eq!(console.launch.config, Some(serde_json::json!({"rate": 20})));
+        assert!(
+            !plan.robots[0]
+                .participants
+                .iter()
+                .any(|participant| participant.launch.participant_id == controller_id)
+        );
+        let runtime = crate::session::stores::runtime::RuntimeStore::from_launch_plan(&plan, &[]);
+        assert!(
+            runtime.metadata(&controller_id).is_none(),
+            "a Webots controller must have no resident registry/control entry"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn webots_excludes_physical_drivers_from_expected_and_resident_sets() -> anyhow::Result<()> {
+        let mut resolved = empty_resolved_robot("robot_v1")?;
+        let component_package = || ResolvedComponentPackage {
+            package: "phoxal/component-ddsm115".to_string(),
+            kind: ArtifactKind::ComponentAssets,
+            source: ResolvedComponentSource::Path {
+                path: PathBuf::from("/tmp/ddsm115"),
+            },
+            path_override: Some(PathBuf::from("/tmp/ddsm115")),
+            suite_runtime: None,
+        };
+        resolved.components.push(ResolvedComponent {
+            instance: "left_drive".to_string(),
+            source_name: "ddsm115".to_string(),
+            assets: component_package(),
+            driver: Some(ResolvedComponentPackage {
+                kind: ArtifactKind::ComponentDriver,
+                ..component_package()
+            }),
+            has_driver: true,
+        });
+        let mut driver = participant(
+            "left_drive",
+            "ddsm115",
+            graph_check::ParticipantScope::Graph,
+        );
+        driver.participant_kind = graph_check::ParticipantKind::Driver;
+        let source_participants = BTreeMap::new();
+        let webots = LaunchMode::Webots {
+            world: PathBuf::from("/tmp/default.wbt"),
+        };
+        assert!(!is_robot_launch_participant(
+            &webots,
+            &driver,
+            &source_participants
+        ));
+        assert!(is_robot_launch_participant(
+            &LaunchMode::Run,
+            &driver,
+            &source_participants
+        ));
+        assert!(!expected_checked_participant_ids(&webots, &resolved).contains("left_drive"));
+        assert!(
+            expected_checked_participant_ids(&LaunchMode::Run, &resolved).contains("left_drive")
         );
         Ok(())
     }
@@ -1046,22 +1121,18 @@ mod tests {
         };
         let service = participant("mission", "mission", graph_check::ParticipantScope::Graph);
 
-        for (participant_id, artifact_id) in [
-            ("simulator-webots-supervisor", "webots-supervisor"),
-            ("simulator-webots-controller-robot_v1", "webots-controller"),
-        ] {
-            let mut simulator = participant(
-                participant_id,
-                artifact_id,
-                graph_check::ParticipantScope::Graph,
-            );
-            simulator.participant_kind = graph_check::ParticipantKind::Simulator;
-            assert_eq!(
-                participant_launch(&mode, &input, &simulator).clock,
-                ClockMode::Simulation,
-                "{participant_id} uses the mode-wide record; its clockless binary policy ignores it"
-            );
-        }
+        let participant_id = "simulator-webots-controller-robot_v1";
+        let mut simulator = participant(
+            participant_id,
+            "webots-controller",
+            graph_check::ParticipantScope::Graph,
+        );
+        simulator.participant_kind = graph_check::ParticipantKind::Simulator;
+        assert_eq!(
+            participant_launch(&mode, &input, &simulator).clock,
+            ClockMode::Simulation,
+            "{participant_id} uses the mode-wide record; its clockless binary policy ignores it"
+        );
         assert_eq!(
             participant_launch(&mode, &input, &service).clock,
             ClockMode::Simulation,
@@ -1173,6 +1244,24 @@ robot:
         resolved.tools.push(tool("tool-log"));
         resolved.tools.push(tool("tool-telemetry"));
         resolved.tools.push(tool(ROBOT_TOOL_DEVICE));
+    }
+
+    fn platform_runtime(name: &str, kind: ArtifactKind) -> ResolvedPlatformRuntime {
+        ResolvedPlatformRuntime {
+            name: name.to_string(),
+            package: format!("phoxal/simulator-{name}"),
+            kind,
+            version: "0.36.0".to_string(),
+            artifact_ref: format!("phoxal/simulator-{name}@0.36.0"),
+            sha256: None,
+            url: None,
+            size: None,
+            published: true,
+            published_triples: Vec::new(),
+            path_override: None,
+            train: "0.36.0".to_string(),
+            target: Some(host_target_triple_for_tests()),
+        }
     }
 
     fn tool(name: &str) -> ResolvedTool {

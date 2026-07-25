@@ -1,21 +1,14 @@
 //! Live simulation resource assembly and ownership.
 
-use super::{
-    SimPlan, SimulateOptions, prepare_substitution_notes, stage_and_prepare_webots_spec,
-    stages_for_simulate, start_spawn_responder,
-};
+use super::{SimPlan, stage_and_prepare_webots_spec, stages_for_simulate};
 use crate::session::output::OutputContext;
 use crate::simulation::command::sim_source;
 use crate::supervisor::BoardBackend;
-use crate::supervisor::ProjectLock;
-use crate::supervisor::ProjectLockIdentity;
-use crate::supervisor::ProjectOperation;
 use crate::supervisor::RequestedStop;
 use crate::supervisor::SupervisionStage;
 use crate::supervisor::SupervisorAction;
 use crate::supervisor::SupervisorOptions;
 use crate::supervisor::start_bus_log_subscriber;
-use crate::supervisor::start_clock_feed;
 use crate::supervisor::start_liveliness_observer;
 use anyhow::Context;
 use anyhow::Result;
@@ -24,59 +17,34 @@ use anyhow::bail;
 use tokio::sync::mpsc;
 
 /// Everything [`live_simulate_setup`] hands back to the caller once it
-/// completes: the board/telemetry/supervisor task `drive_supervision` needs,
-/// plus every ancillary task that must be aborted once supervision ends.
+/// completes: the resident supervisor inputs plus every ancillary task that
+/// must be aborted once supervision ends.
 pub(crate) struct LiveSimSetup {
     pub(crate) router: crate::run::InfrastructureRouter,
-    pub(crate) connect: String,
-    // Keep the simulation-specific lease alive for the entire supervision
-    // lifetime. The project-operation lock is held by the command from
-    // before preparation until this setup and supervision have both ended.
-    pub(crate) _locks: LiveSimulationLocks,
     pub(crate) board: BoardBackend,
-    pub(crate) telemetry: crate::telemetry::TelemetryBackend,
-    pub(crate) runtime_store: phoxal_cli_core::session::stores::runtime::RuntimeStore,
-    pub(crate) orderly_shutdown_timeout: std::time::Duration,
     pub(crate) stages: Vec<SupervisionStage>,
     pub(crate) supervisor_options: SupervisorOptions,
-    pub(crate) action_tx: mpsc::Sender<SupervisorAction>,
-    /// Every feed task that must stay alive for the whole session (log/
-    /// Liveliness observers, clock telemetry, live telemetry) -
+    /// Every feed task that must stay alive for the whole session (log,
+    /// Liveliness, and live telemetry observers) -
     /// collected here instead of leaked under `_`-prefixed bindings (finding
     /// B6), so the caller can abort every one of them once supervision ends.
     pub(crate) background_tasks: crate::run::AbortTasks,
 }
 
-pub(crate) struct LiveSimulationLocks {
-    _simulator_lock: ProjectLock,
-}
-
-impl LiveSimulationLocks {
-    pub(crate) fn acquire(
-        simulator_lock_path: &std::path::Path,
-        identity: ProjectLockIdentity,
-    ) -> Result<Self> {
-        Ok(Self {
-            _simulator_lock: ProjectLock::acquire_path(simulator_lock_path, identity)?,
-        })
-    }
-}
-
 /// Everything between preparation finishing and supervision beginning for a
-/// live `simulation run`: Webots preflight, lock acquisition, world/
-/// controller staging, and spawn-responder startup (finding A1's
-/// "intermediate setup" gap), plus starting every feed/watcher task
-/// supervision needs. Driven through `SessionController::drive_setup` (see
-/// the call site) so Ctrl-C is observed the whole time this runs, not only
-/// once it returns.
+/// `simulation webots run`: Webots preflight, ordinary resident staging,
+/// disposable Webots project generation, and observer startup.
 pub(crate) async fn live_simulate_setup(
     ui: crate::Ui,
     mut sim: SimPlan,
-    options: SimulateOptions,
+    board: BoardBackend,
     events: mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>,
     token: tokio_util::sync::CancellationToken,
     output: OutputContext,
-    renders_tui: bool,
+    action_channel: Option<(
+        mpsc::Sender<SupervisorAction>,
+        mpsc::Receiver<SupervisorAction>,
+    )>,
 ) -> Result<LiveSimSetup> {
     let ensure_active = || {
         if token.is_cancelled() {
@@ -90,17 +58,14 @@ pub(crate) async fn live_simulate_setup(
         .context("Webots preflight failed; live simulate cannot launch the simulator")?;
     ensure_active()?;
 
-    let identity = ProjectLockIdentity::resolve(&sim.ctx.project_root, ProjectOperation::Run);
-    let locks = LiveSimulationLocks::acquire(&crate::host_paths::simulator_lock_path()?, identity)?;
     let staged_root =
         crate::stager::stage_runtime_layout(&sim.ctx.project_root, &sim_source(&sim).resolved)
             .context("failed to stage the simulation runtime layout")?;
     ensure_active()?;
-    let board = BoardBackend::new();
     board.configure(
         sim.ctx.project_root.display().to_string(),
         sim_source(&sim).resolved.train.clone(),
-        "simulation",
+        "simulation:webots",
     );
     board.upsert_process(
         phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
@@ -111,14 +76,13 @@ pub(crate) async fn live_simulate_setup(
         ),
         phoxal_cli_core::session::StartupRequirement::Required,
     );
-    let runtime_store = sim.runtime_store.clone();
     let mut specs = Vec::new();
     ensure_active()?;
     // Resolve the CLI-managed simulation participants (services and tools) from
     // the staged `bin/` under the same canonical identity names a native run
     // uses, so `simulation webots run` reads an identity-keyed `bin/` exactly
-    // like `run`. The Webots-managed supervisor/controllers are staged into the
-    // world instead, so they are not resolved here.
+    // like `run`. The Webots-owned controller is copied into the Webots
+    // project's controllers directory instead, so it is not resolved here.
     let source_dirs = crate::run::source_dirs_by_participant(&sim_source(&sim).source_participants);
     crate::run::prepare_robot_participants(
         &sim.plan,
@@ -131,8 +95,7 @@ pub(crate) async fn live_simulate_setup(
         &ui,
     )?;
     // The router launches from the staged `bin/` entry like every other
-    // official; stage it there before starting it (the remaining simulation
-    // runtime set is staged through the simulation-managed route, #931).
+    // official; stage it there before starting it.
     crate::stager::stage_router_binary(
         &staged_root,
         &sim_source(&sim).resolved,
@@ -155,13 +118,17 @@ pub(crate) async fn live_simulate_setup(
     );
     crate::run::apply_session_connect(&mut sim.plan, &mut specs, &connect);
     ensure_active()?;
-    prepare_substitution_notes(&sim.plan, &board);
-
-    let (webots_spec, spawn_descriptors) = stage_and_prepare_webots_spec(&ui, &sim)?;
-    ensure_active()?;
+    let webots_spec = stage_and_prepare_webots_spec(&ui, &sim, &staged_root, &connect)?;
     let mut background_tasks = crate::run::AbortTasks::default();
-    let spawn_responder = start_spawn_responder(&sim.plan, spawn_descriptors, &connect).await?;
-    background_tasks.push(spawn_responder);
+    ui.info(format!(
+        "Webots profile: webots; world: {}; project: {}",
+        super::webots_world(&sim.plan.mode).display(),
+        crate::webots_stage_root::root()?.display()
+    ));
+    board.set_simulation_info(
+        "webots",
+        super::webots_world(&sim.plan.mode).display().to_string(),
+    );
     ensure_active()?;
     let requested_stop = RequestedStop::new(webots_spec.key.clone(), webots_spec.shutdown_grace);
     specs.push(webots_spec);
@@ -190,10 +157,8 @@ pub(crate) async fn live_simulate_setup(
             })
             .collect::<Vec<_>>(),
     );
-    // OBSERVED readiness: drive board state from each participant's own
-    // Liveliness token, including SIMULATION-MANAGED ones (the
-    // supervisor and every controller), which have no supervised
-    // process of their own to poll.
+    // OBSERVED readiness: drive ordinary resident participant state from each
+    // participant's own Liveliness token.
     background_tasks.extend(sim.plan.robots.iter().map(|robot| {
         start_liveliness_observer(
             robot.namespace.clone(),
@@ -202,60 +167,10 @@ pub(crate) async fn live_simulate_setup(
             board.clone(),
         )
     }));
-    let clock_robot = sim
-        .plan
-        .robots
-        .first()
-        .context("sim launch plan has no robot for the clock telemetry feed")?;
-    let (clock_rx, clock_task) = start_clock_feed(
-        clock_robot.namespace.clone(),
-        clock_robot.id.clone(),
-        connect.clone(),
-    );
-    background_tasks.push(clock_task);
-    // Clock observation is telemetry only. Startup and session state do not
-    // wait for a sample; clocked services and drivers consume it independently
-    // through their simulation-clock runner policy.
-    let telemetry = crate::telemetry::TelemetryBackend::new();
-    telemetry.set_clock_feed(clock_rx.clone());
+    // The restart action channel is shared with ordinary resident supervision.
+    let (_action_tx, action_rx) = action_channel.unwrap_or_else(|| mpsc::channel(16));
 
-    // The restart/hot-reload action channel always exists now (not just
-    // under `--watch`), matching `crate::run`.
-    let (action_tx, action_rx) = mpsc::channel(16);
-    if options.watch {
-        let live_ids = specs
-            .iter()
-            .map(|spec| spec.id.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        background_tasks.push(crate::watch::spawn_sim_watch(
-            crate::watch::SimWatchConfig {
-                ctx: sim.ctx.clone(),
-                options: options.clone(),
-                live_ids,
-                board: board.clone(),
-                action_tx: action_tx.clone(),
-            },
-        ));
-    }
-
-    let stages = stages_for_simulate(specs, &sim.plan, output);
-
-    // Live telemetry (CLI-UX Phase 3/4): only worth subscribing when
-    // a real TUI is up to read it, same gate as `crate::run`. The
-    // sim clock feed (`telemetry.set_clock_feed` above) is wired
-    // unconditionally since it costs nothing extra - the SAME task
-    // already exists for the title telemetry - but device/runtime/
-    // router/joypad each open their own bus connection, so those
-    // stay Tui-gated.
-    let feed_targets = crate::run::RobotFeedTarget::from_plan(&sim.plan);
-    if renders_tui {
-        background_tasks.extend(crate::run::start_telemetry_feeds_at(
-            &feed_targets,
-            &telemetry,
-            &connect,
-            board.recovery_epoch_receiver(),
-        ));
-    }
+    let stages = stages_for_simulate(specs, output);
 
     let starting = phoxal_cli_core::session::state::SessionState::Preparing
         .start()
@@ -271,18 +186,11 @@ pub(crate) async fn live_simulate_setup(
         emits_running_on_startup_complete: true,
     };
 
-    let orderly_shutdown_timeout = crate::supervisor::orderly_shutdown_budget(&stages);
     Ok(LiveSimSetup {
         router,
-        connect,
-        _locks: locks,
         board,
-        telemetry,
-        runtime_store,
-        orderly_shutdown_timeout,
         stages,
         supervisor_options,
-        action_tx,
         background_tasks,
     })
 }

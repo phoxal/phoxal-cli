@@ -55,7 +55,7 @@ pub(crate) struct StagedProject {
 
 impl StagedProject {
     /// The plan-construction options this refresh resolved, so `run`, `start`,
-    /// `watch`, and `build` all validate/construct the plan against the identical
+    /// and `build` all validate/construct the plan against the identical
     /// driver policy the staging step honored.
     pub(crate) fn plan_options(&self) -> phoxal_cli_core::project::layout::PlanOptions {
         phoxal_cli_core::project::layout::PlanOptions {
@@ -66,7 +66,7 @@ impl StagedProject {
 
 /// Refresh the host-triple staging for a buildable source project and return the
 /// staged layout plus the staging-side inputs (#936). This is the one staging
-/// entry `run`, `start`, `watch`, and `phoxal build` all share, so they build and
+/// entry `run`, `start`, and `phoxal build` all share, so they build and
 /// stage identically before diverging on what they do with the staged layout:
 /// resolve the locked graph, prepare native artifacts, resolve the driver policy,
 /// stage the runtime layout under `.phoxal/build/<host-triple>/`, run the
@@ -80,7 +80,7 @@ impl StagedProject {
 /// which threads through the resolve/stage/`bin/`-completion steps so the same
 /// code cross-compiles (or reuses container-built) workspace crates and links
 /// the suite's per-target official blobs into `.phoxal/build/<triple>/`. `run`,
-/// `start`, and `watch` pass `StagingBuild::host_runtime()`.
+/// and `start` pass `StagingBuild::host_runtime()`.
 pub(crate) fn refresh_staging(
     project_start: &Path,
     options: &RunOptions,
@@ -102,7 +102,7 @@ pub(crate) fn refresh_staging(
     // and plan construction from here.
     let driver_policy = DriverPolicy::from_options(options, &crate::run::driven_instances(&robot))?;
 
-    // `run`/`start`/`build`/`watch` never touch the network (#936, finding 1):
+    // `run`/`start`/`build` never touch the network (#936, finding 1):
     // resolve against the suite `phoxal update` persisted into the vendored
     // store, not a fresh fetch. A missing vendored suite fails with "run `phoxal
     // update`".
@@ -124,7 +124,7 @@ pub(crate) fn refresh_staging(
             // selection, enter the source check, or be built.
             drivers: driver_policy.selection(),
             // Native runtime bundles deliberately exclude operator-host Webots
-            // simulators. Host run/start/watch staging keeps them.
+            // simulators. Host run/start staging keeps them.
             include_simulators: build.include_simulators(),
         },
     )?;
@@ -173,7 +173,7 @@ pub(crate) fn refresh_staging(
     )?;
 
     // Declaration drift (#950) is warned from THIS shared path, so run,
-    // start, watch restaging, and build all surface it exactly once.
+    // start and build all surface it exactly once.
     crate::run::report_undeclared_runtimes(&resolved.undeclared_runtimes, ui);
 
     Ok(StagedProject {
@@ -237,7 +237,7 @@ pub(crate) fn prepare_run_on_board(
     // The staging-side record of source crate directories the source-free plan
     // no longer carries: a participant built from local source runs from its
     // crate directory (relative asset resolution) and is rebuilt there under
-    // `--watch`. Execution identity always comes from the plan's `bin/` name.
+    // Execution identity always comes from the plan's `bin/` name.
     let source_dirs = crate::run::source_dirs_by_participant(&staged.source_participants);
     // Single-pass execution (#936, finding 3): `refresh_staging` already built
     // and staged every participant binary into `bin/`, and `validate_layout_plan`
@@ -353,7 +353,7 @@ pub(crate) fn prepare_layout_run_on_board(
         robot_path: layout_root.join("robot.yaml"),
         project_root: layout_root.to_path_buf(),
         // A staged layout has no resolved source graph; source-needing
-        // consumers (`--watch`, simulation) go through `PlanContext::source`,
+        // source consumers go through `PlanContext::source`,
         // which fails with an actionable error on this path.
         source: None,
     };

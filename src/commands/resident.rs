@@ -69,10 +69,26 @@ pub(crate) async fn drive_tui(
         &connect,
         board.recovery_epoch_receiver(),
     ));
-    let mut controller = crate::session::controller::SessionController::new(
+    if initial.execution == "simulation:webots"
+        && let Some(first) = targets.first()
+    {
+        let (clock_rx, clock_task) = crate::supervisor::start_clock_feed(
+            first.scope.namespace.clone(),
+            first.scope.robot_id.clone(),
+            connect.clone(),
+        );
+        telemetry.set_clock_feed(clock_rx);
+        tasks.push(clock_task);
+    }
+    let mut controller = crate::session::controller::SessionController::new_attachment(
         app.output,
-        phoxal_cli_core::session::SessionMode::Run,
+        if initial.execution == "simulation:webots" {
+            phoxal_cli_core::session::SessionMode::Simulation
+        } else {
+            phoxal_cli_core::session::SessionMode::Run
+        },
         &target.project,
+        &initial,
     )?;
     controller.set_bus_endpoint(connect);
     let result = controller

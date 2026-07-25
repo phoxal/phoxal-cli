@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// What role a participant plays in a robot's contract graph: a CLI-managed
 /// peripheral tool (the router transport, the joypad, the Webots
 /// application), a bus service, a component driver, or a simulator (the
-/// Webots supervisor or a robot's controller). Orthogonal to whether this
+/// Webots application or a robot's controller). Orthogonal to whether this
 /// particular incarnation is running from a locally resolved directory or a
 /// fetched suite artifact - callers that need that distinction carry it
 /// alongside, not inside, this enum (see the module docs).

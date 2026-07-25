@@ -1,6 +1,5 @@
 //! Process-group termination and forced shutdown.
 
-use super::BoardBackend;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
@@ -8,30 +7,6 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio::process::Child;
 use tokio::time::timeout;
-
-/// Force-stop every process group currently recorded by the session board.
-pub fn force_kill_supervised_process_groups(board: &BoardBackend) {
-    for status in board.snapshot().participants.into_values() {
-        let Some(pid) = status.pid else {
-            continue;
-        };
-        #[cfg(unix)]
-        if let Err(error) = send_process_group_signal(pid, libc::SIGKILL) {
-            tracing::warn!(
-                participant = %status.id,
-                pid,
-                error = %error,
-                "forced process-group shutdown failed"
-            );
-        }
-        #[cfg(not(unix))]
-        tracing::warn!(
-            participant = %status.id,
-            pid,
-            "forced process-group shutdown is unavailable on this platform"
-        );
-    }
-}
 
 pub async fn stop_child(child: &mut Child, budget: Duration, process_group: bool) -> Result<()> {
     let pid = child.id();

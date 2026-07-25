@@ -1,6 +1,6 @@
 //! Tests for this module.
 
-use super::r#loop::{handle_action, recv_action, request_participant_stop, shutdown_all};
+use super::r#loop::{recv_action, request_participant_stop, shutdown_all};
 use super::signals::process_group_alive;
 use super::*;
 use anyhow::{Context, Result};
@@ -193,24 +193,6 @@ async fn post_ready_keep_degraded_failure_keeps_the_project_active() -> Result<(
     Ok(())
 }
 
-#[test]
-fn orderly_shutdown_budget_covers_grace_group_reap_and_reader_joins() {
-    let mut first = sleep_spec("first");
-    first.shutdown_grace = Duration::from_secs(2);
-    let mut second = sleep_spec("second");
-    second.shutdown_grace = Duration::from_secs(3);
-    let stages = vec![SupervisionStage::new(
-        "all",
-        vec![first, second],
-        WaitBudget::Unbounded,
-    )];
-
-    assert_eq!(
-        orderly_shutdown_budget(&stages),
-        Duration::from_millis(5_500)
-    );
-}
-
 #[tokio::test]
 async fn shutdown_drains_concurrently_within_reverse_canonical_phases() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -302,7 +284,7 @@ async fn closed_action_receiver_is_consumed_once_then_stays_pending() {
 }
 
 #[tokio::test]
-async fn recovery_epoch_resets_reconcilers_and_preserves_webots_ownership() {
+async fn recovery_epoch_resets_reconcilers_and_cli_managed_webots() {
     let board = BoardBackend::new();
     let mut log_reconciler = board.recovery_epoch_receiver();
     let mut bus_reconciler = board.recovery_epoch_receiver();
@@ -312,24 +294,14 @@ async fn recovery_epoch_resets_reconcilers_and_preserves_webots_ownership() {
     webots.pid = Some(41);
     webots.restart_count = 2;
     board.upsert(webots);
-    let mut controller = ParticipantStatus::new(
-        "simulator-webots-controller-robot",
-        ParticipantKind::Simulator,
-        ParticipantState::Ready,
-    );
-    controller.note = Some("SimulationManaged: launched by Webots".to_string());
-    board.upsert(controller);
     board.record_presence("webots", true);
-    board.record_presence("simulator-webots-controller-robot", true);
 
     let epoch = board.begin_recovery_epoch(
         &[(
             phoxal_cli_core::session::ProcessKey::project("webots"),
             Some("CLI-managed Webots application".to_string()),
         )],
-        &[phoxal_cli_core::session::ProcessKey::project(
-            "simulator-webots-controller-robot",
-        )],
+        &[],
     );
 
     assert_eq!(epoch, 1);
@@ -345,7 +317,6 @@ async fn recovery_epoch_resets_reconcilers_and_preserves_webots_ownership() {
     assert_eq!(*log_reconciler.borrow_and_update(), epoch);
     assert_eq!(*bus_reconciler.borrow_and_update(), epoch);
     assert!(!board.is_present("webots"));
-    assert!(!board.is_present("simulator-webots-controller-robot"));
     let snapshot = board.snapshot();
     assert_eq!(
         snapshot.participants["webots"].state,
@@ -353,25 +324,7 @@ async fn recovery_epoch_resets_reconcilers_and_preserves_webots_ownership() {
     );
     assert_eq!(snapshot.participants["webots"].pid, None);
     assert_eq!(snapshot.participants["webots"].restart_count, 0);
-    assert_eq!(
-        snapshot.participants["simulator-webots-controller-robot"]
-            .note
-            .as_deref(),
-        Some("SimulationManaged: launched by Webots")
-    );
-
-    board.record_presence("simulator-webots-controller-robot", true);
-    assert_eq!(
-        board.snapshot().participants["simulator-webots-controller-robot"].state,
-        ParticipantState::Starting,
-        "observations from the dead router must be fenced"
-    );
     board.enable_presence_for_recovery();
-    board.record_presence("simulator-webots-controller-robot", true);
-    assert_eq!(
-        board.snapshot().participants["simulator-webots-controller-robot"].state,
-        ParticipantState::Ready
-    );
 }
 
 #[test]
@@ -569,7 +522,7 @@ async fn requested_webots_stop_uses_sigkill_only_after_term_grace() -> Result<()
 }
 
 #[tokio::test]
-async fn watch_swap_does_not_consume_restart_budget() -> Result<()> {
+async fn same_spec_swap_does_not_consume_restart_budget() -> Result<()> {
     let board = BoardBackend::new();
     board.upsert(ParticipantStatus::new(
         "mission",
@@ -600,52 +553,6 @@ async fn watch_swap_does_not_consume_restart_budget() -> Result<()> {
     assert_eq!(status.note.as_deref(), Some("ok 0.1s, restarted"));
 
     participant.stop_current(&board).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn watch_reconciles_environment_and_shutdown_policy_changes() -> Result<()> {
-    use phoxal_cli_core::project::launch_plan::{LaunchMode, LaunchPlan, PlanRevision};
-
-    let board = BoardBackend::new();
-    board.configure("test", "0.37.0", "run");
-    board.upsert(ParticipantStatus::new(
-        "mission",
-        ParticipantKind::Service,
-        ParticipantState::Starting,
-    ));
-    let mut initial = sleep_spec("mission");
-    initial.bus_participant = false;
-    initial.readiness = phoxal_cli_core::session::ReadinessPolicy::ProcessSpawned;
-    initial.env = vec![("PHOXAL_CONFIG".to_string(), "old".to_string())];
-    let running = RunningParticipant::spawn(initial.clone(), &board).await?;
-    let mut running = vec![running];
-
-    let mut candidate = initial;
-    candidate.env = vec![("PHOXAL_CONFIG".to_string(), "new".to_string())];
-    candidate.shutdown_grace = Duration::from_millis(250);
-    let revision = PlanRevision::compile(
-        2,
-        LaunchPlan {
-            mode: LaunchMode::Run,
-            robots: Vec::new(),
-        },
-    )?;
-    handle_action(
-        &mut running,
-        &board,
-        SupervisorAction::ReconcilePlan {
-            revision,
-            specs: vec![candidate.clone()],
-            remove_ids: Vec::new(),
-            note: "manifest changed".to_string(),
-        },
-    )
-    .await?;
-
-    assert_eq!(running[0].spec, candidate);
-    assert_eq!(board.supervisor_snapshot().plan_revision, 2);
-    shutdown_all(&mut running, &board).await;
     Ok(())
 }
 
@@ -692,7 +599,7 @@ async fn swap_spawn_failure_is_participant_status_not_supervisor_error() -> Resu
     missing.executable = PathBuf::from("/definitely/missing/phoxal-participant");
 
     participant
-        .swap(missing, &board, "watch rebuild completed".to_string())
+        .swap(missing, &board, "replacement prepared".to_string())
         .await?;
 
     assert!(participant.failed);
@@ -787,7 +694,7 @@ async fn participant_failure_stays_visible_until_user_stop() -> Result<()> {
         ParticipantState::Starting,
     ));
     board.upsert(ParticipantStatus::new(
-        "simulator-webots-controller-robot",
+        "mission",
         ParticipantKind::Service,
         ParticipantState::Ready,
     ));
@@ -822,9 +729,9 @@ async fn participant_failure_stays_visible_until_user_stop() -> Result<()> {
         "the session must remain up until the user stops it"
     );
     board.set_state(
-        "simulator-webots-controller-robot",
+        "mission",
         ParticipantState::Failed,
-        Some("controller reported terminal failure".to_string()),
+        Some("mission reported terminal failure".to_string()),
     );
 
     tokio::time::sleep(Duration::from_millis(650)).await;
@@ -839,10 +746,7 @@ async fn participant_failure_stays_visible_until_user_stop() -> Result<()> {
         .expect("user stop must tear down promptly")
         .expect("supervisor task panicked")?;
     assert!(!outcome.graph_healthy());
-    assert_eq!(
-        outcome.failed_participants,
-        vec!["simulator-webots-controller-robot"]
-    );
+    assert_eq!(outcome.failed_participants, vec!["mission"]);
     assert_eq!(
         board.snapshot().participants["webots"].state,
         ParticipantState::Stopped
@@ -1020,7 +924,7 @@ async fn captured_newline_free_output_is_bounded_while_it_is_read() {
 
 #[test]
 fn presence_loss_is_observational_and_can_recover() {
-    let id = "simulator-webots-controller-robot-v1";
+    let id = "mission";
     let board = BoardBackend::new();
     board.upsert(ParticipantStatus::new(
         id,
@@ -1043,25 +947,6 @@ fn presence_loss_is_observational_and_can_recover() {
     let snapshot = board.snapshot();
     assert_eq!(snapshot.participants[id].state, ParticipantState::Ready);
     assert!(snapshot.participants[id].note.is_none());
-}
-
-#[test]
-fn first_presence_preserves_launch_context_note() {
-    let id = "simulator-webots-controller-robot-v1";
-    let board = BoardBackend::new();
-    let mut status =
-        ParticipantStatus::new(id, ParticipantKind::Simulator, ParticipantState::Starting);
-    status.note = Some("SimulationManaged: launched by Webots".to_string());
-    board.upsert(status);
-
-    board.record_presence(id, true);
-
-    let snapshot = board.snapshot();
-    assert_eq!(snapshot.participants[id].state, ParticipantState::Ready);
-    assert_eq!(
-        snapshot.participants[id].note.as_deref(),
-        Some("SimulationManaged: launched by Webots")
-    );
 }
 
 #[test]
@@ -1175,76 +1060,6 @@ fn liveliness_cannot_resurrect_a_terminal_participant() {
     assert_eq!(
         snapshot.participants["mission"].state,
         ParticipantState::Failed
-    );
-}
-
-/// A simulation-managed participant (the Webots supervisor/controller: no
-/// `ParticipantSpec`, no supervised process, launched by Webots itself) that
-/// never appears in Liveliness must both (a) make participant readiness fail with a
-/// clear, bounded-time error instead of hanging, and (b) be counted as
-/// failed afterward so `SupervisorOutcome::graph_healthy` reflects it even
-/// though no process crash was ever observed.
-#[tokio::test]
-async fn participant_wait_times_out_on_a_simulation_managed_participant_that_never_appears() {
-    let board = BoardBackend::new();
-    board.upsert(ParticipantStatus::new(
-        "simulator-webots-supervisor",
-        ParticipantKind::Tool,
-        ParticipantState::Starting,
-    ));
-    board.upsert(ParticipantStatus::new(
-        "simulator-webots-controller-robot",
-        ParticipantKind::Tool,
-        ParticipantState::Starting,
-    ));
-    // The supervisor checks in...
-    board.record_presence("simulator-webots-supervisor", true);
-    // ...but the controller never does.
-
-    let expected = vec![
-        "simulator-webots-supervisor".to_string(),
-        "simulator-webots-controller-robot".to_string(),
-    ];
-    let result = tokio::time::timeout(
-        Duration::from_secs(5),
-        await_participants_ready(
-            &board,
-            &expected,
-            WaitBudget::Bounded(Duration::from_millis(300)),
-            Duration::from_millis(20),
-        ),
-    )
-    .await
-    .expect("participant wait must return within its own timeout, never hang");
-
-    let error = result.expect_err("a controller that never appears must fail the barrier");
-    assert!(
-        error
-            .to_string()
-            .contains("simulator-webots-controller-robot"),
-        "error should name the missing participant: {error}"
-    );
-
-    // Failure propagation: the wait's own board-marking side
-    // effect is what makes the graph unhealthy, even though this
-    // participant never had a supervised process to crash.
-    let snapshot = board.snapshot();
-    assert_eq!(
-        snapshot.participants["simulator-webots-controller-robot"].state,
-        ParticipantState::Failed
-    );
-    assert_eq!(
-        snapshot.participants["simulator-webots-supervisor"].state,
-        ParticipantState::Ready,
-        "the participant that DID appear must not be dragged down by the other's timeout"
-    );
-    let outcome = SupervisorOutcome {
-        failed_participants: snapshot.failed_participants(),
-    };
-    assert!(!outcome.graph_healthy());
-    assert_eq!(
-        outcome.failed_participants,
-        vec!["simulator-webots-controller-robot"]
     );
 }
 

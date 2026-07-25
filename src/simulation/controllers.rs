@@ -6,7 +6,6 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use phoxal_cli_core::project::launch_plan::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
-use phoxal_cli_core::project::launch_plan::SIMULATOR_SUPERVISOR_ARTIFACT_NAME;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use std::path::Path;
@@ -17,75 +16,81 @@ pub(crate) fn stage_simulator_controller_binaries(
     resolved: &ResolvedRobot,
     ui: &crate::Ui,
 ) -> Result<()> {
+    let runtime = resolved_controller_runtime(&resolved.simulators)?;
+    stage_controller_runtime(runtime, ui)
+}
+
+fn stage_controller_runtime(runtime: &ResolvedPlatformRuntime, ui: &crate::Ui) -> Result<()> {
     let webots_home = detected_webots_home_for_build_env();
-    for runtime in &resolved.simulators {
-        let controller_name = webots_controller_name_for_simulator_artifact(&runtime.name)
-            .ok_or_else(|| {
-                anyhow!(
-                    "unrecognized simulator artifact '{}'; expected '{}' or '{}'",
+    stage_controller_runtime_with_home(runtime, ui, webots_home.as_deref())
+}
+
+fn stage_controller_runtime_with_home(
+    runtime: &ResolvedPlatformRuntime,
+    ui: &crate::Ui,
+    webots_home: Option<&Path>,
+) -> Result<()> {
+    let controller_name =
+        webots_controller_name_for_simulator_artifact(&runtime.name).ok_or_else(|| {
+            anyhow!(
+                "unrecognized simulator artifact '{}'; expected '{}'",
+                runtime.name,
+                SIMULATOR_CONTROLLER_ARTIFACT_NAME
+            )
+        })?;
+    let resolved_binary = if let Some(crate_dir) = runtime.source_path() {
+        let preferred_name = format!("phoxal-simulator-{}", runtime.name);
+        let _env_guard = webots_home.map(WebotsHomeEnvGuard::set);
+        crate::run::build_source_binary(crate_dir, &preferred_name, ui, None).with_context(
+            || {
+                format!(
+                    "failed to build path-overridden simulator '{}' from {}",
                     runtime.name,
-                    SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
-                    SIMULATOR_CONTROLLER_ARTIFACT_NAME
+                    crate_dir.display()
                 )
-            })?;
-        let resolved_binary = if let Some(crate_dir) = runtime.source_path() {
-            let preferred_name = format!("phoxal-simulator-{}", runtime.name);
-            let _env_guard = webots_home
-                .as_ref()
-                .map(|home| WebotsHomeEnvGuard::set(home));
-            crate::run::build_source_binary(crate_dir, &preferred_name, ui, None).with_context(
-                || {
-                    format!(
-                        "failed to build path-overridden simulator '{}' from {}",
-                        runtime.name,
-                        crate_dir.display()
-                    )
-                },
-            )?
-        } else {
-            provisioned_official_simulator_binary(runtime)?
-        };
-        require_absolute_symlink_target("resolved simulator binary", &resolved_binary)?;
-        let staged_dir = webots_stage_root::controller_dir(controller_name)?;
-        std::fs::create_dir_all(&staged_dir).with_context(|| {
-            format!(
-                "failed to create staged controller directory {}",
-                staged_dir.display()
-            )
-        })?;
-        let staged_binary = staged_dir.join(controller_name);
-        std::os::unix::fs::symlink(&resolved_binary, &staged_binary).with_context(|| {
-            format!(
-                "failed to symlink simulator binary {} to staged controller path {}",
-                resolved_binary.display(),
-                staged_binary.display()
-            )
-        })?;
-        ui.info(format!(
-            "staged simulator controller binary {} at {} (symlink to {})",
-            runtime.name,
-            staged_binary.display(),
-            resolved_binary.display()
-        ));
-    }
+            },
+        )?
+    } else {
+        provisioned_official_simulator_binary(runtime)?
+    };
+    let staged_dir = webots_stage_root::controller_dir(controller_name)?;
+    std::fs::create_dir_all(&staged_dir).with_context(|| {
+        format!(
+            "failed to create staged controller directory {}",
+            staged_dir.display()
+        )
+    })?;
+    let staged_binary = staged_dir.join(controller_name);
+    std::fs::copy(&resolved_binary, &staged_binary).with_context(|| {
+        format!(
+            "failed to copy simulator binary {} to staged controller path {}",
+            resolved_binary.display(),
+            staged_binary.display()
+        )
+    })?;
+    ui.info(format!(
+        "staged simulator controller binary {} at {} (copied from {})",
+        runtime.name,
+        staged_binary.display(),
+        resolved_binary.display()
+    ));
     Ok(())
 }
 
-/// Symlink targets into the staged simulation must be absolute (Webots' cwd
-/// when it execs `controllers/<name>/<name>` is not the staged tree, so a
-/// relative symlink would not resolve). Both sources this crate ever
-/// symlinks from - the native-artifact cache and a path-pinned crate's cargo
-/// `target_directory` - are already absolute by construction; this asserts
-/// that rather than silently trying to fix up a relative one.
-pub(crate) fn require_absolute_symlink_target(label: &str, path: &Path) -> Result<()> {
-    if path.is_absolute() {
-        Ok(())
-    } else {
-        bail!(
-            "{label} must be an absolute path to symlink into the staged simulation, got {}",
-            path.display()
-        );
-    }
+fn resolved_controller_runtime(
+    simulators: &[ResolvedPlatformRuntime],
+) -> Result<&ResolvedPlatformRuntime> {
+    let controllers = simulators
+        .iter()
+        .filter(|runtime| runtime.name == SIMULATOR_CONTROLLER_ARTIFACT_NAME)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        controllers.len() == 1,
+        "Webots simulation requires exactly one '{}' runtime, resolved {}",
+        SIMULATOR_CONTROLLER_ARTIFACT_NAME,
+        controllers.len()
+    );
+    Ok(controllers[0])
 }
 
 /// Map a resolved simulator artifact name to its Webots controller directory
@@ -96,10 +101,8 @@ pub(crate) fn require_absolute_symlink_target(label: &str, path: &Path) -> Resul
 pub(crate) fn webots_controller_name_for_simulator_artifact(
     artifact_name: &str,
 ) -> Option<&'static str> {
-    if artifact_name == SIMULATOR_SUPERVISOR_ARTIFACT_NAME {
-        Some("phoxal-simulator-webots-supervisor")
-    } else if artifact_name == SIMULATOR_CONTROLLER_ARTIFACT_NAME {
-        Some("phoxal-simulator-webots-controller")
+    if artifact_name == SIMULATOR_CONTROLLER_ARTIFACT_NAME {
+        Some(crate::simulate_staging::WEBOTS_CONTROLLER_NAME)
     } else {
         None
     }
@@ -182,5 +185,102 @@ impl Drop for WebotsHomeEnvGuard {
         unsafe {
             std::env::remove_var("WEBOTS_HOME");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host_paths::test_support::ScratchPhoxalHome;
+    use phoxal_cli_core::project::suite::ArtifactKind;
+
+    fn controller_runtime() -> ResolvedPlatformRuntime {
+        ResolvedPlatformRuntime {
+            name: SIMULATOR_CONTROLLER_ARTIFACT_NAME.to_string(),
+            package: "phoxal/simulator-webots-controller".to_string(),
+            kind: ArtifactKind::Simulator,
+            version: "0.40.2".to_string(),
+            artifact_ref: "phoxal/simulator-webots-controller@0.40.2".to_string(),
+            sha256: None,
+            url: None,
+            size: None,
+            published: true,
+            published_triples: Vec::new(),
+            path_override: None,
+            train: "0.40.2".to_string(),
+            target: None,
+        }
+    }
+
+    #[test]
+    fn exactly_one_controller_runtime_is_required() {
+        assert!(resolved_controller_runtime(&[]).is_err());
+        let one = [controller_runtime()];
+        assert_eq!(
+            resolved_controller_runtime(&one)
+                .expect("one controller")
+                .name,
+            SIMULATOR_CONTROLLER_ARTIFACT_NAME
+        );
+        let duplicate = [controller_runtime(), controller_runtime()];
+        assert!(resolved_controller_runtime(&duplicate).is_err());
+    }
+
+    #[test]
+    fn suite_controller_missing_from_cache_is_a_hard_error() -> Result<()> {
+        let _home = ScratchPhoxalHome::new()?;
+        webots_stage_root::wipe_and_recreate()?;
+        let error =
+            stage_controller_runtime_with_home(&controller_runtime(), &crate::Ui::from_env(), None)
+                .expect_err("missing suite controller must fail");
+        assert!(
+            format!("{error:#}").contains("failed to locate vendored simulator"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_overridden_controller_is_built_and_staged() -> Result<()> {
+        let _home = ScratchPhoxalHome::new()?;
+        let source = tempfile::tempdir()?;
+        std::fs::create_dir_all(source.path().join("src"))?;
+        std::fs::write(
+            source.path().join("Cargo.toml"),
+            r#"[package]
+name = "fixture-webots-controller"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "phoxal-simulator-webots-controller"
+path = "src/main.rs"
+"#,
+        )?;
+        std::fs::write(source.path().join("src/main.rs"), "fn main() {}\n")?;
+        std::fs::write(
+            source.path().join("Cargo.lock"),
+            r#"# This file is automatically @generated by Cargo.
+version = 4
+
+[[package]]
+name = "fixture-webots-controller"
+version = "0.1.0"
+"#,
+        )?;
+        let mut runtime = controller_runtime();
+        runtime.path_override = Some(source.path().to_path_buf());
+        runtime.artifact_ref = format!("path:{}", source.path().display());
+        webots_stage_root::wipe_and_recreate()?;
+        stage_controller_runtime_with_home(&runtime, &crate::Ui::from_env(), None)?;
+        let staged =
+            webots_stage_root::controller_dir(crate::simulate_staging::WEBOTS_CONTROLLER_NAME)?
+                .join(crate::simulate_staging::WEBOTS_CONTROLLER_NAME);
+        assert!(
+            staged.is_file(),
+            "controller was not staged at {}",
+            staged.display()
+        );
+        Ok(())
     }
 }

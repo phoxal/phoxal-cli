@@ -339,10 +339,7 @@ fn tools_resolve_from_suite_entries() -> anyhow::Result<()> {
             .iter()
             .map(|simulator| simulator.package.as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "phoxal/simulator-webots-controller",
-            "phoxal/simulator-webots-supervisor"
-        ]
+        vec!["phoxal/simulator-webots-controller"]
     );
 
     Ok(())
@@ -431,7 +428,6 @@ fn test_suite() -> Suite {
                 "publish",
             )],
         ),
-        fixture_simulator_entry_for_tests("webots-supervisor", "0.14.0", &target, true, Vec::new()),
     ]);
     fixture_suite_for_tests(entries)
 }

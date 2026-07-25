@@ -66,9 +66,10 @@ fn assert_severity_matrix(diagnostics: &[RobotCoherenceDiagnostic], coherent: bo
         coherence_disposition(CoherenceVerb::Check, true, diagnostics),
         hard
     );
-    for verb in [CoherenceVerb::Run, CoherenceVerb::Simulate] {
-        assert_eq!(coherence_disposition(verb, false, diagnostics), hard);
-    }
+    assert_eq!(
+        coherence_disposition(CoherenceVerb::Run, false, diagnostics),
+        hard
+    );
 }
 
 #[test]

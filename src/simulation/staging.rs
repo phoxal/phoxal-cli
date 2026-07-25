@@ -1,18 +1,15 @@
 //! Filesystem staging for generated simulation worlds and meshes.
 
-use super::require_absolute_symlink_target;
 use crate::component_driver::component_assets_dir;
 use crate::simulate_staging::ComponentTypeToStage;
+use crate::simulate_staging::ControllerLaunch;
 use crate::simulate_staging::RobotToStage;
 use crate::simulate_staging::StagedSimulationWorld;
 use crate::simulate_staging::stage_simulation_world;
 use crate::webots_stage_root;
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::anyhow;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
-use phoxal_cli_core::project::launch_plan::SIMULATOR_SUPERVISOR_PROVIDER_ID;
-use phoxal_cli_core::project::launch_plan::simulator_controller_provider_id;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -23,14 +20,11 @@ pub(crate) fn stage_simulation_for_robot(
     world_source_path: &Path,
     resolved: &ResolvedRobot,
     launch_plan: &LaunchPlan,
+    connect_endpoints: &[String],
+    runtime_root: &Path,
 ) -> Result<StagedSimulationWorld> {
-    // Wipe-and-restage per play: the staged root is a single, home-based
-    // location shared across every `simulate` invocation (not project-scoped
-    // any more), and Webots only ever runs one world per play, so a previous
-    // play's stale worlds/protos/meshes/controllers must never linger. This
-    // must run before any of this play's own staging below writes anything.
-    webots_stage_root::wipe_and_recreate()?;
-
+    // Prepare every generated file in the task-local tree before reconciling
+    // it into the ordinary Webots project.
     let base_world_text = std::fs::read_to_string(world_source_path)
         .with_context(|| format!("failed to read {}", world_source_path.display()))?;
     let world_name = world_source_path
@@ -43,25 +37,16 @@ pub(crate) fn stage_simulation_for_robot(
         .first()
         .context("sim launch plan has no robot")?;
     let robot_id = &resolved.robot.robot.id;
-    let controller_id = simulator_controller_provider_id(robot_id);
-    let controller_launch = robot
-        .participants
-        .iter()
-        .find(|participant| participant.launch.participant_id == controller_id)
-        .map(|participant| participant.launch.clone())
-        .ok_or_else(|| {
-            anyhow!("sim launch plan is missing the controller participant '{controller_id}'")
-        })?;
-    let supervisor_launch = robot
-        .participants
-        .iter()
-        .find(|participant| participant.launch.participant_id == SIMULATOR_SUPERVISOR_PROVIDER_ID)
-        .map(|participant| participant.launch.clone())
-        .ok_or_else(|| {
-            anyhow!(
-                "sim launch plan is missing the supervisor participant '{SIMULATOR_SUPERVISOR_PROVIDER_ID}'"
-            )
-        })?;
+    anyhow::ensure!(
+        !connect_endpoints.is_empty(),
+        "Webots controller requires the resident router endpoint"
+    );
+    let controller_launch = ControllerLaunch {
+        namespace: robot.namespace.clone(),
+        robot_id: robot_id.clone(),
+        robot_root: Some(runtime_root.to_path_buf()),
+        connect_endpoints: connect_endpoints.to_vec(),
+    };
 
     let structure_path = project_root.join(&resolved.robot.robot.structure);
     let structure = phoxal::model::structure::Structure::read_from_file(&structure_path)
@@ -121,25 +106,14 @@ pub(crate) fn stage_simulation_for_robot(
         })
         .collect::<Vec<_>>();
 
-    // `require_native` tells the supervisor whether it must resolve native
-    // (packaged) controller/component artifacts rather than accepting a local
-    // dev/path-overridden build; false whenever any simulator artifact is
-    // path-overridden for local simulator development.
-    let require_native = resolved
-        .simulators
-        .iter()
-        .all(|runtime| runtime.source_path().is_none());
-
     let mesh_root = webots_stage_root::meshes_dir()?;
     // The Phase-6 mesh-staging gap: the generated PROTOs reference mesh assets
     // relative to `mesh_root` (the robot's own meshes directly under it, each
     // component's under `<mesh_root>/<component_type>/` per
     // `component_mesh_prefix`), but nothing copied the physical mesh files
     // there before this fix - the robot spawned with no visible geometry.
-    // The robot's own meshes stay a real copy directly under `mesh_root`
-    // (it shares that directory with every component's symlinked subdir, so
-    // it cannot itself be a symlink); each component type's own `meshes/` is
-    // symlinked instead - see `stage_component_meshes`.
+    // The robot's own meshes and each component type's meshes are copied into
+    // the task-local generation tree.
     stage_robot_meshes(project_root, &resolved.robot.robot.structure, &mesh_root)?;
     for (component_type, source_dir) in &component_type_dirs {
         stage_component_meshes(source_dir, component_type, &mesh_root)?;
@@ -149,8 +123,6 @@ pub(crate) fn stage_simulation_for_robot(
         &webots_stage_root::protos_dir()?,
         &mesh_root,
         &webots_stage_root::world_path(world_name)?,
-        supervisor_launch,
-        require_native,
         &[RobotToStage {
             robot_id: robot_id.clone(),
             bundle: &bundle,
@@ -170,11 +142,7 @@ const MESHES_DIR: &str = "meshes";
 /// `component_mesh_prefix: None`, so the robot's own mesh URDF references
 /// (`meshes/<file>`) resolve unprefixed, one level under `mesh_root` itself.
 ///
-/// This stays a real COPY, not a symlink: `mesh_root` also hosts every
-/// mounted component type's own symlinked `<component_type>/` subdirectory
-/// side by side (see `stage_component_meshes`), so `mesh_root` itself must
-/// remain a real directory the robot's own files sit in directly - there is
-/// no single source directory a whole-`mesh_root` symlink could point at.
+/// These copied assets keep the generated project independent of source paths.
 pub(crate) fn stage_robot_meshes(
     project_root: &Path,
     structure_path: &Path,
@@ -197,17 +165,12 @@ pub(crate) fn stage_robot_meshes(
     copy_dir_recursive(&source, mesh_root)
 }
 
-/// Stage one component type's `meshes/` directory (if any) as a SYMLINK at
-/// `<mesh_root>/<component_type>/` pointing at the component's resolved mesh
-/// source directory (the unpacked cached asset bundle's `meshes/` for a
-/// suite component, or the local `components/<id>/meshes/` for a
-/// path-pinned one - both already absolute, see `component_assets_dir`) - the
-/// cache/path-pin stays the single source of truth instead of a copy. The
+/// Stage one component type's `meshes/` directory as copied content. The
 /// prefix `WebotsSceneDescription::from_component`'s `component_mesh_prefix`
 /// embeds into the component's own mesh URDF references (`meshes/<file>` ->
 /// `<component_type>/<file>`, see `staged_mesh_path_from_urdf_filename`), so
-/// the generated PROTOs resolve through the symlinked directory exactly as
-/// they would a copied one. `mesh_root` itself must already exist (see
+/// the generated PROTOs resolve through the copied directory. `mesh_root`
+/// itself must already exist (see
 /// `webots_stage_root::wipe_and_recreate`) - not every robot has its own
 /// meshes to trigger `stage_robot_meshes`' `create_dir_all`.
 pub(crate) fn stage_component_meshes(
@@ -219,15 +182,9 @@ pub(crate) fn stage_component_meshes(
     if !source.is_dir() {
         return Ok(());
     }
-    require_absolute_symlink_target("component mesh source directory", &source)?;
     let dest = mesh_root.join(component_type);
-    std::os::unix::fs::symlink(&source, &dest).with_context(|| {
-        format!(
-            "failed to symlink component meshes {} to staged path {}",
-            source.display(),
-            dest.display()
-        )
-    })
+    std::fs::create_dir_all(&dest)?;
+    copy_dir_recursive(&source, &dest)
 }
 
 pub(crate) fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
@@ -235,10 +192,15 @@ pub(crate) fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
         .with_context(|| format!("failed to read mesh source directory {}", source.display()))?
     {
         let entry = entry?;
-        let file_type = entry.file_type()?;
         let source_path = entry.path();
+        let metadata = std::fs::symlink_metadata(&source_path)?;
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "mesh content must not contain symlinks: {}",
+            source_path.display()
+        );
         let dest_path = dest.join(entry.file_name());
-        if file_type.is_dir() {
+        if metadata.is_dir() {
             std::fs::create_dir_all(&dest_path).with_context(|| {
                 format!(
                     "failed to create staged mesh directory {}",
@@ -246,7 +208,7 @@ pub(crate) fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
                 )
             })?;
             copy_dir_recursive(&source_path, &dest_path)?;
-        } else if file_type.is_file() {
+        } else if metadata.is_file() {
             std::fs::copy(&source_path, &dest_path).with_context(|| {
                 format!(
                     "failed to stage mesh file {} to {}",
@@ -257,4 +219,24 @@ pub(crate) fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn mesh_staging_rejects_symlinks_with_the_source_path() -> Result<()> {
+        let source = tempfile::tempdir()?;
+        let destination = tempfile::tempdir()?;
+        let mesh = source.path().join("body.stl");
+        let linked = source.path().join("linked.stl");
+        std::fs::write(&mesh, b"mesh")?;
+        std::os::unix::fs::symlink(&mesh, &linked)?;
+        let error = copy_dir_recursive(source.path(), destination.path())
+            .expect_err("symlinked mesh must fail explicitly");
+        assert!(error.to_string().contains(&linked.display().to_string()));
+        Ok(())
+    }
 }

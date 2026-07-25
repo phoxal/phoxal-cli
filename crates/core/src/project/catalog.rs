@@ -99,16 +99,10 @@ pub const NATIVE: &[OfficialRuntime] = &[
     },
 ];
 
-pub const WEBOTS: &[OfficialRuntime] = &[
-    OfficialRuntime {
-        package: "phoxal/simulator-webots-controller",
-        kind: ArtifactKind::Simulator,
-    },
-    OfficialRuntime {
-        package: "phoxal/simulator-webots-supervisor",
-        kind: ArtifactKind::Simulator,
-    },
-];
+pub const WEBOTS: &[OfficialRuntime] = &[OfficialRuntime {
+    package: "phoxal/simulator-webots-controller",
+    kind: ArtifactKind::Simulator,
+}];
 
 /// First framework train whose inventory is defined by this complete catalog.
 /// This advances with the CLI's exact `phoxal` dependency; newer trains remain
@@ -240,6 +234,35 @@ mod tests {
             error
                 .to_string()
                 .contains("phoxal/simulator-webots-controller")
+        );
+    }
+
+    #[test]
+    fn current_train_accepts_the_exact_controller_only_webots_catalog() {
+        let artifacts = for_webots(true)
+            .map(|runtime| Artifact {
+                id: runtime.package.to_string(),
+                kind: suite_kind(runtime.kind),
+                targets: [(
+                    "x86_64-unknown-linux-gnu".to_string(),
+                    fixture_blob_for_tests(
+                        &format!("https://example.invalid/{}.tar.gz", runtime.package),
+                        &"0".repeat(64),
+                        1,
+                    ),
+                )]
+                .into_iter()
+                .collect(),
+                assets: None,
+            })
+            .collect();
+        let suite = Suite::new(COMPLETE_CATALOG_SINCE.to_string(), artifacts);
+        validate_suite_inventory(&suite).expect("the new framework train is exact");
+        assert!(
+            !suite
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.id == "phoxal/simulator-webots-supervisor")
         );
     }
 

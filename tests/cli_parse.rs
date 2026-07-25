@@ -62,6 +62,7 @@ fn message_format_is_removed_from_every_former_surface() {
         vec![
             "phoxal",
             "simulation",
+            "webots",
             "run",
             "default",
             "--message-format",
@@ -90,7 +91,7 @@ fn removed_command_surfaces_stay_removed() {
         vec!["phoxal", "check", "--runtime", "avoid_obstacles"],
         vec!["phoxal", "simulate", "default"],
         vec!["phoxal", "simulation", "default"],
-        vec!["phoxal", "simulation", "run", "default", "--pull"],
+        vec!["phoxal", "simulation", "webots", "run", "default", "--pull"],
         vec!["phoxal", "check", "--pull"],
         vec!["phoxal", "validate", "--allow-user-service-drift"],
         vec!["phoxal", "deploy", "--dry-run", "--target", "aarch64"],
@@ -151,36 +152,63 @@ fn parses_install_rollback_deploy_and_service_management() {
 }
 
 #[test]
-fn parses_watch_and_simulation_join_and_rejects_removed_overlays() {
-    let cli = Cli::try_parse_from(["phoxal", "run", "--watch"]).expect("run watch should parse");
-    let RootCommand::Run(run) = cli.command else {
-        panic!("expected run command");
-    };
-    assert!(run.watch);
+fn rejects_watch_simulation_join_and_removed_overlays() {
+    assert!(Cli::try_parse_from(["phoxal", "run", "--watch"]).is_err());
     assert!(Cli::try_parse_from(["phoxal", "run", "--env", "dev"]).is_err());
 
-    let cli = Cli::try_parse_from(["phoxal", "simulation", "run", "default", "--watch"])
-        .expect("simulation run watch should parse");
-    let RootCommand::Simulation(simulation) = cli.command else {
-        panic!("expected simulation command");
-    };
-    let phoxal_cli::simulation::SimulationSubcommand::Run(run) = simulation.command else {
-        panic!("expected simulation run subcommand");
-    };
-    assert!(run.watch);
-    assert!(
-        Cli::try_parse_from(["phoxal", "simulation", "run", "default", "--env", "dev",]).is_err()
-    );
+    for removed in [
+        vec!["--watch"],
+        vec!["--env", "dev"],
+        vec!["--dry-run"],
+        vec!["--target", "aarch64-apple-darwin"],
+        vec!["--connect", "tcp/localhost:7447"],
+        vec!["--no-drivers"],
+        vec!["--external-router"],
+    ] {
+        let mut args = vec!["phoxal", "simulation", "webots", "run", "default"];
+        args.extend(removed);
+        assert!(
+            Cli::try_parse_from(args.clone()).is_err(),
+            "removed simulation option unexpectedly parsed: {args:?}"
+        );
+    }
+    assert!(Cli::try_parse_from(["phoxal", "simulation", "run", "default"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal", "simulation", "join"]).is_err());
+}
 
-    let cli = Cli::try_parse_from(["phoxal", "simulation", "join"])
-        .expect("simulation join should parse");
+#[test]
+fn parses_the_single_webots_run_surface() {
+    let cli = Cli::try_parse_from([
+        "phoxal",
+        "simulation",
+        "webots",
+        "run",
+        "default",
+        "--project",
+        "/tmp/robot.yaml",
+        "--detach",
+    ])
+    .expect("the approved Webots run surface should parse");
     let RootCommand::Simulation(simulation) = cli.command else {
         panic!("expected simulation command");
     };
-    assert!(matches!(
-        simulation.command,
-        phoxal_cli::simulation::SimulationSubcommand::Join(_)
-    ));
+    let phoxal_cli::simulation::SimulationSubcommand::Webots(webots) = simulation.command;
+    let phoxal_cli::simulation::WebotsSubcommand::Run(run) = webots.command;
+    assert_eq!(run.world, "default");
+    assert_eq!(
+        run.project.as_deref(),
+        Some(std::path::Path::new("/tmp/robot.yaml"))
+    );
+    assert!(run.detach);
+
+    let short = Cli::try_parse_from(["phoxal", "simulation", "webots", "run", "default", "-d"])
+        .expect("-d should parse");
+    let RootCommand::Simulation(simulation) = short.command else {
+        panic!("expected simulation command");
+    };
+    let phoxal_cli::simulation::SimulationSubcommand::Webots(webots) = simulation.command;
+    let phoxal_cli::simulation::WebotsSubcommand::Run(run) = webots.command;
+    assert!(run.detach);
 }
 
 #[test]

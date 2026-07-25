@@ -17,7 +17,7 @@ pub(crate) use router::{
 mod command;
 pub(crate) use command::{
     AbortTasks, PreparedRun, Readiness, connect_to_detached_resident, required_readiness,
-    run_resident_supervision, wait_for_required_readiness,
+    run_resident_supervision, run_webots_resident_supervision, wait_for_required_readiness,
 };
 pub use command::{DriversMode, Run, RunOptions};
 mod stages;
@@ -34,7 +34,7 @@ pub(crate) use report::{
 mod participants;
 pub(crate) use participants::{
     DriverDecision, build_layout_specs, prepare_robot_participants, source_cwd,
-    source_dirs_by_participant, spec_from_launch_record, stage_complete_bin_store,
+    source_dirs_by_participant, stage_complete_bin_store,
 };
 mod build;
 pub(crate) use build::{

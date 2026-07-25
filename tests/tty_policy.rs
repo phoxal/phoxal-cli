@@ -6,7 +6,7 @@ fn bin() -> Command {
 
 #[test]
 fn interactive_simulation_fails_clearly_without_a_tty() {
-    let args = ["simulation", "run", "default"];
+    let args = ["simulation", "webots", "run", "default"];
     let output = bin().args(args).output().expect("CLI should run");
     assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
     assert!(output.stdout.is_empty());

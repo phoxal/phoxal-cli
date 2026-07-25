@@ -44,7 +44,7 @@ pub struct ResolveOptions {
     /// The component-driver instances resolution may resolve driver binaries
     /// for. `run`'s driver policy threads through here so an excluded driver is
     /// never resolved - not even to select its suite target artifact (#936).
-    /// Everything except `run`/`start`/`watch` staging resolves `All`.
+    /// Everything except driver-filtered resident staging resolves `All`.
     pub drivers: crate::project::layout::DriverSelection,
     /// Whether simulator-only artifacts belong to this resolution.
     ///
@@ -102,7 +102,7 @@ pub struct ResolvedPlatformRuntime {
     pub sha256: Option<String>,
     pub url: Option<String>,
     pub size: Option<u64>,
-    /// Whether the suite has a built [`phoxal_cli_core::project::suite::Artifact`] (tarball)
+    /// Whether the suite has a built [`crate::project::suite::Artifact`] (tarball)
     /// for the resolved target triple. `false` for a metadata-only / not yet
     /// published entry - resolution still succeeds (the package is real and
     /// versioned), but there is nothing to fetch yet.
@@ -241,7 +241,7 @@ pub struct ResolvedTool {
     pub sha256: String,
     pub url: Option<String>,
     pub size: Option<u64>,
-    /// Whether the suite has a built [`phoxal_cli_core::project::suite::Artifact`] (tarball)
+    /// Whether the suite has a built [`crate::project::suite::Artifact`] (tarball)
     /// for the resolved target triple; `false` for a metadata-only / not yet
     /// published entry, in which case `sha256` is a placeholder
     /// (`"0".repeat(64)`) rather than a real digest - mirrors
@@ -422,8 +422,8 @@ mod tests {
             "phoxal-tool-router"
         );
         assert_eq!(
-            official_binary_name(ArtifactKind::Simulator, "webots-supervisor"),
-            "phoxal-simulator-webots-supervisor"
+            official_binary_name(ArtifactKind::Simulator, "webots-controller"),
+            "phoxal-simulator-webots-controller"
         );
     }
 }

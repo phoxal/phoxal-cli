@@ -6,17 +6,9 @@ use std::time::{Duration, Instant};
 
 use phoxal::check::ParticipantContractSurface;
 
-use crate::project::launch_plan::{LaunchOwnership, LaunchPlan, ParticipantExecution};
+use crate::project::launch_plan::{LaunchPlan, ParticipantExecution};
 use crate::session::board::{BoardSnapshot, ParticipantState};
 use crate::session::{ProcessKey, RobotKey};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RuntimeOwnership {
-    #[default]
-    CliManaged,
-    SimulationManaged,
-    External,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuntimeOrigin {
@@ -25,31 +17,12 @@ pub enum RuntimeOrigin {
     Framework,
 }
 
-impl From<LaunchOwnership> for RuntimeOwnership {
-    fn from(ownership: LaunchOwnership) -> Self {
-        match ownership {
-            LaunchOwnership::CliManaged => Self::CliManaged,
-            LaunchOwnership::SimulationManaged => Self::SimulationManaged,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeParticipantMetadata {
     pub artifact_ref: Option<String>,
-    pub ownership: RuntimeOwnership,
     pub origin: RuntimeOrigin,
     pub input_contracts: Vec<String>,
     pub output_contracts: Vec<String>,
-}
-
-impl RuntimeParticipantMetadata {
-    fn ownership(ownership: impl Into<RuntimeOwnership>) -> Self {
-        Self {
-            ownership: ownership.into(),
-            ..Self::default()
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,7 +92,7 @@ impl RuntimeStore {
                     RuntimeParticipantMetadata {
                         artifact_ref: artifact_ref_for_execution(&participant.execution),
                         origin: origin_for_execution(&participant.execution),
-                        ..RuntimeParticipantMetadata::ownership(participant.launch_ownership)
+                        ..RuntimeParticipantMetadata::default()
                     },
                 );
             }
@@ -169,11 +142,6 @@ impl RuntimeStore {
     #[must_use]
     pub fn session_uptime(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.session_started_at)
-    }
-
-    #[doc(hidden)]
-    pub fn set_test_ownership(&mut self, id: &str, ownership: RuntimeOwnership) {
-        self.metadata.entry(id.to_string()).or_default().ownership = ownership;
     }
 
     #[doc(hidden)]

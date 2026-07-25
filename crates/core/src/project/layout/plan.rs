@@ -5,7 +5,7 @@
 //! embedded metadata of the binaries under `bin/`. Nothing here reads source,
 //! Cargo, or the suite - staging already produced the layout, and this module
 //! is the one place that turns that layout into the same
-//! [`LaunchPlan`](super::super::launch_plan::LaunchPlan) the supervisor
+//! [`LaunchPlan`] the supervisor
 //! consumes, whether the layout was just staged from a source project or
 //! extracted from a `build.phoxal` bundle.
 //!
@@ -32,8 +32,8 @@ use phoxal::participant::launch::{
 };
 
 use super::super::launch_plan::{
-    DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution,
-    ParticipantLaunchRecord, ROBOT_TOOL_DEVICE, RobotLaunch, execution_device_id,
+    DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
+    ROBOT_TOOL_DEVICE, RobotLaunch, execution_device_id,
 };
 use super::{
     DriverSelection, LayoutInspection, RequiredRuntimeKind, RuntimeLayout, SelectedBinary,
@@ -64,7 +64,7 @@ pub struct ConstructedPlan {
     /// One contract surface per checked (non-privileged, CLI-launched)
     /// participant, keyed by its plan participant id and fed straight from the
     /// selected binary's embedded metadata. Privileged tools and
-    /// simulation-managed participants contribute none, matching the coherence
+    /// Webots-owned participants contribute none, matching the coherence
     /// pass's own in-set filter.
     pub contract_surfaces: Vec<ParticipantContractSurface>,
     /// One schema pairing per declared user runtime (service or tool), so the
@@ -145,9 +145,6 @@ impl RuntimeLayout {
         let robot_id = self.robot().robot.id.clone();
         let namespace = self.robot().robot.namespace.clone();
         let robot_root = self.root().to_path_buf();
-        // The constructor is structurally Run-only: simulation constructs its
-        // plan on the legacy resolved-robot path until #931 swaps it over,
-        // which reintroduces mode selection together with its real consumer.
         let service_clock = ClockMode::Real;
 
         let meta_contracts = |binary_name: &str| -> Result<Vec<_>> {
@@ -387,7 +384,6 @@ fn cli_managed_record(
         artifact_id,
         execution,
         launch,
-        launch_ownership: LaunchOwnership::CliManaged,
         startup_requirement: StartupRequirement::Required,
         runtime_failure: RuntimeFailurePolicy::StopProject,
     }

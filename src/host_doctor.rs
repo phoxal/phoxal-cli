@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::AppContext;
 use crate::shell;
 
-const DRY_RUN_FALLBACK: &str = "phoxal simulation run <world> --dry-run";
+const WEBOTS_FALLBACK: &str = "phoxal simulation webots run <world>";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeStatus {
@@ -458,7 +458,7 @@ fn webots_missing() -> HostError {
             "Install Webots from Cyberbotics.",
             "Put webots on PATH or install it in the standard platform location.",
         ],
-        Some(DRY_RUN_FALLBACK),
+        Some(WEBOTS_FALLBACK),
     )
 }
 
@@ -470,7 +470,7 @@ fn webots_home_unresolved() -> HostError {
             "Set WEBOTS_HOME to the Webots installation directory.",
             "Confirm the Webots controller library directory exists under WEBOTS_HOME.",
         ],
-        Some(DRY_RUN_FALLBACK),
+        Some(WEBOTS_FALLBACK),
     )
 }
 

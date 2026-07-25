@@ -100,11 +100,9 @@ pub fn stage_world(
     extern_protos: &[ExternProto],
     root_nodes: &[AstNode],
 ) -> Result<String> {
-    // The robot PROTOs in `extern_protos` are marked `IMPORTABLE` at construction
-    // (see `externproto_for_generated_proto`), which the webots-proto 0.2 writer
-    // emits as `IMPORTABLE EXTERNPROTO`. Webots requires that for a PROTO the
-    // supervisor instantiates at runtime via `importMFNodeFromString`; the base
-    // world's own EXTERNPROTOs stay non-importable.
+    // Generated robot PROTOs are ordinary EXTERNPROTO declarations: the robot
+    // instance is a static node in the staged world, so runtime importability
+    // is neither needed nor advertised.
     match stage_world_source_with_protos(source_world, extern_protos, root_nodes) {
         Ok(staged) => Ok(staged),
         Err(parse_error) => stage_world_source_with_text_fallback(
@@ -155,10 +153,7 @@ pub fn externproto_for_generated_proto(
     world_path: &Path,
 ) -> Result<ExternProto> {
     let externproto_path = relative_path_for_world(generated_proto_path, world_path)?;
-    // Marked IMPORTABLE: the supervisor instantiates this robot PROTO at runtime
-    // via `importMFNodeFromString`, which Webots only allows for an
-    // `IMPORTABLE EXTERNPROTO` declaration.
-    Ok(ExternProto::new(externproto_path, None, Span::default()).with_importable(true))
+    Ok(ExternProto::new(externproto_path, None, Span::default()))
 }
 
 fn build_webots_scene(
@@ -202,21 +197,20 @@ WorldInfo {
 "#;
 
     #[test]
-    fn staged_robot_externprotos_are_importable_and_base_declarations_are_not() -> Result<()> {
+    fn staged_robot_externprotos_are_static_declarations() -> Result<()> {
         let first_url = "../protos/Alpha.proto";
         let second_url = "../protos/Beta.proto";
-        // Runtime-spawned robot PROTOs are constructed IMPORTABLE (as
-        // `externproto_for_generated_proto` does); the webots-proto writer emits
-        // the `IMPORTABLE` qualifier from that flag.
         let added = vec![
-            ExternProto::new(first_url.to_string(), None, Span::default()).with_importable(true),
-            ExternProto::new(second_url.to_string(), None, Span::default()).with_importable(true),
+            ExternProto::new(first_url.to_string(), None, Span::default()),
+            ExternProto::new(second_url.to_string(), None, Span::default()),
         ];
 
         let staged = stage_world(BASE_WORLD, &added, &[])?;
 
-        assert!(staged.contains(&format!("IMPORTABLE EXTERNPROTO \"{first_url}\"")));
-        assert!(staged.contains(&format!("IMPORTABLE EXTERNPROTO \"{second_url}\"")));
+        assert!(staged.contains(&format!("EXTERNPROTO \"{first_url}\"")));
+        assert!(staged.contains(&format!("EXTERNPROTO \"{second_url}\"")));
+        assert!(!staged.contains(&format!("IMPORTABLE EXTERNPROTO \"{first_url}\"")));
+        assert!(!staged.contains(&format!("IMPORTABLE EXTERNPROTO \"{second_url}\"")));
         assert!(staged.contains(
             "EXTERNPROTO \"https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto\""
         ));

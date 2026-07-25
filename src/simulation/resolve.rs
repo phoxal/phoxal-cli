@@ -1,9 +1,9 @@
 //! Project resolution and checked simulation launch-plan construction.
 
 use super::{
-    ResolvedSimulation, SimulateMode, SimulateOptions, driver_metadata_unavailable,
+    ResolvedSimulation, SimulateOptions, driver_metadata_unavailable,
     official_simulator_participants, remap_simulator_participant_ids, remap_simulator_surface_ids,
-    sim_checked_participants, sim_source_participants, simulated_component_records,
+    sim_checked_participants, sim_source_participants,
 };
 use crate::check::CheckGraphContext;
 use crate::check::build_emit_apis_from_source;
@@ -23,7 +23,6 @@ use phoxal_cli_core::project::launch_plan::CheckedRobotLaunchInput;
 use phoxal_cli_core::project::launch_plan::LaunchMode;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::build_launch_plan;
-use phoxal_cli_core::project::launch_plan::simulator_controller_provider_id;
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::suite::Suite;
@@ -34,7 +33,6 @@ use std::path::Path;
 pub(crate) fn resolve_project(
     project_start: &Path,
     options: SimulateOptions,
-    _mode: SimulateMode,
 ) -> Result<ResolvedSimulation> {
     let robot_path = phoxal_cli_core::project::resolver::discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
@@ -49,23 +47,13 @@ pub(crate) fn resolve_project(
         &project_root,
     )?;
 
-    // Resolve Cargo-workspace component drivers so driver metadata can be
-    // staged. Live simulation also stages their crate-owned assets; dry-run
-    // reports the intended staged paths without copying assets.
-    // The robot's own official artifacts (services + component drivers) resolve
-    // for `--target` when set, so a Linux robot can be planned from a non-Linux
-    // host; the simulator itself keeps the host target since Webots runs locally.
-    let official_target = options
-        .target
-        .as_deref()
-        .map(crate::resolver::resolve_target_triple)
-        .transpose()?;
+    // Resolve Cargo-workspace component drivers for compile-time metadata and
+    // for their crate-owned model assets. Physical drivers are never launched.
     let resolved = resolve(
         &robot,
         &project_root,
         suite.as_ref(),
         ResolveOptions {
-            official_target_triple: official_target,
             ..ResolveOptions::default()
         },
     )?;
@@ -80,9 +68,8 @@ pub(crate) fn resolve_project(
 
 /// Build the checked simulation launch plan. Every source participant
 /// (drivers, path-overridden services/simulators) rebuilds live - there is no
-/// disk cache to scope a rebuild around (docs: `check::build_emit_apis_from_source`
-/// never caches), so a `watch`-triggered recheck simply rebuilds the whole
-/// source graph rather than just the one crate that changed.
+/// disk cache for metadata extraction (`check::build_emit_apis_from_source`
+/// never caches).
 /// Also returns the (already sim-filtered/remapped) contract surfaces
 /// alongside the plan (finding A5) - the caller needs both to build a
 /// `RuntimeStore`, and re-deriving them separately would duplicate the whole
@@ -150,8 +137,6 @@ pub(crate) fn build_checked_sim_launch_plan(
         official_simulator_participants(resolved)?;
     checked_participants.extend(official_simulators);
     contract_surfaces.extend(official_simulator_surfaces);
-    let controller_provider_id = simulator_controller_provider_id(&resolved.robot.robot.id);
-    let substitutions = simulated_component_records(&checked_participants, &controller_provider_id);
     let sim_participants = sim_checked_participants(&checked_participants);
     let sim_ids = sim_participants
         .iter()
@@ -179,13 +164,13 @@ pub(crate) fn build_checked_sim_launch_plan(
             project_root,
             resolved,
             checked_participants: &sim_participants,
-            substitutions: &substitutions,
+            substitutions: &[],
             source_participants: &source_participants,
         }],
     )?;
-    let coherence_graph =
-        crate::check::robot_contract_surfaces(&resolved.robot.robot.id, &contract_surfaces);
-    let coherence = crate::check::coherence_for_launch_plan(&plan, &[coherence_graph])?;
-    crate::check::enforce_coherence(crate::check::CoherenceVerb::Simulate, &coherence)?;
+    // The controller is validated in the complete graph above, but is launched
+    // by Webots rather than represented in the resident launch plan.
+    // Runtime-layout coherence therefore applies only to the ordinary resident
+    // graph and is checked during its normal staging path.
     Ok((plan, contract_surfaces))
 }

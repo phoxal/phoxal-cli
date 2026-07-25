@@ -1,6 +1,5 @@
 //! Live telemetry feed for the TUI (CLI-UX Phase 3/4): background bus
-//! subscribers for the framework train's tool telemetry and joypad contracts
-//! contracts, plus the simulation clock's live step/time readout,
+//! subscribers for the framework train's tool telemetry and joypad contracts,
 //! mirroring `supervisor::start_bus_log_subscriber`/
 //! `start_liveliness_observer`'s "observe, update shared
 //! snapshot" pattern.
@@ -278,9 +277,6 @@ impl TelemetryBackend {
         Self::default()
     }
 
-    /// Wire in the simulation clock feed
-    /// (`supervisor::start_clock_feed`). The caller keeps the feed alive for
-    /// the session and hands the receiver here for cheap redraw snapshots.
     pub fn set_clock_feed(&self, rx: watch::Receiver<ClockObservation>) {
         *self.clock_rx.lock().expect("clock_rx mutex poisoned") = Some(rx);
     }
@@ -1833,7 +1829,7 @@ mod tests {
     }
 
     #[test]
-    fn clock_feed_reads_the_watch_channels_latest_value() {
+    fn simulation_clock_feed_reaches_the_tui_snapshot() {
         let telemetry = TelemetryBackend::new();
         let (tx, rx) = watch::channel(ClockObservation::default());
         telemetry.set_clock_feed(rx);
@@ -1843,11 +1839,15 @@ mod tests {
                 Some(phoxal_cli_core::session::telemetry::ClockSample { now_ns: 5, step: 3 });
             observation.received_at = Some(Instant::now());
         });
-        let sample = telemetry
-            .snapshot(&scope("r1"))
-            .clock
-            .expect("clock sample");
-        assert_eq!(sample.value.step, 3);
+        assert_eq!(
+            telemetry
+                .snapshot(&scope("r1"))
+                .clock
+                .expect("clock sample")
+                .value
+                .step,
+            3
+        );
     }
 
     #[test]

@@ -51,7 +51,7 @@ fn read_meta_section(object_bytes: &[u8], describe: &str) -> Result<Option<Vec<u
 
 /// Parses the embedded participant metadata out of an in-memory object file
 /// (an ELF/Mach-O binary of any target architecture). Reads nothing, runs
-/// nothing. A binary with no section at all (see [`read_meta_section`]) parses
+/// nothing. A binary with no section at all (see `read_meta_section`) parses
 /// as an empty contract list and no-config schema, not an error.
 pub fn extract_participant_metadata_from_bytes(
     object_bytes: &[u8],

@@ -17,13 +17,13 @@ cd rover
 
 phoxal check                  # validate the graph's participants + config via phoxal::check
 phoxal service suite          # print official services from the configured artifact suite
-phoxal run                    # stage what is stale and supervise the graph (--watch to hot-swap edits)
+phoxal run                    # stage what is stale and supervise the graph
 phoxal start                  # run the graph headless (the robot-instance verb; no TUI)
 phoxal build                  # stage a runtime layout and archive it as build.phoxal
 phoxal deploy robot@host      # remote source build, then install atomically
 sudo phoxal install build.phoxal
 sudo phoxal rollback
-phoxal simulation run default # resolve and report the simulation launch plan
+phoxal simulation webots run default # run the project in Webots
 phoxal logs -f                # stream participant bus logs from a reachable robot
 phoxal status safety          # inspect the latest safety state over the robot bus
 
@@ -34,14 +34,13 @@ phoxal update                 # verify, activate, and prune project-local artifa
 |---|---|
 | `check` | Resolve `robot.yaml` and the locked Cargo workspace, stage every participant, extract embedded metadata, and validate the complete graph against `phoxal::check`. `--strict` additionally fails on coherence warnings. |
 | `validate` | Lower-level `robot.yaml` structure and Cargo workspace runtime-discovery checks that back `check`. |
-| `run [ROOT]` | Universal launch: build what is stale and run what is staged. On a source project it refreshes the host-triple staging under `.phoxal/build/<host-triple>/` (cargo-build stale crates, link the locked train's vendored officials, flatten `robot.yaml`, stage assets), then supervises the graph in the terminal UI; on an already-staged root or an extracted `build.phoxal` the build step is a no-op and the identical execution path runs it. `--watch` recompiles an immutable whole-plan revision and reconciles only changed participants. `run`/`start`/`build` never touch the network - a missing vendored artifact fails with "run `phoxal update`". |
+| `run [ROOT]` | Universal launch: build what is stale and run what is staged. On a source project it refreshes the host-triple staging under `.phoxal/build/<host-triple>/` (cargo-build stale crates, link the locked train's vendored officials, flatten `robot.yaml`, stage assets), then supervises the graph in the terminal UI; on an already-staged root or an extracted `build.phoxal` the build step is a no-op and the identical execution path runs it. `run`/`start`/`build` never touch the network - a missing vendored artifact fails with "run `phoxal update`". |
 | `start [ROOT]` | The headless robot-instance verb `phoxal.service` uses. Same pipeline as `run` without the TUI: interactively it returns after required readiness; under systemd (`NOTIFY_SOCKET` present) it stays the foreground `sd_notify` resident. |
 | `build [PROJECT]` | Stage a runtime layout for a target and archive it as a deterministic `build.phoxal` (identical contents produce identical bytes). `--target <TRIPLE>` selects the target. `--builder local` compiles on this host; `--builder container` compiles in the pinned Rust image; `--builder ssh://user@host` snapshots source, compiles in a remote temporary directory, and pulls back the same archive. |
 | `install <build.phoxal>` | Safely extract, validate, fsync, and atomically activate an immutable release under `/var/lib/phoxal/releases`; restart the one service and restore the prior symlink on readiness failure. |
 | `rollback [--to RELEASE]` | Activate the immediately older sortable release, or an explicit release directory, with the same readiness and restoration gate. |
 | `deploy <user@host> [PROJECT]` | Snapshot source, build remotely, and invoke the installer. `--build <archive>` skips the source/toolchain leg; the robot needs neither Cargo nor Git. |
-| `simulation run <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` creates a new plan revision for source or project-manifest edits and re-checks driver metadata/substitutions without launching drivers. |
-| `simulation join` | Reserved entry point for joining a running multi-robot simulation; currently reports that the workflow is not available yet. |
+| `simulation webots run <world> [--project PROJECT] [--detach\|-d]` | Run a source project with the ordinary resident router/services/tools graph, all physical drivers excluded, and Webots as the only simulator-side managed child. Each run deletes `.phoxal/webots/` and recreates the complete `worlds/`, `controllers/`, and `protos/` project before launching Webots. |
 | `logs [participant]` | Stream participant bus log events from a reachable robot. `-f`/`--follow` keeps streaming; omit `participant` for every participant. |
 | `status <safety|motion|localization>` | Inspect the latest domain state over the robot bus. `engage-estop` and `reset-estop` publish the robot-wide software emergency-stop request. |
 | `service install\|uninstall\|status\|suite` | Manage exactly one `phoxal.service`, inspect it, or print official services from the configured artifact suite. Device-specific hardware provisioning remains explicit. |
@@ -59,12 +58,13 @@ boundary and is registered with an out-of-process guardian, so killing the CLI
 cannot leave its process graph behind. Shutdown drains graph participants
 concurrently before host tools and budgets each phase by its slowest member.
 
-Finite commands print append-only, pipe-friendly text. Live `run` and `simulation run`
-sessions require a terminal and fail with an actionable error when redirected.
+Finite commands print append-only, pipe-friendly text. Attached `run` and
+`simulation webots run` sessions require a terminal and fail with an actionable
+error when redirected.
 
 ### Interactive sessions
 
-On an interactive terminal, both `run` and live `simulation run` use the
+On an interactive terminal, both `run` and `simulation webots run` use the
 same five fixed pages:
 
 | Page | Purpose |
@@ -134,7 +134,7 @@ kind and identity remain authoritative.
 `phoxal` consumes the framework-generated `phoxal.suite/v0` attached to the
 exact locked train release. The suite is only the immutable byte inventory for
 official package, train, and target combinations. The CLI release owns the
-official Native runtime set; Webots adds its controller and supervisor. Every
+official Native runtime set; Webots adds one controller. Every
 runtime is per robot and required, apart from the router's internal
 graph-recreation policy. An official package unknown to this CLI fails
 with an explicit instruction to update the CLI.
@@ -204,47 +204,32 @@ The shipped binary is `phoxal`; the package keeps the `phoxal-cli` name.
 ## Simulate
 
 ```sh
-phoxal simulation run <world>
+phoxal simulation webots run <world> [--project <project|robot.yaml>] [--detach|-d]
 ```
 
 `<world>` resolves to a `.wbt` file in this order:
 
-1. `<project>/worlds/<world>.wbt`
-2. `<project>/<world>` (path-as-given, e.g. `worlds/foo.wbt`)
+1. A bare configured world name under `<project>/worlds/`.
+2. The path as given: absolute, or relative to the project.
 
-Example: `phoxal simulation run default` finds `worlds/default.wbt` in the project.
+Example: `phoxal simulation webots run default` finds `worlds/default.wbt`.
 
-## Live Split-Recovery Gate
-
-`scripts/live-simulate-gate.sh` is the split-recovery smoke gate for
-the separated repos. Official service and driver binaries resolve from the
-framework's published artifact suite; run `phoxal update` once to vendor the
-locked train (or pass a locally generated suite with `--suite` /
-`PHOXAL_SUITE` when developing against an unreleased framework).
-
-```sh
-# from the phoxal-cli checkout; ROBOT_DIR defaults to the framework hello-rover example
-scripts/live-simulate-gate.sh            # smoke: live resolve + dry-run report (CI-safe)
-scripts/live-simulate-gate.sh --live     # full live run (needs Webots)
-```
-
-The smoke phase runs `simulation run default --dry-run` to resolve and report the
-planned local launch without staging `.phoxal/build` or a release directory. It
-needs no daemon of any kind. The `--live` phase additionally requires Webots on
-`PATH`; run `phoxal update` first, then it runs `simulation run default` so you can confirm the router,
-Webots, host tools, and bus connectivity.
+For an opt-in live smoke test against the sibling framework checkout, run
+`scripts/live-simulate-gate.sh [ROBOT_DIR]`. It builds this CLI if needed,
+launches the selected world, and expects an operator Ctrl-C after visual
+inspection.
 
 ## Host layout
 
 ```text
-~/.phoxal/simulator.lock            Host-global simulation lease.
-
 <project>/.phoxal/project.lock      Permanent per-project operation authority for run, build, and update.
 <project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/targets/<target>/  Unpacked target artifacts.
 <project>/.phoxal/artifacts/<provider>/<package>/versions/<version>/assets/             Unpacked component assets.
 <project>/.phoxal/artifacts/<provider>/<package>/active                                 Atomic selected-version symlink.
 <project>/.phoxal/git/              Git-pinned checkouts.
-<project>/.phoxal/webots/           Webots staging.
+<project>/.phoxal/webots/worlds/     Generated worlds in the disposable Webots project.
+<project>/.phoxal/webots/controllers/ Generated simulator controller in the disposable Webots project.
+<project>/.phoxal/webots/protos/      Generated robot/component PROTOs and their assets.
 <project>/.phoxal/build/<triple>/   Staged runtime layout (compiled robot.yaml + flat bin/ + assets) per target, shared by `run` and live simulation.
 
 /var/phoxal -> /var/lib/phoxal/releases/<utc>-<digest>  Active installed runtime.
@@ -257,9 +242,7 @@ service, permission, install, rollback, deploy, and power-loss contract.
 
 To reset all generated project state while no Phoxal command is active, delete
 `<project>/.phoxal/`. Deleting it during `run`, simulation, or update is
-unsupported because that bypasses the CLI's active locks. Do not delete
-`~/.phoxal/` while a simulation is active because it contains the host-global
-simulator lease. The project lock inode is intentionally permanent; its
+unsupported because that bypasses the CLI's active locks. The project lock inode is intentionally permanent; its
 advisory lock is the authority, while its JSON metadata names the operation,
 project, selected entry, and owning PID for diagnostics only. Process death
 releases ownership without deleting or repairing the file.

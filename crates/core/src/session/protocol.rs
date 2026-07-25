@@ -165,6 +165,18 @@ pub fn validate_snapshot_bounds(snapshot: &SupervisorSnapshotV0) -> anyhow::Resu
             value.len()
         );
     }
+    if let Some(simulation) = &snapshot.simulation {
+        for (name, value) in [
+            ("simulation.profile", simulation.profile.as_str()),
+            ("simulation.world", simulation.world.as_str()),
+        ] {
+            anyhow::ensure!(
+                value.len() <= MAX_SNAPSHOT_TEXT_BYTES,
+                "supervisor snapshot {name} is {} bytes; limit is {MAX_SNAPSHOT_TEXT_BYTES}",
+                value.len()
+            );
+        }
+    }
     anyhow::ensure!(
         snapshot.startup.completed_phases.len() <= MAX_STARTUP_PHASES,
         "supervisor snapshot has {} completed startup phases; limit is {MAX_STARTUP_PHASES}",
@@ -246,7 +258,7 @@ mod tests {
         BoundedString, DesiredProcessState, ProcessDescriptor, ProcessEntry, ProcessFailure,
         ProcessFailureKind, ProcessState, ProcessStatus, StartupStatus,
     };
-    use crate::session::{ParticipantKind, RobotKey, StartupRequirement};
+    use crate::session::{ParticipantKind, RobotKey, SimulationSessionInfo, StartupRequirement};
     use std::collections::BTreeMap;
     use std::time::SystemTime;
 
@@ -262,6 +274,22 @@ mod tests {
         assert!(
             worst_case_snapshot_bytes(MAX_SUPERVISED_PROCESSES + 1).unwrap()
                 > MAX_SNAPSHOT_FRAME_BYTES
+        );
+    }
+
+    #[test]
+    fn simulation_information_has_exact_pre_v1_wire_shape() {
+        let value = serde_json::to_value(SimulationSessionInfo {
+            profile: "webots".to_string(),
+            world: "worlds/default.wbt".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "profile": "webots",
+                "world": "worlds/default.wbt",
+            })
         );
     }
 
@@ -317,6 +345,7 @@ mod tests {
             entry: "e".repeat(MAX_SNAPSHOT_TEXT_BYTES),
             framework_train: "t".repeat(MAX_SNAPSHOT_TEXT_BYTES),
             execution: "x".repeat(MAX_SNAPSHOT_TEXT_BYTES),
+            simulation: None,
             lifecycle: super::super::ProjectLifecycle::Failed,
             router: "r".repeat(MAX_SNAPSHOT_TEXT_BYTES),
             plan_revision: u64::MAX,

@@ -16,7 +16,7 @@ use std::process::Command;
 /// How a staging pass produces the workspace user/driver crate binaries it
 /// links into the runtime layout's flat `bin/` store (#936).
 ///
-/// `run`, `start`, and `watch` use [`StagingBuild::HostRuntime`], a host-native
+/// `run` and `start` use [`StagingBuild::HostRuntime`], a host-native
 /// `cargo build` whose staged layout retains operator-side simulators.
 /// `phoxal build` uses [`StagingBuild::NativeBundle`], optionally
 /// cross-compiling to a `--target`, and deliberately omits those simulators.
@@ -27,7 +27,7 @@ use std::process::Command;
 /// shared implementation regardless of where compilation happened.
 #[derive(Debug, Clone)]
 pub(crate) enum StagingBuild {
-    /// Host-native staging for `run`, `start`, and `watch`.
+    /// Host-native staging for `run` and `start`.
     HostRuntime,
     /// Native robot bundle staging for `phoxal build`.
     NativeBundle {

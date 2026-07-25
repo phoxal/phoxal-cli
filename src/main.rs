@@ -31,7 +31,7 @@ async fn main() -> ExitCode {
 fn init_tracing() {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     // `SessionAwareWriter` routes every line through whichever `run`/
-    // `simulation run` session (if any) has called `session::diagnostics::install`
+    // `simulation webots run` session (if any) has called `session::diagnostics::install`
     // at the moment of the write, falling back to the normal stderr write
     // otherwise (see that module's own docs) - installing it here, ONCE for
     // the process's whole lifetime, is what actually closes findings A2/C2:

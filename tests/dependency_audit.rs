@@ -15,7 +15,6 @@ const ALLOWED_RAW_MODULE_IMPORTS: &[&str] = &[
     "src/commands/behavior.rs",
     "src/commands/logs.rs",
     "src/commands/status.rs",
-    "src/simulation/webots.rs",
     "src/supervisor/bus.rs",
     "src/telemetry.rs",
 ];

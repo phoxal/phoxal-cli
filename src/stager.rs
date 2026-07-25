@@ -212,9 +212,9 @@ pub fn stage_complete_official_store(
 }
 
 /// Stage only the infrastructure router into `bin/`, so it launches from the
-/// staged store like every other official. Used by the Webots path, whose
-/// remaining runtime set is staged through its own (simulation-managed) route
-/// (#931); the router itself is CLI-supervised identically to a native run.
+/// normal build layout like every other official. Used by the Webots path,
+/// where the controller reads that same build layout; the router itself is
+/// CLI-supervised identically to a native run.
 pub fn stage_router_binary(
     staged_root: &Path,
     resolved: &ResolvedRobot,
@@ -602,7 +602,6 @@ robot:
                 execution_device_id: None,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
-            launch_ownership: Default::default(),
             startup_requirement: phoxal_cli_core::session::StartupRequirement::Required,
             runtime_failure: phoxal_cli_core::session::RuntimeFailurePolicy::StopProject,
         }

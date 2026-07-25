@@ -133,7 +133,7 @@ impl Ui {
     /// `eprintln!`/`println!` for a line that arrives when no session is
     /// installed (`try_route` returns `false`) - identical to `Ui::info`/
     /// `warn`'s own fallback, so a caller with no active session (a bare
-    /// `cargo build` outside any `run`/`simulation run` session) sees
+    /// `cargo build` outside any `run`/`simulation webots run` session) sees
     /// unchanged behavior. While a command is running, both streams are
     /// routine dependency progress and route at `Info`, which keeps successful
     /// Cargo compiler chatter out of a TUI. Stderr is retained and replayed at

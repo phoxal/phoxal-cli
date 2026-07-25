@@ -13,16 +13,14 @@ use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
 use phoxal_cli_core::session::reconcile::{
     Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced,
 };
-use phoxal_cli_core::session::telemetry::ClockObservation;
-use phoxal_cli_core::session::telemetry::ClockSample;
+use phoxal_cli_core::session::telemetry::{ClockObservation, ClockSample};
 use phoxal_cli_core::session::{LogScope, LogSeverity, RoutedLogLine};
 use phoxal_cli_core::session::{ParticipantInstanceKey, RobotKey};
 use std::convert::Infallible;
 use std::net::TcpStream;
 use std::net::ToSocketAddrs;
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -199,6 +197,59 @@ pub(crate) async fn bus_log_subscriber_loop(
                 continue 'query;
             }
         }
+    }
+}
+
+/// Start a background feed of simulation-clock samples for the attached TUI.
+pub fn start_clock_feed(
+    namespace: String,
+    robot_id: String,
+    connect: String,
+) -> (watch::Receiver<ClockObservation>, JoinHandle<()>) {
+    let (tx, rx) = watch::channel(ClockObservation::default());
+    let handle = tokio::spawn(async move {
+        loop {
+            wait_for_endpoint(&connect).await;
+            match clock_feed_loop(namespace.clone(), robot_id.clone(), connect.clone(), &tx).await {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::debug!("clock telemetry feed waiting for router: {error:#}");
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+    });
+    (rx, handle)
+}
+
+pub(crate) async fn clock_feed_loop(
+    namespace: String,
+    robot_id: String,
+    connect: String,
+    tx: &watch::Sender<ClockObservation>,
+) -> Result<()> {
+    let bus = Bus::open(BusConfig {
+        namespace,
+        robot_id,
+        participant: "phoxal-cli-clock-observer".to_string(),
+        incarnation: 0,
+        connect_endpoints: vec![connect],
+    })
+    .await
+    .map_err(|error| anyhow!("failed to open bus clock subscription: {error}"))?;
+    let topic = Topic::<Subscribe<api::simulation::Clock>>::new_static(
+        <api::simulation::Clock as phoxal::bus::ContractBody>::TOPIC,
+    );
+    let subscriber = Subscriber::<api::simulation::Clock>::new(&bus, &topic, 32).await?;
+    loop {
+        let received = subscriber.recv().await?;
+        tx.send_modify(|observation| {
+            observation.latest = Some(ClockSample {
+                now_ns: received.body.now_ns,
+                step: received.body.step,
+            });
+            observation.received_at = Some(Instant::now());
+        });
     }
 }
 
@@ -419,61 +470,6 @@ fn apply_liveliness_event(
         },
         event.status == ParticipantLivelinessStatus::Alive,
     );
-}
-
-/// Start a background feed of `v0_1::simulation::Clock` samples. Returns a
-/// `watch::Receiver` the TUI's telemetry layer polls cheaply, plus the feed
-/// task's handle.
-pub fn start_clock_feed(
-    namespace: String,
-    robot_id: String,
-    connect: String,
-) -> (watch::Receiver<ClockObservation>, JoinHandle<()>) {
-    let (tx, rx) = watch::channel(ClockObservation::default());
-    let handle = tokio::spawn(async move {
-        loop {
-            wait_for_endpoint(&connect).await;
-            match clock_feed_loop(namespace.clone(), robot_id.clone(), connect.clone(), &tx).await {
-                Ok(()) => break,
-                Err(error) => {
-                    tracing::debug!("clock telemetry feed waiting for router: {error:#}");
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                }
-            }
-        }
-    });
-    (rx, handle)
-}
-
-pub(crate) async fn clock_feed_loop(
-    namespace: String,
-    robot_id: String,
-    connect: String,
-    tx: &watch::Sender<ClockObservation>,
-) -> Result<()> {
-    let bus = Bus::open(BusConfig {
-        namespace,
-        robot_id,
-        participant: "phoxal-cli-clock-observer".to_string(),
-        incarnation: 0,
-        connect_endpoints: vec![connect],
-    })
-    .await
-    .map_err(|error| anyhow!("failed to open bus clock subscription: {error}"))?;
-    let topic = Topic::<Subscribe<api::simulation::Clock>>::new_static(
-        <api::simulation::Clock as phoxal::bus::ContractBody>::TOPIC,
-    );
-    let subscriber = Subscriber::<api::simulation::Clock>::new(&bus, &topic, 32).await?;
-    loop {
-        let received = subscriber.recv().await?;
-        tx.send_modify(|observation| {
-            observation.latest = Some(ClockSample {
-                now_ns: received.body.now_ns,
-                step: received.body.step,
-            });
-            observation.received_at = Some(Instant::now());
-        });
-    }
 }
 
 #[must_use]
