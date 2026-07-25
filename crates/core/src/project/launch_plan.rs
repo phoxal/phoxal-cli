@@ -104,6 +104,10 @@ pub struct LaunchPlan {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanRevision {
     pub number: u64,
+    /// The digest of the plan's *content* - what to launch - and deliberately
+    /// not of the run identities it carries. Two builds of the same layout
+    /// digest identically even though every supervised run mints a fresh
+    /// `ExecutionId` (#952 section B).
     pub digest: String,
     pub plan: LaunchPlan,
 }

@@ -48,9 +48,15 @@ pub enum CoherenceMismatchDiagnostic {
         served: Vec<String>,
         remedy: &'static str,
     },
+    MultipleTimelineAuthorities {
+        participant_ids: Vec<String>,
+        remedy: &'static str,
+    },
 }
 
 pub(super) const COHERENCE_REMEDY: &str = "align the version, mark a genuinely external consumer edge #[phoxal(external)], or update the lagging artifact";
+
+pub(super) const TIMELINE_AUTHORITY_REMEDY: &str = "exactly one participant may publish the world clock: launch one simulation controller, or none at all on a real robot";
 
 impl CoherenceMismatchDiagnostic {
     fn from_mismatch(mismatch: &graph_check::CoherenceMismatch) -> Self {
@@ -79,6 +85,12 @@ impl CoherenceMismatchDiagnostic {
                 served: served.iter().cloned().collect(),
                 remedy: COHERENCE_REMEDY,
             },
+            graph_check::CoherenceMismatch::MultipleTimelineAuthorities { participant_ids } => {
+                Self::MultipleTimelineAuthorities {
+                    participant_ids: participant_ids.iter().cloned().collect(),
+                    remedy: TIMELINE_AUTHORITY_REMEDY,
+                }
+            }
         }
     }
 
@@ -111,6 +123,13 @@ impl CoherenceMismatchDiagnostic {
                     "participant {participant_id} asks {contract} at {version}, but the in-set servers provide [{served}]; remedy: {remedy}"
                 )
             }
+            Self::MultipleTimelineAuthorities {
+                participant_ids,
+                remedy,
+            } => format!(
+                "participants [{}] all publish the world clock, so the graph has more than one timeline authority; remedy: {remedy}",
+                participant_ids.join(", ")
+            ),
         }
     }
 }

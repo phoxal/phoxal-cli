@@ -6,13 +6,12 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use phoxal::behavior::{BehaviorCatalog, Node, ValueType};
 use phoxal::bus::{CommandPublisher, ContractBody, Publish, Subscribe, Subscriber, Topic};
-use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::v0_1 as api;
 use serde::Serialize;
 use tokio::time::timeout;
 
 use crate::AppContext;
-use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
+use crate::commands::bus_target::BusTargetArgs;
 use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot};
 
 #[derive(Debug, Args)]
@@ -74,22 +73,24 @@ pub struct RequestArgs {
     pub priority: u8,
     #[arg(long, value_enum, default_value_t = ConflictPolicy::Reject)]
     pub conflict: ConflictPolicy,
-    #[arg(long, default_value = DEFAULT_ROUTER_CONNECT)]
-    pub connect: String,
+    #[command(flatten)]
+    pub target: BusTargetArgs,
 }
 
+// There is no behavior-execution selector here. `--execution` names the
+// supervised *run* whose bus this addresses (#952 section B), and the behavior
+// service publishes exactly one current snapshot on it; the old positional
+// argument accepted only `latest` anyway.
 #[derive(Debug, Args)]
 pub struct InspectArgs {
-    #[arg(default_value = "latest")]
-    pub execution: String,
-    #[arg(long, default_value = DEFAULT_ROUTER_CONNECT)]
-    pub connect: String,
+    #[command(flatten)]
+    pub target: BusTargetArgs,
 }
 
 #[derive(Debug, Args)]
 pub struct ControlArgs {
-    #[arg(long, default_value = DEFAULT_ROUTER_CONNECT)]
-    pub connect: String,
+    #[command(flatten)]
+    pub target: BusTargetArgs,
 }
 
 #[derive(Debug, Serialize)]
@@ -349,7 +350,7 @@ fn run_fake_node(
 }
 
 async fn request(app: &AppContext, args: &RequestArgs) -> Result<()> {
-    let bus = open_bus(app, &args.connect, "phoxal-cli-behavior-request").await?;
+    let bus = args.target.open(app, "phoxal-cli-behavior-request").await?;
     let topic = Topic::<Publish<api::behavior::Request>>::new_owned(
         api::topic::new()
             .behavior()
@@ -381,10 +382,7 @@ async fn request(app: &AppContext, args: &RequestArgs) -> Result<()> {
 }
 
 async fn inspect(app: &AppContext, args: &InspectArgs) -> Result<()> {
-    if args.execution != "latest" {
-        bail!("v0 supports only `behavior inspect latest`");
-    }
-    let bus = open_bus(app, &args.connect, "phoxal-cli-behavior-inspect").await?;
+    let bus = args.target.open(app, "phoxal-cli-behavior-inspect").await?;
     let topic = Topic::<Subscribe<api::behavior::Snapshot>>::new_static(
         <api::behavior::Snapshot as ContractBody>::TOPIC,
     );
@@ -410,7 +408,7 @@ async fn control(
     args: &ControlArgs,
     command: api::behavior::Command,
 ) -> Result<()> {
-    let bus = open_bus(app, &args.connect, "phoxal-cli-behavior-control").await?;
+    let bus = args.target.open(app, "phoxal-cli-behavior-control").await?;
     let topic = Topic::<Publish<api::behavior::Command>>::new_owned(
         api::topic::new()
             .behavior()
@@ -422,29 +420,6 @@ async fn control(
     bus.close().await?;
     app.ui.info("behavior control command published");
     Ok(())
-}
-
-/// Open an ad hoc command session on the **running** execution.
-///
-/// The bus key root is execution-scoped (#952 section B), so a client that
-/// minted its own `ExecutionId` would publish on a root nobody subscribes.
-/// Each invocation is a fresh process and therefore a fresh `ProducerId`, which
-/// is exactly what makes repeated invocations acceptable under strict
-/// per-producer sequence rejection (section G).
-async fn open_bus(app: &AppContext, connect: &str, participant: &str) -> Result<Bus> {
-    let robot_path = discover_robot_yaml(app.project.root())?;
-    let robot = load_robot(&robot_path)?;
-    let execution = crate::supervisor::active_execution(app.project.root())?
-        .context("no phoxal run is active; start one before sending behavior commands")?;
-    Ok(Bus::open(BusConfig {
-        namespace: robot.robot.namespace,
-        robot_id: robot.robot.id,
-        execution,
-        participant: participant.to_string(),
-        producer: phoxal::bus::ProducerId::mint(),
-        connect_endpoints: vec![connect.to_string()],
-    })
-    .await?)
 }
 
 fn explicit_root(app: &AppContext, explicit: Option<&PathBuf>) -> Result<PathBuf> {

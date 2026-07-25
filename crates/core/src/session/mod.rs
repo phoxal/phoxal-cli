@@ -23,9 +23,9 @@ pub use protocol::{
     CommandSessionId, ConnectionRole, HandshakeReply, HandshakeRequest,
 };
 pub use supervisor::{
-    BoundedString, DesiredProcessState, ExitDescription, IncarnationId, ParticipantInstanceKey,
-    ProcessDescriptor, ProcessEntry, ProcessFailure, ProcessFailureKind, ProcessKey, ProcessScope,
-    ProcessState, ProjectLifecycle, ReadinessPolicy, RobotKey, RuntimeFailurePolicy,
+    BoundedString, DesiredProcessState, ExitDescription, ParticipantInstanceKey, ProcessDescriptor,
+    ProcessEntry, ProcessFailure, ProcessFailureKind, ProcessKey, ProcessScope, ProcessState,
+    ProducerId, ProjectLifecycle, ReadinessPolicy, RobotKey, RuntimeFailurePolicy,
     SimulationSessionInfo, StartupRequirement, SupervisorSnapshotV0,
 };
 pub use telemetry::{

@@ -256,9 +256,9 @@ impl SessionController {
             .supervisor_snapshot()
             .processes
             .get(&key)
-            .and_then(|entry| entry.status.incarnation)
+            .and_then(|entry| entry.status.producer)
         else {
-            self.report_command_warning(format!("process `{id}` has no restartable incarnation"));
+            self.report_command_warning(format!("process `{id}` has no restartable producer"));
             return;
         };
         match client

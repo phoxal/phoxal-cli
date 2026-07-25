@@ -10,7 +10,7 @@
 //! - Adds exactly one static robot instance.
 //! - Assigns that robot the `phoxal-simulator-webots-controller` controller.
 //! - Passes only stable robot, namespace, staged-root, and router inputs.
-//!   Process incarnation and clock epoch are controller-owned.
+//!   Producer identity and the world timeline are controller-owned.
 //!
 //! The generated PROTO body lives in the same Webots project and the authored
 //! world references it relatively.
@@ -372,11 +372,65 @@ robot:
         );
         assert!(!text.contains("supervisor TRUE"));
         assert!(!text.contains("--participant-id"));
-        assert!(!text.contains("--incarnation"));
+        assert!(!text.contains("--producer"));
         assert!(!text.contains("--epoch"));
         assert!(text.contains("--robot-root"));
         assert!(text.contains("../../runtime"));
         assert!(text.contains("unixsock-stream/a,tcp/localhost:7447"));
+        Ok(())
+    }
+
+    /// #952: the run identity reaches the controller through Webots'
+    /// environment and nowhere else. The staged scene must therefore be a
+    /// function of the robot model alone - two runs of the same project stage
+    /// byte-identical worlds, and neither contains an execution id.
+    ///
+    /// This is what keeps the staged-content digest stable across runs, and
+    /// what keeps the controller directory a run-invariant function of package
+    /// content once controllers are installed packages (#951).
+    #[test]
+    fn the_staged_world_is_a_function_of_the_robot_model_not_of_the_run() -> Result<()> {
+        let bundle = fixture_bundle();
+        let launch = ControllerLaunch {
+            namespace: "dev".to_string(),
+            robot_id: "testbot".to_string(),
+            robot_root: Some(PathBuf::from("../../runtime")),
+            connect_endpoints: vec!["tcp/localhost:7447".to_string()],
+        };
+
+        let mut staged = Vec::new();
+        let executions = [
+            phoxal::bus::ExecutionId::mint(),
+            phoxal::bus::ExecutionId::mint(),
+        ];
+        for _ in &executions {
+            let temp = tempfile::tempdir()?;
+            let world = temp.path().join("worlds/default.wbt");
+            stage_simulation_world(
+                BASE_WORLD,
+                &temp.path().join("protos"),
+                &temp.path().join("meshes"),
+                &world,
+                &[RobotToStage {
+                    robot_id: "testbot".to_string(),
+                    bundle: &bundle,
+                    component_types: Vec::new(),
+                    controller_launch: launch.clone(),
+                }],
+            )?;
+            staged.push(std::fs::read_to_string(world)?);
+        }
+
+        assert_eq!(
+            staged[0], staged[1],
+            "two runs of one project must stage the same scene"
+        );
+        for execution in executions {
+            assert!(
+                !staged[0].contains(&execution.to_string()),
+                "the run identity must not enter the staged world"
+            );
+        }
         Ok(())
     }
 

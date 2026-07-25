@@ -10,7 +10,7 @@ use phoxal_cli_core::session::{
     ProcessFailureKind, ProcessKey, ProcessState, ProjectLifecycle, RobotKey, StartupRequirement,
     SupervisorSnapshotV0,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,7 +50,7 @@ pub struct BoardBackend {
 #[derive(Debug, Default)]
 struct PresenceState {
     enabled: bool,
-    instances: BTreeSet<ParticipantInstanceKey>,
+    instances: HashSet<ParticipantInstanceKey>,
 }
 
 #[derive(Debug)]
@@ -79,7 +79,7 @@ impl Default for BoardBackend {
             snapshot_tx,
             presence: Arc::new(Mutex::new(PresenceState {
                 enabled: true,
-                instances: BTreeSet::new(),
+                instances: HashSet::new(),
             })),
             recovery_epoch: Arc::default(),
             recovery_epoch_tx,
@@ -134,7 +134,7 @@ impl BoardBackend {
     /// starts. Presence for an unknown id is dropped rather than deferred, so
     /// untrusted bus keys cannot grow supervisor state.
     ///
-    /// Appearance of the exact expected incarnation is the sole transition
+    /// Appearance of the exact expected producer is the sole transition
     /// to `Ready`. Disappearance is observational and never mutates process
     /// lifecycle or commands a restart. Direct process lifecycle and startup
     /// timeouts retain that authority. Observations cannot resurrect terminal
@@ -182,7 +182,7 @@ impl BoardBackend {
         }
 
         // Exact Liveliness is a one-way startup proof. Once the exact minted
-        // incarnation is ready, later token loss remains observational and
+        // producer is ready, later token loss remains observational and
         // cannot mutate process lifecycle or invoke failure policy.
         if present {
             let exact = self
@@ -193,7 +193,7 @@ impl BoardBackend {
                 .processes
                 .get(&process_key)
                 .is_some_and(|entry| {
-                    entry.status.incarnation == Some(instance.producer)
+                    entry.status.producer == Some(instance.producer)
                         && entry.status.actual == ProcessState::Starting
                 });
             if exact {
@@ -741,7 +741,7 @@ impl BoardBackend {
     pub fn set_producer(&self, key: &ProcessKey, producer: phoxal::bus::ProducerId) {
         let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
         if let Some(entry) = actor.snapshot.processes.get_mut(key) {
-            entry.status.incarnation = Some(producer);
+            entry.status.producer = Some(producer);
             actor.publish(&self.snapshot_tx);
         }
     }
@@ -893,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_incarnation_readiness_rejects_stale_holder_and_aggregates_presence() {
+    fn exact_producer_readiness_rejects_stale_holder_and_aggregates_presence() {
         let board = BoardBackend::new();
         let robot = RobotKey::new("lab", "rover");
         let key = ProcessKey::robot(robot.clone(), "mission");
@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_process_retains_incarnation_and_bounded_pre_bus_evidence() {
+    fn failed_process_retains_its_producer_and_bounded_pre_bus_evidence() {
         let board = BoardBackend::new();
         let key = ProcessKey::project("early-crash");
         board.upsert_process(
@@ -981,7 +981,7 @@ mod tests {
         );
         let snapshot = board.supervisor_snapshot();
         let status = &snapshot.processes[&key].status;
-        assert_eq!(status.incarnation, Some(producer(91)));
+        assert_eq!(status.producer, Some(producer(91)));
         let failure = status.last_failure.as_ref().expect("failure evidence");
         assert_eq!(failure.exit.as_ref().and_then(|exit| exit.code), Some(7));
         assert!(
@@ -998,7 +998,7 @@ mod tests {
     fn minted_producer_identities_are_distinct() {
         let values = (0..1_024)
             .map(|_| phoxal::bus::ProducerId::mint())
-            .collect::<std::collections::BTreeSet<_>>();
+            .collect::<std::collections::HashSet<_>>();
         assert_eq!(values.len(), 1_024);
     }
 }

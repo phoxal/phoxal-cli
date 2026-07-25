@@ -176,7 +176,7 @@ impl RunningParticipant {
             // replacement overlaps a stale holder of the same stable key,
             // Zenoh reports continuous presence rather than another `Alive`;
             // preserve that known binary state instead of inventing an
-            // incarnation signal or waiting for a duplicate event.
+            // producer signal or waiting for a duplicate event.
             if board.is_exact_present(instance) {
                 board.set_state(
                     &self.spec.key,

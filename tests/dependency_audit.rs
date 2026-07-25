@@ -12,7 +12,10 @@ const ALLOWED_BASELINE: &[&str] = &[
     "phoxal-cli-ui",
 ];
 const ALLOWED_RAW_MODULE_IMPORTS: &[&str] = &[
-    "src/commands/behavior.rs",
+    // The one place that builds an ad hoc client session: every user-facing
+    // command reaches the bus through `BusTargetArgs`, so the raw session
+    // surface has one entry point rather than one per command.
+    "src/commands/bus_target.rs",
     "src/commands/logs.rs",
     "src/commands/status.rs",
     "src/supervisor/bus.rs",

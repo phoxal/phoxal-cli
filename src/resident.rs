@@ -52,7 +52,7 @@ struct CommandSessions {
     active: HashMap<CommandSessionId, CommandSessionState>,
     /// Restart acceptance must be fenced across command sessions. A client
     /// may reconnect after losing a reply, before the supervisor consumes the
-    /// first action and advances the board incarnation.
+    /// first action and advances the board's producer identity.
     pending_restarts: HashMap<phoxal_cli_core::session::ProcessKey, phoxal::bus::ProducerId>,
 }
 
@@ -443,7 +443,7 @@ fn process_command(
         current
             .processes
             .get(key)
-            .and_then(|entry| entry.status.incarnation)
+            .and_then(|entry| entry.status.producer)
             == Some(*expected)
     });
     {
@@ -469,7 +469,7 @@ fn process_command(
             expected_producer,
         } => match current.processes.get(&process) {
             None => CommandReply::rejected(CommandError::UnknownProcess),
-            Some(entry) if entry.status.incarnation != Some(expected_producer) => {
+            Some(entry) if entry.status.producer != Some(expected_producer) => {
                 CommandReply::rejected(CommandError::SupersededIncarnation)
             }
             Some(_) if sessions.pending_restarts.get(&process) == Some(&expected_producer) => {
@@ -582,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn command_watermark_replays_and_fences_incarnations() {
+    fn command_watermark_replays_and_fences_producers() {
         let board = BoardBackend::new();
         let key = ProcessKey::project("worker");
         board.upsert_process(
@@ -630,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_restart_is_deduplicated_across_fresh_sessions_until_incarnation_advances() {
+    fn pending_restart_is_deduplicated_across_fresh_sessions_until_the_producer_advances() {
         let board = BoardBackend::new();
         let key = ProcessKey::project("worker");
         board.upsert_process(

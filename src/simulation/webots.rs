@@ -53,18 +53,12 @@ pub(crate) fn stage_and_prepare_webots_spec(
         executable: webots_path,
         args: webots_launch_args(&staged.staged_world_path),
         cwd: None,
-        // The controller is Webots' child, not ours, so this is the only hop
-        // that can carry the supervised run to it (#952 section B). Webots
-        // passes its environment through to the controllers it spawns, so the
-        // controller joins the same execution root as every service. It must
-        // NOT travel in `controllerArgs`, the staged world text, or any file
-        // inside the controller directory: the controller directory stays a
-        // run-invariant function of package content, and the staged scene stays
+        // The run identity travels in the environment and nowhere else: not in
+        // `controllerArgs`, not in the staged world text, and not in any file
+        // inside the controller directory, so the controller directory stays a
+        // run-invariant function of package content and the staged scene stays
         // a function of the robot model.
-        env: vec![(
-            phoxal::participant::launch::env::EXECUTION_ID.to_string(),
-            execution.to_string(),
-        )],
+        env: webots_spawn_env(execution),
         shutdown_grace: std::time::Duration::from_secs(20),
         process_group: true,
         note: None,
@@ -77,6 +71,24 @@ pub(crate) fn stage_and_prepare_webots_spec(
         restart_policy: Default::default(),
     };
     Ok(spec)
+}
+
+/// The environment the Webots application is spawned with.
+///
+/// Exactly one variable, and it is deliberately the only one: the controller is
+/// Webots' child, not ours, so this hop is the only way the supervised run
+/// reaches it (#952 section B). Webots passes its environment through to the
+/// controllers it spawns, so the controller joins the same execution root as
+/// every service.
+///
+/// Nothing time-authoritative belongs here. The controller owns its own world
+/// history and mints its own timeline; handing it an execution *origin* would
+/// let it reconstruct real robot time it never reached.
+fn webots_spawn_env(execution: phoxal::bus::ExecutionId) -> Vec<(String, String)> {
+    vec![(
+        phoxal::participant::launch::env::EXECUTION_ID.to_string(),
+        execution.to_string(),
+    )]
 }
 
 /// Build Webots' argv for a live simulate launch.
@@ -98,4 +110,47 @@ pub(crate) fn webots_launch_args(staged_world_path: &Path) -> Vec<String> {
         "--batch".to_string(),
         staged_world_path.display().to_string(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phoxal::participant::launch::env;
+
+    /// The Webots hop carries the run and nothing else. A second variable here
+    /// is not a detail: `PHOXAL_EXECUTION_ORIGIN` would hand the controller the
+    /// real host clock's zero, which is exactly the robot time it must not be
+    /// able to express.
+    #[test]
+    fn the_webots_process_receives_the_execution_and_nothing_time_authoritative() {
+        let execution = phoxal::bus::ExecutionId::mint();
+        let spawned = webots_spawn_env(execution);
+
+        assert_eq!(
+            spawned,
+            vec![(env::EXECUTION_ID.to_string(), execution.to_string())]
+        );
+        for (key, _) in &spawned {
+            assert_ne!(key, env::EXECUTION_ORIGIN, "the controller gets no clock");
+            assert_ne!(key, env::PRODUCER_ID, "the controller mints its own");
+        }
+    }
+
+    /// Two runs of the same project differ only in that environment: same
+    /// argv, so the staged world path and Webots' own flags are run-invariant.
+    #[test]
+    fn two_runs_differ_only_in_the_environment_they_hand_webots() {
+        let world = Path::new("/tmp/staged/worlds/rover.wbt");
+        assert_eq!(webots_launch_args(world), webots_launch_args(world));
+
+        let first = phoxal::bus::ExecutionId::mint();
+        let second = phoxal::bus::ExecutionId::mint();
+        assert_ne!(webots_spawn_env(first), webots_spawn_env(second));
+        assert!(
+            !webots_launch_args(world)
+                .iter()
+                .any(|arg| arg.contains(&first.to_string())),
+            "the run identity must not enter Webots' argv"
+        );
+    }
 }

@@ -3,7 +3,7 @@
 use phoxal::bus::ExecutionId;
 use serde::{Deserialize, Serialize};
 
-use super::{IncarnationId, ProcessKey, ProcessScope, SupervisorSnapshotV0};
+use super::{ProcessKey, ProcessScope, ProducerId, SupervisorSnapshotV0};
 
 pub const SUPERVISOR_PROTOCOL_VERSION: u16 = 0;
 pub const MAX_SUPERVISED_PROCESSES: usize = 40;
@@ -66,7 +66,7 @@ pub struct CommandKey {
 pub enum CommandAction {
     Restart {
         process: ProcessKey,
-        expected_producer: IncarnationId,
+        expected_producer: ProducerId,
     },
     Shutdown,
 }
@@ -324,7 +324,7 @@ mod tests {
                         desired: DesiredProcessState::Running,
                         actual: ProcessState::Failed,
                         pid: Some(u32::MAX),
-                        incarnation: Some(phoxal::bus::ProducerId::mint()),
+                        producer: Some(phoxal::bus::ProducerId::mint()),
                         restart_count_in_generation: u32::MAX,
                         restart_count_total: u64::MAX,
                         last_failure: Some(ProcessFailure {

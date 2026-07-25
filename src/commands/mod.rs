@@ -9,6 +9,7 @@ use crate::AppContext;
 
 pub mod behavior;
 pub mod build;
+pub mod bus_target;
 pub mod check;
 pub mod deploy;
 pub mod doctor;

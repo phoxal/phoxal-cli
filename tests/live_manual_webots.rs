@@ -114,7 +114,14 @@ async fn manual_command_moves_then_stops_after_ttl() {
         .expect("safety state timeout")
         .expect("safety state sample")
         .body;
-    assert!(safety_state.motion.expires_at_ns > first_time.ticks());
+    assert_eq!(
+        safety_state
+            .motion
+            .expires_at
+            .checked_cmp(first_time)
+            .expect("the safety product must be on the world's own timeline"),
+        std::cmp::Ordering::Greater
+    );
 
     // No software e-stop reset is sent before this command. A fresh manual
     // input must be enough to select motion on a robot whose configured
