@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.24.6](https://github.com/phoxal/phoxal-cli/releases/tag/v0.24.6) - 2026-07-25
+
+
+### Refactored
+
+- *(suite)* Accept artifact-only phoxal.suite/v0, drop profile surface ([#201](https://github.com/phoxal/phoxal-cli/pull/201))
+
+
 ## [0.24.5](https://github.com/phoxal/phoxal-cli/releases/tag/v0.24.5) - 2026-07-25
 
 
