@@ -8,7 +8,7 @@ use anyhow::anyhow;
 use phoxal::bus::{DEFAULT_QUERY_TIMEOUT, Querier, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
 use phoxal::raw::{ParticipantLivelinessEvent, ParticipantLivelinessStatus};
-use phoxal_api::v0_2 as api;
+use phoxal_api::v0_1 as api;
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
 use phoxal_cli_core::session::reconcile::{
     Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced,
@@ -56,6 +56,7 @@ pub fn start_bus_log_subscriber(
     namespace: String,
     robot_id: String,
     connect: String,
+    execution: phoxal::bus::ExecutionId,
     board: BoardBackend,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -70,7 +71,8 @@ pub fn start_bus_log_subscriber(
                 namespace: namespace.clone(),
                 robot_id: robot_id.clone(),
                 participant: "phoxal-cli-supervisor".to_string(),
-                incarnation: 0,
+                execution,
+                producer: phoxal::bus::ProducerId::mint(),
                 connect_endpoints: vec![connect.clone()],
             })
             .await
@@ -205,12 +207,21 @@ pub fn start_clock_feed(
     namespace: String,
     robot_id: String,
     connect: String,
+    execution: phoxal::bus::ExecutionId,
 ) -> (watch::Receiver<ClockObservation>, JoinHandle<()>) {
     let (tx, rx) = watch::channel(ClockObservation::default());
     let handle = tokio::spawn(async move {
         loop {
             wait_for_endpoint(&connect).await;
-            match clock_feed_loop(namespace.clone(), robot_id.clone(), connect.clone(), &tx).await {
+            match clock_feed_loop(
+                namespace.clone(),
+                robot_id.clone(),
+                connect.clone(),
+                execution,
+                &tx,
+            )
+            .await
+            {
                 Ok(()) => break,
                 Err(error) => {
                     tracing::debug!("clock telemetry feed waiting for router: {error:#}");
@@ -226,13 +237,15 @@ pub(crate) async fn clock_feed_loop(
     namespace: String,
     robot_id: String,
     connect: String,
+    execution: phoxal::bus::ExecutionId,
     tx: &watch::Sender<ClockObservation>,
 ) -> Result<()> {
     let bus = Bus::open(BusConfig {
         namespace,
         robot_id,
         participant: "phoxal-cli-clock-observer".to_string(),
-        incarnation: 0,
+        execution,
+        producer: phoxal::bus::ProducerId::mint(),
         connect_endpoints: vec![connect],
     })
     .await
@@ -244,8 +257,13 @@ pub(crate) async fn clock_feed_loop(
     loop {
         let received = subscriber.recv().await?;
         tx.send_modify(|observation| {
+            // The clock's instant rides in the envelope now, stamped by the
+            // world authority; the body carries only the step counter.
             observation.latest = Some(ClockSample {
-                now_ns: received.body.now_ns,
+                now_ns: received
+                    .metadata
+                    .produced_exactly_at()
+                    .map_or(0, |at| at.ticks()),
                 step: received.body.step,
             });
             observation.received_at = Some(Instant::now());
@@ -396,6 +414,7 @@ pub fn start_liveliness_observer(
     namespace: String,
     robot_id: String,
     connect: String,
+    execution: phoxal::bus::ExecutionId,
     board: BoardBackend,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -405,6 +424,7 @@ pub fn start_liveliness_observer(
                 namespace.clone(),
                 robot_id.clone(),
                 connect.clone(),
+                execution,
                 board.clone(),
             )
             .await
@@ -423,13 +443,15 @@ pub(crate) async fn liveliness_observer_loop(
     namespace: String,
     robot_id: String,
     connect: String,
+    execution: phoxal::bus::ExecutionId,
     board: BoardBackend,
 ) -> Result<()> {
     let bus = Bus::open(BusConfig {
         namespace: namespace.clone(),
         robot_id: robot_id.clone(),
         participant: LIVELINESS_OBSERVER_ID.to_string(),
-        incarnation: 0,
+        execution,
+        producer: phoxal::bus::ProducerId::mint(),
         connect_endpoints: vec![connect],
     })
     .await
@@ -466,7 +488,7 @@ fn apply_liveliness_event(
         ParticipantInstanceKey {
             robot: RobotKey::new(namespace, robot_id),
             participant: id.to_string(),
-            incarnation: event.key.incarnation(),
+            producer: event.key.producer(),
         },
         event.status == ParticipantLivelinessStatus::Alive,
     );
@@ -479,6 +501,13 @@ pub fn default_connect_endpoint() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A deterministic producer identity for tests, so a case can name the
+    /// exact restart it means.
+    fn producer(seed: u8) -> phoxal::bus::ProducerId {
+        phoxal::bus::ProducerId::parse(&format!("{:032x}", u128::from(seed)))
+            .expect("test producer id must parse")
+    }
     use super::*;
     use phoxal::raw::ParticipantLivelinessKey;
     use phoxal_cli_core::session::ParticipantKind;
@@ -503,7 +532,7 @@ mod tests {
 
     fn event(participant: &str, status: ParticipantLivelinessStatus) -> ParticipantLivelinessEvent {
         ParticipantLivelinessEvent {
-            key: ParticipantLivelinessKey::new("dev/robots/rover", participant, 7)
+            key: ParticipantLivelinessKey::new("dev/robots/rover/xdead", participant, producer(7))
                 .expect("valid participant key"),
             status,
         }
@@ -521,7 +550,7 @@ mod tests {
             ParticipantKind::Service,
             phoxal_cli_core::session::StartupRequirement::Required,
         );
-        board.set_incarnation(&key, 7);
+        board.set_producer(&key, producer(7));
 
         apply_liveliness_event(
             &board,

@@ -1,5 +1,6 @@
 //! Install and roll back immutable compiled runtime releases.
 
+use phoxal_cli_core::project::launch_plan::RunIdentity;
 use std::future::Future;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -222,6 +223,7 @@ async fn install_archive(
             &candidate,
             &phoxal_cli_core::project::layout::PlanOptions::default(),
             phoxal_cli_core::project::layout::LayoutInspection::Host,
+            RunIdentity::default(),
         )
         .context("installed runtime failed dry plan compilation")?;
         fsync_tree(&candidate)?;

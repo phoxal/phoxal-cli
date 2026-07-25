@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use phoxal::bus::{DEFAULT_QUERY_TIMEOUT, Querier, Subscriber};
 use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::v0_2 as api;
+use phoxal_api::v0_1 as api;
 use std::path::Path;
 use std::time::Duration;
 
@@ -50,10 +50,13 @@ impl Logs {
             self.namespace.clone(),
             self.robot_id.clone(),
         )?;
+        let execution = crate::supervisor::active_execution(app.project.root())?
+            .context("no phoxal run is active; start one before streaming logs")?;
         stream_logs(
             namespace,
             robot_id,
             self.connect.clone(),
+            execution,
             self.participant.clone(),
             self.follow,
         )
@@ -85,6 +88,7 @@ async fn stream_logs(
     namespace: String,
     robot_id: String,
     connect: String,
+    execution: phoxal::bus::ExecutionId,
     participant: Option<String>,
     follow: bool,
 ) -> Result<()> {
@@ -92,7 +96,8 @@ async fn stream_logs(
         namespace,
         robot_id,
         participant: "phoxal-cli-logs".to_string(),
-        incarnation: 0,
+        execution,
+        producer: phoxal::bus::ProducerId::mint(),
         connect_endpoints: vec![connect],
     })
     .await?;

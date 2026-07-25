@@ -9,6 +9,7 @@ use anyhow::{Result, anyhow, bail};
 use graph_check::{ParticipantClass, Problem};
 use phoxal::model::robot::v0::Robot;
 use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind, ToolParticipant};
+use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::project::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_DEVICE, ROBOT_TOOL_JOYPAD, SubstitutionRecord,
     build_launch_plan,
@@ -204,6 +205,7 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
             substitutions: &[],
             source_participants: &source_participants,
         }],
+        RunIdentity::default(),
     )?;
 
     assert_eq!(plan.mode, LaunchMode::Run);

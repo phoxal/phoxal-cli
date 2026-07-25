@@ -26,7 +26,7 @@ struct Config {
 #[derive(phoxal::Api)]
 #[allow(dead_code)]
 struct Api {
-    target: Publisher<phoxal_api::v0_1::drive::Target>,
+    target: CommandPublisher<phoxal_api::v0_1::drive::Target>,
 }
 
 #[phoxal::service(id = "avoid")]

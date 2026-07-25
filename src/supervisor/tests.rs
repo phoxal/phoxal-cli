@@ -973,7 +973,7 @@ async fn respawn_requires_the_new_exact_incarnation_despite_stable_presence() ->
         ParticipantState::Starting,
     ));
     let mut participant = RunningParticipant::spawn(sleep_spec("mission"), &board).await?;
-    let first_incarnation = board.supervisor_snapshot().processes
+    let first_producer = board.supervisor_snapshot().processes
         [&phoxal_cli_core::session::ProcessKey::project("mission")]
         .status
         .incarnation
@@ -983,7 +983,7 @@ async fn respawn_requires_the_new_exact_incarnation_despite_stable_presence() ->
         phoxal_cli_core::session::ParticipantInstanceKey {
             robot: robot.clone(),
             participant: "mission".to_string(),
-            incarnation: first_incarnation,
+            producer: first_producer,
         },
         true,
     );
@@ -1009,17 +1009,17 @@ async fn respawn_requires_the_new_exact_incarnation_despite_stable_presence() ->
             [&phoxal_cli_core::session::ProcessKey::project("mission")]
             .status
             .incarnation,
-        Some(first_incarnation),
+        Some(first_producer),
         "the failed row keeps its incarnation until replacement spawn"
     );
     tokio::time::sleep(Duration::from_millis(5)).await;
     participant.poll(&board, &restart_policy).await?;
-    let second_incarnation = board.supervisor_snapshot().processes
+    let second_producer = board.supervisor_snapshot().processes
         [&phoxal_cli_core::session::ProcessKey::project("mission")]
         .status
         .incarnation
         .expect("the replacement spawn mints an incarnation");
-    assert_ne!(first_incarnation, second_incarnation);
+    assert_ne!(first_producer, second_producer);
 
     let snapshot = board.snapshot();
     assert_eq!(
@@ -1031,7 +1031,7 @@ async fn respawn_requires_the_new_exact_incarnation_despite_stable_presence() ->
         phoxal_cli_core::session::ParticipantInstanceKey {
             robot,
             participant: "mission".to_string(),
-            incarnation: second_incarnation,
+            producer: second_producer,
         },
         true,
     );

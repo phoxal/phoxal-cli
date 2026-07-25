@@ -14,6 +14,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use phoxal_cli_core::project::launch_plan::RunIdentity;
 use tokio::sync::mpsc;
 
 /// Everything [`live_simulate_setup`] hands back to the caller once it
@@ -34,6 +35,7 @@ pub(crate) struct LiveSimSetup {
 /// Everything between preparation finishing and supervision beginning for a
 /// `simulation webots run`: Webots preflight, ordinary resident staging,
 /// disposable Webots project generation, and observer startup.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn live_simulate_setup(
     ui: crate::Ui,
     mut sim: SimPlan,
@@ -45,6 +47,7 @@ pub(crate) async fn live_simulate_setup(
         mpsc::Sender<SupervisorAction>,
         mpsc::Receiver<SupervisorAction>,
     )>,
+    run: RunIdentity,
 ) -> Result<LiveSimSetup> {
     let ensure_active = || {
         if token.is_cancelled() {
@@ -143,6 +146,7 @@ pub(crate) async fn live_simulate_setup(
     ui.info(format!("infrastructure router ready on {connect}"));
     crate::run::report_launch_commands(&sim.plan, &specs, &ui)?;
 
+    let execution = run.execution();
     background_tasks.extend(
         sim.plan
             .robots
@@ -152,6 +156,7 @@ pub(crate) async fn live_simulate_setup(
                     robot.namespace.clone(),
                     robot.id.clone(),
                     connect.clone(),
+                    execution,
                     board.clone(),
                 )
             })
@@ -164,6 +169,7 @@ pub(crate) async fn live_simulate_setup(
             robot.namespace.clone(),
             robot.id.clone(),
             connect.clone(),
+            execution,
             board.clone(),
         )
     }));

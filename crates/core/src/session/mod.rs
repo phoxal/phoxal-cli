@@ -20,7 +20,7 @@ pub use mode::SessionMode;
 pub use participant_kind::ParticipantKind;
 pub use protocol::{
     BootstrapResult, CommandAction, CommandError, CommandKey, CommandReply, CommandRequest,
-    CommandSessionId, ConnectionRole, HandshakeReply, HandshakeRequest, LaunchNonce,
+    CommandSessionId, ConnectionRole, HandshakeReply, HandshakeRequest,
 };
 pub use supervisor::{
     BoundedString, DesiredProcessState, ExitDescription, IncarnationId, ParticipantInstanceKey,

@@ -103,10 +103,10 @@ pub(super) fn draw_header(
         )),
         sections[0],
     );
-    let device_title = telemetry.device.as_ref().map_or_else(
-        || "Device".to_string(),
-        |device| format!("Device · {}", device.value.device_id),
-    );
+    let device_title = telemetry
+        .device
+        .as_ref()
+        .map_or_else(|| "Device".to_string(), |_| "Device".to_string());
     frame.render_widget(
         Paragraph::new(header_device_lines(
             telemetry.device.as_ref(),

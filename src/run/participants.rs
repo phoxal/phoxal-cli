@@ -539,6 +539,7 @@ mod tests {
         BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
     };
     use phoxal_cli_core::check::participant_metadata::host_architecture;
+    use phoxal_cli_core::project::launch_plan::RunIdentity;
     use phoxal_cli_core::session::RuntimeFailurePolicy;
     use phoxal_cli_core::session::StartupRequirement;
 
@@ -571,7 +572,9 @@ mod tests {
             },
             launch: ParticipantLaunch {
                 participant_id: id.to_string(),
-                incarnation: 0,
+                execution: phoxal::bus::ExecutionId::mint(),
+                producer: phoxal::bus::ProducerId::mint(),
+                execution_origin: None,
                 namespace: "dev".to_string(),
                 robot_id: "robot_v1".to_string(),
                 bus: BusProfile {
@@ -581,7 +584,6 @@ mod tests {
                 config: None,
                 robot_root: None,
                 component_instance: None,
-                execution_device_id: None,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
             startup_requirement: StartupRequirement::Required,
@@ -680,6 +682,7 @@ services:
         let plan = RuntimeLayout::construct_plan(
             root,
             &phoxal_cli_core::project::layout::PlanOptions::default(),
+            RunIdentity::default(),
         )?
         .plan;
         let board = BoardBackend::new();
@@ -740,6 +743,7 @@ services:
         let plan = RuntimeLayout::construct_plan(
             root,
             &phoxal_cli_core::project::layout::PlanOptions::default(),
+            RunIdentity::default(),
         )?
         .plan;
         // Pick one official artifact from the plan and pretend the project

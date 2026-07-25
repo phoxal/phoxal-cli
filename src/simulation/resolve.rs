@@ -22,6 +22,7 @@ use phoxal_cli_core::check::source::SourceParticipantKind;
 use phoxal_cli_core::project::launch_plan::CheckedRobotLaunchInput;
 use phoxal_cli_core::project::launch_plan::LaunchMode;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
+use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::project::launch_plan::build_launch_plan;
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
@@ -79,6 +80,7 @@ pub(crate) fn build_checked_sim_launch_plan(
     world: &Path,
     resolved: &ResolvedRobot,
     suite: Option<&Suite>,
+    run: RunIdentity,
 ) -> Result<(LaunchPlan, Vec<graph_check::ParticipantContractSurface>)> {
     let source_participants = sim_source_participants(project_root, resolved, suite)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
@@ -167,6 +169,7 @@ pub(crate) fn build_checked_sim_launch_plan(
             substitutions: &[],
             source_participants: &source_participants,
         }],
+        run,
     )?;
     // The controller is validated in the complete graph above, but is launched
     // by Webots rather than represented in the resident launch plan.

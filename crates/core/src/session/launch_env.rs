@@ -55,7 +55,9 @@ pub const ENV_TO_FLAG: &[(&str, &str)] = &[
     (env::NAMESPACE, "--namespace"),
     (env::ROBOT_ROOT, "--robot-root"),
     (env::COMPONENT_INSTANCE, "--component-instance"),
-    (env::EXECUTION_DEVICE_ID, "--execution-device-id"),
+    (env::EXECUTION_ID, "--execution-id"),
+    (env::PRODUCER_ID, "--producer-id"),
+    (env::EXECUTION_ORIGIN, "--execution-origin"),
     (env::CONNECT, "--connect"),
     (env::CONFIG, "--config"),
     (env::CLOCK, "--clock"),
@@ -95,11 +97,13 @@ fn encode_common_participant_variables(
             component_instance.clone(),
         );
     }
-    if let Some(execution_device_id) = &launch.execution_device_id {
-        variables.insert(
-            env::EXECUTION_DEVICE_ID.to_string(),
-            execution_device_id.to_string(),
-        );
+    // Every participant carries the supervised run and its own producer
+    // identity (#952 section B/G); the origin is present whenever the
+    // supervisor minted one.
+    variables.insert(env::EXECUTION_ID.to_string(), launch.execution.to_string());
+    variables.insert(env::PRODUCER_ID.to_string(), launch.producer.to_string());
+    if let Some(origin) = launch.execution_origin {
+        variables.insert(env::EXECUTION_ORIGIN.to_string(), origin.encode());
     }
     if !launch.bus.connect_endpoints.is_empty() {
         variables.insert(
@@ -214,7 +218,9 @@ mod tests {
     fn spawn_env_and_environment_file_carry_identical_variables() -> anyhow::Result<()> {
         let launch = ParticipantLaunch {
             participant_id: "mission".to_string(),
-            incarnation: 0,
+            execution: phoxal::bus::ExecutionId::mint(),
+            producer: phoxal::bus::ProducerId::mint(),
+            execution_origin: None,
             namespace: "dev".to_string(),
             robot_id: "robot_v1".to_string(),
             bus: BusProfile {
@@ -227,7 +233,6 @@ mod tests {
             })),
             robot_root: Some(PathBuf::from("/tmp/phoxal/robot")),
             component_instance: None,
-            execution_device_id: None,
             shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
         };
 
@@ -248,7 +253,9 @@ mod tests {
     fn tool_environment_is_clockless() -> anyhow::Result<()> {
         let launch = ParticipantLaunch {
             participant_id: "tool-log".to_string(),
-            incarnation: 0,
+            execution: phoxal::bus::ExecutionId::mint(),
+            producer: phoxal::bus::ProducerId::mint(),
+            execution_origin: None,
             namespace: "dev".to_string(),
             robot_id: "robot_v1".to_string(),
             bus: BusProfile {
@@ -258,9 +265,6 @@ mod tests {
             config: None,
             robot_root: Some(PathBuf::from("/tmp/phoxal/robot")),
             component_instance: None,
-            execution_device_id: Some(
-                phoxal::participant::launch::ExecutionDeviceId::new("project-e2e").unwrap(),
-            ),
             shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
         };
 
@@ -277,12 +281,20 @@ mod tests {
             encoded.variables().get(env::CONNECT).map(String::as_str),
             Some("tcp/localhost:7447")
         );
+        // Every participant carries the supervised run and its own producer.
         assert_eq!(
             encoded
                 .variables()
-                .get(env::EXECUTION_DEVICE_ID)
+                .get(env::EXECUTION_ID)
                 .map(String::as_str),
-            Some("project-e2e")
+            Some(launch.execution.to_string().as_str())
+        );
+        assert_eq!(
+            encoded
+                .variables()
+                .get(env::PRODUCER_ID)
+                .map(String::as_str),
+            Some(launch.producer.to_string().as_str())
         );
         Ok(())
     }
@@ -291,7 +303,9 @@ mod tests {
     fn oversized_config_names_participant_size_and_limit() {
         let launch = ParticipantLaunch {
             participant_id: "huge_config".to_string(),
-            incarnation: 0,
+            execution: phoxal::bus::ExecutionId::mint(),
+            producer: phoxal::bus::ProducerId::mint(),
+            execution_origin: None,
             namespace: "dev".to_string(),
             robot_id: "robot_v1".to_string(),
             bus: BusProfile::default(),
@@ -301,7 +315,6 @@ mod tests {
             })),
             robot_root: None,
             component_instance: None,
-            execution_device_id: None,
             shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
         };
 

@@ -13,6 +13,7 @@
 //! runtimes are synthesized host-architecture objects, since a full `phoxal
 //! build` of the official catalog needs the entire vendored suite.
 
+use phoxal_cli_core::project::launch_plan::RunIdentity;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -118,13 +119,15 @@ fn stage_layout(root: &Path, fixture: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Erase the two deliberately deployment-scoped fields so a plan can be compared
-/// for content identity across two extraction locations.
+/// Erase the deployment- and run-scoped fields so a plan can be compared for
+/// content identity across two extraction locations. The run identities are
+/// minted per supervised run by design (#952 section B), so they differ between
+/// two builds of the same content and say nothing about plan identity.
 fn normalize(plan: &mut LaunchPlan) {
+    *plan = phoxal_cli_core::project::launch_plan::content_only(plan.clone());
     for robot in &mut plan.robots {
         for participant in &mut robot.participants {
             participant.launch.robot_root = None;
-            participant.launch.execution_device_id = None;
         }
     }
 }
@@ -142,6 +145,7 @@ fn source_build_extract_and_loader_validate_produce_the_same_plan() -> Result<()
         &staged_root,
         &PlanOptions::default(),
         LayoutInspection::Host,
+        RunIdentity::default(),
     )
     .context("the staged layout must validate through the loader")?;
     // The real fixture's user service is a planned participant.
@@ -173,6 +177,7 @@ fn source_build_extract_and_loader_validate_produce_the_same_plan() -> Result<()
         &extracted_root,
         &PlanOptions::default(),
         LayoutInspection::Host,
+        RunIdentity::default(),
     )
     .context("the extracted bundle must validate through the loader offline")?;
 

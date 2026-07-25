@@ -7,14 +7,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use phoxal_api::v0_2 as state_api;
+use phoxal_api::v0_1 as state_api;
 
 use crate::session::stores::telemetry::RobotScope;
 use crate::session::stores::telemetry::Timestamped;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeviceSample {
-    pub device_id: String,
     pub cpu_pct: Option<f32>,
     pub ram_used_bytes: Option<u64>,
     pub ram_total_bytes: Option<u64>,

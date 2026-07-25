@@ -1,5 +1,6 @@
 //! Bounded, CLI-internal protocol for the project-local resident supervisor.
 
+use phoxal::bus::ExecutionId;
 use serde::{Deserialize, Serialize};
 
 use super::{IncarnationId, ProcessKey, ProcessScope, SupervisorSnapshotV0};
@@ -65,7 +66,7 @@ pub struct CommandKey {
 pub enum CommandAction {
     Restart {
         process: ProcessKey,
-        expected_incarnation: IncarnationId,
+        expected_producer: IncarnationId,
     },
     Shutdown,
 }
@@ -114,14 +115,19 @@ pub enum CommandError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaunchNonce(pub [u8; 32]);
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum BootstrapResult {
     Bound {
         supervisor_generation: u64,
-        launch_nonce: LaunchNonce,
+        /// The supervised run the resident adopted (#952 section B).
+        ///
+        /// This replaces the separate bootstrap nonce: the launcher mints the
+        /// `ExecutionId`, the resident adopts it as the run identity and echoes
+        /// it here, and the launcher verifies it exactly as it verified the
+        /// nonce - so the loser of a concurrent-launch race still cannot adopt
+        /// the winner. Uniqueness, not secrecy, was the load-bearing property,
+        /// and the private socketpair remains the security boundary.
+        execution: ExecutionId,
     },
     Rejected {
         error: String,
@@ -318,7 +324,7 @@ mod tests {
                         desired: DesiredProcessState::Running,
                         actual: ProcessState::Failed,
                         pid: Some(u32::MAX),
-                        incarnation: Some(u64::MAX),
+                        incarnation: Some(phoxal::bus::ProducerId::mint()),
                         restart_count_in_generation: u32::MAX,
                         restart_count_total: u64::MAX,
                         last_failure: Some(ProcessFailure {

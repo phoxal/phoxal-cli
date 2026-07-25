@@ -108,16 +108,21 @@ impl RunningParticipant {
             self.spec.note.clone(),
         );
         if let ReadinessPolicy::ExactLiveliness(instance) = &mut self.spec.readiness {
-            let incarnation = board.mint_incarnation();
-            instance.incarnation = incarnation;
+            // A restarted participant is structurally a different producer
+            // (#952 section G), so the supervisor pre-mints the identity the
+            // child will publish under and keys its own restart fencing on the
+            // same value. The Liveliness key carries it too, which is what
+            // makes "this exact restart is live" observable.
+            let producer = phoxal::bus::ProducerId::mint();
+            instance.producer = producer;
             self.spec
                 .env
-                .retain(|(key, _)| key != phoxal::participant::launch::env::INCARNATION);
+                .retain(|(key, _)| key != phoxal::participant::launch::env::PRODUCER_ID);
             self.spec.env.push((
-                phoxal::participant::launch::env::INCARNATION.to_string(),
-                incarnation.to_string(),
+                phoxal::participant::launch::env::PRODUCER_ID.to_string(),
+                producer.to_string(),
             ));
-            board.set_incarnation(&self.spec.key, incarnation);
+            board.set_producer(&self.spec.key, producer);
         }
         let mut command = Command::new(&self.spec.executable);
         command.args(&self.spec.args);

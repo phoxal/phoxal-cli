@@ -103,6 +103,10 @@ fn extracted_crates_follow_the_one_way_dependency_rule() {
             .iter()
             .filter(|dependency| dependency["source"].is_null())
             .filter_map(|dependency| dependency["name"].as_str())
+            // The framework crates are path-pinned while the #952 train is
+            // unreleased. That is a version pin, not a workspace edge - the
+            // rule this test guards is about the CLI's own crates.
+            .filter(|name| !matches!(*name, "phoxal" | "phoxal-api"))
             .collect::<Vec<_>>();
         assert_eq!(
             path_dependencies, expected_path_dependencies,

@@ -3,10 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
+use phoxal::bus::{ExecutionId, ProducerId};
 use phoxal::check as graph_check;
+use phoxal::participant::ExecutionOrigin;
 use phoxal::participant::launch::{
-    BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ExecutionDeviceId, ParticipantLaunch,
+    BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -36,69 +38,6 @@ pub fn simulator_controller_provider_id(robot_id: &str) -> String {
 #[must_use]
 pub fn runtime_layout_dir(project_root: &Path, triple: &str) -> PathBuf {
     project_root.join(RUNTIME_BUILD_ROOT_RELATIVE).join(triple)
-}
-
-/// Mint the bounded observation identity shared by every per-robot
-/// `tool-device` launched by one canonical project supervisor.
-///
-/// The identity hashes the *logical* root - absolute and lexically normalized,
-/// but with symlinks left unresolved - never the `fs::canonicalize` real path.
-/// The production deployment (#930) is a stable symlink `/var/phoxal ->
-/// releases/<timestamp>/` that is retargeted on each activation; canonicalizing
-/// would fold the release timestamp into the identity, so every activation would
-/// mint a *new* device id and break observation continuity across releases.
-/// Hashing `/var/phoxal` as given keeps one identity across activations. The
-/// documented tradeoff: moving or copying the project directory to a genuinely
-/// different logical path is a different device, which is the correct and
-/// expected behavior for a relocated deployment.
-pub fn execution_device_id(project_root: &Path) -> Result<ExecutionDeviceId> {
-    let logical = logical_root(project_root);
-    let digest = Sha256::digest(logical.as_os_str().as_encoded_bytes());
-    ExecutionDeviceId::new(format!("project-{}", &hex::encode(digest)[..24]))
-        .map_err(|error| anyhow!("failed to mint execution-device identity: {error}"))
-}
-
-/// The logical absolute root used for the device identity: a relative path is
-/// anchored at the current directory, then `.`/`..`/redundant-separator
-/// components are collapsed *lexically*. No filesystem lookup happens, so a
-/// symlink on the path (`/var/phoxal`) is preserved rather than resolved to its
-/// target - that symlink-independence is the whole point (see
-/// [`execution_device_id`]).
-fn logical_root(project_root: &Path) -> PathBuf {
-    let absolute = if project_root.is_absolute() {
-        project_root.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(project_root))
-            .unwrap_or_else(|_| project_root.to_path_buf())
-    };
-    normalize_lexically(&absolute)
-}
-
-/// Collapse `.` and `..` components lexically, without touching the filesystem.
-/// `..` pops a preceding normal component; it is preserved when there is nothing
-/// to pop (a leading `..` on a relative remainder) so the result never silently
-/// climbs above the root prefix.
-fn normalize_lexically(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if matches!(
-                    normalized.components().next_back(),
-                    Some(Component::Normal(_))
-                ) {
-                    normalized.pop();
-                } else {
-                    normalized.push(component.as_os_str());
-                }
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -181,7 +120,11 @@ impl PlanRevision {
             .saturating_add(4);
         crate::session::protocol::validate_snapshot_capacity(process_count)?;
         validate_supervisor_identity_bounds(&plan)?;
-        let canonical = serde_json::to_vec(&plan)?;
+        // The digest is the plan's *content* - what to launch - so it excludes
+        // the run identities, which say *which run* rather than what (#952
+        // section B). Two builds of the same layout must digest identically
+        // even though every supervised run mints fresh identities.
+        let canonical = serde_json::to_vec(&content_only(plan.clone()))?;
         let digest = hex::encode(Sha256::digest(canonical));
         Ok(Self {
             number,
@@ -383,16 +326,82 @@ pub struct CheckedRobotLaunchInput<'a> {
 pub fn build_launch_plan(
     mode: LaunchMode,
     robots: &[CheckedRobotLaunchInput<'_>],
+    run: RunIdentity,
 ) -> Result<LaunchPlan> {
     if robots.is_empty() {
         bail!("LaunchPlan requires at least one robot");
     }
     let robots = robots
         .iter()
-        .map(|robot| build_robot_launch(&mode, robot))
+        .map(|robot| build_robot_launch(&mode, robot, run))
         .collect::<Result<Vec<_>>>()?;
 
     Ok(LaunchPlan { mode, robots })
+}
+
+/// Erase the per-run identities so two plans can be compared for content.
+///
+/// A supervised run mints a fresh `ExecutionId`, a fresh `ExecutionOrigin`, and
+/// one `ProducerId` per participant, so no two plan builds ever agree on them -
+/// and none of them describes *what* the plan launches.
+#[must_use]
+pub fn content_only(mut plan: LaunchPlan) -> LaunchPlan {
+    let fixed_execution =
+        ExecutionId::parse(&"0".repeat(ExecutionId::LEN)).expect("fixed execution id");
+    let fixed_producer =
+        ProducerId::parse(&"0".repeat(ExecutionId::LEN)).expect("fixed producer id");
+    for robot in &mut plan.robots {
+        for participant in &mut robot.participants {
+            participant.launch.execution = fixed_execution;
+            participant.launch.producer = fixed_producer;
+            participant.launch.execution_origin = None;
+        }
+    }
+    plan
+}
+
+/// The identities one supervised run shares across every participant it
+/// launches (#952 sections B and I).
+///
+/// The supervisor mints these once per run. Every participant in the plan
+/// carries them, so the bus root is execution-scoped and traffic from a
+/// previous run cannot be observed as current; each participant still gets its
+/// own [`ProducerId`].
+#[derive(Clone, Copy, Debug)]
+pub struct RunIdentity {
+    execution: ExecutionId,
+    origin: ExecutionOrigin,
+}
+
+impl RunIdentity {
+    /// Adopt `execution` if a launcher already minted one for this run, or mint
+    /// a fresh identity. The origin of real robot time is always minted here,
+    /// by the process that supervises the run.
+    #[must_use]
+    pub fn mint_or_adopt(execution: Option<ExecutionId>) -> Self {
+        RunIdentity {
+            execution: execution.unwrap_or_else(ExecutionId::mint),
+            origin: ExecutionOrigin::mint(),
+        }
+    }
+
+    /// The supervised run.
+    #[must_use]
+    pub fn execution(&self) -> ExecutionId {
+        self.execution
+    }
+
+    /// The origin of real robot time for this run.
+    #[must_use]
+    pub fn origin(&self) -> ExecutionOrigin {
+        self.origin
+    }
+}
+
+impl Default for RunIdentity {
+    fn default() -> Self {
+        Self::mint_or_adopt(None)
+    }
 }
 
 /// The kind-stripped short name of an official tool artifact id
@@ -405,6 +414,7 @@ fn tool_short_name(artifact_id: &str) -> &str {
 fn build_robot_launch(
     mode: &LaunchMode,
     input: &CheckedRobotLaunchInput<'_>,
+    run: RunIdentity,
 ) -> Result<RobotLaunch> {
     ensure_launch_set_parity(mode, input)?;
     let source_participants = input
@@ -433,7 +443,7 @@ fn build_robot_launch(
         .filter(|participant| is_robot_launch_participant(mode, participant, &source_participants))
     {
         let execution = participant_execution(checked, &source_participants, &official_kinds)?;
-        let launch = participant_launch(mode, input, checked);
+        let launch = participant_launch(mode, input, checked, run);
         participants.push(ParticipantLaunchRecord {
             artifact_id: checked.artifact_id.clone(),
             execution,
@@ -450,14 +460,6 @@ fn build_robot_launch(
     {
         let startup_requirement = StartupRequirement::Required;
         let runtime_failure = RuntimeFailurePolicy::StopProject;
-        let execution_device_id = (tool.name == ROBOT_TOOL_DEVICE)
-            .then(|| {
-                execution_device_id(&runtime_layout_dir(
-                    input.project_root,
-                    &input.resolved.target,
-                ))
-            })
-            .transpose()?;
         participants.push(ParticipantLaunchRecord {
             artifact_id: tool.name.clone(),
             // Vendored or workspace-overridden, a tool resolves to the one
@@ -469,7 +471,9 @@ fn build_robot_launch(
             },
             launch: ParticipantLaunch {
                 participant_id: format!("{}-{}", tool.name, input.resolved.robot.robot.id),
-                incarnation: 0,
+                execution: run.execution(),
+                producer: ProducerId::mint(),
+                execution_origin: Some(run.origin()),
                 namespace: input.resolved.robot.robot.namespace.clone(),
                 robot_id: input.resolved.robot.robot.id.clone(),
                 bus: BusProfile {
@@ -482,7 +486,6 @@ fn build_robot_launch(
                     &input.resolved.target,
                 )),
                 component_instance: None,
-                execution_device_id,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
             startup_requirement,
@@ -596,6 +599,7 @@ fn participant_launch(
     mode: &LaunchMode,
     input: &CheckedRobotLaunchInput<'_>,
     checked: &graph_check::ParticipantApis,
+    run: RunIdentity,
 ) -> ParticipantLaunch {
     let component_instance = match &checked.scope {
         graph_check::ParticipantScope::ComponentInstance(instance) => Some(instance.clone()),
@@ -603,7 +607,9 @@ fn participant_launch(
     };
     ParticipantLaunch {
         participant_id: checked.participant_id.clone(),
-        incarnation: 0,
+        execution: run.execution(),
+        producer: ProducerId::mint(),
+        execution_origin: Some(run.origin()),
         namespace: input.resolved.robot.robot.namespace.clone(),
         robot_id: input.resolved.robot.robot.id.clone(),
         bus: BusProfile {
@@ -636,7 +642,6 @@ fn participant_launch(
             &input.resolved.target,
         )),
         component_instance,
-        execution_device_id: None,
         shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
     }
 }
@@ -771,7 +776,9 @@ mod tests {
             },
             launch: ParticipantLaunch {
                 participant_id: format!("participant-{index}"),
-                incarnation: 0,
+                execution: ExecutionId::mint(),
+                producer: ProducerId::mint(),
+                execution_origin: None,
                 namespace: "dev".to_string(),
                 robot_id: "robot-v1".to_string(),
                 bus: BusProfile {
@@ -781,7 +788,6 @@ mod tests {
                 config: None,
                 robot_root: Some(PathBuf::from("/var/phoxal")),
                 component_instance: None,
-                execution_device_id: None,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
             startup_requirement: StartupRequirement::Required,
@@ -843,6 +849,7 @@ mod tests {
                 substitutions: &[],
                 source_participants: &sources,
             }],
+            RunIdentity::default(),
         )?;
 
         assert_eq!(
@@ -923,6 +930,7 @@ mod tests {
                 substitutions: &[],
                 source_participants: &sources,
             }],
+            RunIdentity::default(),
         )?;
 
         assert_eq!(
@@ -1012,7 +1020,7 @@ mod tests {
             empty_checked_input(Path::new("/tmp/project"), &robot_b),
         ];
 
-        let plan = build_launch_plan(LaunchMode::Run, &inputs)?;
+        let plan = build_launch_plan(LaunchMode::Run, &inputs, RunIdentity::default())?;
         let ids = plan
             .robots
             .iter()
@@ -1042,28 +1050,17 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(devices.len(), 2);
         assert_eq!(
-            devices[0].launch.execution_device_id, devices[1].launch.execution_device_id,
-            "co-hosted robot samplers must expose one project device identity"
+            devices[0].launch.execution, devices[1].launch.execution,
+            "co-hosted robot samplers belong to one supervised run"
+        );
+        assert_ne!(
+            devices[0].launch.producer, devices[1].launch.producer,
+            "each participant is its own producer"
         );
         assert_eq!(devices[0].startup_requirement, StartupRequirement::Required);
         assert_eq!(
             devices[0].runtime_failure,
             RuntimeFailurePolicy::StopProject
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn execution_device_identity_is_project_scoped_stable_and_bounded() -> anyhow::Result<()> {
-        let first = tempfile::tempdir()?;
-        let second = tempfile::tempdir()?;
-        let first_identity = execution_device_id(first.path())?;
-
-        assert_eq!(first_identity, execution_device_id(first.path())?);
-        assert_ne!(first_identity, execution_device_id(second.path())?);
-        assert!(
-            first_identity.to_string().len()
-                <= phoxal::participant::launch::MAX_EXECUTION_DEVICE_ID_BYTES
         );
         Ok(())
     }
@@ -1074,38 +1071,6 @@ mod tests {
     /// continuity survives an activation. A genuinely different logical root is
     /// still a different device.
     #[cfg(unix)]
-    #[test]
-    fn execution_device_identity_is_stable_across_symlink_retargeting() -> anyhow::Result<()> {
-        let base = tempfile::tempdir()?;
-        let release_a = base.path().join("releases/a");
-        let release_b = base.path().join("releases/b");
-        std::fs::create_dir_all(&release_a)?;
-        std::fs::create_dir_all(&release_b)?;
-        let stable = base.path().join("phoxal");
-
-        std::os::unix::fs::symlink(&release_a, &stable)?;
-        let identity_a = execution_device_id(&stable)?;
-
-        // Retarget the stable symlink to a new release, exactly as an activation
-        // does. The logical path `<base>/phoxal` is unchanged, so the identity
-        // must not move.
-        std::fs::remove_file(&stable)?;
-        std::os::unix::fs::symlink(&release_b, &stable)?;
-        assert_eq!(
-            identity_a,
-            execution_device_id(&stable)?,
-            "retargeting the deployment symlink must preserve the device identity"
-        );
-
-        // The underlying release directories are genuinely different roots.
-        assert_ne!(
-            execution_device_id(&release_a)?,
-            execution_device_id(&release_b)?,
-            "distinct logical roots must be distinct devices"
-        );
-        Ok(())
-    }
-
     #[test]
     fn webots_launch_records_need_no_simulator_clock_exception() -> anyhow::Result<()> {
         let resolved = empty_resolved_robot("robot_v1")?;
@@ -1129,12 +1094,12 @@ mod tests {
         );
         simulator.participant_kind = graph_check::ParticipantKind::Simulator;
         assert_eq!(
-            participant_launch(&mode, &input, &simulator).clock,
+            participant_launch(&mode, &input, &simulator, RunIdentity::default()).clock,
             ClockMode::Simulation,
             "{participant_id} uses the mode-wide record; its clockless binary policy ignores it"
         );
         assert_eq!(
-            participant_launch(&mode, &input, &service).clock,
+            participant_launch(&mode, &input, &service, RunIdentity::default()).clock,
             ClockMode::Simulation,
             "services in simulation must advance from published world steps"
         );
@@ -1168,6 +1133,7 @@ mod tests {
                 substitutions: &[],
                 source_participants: &sources,
             }],
+            RunIdentity::default(),
         )
         .expect_err("parity should fail");
         let message = error.to_string();

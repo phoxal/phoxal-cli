@@ -13,7 +13,13 @@ use serde::{Deserialize, Serialize};
 
 use super::ParticipantKind;
 
-pub type IncarnationId = u64;
+/// The identity a spawned participant publishes under.
+///
+/// This is the framework's `ProducerId` (#952 section G), pre-minted by the
+/// supervisor: a restart is structurally a different producer, so supervisor
+/// restart fencing and bus-level producer fencing key on the same value rather
+/// than on two parallel numbering schemes.
+pub type IncarnationId = phoxal::bus::ProducerId;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RobotKey {
@@ -133,7 +139,7 @@ impl<'de> Deserialize<'de> for ProcessKey {
 pub struct ParticipantInstanceKey {
     pub robot: RobotKey,
     pub participant: String,
-    pub incarnation: IncarnationId,
+    pub producer: IncarnationId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

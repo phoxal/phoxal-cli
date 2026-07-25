@@ -61,6 +61,7 @@ pub(crate) use signals::{
     send_process_group_terminate, send_process_signal, send_terminate, stop_child,
 };
 mod lock;
+pub use lock::active_execution;
 pub(crate) use lock::{ProjectLock, ProjectLockIdentity, ProjectLockStatus, ProjectOperation};
 mod bus;
 pub(crate) use bus::{

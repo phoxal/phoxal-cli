@@ -58,7 +58,9 @@ fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRe
         execution,
         launch: ParticipantLaunch {
             participant_id: id.to_string(),
-            incarnation: 0,
+            execution: phoxal::bus::ExecutionId::mint(),
+            producer: phoxal::bus::ProducerId::mint(),
+            execution_origin: None,
             namespace: "dev".to_string(),
             robot_id: "robot".to_string(),
             bus: BusProfile {
@@ -68,7 +70,6 @@ fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRe
             config: None,
             robot_root: Some(PathBuf::from("/tmp/robot")),
             component_instance: None,
-            execution_device_id: None,
             shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
         },
         startup_requirement: StartupRequirement::Required,

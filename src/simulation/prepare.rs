@@ -5,10 +5,14 @@ use super::{
     sim_source_participants,
 };
 use anyhow::Result;
-use phoxal_cli_core::project::launch_plan::PlanContext;
+use phoxal_cli_core::project::launch_plan::{PlanContext, RunIdentity};
 use std::path::Path;
 
-pub(crate) fn prepare(project_start: &Path, options: SimulateOptions) -> Result<SimPlan> {
+pub(crate) fn prepare(
+    project_start: &Path,
+    options: SimulateOptions,
+    run: RunIdentity,
+) -> Result<SimPlan> {
     let resolved = resolve_project(project_start, options.clone())?;
     let descriptors = phoxal_cli_core::artifacts::descriptors_for(&resolved.resolved, true, true)?;
     crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, None)?;
@@ -17,6 +21,7 @@ pub(crate) fn prepare(project_start: &Path, options: SimulateOptions) -> Result<
         &resolved.world_path,
         &resolved.resolved,
         resolved.suite.as_ref(),
+        run,
     )?;
     let source_participants = sim_source_participants(
         &resolved.project_root,

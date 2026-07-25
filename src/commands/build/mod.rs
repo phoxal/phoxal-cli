@@ -20,6 +20,7 @@
 
 pub(crate) mod container;
 
+use phoxal_cli_core::project::launch_plan::RunIdentity;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -257,6 +258,7 @@ impl Build {
                 extracted.path(),
                 &phoxal_cli_core::project::layout::PlanOptions::default(),
                 LayoutInspection::Target(expected_target_for_triple(&target)?),
+                RunIdentity::default(),
             )?;
             let staged_root = publish_staged_root(project_root, &target, extracted.path())?;
             let output = self
@@ -427,6 +429,7 @@ impl Build {
             &staged.staged_root,
             &staged.plan_options(),
             LayoutInspection::Target(expected_target),
+            RunIdentity::default(),
         )
         .context("failed to validate the staged runtime layout for the target")?;
 

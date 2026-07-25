@@ -245,31 +245,14 @@ fn parses_bus_backed_status_commands() {
     assert!(Cli::try_parse_from(["phoxal", "status"]).is_err());
     assert!(Cli::try_parse_from(["phoxal", "status", "release", "mission"]).is_err());
     assert!(Cli::try_parse_from(["phoxal", "status", "resume", "mission"]).is_err());
-    let cli = Cli::try_parse_from([
-        "phoxal",
-        "status",
-        "engage-estop",
-        "--connect",
-        "tcp/robot:7447",
-    ])
-    .expect("status engage-estop should parse");
-    let RootCommand::Status(command) = cli.command else {
-        panic!("expected status command");
-    };
-    let status::StatusSubcommand::EngageEstop(arg) = command.command else {
-        panic!("expected engage-estop subcommand");
-    };
-    assert_eq!(arg.connect, "tcp/robot:7447");
-
-    let cli = Cli::try_parse_from(["phoxal", "status", "reset-estop"])
-        .expect("status reset-estop should parse");
-    let RootCommand::Status(command) = cli.command else {
-        panic!("expected status command");
-    };
-    assert!(matches!(
-        command.command,
-        status::StatusSubcommand::ResetEstop(_)
-    ));
+    // There is no software emergency-stop command: every emergency stop is a
+    // manifest-declared component under the ordinary rules (#952 section A).
+    for removed in ["engage-estop", "reset-estop"] {
+        assert!(
+            Cli::try_parse_from(["phoxal", "status", removed]).is_err(),
+            "`status {removed}` must no longer parse"
+        );
+    }
 
     for domain in ["safety", "motion", "localization"] {
         let cli = Cli::try_parse_from(["phoxal", "status", domain, "--connect", "tcp/robot:7447"])
@@ -281,7 +264,6 @@ fn parses_bus_backed_status_commands() {
             status::StatusSubcommand::Safety(arg)
             | status::StatusSubcommand::Motion(arg)
             | status::StatusSubcommand::Localization(arg) => arg.connect,
-            _ => panic!("expected domain-native status command for {domain}"),
         };
         assert_eq!(connect, "tcp/robot:7447");
     }

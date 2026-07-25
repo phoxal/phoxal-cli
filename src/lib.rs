@@ -59,5 +59,5 @@ pub use context::AppContext;
 // or tracing output can never be routed through an active session's
 // diagnostics again (see `session::diagnostics`'s own module docs).
 pub use session::diagnostics::SessionAwareWriter;
-pub use supervisor::maybe_run_guardian;
+pub use supervisor::{active_execution, maybe_run_guardian};
 pub use ui::Ui;

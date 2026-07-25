@@ -1,6 +1,7 @@
 //! Stable project-operation authority for execution and artifact mutation.
 
 use anyhow::{Context, Result, bail};
+use phoxal::bus::ExecutionId;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -12,6 +13,15 @@ pub struct ProjectLockIdentity {
     pub entry: PathBuf,
     pub operation: ProjectOperation,
     pub pid: u32,
+    /// The supervised run this lock holder started, for a `Run` operation.
+    ///
+    /// The bus key root is execution-scoped (#952 section B), so an ad hoc
+    /// inspector has to join the *running* execution rather than mint its own -
+    /// otherwise it subscribes a root nobody publishes on. The lock is written
+    /// when the run starts and released when it ends, which is exactly the
+    /// execution's lifetime, so it is the natural place to publish the id.
+    #[serde(default)]
+    pub execution: Option<ExecutionId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,8 +60,29 @@ impl ProjectLockIdentity {
             entry,
             operation,
             pid: std::process::id(),
+            execution: None,
         }
     }
+
+    /// Record the supervised run this holder is about to start.
+    #[must_use]
+    pub fn in_execution(mut self, execution: ExecutionId) -> Self {
+        self.execution = Some(execution);
+        self
+    }
+}
+
+/// The execution an ad hoc client should join to observe the running project.
+///
+/// `None` means nothing is running, which is a better error for the caller than
+/// silently subscribing an empty root.
+pub fn active_execution(project: &Path) -> Result<Option<ExecutionId>> {
+    Ok(match ProjectLock::inspect(project)? {
+        ProjectLockStatus::Held(identity) if identity.operation == ProjectOperation::Run => {
+            identity.execution
+        }
+        ProjectLockStatus::Held(_) | ProjectLockStatus::Free => None,
+    })
 }
 
 fn best_effort_absolute(path: &Path) -> PathBuf {
@@ -203,6 +234,7 @@ mod tests {
                 ProjectOperation::Run
             },
             pid,
+            execution: None,
         }
     }
 
