@@ -10,6 +10,8 @@ use crate::AppContext;
 
 pub(crate) const REMOTE_TOOLCHAIN_PATH: &str = r#"export PATH="$HOME/.cargo/bin:$PATH""#;
 pub(crate) const REMOTE_PHOXAL: &str = "/usr/local/bin/phoxal";
+const ARCHIVE_TAR_OPTIONS: [&str; 2] = ["--no-xattrs", "-czf"];
+const ARCHIVE_TAR_ENV: (&str, &str) = ("COPYFILE_DISABLE", "1");
 
 #[derive(Debug, Args)]
 pub struct Deploy {
@@ -142,16 +144,18 @@ fn archive_directory(root: &Path, prefix: &str) -> Result<tempfile::NamedTempFil
         .prefix(prefix)
         .suffix(".tar.gz")
         .tempfile()?;
-    run_local(
-        "tar",
-        &[
-            "-czf",
-            archive.path().to_string_lossy().as_ref(),
-            "-C",
-            root.to_string_lossy().as_ref(),
-            ".",
-        ],
-    )?;
+    let status = Command::new("tar")
+        .env(ARCHIVE_TAR_ENV.0, ARCHIVE_TAR_ENV.1)
+        .args(ARCHIVE_TAR_OPTIONS)
+        .arg(archive.path())
+        .arg("-C")
+        .arg(root)
+        .arg(".")
+        .status()?;
+    anyhow::ensure!(
+        status.success(),
+        "tar archive creation failed with {status}"
+    );
     Ok(archive)
 }
 
@@ -350,5 +354,11 @@ mod tests {
         );
         assert_eq!(std::fs::read(active.join("phoxal-service-asset"))?, b"ELF");
         Ok(())
+    }
+
+    #[test]
+    fn transfer_archives_disable_host_extended_metadata() {
+        assert_eq!(ARCHIVE_TAR_OPTIONS, ["--no-xattrs", "-czf"]);
+        assert_eq!(ARCHIVE_TAR_ENV, ("COPYFILE_DISABLE", "1"));
     }
 }
