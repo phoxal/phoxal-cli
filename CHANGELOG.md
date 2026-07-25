@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.24.5](https://github.com/phoxal/phoxal-cli/releases/tag/v0.24.5) - 2026-07-25
+
+
+### Fixed
+
+- *(supervisor)* Scrub guardian systemd environment ([#199](https://github.com/phoxal/phoxal-cli/pull/199))
+
+
 ## [0.24.4](https://github.com/phoxal/phoxal-cli/releases/tag/v0.24.4) - 2026-07-25
 
 
