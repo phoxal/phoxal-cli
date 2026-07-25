@@ -56,8 +56,8 @@ tracing-subscriber = "0.3.23"
 unicode-width = "0.2"
 urdf-rs = "0.9.0"
 webots-proto = "0.2.0"
-phoxal = "=0.39.0"
-phoxal-api = "=0.39.0"
+phoxal = "=0.40.0"
+phoxal-api = "=0.40.0"
 phoxal-cli-client = { path = "crates/client" }
 phoxal-cli-core = { path = "crates/core" }
 phoxal-cli-ui = { path = "crates/ui" }
@@ -135,4 +135,3 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
-

@@ -371,6 +371,9 @@ fn stage_candidate(
     phoxal::model::robot::Robot::V0(compiled.clone())
         .write_to_dir(candidate)
         .context("failed to write compiled runtime robot.yaml")?;
+    crate::runtime_header::RuntimeHeader::for_phoxal_version(&resolved.train)
+        .write_to(candidate)
+        .context("failed to write compiled runtime compatibility header")?;
 
     let structure = &resolved.robot.robot.structure;
     ensure_safe_relative_path(structure, "robot structure")?;

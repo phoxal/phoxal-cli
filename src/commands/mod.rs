@@ -10,8 +10,10 @@ use crate::AppContext;
 pub mod behavior;
 pub mod build;
 pub mod check;
+pub mod deploy;
 pub mod doctor;
 pub mod init;
+pub mod install;
 pub mod logs;
 pub mod resident;
 pub mod run;
@@ -210,9 +212,15 @@ pub enum RootCommand {
         about = "Stage a runtime layout for a target and archive it as build.phoxal.",
         long_about = "Stage a runtime layout for a target and archive it as a deterministic build.phoxal.\n\n\
                       `build` refreshes staging exactly as `run` would - but for the selected --target rather than the host - validates the staged layout through the shared loader against the declared target architecture (no execution), and archives the staged layout deterministically: identical contents always produce identical archive bytes. The default output is a sibling of the staged directory, <project>/.phoxal/build/<triple>.build.phoxal, and the path plus its sha256 are printed at the end.\n\n\
-                      `--builder` selects where compilation happens, never a different output: `local` (the default) compiles on this host with `cargo build --target` (a missing cross toolchain is an actionable `rustup target add` error - the CLI never installs toolchains); `container` compiles natively inside the pinned official rust image for the target platform (without --target it targets this host's architecture on linux-gnu; --builder-image overrides the image) and then reuses the identical host-side staging + archive; `ssh://user@host` is the remote builder, which lands in phase 11 (#930). Every backend produces the identical deterministic build.phoxal. Extract a bundle with `phoxal run <dir>` after `tar -xzf build.phoxal`, or plain `tar` - the archive is ordinary tar.gz."
+                      `--builder` selects where compilation happens, never a different output: `local` (the default) compiles on this host with `cargo build --target`; `container` compiles natively inside the pinned official rust image for the target platform; `ssh://user@host` snapshots the source, compiles in a remote temporary directory, and pulls back the same archive. Every backend produces the identical deterministic build.phoxal."
     )]
     Build(build::Build),
+    #[command(about = "Build and install a runtime on a prepared robot over SSH.")]
+    Deploy(deploy::Deploy),
+    #[command(about = "Install one compiled runtime archive atomically.")]
+    Install(install::Install),
+    #[command(about = "Activate an older installed runtime release.")]
+    Rollback(install::Rollback),
     // Preserved prototype for the parked behavior-orchestration design. Keep it
     // out of the supported command listing until that plan is rewritten.
     #[command(about = "Experimental behavior-orchestration prototype.", hide = true)]
@@ -271,6 +279,9 @@ impl RootCommand {
             Self::Init(command) => command.run(app).await,
             Self::Check(command) => command.run(app).await,
             Self::Build(command) => command.run(app).await,
+            Self::Deploy(command) => command.run(app).await,
+            Self::Install(command) => command.run(app).await,
+            Self::Rollback(command) => command.run(app).await,
             Self::Behavior(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
             Self::Simulation(command) => command.run(app).await,

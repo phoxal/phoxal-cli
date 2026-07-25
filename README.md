@@ -20,6 +20,9 @@ phoxal service suite          # print official services from the configured arti
 phoxal run                    # stage what is stale and supervise the graph (--watch to hot-swap edits)
 phoxal start                  # run the graph headless (the robot-instance verb; no TUI)
 phoxal build                  # stage a runtime layout and archive it as build.phoxal
+phoxal deploy robot@host      # remote source build, then install atomically
+sudo phoxal install build.phoxal
+sudo phoxal rollback
 phoxal simulation run default # resolve and report the simulation launch plan
 phoxal logs -f                # stream participant bus logs from a reachable robot
 phoxal status safety          # inspect the latest safety state over the robot bus
@@ -33,19 +36,23 @@ phoxal update                 # verify, activate, and prune project-local artifa
 | `validate` | Lower-level `robot.yaml` structure and Cargo workspace runtime-discovery checks that back `check`. |
 | `run [ROOT]` | Universal launch: build what is stale and run what is staged. On a source project it refreshes the host-triple staging under `.phoxal/build/<host-triple>/` (cargo-build stale crates, link the locked train's vendored officials, flatten `robot.yaml`, stage assets), then supervises the graph in the terminal UI; on an already-staged root or an extracted `build.phoxal` the build step is a no-op and the identical execution path runs it. `--watch` recompiles an immutable whole-plan revision and reconciles only changed participants. `run`/`start`/`build` never touch the network - a missing vendored artifact fails with "run `phoxal update`". |
 | `start [ROOT]` | The headless robot-instance verb `phoxal.service` uses. Same pipeline as `run` without the TUI: interactively it returns after required readiness; under systemd (`NOTIFY_SOCKET` present) it stays the foreground `sd_notify` resident. |
-| `build [PROJECT]` | Stage a runtime layout for a target and archive it as a deterministic `build.phoxal` (identical contents produce identical bytes). `--target <TRIPLE>` selects the target (defaults to the builder's native triple). `--builder local` (default) compiles on this host; `--builder container` compiles inside the pinned official Docker `rust` image, selecting the container platform from the target arch so compilation is native (`--container-engine docker\|podman`, `--builder-image` to override the image - use `rust:1.88-bullseye` for older-glibc devices like the jetson L4T r36); `--builder ssh://user@host` is reserved for a later phase. Default output is `<project>/.phoxal/build/<triple>.build.phoxal`, a sibling of the staged directory. |
+| `build [PROJECT]` | Stage a runtime layout for a target and archive it as a deterministic `build.phoxal` (identical contents produce identical bytes). `--target <TRIPLE>` selects the target. `--builder local` compiles on this host; `--builder container` compiles in the pinned Rust image; `--builder ssh://user@host` snapshots source, compiles in a remote temporary directory, and pulls back the same archive. |
+| `install <build.phoxal>` | Safely extract, validate, fsync, and atomically activate an immutable release under `/var/lib/phoxal/releases`; restart the one service and restore the prior symlink on readiness failure. |
+| `rollback [--to RELEASE]` | Activate the immediately older sortable release, or an explicit release directory, with the same readiness and restoration gate. |
+| `deploy <user@host> [PROJECT]` | Snapshot source, build remotely, and invoke the installer. `--build <archive>` skips the source/toolchain leg; the robot needs neither Cargo nor Git. |
 | `simulation run <world>` | Resolve the robot and report or run the host-native simulation plan. `--watch` creates a new plan revision for source or project-manifest edits and re-checks driver metadata/substitutions without launching drivers. |
 | `simulation join` | Reserved entry point for joining a running multi-robot simulation; currently reports that the workflow is not available yet. |
 | `logs [participant]` | Stream participant bus log events from a reachable robot. `-f`/`--follow` keeps streaming; omit `participant` for every participant. |
 | `status <safety|motion|localization>` | Inspect the latest domain state over the robot bus. `engage-estop` and `reset-estop` publish the robot-wide software emergency-stop request. |
-| `service suite` | Print official services from the configured artifact suite. |
+| `service install\|uninstall\|status\|suite` | Manage exactly one `phoxal.service`, inspect it, or print official services from the configured artifact suite. Device-specific hardware provisioning remains explicit. |
 | `update` | Fetch and verify the immutable suite for the locked train, atomically retarget cached artifacts, and prune inactive cached versions after successful activation. Supports `--dry-run`; use `cargo update -p phoxal` to change trains. |
 | `doctor` | Check host prerequisites (Webots, Rust toolchain) without changing anything. |
 | `version` | Print the CLI version, wire codec, and participant metadata section names. |
 | `self upgrade` | Update the CLI binary itself. |
 
-Interactive sessions bind their infrastructure router at the exact project-local
-`<project>/.phoxal/zenoh.sock` endpoint. Router bootstrap readiness travels over
+Interactive source sessions bind their infrastructure router at
+`<project>/.phoxal/zenoh.sock`; the installed runtime uses
+`/run/phoxal/zenoh.sock`. Router bootstrap readiness travels over
 an inherited one-shot file descriptor; stdout and stderr are logs only. Every
 launched graph process crosses the same environment-scrubbing `ManagedChild`
 boundary and is registered with an out-of-process guardian, so killing the CLI
@@ -241,7 +248,14 @@ Webots, host tools, and bus connectivity.
 <project>/.phoxal/git/              Git-pinned checkouts.
 <project>/.phoxal/webots/           Webots staging.
 <project>/.phoxal/build/<triple>/   Staged runtime layout (compiled robot.yaml + flat bin/ + assets) per target, shared by `run` and live simulation.
+
+/var/phoxal -> /var/lib/phoxal/releases/<utc>-<digest>  Active installed runtime.
+/var/lib/phoxal/state/              Persistent installed lock and plan content.
+/run/phoxal/                        Installed supervisor and router sockets.
 ```
+
+See [Device preparation and deployment](docs/DEPLOYMENT.md) for the complete
+service, permission, install, rollback, deploy, and power-loss contract.
 
 To reset all generated project state while no Phoxal command is active, delete
 `<project>/.phoxal/`. Deleting it during `run`, simulation, or update is

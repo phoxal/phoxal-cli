@@ -21,7 +21,7 @@ pub fn project_root() -> Result<PathBuf> {
 }
 
 pub fn project_state_dir() -> Result<PathBuf> {
-    project_root().map(|root| root.join(".phoxal"))
+    project_root().map(|root| crate::runtime_paths::RuntimePaths::for_root(&root).state_root)
 }
 
 pub fn artifacts_dir() -> Result<PathBuf> {
@@ -31,7 +31,8 @@ pub fn artifacts_dir() -> Result<PathBuf> {
 /// Base directory holding the staged runtime layouts, one subdirectory per
 /// target triple (`.phoxal/build/<triple>/`). Written by the stager for `run`
 /// and live simulation; never runtime state (project.lock, supervisor.sock,
-/// and plans stay directly under `.phoxal/`).
+/// and plans stay in the selected [`crate::runtime_paths::RuntimePaths`] state
+/// root).
 pub fn build_dir() -> Result<PathBuf> {
     project_state_dir().map(|root| root.join("build"))
 }

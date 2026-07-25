@@ -13,7 +13,8 @@
 //! - `local` (default) compiles on this host with `cargo build --target`;
 //! - `container` compiles inside a per-target toolchain image, then reuses the
 //!   identical host-side staging + archive;
-//! - `ssh://user@host` is the remote builder, which lands in phase 11 (#930).
+//! - `ssh://user@host` snapshots source, compiles in a remote temporary
+//!   directory, and pulls back the identical archive.
 //!
 //! Every backend produces the identical deterministic `build.phoxal`.
 
@@ -52,7 +53,7 @@ pub struct Build {
         long,
         default_value = "local",
         value_name = "local|container|ssh://user@host",
-        help = "Where compilation happens: `local` (host), `container` (toolchain image), or `ssh://user@host` (remote, phase 11)."
+        help = "Where compilation happens: `local` (host), `container` (toolchain image), or `ssh://user@host` (remote source snapshot)."
     )]
     pub builder: String,
     #[arg(
@@ -118,16 +119,23 @@ fn resolve_target(selector: &str) -> Result<String> {
 
 /// The resolved build backend and its target triple: the pure decision every
 /// invocation makes before touching the project, so the `--builder`/`--target`
-/// interplay (container requires a target, ssh is phase 11, local defaults to
-/// the host) is unit-testable without an `AppContext`.
+/// interplay is unit-testable without an `AppContext`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Backend {
-    Local { target: String },
-    Container { target: String },
+    Local {
+        target: String,
+    },
+    Container {
+        target: String,
+    },
+    Ssh {
+        host: String,
+        target: Option<String>,
+    },
 }
 
 /// The host-architecture linux-gnu triple - the container builder's "native
-/// triple" default when no `--target` is given (2026-07-24 decision). The
+/// triple" default when no `--target` is given. The
 /// container compiles natively for the host's CPU architecture under Linux; the
 /// artifacts target Linux devices, never the macOS/Windows host itself.
 fn host_linux_gnu_triple() -> String {
@@ -138,7 +146,7 @@ fn host_linux_gnu_triple() -> String {
 /// Decide the backend from a parsed `--builder` and an already-resolved explicit
 /// `--target`. `local` defaults its target to the host triple; `container`
 /// defaults to the host-architecture linux-gnu triple (native compilation inside
-/// the image); `ssh://` is rejected as a phase-11 feature.
+/// the image); `ssh://` discovers the remote host triple when one is not given.
 fn select_backend(builder: BuilderKind, explicit_target: Option<String>) -> Result<Backend> {
     match builder {
         BuilderKind::Local => Ok(Backend::Local {
@@ -149,11 +157,10 @@ fn select_backend(builder: BuilderKind, explicit_target: Option<String>) -> Resu
             // the container - the builder's native triple.
             target: explicit_target.unwrap_or_else(host_linux_gnu_triple),
         }),
-        BuilderKind::Ssh(host) => bail!(
-            "remote builders land in phase 11 (#930); `--builder ssh://{host}` is not available \
-             yet. Use `--builder container --target <TRIPLE>` to cross-build locally, or run \
-             `phoxal build` on {host} directly."
-        ),
+        BuilderKind::Ssh(host) => Ok(Backend::Ssh {
+            host,
+            target: explicit_target,
+        }),
     }
 }
 
@@ -193,7 +200,85 @@ impl Build {
                 let runner = ProcessEngineRunner { ui: &app.ui };
                 self.build_container(app, &project_root, &target, &runner)
             }
+            Backend::Ssh { host, target } => {
+                self.build_ssh(app, &project_root, &host, target.as_deref())
+            }
         }
+    }
+
+    fn build_ssh(
+        &self,
+        app: &AppContext,
+        project_root: &Path,
+        host: &str,
+        explicit_target: Option<&str>,
+    ) -> Result<()> {
+        crate::commands::deploy::validate_ssh_target(host)?;
+        crate::commands::deploy::require_remote_phoxal(host)?;
+        let target = explicit_target
+            .map(str::to_string)
+            .map(Ok)
+            .unwrap_or_else(|| crate::commands::deploy::remote_toolchain_target(host))?;
+        let remote_dir = crate::commands::deploy::create_remote_temp(host)?;
+        let result = (|| -> Result<()> {
+            crate::commands::deploy::upload_source_payload(host, project_root, &remote_dir)?;
+            let source_dir = format!("{remote_dir}/source");
+            let remote_archive = format!("{remote_dir}/build.phoxal");
+            crate::commands::deploy::run_remote(
+                host,
+                &format!(
+                    "{}; {}; {} build {} --builder local --target {} --output {}",
+                    crate::commands::deploy::REMOTE_TOOLCHAIN_PATH,
+                    crate::commands::deploy::remote_unpack_source_command(&remote_dir),
+                    crate::commands::deploy::REMOTE_PHOXAL,
+                    crate::commands::deploy::shell_quote(&source_dir),
+                    crate::commands::deploy::shell_quote(&target),
+                    crate::commands::deploy::shell_quote(&remote_archive),
+                ),
+            )?;
+            let pulled = tempfile::Builder::new()
+                .prefix("phoxal-ssh-build-")
+                .suffix(".build.phoxal")
+                .tempfile()?;
+            crate::commands::deploy::run_local(
+                "scp",
+                &[
+                    "-q",
+                    &format!("{host}:{remote_archive}"),
+                    pulled.path().to_string_lossy().as_ref(),
+                ],
+            )?;
+            let extracted = tempfile::Builder::new()
+                .prefix("phoxal-ssh-layout-")
+                .tempdir()?;
+            crate::archive::extract_build_archive(pulled.path(), extracted.path())?;
+            crate::runtime_header::RuntimeHeader::read_and_validate(extracted.path())?;
+            crate::loader::validate_layout_plan(
+                extracted.path(),
+                &phoxal_cli_core::project::layout::PlanOptions::default(),
+                LayoutInspection::Target(expected_target_for_triple(&target)?),
+            )?;
+            let staged_root = publish_staged_root(project_root, &target, extracted.path())?;
+            let output = self
+                .output
+                .clone()
+                .unwrap_or_else(|| default_output(project_root, &target));
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(pulled.path(), &output)?;
+            let digest = sha256_file(&output)?;
+            app.ui.info(format!(
+                "staged runtime layout at {}",
+                staged_root.display()
+            ));
+            println!("{}", output.display());
+            println!("sha256:{digest}");
+            Ok(())
+        })();
+        let cleanup = crate::commands::deploy::cleanup_remote_temp(host, &remote_dir);
+        result?;
+        cleanup
     }
 
     /// Build on this host with `cargo build --target`, then stage, validate, and
@@ -338,6 +423,7 @@ impl Build {
         // LaunchMode::Run already enforces this).
         let expected_target = expected_target_for_triple(target)
             .context("cannot validate the staged runtime layout for the requested target")?;
+        crate::runtime_header::RuntimeHeader::read_and_validate(&staged.staged_root)?;
         crate::loader::validate_layout_plan(
             &staged.staged_root,
             &staged.plan_options(),
@@ -443,6 +529,23 @@ fn default_output(project_root: &Path, target: &str) -> PathBuf {
     ))
 }
 
+fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 /// How a `git ls-files` entry materializes on disk, deciding how the snapshot
 /// treats it (#936, finding B).
 enum SnapshotEntry {
@@ -494,7 +597,7 @@ fn classify_snapshot_entry(source: &Path) -> Result<SnapshotEntry> {
 /// is rejected with a precise error: v0 does not include submodule working trees
 /// in the snapshot, so a build that would silently drop submodule sources fails
 /// loudly instead.
-fn snapshot_source(project_root: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn snapshot_source(project_root: &Path, dest: &Path) -> Result<()> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(project_root)
@@ -509,7 +612,7 @@ fn snapshot_source(project_root: &Path, dest: &Path) -> Result<()> {
         .context("failed to run `git ls-files` for the source snapshot; is git installed?")?;
     if !output.status.success() {
         bail!(
-            "`--builder container` needs a git working tree to snapshot the source; \
+            "source snapshotting needs a git working tree; \
              `git ls-files` failed in {} (initialize a repository or commit the project first)",
             project_root.display()
         );
@@ -528,10 +631,9 @@ fn snapshot_source(project_root: &Path, dest: &Path) -> Result<()> {
         match classify_snapshot_entry(&source)? {
             SnapshotEntry::Missing => continue,
             SnapshotEntry::Submodule => bail!(
-                "`--builder container` does not support git submodules yet (v0): `{rel}` is a \
-                 submodule, and its working tree would be silently dropped from the source \
-                 snapshot. Vendor the submodule's sources into the workspace, or build without \
-                 `--builder container` until submodule snapshots land.",
+                "source snapshotting does not support git submodules yet (v0): `{rel}` is a \
+                 submodule, and its working tree would be silently dropped. Vendor the \
+                 submodule's sources into the workspace before building or deploying.",
             ),
             SnapshotEntry::Symlink => {
                 if let Some(parent) = target.parent() {
@@ -590,7 +692,9 @@ fn ensure_snapshot_link_contained(project_root: &Path, rel: &Path, link: &Path) 
     };
     if escapes {
         bail!(
-            "`--builder container` cannot snapshot `{}`: it is a symlink to `{}`, which escapes              the project root {}. The frozen snapshot can only preserve project-internal links;              move the linked content into the project, or replace the link with the real file.",
+            "source snapshotting cannot preserve `{}`: it is a symlink to `{}`, which escapes \
+             the project root {}. Move the linked content into the project, or replace the link \
+             with the real file.",
             rel.display(),
             link.display(),
             project_root.display()
@@ -709,16 +813,18 @@ mod tests {
     }
 
     #[test]
-    fn ssh_backend_is_rejected_as_phase_11() {
-        let error = select_backend(
+    fn ssh_backend_retains_the_host_and_optional_target() {
+        let backend = select_backend(
             BuilderKind::Ssh("dev@jetson-nano-orin".to_string()),
             Some("aarch64-unknown-linux-gnu".to_string()),
         )
-        .expect_err("ssh builder must be rejected");
-        assert!(error.to_string().contains("phase 11 (#930)"), "{error}");
-        assert!(
-            error.to_string().contains("dev@jetson-nano-orin"),
-            "{error}"
+        .unwrap();
+        assert_eq!(
+            backend,
+            Backend::Ssh {
+                host: "dev@jetson-nano-orin".to_string(),
+                target: Some("aarch64-unknown-linux-gnu".to_string()),
+            }
         );
     }
 

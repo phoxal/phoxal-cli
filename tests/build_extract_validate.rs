@@ -100,6 +100,7 @@ fn synthesize_official() -> Vec<u8> {
 fn stage_layout(root: &Path, fixture: &Path) -> Result<()> {
     fs::create_dir_all(root)?;
     fs::write(root.join("robot.yaml"), ROBOT_YAML)?;
+    phoxal_cli::runtime_header::RuntimeHeader::current().write_to(root)?;
     let bin = root.join("bin");
     fs::create_dir_all(&bin)?;
     let layout = RuntimeLayout::open(root)?;
@@ -162,7 +163,9 @@ fn source_build_extract_and_loader_validate_produce_the_same_plan() -> Result<()
     let extracted_root = work.path().join("elsewhere/extracted");
     extract_build_archive(&bundle, &extracted_root)?;
     assert!(extracted_root.join("robot.yaml").is_file());
+    assert!(extracted_root.join("phoxal.runtime.json").is_file());
     assert!(extracted_root.join("bin/mission").is_file());
+    phoxal_cli::runtime_header::RuntimeHeader::read_and_validate(&extracted_root)?;
 
     // The extracted root passes the offline loader validation with no Cargo,
     // suite, or network - and never touches `.phoxal/artifacts` (there is none).

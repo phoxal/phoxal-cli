@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -15,9 +16,24 @@ pub struct Service {
 
 #[derive(Debug, Subcommand)]
 pub enum ServiceSubcommand {
+    #[command(about = "Install the one systemd phoxal.service and generic runtime paths.")]
+    Install(ServiceInstall),
+    #[command(about = "Disable and remove phoxal.service without deleting releases.")]
+    Uninstall(ServiceUninstall),
+    #[command(about = "Show the live systemd state for phoxal.service.")]
+    Status(ServiceStatus),
     #[command(about = "Print official services from the configured artifact suite.")]
     Suite(Suite),
 }
+
+#[derive(Debug, Args)]
+pub struct ServiceInstall {}
+
+#[derive(Debug, Args)]
+pub struct ServiceUninstall {}
+
+#[derive(Debug, Args)]
+pub struct ServiceStatus {}
 
 #[derive(Debug, Args)]
 pub struct Suite {}
@@ -37,9 +53,243 @@ pub struct ServiceSuiteEntry {
 impl Service {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match &self.command {
+            ServiceSubcommand::Install(command) => command.run(app).await,
+            ServiceSubcommand::Uninstall(command) => command.run(app).await,
+            ServiceSubcommand::Status(command) => command.run(app).await,
             ServiceSubcommand::Suite(command) => command.run(app).await,
         }
     }
+}
+
+const UNIT_PATH: &str = "/etc/systemd/system/phoxal.service";
+const UNIT_MARKER: &str = "# Managed by phoxal";
+
+fn unit_contents() -> &'static str {
+    r#"# Managed by phoxal
+[Unit]
+Description=Phoxal robot runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=phoxal
+Group=phoxal-engineering
+SupplementaryGroups=phoxal
+WorkingDirectory=/var/phoxal
+ExecStart=/usr/local/bin/phoxal start /var/phoxal
+Restart=on-failure
+RestartSec=2s
+WatchdogSec=30s
+TimeoutStartSec=300s
+TimeoutStopSec=300s
+KillMode=control-group
+UMask=0007
+RuntimeDirectory=phoxal
+RuntimeDirectoryMode=2775
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/phoxal/state /run/phoxal
+
+[Install]
+WantedBy=multi-user.target
+"#
+}
+
+impl ServiceInstall {
+    async fn run(&self, app: &AppContext) -> Result<()> {
+        require_root()?;
+        require_systemd()?;
+        ensure_group("phoxal", true)?;
+        ensure_group("phoxal-engineering", false)?;
+        ensure_service_user()?;
+        ensure_runtime_paths()?;
+        write_managed_unit(Path::new(UNIT_PATH))?;
+        run_status("systemctl", &["daemon-reload"])?;
+        run_status("systemctl", &["enable", "phoxal.service"])?;
+        app.ui
+            .info("installed the single phoxal.service; install a build.phoxal before starting it");
+        Ok(())
+    }
+}
+
+impl ServiceUninstall {
+    async fn run(&self, app: &AppContext) -> Result<()> {
+        require_root()?;
+        require_systemd()?;
+        let path = Path::new(UNIT_PATH);
+        if path.exists() {
+            let contents = std::fs::read_to_string(path)?;
+            anyhow::ensure!(
+                contents.starts_with(UNIT_MARKER),
+                "refusing to remove foreign unit {}",
+                path.display()
+            );
+            let _ = run_status("systemctl", &["disable", "--now", "phoxal.service"]);
+            std::fs::remove_file(path)?;
+            sync_parent(path)?;
+            run_status("systemctl", &["daemon-reload"])?;
+        }
+        app.ui.info(
+            "removed phoxal.service; releases, state, users, and hardware-group membership were preserved",
+        );
+        Ok(())
+    }
+}
+
+impl ServiceStatus {
+    async fn run(&self, _app: &AppContext) -> Result<()> {
+        require_systemd()?;
+        run_status(
+            "systemctl",
+            &["status", "--no-pager", "--full", "phoxal.service"],
+        )
+    }
+}
+
+fn require_root() -> Result<()> {
+    anyhow::ensure!(
+        unsafe { libc::geteuid() } == 0,
+        "`phoxal service install` and `uninstall` require root"
+    );
+    Ok(())
+}
+
+fn require_systemd() -> Result<()> {
+    anyhow::ensure!(
+        Path::new("/run/systemd/system").is_dir(),
+        "systemd is not the active service manager on this host"
+    );
+    Ok(())
+}
+
+fn ensure_group(name: &str, system: bool) -> Result<()> {
+    if Command::new("getent")
+        .args(["group", name])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        return Ok(());
+    }
+    let mut args = Vec::new();
+    if system {
+        args.push("--system");
+    }
+    args.push(name);
+    run_status("groupadd", &args)
+}
+
+fn ensure_service_user() -> Result<()> {
+    if Command::new("id")
+        .args(["-u", "phoxal"])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        return run_status(
+            "usermod",
+            &[
+                "--gid",
+                "phoxal",
+                "--append",
+                "--groups",
+                "phoxal-engineering",
+                "phoxal",
+            ],
+        );
+    }
+    run_status(
+        "useradd",
+        &[
+            "--system",
+            "--gid",
+            "phoxal",
+            "--groups",
+            "phoxal-engineering",
+            "--home-dir",
+            crate::runtime_paths::INSTALL_ROOT,
+            "--shell",
+            "/usr/sbin/nologin",
+            "phoxal",
+        ],
+    )
+}
+
+fn ensure_runtime_paths() -> Result<()> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::PermissionsExt;
+    for path in [
+        crate::runtime_paths::RELEASES_ROOT,
+        crate::runtime_paths::INSTALLED_STATE_ROOT,
+        crate::runtime_paths::INSTALLED_VOLATILE_ROOT,
+    ] {
+        std::fs::create_dir_all(path)?;
+    }
+    std::fs::set_permissions(
+        crate::runtime_paths::RELEASES_ROOT,
+        std::fs::Permissions::from_mode(0o755),
+    )?;
+    run_status("chown", &["root:root", crate::runtime_paths::RELEASES_ROOT])?;
+    for path in [
+        crate::runtime_paths::INSTALLED_STATE_ROOT,
+        crate::runtime_paths::INSTALLED_VOLATILE_ROOT,
+    ] {
+        run_status("chown", &["phoxal:phoxal-engineering", path])?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o2775))?;
+    }
+    let lock = Path::new(crate::runtime_paths::INSTALLED_STATE_ROOT).join("project.lock");
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock)?
+        .sync_all()?;
+    run_status(
+        "chown",
+        &["phoxal:phoxal-engineering", lock.to_string_lossy().as_ref()],
+    )?;
+    std::fs::set_permissions(lock, std::fs::Permissions::from_mode(0o660))?;
+    Ok(())
+}
+
+fn write_managed_unit(path: &Path) -> Result<()> {
+    if path.exists() {
+        let current = std::fs::read_to_string(path)?;
+        anyhow::ensure!(
+            current.starts_with(UNIT_MARKER),
+            "refusing to overwrite foreign unit {}",
+            path.display()
+        );
+        if current == unit_contents() {
+            return Ok(());
+        }
+    }
+    let candidate = PathBuf::from(format!(
+        "{}.candidate-{}",
+        path.display(),
+        std::process::id()
+    ));
+    std::fs::write(&candidate, unit_contents())?;
+    std::fs::File::open(&candidate)?.sync_all()?;
+    std::fs::rename(&candidate, path)?;
+    sync_parent(path)
+}
+
+fn sync_parent(path: &Path) -> Result<()> {
+    std::fs::File::open(path.parent().context("path has no parent")?)?.sync_all()?;
+    Ok(())
+}
+
+fn run_status(program: &str, args: &[&str]) -> Result<()> {
+    let status = Command::new(program).args(args).status()?;
+    anyhow::ensure!(
+        status.success(),
+        "{} {} failed with {status}",
+        program,
+        args.join(" ")
+    );
+    Ok(())
 }
 
 impl Suite {
@@ -57,6 +307,24 @@ impl Suite {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn managed_service_renders_one_resident_runtime_authority() {
+        let unit = unit_contents();
+        assert_eq!(unit.matches("ExecStart=").count(), 1);
+        assert!(unit.contains("ExecStart=/usr/local/bin/phoxal start /var/phoxal"));
+        assert!(unit.contains("Type=notify"));
+        assert!(unit.contains("NotifyAccess=main"));
+        assert!(unit.contains("WatchdogSec=30s"));
+        assert!(unit.contains("User=phoxal\nGroup=phoxal-engineering"));
+        assert!(!unit.contains("StateDirectory="));
+        assert!(!unit.contains("participant"));
     }
 }
 

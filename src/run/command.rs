@@ -254,6 +254,7 @@ async fn resident_supervision_inner(
 ) -> Result<()> {
     let identity = ProjectLockIdentity::resolve(&project_root, ProjectOperation::Run);
     let _lock = ProjectLock::acquire(identity)?;
+    let execution_root = crate::runtime_paths::pin_installed_release(&project_root)?;
     let board = BoardBackend::new();
     board.configure(project_root.display().to_string(), "resolving", "run");
     board.begin_phase("prepare");
@@ -274,7 +275,7 @@ async fn resident_supervision_inner(
         )?;
     }
 
-    let prepare_root = project_root.clone();
+    let prepare_root = execution_root;
     let ui = app.ui;
     let prepare_board = board.clone();
     let prepare_options = options.clone();
@@ -510,8 +511,8 @@ pub(crate) async fn wait_for_required_readiness(
                 // empty process list; the resident logged the precise error.
                 if failures.is_empty() {
                     bail!(
-                        "resident startup failed before any participant launched; see \
-                         .phoxal/supervisor.log in the project root for the exact error"
+                        "resident startup failed before any participant launched; see the \
+                         selected runtime state directory's supervisor.log for the exact error"
                     )
                 }
                 bail!("resident startup failed: {}", failures.join(", "))

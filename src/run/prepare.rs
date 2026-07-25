@@ -206,6 +206,7 @@ pub(crate) fn prepare_run_on_board(
     // The one execution path: construct and validate the launch plan from the
     // staged layout alone. Byte-identical, for the same robot, to a plan built
     // from an extracted bundle of this layout.
+    crate::runtime_header::RuntimeHeader::read_and_validate(&staged.staged_root)?;
     let plan = crate::loader::validate_layout_plan(
         &staged.staged_root,
         &plan_options,
@@ -293,14 +294,18 @@ pub(crate) fn prepare_run_on_board(
 /// extracted `build.phoxal` or a `.phoxal/build/<triple>/` directory. There is
 /// nothing to build, resolve, or fetch: the launch plan and every executable
 /// come from the layout's flat `bin/` store, so this needs no Cargo, suite,
-/// toolchain, or network, and never touches `.phoxal/artifacts`. Runtime state
-/// (`project.lock`, `supervisor.sock`, plans) is created at run time under
-/// `<layout_root>/.phoxal/`.
+/// toolchain, or network, and never touches `.phoxal/artifacts`. An arbitrary
+/// layout keeps runtime state under `<layout_root>/.phoxal`; the installed
+/// `/var/phoxal` identity maps persistent state to `/var/lib/phoxal/state` and
+/// sockets to `/run/phoxal`.
 pub(crate) fn prepare_layout_run_on_board(
     layout_root: &Path,
     options: RunOptions,
     board: BoardBackend,
 ) -> Result<PreparedRun> {
+    // A compiled root declares its whole typed-document contract before any
+    // robot or participant metadata is interpreted.
+    crate::runtime_header::RuntimeHeader::read_and_validate(layout_root)?;
     let layout = RuntimeLayout::open(layout_root).with_context(|| {
         format!(
             "failed to open staged runtime layout {}",
@@ -324,7 +329,10 @@ pub(crate) fn prepare_layout_run_on_board(
     .context("failed to construct the launch plan from the staged runtime layout")?;
 
     board.configure(
-        layout_root.display().to_string(),
+        crate::runtime_paths::RuntimePaths::for_root(layout_root)
+            .ownership_root
+            .display()
+            .to_string(),
         "staged".to_string(),
         "run",
     );

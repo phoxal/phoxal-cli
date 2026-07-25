@@ -25,7 +25,7 @@ impl AppContext {
     ) -> Result<Self> {
         // SAFETY: AppContext is constructed once during single-threaded CLI
         // startup, before workers are spawned. Path helpers use this to keep
-        // every mutable artifact under the selected project's `.phoxal/`.
+        // every mutable artifact under the selected runtime's path policy.
         unsafe {
             std::env::set_var(crate::host_paths::PROJECT_ROOT_ENV, &workspace_root);
             if offline {

@@ -126,9 +126,15 @@ pub(crate) struct ProjectTarget {
 
 pub(crate) fn resolve_target(explicit: Option<&Path>, fallback: &Path) -> Result<ProjectTarget> {
     let selected = explicit.unwrap_or(fallback);
-    let selected = selected
-        .canonicalize()
-        .with_context(|| format!("failed to resolve {}", selected.display()))?;
+    let preserve_installed_identity =
+        selected == Path::new(crate::runtime_paths::ACTIVE_RUNTIME_ROOT);
+    let selected = if preserve_installed_identity {
+        selected.to_path_buf()
+    } else {
+        selected
+            .canonicalize()
+            .with_context(|| format!("failed to resolve {}", selected.display()))?
+    };
     let (project, requested_entry) = if selected.is_file() {
         (
             selected
@@ -141,10 +147,14 @@ pub(crate) fn resolve_target(explicit: Option<&Path>, fallback: &Path) -> Result
         let entry = phoxal_cli_core::project::resolver::discover_robot_yaml(&selected)
             .with_context(|| format!("failed to find robot.yaml from {}", selected.display()))?;
         (
-            entry
-                .parent()
-                .context("robot.yaml has no parent project")?
-                .canonicalize()?,
+            if preserve_installed_identity {
+                selected
+            } else {
+                entry
+                    .parent()
+                    .context("robot.yaml has no parent project")?
+                    .canonicalize()?
+            },
             None,
         )
     };

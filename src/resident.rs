@@ -170,9 +170,12 @@ fn resident_log_file() -> Result<File> {
     let project = std::env::var_os(crate::host_paths::PROJECT_ROOT_ENV)
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
-    let directory = project.join(".phoxal");
+    let path = crate::runtime_paths::RuntimePaths::for_root(&project).supervisor_log();
+    let directory = path
+        .parent()
+        .expect("supervisor log has a parent")
+        .to_path_buf();
     std::fs::create_dir_all(&directory)?;
-    let path = directory.join("supervisor.log");
     if path
         .metadata()
         .is_ok_and(|metadata| metadata.len() >= RESIDENT_LOG_MAX_BYTES)
@@ -289,7 +292,7 @@ impl Drop for ResidentSocket {
 }
 
 pub fn supervisor_socket_path(project: &Path) -> Result<PathBuf> {
-    let path = project.join(".phoxal/supervisor.sock");
+    let path = crate::runtime_paths::RuntimePaths::for_root(project).supervisor_socket();
     let absolute = if path.is_absolute() {
         path
     } else {
