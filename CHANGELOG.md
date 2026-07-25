@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.24.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.24.1) - 2026-07-25
+
+
+### Fixed
+
+- *(build)* Omit simulators from native bundles ([#191](https://github.com/phoxal/phoxal-cli/pull/191))
+
+
 ## [0.24.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.24.0) - 2026-07-25
 
 
