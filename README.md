@@ -131,18 +131,16 @@ kind and identity remain authoritative.
 
 ## Artifact Suite
 
-`phoxal` consumes the framework-generated `phoxal.suite/v1` attached to the
+`phoxal` consumes the framework-generated `phoxal.suite/v0` attached to the
 exact locked train release. The suite is only the immutable byte inventory for
 official package, train, and target combinations. The CLI release owns the
 official Native runtime set; Webots adds its controller and supervisor. Every
 runtime is per robot and required, apart from the router's internal
-graph-recreation policy. Launch planning never consumes the suite's profile,
-scope, or criticality fields. An official package unknown to this CLI fails
-with an explicit instruction to update the CLI. Legacy `phoxal.suite/v0`
-descriptors are rejected rather than guessed or upgraded in place.
+graph-recreation policy. An official package unknown to this CLI fails
+with an explicit instruction to update the CLI.
 
 For example:
-`https://github.com/phoxal/framework/releases/download/v0.38.1/suite.json`.
+`https://github.com/phoxal/framework/releases/download/v<train>/suite.json`.
 Local development may use `--suite <path>`, `PHOXAL_SUITE=<path>`, or
 the global `--suite` option; every override must still declare the locked train
 version.

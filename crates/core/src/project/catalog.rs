@@ -1,8 +1,7 @@
 //! CLI-owned official runtime catalog.
 //!
 //! The immutable suite is only an inventory of bytes. Runtime membership
-//! belongs to this CLI release and is deliberately not read from suite
-//! profiles. Launch planning applies the CLI-internal failure policy.
+//! belongs to this CLI release, which applies the CLI-internal failure policy.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -204,7 +203,7 @@ const fn suite_kind(kind: ArtifactKind) -> Kind {
 mod tests {
     use super::*;
     use crate::project::suite::{fixture_blob_for_tests, fixture_suite_for_tests};
-    use phoxal::suite::v1::Artifact;
+    use phoxal::suite::Artifact;
 
     #[test]
     fn unknown_official_package_requests_cli_update() {
