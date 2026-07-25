@@ -69,10 +69,15 @@ pub fn encode_participant_env(launch: &ParticipantLaunch) -> Result<EncodedParti
     Ok(EncodedParticipantEnv { variables })
 }
 
+/// A tool joins the *execution*, not the clock (#952 section B). It therefore
+/// carries the execution and its own producer identity like every bus
+/// participant, but never the execution origin: the origin is what turns a host
+/// boot-clock reading into an exact `RobotInstant`, and a tool must not be able
+/// to reconstruct one.
 pub fn encode_tool_env(launch: &ParticipantLaunch) -> Result<EncodedParticipantEnv> {
-    Ok(EncodedParticipantEnv {
-        variables: encode_common_participant_variables(launch)?,
-    })
+    let mut variables = encode_common_participant_variables(launch)?;
+    variables.remove(env::EXECUTION_ORIGIN);
+    Ok(EncodedParticipantEnv { variables })
 }
 
 fn encode_common_participant_variables(
@@ -255,7 +260,7 @@ mod tests {
             participant_id: "tool-log".to_string(),
             execution: phoxal::bus::ExecutionId::mint(),
             producer: phoxal::bus::ProducerId::mint(),
-            execution_origin: None,
+            execution_origin: Some(phoxal::participant::ExecutionOrigin::mint()),
             namespace: "dev".to_string(),
             robot_id: "robot_v1".to_string(),
             bus: BusProfile {
@@ -280,6 +285,11 @@ mod tests {
         assert_eq!(
             encoded.variables().get(env::CONNECT).map(String::as_str),
             Some("tcp/localhost:7447")
+        );
+        assert_eq!(
+            encoded.variables().get(env::EXECUTION_ORIGIN),
+            None,
+            "a tool must not receive the origin that would let it reconstruct robot time"
         );
         // Every participant carries the supervised run and its own producer.
         assert_eq!(

@@ -22,6 +22,7 @@ pub(crate) fn stage_and_prepare_webots_spec(
     sim: &SimPlan,
     runtime_root: &Path,
     connect: &str,
+    execution: phoxal::bus::ExecutionId,
 ) -> Result<ParticipantSpec> {
     crate::webots_stage_root::wipe_and_recreate()?;
     let world = webots_world(&sim.plan.mode);
@@ -52,7 +53,18 @@ pub(crate) fn stage_and_prepare_webots_spec(
         executable: webots_path,
         args: webots_launch_args(&staged.staged_world_path),
         cwd: None,
-        env: Vec::new(),
+        // The controller is Webots' child, not ours, so this is the only hop
+        // that can carry the supervised run to it (#952 section B). Webots
+        // passes its environment through to the controllers it spawns, so the
+        // controller joins the same execution root as every service. It must
+        // NOT travel in `controllerArgs`, the staged world text, or any file
+        // inside the controller directory: the controller directory stays a
+        // run-invariant function of package content, and the staged scene stays
+        // a function of the robot model.
+        env: vec![(
+            phoxal::participant::launch::env::EXECUTION_ID.to_string(),
+            execution.to_string(),
+        )],
         shutdown_grace: std::time::Duration::from_secs(20),
         process_group: true,
         note: None,

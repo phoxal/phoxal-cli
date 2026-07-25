@@ -121,7 +121,8 @@ pub(crate) async fn live_simulate_setup(
     );
     crate::run::apply_session_connect(&mut sim.plan, &mut specs, &connect);
     ensure_active()?;
-    let webots_spec = stage_and_prepare_webots_spec(&ui, &sim, &staged_root, &connect)?;
+    let webots_spec =
+        stage_and_prepare_webots_spec(&ui, &sim, &staged_root, &connect, run.execution())?;
     let mut background_tasks = crate::run::AbortTasks::default();
     ui.info(format!(
         "Webots profile: webots; world: {}; project: {}",
