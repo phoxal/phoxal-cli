@@ -93,7 +93,6 @@ fn removed_command_surfaces_stay_removed() {
         vec!["phoxal", "simulation", "run", "default", "--pull"],
         vec!["phoxal", "check", "--pull"],
         vec!["phoxal", "validate", "--allow-user-service-drift"],
-        vec!["phoxal", "deploy", "robot@192.168.1.50"],
         vec!["phoxal", "deploy", "--dry-run", "--target", "aarch64"],
         vec!["phoxal", "robot", "new", "rover"],
         vec!["phoxal", "robot"],
@@ -103,6 +102,51 @@ fn removed_command_surfaces_stay_removed() {
         vec!["phoxal", "cache", "clean"],
     ] {
         assert!(Cli::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
+fn parses_install_rollback_deploy_and_service_management() {
+    assert!(matches!(
+        Cli::try_parse_from(["phoxal", "install", "robot.build.phoxal"])
+            .unwrap()
+            .command,
+        RootCommand::Install(_)
+    ));
+    assert!(matches!(
+        Cli::try_parse_from([
+            "phoxal",
+            "rollback",
+            "--to",
+            "20260725T010000.000Z-deadbeef"
+        ])
+        .unwrap()
+        .command,
+        RootCommand::Rollback(_)
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["phoxal", "deploy", "robot@192.168.1.50"])
+            .unwrap()
+            .command,
+        RootCommand::Deploy(_)
+    ));
+    assert!(matches!(
+        Cli::try_parse_from([
+            "phoxal",
+            "deploy",
+            "robot@192.168.1.50",
+            "--build",
+            "robot.build.phoxal",
+        ])
+        .unwrap()
+        .command,
+        RootCommand::Deploy(_)
+    ));
+    for subcommand in ["install", "uninstall", "status"] {
+        assert!(
+            Cli::try_parse_from(["phoxal", "service", subcommand]).is_ok(),
+            "service {subcommand} should parse"
+        );
     }
 }
 

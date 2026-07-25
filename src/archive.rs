@@ -13,13 +13,15 @@
 //! otherwise). Paths are stored relative with `/` separators and no `.`/`..`
 //! components, so extraction can never escape its destination.
 //!
-//! The archive is not executable and carries no generated header, manifest, or
-//! provenance file - only the real runtime content of the staged layout. Plain
+//! The archive is not executable. Its `phoxal.runtime.json` compatibility
+//! declaration is ordinary deterministic runtime content, next to the compiled
+//! manifest and binaries. Plain
 //! `tar -xzf build.phoxal` extracts it identically to [`extract_build_archive`];
 //! the helper here only adds the path-escape guard.
 
+use std::collections::HashSet;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -38,6 +40,10 @@ pub const BUILD_ARCHIVE_EXTENSION: &str = "build.phoxal";
 /// non-zero epoch keeps extracted files from tripping tools that treat mtime 0
 /// as "missing".
 const FIXED_MTIME: u64 = 1_577_836_800;
+const MAX_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_EXTRACTED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_ENTRIES: usize = 16_384;
 
 /// Write the staged runtime layout at `layout_root` to `output` as a
 /// deterministic `build.phoxal`, returning the archive's hex SHA-256 digest.
@@ -111,11 +117,10 @@ fn collect_into(root: &Path, dir: &Path, out: &mut Vec<Entry>) -> Result<()> {
     for entry in read {
         let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
         let path = entry.path();
-        // The staged layout has no `.phoxal` of its own by construction; a layout
-        // run creates runtime state (project.lock, supervisor.sock, plans) under
-        // `<root>/.phoxal/` at run time. Never fold that lock/socket state into a
-        // bundle if a prior run left it behind - the bundle is pure runtime
-        // content only.
+        // The staged layout has no `.phoxal` of its own by construction. An
+        // ordinary extracted layout may create local runtime state there; an
+        // installed runtime redirects all state outside its immutable release.
+        // Never fold state from a prior ordinary run into a bundle.
         if dir == root && path.file_name() == Some(std::ffi::OsStr::new(".phoxal")) {
             continue;
         }
@@ -228,14 +233,28 @@ fn is_executable(_metadata: &fs::Metadata) -> bool {
 /// symlink ancestors, so a `dest/foo` symlink pointing outside would let entry
 /// `foo/bar` write outside despite a clean lexical path (#936, finding E).
 pub fn extract_build_archive(archive: &Path, dest: &Path) -> Result<()> {
+    let archive_len = fs::metadata(archive)
+        .with_context(|| format!("failed to inspect {}", archive.display()))?
+        .len();
+    anyhow::ensure!(
+        archive_len <= MAX_ARCHIVE_BYTES,
+        "build archive is {archive_len} bytes; limit is {MAX_ARCHIVE_BYTES}"
+    );
     ensure_fresh_destination(dest)?;
     let file =
         fs::File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
     let mut tar = Archive::new(GzDecoder::new(file));
-    for entry in tar
+    let mut seen = HashSet::new();
+    let mut extracted_bytes = 0_u64;
+    for (index, entry) in tar
         .entries()
         .with_context(|| format!("failed to read {}", archive.display()))?
+        .enumerate()
     {
+        anyhow::ensure!(
+            index < MAX_ENTRIES,
+            "build archive contains more than {MAX_ENTRIES} entries"
+        );
         let mut entry = entry.context("failed to read archive entry")?;
         let path = entry
             .path()
@@ -247,10 +266,34 @@ pub fn extract_build_archive(archive: &Path, dest: &Path) -> Result<()> {
                 path.display()
             )
         })?;
-        if entry.header().entry_type().is_dir() {
+        anyhow::ensure!(
+            seen.insert(safe.clone()),
+            "build archive contains duplicate entry `{}`",
+            safe.display()
+        );
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
             create_dirs_no_symlink(dest, &safe)?;
             continue;
         }
+        anyhow::ensure!(
+            entry_type.is_file(),
+            "refusing archive entry `{}`: symlinks, hardlinks, and special files are not allowed",
+            safe.display()
+        );
+        let size = entry.size();
+        anyhow::ensure!(
+            size <= MAX_ENTRY_BYTES,
+            "archive entry `{}` is {size} bytes; per-file limit is {MAX_ENTRY_BYTES}",
+            safe.display()
+        );
+        extracted_bytes = extracted_bytes
+            .checked_add(size)
+            .context("archive extracted size overflow")?;
+        anyhow::ensure!(
+            extracted_bytes <= MAX_EXTRACTED_BYTES,
+            "archive expands beyond the {MAX_EXTRACTED_BYTES}-byte limit"
+        );
         let out = if let Some(parent) = safe.parent() {
             create_dirs_no_symlink(dest, parent)?.join(
                 safe.file_name()
@@ -272,12 +315,45 @@ pub fn extract_build_archive(archive: &Path, dest: &Path) -> Result<()> {
                 );
             }
         }
-        let mut data = Vec::new();
-        entry
-            .read_to_end(&mut data)
-            .with_context(|| format!("failed to read archive entry {}", safe.display()))?;
-        write_with_mode(&out, &data, entry.header().mode().ok())?;
+        let mode = entry.header().mode().ok();
+        write_stream_with_mode(&out, &mut entry, size, mode)?;
     }
+    Ok(())
+}
+
+fn write_stream_with_mode(
+    out: &Path,
+    input: &mut impl Read,
+    expected: u64,
+    mode: Option<u32>,
+) -> Result<()> {
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        options.custom_flags(libc::O_NOFOLLOW);
+        if let Some(mode) = mode {
+            // Archives select only executable versus data. Never reproduce
+            // setuid/setgid/sticky or group/world-writable bits from an
+            // untrusted tar header into a root-owned installed release.
+            options.mode(if mode & 0o111 == 0 { 0o644 } else { 0o755 });
+        }
+    }
+    let mut file = options
+        .open(out)
+        .with_context(|| format!("failed to create {}", out.display()))?;
+    let copied = io::copy(input, &mut file)
+        .with_context(|| format!("failed to extract {}", out.display()))?;
+    anyhow::ensure!(
+        copied == expected,
+        "archive entry {} declared {expected} bytes but produced {copied}",
+        out.display()
+    );
+    #[cfg(not(unix))]
+    if let Some(_mode) = mode {}
+    file.sync_all()?;
     Ok(())
 }
 
@@ -356,29 +432,6 @@ fn create_dirs_no_symlink(dest: &Path, relative: &Path) -> Result<PathBuf> {
     Ok(current)
 }
 
-#[cfg(unix)]
-fn write_with_mode(out: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    // Never write through a symlink: if `out` is (or races to become) a symlink,
-    // the open fails rather than following it outside the destination.
-    options.custom_flags(libc::O_NOFOLLOW);
-    if let Some(mode) = mode {
-        options.mode(mode);
-    }
-    let mut file = options
-        .open(out)
-        .with_context(|| format!("failed to create {}", out.display()))?;
-    file.write_all(data)
-        .with_context(|| format!("failed to write {}", out.display()))
-}
-
-#[cfg(not(unix))]
-fn write_with_mode(out: &Path, data: &[u8], _mode: Option<u32>) -> Result<()> {
-    fs::write(out, data).with_context(|| format!("failed to write {}", out.display()))
-}
-
 /// The slash-separated path of `path` relative to `root`, rejecting any `..`
 /// component so the archived path can never point outside the layout.
 fn relative_slash_path(root: &Path, path: &Path) -> Result<String> {
@@ -426,6 +479,7 @@ fn safe_relative(path: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use std::io::Write;
 
     #[cfg(unix)]
     fn write_executable(path: &Path, data: &[u8]) {
@@ -545,32 +599,33 @@ mod tests {
     /// bypassing the `tar` crate's write-side `..` guard, so the extractor's own
     /// escape guard is what's under test.
     fn raw_tar_gz(name: &str, data: &[u8]) -> Vec<u8> {
-        let mut header = [0u8; 512];
-        let name_bytes = name.as_bytes();
-        header[..name_bytes.len()].copy_from_slice(name_bytes);
-        // mode 0644, uid 0, gid 0 as NUL-terminated octal.
-        header[100..108].copy_from_slice(b"0000644\0");
-        header[108..116].copy_from_slice(b"0000000\0");
-        header[116..124].copy_from_slice(b"0000000\0");
-        // size (11 octal digits + NUL), mtime.
-        let size = format!("{:011o}\0", data.len());
-        header[124..136].copy_from_slice(size.as_bytes());
-        header[136..148].copy_from_slice(b"00000000000\0");
-        header[156] = b'0'; // typeflag: regular file
-        header[257..263].copy_from_slice(b"ustar\0");
-        header[263..265].copy_from_slice(b"00");
-        // Checksum: sum of all bytes with the 8-byte checksum field as spaces.
-        header[148..156].copy_from_slice(b"        ");
-        let sum: u32 = header.iter().map(|&byte| u32::from(byte)).sum();
-        let cksum = format!("{sum:06o}\0 ");
-        header[148..156].copy_from_slice(cksum.as_bytes());
+        raw_tar_gz_entries(&[(name, data, b'0')])
+    }
 
+    fn raw_tar_gz_entries(entries: &[(&str, &[u8], u8)]) -> Vec<u8> {
         let mut tar = Vec::new();
-        tar.extend_from_slice(&header);
-        tar.extend_from_slice(data);
-        // Pad the data to a 512-byte block, then two zero blocks terminate.
-        let pad = (512 - data.len() % 512) % 512;
-        tar.extend(std::iter::repeat_n(0u8, pad));
+        for (name, data, typeflag) in entries {
+            let mut header = [0u8; 512];
+            let name_bytes = name.as_bytes();
+            header[..name_bytes.len()].copy_from_slice(name_bytes);
+            header[100..108].copy_from_slice(b"0000644\0");
+            header[108..116].copy_from_slice(b"0000000\0");
+            header[116..124].copy_from_slice(b"0000000\0");
+            let size = format!("{:011o}\0", data.len());
+            header[124..136].copy_from_slice(size.as_bytes());
+            header[136..148].copy_from_slice(b"00000000000\0");
+            header[156] = *typeflag;
+            header[257..263].copy_from_slice(b"ustar\0");
+            header[263..265].copy_from_slice(b"00");
+            header[148..156].copy_from_slice(b"        ");
+            let sum: u32 = header.iter().map(|&byte| u32::from(byte)).sum();
+            let cksum = format!("{sum:06o}\0 ");
+            header[148..156].copy_from_slice(cksum.as_bytes());
+            tar.extend_from_slice(&header);
+            tar.extend_from_slice(data);
+            let pad = (512 - data.len() % 512) % 512;
+            tar.extend(std::iter::repeat_n(0u8, pad));
+        }
         tar.extend(std::iter::repeat_n(0u8, 1024));
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -594,6 +649,46 @@ mod tests {
         assert!(
             !dir.path().join("escape").exists(),
             "the escaping file must not be written outside the destination"
+        );
+    }
+
+    #[test]
+    fn duplicate_entries_and_links_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let duplicate = dir.path().join("duplicate.tar.gz");
+        fs::write(
+            &duplicate,
+            raw_tar_gz_entries(&[
+                ("robot.yaml", b"first", b'0'),
+                ("robot.yaml", b"second", b'0'),
+            ]),
+        )
+        .unwrap();
+        let error = extract_build_archive(&duplicate, &dir.path().join("duplicate-dest"))
+            .expect_err("duplicate paths must be rejected");
+        assert!(error.to_string().contains("duplicate"), "{error}");
+
+        let link = dir.path().join("link.tar.gz");
+        fs::write(&link, raw_tar_gz_entries(&[("bin/escape", b"", b'2')])).unwrap();
+        let error = extract_build_archive(&link, &dir.path().join("link-dest"))
+            .expect_err("links must be rejected");
+        assert!(
+            error.to_string().contains("symlinks") || error.to_string().contains("special files"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extracted_modes_strip_privilege_and_writable_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("runtime");
+        write_stream_with_mode(&executable, &mut b"binary".as_slice(), 6, Some(0o6777)).unwrap();
+        assert_eq!(
+            fs::metadata(executable).unwrap().permissions().mode() & 0o7777,
+            0o755
         );
     }
 

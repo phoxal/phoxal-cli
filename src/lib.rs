@@ -37,6 +37,8 @@ pub(crate) mod progress;
 pub(crate) mod resident;
 pub mod resolver;
 pub mod run;
+pub mod runtime_header;
+pub mod runtime_paths;
 pub(crate) mod sd_notify;
 pub(crate) mod session;
 pub(crate) mod shell;

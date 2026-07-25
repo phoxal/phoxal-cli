@@ -402,6 +402,8 @@ pub(crate) fn materialize_plan_binaries(
     revision: &phoxal_cli_core::project::launch_plan::PlanRevision,
     specs: &mut [crate::supervisor::ParticipantSpec],
 ) -> Result<()> {
+    let content_root =
+        crate::runtime_paths::RuntimePaths::for_root(project_root).plan_content_root();
     for spec in specs {
         if !spec.executable.is_file() {
             continue;
@@ -416,7 +418,7 @@ pub(crate) fn materialize_plan_binaries(
             .unwrap_or("participant");
         #[cfg(target_os = "macos")]
         if let Some(path) = materialize_macos_app_binary(
-            project_root,
+            &content_root,
             revision,
             &spec.executable,
             &identity,
@@ -426,7 +428,7 @@ pub(crate) fn materialize_plan_binaries(
             continue;
         }
         let name = format!("{identity}-{suffix}");
-        let path = revision.publish_content(project_root, &name, &bytes)?;
+        let path = revision.publish_content_in(&content_root, &name, &bytes)?;
         std::fs::set_permissions(&path, std::fs::metadata(&spec.executable)?.permissions())?;
         spec.executable = path;
     }
@@ -439,7 +441,7 @@ fn content_identity(bytes: &[u8]) -> String {
 
 #[cfg(target_os = "macos")]
 fn materialize_macos_app_binary(
-    project_root: &std::path::Path,
+    content_root: &std::path::Path,
     revision: &phoxal_cli_core::project::launch_plan::PlanRevision,
     executable: &std::path::Path,
     identity: &str,
@@ -466,7 +468,7 @@ fn materialize_macos_app_binary(
         .and_then(|name| name.to_str())
         .unwrap_or("Participant.app");
     let materialized_root =
-        revision.content_path(project_root, &format!("{identity}-{bundle_name}"));
+        revision.content_path_in(content_root, &format!("{identity}-{bundle_name}"));
     let materialized_contents = materialized_root.join("Contents");
     let materialized_macos = materialized_contents.join("MacOS");
     std::fs::create_dir_all(&materialized_macos)?;

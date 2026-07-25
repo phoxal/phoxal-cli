@@ -194,10 +194,12 @@ impl PlanRevision {
 
     #[must_use]
     pub fn content_path(&self, root: &Path, name: &str) -> PathBuf {
-        root.join(".phoxal")
-            .join("plans")
-            .join("content")
-            .join(name)
+        self.content_path_in(&root.join(".phoxal").join("plans").join("content"), name)
+    }
+
+    #[must_use]
+    pub fn content_path_in(&self, content_root: &Path, name: &str) -> PathBuf {
+        content_root.join(name)
     }
 
     /// Publish content-addressed bytes without ever overwriting an existing
@@ -207,11 +209,24 @@ impl PlanRevision {
     /// participants. A repeated identical write is idempotent; different
     /// bytes at the same content address are corruption and fail closed.
     pub fn publish_content(&self, root: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf> {
+        self.publish_content_in(
+            &root.join(".phoxal").join("plans").join("content"),
+            name,
+            bytes,
+        )
+    }
+
+    pub fn publish_content_in(
+        &self,
+        content_root: &Path,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf> {
         anyhow::ensure!(
             !name.is_empty() && Path::new(name).components().count() == 1,
             "plan content name must be one path component"
         );
-        let path = self.content_path(root, name);
+        let path = self.content_path_in(content_root, name);
         let parent = path.parent().expect("content path has parent");
         std::fs::create_dir_all(parent)?;
         match std::fs::OpenOptions::new()

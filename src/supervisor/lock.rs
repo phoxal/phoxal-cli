@@ -20,6 +20,7 @@ pub enum ProjectOperation {
     Run,
     Build,
     Update,
+    Install,
 }
 
 impl std::fmt::Display for ProjectOperation {
@@ -28,6 +29,7 @@ impl std::fmt::Display for ProjectOperation {
             Self::Run => "run",
             Self::Build => "build",
             Self::Update => "update",
+            Self::Install => "install",
         })
     }
 }
@@ -35,7 +37,11 @@ impl std::fmt::Display for ProjectOperation {
 impl ProjectLockIdentity {
     #[must_use]
     pub fn resolve(project: &Path, operation: ProjectOperation) -> Self {
-        let project = best_effort_absolute(project);
+        let project = if crate::runtime_paths::is_installed_root(project) {
+            crate::runtime_paths::RuntimePaths::for_root(project).ownership_root
+        } else {
+            best_effort_absolute(project)
+        };
         let entry = phoxal_cli_core::project::resolver::discover_robot_yaml(&project)
             .map(|entry| best_effort_absolute(&entry))
             .unwrap_or_else(|_| project.join("robot.yaml"));
@@ -76,7 +82,7 @@ pub enum ProjectLockStatus {
 impl ProjectLock {
     #[must_use]
     pub fn lock_path(project: &Path) -> PathBuf {
-        project.join(".phoxal/project.lock")
+        crate::runtime_paths::RuntimePaths::for_root(project).project_lock()
     }
 
     pub fn inspect(project: &Path) -> Result<ProjectLockStatus> {
@@ -278,7 +284,8 @@ mod tests {
     }
 
     #[test]
-    fn sigkill_releases_authority_and_metadata_is_diagnostic() -> Result<()> {
+    fn installed_runtime_install_excludes_resident_run_and_sigkill_releases_authority() -> Result<()>
+    {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("supervisor.lock");
         let mut child = Command::new(std::env::current_exe()?)
@@ -308,11 +315,10 @@ mod tests {
             "unexpected helper output: {output}"
         );
 
-        let error = ProjectLock::acquire_path(
-            &path,
-            identity(temp.path(), "simulation", std::process::id()),
-        )
-        .expect_err("a second process must not acquire the advisory lock");
+        let mut installer = identity(temp.path(), "simulation", std::process::id());
+        installer.operation = ProjectOperation::Install;
+        let error = ProjectLock::acquire_path(&path, installer.clone())
+            .expect_err("install must not overlap a resident run");
         let message = format!("{error:#}");
         assert!(message.contains("operation=run"), "{message}");
         assert!(message.contains("project="), "{message}");
@@ -320,10 +326,7 @@ mod tests {
 
         child.kill()?;
         child.wait()?;
-        let replacement = ProjectLock::acquire_path(
-            &path,
-            identity(temp.path(), "simulation", std::process::id()),
-        )?;
+        let replacement = ProjectLock::acquire_path(&path, installer)?;
         drop(replacement);
         assert!(path.is_file());
         Ok(())

@@ -305,8 +305,10 @@ pub(crate) async fn start_infrastructure_router(
         binary.display()
     );
     let launch = RouterLaunch { binary, config };
-    std::fs::create_dir_all(project_root.join(".phoxal"))?;
     let endpoint = project_router_endpoint(project_root);
+    std::fs::create_dir_all(
+        crate::runtime_paths::RuntimePaths::for_root(project_root).volatile_root,
+    )?;
     let (process, listeners) = launch_router_process(&launch, &endpoint).await?;
     Ok((
         InfrastructureRouter {
@@ -323,7 +325,9 @@ pub(crate) async fn start_infrastructure_router(
 pub(crate) fn project_router_endpoint(project_root: &Path) -> String {
     format!(
         "unixsock-stream/{}",
-        project_root.join(".phoxal/zenoh.sock").display()
+        crate::runtime_paths::RuntimePaths::for_root(project_root)
+            .router_socket()
+            .display()
     )
 }
 
