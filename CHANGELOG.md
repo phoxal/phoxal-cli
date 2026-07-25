@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.24.7](https://github.com/phoxal/phoxal-cli/releases/tag/v0.24.7) - 2026-07-25
+
+
+### Refactored
+
+- *(simulation)* Simplify Webots source runs ([#203](https://github.com/phoxal/phoxal-cli/pull/203))
+
+
 ## [0.24.6](https://github.com/phoxal/phoxal-cli/releases/tag/v0.24.6) - 2026-07-25
 
 
