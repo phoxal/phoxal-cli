@@ -285,7 +285,7 @@ impl Build {
     /// archive. Local staging reads the live tree, but the Build lock (held by
     /// [`Self::run`]) already serializes it against other phoxal operations.
     fn build_local(&self, app: &AppContext, project_root: &Path, target: &str) -> Result<()> {
-        let staging = StagingBuild::local(Some(target.to_string()));
+        let staging = StagingBuild::native_bundle(target.to_string());
         // Local builds and stages the live project tree under the lock.
         self.stage_validate_archive(app, project_root, project_root, target, &staging)
     }
@@ -312,10 +312,10 @@ impl Build {
         // host's vendored `.phoxal/artifacts` (host-path, unaffected by the
         // snapshot). The default output stays a sibling of the real project's
         // staged directory.
-        let staging = StagingBuild::Prebuilt {
-            target: Some(target.to_string()),
-            target_dir: snapshot.path().join("target"),
-        };
+        let staging = StagingBuild::prebuilt_native_bundle(
+            target.to_string(),
+            snapshot.path().join("target"),
+        );
         self.stage_validate_archive(app, project_root, snapshot.path(), target, &staging)
     }
 

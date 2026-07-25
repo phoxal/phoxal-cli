@@ -468,7 +468,7 @@ fn recheck_run_target(
     let staged = crate::run::refresh_staging(
         project_root,
         options,
-        &crate::run::StagingBuild::local(None),
+        &crate::run::StagingBuild::host_runtime(),
         true,
         &ui,
     )?;

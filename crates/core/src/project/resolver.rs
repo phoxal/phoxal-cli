@@ -32,7 +32,7 @@ pub fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolveOptions {
     /// Override the official service/driver target triple. `check --target`
     /// resolves suite assets for that Linux triple instead of the host, so a
@@ -46,6 +46,23 @@ pub struct ResolveOptions {
     /// never resolved - not even to select its suite target artifact (#936).
     /// Everything except `run`/`start`/`watch` staging resolves `All`.
     pub drivers: crate::project::layout::DriverSelection,
+    /// Whether simulator-only artifacts belong to this resolution.
+    ///
+    /// Host run/check/simulation paths keep them. A native runtime bundle does
+    /// not: simulators execute beside Webots on an operator host and are never
+    /// installed on the robot target.
+    pub include_simulators: bool,
+}
+
+impl Default for ResolveOptions {
+    fn default() -> Self {
+        Self {
+            official_target_triple: None,
+            tool_target_triple: None,
+            drivers: crate::project::layout::DriverSelection::default(),
+            include_simulators: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

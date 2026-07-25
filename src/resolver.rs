@@ -79,18 +79,22 @@ pub fn resolve(
         &target,
         prefer_vendored,
     )?;
-    // Simulator artifacts execute HOST-side (under Webots, which only exists
-    // for host platforms) - never on a device target. Resolving them for a
-    // requested `--target` device triple would fail spuriously (no such blob)
-    // even though a native bundle excludes simulators entirely (#936).
-    let mut simulators = resolve_suite_entries(
-        robot,
-        suite,
-        Kind::Simulator,
-        ArtifactKind::Simulator,
-        &host_target_triple(),
-        prefer_vendored,
-    )?;
+    // Simulator artifacts execute HOST-side under Webots and never belong to
+    // an installed native robot bundle. Host run/check/simulation resolution
+    // keeps them; `phoxal build` explicitly omits them so a physical aarch64
+    // build does not require a nonexistent aarch64 Webots-controller artifact.
+    let mut simulators = if options.include_simulators {
+        resolve_suite_entries(
+            robot,
+            suite,
+            Kind::Simulator,
+            ArtifactKind::Simulator,
+            &host_target_triple(),
+            prefer_vendored,
+        )?
+    } else {
+        Vec::new()
+    };
 
     let mut components = resolve_components(&ComponentResolveContext {
         robot,
@@ -819,7 +823,8 @@ mod tests {
     use phoxal_cli_core::project::resolver::load_robot;
     use phoxal_cli_core::project::suite::{
         fixture_component_assets_entry_for_tests, fixture_contract_for_tests,
-        fixture_service_entry_for_tests, fixture_suite_for_tests,
+        fixture_service_entry_for_tests, fixture_simulator_entry_for_tests,
+        fixture_suite_for_tests,
     };
     use std::path::PathBuf;
 
@@ -903,6 +908,75 @@ tools:
             "failed to generate fixture Cargo.lock"
         );
         Ok(root)
+    }
+
+    #[test]
+    fn native_bundle_resolution_never_requires_a_simulator_target() -> anyhow::Result<()> {
+        let _phoxal_home = ScratchPhoxalHome::new()?;
+        let target = host_target_triple();
+        let suite = fixture_suite_for_tests(vec![
+            fixture_service_entry_for_tests("drive", "0.1.0", &target, true, Vec::new()),
+            // The catalog entry exists, but has no binary for this physical
+            // target. Host resolution must notice that; Native build
+            // resolution must omit the simulator before artifact selection.
+            fixture_simulator_entry_for_tests(
+                "webots-controller",
+                "0.1.0",
+                &target,
+                false,
+                Vec::new(),
+            ),
+            fixture_component_assets_entry_for_tests("ddsm115", "0.1.0"),
+        ]);
+        let robot = Robot::parse_from_string(
+            r#"schema: robot/v0
+robot:
+  id: testbot
+  namespace: test
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: differential
+    left_actuators: [left_drive.motor]
+    right_actuators: [right_drive.motor]
+    left_encoders: [left_drive.encoder]
+    right_encoders: [right_drive.encoder]
+    wheel_radius_m: 0.1
+    wheel_base_m: 0.5
+  components:
+    left_drive:
+      component: ddsm115
+      mount_link: left_wheel_mount
+    right_drive:
+      component: ddsm115
+      mount_link: right_wheel_mount
+"#,
+        )?;
+        let project = locked_project_root()?;
+
+        resolve(
+            &robot,
+            project.path(),
+            Some(&suite),
+            ResolveOptions::default(),
+        )
+        .expect_err("host resolution still requires its simulator artifact");
+
+        let resolved = resolve(
+            &robot,
+            project.path(),
+            Some(&suite),
+            ResolveOptions {
+                include_simulators: false,
+                ..ResolveOptions::default()
+            },
+        )?;
+        assert!(
+            resolved.simulators.is_empty(),
+            "a Native bundle must carry no simulator-only runtimes"
+        );
+        Ok(())
     }
 
     #[test]

@@ -16,38 +16,61 @@ use std::process::Command;
 /// How a staging pass produces the workspace user/driver crate binaries it
 /// links into the runtime layout's flat `bin/` store (#936).
 ///
-/// `run`, `start`, `watch`, and a host `phoxal build` use [`StagingBuild::Local`],
-/// a `cargo build` on this host, optionally cross-compiling to a `--target`.
+/// `run`, `start`, and `watch` use [`StagingBuild::HostRuntime`], a host-native
+/// `cargo build` whose staged layout retains operator-side simulators.
+/// `phoxal build` uses [`StagingBuild::NativeBundle`], optionally
+/// cross-compiling to a `--target`, and deliberately omits those simulators.
 /// The `container` builder compiles the workspace inside a toolchain image first
-/// and then reuses the identical host-side staging with
-/// [`StagingBuild::Prebuilt`], which points the same lookup at the binaries the
-/// container already produced under a mounted target directory. Both feed
+/// and then reuses the identical native-bundle staging with prebuilt binaries
+/// under a mounted target directory. Both feed
 /// `stage_complete_bin_store`, so the layout, validation, and archive are one
 /// shared implementation regardless of where compilation happened.
 #[derive(Debug, Clone)]
 pub(crate) enum StagingBuild {
-    /// Build user/driver crates on this host with `cargo build`, cross-compiling
-    /// to `target` when it is set and differs from the host.
-    Local { target: Option<String> },
-    /// Reuse binaries already built (by the container builder) under
-    /// `target_dir` - the cargo target directory of the container's snapshot -
-    /// for `target`. No cargo runs on the host for these.
-    Prebuilt {
-        target: Option<String>,
-        target_dir: PathBuf,
+    /// Host-native staging for `run`, `start`, and `watch`.
+    HostRuntime,
+    /// Native robot bundle staging for `phoxal build`.
+    NativeBundle {
+        target: String,
+        /// Reuse binaries already built by the container builder when present.
+        /// This is the cargo target directory of the container's snapshot; no
+        /// cargo runs on the host in that case.
+        prebuilt_target_dir: Option<PathBuf>,
     },
 }
 
 impl StagingBuild {
-    /// A host build for the given cross target (`None` = host triple).
-    pub(crate) fn local(target: Option<String>) -> Self {
-        Self::Local { target }
+    /// Host-native staging for an operator runtime.
+    pub(crate) fn host_runtime() -> Self {
+        Self::HostRuntime
     }
 
-    /// The requested target triple, or `None` for a host-native staging pass.
+    /// Build a native robot bundle on this host.
+    pub(crate) fn native_bundle(target: String) -> Self {
+        Self::NativeBundle {
+            target,
+            prebuilt_target_dir: None,
+        }
+    }
+
+    /// Stage a native robot bundle from binaries built in a container.
+    pub(crate) fn prebuilt_native_bundle(target: String, target_dir: PathBuf) -> Self {
+        Self::NativeBundle {
+            target,
+            prebuilt_target_dir: Some(target_dir),
+        }
+    }
+
+    /// Whether operator-side simulator artifacts belong to this staging pass.
+    pub(crate) fn include_simulators(&self) -> bool {
+        matches!(self, Self::HostRuntime)
+    }
+
+    /// The requested target triple, or `None` for a host-runtime staging pass.
     pub(crate) fn target(&self) -> Option<&str> {
         match self {
-            Self::Local { target } | Self::Prebuilt { target, .. } => target.as_deref(),
+            Self::HostRuntime => None,
+            Self::NativeBundle { target, .. } => Some(target),
         }
     }
 
@@ -59,12 +82,15 @@ impl StagingBuild {
         ui: &crate::Ui,
     ) -> Result<PathBuf> {
         match self {
-            Self::Local { target } => {
-                build_source_binary(crate_dir, preferred_name, ui, target.as_deref())
-            }
-            Self::Prebuilt { target, target_dir } => {
-                locate_prebuilt_binary(crate_dir, preferred_name, target_dir, target.as_deref())
-            }
+            Self::HostRuntime => build_source_binary(crate_dir, preferred_name, ui, None),
+            Self::NativeBundle {
+                target,
+                prebuilt_target_dir: None,
+            } => build_source_binary(crate_dir, preferred_name, ui, Some(target)),
+            Self::NativeBundle {
+                target,
+                prebuilt_target_dir: Some(target_dir),
+            } => locate_prebuilt_binary(crate_dir, preferred_name, target_dir, Some(target)),
         }
     }
 }
