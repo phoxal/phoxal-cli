@@ -75,11 +75,12 @@ impl StagedProject {
 /// `loader::validate_layout_plan` over `staged_root` next.
 ///
 /// `build` reuses this per target triple: `build` is a
-/// [`StagingBuild`](crate::run::StagingBuild) carrying the requested `--target`,
+/// native-bundle [`StagingBuild`](crate::run::StagingBuild) carrying the
+/// requested `--target`,
 /// which threads through the resolve/stage/`bin/`-completion steps so the same
 /// code cross-compiles (or reuses container-built) workspace crates and links
 /// the suite's per-target official blobs into `.phoxal/build/<triple>/`. `run`,
-/// `start`, and `watch` pass `StagingBuild::local(None)` for a host-native pass.
+/// `start`, and `watch` pass `StagingBuild::host_runtime()`.
 pub(crate) fn refresh_staging(
     project_start: &Path,
     options: &RunOptions,
@@ -122,6 +123,9 @@ pub(crate) fn refresh_staging(
             // excluded driver is not resolved, so it cannot fail artifact
             // selection, enter the source check, or be built.
             drivers: driver_policy.selection(),
+            // Native runtime bundles deliberately exclude operator-host Webots
+            // simulators. Host run/start/watch staging keeps them.
+            include_simulators: build.include_simulators(),
         },
     )?;
 
@@ -197,7 +201,7 @@ pub(crate) fn prepare_run_on_board(
     let staged = refresh_staging(
         project_start,
         &options,
-        &crate::run::StagingBuild::local(None),
+        &crate::run::StagingBuild::host_runtime(),
         true,
         ui,
     )?;
