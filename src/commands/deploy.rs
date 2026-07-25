@@ -109,11 +109,18 @@ pub(crate) fn upload_source_payload(target: &str, project: &Path, remote_dir: &s
         .prefix("phoxal-deploy-artifacts-")
         .tempdir()?;
     let artifacts = project.join(".phoxal/artifacts");
-    if artifacts.is_dir() {
-        crate::stager::copy_tree_into(&artifacts, artifact_payload.path())?;
-    }
+    // Archive the vendored store itself rather than copying it through the
+    // runtime-layout tree copier: each package's `active` entry is a relative
+    // symlink to its immutable version, and that activation link is required
+    // for remote resolution. `tar` preserves it verbatim. The empty temporary
+    // directory remains the payload when the project has no vendored store.
+    let artifact_root = if artifacts.is_dir() {
+        artifacts.as_path()
+    } else {
+        artifact_payload.path()
+    };
     let source_archive = archive_directory(snapshot.path(), "phoxal-source-")?;
-    let artifacts_archive = archive_directory(artifact_payload.path(), "phoxal-artifacts-")?;
+    let artifacts_archive = archive_directory(artifact_root, "phoxal-artifacts-")?;
     for (local, remote_name) in [
         (source_archive.path(), "source.tar.gz"),
         (artifacts_archive.path(), "artifacts.tar.gz"),
@@ -312,5 +319,36 @@ mod tests {
         assert!(command.contains("source.tar.gz"));
         assert!(command.contains("artifacts.tar.gz"));
         assert!(command.contains("source/.phoxal/artifacts"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_payload_preserves_the_active_version_symlink() -> Result<()> {
+        let store = tempfile::tempdir()?;
+        let package = store.path().join("phoxal/service-asset");
+        std::fs::create_dir_all(package.join("versions/0.40.0"))?;
+        std::fs::write(package.join("versions/0.40.0/phoxal-service-asset"), b"ELF")?;
+        std::os::unix::fs::symlink("versions/0.40.0", package.join("active"))?;
+
+        let archive = archive_directory(store.path(), "phoxal-artifacts-test-")?;
+        let extracted = tempfile::tempdir()?;
+        run_local(
+            "tar",
+            &[
+                "-xzf",
+                archive.path().to_string_lossy().as_ref(),
+                "-C",
+                extracted.path().to_string_lossy().as_ref(),
+            ],
+        )?;
+
+        let active = extracted.path().join("phoxal/service-asset/active");
+        assert!(std::fs::symlink_metadata(&active)?.file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_link(&active)?,
+            std::path::PathBuf::from("versions/0.40.0")
+        );
+        assert_eq!(std::fs::read(active.join("phoxal-service-asset"))?, b"ELF");
+        Ok(())
     }
 }
