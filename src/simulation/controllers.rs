@@ -199,15 +199,15 @@ mod tests {
             name: SIMULATOR_CONTROLLER_ARTIFACT_NAME.to_string(),
             package: "phoxal/simulator-webots-controller".to_string(),
             kind: ArtifactKind::Simulator,
-            version: "0.40.1".to_string(),
-            artifact_ref: "phoxal/simulator-webots-controller@0.40.1".to_string(),
+            version: "0.40.2".to_string(),
+            artifact_ref: "phoxal/simulator-webots-controller@0.40.2".to_string(),
             sha256: None,
             url: None,
             size: None,
             published: true,
             published_triples: Vec::new(),
             path_override: None,
-            train: "0.40.1".to_string(),
+            train: "0.40.2".to_string(),
             target: None,
         }
     }
