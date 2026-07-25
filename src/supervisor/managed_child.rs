@@ -15,6 +15,17 @@ static GUARDIAN: LazyLock<Mutex<Option<GuardianClient>>> = LazyLock::new(|| Mute
 static SPAWN_GATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static NEXT_GUARDIAN_TOKEN: AtomicU64 = AtomicU64::new(1);
 const GUARDIAN_RECORD_LEN: usize = 17;
+const SUPERVISOR_ONLY_ENV: [&str; 9] = [
+    "NOTIFY_SOCKET",
+    "WATCHDOG_USEC",
+    "WATCHDOG_PID",
+    "LISTEN_FDS",
+    "LISTEN_PID",
+    "LISTEN_FDNAMES",
+    "INVOCATION_ID",
+    "JOURNAL_STREAM",
+    "PHOXAL_PROJECT_LOCK_FD",
+];
 type GuardianRecord = [u8; GUARDIAN_RECORD_LEN];
 
 fn next_guardian_token() -> u64 {
@@ -45,6 +56,30 @@ fn clear_close_on_exec(fd: RawFd) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+fn scrub_std_environment(command: &mut std::process::Command) {
+    for key in SUPERVISOR_ONLY_ENV {
+        command.env_remove(key);
+    }
+}
+
+fn guardian_command(
+    exe: &std::path::Path,
+    control_fd: RawFd,
+    acknowledgement_fd: RawFd,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("__graph-guardian")
+        .arg(control_fd.to_string())
+        .arg(acknowledgement_fd.to_string())
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    scrub_std_environment(&mut command);
+    command
 }
 
 pub(crate) fn create_cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
@@ -116,15 +151,11 @@ impl GuardianClient {
             let _spawn_gate = SPAWN_GATE.lock().expect("spawn gate poisoned");
             let control_fd = read_fd.as_raw_fd();
             let acknowledgement_fd = acknowledgement_write_fd.as_raw_fd();
-            let mut command = std::process::Command::new(exe);
-            command
-                .arg("__graph-guardian")
-                .arg(read_fd.as_raw_fd().to_string())
-                .arg(acknowledgement_write_fd.as_raw_fd().to_string())
-                .process_group(0)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+            let mut command = guardian_command(
+                &exe,
+                read_fd.as_raw_fd(),
+                acknowledgement_write_fd.as_raw_fd(),
+            );
             // SAFETY: this post-fork hook calls only fcntl. The spawn gate
             // prevents any unrelated child from inheriting these descriptors,
             // while the parent keeps its CLOEXEC defaults.
@@ -382,19 +413,7 @@ impl DerefMut for ManagedChild {
 }
 
 pub(crate) fn scrub_environment(command: &mut Command) {
-    for key in [
-        "NOTIFY_SOCKET",
-        "WATCHDOG_USEC",
-        "WATCHDOG_PID",
-        "LISTEN_FDS",
-        "LISTEN_PID",
-        "LISTEN_FDNAMES",
-        "INVOCATION_ID",
-        "JOURNAL_STREAM",
-        "PHOXAL_PROJECT_LOCK_FD",
-    ] {
-        command.env_remove(key);
-    }
+    scrub_std_environment(command.as_std_mut());
 }
 
 pub(crate) fn materialize_plan_binaries(
@@ -612,6 +631,33 @@ fn guard_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guardian_strips_supervisor_bootstrap_environment() {
+        let command = guardian_command(std::path::Path::new("/usr/bin/true"), 10, 11);
+        // Keep this expectation independent from SUPERVISOR_ONLY_ENV so
+        // accidentally shrinking the production scrub list fails the test.
+        for key in [
+            "NOTIFY_SOCKET",
+            "WATCHDOG_USEC",
+            "WATCHDOG_PID",
+            "LISTEN_FDS",
+            "LISTEN_PID",
+            "LISTEN_FDNAMES",
+            "INVOCATION_ID",
+            "JOURNAL_STREAM",
+            "PHOXAL_PROJECT_LOCK_FD",
+        ] {
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(candidate, _)| *candidate == std::ffi::OsStr::new(key))
+                    .map(|(_, value)| value),
+                Some(None),
+                "{key} must be explicitly removed from the guardian environment"
+            );
+        }
+    }
 
     #[test]
     fn planned_binary_identity_changes_only_with_its_bytes() {
