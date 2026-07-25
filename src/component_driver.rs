@@ -10,7 +10,7 @@ use phoxal_cli_core::project::resolver::{
 use phoxal_cli_core::project::tooling::resolve_project_path;
 
 /// Locate the on-disk source directory for a component instance's resolved
-/// `component_driver` package (the crate `check`/`run`/`watch` build). Errors
+/// `component_driver` package (the crate `check` and `run` build). Errors
 /// if the instance has no resolved driver package (a driverless instance, or
 /// one whose `driver:` block failed to resolve - callers only reach this for
 /// instances known to have a driver).

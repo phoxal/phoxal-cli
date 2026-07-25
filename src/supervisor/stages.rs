@@ -1,8 +1,7 @@
 //! Ordered participant startup and readiness barriers.
 
 use super::{
-    BoardBackend, ParticipantSpec, ParticipantState, READER_JOIN_BUDGET, RunningParticipant,
-    SupervisorOptions,
+    BoardBackend, ParticipantSpec, ParticipantState, RunningParticipant, SupervisorOptions,
 };
 use anyhow::Result;
 use anyhow::bail;
@@ -32,25 +31,6 @@ pub struct SupervisionStage {
     pub failure_ids: Vec<ProcessKey>,
     pub optional_ids: Vec<ProcessKey>,
     pub timeout: crate::session::output::WaitBudget,
-}
-
-/// Maximum time the controller should allow the supervisor to stop every
-/// launched process sequentially after the first cancel request. Each
-/// participant gets its authored grace, the one-second process-group reap
-/// allowance used by [`kill_child_process_group`], and two bounded reader
-/// joins for stdout and stderr. A second cancel still forces an immediate exit.
-#[must_use]
-pub fn orderly_shutdown_budget(stages: &[SupervisionStage]) -> Duration {
-    stages.iter().fold(Duration::from_secs(1), |budget, stage| {
-        let phase_max = stage.specs.iter().fold(Duration::ZERO, |maximum, spec| {
-            maximum.max(
-                spec.shutdown_grace
-                    .saturating_add(Duration::from_secs(1))
-                    .saturating_add(READER_JOIN_BUDGET.saturating_mul(2)),
-            )
-        });
-        budget.saturating_add(phase_max)
-    })
 }
 
 impl SupervisionStage {

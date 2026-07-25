@@ -21,7 +21,6 @@ use anyhow::anyhow;
 use phoxal_cli_core::check::participant_metadata::inspect_selected_binary;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
-use phoxal_cli_core::project::launch_plan::LaunchOwnership;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
@@ -34,7 +33,7 @@ use phoxal_cli_core::project::suite::ArtifactKind;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::launch_env::{encode_participant_env, encode_tool_env};
 use phoxal_cli_core::session::stores::telemetry::RobotScope;
-use phoxal_cli_core::session::{ProcessKey, RobotKey, StartupRequirement};
+use phoxal_cli_core::session::{ProcessKey, RobotKey};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -207,23 +206,6 @@ pub(crate) fn build_layout_specs(
                         | ParticipantExecution::OfficialTool { .. }
                 );
             let local = base_local || source_overridden_official;
-            if participant.launch_ownership == LaunchOwnership::SimulationManaged {
-                let mut status = ParticipantStatus::new(&id, kind, ParticipantState::Starting)
-                    .with_local(local)
-                    .with_scope(scope.clone());
-                status.note = Some(
-                    "SimulationManaged: launched by Webots via the supervisor, not the CLI supervisor"
-                        .to_string(),
-                );
-                register_simulation_managed_participant(
-                    board,
-                    key,
-                    status,
-                    participant.launch.incarnation,
-                    participant.startup_requirement,
-                );
-                continue;
-            }
             board.upsert_process(
                 key.clone(),
                 ParticipantStatus::new(&id, kind, ParticipantState::Starting)
@@ -301,38 +283,6 @@ pub(crate) fn prepare_robot_participants(
             let id = participant.launch.participant_id.clone();
             let key = ProcessKey::robot(robot_key.clone(), &id);
             let (kind, local) = participant_kind(&participant.execution);
-            if participant.launch_ownership == LaunchOwnership::SimulationManaged {
-                // Webots (via the supervisor) owns this participant's
-                // lifecycle - the CLI never spawns or restarts it, and has no
-                // process to poll for readiness. It still satisfies the graph
-                // proof and appears on the board, starting `Starting`, not
-                // `Ready`: OBSERVED readiness comes from its own stable bus
-                // Liveliness token, driven by `BoardBackend::record_presence`
-                // once the history-enabled observer is running. A
-                // controller/supervisor Webots never launches, or that fails
-                // before its own `#[setup]` completes, therefore never reaches
-                // `Ready`; the staged startup wait detects that omission.
-                // Disappearance after startup remains observational presence
-                // state and never becomes synthesized process failure
-                // authority.
-                // `crate::simulation` renders its controllerArgs into the
-                // staged world instead of a `ParticipantSpec` (Part 5).
-                let mut status = ParticipantStatus::new(&id, kind, ParticipantState::Starting)
-                    .with_local(local)
-                    .with_scope(scope.clone());
-                status.note = Some(
-                    "SimulationManaged: launched by Webots via the supervisor, not the CLI supervisor"
-                        .to_string(),
-                );
-                register_simulation_managed_participant(
-                    board,
-                    key,
-                    status,
-                    participant.launch.incarnation,
-                    participant.startup_requirement,
-                );
-                continue;
-            }
             board.upsert_process(
                 key.clone(),
                 ParticipantStatus::new(&id, kind, ParticipantState::Starting)
@@ -380,22 +330,6 @@ pub(crate) fn prepare_robot_participants(
     Ok(())
 }
 
-fn register_simulation_managed_participant(
-    board: &BoardBackend,
-    key: ProcessKey,
-    status: ParticipantStatus,
-    incarnation: u64,
-    startup_requirement: StartupRequirement,
-) {
-    board.upsert_process(key.clone(), status, startup_requirement);
-    // Webots-owned controllers are intentionally outside `ManagedChild`, so
-    // their launch record keeps the reserved unmanaged incarnation (zero).
-    // Record that exact value on the board: observed Liveliness remains the
-    // readiness proof, but can now satisfy the same exact-incarnation gate as
-    // a supervisor-minted child.
-    board.set_incarnation(&key, incarnation);
-}
-
 /// The board `ParticipantKind` plus whether the participant runs from local
 /// (user/robot-owned) code, for a participant's source-free `execution` (#936).
 /// The role alone decides both here: officials and tools are framework binaries
@@ -416,49 +350,6 @@ pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (Participant
         ParticipantExecution::ComponentDriver { .. } => (ParticipantKind::Driver, true),
     }
 }
-
-pub(crate) fn spec_from_launch_record(
-    participant: &ParticipantLaunchRecord,
-    resolved: &ResolvedRobot,
-    source_dirs: &BTreeMap<String, PathBuf>,
-    staged_root: &Path,
-) -> Result<Option<ParticipantSpec>> {
-    if participant.launch_ownership == LaunchOwnership::SimulationManaged {
-        return Ok(None);
-    }
-    let robot = RobotKey::new(&participant.launch.namespace, &participant.launch.robot_id);
-    // `_local`: this function only builds a `ParticipantSpec` (no
-    // `ParticipantStatus` to mark `.with_local` on) - see the other
-    // `participant_kind` call sites for where the bool is actually consumed.
-    let (kind, _local) = participant_kind(&participant.execution);
-    // Single-pass, like [`build_layout_specs`] (#936, finding 3): the watch
-    // recheck already re-staged the swapped crate into `bin/` through
-    // `refresh_staging` and re-validated that `bin/` through
-    // `validate_layout_plan`, so read the executable straight from the validated
-    // `bin/` store instead of re-resolving and rebuilding it. The activated bytes
-    // are exactly the validated bytes.
-    let executable = staged_root
-        .join(BIN_DIR)
-        .join(participant.execution.binary_name());
-    inspect_selected_binary(&executable).with_context(|| {
-        format!(
-            "failed to inspect staged runtime `{}` at {}",
-            participant.launch.participant_id,
-            executable.display()
-        )
-    })?;
-    let cwd = source_cwd(participant, resolved, source_dirs);
-    Ok(Some(participant_spec(
-        participant,
-        &robot,
-        kind,
-        executable,
-        cwd,
-    )?))
-}
-
-/// The staged flat `bin/` directory name under a runtime layout root.
-const BIN_DIR: &str = "bin";
 
 /// Every official platform runtime the loader may need to resolve, keyed by its
 /// launch identity: the services and simulators in `platform_runtimes` plus the
@@ -649,7 +540,7 @@ mod tests {
     };
     use phoxal_cli_core::check::participant_metadata::host_architecture;
     use phoxal_cli_core::session::RuntimeFailurePolicy;
-    use phoxal_cli_core::session::{ParticipantInstanceKey, ParticipantKind};
+    use phoxal_cli_core::session::StartupRequirement;
 
     /// Synthesize a host-format object of a given architecture carrying the
     /// phoxal metadata section, so inspection is exercised against real object
@@ -693,7 +584,6 @@ mod tests {
                 execution_device_id: None,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
-            launch_ownership: LaunchOwnership::CliManaged,
             startup_requirement: StartupRequirement::Required,
             runtime_failure: RuntimeFailurePolicy::StopProject,
         }
@@ -738,38 +628,6 @@ mod tests {
         assert!(error.contains("mission"), "{error}");
         assert!(error.contains("built for"), "{error}");
         Ok(())
-    }
-
-    #[test]
-    fn simulation_managed_readiness_accepts_its_exact_unmanaged_incarnation() {
-        let board = BoardBackend::new();
-        let robot = RobotKey::new("dev", "rover");
-        let key = ProcessKey::robot(robot.clone(), "simulator-webots-supervisor");
-        register_simulation_managed_participant(
-            &board,
-            key.clone(),
-            ParticipantStatus::new(
-                key.to_string(),
-                ParticipantKind::Simulator,
-                ParticipantState::Starting,
-            ),
-            0,
-            StartupRequirement::Required,
-        );
-
-        board.record_instance_presence(
-            ParticipantInstanceKey {
-                robot,
-                participant: "simulator-webots-supervisor".to_string(),
-                incarnation: 0,
-            },
-            true,
-        );
-
-        assert_eq!(
-            board.snapshot().participants[&key.to_string()].state,
-            ParticipantState::Ready
-        );
     }
 
     const LAYOUT_ROBOT_YAML: &str = r#"schema: robot/v0

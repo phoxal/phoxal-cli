@@ -45,6 +45,8 @@ pub struct TitleInfo {
     pub manifest: String,
     pub mode: SessionMode,
     pub bus_endpoint: String,
+    pub simulation_profile: Option<String>,
+    pub simulation_world: Option<String>,
     pub started_at: SystemTime,
     pub started_instant: Instant,
 }

@@ -26,7 +26,7 @@ pub use supervisor::{
     BoundedString, DesiredProcessState, ExitDescription, IncarnationId, ParticipantInstanceKey,
     ProcessDescriptor, ProcessEntry, ProcessFailure, ProcessFailureKind, ProcessKey, ProcessScope,
     ProcessState, ProjectLifecycle, ReadinessPolicy, RobotKey, RuntimeFailurePolicy,
-    StartupRequirement, SupervisorSnapshotV0,
+    SimulationSessionInfo, StartupRequirement, SupervisorSnapshotV0,
 };
 pub use telemetry::{
     ClockObservation, ClockSample, DeviceDiskSample, DeviceSample, JoypadCommand, JoypadDevice,
@@ -34,3 +34,6 @@ pub use telemetry::{
     RuntimeDirection, RuntimeFeedStatus, RuntimePerformanceSample, RuntimePerformanceSummary,
     RuntimeStepSample, RuntimeTopicSample, TelemetrySnapshot, TopicMetric,
 };
+
+/// Board/process identity of the Webots application managed by the resident.
+pub const WEBOTS_PROCESS_ID: &str = "webots";

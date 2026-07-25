@@ -122,7 +122,7 @@ impl SourceParticipant {
 /// `Tool`/`Simulator` are always the latter shape (a source override of a
 /// known official artifact - see `kind_label`); `ComponentDriver` has no
 /// such axis. Use [`Self::shared_kind`] to bridge into the shared enum for
-/// call sites (`supervisor`, `watch`) that only care about the role split.
+/// call sites that only care about the role split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceParticipantKind {
     UserService,

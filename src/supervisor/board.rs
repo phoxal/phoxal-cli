@@ -30,7 +30,7 @@ pub struct BoardBackend {
     recovery_epoch: Arc<AtomicU64>,
     recovery_epoch_tx: watch::Sender<u64>,
     /// Optional live sink for [`RoutedLogLine`]s - set by
-    /// `session::controller::SessionController::drive_supervision` once its
+    /// the resident supervisor once its
     /// `TuiDisplay` renderer exists, so it can maintain its own bounded
     /// per-runtime scrollback (Part 3) without polling the board's own
     /// 8-line history. `None` outside a TUI session (Plain/Json output, or
@@ -252,8 +252,8 @@ impl BoardBackend {
     }
 
     /// Fence observations from the dead router and reset every graph-owned row
-    /// before a replacement router or child is started. Wait-only rows are
-    /// Webots-owned participants, so their ownership notes are preserved.
+    /// before a replacement router or child is started. Wait-only readiness
+    /// rows retain their authored notes because they have no spawned spec.
     pub(crate) fn begin_recovery_epoch(
         &self,
         spawned: &[(ProcessKey, Option<String>)],
@@ -441,23 +441,6 @@ impl BoardBackend {
         let mut snapshot = self.inner.lock().expect("board mutex poisoned");
         if let Some(status) = snapshot.participants.get_mut(&id) {
             status.note = Some(note.into());
-        }
-    }
-
-    pub fn set_note_by_participant_id(&self, participant_id: &str, note: impl Into<String>) {
-        let note = note.into();
-        let keys = self
-            .state
-            .lock()
-            .expect("supervisor state mutex poisoned")
-            .snapshot
-            .processes
-            .keys()
-            .filter(|key| key.id == participant_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in keys {
-            self.set_note(&key, note.clone());
         }
     }
 
@@ -679,17 +662,18 @@ impl BoardBackend {
         actor.publish(&self.snapshot_tx);
     }
 
-    pub(crate) fn activate_next_plan_revision(&self) -> u64 {
-        let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
-        actor.snapshot.plan_revision = actor.snapshot.plan_revision.saturating_add(1);
-        let revision = actor.snapshot.plan_revision;
-        actor.publish(&self.snapshot_tx);
-        revision
-    }
-
     pub fn set_router_status(&self, status: impl Into<String>) {
         let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
         actor.snapshot.router = bounded_snapshot_text(&status.into());
+        actor.publish(&self.snapshot_tx);
+    }
+
+    pub fn set_simulation_info(&self, profile: impl Into<String>, world: impl Into<String>) {
+        let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
+        actor.snapshot.simulation = Some(phoxal_cli_core::session::SimulationSessionInfo {
+            profile: bounded_snapshot_text(&profile.into()),
+            world: bounded_snapshot_text(&world.into()),
+        });
         actor.publish(&self.snapshot_tx);
     }
 

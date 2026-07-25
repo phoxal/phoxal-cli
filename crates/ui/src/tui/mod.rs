@@ -96,6 +96,14 @@ impl TuiDisplay {
         }
     }
 
+    pub fn set_simulation_info(
+        &mut self,
+        simulation: Option<&phoxal_cli_core::session::SimulationSessionInfo>,
+    ) {
+        self.title.simulation_profile = simulation.map(|info| info.profile.clone());
+        self.title.simulation_world = simulation.map(|info| info.world.clone());
+    }
+
     pub fn set_bus_endpoint(&mut self, endpoint: String) {
         self.title.bus_endpoint = endpoint;
     }
@@ -266,6 +274,8 @@ mod tests {
             manifest: "./robot.yaml".to_string(),
             mode: phoxal_cli_core::session::SessionMode::Run,
             bus_endpoint: "tcp/localhost:7447".to_string(),
+            simulation_profile: None,
+            simulation_world: None,
             started_at: SystemTime::UNIX_EPOCH,
             started_instant: Instant::now(),
         }
@@ -280,6 +290,21 @@ mod tests {
                 .is_ok()
         );
         assert!(display.activated.is_none());
+    }
+
+    #[test]
+    fn late_webots_snapshot_updates_session_information() {
+        let mut display = TuiDisplay::new(Theme::new(ColorCapability::None), title());
+        display.set_simulation_info(Some(&phoxal_cli_core::session::SimulationSessionInfo {
+            profile: "webots".to_string(),
+            world: "worlds/default.wbt".to_string(),
+        }));
+
+        assert_eq!(display.title.simulation_profile.as_deref(), Some("webots"));
+        assert_eq!(
+            display.title.simulation_world.as_deref(),
+            Some("worlds/default.wbt")
+        );
     }
 
     #[test]

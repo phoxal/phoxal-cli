@@ -1,8 +1,3 @@
-#[cfg(test)]
-use phoxal::bus::ContractBody;
-#[cfg(test)]
-use phoxal_api::v0_2::simulation::{SpawnRequest, SpawnSet};
-
 /// Bound on each non-interactive simulate participant-readiness stage. The
 /// simulation clock is telemetry and never participates in this budget.
 /// Generous enough to cover a first-run Webots GUI launch plus every
@@ -12,38 +7,37 @@ const SIMULATE_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::fro
 
 mod command;
 pub(crate) use command::ResolvedSimulation;
+pub(crate) use command::{SimPlan, SimulateOptions};
 pub use command::{
-    SimPlan, SimulateMode, SimulateOptions, Simulation, SimulationJoin, SimulationRun,
-    SimulationSubcommand, run,
+    Simulation, SimulationRun, SimulationSubcommand, SimulationWebots, WebotsSubcommand,
 };
 mod setup;
-pub(crate) use setup::{LiveSimSetup, live_simulate_setup};
+pub(crate) use setup::live_simulate_setup;
 mod prepare;
-pub use prepare::prepare;
-pub(crate) use prepare::prepare_with_mode;
+pub(crate) use prepare::prepare;
 mod resolve;
 pub(crate) use resolve::{build_checked_sim_launch_plan, resolve_project};
 mod participants;
 pub(crate) use participants::{
     driver_metadata_unavailable, official_simulator_participants, remap_simulator_participant_ids,
     remap_simulator_surface_ids, sim_checked_participants, sim_source_participants,
-    simulated_component_records, simulator_participant_id_for_resolved_artifact,
 };
-mod report;
-pub(crate) use report::{report_plan_only, simulation_managed_participant_ids, webots_world};
 mod stages;
-pub(crate) use stages::{
-    WEBOTS_APP_ID, native_tool_labels_from_plan, prepare_substitution_notes, stages_for_simulate,
-    substitution_lines,
-};
+pub(crate) use stages::stages_for_simulate;
 mod webots;
-pub(crate) use webots::{stage_and_prepare_webots_spec, start_spawn_responder};
+pub(crate) use webots::stage_and_prepare_webots_spec;
 mod controllers;
-pub(crate) use controllers::{
-    require_absolute_symlink_target, stage_simulator_controller_binaries,
-};
+pub(crate) use controllers::stage_simulator_controller_binaries;
 mod staging;
 pub(crate) use staging::stage_simulation_for_robot;
 
-#[cfg(test)]
-mod tests;
+pub(crate) fn webots_world(
+    mode: &phoxal_cli_core::project::launch_plan::LaunchMode,
+) -> &std::path::Path {
+    match mode {
+        phoxal_cli_core::project::launch_plan::LaunchMode::Webots { world } => world,
+        phoxal_cli_core::project::launch_plan::LaunchMode::Run => {
+            unreachable!("Webots preparation always builds a Webots launch plan")
+        }
+    }
+}

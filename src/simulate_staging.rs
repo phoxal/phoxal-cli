@@ -1,24 +1,19 @@
-//! World-staging orchestration for `simulate` (Part 4).
+//! Static Webots world staging.
 //!
 //! `src/webots_staging` is a real, tested render engine (robot PROTO
 //! generation, instance-node rendering, world staging) with no caller before
 //! this module. This module wires it into the `simulate` launch flow: given
 //! the resolved robot + the base world + each robot's controller launch
-//! contract, it stages a copy of the world that:
+//! inputs, it stages a copy of the world that:
 //!
 //! - Declares an `EXTERNPROTO` for each robot's generated PROTO.
-//! - Never adds a robot as a static instance node - robots are always
-//!   supervisor-spawned at runtime, never pre-baked (see the module doc on
-//!   `crate::simulation`).
-//! - Adds exactly one static root node: the Webots supervisor `Robot` node
-//!   (`supervisor TRUE`, `controller "phoxal-simulator-webots-supervisor"`).
-//!   Its `--config` contains only non-spawn settings. Robot nodes are served
-//!   separately over the bus by the live `simulate` launch path.
+//! - Adds exactly one static robot instance.
+//! - Assigns that robot the `phoxal-simulator-webots-controller` controller.
+//! - Passes only stable robot, namespace, staged-root, and router inputs.
+//!   Process incarnation and clock epoch are controller-owned.
 //!
-//! Each spawn descriptor's `node_string` is a robot *instance* reference (PROTO
-//! name + transform + `controller "phoxal-simulator-webots-controller"` +
-//! `controllerArgs`), not the PROTO body - the body lives in the staged
-//! `.proto` file the `EXTERNPROTO` declares.
+//! The generated PROTO body lives in the same Webots project and the authored
+//! world references it relatively.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,20 +22,22 @@ use anyhow::{Context, Result, anyhow};
 use phoxal::model::simulation::Simulation as SimulationModel;
 use phoxal::model::structure::Structure;
 use phoxal::model::v0::Robot as RobotBundle;
-use phoxal::participant::launch::ParticipantLaunch;
-use phoxal_api::v0_2::simulation::RobotSpawn;
-use serde::Serialize;
 
 use crate::webots_staging::{
     self, RobotInstance, WebotsController, externproto_for_generated_proto, generate_robot_proto,
     proto_name_for_robot, relative_mesh_url_prefix, render_robot_instance_node, stage_world,
 };
-use phoxal_cli_core::session::launch_env::to_controller_args;
 
-/// The supervisor's controller artifact name (Webots `controller` field).
-pub const SUPERVISOR_CONTROLLER_NAME: &str = "phoxal-simulator-webots-supervisor";
 /// The controller's controller artifact name (Webots `controller` field).
-pub const CONTROLLER_CONTROLLER_NAME: &str = "phoxal-simulator-webots-controller";
+pub const WEBOTS_CONTROLLER_NAME: &str = "phoxal-simulator-webots-controller";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerLaunch {
+    pub robot_id: String,
+    pub namespace: String,
+    pub robot_root: Option<PathBuf>,
+    pub connect_endpoints: Vec<String>,
+}
 
 /// The staged PROTO subdirectory the generated robot PROTO's own
 /// `EXTERNPROTO` declarations point at for its mounted components
@@ -61,49 +58,24 @@ pub struct ComponentTypeToStage<'a> {
 
 /// One robot to stage into the simulation world: its bundle (manifest +
 /// component specs + structure), the distinct component types it mounts, and
-/// the `ParticipantLaunch` for the controller that substitutes its
+/// the stable launch inputs for the controller that substitutes its
 /// component-driver contracts. `component_types` may be empty for a robot
 /// with no mounted components (or none with a `simulation.yaml`).
 pub struct RobotToStage<'a> {
     pub robot_id: String,
     pub bundle: &'a RobotBundle,
     pub component_types: Vec<ComponentTypeToStage<'a>>,
-    pub controller_launch: ParticipantLaunch,
+    pub controller_launch: ControllerLaunch,
 }
 
-/// The supervisor `--config` payload. Spawn data is deliberately absent.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct SupervisorConfig {
-    pub require_native: bool,
-}
-
-/// Everything the caller needs to launch the staged world and register its
-/// simulation-managed participants (Part 5).
-///
-/// P4/C2 triage: `supervisor_launch`/`controller_launches` are real,
-/// correctly-populated values (their EFFECT already lives in the staged
-/// world's baked-in `controllerArgs`), but the real caller
-/// (`crate::simulation::stage_and_prepare_webots_spec`) only needs
-/// `staged_world_path`/`spawn_descriptors` afterward - these two exist for
-/// test introspection of what was actually rendered
-/// (`staged.supervisor_launch`/`staged.controller_launches` in this module's
-/// and `crate::simulation`'s own tests), not because they are unused
-/// byproducts.
+/// Everything the caller needs to launch the staged world.
 pub struct StagedSimulationWorld {
     pub staged_world_path: PathBuf,
-    #[allow(dead_code)]
-    pub supervisor_launch: ParticipantLaunch,
-    #[allow(dead_code)]
-    pub controller_launches: Vec<(String, ParticipantLaunch)>,
-    pub spawn_descriptors: Vec<RobotSpawn>,
 }
 
-/// Stage a simulation world for the given robots: generate each robot's
-/// PROTO (plus one PROTO per distinct component type it mounts), render its
-/// supervisor-owned instance node (never a static root node), build the
-/// supervisor's static `Robot` node with non-spawn `--config`, and stage the
-/// augmented world text. The returned descriptors are served over the bus by
-/// the live launch path.
+/// Stage a simulation world for exactly one robot: generate its PROTO (plus
+/// one PROTO per distinct component type), render one static controller-bearing
+/// instance node, and stage the augmented world text.
 ///
 /// `staged_protos_dir` is where each generated robot `.proto` file is
 /// written; component PROTOs go under its `components/` subdirectory (the
@@ -117,8 +89,6 @@ pub fn stage_simulation_world(
     staged_protos_dir: &Path,
     mesh_root: &Path,
     staged_world_path: &Path,
-    supervisor_launch_base: ParticipantLaunch,
-    require_native: bool,
     robots: &[RobotToStage<'_>],
 ) -> Result<StagedSimulationWorld> {
     std::fs::create_dir_all(staged_protos_dir).with_context(|| {
@@ -146,8 +116,11 @@ pub fn stage_simulation_world(
     }
 
     let mut extern_protos = Vec::with_capacity(robots.len());
-    let mut spawn_descriptors = Vec::with_capacity(robots.len());
-    let mut controller_launches = Vec::with_capacity(robots.len());
+    anyhow::ensure!(
+        robots.len() == 1,
+        "a Webots simulation world must contain exactly one robot"
+    );
+    let mut static_robot_nodes = Vec::with_capacity(1);
 
     let component_protos_dir = staged_protos_dir.join(COMPONENT_PROTOS_SUBDIR);
     std::fs::create_dir_all(&component_protos_dir).with_context(|| {
@@ -182,7 +155,7 @@ pub fn stage_simulation_world(
             &mesh_url_prefix,
         )
         .with_context(|| format!("failed to generate PROTO for robot '{}'", robot.robot_id))?;
-        std::fs::write(&proto_path, &proto_text)
+        std::fs::write(&proto_path, proto_text)
             .with_context(|| format!("failed to write staged PROTO {}", proto_path.display()))?;
 
         let extern_proto = externproto_for_generated_proto(&proto_path, staged_world_path)
@@ -194,18 +167,13 @@ pub fn stage_simulation_world(
             })?;
         extern_protos.push(extern_proto);
 
-        let controller_args = to_controller_args(&robot.controller_launch).with_context(|| {
-            format!(
-                "failed to render controller argv for robot '{}'",
-                robot.robot_id
-            )
-        })?;
+        let controller_args = controller_args(&robot.controller_launch)?;
         let instance = RobotInstance {
             proto_name: proto_name.clone(),
             def_name: proto_name.clone(),
             robot_id: robot.robot_id.clone(),
             controller: Some(WebotsController {
-                controller_name: CONTROLLER_CONTROLLER_NAME.to_string(),
+                controller_name: WEBOTS_CONTROLLER_NAME.to_string(),
                 controller_args,
             }),
             supervisor: Some(false),
@@ -223,29 +191,12 @@ pub fn stage_simulation_world(
                 robot.robot_id
             )
         })?;
-        let node_string = render_node_to_string(&instance_node)?;
-
-        spawn_descriptors.push(RobotSpawn {
-            robot_id: robot.robot_id.clone(),
-            node_string,
-        });
-        controller_launches.push((robot.robot_id.clone(), robot.controller_launch.clone()));
+        static_robot_nodes.push(instance_node);
     }
 
-    let supervisor_config = SupervisorConfig { require_native };
-    let mut supervisor_launch = supervisor_launch_base;
-    supervisor_launch.config = Some(
-        serde_json::to_value(&supervisor_config)
-            .context("failed to encode supervisor non-spawn config")?,
-    );
-    let supervisor_args =
-        to_controller_args(&supervisor_launch).context("failed to render supervisor argv")?;
-
-    let supervisor_node = supervisor_robot_node(supervisor_args)?;
-
-    let staged_text = stage_world(base_world_text, &extern_protos, &[supervisor_node])
+    let staged_text = stage_world(base_world_text, &extern_protos, &static_robot_nodes)
         .context("failed to stage simulation world")?;
-    std::fs::write(staged_world_path, &staged_text).with_context(|| {
+    std::fs::write(staged_world_path, staged_text).with_context(|| {
         format!(
             "failed to write staged world {}",
             staged_world_path.display()
@@ -254,10 +205,25 @@ pub fn stage_simulation_world(
 
     Ok(StagedSimulationWorld {
         staged_world_path: staged_world_path.to_path_buf(),
-        supervisor_launch,
-        controller_launches,
-        spawn_descriptors,
     })
+}
+
+fn controller_args(launch: &ControllerLaunch) -> Result<Vec<String>> {
+    let mut args = vec![
+        "--robot-id".to_string(),
+        launch.robot_id.clone(),
+        "--namespace".to_string(),
+        launch.namespace.clone(),
+    ];
+    if let Some(root) = &launch.robot_root {
+        args.extend(["--robot-root".to_string(), root.display().to_string()]);
+    }
+    anyhow::ensure!(
+        !launch.connect_endpoints.is_empty(),
+        "Webots controller requires at least one router endpoint"
+    );
+    args.extend(["--connect".to_string(), launch.connect_endpoints.join(",")]);
+    Ok(args)
 }
 
 /// Generate one PROTO per distinct component type the robot mounts, writing
@@ -323,7 +289,7 @@ fn stage_component_protos(
                 component_type.component_type
             )
         })?;
-        std::fs::write(&comp_proto_path, &artifact.proto_text).with_context(|| {
+        std::fs::write(&comp_proto_path, artifact.proto_text).with_context(|| {
             format!(
                 "failed to write staged component PROTO {}",
                 comp_proto_path.display()
@@ -338,89 +304,18 @@ fn stage_component_protos(
     Ok(component_solid_links)
 }
 
-/// Build the supervisor's static `Robot { supervisor TRUE controller "..."
-/// controllerArgs [...] }` node. This IS added as a static root node of the
-/// staged world - it is the only simulator-side static node; every robot is
-/// supervisor-spawned instead (never both pre-baked as a static node AND
-/// supervisor-spawned).
-fn supervisor_robot_node(
-    controller_args: Vec<String>,
-) -> Result<webots_proto::ast::proto::ast::AstNode> {
-    use webots_proto::ast::proto::ast::{AstNode, AstNodeKind, NodeBodyElement, NodeField};
-    use webots_proto::ast::proto::span::Span;
-
-    let mut fields = vec![
-        NodeBodyElement::Field(NodeField::new(
-            "controller".to_string(),
-            webots_proto::FieldValue::String(SUPERVISOR_CONTROLLER_NAME.to_string()),
-            Span::default(),
-        )),
-        NodeBodyElement::Field(NodeField::new(
-            "supervisor".to_string(),
-            webots_proto::FieldValue::Bool(true),
-            Span::default(),
-        )),
-    ];
-    if !controller_args.is_empty() {
-        use webots_proto::ast::proto::ast::{ArrayElement, ArrayValue};
-        fields.push(NodeBodyElement::Field(NodeField::new(
-            "controllerArgs".to_string(),
-            webots_proto::FieldValue::Array(
-                ArrayValue::new().with_elements(
-                    controller_args
-                        .into_iter()
-                        .map(webots_proto::FieldValue::String)
-                        .map(ArrayElement::new)
-                        .collect(),
-                ),
-            ),
-            Span::default(),
-        )));
-    }
-
-    Ok(AstNode::new(
-        AstNodeKind::Node {
-            type_name: "Robot".to_string(),
-            def_name: None,
-            fields,
-        },
-        Span::default(),
-    ))
-}
-
-/// Serialize a single `AstNode` to canonical Webots text by wrapping it as
-/// the sole root node of a headerless document - the same approach
-/// `webots_staging::world::stage_world_source_with_text_fallback` uses to
-/// render root nodes standalone, since `webots-proto`'s canonical writer only
-/// exposes whole-document serialization.
-fn render_node_to_string(node: &webots_proto::ast::proto::ast::AstNode) -> Result<String> {
-    let document = webots_proto::Proto {
-        header: None,
-        externprotos: Vec::new(),
-        proto: None,
-        root_nodes: vec![node.clone()],
-        source_path: None,
-        source_content: None,
-    };
-    let rendered = document
-        .to_canonical_string()
-        .context("failed to serialize spawn descriptor node")?;
-    Ok(rendered.trim().to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal::model::structure::Structure;
-    use phoxal::participant::launch::{BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS};
+    use clap::Parser;
 
-    const BASE_WORLD: &str = "#VRML_SIM R2023b utf8\n\nWorldInfo {\n}\n";
+    const BASE_WORLD: &str = "#VRML_SIM R2025a utf8\nWorldInfo {}\n";
 
-    fn fixture_bundle(robot_id: &str) -> RobotBundle {
-        let manifest_yaml = format!(
+    fn fixture_bundle() -> RobotBundle {
+        let manifest = phoxal::model::robot::v0::Robot::parse_from_string(
             r#"schema: robot/v0
 robot:
-  id: {robot_id}
+  id: testbot
   namespace: dev
   motion_limits:
     max_linear_speed_mps: 0.6
@@ -429,24 +324,13 @@ robot:
     kind: omnidirectional
     actuators: []
     encoders: []
-  components: {{}}
-"#
-        );
-        let manifest = phoxal::model::robot::v0::Robot::parse_from_string(&manifest_yaml)
-            .expect("fixture manifest should parse");
-        let structure = Structure::from_urdf_str(
-            r#"<robot name="testbot">
-  <link name="base_footprint" />
-  <link name="base_link" />
-  <joint name="root" type="fixed">
-    <parent link="base_footprint" />
-    <child link="base_link" />
-    <origin xyz="0 0 0" rpy="0 0 0" />
-  </joint>
-</robot>
+  components: {}
 "#,
         )
-        .expect("fixture structure should parse");
+        .expect("fixture robot should parse");
+        let structure =
+            Structure::from_urdf_str(r#"<robot name="testbot"><link name="base_link"/></robot>"#)
+                .expect("fixture structure should parse");
         RobotBundle {
             manifest,
             components: BTreeMap::new(),
@@ -454,157 +338,88 @@ robot:
         }
     }
 
-    fn fixture_launch(participant_id: &str, robot_id: &str) -> ParticipantLaunch {
-        ParticipantLaunch {
-            participant_id: participant_id.to_string(),
-            incarnation: 0,
-            namespace: "dev".to_string(),
-            robot_id: robot_id.to_string(),
-            bus: BusProfile {
-                connect_endpoints: vec!["tcp/localhost:7447".to_string()],
-            },
-            clock: ClockMode::Simulation,
-            config: None,
-            robot_root: Some(PathBuf::from("/robot")),
-            component_instance: None,
-            execution_device_id: None,
-            shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
-        }
-    }
-
     #[test]
-    fn stages_world_with_supervisor_node_and_no_static_robot_instance() -> Result<()> {
+    fn stages_exactly_one_static_controller_robot_without_lifecycle_arguments() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let protos_dir = temp.path().join("protos");
-        let mesh_root = temp.path().join("meshes");
-        std::fs::create_dir_all(&mesh_root)?;
-        let world_path = temp.path().join("worlds/default.wbt");
-
-        let bundle = fixture_bundle("testbot");
-        let mut controller_launch =
-            fixture_launch("simulator-webots-controller-testbot", "testbot");
-        controller_launch.config = Some(serde_json::json!({
-            "message": "quoted \"value\" and backslash \\ with newline\nvisible",
-        }));
-        let supervisor_launch_base = fixture_launch("simulator-webots-supervisor", "testbot");
-
-        let staged = stage_simulation_world(
+        let bundle = fixture_bundle();
+        let launch = ControllerLaunch {
+            namespace: "dev".to_string(),
+            robot_id: "testbot".to_string(),
+            robot_root: Some(PathBuf::from("../../runtime")),
+            connect_endpoints: vec![
+                "unixsock-stream/a".to_string(),
+                "tcp/localhost:7447".to_string(),
+            ],
+        };
+        let world = temp.path().join("worlds/default.wbt");
+        stage_simulation_world(
             BASE_WORLD,
-            &protos_dir,
-            &mesh_root,
-            &world_path,
-            supervisor_launch_base,
-            true,
+            &temp.path().join("protos"),
+            &temp.path().join("meshes"),
+            &world,
             &[RobotToStage {
                 robot_id: "testbot".to_string(),
                 bundle: &bundle,
                 component_types: Vec::new(),
-                controller_launch: controller_launch.clone(),
+                controller_launch: launch,
             }],
         )?;
-
-        let staged_text = std::fs::read_to_string(&staged.staged_world_path)?;
-
-        // (a) an EXTERNPROTO for the robot's generated PROTO.
-        assert!(
-            staged_text.contains("EXTERNPROTO"),
-            "staged world should declare an EXTERNPROTO:\n{staged_text}"
-        );
-        assert!(
-            staged_text.contains("Testbot.proto") || staged_text.contains("Testbot\""),
-            "staged world should reference the generated Testbot PROTO:\n{staged_text}"
-        );
-
-        // (b) the supervisor Robot node with `supervisor TRUE` + the
-        // supervisor controller name.
-        assert!(
-            staged_text.contains("supervisor TRUE"),
-            "staged world should contain the supervisor node:\n{staged_text}"
-        );
-        assert!(
-            staged_text.contains(SUPERVISOR_CONTROLLER_NAME),
-            "staged world should name the supervisor controller:\n{staged_text}"
-        );
-
-        // (c) no static robot instance node - only the supervisor `Robot`
-        // node is a root node. The controller's controller name is carried
-        // only in the separately returned bus spawn descriptor, never in the
-        // staged world or supervisor `--config`.
+        let text = std::fs::read_to_string(world)?;
         assert_eq!(
-            staged_text
-                .matches(&format!("controller \"{CONTROLLER_CONTROLLER_NAME}\""))
+            text.matches(&format!("controller \"{WEBOTS_CONTROLLER_NAME}\""))
                 .count(),
-            0,
-            "staged world root nodes must not carry an unescaped controller field for the robot controller:\n{staged_text}"
+            1
         );
-        assert!(!staged_text.contains(CONTROLLER_CONTROLLER_NAME));
+        assert!(!text.contains("supervisor TRUE"));
+        assert!(!text.contains("--participant-id"));
+        assert!(!text.contains("--incarnation"));
+        assert!(!text.contains("--epoch"));
+        assert!(text.contains("--robot-root"));
+        assert!(text.contains("../../runtime"));
+        assert!(text.contains("unixsock-stream/a,tcp/localhost:7447"));
+        Ok(())
+    }
+
+    #[derive(Debug, Parser)]
+    struct ControllerCliShape {
+        #[arg(long)]
+        robot_id: String,
+        #[arg(long)]
+        namespace: String,
+        #[arg(long)]
+        robot_root: Option<PathBuf>,
+        #[arg(long)]
+        connect: Option<String>,
+    }
+
+    #[test]
+    fn controller_argv_round_trips_through_the_framework_clap_shape() -> Result<()> {
+        let launch = ControllerLaunch {
+            namespace: "dev".to_string(),
+            robot_id: "testbot".to_string(),
+            robot_root: Some(PathBuf::from("../../runtime")),
+            connect_endpoints: vec![
+                "unixsock-stream/a".to_string(),
+                "tcp/localhost:7447".to_string(),
+            ],
+        };
+        let args = controller_args(&launch)?;
+        let parsed = ControllerCliShape::try_parse_from(
+            std::iter::once("controller").chain(args.iter().map(String::as_str)),
+        )?;
+        assert_eq!(parsed.robot_id, "testbot");
+        assert_eq!(parsed.namespace, "dev");
+        assert_eq!(parsed.robot_root, Some(PathBuf::from("../../runtime")));
         assert_eq!(
-            staged_text.matches("Robot {").count(),
-            1,
-            "the staged world should contain exactly one root Robot node (the supervisor):\n{staged_text}"
+            parsed.connect.as_deref(),
+            Some("unixsock-stream/a,tcp/localhost:7447")
         );
-
-        // The separately returned spawn descriptor carries the controller
-        // controller name + a controllerArgs list for the bus responder.
-        assert_eq!(staged.spawn_descriptors.len(), 1);
-        let descriptor = &staged.spawn_descriptors[0];
-        assert_eq!(descriptor.robot_id, "testbot");
-        assert!(
-            descriptor.node_string.contains(CONTROLLER_CONTROLLER_NAME),
-            "{}",
-            descriptor.node_string
-        );
-        assert!(
-            descriptor.node_string.contains("controllerArgs"),
-            "{}",
-            descriptor.node_string
-        );
-        assert!(
-            descriptor.node_string.contains("--participant-id"),
-            "{}",
-            descriptor.node_string
-        );
-
-        // The supervisor launch's config contains no spawn data.
-        let config = staged
-            .supervisor_launch
-            .config
-            .as_ref()
-            .expect("supervisor launch should carry a config");
-        assert_eq!(config["require_native"], serde_json::json!(true));
-        assert!(config.get("spawn").is_none());
-        assert!(config.get("node_string").is_none());
-        let mut config_keys = config
-            .as_object()
-            .expect("supervisor config should be a JSON object")
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        config_keys.sort_unstable();
-        assert_eq!(config_keys, vec!["require_native"]);
-
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct SupervisorConfigForTest {
-            require_native: bool,
-        }
-
-        let config_argv = serde_json::to_string(config)?;
-        let decoded: SupervisorConfigForTest = serde_json::from_str(&config_argv)?;
-        assert!(decoded.require_native);
-        assert!(descriptor.node_string.contains("--config"));
-        assert!(descriptor.node_string.contains("quoted"));
-        let parsed_descriptor: webots_proto::Proto = descriptor.node_string.parse()?;
-        assert_eq!(parsed_descriptor.root_nodes.len(), 1);
-
-        assert_eq!(staged.controller_launches.len(), 1);
-        assert_eq!(staged.controller_launches[0].0, "testbot");
-
+        assert_eq!(args.iter().filter(|arg| *arg == "--connect").count(), 1);
         Ok(())
     }
 
     #[test]
-    fn stages_a_mounted_component_proto_alongside_the_robot_proto() -> Result<()> {
+    fn stages_a_mounted_component_proto_and_relative_world_reference() -> Result<()> {
         use phoxal::model::component::v0::Component as ComponentSpec;
 
         let temp = tempfile::tempdir()?;
@@ -615,17 +430,14 @@ robot:
         std::fs::create_dir_all(&component_source_dir)?;
         std::fs::write(
             component_source_dir.join("structure.urdf"),
-            r#"<robot name="ddsm115">
-  <link name="wheel" />
-</robot>
-"#,
+            r#"<robot name="ddsm115"><link name="wheel" /></robot>"#,
         )?;
         std::fs::write(
             component_source_dir.join("simulation.yaml"),
             "schema: simulation/v0\ncapabilities: {}\nlinks: {}\n",
         )?;
-
-        let manifest_yaml = r#"schema: robot/v0
+        let manifest = phoxal::model::robot::v0::Robot::parse_from_string(
+            r#"schema: robot/v0
 robot:
   id: testbot
   namespace: dev
@@ -643,8 +455,8 @@ robot:
       parameters:
         motor:
           kind: motor
-"#;
-        let manifest = phoxal::model::robot::v0::Robot::parse_from_string(manifest_yaml)?;
+"#,
+        )?;
         let structure = Structure::from_urdf_str(
             r#"<robot name="testbot">
   <link name="base_footprint" />
@@ -652,10 +464,8 @@ robot:
   <joint name="root" type="fixed">
     <parent link="base_footprint" />
     <child link="base_link" />
-    <origin xyz="0 0 0" rpy="0 0 0" />
   </joint>
-</robot>
-"#,
+</robot>"#,
         )?;
         let bundle = RobotBundle {
             manifest,
@@ -668,17 +478,11 @@ robot:
             )]),
             structure,
         };
-
-        let controller_launch = fixture_launch("simulator-webots-controller-testbot", "testbot");
-        let supervisor_launch_base = fixture_launch("simulator-webots-supervisor", "testbot");
-
         let staged = stage_simulation_world(
             BASE_WORLD,
             &protos_dir,
             &mesh_root,
             &world_path,
-            supervisor_launch_base,
-            false,
             &[RobotToStage {
                 robot_id: "testbot".to_string(),
                 bundle: &bundle,
@@ -686,50 +490,19 @@ robot:
                     component_type: "ddsm115",
                     source_dir: &component_source_dir,
                 }],
-                controller_launch,
+                controller_launch: ControllerLaunch {
+                    robot_id: "testbot".to_string(),
+                    namespace: "dev".to_string(),
+                    robot_root: Some(PathBuf::from("../../runtime")),
+                    connect_endpoints: vec!["unixsock-stream/router".to_string()],
+                },
             }],
         )?;
-
-        let component_proto_path = protos_dir.join("components").join("Ddsm115.proto");
-        assert!(
-            component_proto_path.is_file(),
-            "expected staged component PROTO at {}",
-            component_proto_path.display()
-        );
-        let component_proto_text = std::fs::read_to_string(&component_proto_path)?;
-        let parsed_component_proto: webots_proto::Proto = component_proto_text.parse()?;
-        assert!(
-            parsed_component_proto.proto.is_some(),
-            "component PROTO should parse as a PROTO document:\n{component_proto_text}"
-        );
-
-        let robot_proto_path = protos_dir.join("Testbot.proto");
-        assert!(
-            robot_proto_path.is_file(),
-            "expected staged robot PROTO at {}",
-            robot_proto_path.display()
-        );
-        let robot_proto_text = std::fs::read_to_string(&robot_proto_path)?;
-        assert!(
-            robot_proto_text.contains("components/Ddsm115.proto"),
-            "robot PROTO should reference mounted component PROTO relative to the robot PROTO:\n{robot_proto_text}"
-        );
-        let parsed_robot_proto: webots_proto::Proto = robot_proto_text.parse()?;
-        assert!(
-            parsed_robot_proto.proto.is_some(),
-            "robot PROTO should parse as a PROTO document:\n{robot_proto_text}"
-        );
-
-        let staged_text = std::fs::read_to_string(&staged.staged_world_path)?;
-        assert!(
-            staged_text.contains("EXTERNPROTO"),
-            "staged world should still declare the robot's own EXTERNPROTO:\n{staged_text}"
-        );
-        assert!(
-            staged_text.contains("../protos/Testbot.proto"),
-            "staged world should reference the robot PROTO relative to the .wbt path:\n{staged_text}"
-        );
-
+        assert!(protos_dir.join("components/Ddsm115.proto").is_file());
+        let robot_proto = std::fs::read_to_string(protos_dir.join("Testbot.proto"))?;
+        assert!(robot_proto.contains("components/Ddsm115.proto"));
+        let staged_world = std::fs::read_to_string(staged.staged_world_path)?;
+        assert!(staged_world.contains("../protos/Testbot.proto"));
         Ok(())
     }
 }

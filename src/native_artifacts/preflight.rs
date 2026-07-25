@@ -119,7 +119,7 @@ pub fn prepare_descriptors_with_preflight(
 /// Strictly validate that every artifact `descriptors` requires is already
 /// vendored and digest-current in the project-local `.phoxal/artifacts` store,
 /// without touching the network (#936, finding 1). This replaces the download
-/// preflight on the `run`/`start`/`build`/`watch` execution paths: those paths
+/// preflight on the `run`/`start`/`build` execution paths: those paths
 /// never fetch, so a missing or stale artifact is a hard, actionable error that
 /// names what is absent and points at `phoxal update`, rather than a silent
 /// download. Descriptors with no URL (source overrides, asset-only entries) are

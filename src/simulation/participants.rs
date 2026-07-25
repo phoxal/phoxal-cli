@@ -10,10 +10,6 @@ use anyhow::bail;
 use phoxal::check as graph_check;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::project::launch_plan::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
-use phoxal_cli_core::project::launch_plan::SIMULATOR_SUPERVISOR_ARTIFACT_NAME;
-use phoxal_cli_core::project::launch_plan::SIMULATOR_SUPERVISOR_PROVIDER_ID;
-use phoxal_cli_core::project::launch_plan::SubstitutedContract;
-use phoxal_cli_core::project::launch_plan::SubstitutionRecord;
 use phoxal_cli_core::project::launch_plan::simulator_controller_provider_id;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::suite::Suite;
@@ -29,11 +25,9 @@ pub(crate) fn official_simulator_participants(
     let robot_id = resolved.robot.robot.id.as_str();
     let mut participants = Vec::new();
     let mut surfaces = Vec::new();
-    for runtime in resolved
-        .simulators
-        .iter()
-        .filter(|runtime| runtime.source_path().is_none())
-    {
+    for runtime in resolved.simulators.iter().filter(|runtime| {
+        runtime.source_path().is_none() && runtime.name == SIMULATOR_CONTROLLER_ARTIFACT_NAME
+    }) {
         let raw = extract_emit_apis_from_staged_runtime(runtime).with_context(|| {
             format!(
                 "failed to synthesize suite emit-apis for simulator {}",
@@ -59,9 +53,8 @@ pub(crate) fn official_simulator_participants(
             simulator_participant_id_for_resolved_artifact(&runtime.name, robot_id).ok_or_else(
                 || {
                     anyhow!(
-                        "unrecognized simulator artifact name '{}'; expected '{}' or '{}'",
+                        "unrecognized simulator artifact name '{}'; expected '{}'",
                         runtime.name,
-                        SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
                         SIMULATOR_CONTROLLER_ARTIFACT_NAME
                     )
                 },
@@ -109,9 +102,8 @@ pub(crate) fn remap_simulator_participant_ids(
             simulator_participant_id_for_resolved_artifact(&participant.artifact_id, robot_id)
                 .ok_or_else(|| {
                     anyhow!(
-                        "unrecognized simulator artifact name '{}'; expected '{}' or '{}'",
+                        "unrecognized simulator artifact name '{}'; expected '{}'",
                         participant.artifact_id,
-                        SIMULATOR_SUPERVISOR_ARTIFACT_NAME,
                         SIMULATOR_CONTROLLER_ARTIFACT_NAME
                     )
                 })?;
@@ -119,20 +111,13 @@ pub(crate) fn remap_simulator_participant_ids(
     Ok(())
 }
 
-/// Map a resolved simulator artifact name (`ResolvedPlatformRuntime::name`,
-/// e.g. `"webots-supervisor"` / `"webots-controller"`) to its participant id:
-/// the supervisor gets the stable world-scoped id, the controller gets the
-/// robot-scoped substitution-provider id. `None` for any other simulator
-/// artifact name - callers decide whether that is a hard error (constructing
-/// the participant) or simply "not one of the two known roles" (computing the
-/// expected id set for parity checks).
+/// Map the resolved Webots controller artifact to its compile-time graph id.
+/// This identity never becomes a resident launch-plan or board row.
 pub(crate) fn simulator_participant_id_for_resolved_artifact(
     artifact_name: &str,
     robot_id: &str,
 ) -> Option<String> {
-    if artifact_name == SIMULATOR_SUPERVISOR_ARTIFACT_NAME {
-        Some(SIMULATOR_SUPERVISOR_PROVIDER_ID.to_string())
-    } else if artifact_name == SIMULATOR_CONTROLLER_ARTIFACT_NAME {
+    if artifact_name == SIMULATOR_CONTROLLER_ARTIFACT_NAME {
         Some(simulator_controller_provider_id(robot_id))
     } else {
         None
@@ -142,9 +127,8 @@ pub(crate) fn simulator_participant_id_for_resolved_artifact(
 /// Simulate's source participants: identical to
 /// `source_participants_from_resolved` (a Suite-sourced driver is never a
 /// source participant - see `component_driver_platform_refs_from_resolved`),
-/// sorted for stable dry-run/watch-target output. `suite` is accepted for
-/// signature symmetry with the other `sim_*` helpers but no longer consulted
-/// here now that suite drivers route entirely through the platform-ref path.
+/// sorted for deterministic checking and staging. `suite` is accepted for
+/// signature symmetry with the other `sim_*` helpers but no longer consulted.
 pub(crate) fn sim_source_participants(
     project_root: &Path,
     resolved: &ResolvedRobot,
@@ -152,12 +136,9 @@ pub(crate) fn sim_source_participants(
 ) -> Result<Vec<SourceParticipant>> {
     let mut participants =
         source_participants_from_resolved(project_root, resolved, component_driver_crate_dir)?;
-    // The legacy simulation leg does not launch user tools: its plan builder
-    // predates the declaration model, and its layout swap (#931) brings the
-    // user-tool producer with it. Filtering here keeps sim from building and
-    // then silently never launching a declared tool (#950).
     participants.retain(|participant| {
-        participant.kind != phoxal_cli_core::check::source::SourceParticipantKind::UserTool
+        participant.kind != phoxal_cli_core::check::source::SourceParticipantKind::Simulator
+            || participant.expected_artifact_id == SIMULATOR_CONTROLLER_ARTIFACT_NAME
     });
     participants.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(participants)
@@ -172,58 +153,6 @@ pub(crate) fn driver_metadata_unavailable(
         participant.expected_artifact_id,
         participant.name
     )
-}
-
-/// Board display only: which component-driver participants sim dropped from
-/// the checked set (see `sim_checked_participants`) are instead "simulated by"
-/// the Webots controller. This is not a checked fact - `phoxal::check` (0.28+)
-/// no longer has a substitution concept, materializes nothing, and exposes no
-/// way to recover a materialized topic from a report - it is purely the CLI's
-/// own record of a caller-side plan choice, so it can render "component X
-/// simulated by webots-controller" on the sim board and dry-run output.
-///
-/// A driver's own contract report carries only `family` per contract now (no
-/// `schema_id`/`topic`/`direction`, D1), so there is nothing left to
-/// materialize per instance here - the record just carries the family for
-/// display.
-pub(crate) fn simulated_component_records(
-    participants: &[graph_check::ParticipantApis],
-    provider_participant_id: &str,
-) -> Vec<SubstitutionRecord> {
-    let mut records = participants
-        .iter()
-        .filter(|participant| {
-            participant.participant_class.is_checked()
-                && participant.participant_kind == graph_check::ParticipantKind::Driver
-        })
-        .filter_map(|participant| match &participant.scope {
-            graph_check::ParticipantScope::ComponentInstance(instance) => {
-                Some(SubstitutionRecord {
-                    component_instance: instance.clone(),
-                    provider_participant_id: provider_participant_id.to_string(),
-                    provider_artifact_id: SIMULATOR_CONTROLLER_ARTIFACT_NAME.to_string(),
-                    provider_kind: "simulator".to_string(),
-                    contracts: participant
-                        .contracts
-                        .iter()
-                        .map(|contract| SubstitutedContract {
-                            family: contract.family.clone(),
-                        })
-                        .collect(),
-                })
-            }
-            graph_check::ParticipantScope::Graph => None,
-        })
-        .collect::<Vec<_>>();
-    records.sort_by(|left, right| {
-        left.component_instance
-            .cmp(&right.component_instance)
-            .then_with(|| {
-                left.provider_participant_id
-                    .cmp(&right.provider_participant_id)
-            })
-    });
-    records
 }
 
 pub(crate) fn sim_checked_participants(

@@ -2,7 +2,7 @@
 //! deterministic `build.phoxal` (#936).
 //!
 //! `build` refreshes staging exactly as `run` would - through the one shared
-//! [`refresh_staging`](crate::run::refresh_staging) entry - but for the selected
+//! `refresh_staging` entry - but for the selected
 //! target rather than the host, validates the staged layout through the shared
 //! loader (against the declared target architecture, no execution), and archives
 //! the staged layout deterministically. The bundle matches the staged layout
@@ -404,7 +404,6 @@ impl Build {
             drivers: crate::run::DriversMode::On,
             drivers_subset: Vec::new(),
             suite_source: app.suite_source.clone(),
-            watch: false,
         };
         // A shippable bundle contains everything, so staging validates against
         // the full driver set (DriverSelection::All), never a `--drivers`

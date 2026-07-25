@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-/// Resolve `--world <name>` against the robot project only: either
-/// `<project>/worlds/<name>.wbt`, or `world_arg` itself as a project-relative
-/// path. There is no host-wide `~/.phoxal/worlds/` fallback - a world file is
-/// project content, not a shared host resource.
+/// Resolve `--world <name>` as either `<project>/worlds/<name>.wbt` or the
+/// supplied path. Relative paths are anchored at the robot project; absolute
+/// paths and explicit `..` traversal are accepted by design so a source
+/// project can use an authored world outside its own directory. There is no
+/// implicit host-wide `~/.phoxal/worlds/` fallback.
 pub fn resolve_world(project_root: &Path, world_arg: &str) -> Result<PathBuf> {
     let candidates = [
         project_root.join("worlds").join(format!("{world_arg}.wbt")),
@@ -19,7 +20,7 @@ pub fn resolve_world(project_root: &Path, world_arg: &str) -> Result<PathBuf> {
         }
     }
     bail!(
-        "failed to resolve world '{world_arg}'; tried:\n{}\n{}\nplace a .wbt file at one of these project-relative paths",
+        "failed to resolve world '{world_arg}'; tried:\n{}\n{}\nplace a .wbt file at one of these paths",
         candidates[0].display(),
         candidates[1].display()
     )
@@ -50,6 +51,24 @@ mod tests {
         fs::write(&world, "#VRML_SIM R2025a utf8\n")?;
 
         assert_eq!(resolve_world(project.path(), "worlds/foo.wbt")?, world);
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_an_explicit_world_outside_the_project() -> anyhow::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let project = parent.path().join("robot");
+        fs::create_dir_all(&project)?;
+        let world = parent.path().join("shared.wbt");
+        fs::write(&world, "#VRML_SIM R2025a utf8\n")?;
+        assert_eq!(
+            resolve_world(&project, "../shared.wbt")?.canonicalize()?,
+            world.canonicalize()?
+        );
+        assert_eq!(
+            resolve_world(&project, world.to_str().expect("utf8 path"))?,
+            world
+        );
         Ok(())
     }
 

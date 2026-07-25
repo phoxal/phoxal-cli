@@ -8,8 +8,8 @@
 //!
 //! Uses a process-global cell for the session's event sender. [`install`] is
 //! called once by
-//! [`super::controller::SessionController::new`] for the lifetime of one
-//! `run`/`simulation run` session; [`uninstall`] restores direct stderr
+//! [`super::controller::SessionController::new_attachment`] for the lifetime of one
+//! `run`/`simulation webots run` session; [`uninstall`] restores direct stderr
 //! writing on teardown. Every OTHER verb (and any code running before a
 //! session starts) never calls [`install`], so [`SessionWriter`] simply
 //! forwards to the real stderr - this module changes nothing for a caller
@@ -38,12 +38,18 @@ use phoxal_cli_core::session::event::{
 
 struct ActiveSession {
     sender: mpsc::Sender<SessionEvent>,
-    children: Vec<Arc<Mutex<Option<Child>>>>,
 }
+
+type CapturedChild = Arc<Mutex<Option<Child>>>;
 
 fn sender_cell() -> &'static Mutex<Option<ActiveSession>> {
     static CELL: OnceLock<Mutex<Option<ActiveSession>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn child_cell() -> &'static Mutex<Vec<CapturedChild>> {
+    static CELL: OnceLock<Mutex<Vec<CapturedChild>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 /// Start routing the CLI's own tracing output through `events` instead of
@@ -51,10 +57,8 @@ fn sender_cell() -> &'static Mutex<Option<ActiveSession>> {
 pub fn install(events: mpsc::Sender<SessionEvent>) {
     *sender_cell()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ActiveSession {
-        sender: events,
-        children: Vec::new(),
-    });
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(ActiveSession { sender: events });
 }
 
 /// Stop routing to a session channel; every subsequent tracing line writes
@@ -108,38 +112,29 @@ pub(crate) fn try_route(
 
 /// Register a captured child owned by the active session. The controller
 /// stops these before waiting on cancelled preparation/setup work.
-pub(crate) fn register_child(child: Arc<Mutex<Option<Child>>>) {
-    if let Some(session) = sender_cell()
+pub(crate) fn register_child(child: CapturedChild) {
+    child_cell()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_mut()
-    {
-        session.children.push(child);
-    }
+        .push(child);
 }
 
 /// Stop tracking a child once its owner has reaped it.
-pub(crate) fn unregister_child(child: &Arc<Mutex<Option<Child>>>) {
-    if let Some(session) = sender_cell()
+pub(crate) fn unregister_child(child: &CapturedChild) {
+    child_cell()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_mut()
-    {
-        session
-            .children
-            .retain(|tracked| !Arc::ptr_eq(tracked, child));
-    }
+        .retain(|tracked| !Arc::ptr_eq(tracked, child));
 }
 
-/// Best-effort immediate stop for every captured child owned by the active
-/// session. A child may already have completed, so kill errors are harmless.
+/// Best-effort immediate stop for every captured build child. Captured
+/// commands are process-group leaders, so cancellation reaches cargo and its
+/// compiler/linker descendants.
 pub(crate) fn kill_active_children() {
-    let children = sender_cell()
+    let children = child_cell()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .map(|session| session.children.clone())
-        .unwrap_or_default();
+        .clone();
     for child in children {
         let mut child = child
             .lock()
@@ -149,9 +144,8 @@ pub(crate) fn kill_active_children() {
         };
         #[cfg(unix)]
         if let Ok(group) = i32::try_from(child.id()) {
-            // Captured build commands are process-group leaders (see
-            // `Ui::command_status_captured`), so cancellation reaches rustc,
-            // linkers, and any other descendants as well as cargo itself.
+            // SAFETY: the captured command created this process group in
+            // `Ui::command_status_captured`.
             let _ = unsafe { libc::kill(-group, libc::SIGKILL) };
         }
         #[cfg(not(unix))]
@@ -250,7 +244,7 @@ pub(crate) fn run_phase<T>(
 
 /// The [`MakeWriter`] installed on the process-wide `tracing_subscriber::fmt`
 /// layer in `main`. Stable for the process's whole lifetime - which session
-/// (if any) is currently listening is decided per-write by [`current_sender`],
+/// (if any) is currently listening is decided per-write by `current_sender`,
 /// not by rebuilding the subscriber.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SessionAwareWriter;

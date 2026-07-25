@@ -512,7 +512,6 @@ pub(crate) fn apply_session_connect(
 mod recovery_tests {
     use super::*;
     use crate::session::output::WaitBudget;
-    use crate::supervisor::{ParticipantState, ParticipantStatus};
     use phoxal_cli_core::session::ParticipantKind;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -709,28 +708,17 @@ mod recovery_tests {
     }
 
     #[tokio::test]
-    async fn router_death_preserves_pinned_endpoint_with_an_extra_listener() -> Result<()> {
+    async fn router_death_recreates_cli_managed_webots_with_the_pinned_endpoint() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let router_binary = write_fake_router(temp.path(), 1, true)?;
         let webots_binary = write_fake_webots(temp.path())?;
         let router = start_fake_router(router_binary).await?;
         let board = BoardBackend::new();
-        let controller_id = "simulator-webots-controller-robot";
-        let mut controller = ParticipantStatus::new(
-            controller_id,
-            ParticipantKind::Simulator,
-            ParticipantState::Starting,
-        );
-        controller.note = Some("SimulationManaged: launched by Webots".to_string());
-        board.upsert(controller);
-        let stages = vec![
-            SupervisionStage::new(
-                "starting Webots",
-                vec![webots_spec(webots_binary)],
-                WaitBudget::Bounded(Duration::from_secs(5)),
-            )
-            .with_extra_ready_ids([phoxal_cli_core::session::ProcessKey::project(controller_id)]),
-        ];
+        let stages = vec![SupervisionStage::new(
+            "starting Webots",
+            vec![webots_spec(webots_binary)],
+            WaitBudget::Bounded(Duration::from_secs(5)),
+        )];
         let token = tokio_util::sync::CancellationToken::new();
         let supervision = tokio::spawn(router.supervise(
             stages,
@@ -788,12 +776,6 @@ mod recovery_tests {
                     .starts_with(&format!("--local-endpoint {TEST_LISTENER} --ready-fd "))),
             "replacement router must receive the original listener: {args:?}"
         );
-        assert_eq!(
-            board.snapshot().participants[controller_id].note.as_deref(),
-            Some("SimulationManaged: launched by Webots"),
-            "the CLI must retain, but never spawn, the Webots-owned controller row"
-        );
-
         token.cancel();
         let outcome = tokio::time::timeout(Duration::from_secs(5), supervision)
             .await

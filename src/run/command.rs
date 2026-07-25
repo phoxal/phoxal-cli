@@ -23,11 +23,16 @@ use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::PlanContext;
 use phoxal_cli_core::project::layout::RuntimeLayout;
 use phoxal_cli_core::project::train::resolve_locked_train;
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+const PREPARATION_CANCEL_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(25)
+} else {
+    Duration::from_secs(5)
+};
 
 #[derive(Debug, Args)]
 pub struct Run {
@@ -52,11 +57,6 @@ pub struct Run {
         help = "Driver launch policy."
     )]
     pub drivers: DriversMode,
-    #[arg(
-        long,
-        help = "Watch local source artifacts and hot-reload checked changes."
-    )]
-    pub watch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -70,7 +70,6 @@ pub struct RunOptions {
     pub drivers: DriversMode,
     pub drivers_subset: Vec<String>,
     pub suite_source: Option<String>,
-    pub watch: bool,
 }
 
 #[derive(Debug)]
@@ -132,23 +131,12 @@ impl Run {
             drivers: self.drivers,
             drivers_subset: self.drivers_subset.clone(),
             suite_source: app.suite_source.clone(),
-            watch: self.watch,
         };
         if options.drivers == DriversMode::Off && !options.drivers_subset.is_empty() {
             bail!("--driver cannot be combined with --drivers off");
         }
         let target =
             crate::commands::resident::resolve_target(self.target.as_deref(), app.project.root())?;
-        // `--watch` is a source-only dev loop: a staged runtime layout (an
-        // extracted bundle or a `.phoxal/build/<triple>/` directory) has no
-        // source to rebuild. Reject it early with the cheap layout-shape check,
-        // before the resident spins up (#936).
-        if self.watch && is_layout_only_root(&target.project) {
-            bail!(
-                "`--watch` requires a buildable source project; {} is a staged runtime layout with no source to rebuild",
-                target.project.display()
-            );
-        }
         // SAFETY: command dispatch has not started worker threads for this run
         // yet; all project-local path helpers must agree on the selected root.
         unsafe {
@@ -162,14 +150,13 @@ impl Run {
             // `run` never owns the systemd notify socket; that is `start`'s job.
             return run_resident_supervision(app, target.project, options, None).await;
         }
-        self.launch_client(app, target, options).await
+        self.launch_client(app, target).await
     }
 
     async fn launch_client(
         &self,
         app: &AppContext,
         target: crate::commands::resident::ProjectTarget,
-        _options: RunOptions,
     ) -> Result<()> {
         let (mut launched, client) = connect_to_detached_resident(&target.project).await?;
         if self.detach {
@@ -229,8 +216,30 @@ pub(crate) async fn run_resident_supervision(
     options: RunOptions,
     notify: Option<crate::sd_notify::SdNotify>,
 ) -> Result<()> {
+    run_resident_supervision_mode(app, project_root, ResidentMode::Run(options), notify).await
+}
+
+pub(crate) async fn run_webots_resident_supervision(
+    app: &AppContext,
+    project_root: PathBuf,
+    options: crate::simulation::SimulateOptions,
+) -> Result<()> {
+    run_resident_supervision_mode(app, project_root, ResidentMode::Webots(options), None).await
+}
+
+enum ResidentMode {
+    Run(RunOptions),
+    Webots(crate::simulation::SimulateOptions),
+}
+
+async fn run_resident_supervision_mode(
+    app: &AppContext,
+    project_root: PathBuf,
+    mode: ResidentMode,
+    notify: Option<crate::sd_notify::SdNotify>,
+) -> Result<()> {
     let nonce = crate::resident::private_bootstrap_nonce()?;
-    match resident_supervision_inner(app, project_root, options, nonce.clone(), notify).await {
+    match resident_supervision_inner(app, project_root, mode, nonce.clone(), notify).await {
         Ok(()) => Ok(()),
         Err(error) => {
             if nonce.is_some() {
@@ -248,15 +257,22 @@ pub(crate) async fn run_resident_supervision(
 async fn resident_supervision_inner(
     app: &AppContext,
     project_root: PathBuf,
-    options: RunOptions,
+    mode: ResidentMode,
     launch_nonce: Option<phoxal_cli_core::session::LaunchNonce>,
     notify: Option<crate::sd_notify::SdNotify>,
 ) -> Result<()> {
     let identity = ProjectLockIdentity::resolve(&project_root, ProjectOperation::Run);
     let _lock = ProjectLock::acquire(identity)?;
-    let execution_root = crate::runtime_paths::pin_installed_release(&project_root)?;
+    let execution_root = match &mode {
+        ResidentMode::Run(_) => crate::runtime_paths::pin_installed_release(&project_root)?,
+        ResidentMode::Webots(_) => project_root.clone(),
+    };
     let board = BoardBackend::new();
-    board.configure(project_root.display().to_string(), "resolving", "run");
+    let execution = match &mode {
+        ResidentMode::Run(_) => "run",
+        ResidentMode::Webots(_) => "simulation:webots",
+    };
+    board.configure(project_root.display().to_string(), "resolving", execution);
     board.begin_phase("prepare");
     let token = tokio_util::sync::CancellationToken::new();
     let (action_tx, action_rx) = mpsc::channel(16);
@@ -275,50 +291,108 @@ async fn resident_supervision_inner(
         )?;
     }
 
-    let prepare_root = execution_root;
-    let ui = app.ui;
+    let (events, events_rx) = mpsc::channel(16);
+    let event_drain = tokio::spawn(drain_session_events(events_rx));
     let prepare_board = board.clone();
-    let prepare_options = options.clone();
-    let prepared = match tokio::task::spawn_blocking(move || {
-        prepare_run(&prepare_root, prepare_options, &ui, prepare_board)
-    })
-    .await?
-    {
+    let prepare_token = token.clone();
+    let prepare_ui = app.ui;
+    let prepare_output = app.output;
+    let mut preparation = tokio::spawn(async move {
+        match mode {
+            ResidentMode::Run(options) => {
+                let prepare_root = execution_root;
+                let prepare_options = options.clone();
+                let blocking_board = prepare_board.clone();
+                let prepared = tokio::task::spawn_blocking(move || {
+                    prepare_run(&prepare_root, prepare_options, &prepare_ui, blocking_board)
+                })
+                .await??;
+                prepare_board.complete_phase("prepare");
+                live_run_setup(
+                    prepared,
+                    prepare_ui,
+                    prepare_output,
+                    prepare_token,
+                    events,
+                    Some((action_tx, action_rx)),
+                )
+                .await
+                .map(|setup| ResidentSetup {
+                    router: setup.router,
+                    board: setup.board,
+                    stages: setup.stages,
+                    supervisor_options: setup.supervisor_options,
+                    background_tasks: setup.background_tasks,
+                })
+            }
+            ResidentMode::Webots(options) => {
+                let prepare_root = execution_root;
+                let sim = tokio::task::spawn_blocking(move || {
+                    crate::simulation::prepare(&prepare_root, options)
+                })
+                .await??;
+                prepare_board.complete_phase("prepare");
+                crate::simulation::live_simulate_setup(
+                    prepare_ui,
+                    sim,
+                    prepare_board,
+                    events,
+                    prepare_token,
+                    prepare_output,
+                    Some((action_tx, action_rx)),
+                )
+                .await
+                .map(|setup| ResidentSetup {
+                    router: setup.router,
+                    board: setup.board,
+                    stages: setup.stages,
+                    supervisor_options: setup.supervisor_options,
+                    background_tasks: setup.background_tasks,
+                })
+            }
+        }
+    });
+    let signal_token = token.clone();
+    let signal_task = tokio::spawn(async move {
+        if let Err(error) = resident_shutdown_signal().await {
+            tracing::warn!("resident preparation signal watcher failed: {error:#}");
+        }
+        signal_token.cancel();
+    });
+    let prepared_result = tokio::select! {
+        result = &mut preparation => Some(result?),
+        () = token.cancelled() => None,
+    };
+    signal_task.abort();
+    let Some(prepared_result) = prepared_result else {
+        finish_cancelled_preparation(&board, &mut preparation, true).await;
+        event_drain.abort();
+        socket.close().await;
+        return Ok(());
+    };
+    let prepared = match prepared_result {
         Ok(prepared) => prepared,
         Err(error) => {
+            if token.is_cancelled() {
+                board.set_lifecycle(phoxal_cli_core::session::ProjectLifecycle::Stopped);
+                event_drain.abort();
+                socket.close().await;
+                return Ok(());
+            }
             board.set_lifecycle(phoxal_cli_core::session::ProjectLifecycle::Failed);
+            event_drain.abort();
             socket.close().await;
             return Err(error);
         }
     };
-    board.complete_phase("prepare");
-    let (events, _events_rx) = mpsc::channel(16);
-    let setup = match live_run_setup(
-        prepared,
-        app.ui,
-        options.watch,
-        options,
-        app.output,
-        token.clone(),
-        events,
-        Some((action_tx, action_rx)),
-    )
-    .await
-    {
-        Ok(setup) => setup,
-        Err(error) => {
-            board.set_lifecycle(phoxal_cli_core::session::ProjectLifecycle::Failed);
-            socket.close().await;
-            return Err(error);
-        }
-    };
-    let LiveRunSetup {
+    let ResidentSetup {
         router,
         board,
         stages,
         supervisor_options,
         mut background_tasks,
-    } = setup;
+    } = prepared;
+    background_tasks.push(event_drain);
     // Under systemd the foreground resident owns readiness/watchdog signalling:
     // once the supervised graph reaches required readiness send `READY=1`, then
     // ping `WATCHDOG=1` on a timer. The task is a background task, so it is
@@ -344,6 +418,38 @@ async fn resident_supervision_inner(
     drop(background_tasks);
     socket.close().await;
     outcome.map(|_| ())
+}
+
+async fn drain_session_events(
+    mut events: mpsc::Receiver<phoxal_cli_core::session::event::SessionEvent>,
+) {
+    while events.recv().await.is_some() {}
+}
+
+async fn finish_cancelled_preparation<T>(
+    board: &BoardBackend,
+    preparation: &mut tokio::task::JoinHandle<T>,
+    terminate_children: bool,
+) {
+    if terminate_children {
+        crate::session::diagnostics::kill_active_children();
+    }
+    if tokio::time::timeout(PREPARATION_CANCEL_TIMEOUT, &mut *preparation)
+        .await
+        .is_err()
+    {
+        preparation.abort();
+        let _ = preparation.await;
+    }
+    board.set_lifecycle(phoxal_cli_core::session::ProjectLifecycle::Stopped);
+}
+
+struct ResidentSetup {
+    router: InfrastructureRouter,
+    board: BoardBackend,
+    stages: Vec<SupervisionStage>,
+    supervisor_options: SupervisorOptions,
+    background_tasks: AbortTasks,
 }
 
 /// Wait for the supervised graph to reach required readiness on the board, send
@@ -423,14 +529,8 @@ fn classify_run_root(root: &Path) -> Result<RunRoot> {
     )
 }
 
-/// The cheap layout-shape check used before the resident starts: a `robot.yaml`
-/// next to a `bin/` store with no Cargo train anchor is a staged runtime layout
-/// (an extracted bundle or a `.phoxal/build/<triple>/` directory), not a source
-/// project. Avoids the `cargo metadata` call [`classify_run_root`] makes.
-fn is_layout_only_root(root: &Path) -> bool {
-    RuntimeLayout::is_layout_root(root) && !root.join("Cargo.toml").is_file()
-}
-
+/// Keep private/headless residents in process; interactive foreground clients
+/// launch a detached resident and attach to its socket.
 const fn should_run_resident_in_process(
     interactive: bool,
     detach: bool,
@@ -534,8 +634,6 @@ pub(crate) async fn wait_for_required_readiness(
 pub(crate) async fn live_run_setup(
     mut prepared: PreparedRun,
     ui: crate::Ui,
-    watch_enabled: bool,
-    watch_options: RunOptions,
     output: crate::session::output::OutputContext,
     token: tokio_util::sync::CancellationToken,
     events: mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>,
@@ -595,23 +693,7 @@ pub(crate) async fn live_run_setup(
         )
     }));
 
-    let (action_tx, action_rx) = action_channel.unwrap_or_else(|| mpsc::channel(16));
-    if watch_enabled {
-        let live_ids = prepared
-            .specs
-            .iter()
-            .map(|spec| spec.id.clone())
-            .collect::<BTreeSet<_>>();
-        background_tasks.push(crate::watch::spawn_run_watch(
-            crate::watch::RunWatchConfig {
-                ctx: prepared.ctx.clone(),
-                options: watch_options,
-                live_ids,
-                board: prepared.board.clone(),
-                action_tx: action_tx.clone(),
-            },
-        ));
-    }
+    let (_action_tx, action_rx) = action_channel.unwrap_or_else(|| mpsc::channel(16));
 
     let stages = stages_for_run(prepared.specs, output);
     let starting = phoxal_cli_core::session::state::SessionState::Preparing
@@ -719,7 +801,7 @@ mod readiness_tests {
 
 #[cfg(test)]
 mod run_root_tests {
-    use super::{RunRoot, classify_run_root, is_layout_only_root};
+    use super::{RunRoot, classify_run_root};
     use std::fs;
 
     /// A staged runtime layout: `robot.yaml` next to a `bin/` store, no Cargo
@@ -727,24 +809,6 @@ mod run_root_tests {
     fn write_layout(root: &std::path::Path) {
         fs::write(root.join("robot.yaml"), "schema: robot/v0\n").unwrap();
         fs::create_dir_all(root.join("bin")).unwrap();
-    }
-
-    #[test]
-    fn layout_only_root_is_recognized_without_a_cargo_call() {
-        let layout = tempfile::tempdir().unwrap();
-        write_layout(layout.path());
-        assert!(is_layout_only_root(layout.path()));
-
-        // A source project also carrying a stray root `bin/` is not a layout
-        // root: its Cargo train anchor makes it buildable source.
-        let source = tempfile::tempdir().unwrap();
-        write_layout(source.path());
-        fs::write(source.path().join("Cargo.toml"), "[workspace]\n").unwrap();
-        assert!(!is_layout_only_root(source.path()));
-
-        // A bare directory is neither.
-        let bare = tempfile::tempdir().unwrap();
-        assert!(!is_layout_only_root(bare.path()));
     }
 
     #[test]
@@ -765,5 +829,48 @@ mod run_root_tests {
                 && error.contains("staged runtime layout"),
             "{error}"
         );
+    }
+}
+
+#[cfg(test)]
+mod preparation_cancellation_tests {
+    use super::{BoardBackend, drain_session_events, finish_cancelled_preparation};
+    use phoxal_cli_core::session::ProjectLifecycle;
+    use phoxal_cli_core::session::event::{DiagnosticLevel, DiagnosticSource, SessionEvent};
+
+    #[tokio::test]
+    async fn cancellation_during_preparation_finishes_stopped_not_failed() {
+        let board = BoardBackend::new();
+        board.set_lifecycle(ProjectLifecycle::Starting);
+        let mut preparation = tokio::spawn(std::future::pending::<()>());
+        // Other unit tests may be building fixtures concurrently in this
+        // process. The production call passes `true`; this lifecycle-only test
+        // avoids killing unrelated test-owned cargo process groups.
+        finish_cancelled_preparation(&board, &mut preparation, false).await;
+        assert_eq!(
+            board.supervisor_snapshot().lifecycle,
+            ProjectLifecycle::Stopped
+        );
+    }
+
+    #[tokio::test]
+    async fn unrendered_resident_events_are_continuously_drained() {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let drain = tokio::spawn(drain_session_events(rx));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            for index in 0..64 {
+                tx.send(SessionEvent::Diagnostic {
+                    source: DiagnosticSource::Cli,
+                    level: DiagnosticLevel::Info,
+                    message: index.to_string(),
+                })
+                .await
+                .expect("drain stays open");
+            }
+        })
+        .await
+        .expect("event producer must not wedge after channel capacity");
+        drop(tx);
+        drain.await.expect("drain task");
     }
 }

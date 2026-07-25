@@ -112,8 +112,8 @@ impl Default for RestartPolicy {
 /// Finding A7/C2: this struct deliberately carries no UI/telemetry handle.
 /// Live telemetry (host/process/router/joypad feeds) is owned by the caller
 /// and passed directly to
-/// `session::controller::SessionController::drive_supervision`, and this
-/// loop never reads it - so an earlier `telemetry: TelemetryBackend` field
+/// the resident supervisor, and this loop never reads it - so an earlier
+/// `telemetry: TelemetryBackend` field
 /// here was dead weight, not a real dependency.
 #[derive(Debug, Clone)]
 pub struct SupervisorOptions {
@@ -171,12 +171,6 @@ impl RequestedStop {
 
 #[derive(Debug)]
 pub enum SupervisorAction {
-    ReconcilePlan {
-        revision: phoxal_cli_core::project::launch_plan::PlanRevision,
-        specs: Vec<ParticipantSpec>,
-        remove_ids: Vec<String>,
-        note: String,
-    },
     /// Stop and respawn a participant from its own current spec, unchanged -
     /// the TUI's `r restart` (see `crate::display::DisplayAction::Restart`).
     /// Handled the same way as `Swap` with the participant's own spec cloned

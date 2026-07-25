@@ -41,12 +41,6 @@ pub fn webots_dir() -> Result<PathBuf> {
     project_state_dir().map(|root| root.join("webots"))
 }
 
-pub fn simulator_lock_path() -> Result<PathBuf> {
-    dirs::home_dir()
-        .context("$HOME is not set; cannot locate the simulator lock")
-        .map(|home| home.join(".phoxal").join("simulator.lock"))
-}
-
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::ffi::OsString;

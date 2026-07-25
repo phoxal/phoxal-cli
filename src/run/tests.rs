@@ -13,7 +13,7 @@ use phoxal::participant::launch::{
     BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
 };
 use phoxal_cli_core::project::launch_plan::{
-    LaunchMode, LaunchOwnership, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
+    LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
 };
 use phoxal_cli_core::session::{ParticipantKind, RuntimeFailurePolicy, StartupRequirement};
 use std::path::PathBuf;
@@ -71,7 +71,6 @@ fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRe
             execution_device_id: None,
             shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
         },
-        launch_ownership: LaunchOwnership::CliManaged,
         startup_requirement: StartupRequirement::Required,
         runtime_failure: RuntimeFailurePolicy::StopProject,
     }
@@ -113,7 +112,6 @@ fn driver_subset_is_strict() -> Result<()> {
             drivers: DriversMode::On,
             drivers_subset: vec!["imu".to_string()],
             suite_source: None,
-            watch: false,
         },
         &available,
     )?;
@@ -133,7 +131,6 @@ fn driver_subset_is_strict() -> Result<()> {
             drivers: DriversMode::On,
             drivers_subset: vec!["missing".to_string()],
             suite_source: None,
-            watch: false,
         },
         &available,
     )
@@ -152,7 +149,6 @@ fn drivers_off_selects_no_drivers() -> Result<()> {
             drivers: DriversMode::Off,
             drivers_subset: Vec::new(),
             suite_source: None,
-            watch: false,
         },
         &available_drivers(&["imu"]),
     )?;
@@ -180,7 +176,6 @@ fn excluded_drivers_are_summarized_with_reasons() -> Result<()> {
             drivers: DriversMode::Off,
             drivers_subset: Vec::new(),
             suite_source: None,
-            watch: false,
         },
         &available,
     )?;
@@ -200,7 +195,6 @@ fn excluded_drivers_are_summarized_with_reasons() -> Result<()> {
             drivers: DriversMode::On,
             drivers_subset: vec!["imu".to_string()],
             suite_source: None,
-            watch: false,
         },
         &available,
     )?;
@@ -226,7 +220,6 @@ fn excluded_drivers_are_summarized_with_reasons() -> Result<()> {
             drivers: DriversMode::On,
             drivers_subset: Vec::new(),
             suite_source: None,
-            watch: false,
         },
         &available,
     )?;

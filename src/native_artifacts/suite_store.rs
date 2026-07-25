@@ -1,6 +1,6 @@
 //! Vendored suite persistence for the strictly-offline execution path (#936).
 //!
-//! `run`, `start`, `build`, and `watch` never touch the network: they resolve
+//! `run`, `start`, and `build` never touch the network: they resolve
 //! the robot graph against the artifact suite `phoxal update` already fetched and
 //! persisted into the project-local `.phoxal/artifacts` store, alongside the
 //! artifact blobs it vendored. `phoxal update` is the only code path that fetches

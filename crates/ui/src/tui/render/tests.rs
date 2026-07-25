@@ -25,6 +25,8 @@ fn title() -> TitleInfo {
         manifest: "./robot.yaml".to_string(),
         mode: SessionMode::Run,
         bus_endpoint: "tcp/localhost:7447".to_string(),
+        simulation_profile: None,
+        simulation_world: None,
         started_at: UNIX_EPOCH,
         started_instant: Instant::now(),
     }
@@ -251,6 +253,32 @@ fn help_renders_product_and_issue_links() {
     state.show_info = true;
     let compact = render_model(&title(), &state, &model, 44, 18);
     assert!(compact.contains("start time"), "{compact}");
+}
+
+#[test]
+fn webots_session_information_contains_only_profile_world_and_process_state() {
+    let telemetry = TelemetrySnapshot::default();
+    let board = BoardSnapshot::default();
+    let logs = LogStore::new();
+    let runtime = RuntimeStore::new();
+    let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
+    let mut state = AppState::default();
+    state.show_info = true;
+    let mut simulation_title = title();
+    simulation_title.mode = SessionMode::Simulation;
+    simulation_title.simulation_profile = Some("webots".to_string());
+    simulation_title.simulation_world = Some("worlds/default.wbt".to_string());
+
+    let rendered = render_model(&simulation_title, &state, &model, 80, 24);
+    assert!(rendered.contains("simulation       webots"), "{rendered}");
+    assert!(
+        rendered.contains("world            worlds/default.wbt"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Webots process   not started"),
+        "{rendered}"
+    );
 }
 
 #[test]

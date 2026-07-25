@@ -12,7 +12,7 @@ pub struct AppContext {
     pub project: Project,
     pub suite_source: Option<String>,
     pub offline: bool,
-    /// The output contract for `run`/`simulation run`'s `SessionController`.
+    /// The output contract for `run`/`simulation webots run`'s `SessionController`.
     /// [`AppContext::new`] computes it once from stderr's terminal state.
     pub output: OutputContext,
 }

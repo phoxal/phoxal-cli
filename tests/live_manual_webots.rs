@@ -11,14 +11,21 @@ use phoxal_api::v0_2 as api;
 use tokio::time::timeout;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-#[ignore = "requires a running robot-v1 Webots session on tcp/localhost:7447"]
+#[ignore = "requires a running robot-v1 Webots session for PHOXAL_PROJECT_ROOT"]
 async fn manual_command_moves_then_stops_after_ttl() {
+    let project_root = std::env::var_os("PHOXAL_PROJECT_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().expect("current project directory"));
+    let connect = format!(
+        "unixsock-stream/{}",
+        project_root.join(".phoxal/zenoh.sock").display()
+    );
     let bus = Bus::open(BusConfig {
         namespace: "dev".to_string(),
         robot_id: "robot-v1".to_string(),
         participant: "live-manual-webots-test".to_string(),
         incarnation: 0,
-        connect_endpoints: vec!["tcp/localhost:7447".to_string()],
+        connect_endpoints: vec![connect],
     })
     .await
     .expect("connect to the live simulation router");

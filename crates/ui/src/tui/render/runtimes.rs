@@ -441,9 +441,6 @@ pub(super) fn draw_runtime_detail(
     let pid = status
         .pid
         .map_or_else(|| "n/a".to_string(), |pid| pid.to_string());
-    let ownership = metadata
-        .map(|metadata| format!("{:?}", metadata.ownership))
-        .unwrap_or_else(|| "n/a".to_string());
     let ready_after = model
         .runtime
         .time_to_ready(&status.id)
@@ -467,7 +464,6 @@ pub(super) fn draw_runtime_detail(
     ];
     let lifecycle = vec![
         Line::from(format!("state         {}", status.state.label())),
-        Line::from(format!("ownership     {ownership}")),
         Line::from(format!("ready after   {ready_after}")),
         Line::from(format!("uptime        {uptime}")),
         Line::from(format!("restarts      {restarts}")),

@@ -52,7 +52,7 @@ impl WaitBudget {
     }
 }
 
-/// The immutable output contract for one `run`/`simulation run` invocation.
+/// The immutable output contract for one `run`/`simulation webots run` invocation.
 #[derive(Debug, Clone, Copy)]
 pub struct OutputContext {
     pub interactive: bool,

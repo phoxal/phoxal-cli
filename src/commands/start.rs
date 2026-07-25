@@ -2,7 +2,7 @@
 //!
 //! `start` runs the same universal pipeline as `run` - classify the root, refresh
 //! staging when it is a source project, then supervise the staged layout - but it
-//! is headless: it never mounts the TUI and takes no `--watch`/interactive flags.
+//! is headless: it never mounts the TUI or takes interactive flags.
 //! It has two invocation modes:
 //!
 //! - **interactive** (no `NOTIFY_SOCKET`): behaves like `run -d`. It spawns the
@@ -40,14 +40,13 @@ pub struct Start {
 
 impl Start {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        // `start` is headless: the full official driver set, no subset, no watch,
+        // `start` is headless: the full official driver set and no subset,
         // no TUI. Driver gating lives on `run`; a robot instance always launches
         // its drivers.
         let options = RunOptions {
             drivers: DriversMode::On,
             drivers_subset: Vec::new(),
             suite_source: app.suite_source.clone(),
-            watch: false,
         };
         let target = resolve_target(self.target.as_deref(), app.project.root())?;
         // SAFETY: command dispatch has not started worker threads for this run

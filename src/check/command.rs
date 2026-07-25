@@ -37,9 +37,10 @@ pub struct PlatformArtifactRef {
     /// robot runtime participant). A suite-resolved component
     /// driver is fetched once but launched once per instance that declares
     /// it (`left_drive`/`right_drive` sharing one `phoxal/component-<id>
-    /// -driver` package) - mirrors how [`SourceParticipant::component_driver_with_artifact_id`]
-    /// keys a workspace-built driver's graph membership by instance, not
-    /// by artifact id. Must not be empty when `kind == ComponentDriver`.
+    /// -driver` package) - mirrors how
+    /// `SourceParticipant::component_driver_with_artifact_id` keys a
+    /// workspace-built driver's graph membership by instance, not by artifact
+    /// id. Must not be empty when `kind == ComponentDriver`.
     pub instances: Vec<String>,
 }
 

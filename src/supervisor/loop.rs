@@ -1,10 +1,10 @@
 //! Main supervision loop, actions, and orderly shutdown.
 
 use super::{
-    BoardBackend, ParticipantSpec, ParticipantState, RequestedStop, RunningParticipant,
-    SupervisionStage, SupervisorAction, SupervisorOptions, SupervisorOutcome, await_stage_ready,
-    emit_event, join_reader, maybe_emit_startup_outcome, send_process_group_terminate,
-    send_terminate, spawn_until_pending, stop_child,
+    BoardBackend, ParticipantState, RequestedStop, RunningParticipant, SupervisionStage,
+    SupervisorAction, SupervisorOptions, SupervisorOutcome, await_stage_ready, emit_event,
+    join_reader, maybe_emit_startup_outcome, send_process_group_terminate, send_terminate,
+    spawn_until_pending, stop_child,
 };
 use crate::session::output::WaitBudget;
 use anyhow::Result;
@@ -263,51 +263,11 @@ pub(crate) async fn recv_action(
 }
 
 pub(crate) async fn handle_action(
-    running: &mut Vec<RunningParticipant>,
+    running: &mut [RunningParticipant],
     board: &BoardBackend,
     action: SupervisorAction,
 ) -> Result<()> {
     match action {
-        SupervisorAction::ReconcilePlan {
-            revision,
-            specs,
-            remove_ids,
-            note,
-        } => {
-            for remove_id in remove_ids {
-                if let Some(index) = running
-                    .iter()
-                    .position(|participant| participant.spec.id == remove_id)
-                {
-                    running[index].stop_current(board).await?;
-                    running.remove(index);
-                }
-            }
-            for spec in specs {
-                let key = spec.key.clone();
-                if let Some(index) = running
-                    .iter()
-                    .position(|participant| participant.spec.key == key)
-                {
-                    if running[index].spec != spec {
-                        running[index].swap(spec, board, note.clone()).await?;
-                    }
-                } else {
-                    let phase = canonical_phase(&spec);
-                    let participant =
-                        RunningParticipant::spawn_in_phase(spec, board, phase).await?;
-                    running.push(participant);
-                }
-            }
-            let accepted_revision = board.activate_next_plan_revision();
-            tracing::info!(
-                accepted_revision,
-                candidate_revision = revision.number,
-                candidate_digest = %revision.digest,
-                "activated immutable plan revision"
-            );
-            Ok(())
-        }
         SupervisorAction::Restart { key } => {
             let Some(participant) = running
                 .iter_mut()
@@ -366,14 +326,6 @@ pub(crate) async fn shutdown_all(running: &mut [RunningParticipant], board: &Boa
                 tracing::warn!(%error, "shutdown worker failed");
             }
         }
-    }
-}
-
-fn canonical_phase(spec: &ParticipantSpec) -> &'static str {
-    if spec.kind == phoxal_cli_core::session::ParticipantKind::Tool || spec.id == "webots" {
-        "starting project infrastructure"
-    } else {
-        "starting robot graph"
     }
 }
 

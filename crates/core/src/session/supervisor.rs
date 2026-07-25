@@ -312,6 +312,12 @@ pub struct StartupStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulationSessionInfo {
+    pub profile: String,
+    pub world: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorSnapshotV0 {
     pub supervisor_generation: u64,
     pub revision: u64,
@@ -320,6 +326,8 @@ pub struct SupervisorSnapshotV0 {
     pub entry: String,
     pub framework_train: String,
     pub execution: String,
+    #[serde(default)]
+    pub simulation: Option<SimulationSessionInfo>,
     pub lifecycle: ProjectLifecycle,
     pub router: String,
     pub plan_revision: u64,
@@ -337,6 +345,7 @@ impl Default for SupervisorSnapshotV0 {
             entry: String::new(),
             framework_train: String::new(),
             execution: String::new(),
+            simulation: None,
             lifecycle: ProjectLifecycle::Starting,
             router: String::new(),
             plan_revision: 0,

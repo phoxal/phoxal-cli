@@ -83,7 +83,7 @@ pub(super) fn draw_session_info(
         |_| "n/a".to_string(),
         |value| format!("unix {}", value.as_secs()),
     );
-    let lines = vec![
+    let mut lines = vec![
         Line::from(format!(
             "robot            {}",
             sanitize_terminal_text(&title.robot)
@@ -108,7 +108,35 @@ pub(super) fn draw_session_info(
             human::duration(model.now.saturating_duration_since(title.started_instant))
         )),
     ];
-    let info_height = if area.width < 70 { 15 } else { 13 };
+    if let Some(profile) = &title.simulation_profile {
+        lines.push(Line::from(format!(
+            "simulation       {}",
+            sanitize_terminal_text(profile)
+        )));
+    }
+    if let Some(world) = &title.simulation_world {
+        lines.push(Line::from(format!(
+            "world            {}",
+            sanitize_terminal_text(world)
+        )));
+    }
+    if title.simulation_profile.is_some() {
+        let state = model
+            .board
+            .participants
+            .values()
+            .find(|status| status.id == phoxal_cli_core::session::WEBOTS_PROCESS_ID)
+            .map_or_else(
+                || "not started".to_string(),
+                |status| status.state.label().to_string(),
+            );
+        lines.push(Line::from(format!("Webots process   {state}")));
+    }
+    let info_height = if area.width < 70 {
+        lines.len().saturating_add(7)
+    } else {
+        lines.len().saturating_add(5)
+    } as u16;
     let target = centered_fixed(area, area.width.min(74), area.height.min(info_height));
     frame.render_widget(Clear, target);
     frame.render_widget(

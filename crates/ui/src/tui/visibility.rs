@@ -1,7 +1,7 @@
 //! One terminal visibility policy shared by Overview, Runtimes, Logs, and Bus.
 
 use phoxal_cli_core::session::ParticipantKind;
-use phoxal_cli_core::session::stores::runtime::{RuntimeOwnership, RuntimeStore};
+use phoxal_cli_core::session::stores::runtime::RuntimeStore;
 use phoxal_cli_core::session::{BoardSnapshot, ParticipantStatus};
 
 #[must_use]
@@ -12,10 +12,7 @@ pub fn is_visible_runtime(status: &ParticipantStatus, runtime: &RuntimeStore) ->
     ) {
         return false;
     }
-    runtime.metadata(&status.id).map_or_else(
-        || !is_session_internal_runtime_id(&status.id),
-        |metadata| metadata.ownership != RuntimeOwnership::SimulationManaged,
-    )
+    runtime.metadata(&status.id).is_some() || !is_session_internal_runtime_id(&status.id)
 }
 
 fn is_session_internal_runtime_id(id: &str) -> bool {
@@ -35,7 +32,7 @@ fn is_known_internal_id(id: &str) -> bool {
         || starts_with_ignore_ascii_case(id, "phoxal-cli/")
         || starts_with_ignore_ascii_case(id, "tool-")
         || id.eq_ignore_ascii_case("supervisor")
-        || id.eq_ignore_ascii_case("webots")
+        || id.eq_ignore_ascii_case(phoxal_cli_core::session::WEBOTS_PROCESS_ID)
         || starts_with_ignore_ascii_case(id, "webots-")
         || starts_with_ignore_ascii_case(id, "simulator-")
 }
@@ -55,7 +52,7 @@ mod tests {
 
     #[test]
     fn run_and_webots_share_robot_runtime_visibility() {
-        let mut runtime = RuntimeStore::new();
+        let runtime = RuntimeStore::new();
         let service =
             ParticipantStatus::new("motion", ParticipantKind::Service, ParticipantState::Ready);
         let driver =
@@ -74,11 +71,6 @@ mod tests {
         assert!(is_visible_runtime(&driver, &runtime));
         assert!(!is_visible_runtime(&tool, &runtime));
         assert!(!is_visible_runtime(&simulator, &runtime));
-        runtime.set_test_ownership("wheels", RuntimeOwnership::SimulationManaged);
-        assert!(
-            !is_visible_runtime(&driver, &runtime),
-            "a Webots-substituted physical driver is not an executing runtime"
-        );
     }
 
     #[test]
