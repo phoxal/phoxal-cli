@@ -24,6 +24,14 @@ The unit runs as `phoxal:phoxal-engineering`, starts
 resident CLI supervisor the sole readiness and watchdog authority. Participant
 children receive no systemd notification environment.
 
+On a host upgraded from the retired `/opt/phoxal` deployment, `service install`
+first disables and removes systemd wiring for the legacy `phoxal.target`,
+`phoxal-router.service`, and `phoxal-participant-*.service` units. It removes
+only unit symlinks whose resolved targets are under `/opt/phoxal`; same-named
+foreign units are reported and left untouched. Legacy runtime data under
+`/opt/phoxal` is preserved for the administrator to remove explicitly after
+the new installation is verified.
+
 The equivalent manual preparation is:
 
 ```sh

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -63,6 +65,8 @@ impl Service {
 
 const UNIT_PATH: &str = "/etc/systemd/system/phoxal.service";
 const UNIT_MARKER: &str = "# Managed by phoxal";
+const SYSTEMD_UNIT_ROOT: &str = "/etc/systemd/system";
+const LEGACY_INSTALL_ROOT: &str = "/opt/phoxal";
 
 fn unit_contents() -> &'static str {
     r#"# Managed by phoxal
@@ -101,6 +105,24 @@ impl ServiceInstall {
     async fn run(&self, app: &AppContext) -> Result<()> {
         require_root()?;
         require_systemd()?;
+        let legacy = sweep_legacy_units(
+            Path::new(SYSTEMD_UNIT_ROOT),
+            Path::new(LEGACY_INSTALL_ROOT),
+            &HostSystemctl,
+        )?;
+        for path in &legacy.skipped_foreign {
+            app.ui.warn(format!(
+                "left same-named foreign systemd entry untouched: {}",
+                path.display()
+            ));
+        }
+        if !legacy.removed_units.is_empty() {
+            app.ui.info(format!(
+                "removed legacy {} systemd wiring; preserved {}",
+                legacy.removed_units.join(", "),
+                LEGACY_INSTALL_ROOT
+            ));
+        }
         ensure_group("phoxal", true)?;
         ensure_group("phoxal-engineering", false)?;
         ensure_service_user()?;
@@ -292,6 +314,134 @@ fn run_status(program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+trait Systemctl {
+    fn disable_now(&self, unit: &str) -> Result<()>;
+}
+
+struct HostSystemctl;
+
+impl Systemctl for HostSystemctl {
+    fn disable_now(&self, unit: &str) -> Result<()> {
+        run_status("systemctl", &["disable", "--now", unit])
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LegacySweep {
+    removed_units: Vec<String>,
+    skipped_foreign: Vec<PathBuf>,
+}
+
+fn sweep_legacy_units(
+    systemd_root: &Path,
+    legacy_root: &Path,
+    systemctl: &impl Systemctl,
+) -> Result<LegacySweep> {
+    let mut links_by_unit = BTreeMap::<String, Vec<PathBuf>>::new();
+    let mut skipped_foreign = Vec::new();
+    let canonical_legacy_root = match legacy_root.canonicalize() {
+        Ok(path) => Some(path),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    for directory in [
+        systemd_root.to_path_buf(),
+        systemd_root.join("phoxal.target.wants"),
+        systemd_root.join("multi-user.target.wants"),
+    ] {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let Some(unit) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !is_legacy_unit_name(&unit) {
+                continue;
+            }
+            let path = entry.path();
+            if is_confirmed_legacy_link(&path, canonical_legacy_root.as_deref()) {
+                links_by_unit.entry(unit).or_default().push(path);
+            } else {
+                skipped_foreign.push(path);
+            }
+        }
+    }
+
+    let mut units = links_by_unit.keys().cloned().collect::<Vec<_>>();
+    units.sort_by(|left, right| {
+        legacy_unit_rank(left)
+            .cmp(&legacy_unit_rank(right))
+            .then_with(|| left.cmp(right))
+    });
+    for unit in &units {
+        systemctl.disable_now(unit)?;
+        for path in &links_by_unit[unit] {
+            match std::fs::symlink_metadata(path) {
+                Ok(_) if is_confirmed_legacy_link(path, canonical_legacy_root.as_deref()) => {
+                    std::fs::remove_file(path)?;
+                    sync_parent(path)?;
+                }
+                Ok(_) => anyhow::bail!(
+                    "refusing to remove changed or foreign systemd entry {}",
+                    path.display()
+                ),
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    let legacy_wants = systemd_root.join("phoxal.target.wants");
+    match std::fs::remove_dir(&legacy_wants) {
+        Ok(()) => sync_parent(&legacy_wants)?,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty
+            ) => {}
+        Err(error) => return Err(error.into()),
+    }
+    skipped_foreign.sort();
+    Ok(LegacySweep {
+        removed_units: units,
+        skipped_foreign,
+    })
+}
+
+fn is_legacy_unit_name(name: &str) -> bool {
+    name == "phoxal.target"
+        || name == "phoxal-router.service"
+        || (name
+            .strip_prefix("phoxal-participant-")
+            .and_then(|suffix| suffix.strip_suffix(".service"))
+            .is_some_and(|participant| !participant.is_empty()))
+}
+
+fn legacy_unit_rank(name: &str) -> u8 {
+    match name {
+        "phoxal.target" => 0,
+        "phoxal-router.service" => 1,
+        _ => 2,
+    }
+}
+
+fn is_confirmed_legacy_link(path: &Path, canonical_legacy_root: Option<&Path>) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_symlink() {
+        return false;
+    }
+    let Some(legacy_root) = canonical_legacy_root else {
+        return false;
+    };
+    path.canonicalize()
+        .is_ok_and(|target| target.starts_with(legacy_root))
+}
+
 impl Suite {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let root = app.project.root().to_path_buf();
@@ -312,6 +462,9 @@ impl Suite {
 
 #[cfg(test)]
 mod unit_tests {
+    use std::cell::RefCell;
+    use std::os::unix::fs::symlink;
+
     use super::*;
 
     #[test]
@@ -325,6 +478,99 @@ mod unit_tests {
         assert!(unit.contains("User=phoxal\nGroup=phoxal-engineering"));
         assert!(!unit.contains("StateDirectory="));
         assert!(!unit.contains("participant"));
+    }
+
+    #[derive(Default)]
+    struct FakeSystemctl {
+        disabled: RefCell<Vec<String>>,
+    }
+
+    impl Systemctl for FakeSystemctl {
+        fn disable_now(&self, unit: &str) -> Result<()> {
+            self.disabled.borrow_mut().push(unit.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn legacy_sweep_removes_only_opt_phoxal_unit_links_in_safe_order() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let systemd = temp.path().join("etc/systemd/system");
+        let legacy = temp.path().join("opt/phoxal");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir_all(systemd.join("phoxal.target.wants"))?;
+        std::fs::create_dir_all(systemd.join("multi-user.target.wants"))?;
+        std::fs::create_dir_all(legacy.join("systemd"))?;
+        std::fs::create_dir_all(&foreign)?;
+        for unit in [
+            "phoxal.target",
+            "phoxal-router.service",
+            "phoxal-participant-drive.service",
+        ] {
+            std::fs::write(legacy.join("systemd").join(unit), "[Unit]\n")?;
+            symlink(legacy.join("systemd").join(unit), systemd.join(unit))?;
+        }
+        symlink(
+            legacy.join("systemd/phoxal.target"),
+            systemd.join("multi-user.target.wants/phoxal.target"),
+        )?;
+        symlink(
+            legacy.join("systemd/phoxal-router.service"),
+            systemd.join("phoxal.target.wants/phoxal-router.service"),
+        )?;
+        symlink(
+            legacy.join("systemd/phoxal-participant-drive.service"),
+            systemd.join("phoxal.target.wants/phoxal-participant-drive.service"),
+        )?;
+        std::fs::write(systemd.join("phoxal.service"), "# Managed by phoxal\n")?;
+        std::fs::write(foreign.join("phoxal-participant-map.service"), "[Unit]\n")?;
+        symlink(
+            foreign.join("phoxal-participant-map.service"),
+            systemd.join("phoxal-participant-map.service"),
+        )?;
+        std::fs::write(
+            systemd.join("phoxal-participant-safety.service"),
+            "[Unit]\n",
+        )?;
+        let systemctl = FakeSystemctl::default();
+
+        let result = sweep_legacy_units(&systemd, &legacy, &systemctl)?;
+
+        assert_eq!(
+            result.removed_units,
+            [
+                "phoxal.target",
+                "phoxal-router.service",
+                "phoxal-participant-drive.service"
+            ]
+        );
+        assert_eq!(
+            *systemctl.disabled.borrow(),
+            result.removed_units,
+            "the target must stop before its router and participants"
+        );
+        assert_eq!(
+            result.skipped_foreign,
+            [
+                systemd.join("phoxal-participant-map.service"),
+                systemd.join("phoxal-participant-safety.service")
+            ]
+        );
+        assert!(systemd.join("phoxal.service").is_file());
+        assert!(legacy.join("systemd/phoxal.target").is_file());
+        assert!(!systemd.join("phoxal.target").exists());
+        assert!(!systemd.join("phoxal.target.wants").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_unit_name_never_selects_the_resident_service() {
+        assert!(is_legacy_unit_name("phoxal.target"));
+        assert!(is_legacy_unit_name("phoxal-router.service"));
+        assert!(is_legacy_unit_name("phoxal-participant-drive.service"));
+        assert!(!is_legacy_unit_name("phoxal.service"));
+        assert!(!is_legacy_unit_name("phoxal-participant-.service"));
+        assert!(!is_legacy_unit_name("phoxal-participant-drive.timer"));
     }
 }
 
