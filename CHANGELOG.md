@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.24.4](https://github.com/phoxal/phoxal-cli/releases/tag/v0.24.4) - 2026-07-25
+
+
+### Fixed
+
+- *(deploy)* Converge installed runtime hygiene ([#197](https://github.com/phoxal/phoxal-cli/pull/197))
+
+
 ## [0.24.3](https://github.com/phoxal/phoxal-cli/releases/tag/v0.24.3) - 2026-07-25
 
 
