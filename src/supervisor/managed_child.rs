@@ -62,6 +62,17 @@ fn scrub_std_environment(command: &mut std::process::Command) {
     for key in SUPERVISOR_ONLY_ENV {
         command.env_remove(key);
     }
+    // Every participant launch-contract variable is removed before the spec's
+    // own entries are applied, so a child is configured by its spec and by
+    // nothing that happened to be in the operator's shell. An ambient
+    // `PHOXAL_EXECUTION_ORIGIN` is the sharp case: inherited by the Webots
+    // application and through it by the controller, it would hand a clockless
+    // process real-clock authority over a run it is not part of (#952 section
+    // B). An ambient producer id is the same story for identity - a
+    // replacement controller would inherit the producer of the one it replaced.
+    for key in phoxal::participant::launch::env::ALL {
+        command.env_remove(key);
+    }
 }
 
 fn guardian_command(
@@ -657,6 +668,48 @@ mod tests {
                 "{key} must be explicitly removed from the guardian environment"
             );
         }
+    }
+
+    /// #952: a managed child is configured by its spec, not by whatever the
+    /// operator's shell happened to export. The Webots case is the sharp one:
+    /// an ambient `PHOXAL_EXECUTION_ORIGIN` would be inherited by Webots and
+    /// through it by the controller, handing a clockless process real-clock
+    /// authority over a run it is not part of - and an ambient producer id
+    /// would let a replacement controller reuse the identity of the one it
+    /// replaced.
+    #[test]
+    fn a_managed_child_inherits_no_ambient_launch_contract_variable() {
+        let mut command = std::process::Command::new("/usr/bin/true");
+        scrub_std_environment(&mut command);
+        let explicit = [(
+            phoxal::participant::launch::env::EXECUTION_ID.to_string(),
+            "x0123456789abcdef0123456789abcdef".to_string(),
+        )];
+        command.envs(explicit.iter().map(|(key, value)| (key, value)));
+
+        let effective = |key: &str| {
+            command
+                .get_envs()
+                .find(|(candidate, _)| *candidate == std::ffi::OsStr::new(key))
+                .map(|(_, value)| value)
+        };
+        for key in phoxal::participant::launch::env::ALL {
+            if *key == phoxal::participant::launch::env::EXECUTION_ID {
+                continue;
+            }
+            assert_eq!(
+                effective(key),
+                Some(None),
+                "{key} must be removed from a managed child's inherited environment"
+            );
+        }
+        assert_eq!(
+            effective(phoxal::participant::launch::env::EXECUTION_ID)
+                .flatten()
+                .map(std::ffi::OsStr::to_string_lossy),
+            Some("x0123456789abcdef0123456789abcdef".into()),
+            "the spec's own entries are applied after the scrub, not before it"
+        );
     }
 
     #[test]
