@@ -470,7 +470,7 @@ fn process_command(
         } => match current.processes.get(&process) {
             None => CommandReply::rejected(CommandError::UnknownProcess),
             Some(entry) if entry.status.producer != Some(expected_producer) => {
-                CommandReply::rejected(CommandError::SupersededIncarnation)
+                CommandReply::rejected(CommandError::SupersededProducer)
             }
             Some(_) if sessions.pending_restarts.get(&process) == Some(&expected_producer) => {
                 CommandReply::rejected(CommandError::AlreadyProcessed)
@@ -625,7 +625,7 @@ mod tests {
         );
         assert_eq!(
             process_command(&state, session, request(2, 8)).error,
-            Some(CommandError::SupersededIncarnation)
+            Some(CommandError::SupersededProducer)
         );
     }
 

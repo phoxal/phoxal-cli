@@ -110,7 +110,7 @@ pub enum CommandError {
     AlreadyProcessed,
     OutOfOrder,
     UnknownProcess,
-    SupersededIncarnation,
+    SupersededProducer,
     SupervisorUnavailable,
 }
 
