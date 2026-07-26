@@ -10,7 +10,7 @@ use phoxal_cli_core::project::resolver::ResolvedComponent;
 use phoxal_cli_core::project::resolver::ResolvedComponentSource;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
-use phoxal_cli_core::project::resolver::tool_emit_apis_id;
+use phoxal_cli_core::project::resolver::tool_participant_id;
 use phoxal_cli_core::project::suite::ArtifactKind;
 use phoxal_cli_core::project::tooling::resolve_project_path;
 use std::path::Path;
@@ -108,7 +108,7 @@ pub(crate) fn component_driver_platform_refs_from_resolved(
 /// Every distinct Suite-sourced component driver's `suite_runtime`, keyed
 /// by its `artifact_ref` - the same shape as the `official_by_ref` map every
 /// caller already builds from `resolved.platform_runtimes` for the shared
-/// `extract_emit_apis_from_staged_runtime` closure. Callers merge this in so
+/// `extract_participant_report_from_staged_runtime` closure. Callers merge this in so
 /// one fetch closure resolves services, simulators, AND suite component
 /// drivers identically.
 pub(crate) fn component_driver_runtimes_by_ref(
@@ -215,7 +215,7 @@ pub(crate) fn source_participants_from_resolved(
             tool.path_override.as_ref().map(|path| {
                 SourceParticipant::tool(
                     tool.name.clone(),
-                    tool_emit_apis_id(&tool.name).to_string(),
+                    tool_participant_id(&tool.name).to_string(),
                     path.clone(),
                 )
             })

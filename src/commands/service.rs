@@ -610,7 +610,7 @@ mod tests {
 
     use super::*;
     use phoxal_cli_core::project::suite::{
-        fixture_contract_for_tests, fixture_service_entry_for_tests, fixture_suite_for_tests,
+        fixture_service_entry_for_tests, fixture_suite_for_tests,
     };
 
     #[test]
@@ -660,7 +660,6 @@ robot:
             "0.1.0",
             &crate::resolver::host_target_triple(),
             true,
-            vec![fixture_contract_for_tests("v0.1::drive::Target", "publish")],
         )]);
         let path = root.join("suite.json");
         fs::write(&path, serde_json::to_string_pretty(&suite)?)?;

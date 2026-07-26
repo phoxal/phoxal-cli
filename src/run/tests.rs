@@ -93,7 +93,6 @@ fn plan_with_drivers(ids: &[&str]) -> LaunchPlan {
                     )
                 })
                 .collect(),
-            substitutions: Vec::new(),
         }],
     }
 }

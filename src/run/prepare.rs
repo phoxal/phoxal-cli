@@ -11,11 +11,11 @@
 
 use super::{DriverPolicy, PreparedRun, RunOptions};
 use crate::check::CheckGraphContext;
-use crate::check::build_emit_apis_from_source;
+use crate::check::build_participant_report_from_source;
 use crate::check::check_artifact_refs_from_resolved;
-use crate::check::extract_emit_apis_from_staged_runtime;
-use crate::check::extract_emit_apis_from_staged_tool;
-use crate::check::fetch_emit_apis_from_tool;
+use crate::check::extract_participant_report_from_staged_runtime;
+use crate::check::extract_participant_report_from_staged_tool;
+use crate::check::fetch_participant_report_from_tool;
 use crate::check::run_check_with_context;
 use crate::check::source_participants_from_resolved;
 use crate::check::tool_participants_from_resolved;
@@ -416,17 +416,17 @@ fn run_source_check(
         CheckGraphContext { robot: Some(robot) },
         |artifact_ref| {
             if let Some(runtime) = official_by_ref.get(artifact_ref) {
-                return extract_emit_apis_from_staged_runtime(runtime);
+                return extract_participant_report_from_staged_runtime(runtime);
             }
             if let Some(tool) = tools_by_ref.get(artifact_ref) {
-                return extract_emit_apis_from_staged_tool(tool);
+                return extract_participant_report_from_staged_tool(tool);
             }
             Err(anyhow!(
                 "resolved official artifact {artifact_ref} is not in the suite"
             ))
         },
-        fetch_emit_apis_from_tool,
-        build_emit_apis_from_source,
+        fetch_participant_report_from_tool,
+        build_participant_report_from_source,
     )?;
     let _ = project_root;
     if !outcome.is_ok() {

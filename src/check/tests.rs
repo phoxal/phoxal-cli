@@ -1,6 +1,6 @@
 //! Tests for this module.
 
-use super::build::build_emit_apis_from_source_with_diagnostics;
+use super::build::build_participant_report_from_source_with_diagnostics;
 use super::participants::{
     component_driver_platform_refs_from_resolved, platform_artifact_refs_from_resolved,
 };
@@ -11,8 +11,7 @@ use phoxal::model::robot::v0::Robot;
 use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind, ToolParticipant};
 use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::project::launch_plan::{
-    CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_DEVICE, ROBOT_TOOL_JOYPAD, SubstitutionRecord,
-    build_launch_plan,
+    CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_DEVICE, ROBOT_TOOL_JOYPAD, build_launch_plan,
 };
 use phoxal_cli_core::project::resolver::{
     ResolveOptions, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
@@ -20,8 +19,8 @@ use phoxal_cli_core::project::resolver::{
 };
 use phoxal_cli_core::project::suite::{
     ArtifactKind, fixture_component_assets_entry_for_tests,
-    fixture_component_driver_entry_for_tests, fixture_contract_for_tests,
-    fixture_service_entry_for_tests, fixture_suite_for_tests,
+    fixture_component_driver_entry_for_tests, fixture_service_entry_for_tests,
+    fixture_suite_for_tests,
 };
 use std::path::{Path, PathBuf};
 
@@ -71,7 +70,6 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
             "0.1.0",
             &crate::resolver::host_target_triple(),
             true,
-            vec![fixture_contract_for_tests("v0.1::drive::Target", "publish")],
         ),
         fixture_component_assets_entry_for_tests("ddsm115", "0.1.0"),
         fixture_component_driver_entry_for_tests(
@@ -79,7 +77,6 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
             "0.1.0",
             &crate::resolver::host_target_triple(),
             true,
-            Vec::new(),
         ),
     ]);
     let mut resolved = resolve(
@@ -117,30 +114,32 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
                 .iter()
                 .find(|participant| participant.artifact_ref == artifact_ref)
                 .ok_or_else(|| anyhow!("unexpected platform artifact {artifact_ref}"))?;
-            Ok(launch_plan_raw_emit_apis(
-                participant.kind.emit_apis_kind(),
+            Ok(launch_plan_raw_participant_report(
+                participant.kind.wire_kind(),
                 &participant.name,
             ))
         },
         |_| bail!("no tools in this check fixture"),
         |source| match source.kind {
-            SourceParticipantKind::UserTool => Ok(launch_plan_raw_emit_apis("tool", &source.name)),
-            SourceParticipantKind::UserService => {
-                Ok(launch_plan_raw_emit_apis("service", &source.name))
+            SourceParticipantKind::UserTool => {
+                Ok(launch_plan_raw_participant_report("tool", &source.name))
             }
-            SourceParticipantKind::ComponentDriver => Ok(launch_plan_raw_emit_apis(
+            SourceParticipantKind::UserService => {
+                Ok(launch_plan_raw_participant_report("service", &source.name))
+            }
+            SourceParticipantKind::ComponentDriver => Ok(launch_plan_raw_participant_report(
                 "driver",
                 &source.expected_artifact_id,
             )),
-            SourceParticipantKind::OfficialService => Ok(launch_plan_raw_emit_apis(
+            SourceParticipantKind::OfficialService => Ok(launch_plan_raw_participant_report(
                 "service",
                 &source.expected_artifact_id,
             )),
-            SourceParticipantKind::Tool => Ok(launch_plan_raw_emit_apis(
+            SourceParticipantKind::Tool => Ok(launch_plan_raw_participant_report(
                 "tool",
                 &source.expected_artifact_id,
             )),
-            SourceParticipantKind::Simulator => Ok(launch_plan_raw_emit_apis(
+            SourceParticipantKind::Simulator => Ok(launch_plan_raw_participant_report(
                 "simulator",
                 &source.expected_artifact_id,
             )),
@@ -153,7 +152,6 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
             project_root: temp.path(),
             resolved: &resolved,
             checked_participants: &outcome.checked_participants,
-            substitutions: &[],
             source_participants: &source_participants,
         }],
         RunIdentity::default(),
@@ -162,7 +160,6 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
     assert_eq!(plan.mode, LaunchMode::Run);
     let robot = &plan.robots[0];
     assert_eq!(robot.id, "testbot");
-    assert_eq!(robot.substitutions, Vec::<SubstitutionRecord>::new());
     let participant_ids = robot
         .participants
         .iter()
@@ -223,8 +220,8 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
     Ok(())
 }
 
-fn launch_plan_raw_emit_apis(kind: &str, id: &str) -> RawEmitApis {
-    RawEmitApis {
+fn launch_plan_raw_participant_report(kind: &str, id: &str) -> RawParticipantReport {
+    RawParticipantReport {
         artifact: RawArtifact {
             kind: kind.to_string(),
             id: id.to_string(),
@@ -266,7 +263,7 @@ tools:
     // The tool emits a schema requiring a STRING port; the authored 9000 is an
     // integer, so the check must surface an InvalidConfig problem for it.
     let build = |participant: &SourceParticipant| {
-        let mut raw = launch_plan_raw_emit_apis("tool", &participant.name);
+        let mut raw = launch_plan_raw_participant_report("tool", &participant.name);
         raw.config_schema = Some(serde_json::json!({
             "type": "object",
             "properties": {"port": {"type": "string"}},
@@ -293,7 +290,10 @@ tools:
 
     // The kind gate rejects a user tool whose binary emits a non-tool kind.
     let bad_kind = |participant: &SourceParticipant| {
-        Ok(launch_plan_raw_emit_apis("service", &participant.name))
+        Ok(launch_plan_raw_participant_report(
+            "service",
+            &participant.name,
+        ))
     };
     let error = run_check_with_context(
         &[],
@@ -431,7 +431,7 @@ fn fixture_suite_component_package(
 }
 
 #[test]
-fn healthy_graph_passes_with_fake_emit_apis() -> Result<()> {
+fn healthy_graph_passes_with_fake_participant_report() -> Result<()> {
     let images = vec![("mission".to_string(), "mission:ok".to_string())];
     let sources = vec![SourceParticipant::user_service(
         "drive".to_string(),
@@ -632,7 +632,7 @@ fn official_service_artifact_identity_must_match_resolved_name() {
 
     let message = error.to_string();
     assert!(
-        message.contains("official service emit-apis artifact.id 'mission'")
+        message.contains("official service participant report artifact.id 'mission'")
             && message.contains("expected artifact id 'drive'"),
         "{message}"
     );
@@ -663,7 +663,7 @@ fn official_driver_artifact_identity_uses_driver_label() {
 
     let message = error.to_string();
     assert!(
-        message.contains("official driver emit-apis artifact.kind 'service'")
+        message.contains("official driver participant report artifact.kind 'service'")
             && message.contains("expected kind 'driver'"),
         "{message}"
     );
@@ -699,7 +699,7 @@ fn tool_artifact_identity_must_match_resolved_tool() {
 
     let message = error.to_string();
     assert!(
-        message.contains("tool emit-apis artifact.id 'simulator_webots_controller'")
+        message.contains("tool participant report artifact.id 'simulator_webots_controller'")
             && message.contains("expected artifact id 'joypad'"),
         "{message}"
     );
@@ -759,7 +759,7 @@ fn tool_artifact_kind_legacy_runtime_is_rejected() {
     let message = error.to_string();
     assert!(
         message.contains(
-            "tool emit-apis artifact.kind 'runtime' does not match the expected kind 'tool'"
+            "tool participant report artifact.kind 'runtime' does not match the expected kind 'tool'"
         ),
         "{message}"
     );
@@ -807,7 +807,7 @@ fn component_driver_artifact_kind_legacy_runtime_is_rejected() {
     let message = error.to_string();
     assert!(
             message.contains(
-                "component driver emit-apis artifact.kind 'runtime' does not match the expected kind 'driver'"
+                "component driver participant report artifact.kind 'runtime' does not match the expected kind 'driver'"
             ),
             "{message}"
         );
@@ -839,7 +839,7 @@ fn tool_artifact_kind_garbage_is_rejected() {
 
     let message = error.to_string();
     assert!(
-        message.contains("tool emit-apis artifact.kind 'nonsense'")
+        message.contains("tool participant report artifact.kind 'nonsense'")
             && message.contains("expected kind 'tool'"),
         "{message}"
     );
@@ -976,7 +976,7 @@ fn user_service_with_no_producer_is_a_legal_graph() -> Result<()> {
 }
 
 #[test]
-fn build_emit_apis_from_source_never_caches_across_calls() -> Result<()> {
+fn build_participant_report_from_source_never_caches_across_calls() -> Result<()> {
     // The old `cache/emit-apis/` disk cache is gone: two back-to-back calls
     // for the SAME crate dir each invoke the (fake) build closure - nothing
     // is remembered between calls.
@@ -985,7 +985,7 @@ fn build_emit_apis_from_source_never_caches_across_calls() -> Result<()> {
     let participant = SourceParticipant::user_service("sibling", crate_dir.clone());
 
     let mut build_count = 0;
-    let first = build_emit_apis_from_source_with_diagnostics(
+    let first = build_participant_report_from_source_with_diagnostics(
         &participant,
         |_| {
             build_count += 1;
@@ -993,7 +993,7 @@ fn build_emit_apis_from_source_never_caches_across_calls() -> Result<()> {
         },
         None,
     )?;
-    let second = build_emit_apis_from_source_with_diagnostics(
+    let second = build_participant_report_from_source_with_diagnostics(
         &participant,
         |_| {
             build_count += 1;
@@ -1061,7 +1061,7 @@ fn source_build_error_is_a_hard_error() {
 
     let message = format!("{error:#}");
     assert!(
-        message.contains("failed to obtain emit-apis for user service drive"),
+        message.contains("failed to obtain participant report for user service drive"),
         "{message}"
     );
     assert!(message.contains("source build failed"), "{message}");
@@ -1087,7 +1087,7 @@ fn component_driver_build_error_is_a_hard_error() {
 
     let message = format!("{error:#}");
     assert!(
-        message.contains("failed to obtain emit-apis for component driver left_drive"),
+        message.contains("failed to obtain participant report for component driver left_drive"),
         "{message}"
     );
     assert!(message.contains("component build failed"), "{message}");
@@ -1341,7 +1341,7 @@ fn driverless_suite_component_stages_assets_only_and_is_not_a_check_participant(
 }
 
 #[test]
-fn path_overridden_service_enters_check_through_source_emit_apis() -> Result<()> {
+fn path_overridden_service_enters_check_through_source_participant_report() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut resolved = resolved_with_components(Vec::new())?;
     resolved.platform_runtimes.push(ResolvedPlatformRuntime {
@@ -1420,44 +1420,7 @@ fn missing_image_is_reported_after_other_images_are_checked() -> Result<()> {
 }
 
 #[test]
-fn raw_emit_apis_parses_from_json() -> Result<()> {
-    let parsed: RawEmitApis = serde_json::from_str(
-        r#"{
-                "artifact": { "kind": "service", "id": "drive", "ignored": true },
-                "config_schema": { "type": "object" }
-            }"#,
-    )?;
-    let participant = graph_check::ParticipantApis::try_from(parsed)?;
-
-    assert_eq!(participant.artifact_id, "drive");
-    assert_eq!(participant.participant_class, ParticipantClass::Checked);
-    assert_eq!(
-        participant
-            .config_schema
-            .as_ref()
-            .and_then(|schema| schema.get("type"))
-            .and_then(Value::as_str),
-        Some("object")
-    );
-    Ok(())
-}
-
-#[test]
-fn raw_emit_apis_threads_privileged_participant_class() -> Result<()> {
-    let parsed: RawEmitApis = serde_json::from_str(
-        r#"{
-                "artifact": { "kind": "tool", "id": "joypad" },
-                "participant_class": "privileged"
-            }"#,
-    )?;
-    let participant = graph_check::ParticipantApis::try_from(parsed)?;
-
-    assert_eq!(participant.participant_class, ParticipantClass::Privileged);
-    Ok(())
-}
-
-#[test]
-fn raw_emit_apis_unknown_participant_class_defaults_to_checked() -> Result<()> {
+fn raw_participant_report_unknown_participant_class_defaults_to_checked() -> Result<()> {
     let mut raw = raw("drive");
     raw.participant_class = "future".to_string();
     let participant = graph_check::ParticipantApis::try_from(raw)?;
@@ -1472,7 +1435,7 @@ fn user_service_config_is_validated_against_emitted_schema() -> Result<()> {
         "avoid".to_string(),
         PathBuf::from("/fake/project/runtimes/avoid"),
     )];
-    let emitted = RawEmitApis {
+    let emitted = RawParticipantReport {
         artifact: RawArtifact {
             kind: "service".to_string(),
             id: "avoid".to_string(),
@@ -1712,16 +1675,16 @@ fn fixture_crate_dir(temp: &tempfile::TempDir, marker: &str) -> PathBuf {
     temp.path().to_path_buf()
 }
 
-fn raw(id: &str) -> RawEmitApis {
+fn raw(id: &str) -> RawParticipantReport {
     raw_kind("service", id)
 }
 
-fn raw_kind(kind: &str, id: &str) -> RawEmitApis {
+fn raw_kind(kind: &str, id: &str) -> RawParticipantReport {
     raw_kind_class(kind, id, "checked")
 }
 
-fn raw_kind_class(kind: &str, id: &str, participant_class: &str) -> RawEmitApis {
-    RawEmitApis {
+fn raw_kind_class(kind: &str, id: &str, participant_class: &str) -> RawParticipantReport {
+    RawParticipantReport {
         artifact: RawArtifact {
             kind: kind.to_string(),
             id: id.to_string(),

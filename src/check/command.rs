@@ -1,11 +1,11 @@
 //! Command responsibilities for check.
 
 use super::{
-    CheckGraphContext, CheckOptions, CheckOutcome, build_emit_apis_from_source_for_check,
+    CheckGraphContext, CheckOptions, CheckOutcome, build_participant_report_from_source_for_check,
     check_artifact_refs_from_resolved, component_driver_runtimes_by_ref, ensure_check_outcome_ok,
-    ensure_suite_availability, extract_emit_apis_from_staged_runtime,
-    extract_emit_apis_from_staged_tool, fetch_emit_apis_from_tool, run_check_with_context,
-    source_participants_from_resolved, tool_participants_from_resolved,
+    ensure_suite_availability, extract_participant_report_from_staged_runtime,
+    extract_participant_report_from_staged_tool, fetch_participant_report_from_tool,
+    run_check_with_context, source_participants_from_resolved, tool_participants_from_resolved,
 };
 use crate::AppContext;
 use crate::component_driver::component_driver_crate_dir;
@@ -145,17 +145,17 @@ pub(super) fn run(
         },
         |artifact_ref| {
             if let Some(runtime) = official_by_ref.get(artifact_ref) {
-                return extract_emit_apis_from_staged_runtime(runtime);
+                return extract_participant_report_from_staged_runtime(runtime);
             }
             if let Some(tool) = tools_by_ref.get(artifact_ref) {
-                return extract_emit_apis_from_staged_tool(tool);
+                return extract_participant_report_from_staged_tool(tool);
             }
             Err(anyhow!(
                 "resolved official artifact {artifact_ref} is not in the suite"
             ))
         },
-        fetch_emit_apis_from_tool,
-        |participant| build_emit_apis_from_source_for_check(participant, ui),
+        fetch_participant_report_from_tool,
+        |participant| build_participant_report_from_source_for_check(participant, ui),
     )?;
 
     Ok(CheckRunResult {

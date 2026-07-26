@@ -10,7 +10,7 @@ use super::suite::ArtifactKind;
 const PHOXAL_PROVIDER: &str = "phoxal";
 const ROBOT_FILE: &str = "robot.yaml";
 
-pub fn tool_emit_apis_id(tool_name: &str) -> &str {
+pub fn tool_participant_id(tool_name: &str) -> &str {
     tool_name
         .strip_prefix("phoxal/tool-")
         .or_else(|| tool_name.strip_prefix("phoxal/infrastructure-"))
@@ -378,12 +378,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_emit_apis_id_strips_provider_and_tool_prefixes() {
-        assert_eq!(tool_emit_apis_id("phoxal/tool-router"), "router");
-        assert_eq!(tool_emit_apis_id("tool-router"), "router");
-        assert_eq!(tool_emit_apis_id("router"), "router");
-        assert_eq!(tool_emit_apis_id("phoxal/infrastructure-router"), "router");
-        assert_eq!(tool_emit_apis_id("infrastructure-router"), "router");
+    fn tool_participant_id_strips_provider_and_tool_prefixes() {
+        assert_eq!(tool_participant_id("phoxal/tool-router"), "router");
+        assert_eq!(tool_participant_id("tool-router"), "router");
+        assert_eq!(tool_participant_id("router"), "router");
+        assert_eq!(
+            tool_participant_id("phoxal/infrastructure-router"),
+            "router"
+        );
+        assert_eq!(tool_participant_id("infrastructure-router"), "router");
     }
 
     #[test]

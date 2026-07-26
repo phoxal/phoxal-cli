@@ -1,6 +1,6 @@
 use clap::Args;
 use phoxal::check as graph_check;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 
 use phoxal::model::robot::RobotV0;
@@ -21,19 +21,21 @@ pub struct CheckOptions {
     pub target: Option<String>,
 }
 
-/// The CLI's own participant-report shape: known artifact identity (never
-/// self-reported anymore - a built binary's linker section carries only its
-/// config schema, see `phoxal_cli_core::check::participant_metadata`). No
-/// `bus_abi` (D1, X-tools slice: dissolved into the version-qualified
-/// contract key, `phoxal::check::ParticipantApis` no longer carries it
-/// either). No contract inventory (organization#957): there is no
-/// API-coherence pass left to feed.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct RawEmitApis {
+/// The CLI's own participant-report shape: `artifact.id` IS self-reported -
+/// a built binary's linker section carries the participant's own declared
+/// `id` alongside its config schema (see
+/// `phoxal_cli_core::check::participant_metadata`) - and is checked against
+/// the identity that selected the binary before its schema is trusted
+/// (`raw_participant_report_from_extracted_metadata`). `artifact.kind` is still
+/// supplied by the caller: the section carries no kind label. No `bus_abi`
+/// (D1, X-tools slice: dissolved into the version-qualified contract key,
+/// `phoxal::check::ParticipantApis` no longer carries it either). No contract
+/// inventory (organization#957): there is no API-coherence pass left to
+/// feed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawParticipantReport {
     pub artifact: RawArtifact,
-    #[serde(default = "default_participant_class")]
     pub participant_class: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<Value>,
 }
 
@@ -41,7 +43,7 @@ pub(crate) fn default_participant_class() -> String {
     "checked".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RawArtifact {
     pub kind: String,
     pub id: String,
@@ -79,13 +81,14 @@ mod config;
 pub(crate) use config::{validate_user_runtime_config, validate_user_service_config};
 mod metadata;
 pub(crate) use metadata::{
-    extract_emit_apis_from_staged_runtime, extract_emit_apis_from_staged_tool,
-    fetch_emit_apis_from_tool, raw_emit_apis_from_extracted_metadata, tool_env_override,
+    extract_participant_report_from_staged_runtime, extract_participant_report_from_staged_tool,
+    fetch_participant_report_from_tool, raw_participant_report_from_extracted_metadata,
+    tool_env_override,
 };
 mod build;
 pub(crate) use build::{
-    build_emit_apis_from_source, build_emit_apis_from_source_for_check, validate_artifact_identity,
-    validate_source_artifact_identity,
+    build_participant_report_from_source, build_participant_report_from_source_for_check,
+    validate_artifact_identity, validate_source_artifact_identity,
 };
 mod errors;
 pub use errors::MissingImageError;
