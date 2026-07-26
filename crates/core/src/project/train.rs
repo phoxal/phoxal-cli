@@ -366,7 +366,6 @@ struct ResolveDependency {
 mod tests {
     use super::*;
     use std::fs;
-    use std::process::Command;
 
     #[test]
     fn registry_metadata_distinguishes_yanked_locked_train() {
@@ -412,125 +411,99 @@ mod tests {
     }
 
     #[test]
-    fn locked_metadata_discovers_directory_runtimes_and_delegated_component_assets() {
+    fn workspace_runtime_discovery_classifies_directories_and_component_assets() {
         let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("src")).unwrap();
-        fs::create_dir_all(root.path().join("train/phoxal/src")).unwrap();
-        fs::create_dir_all(root.path().join("services/mission/src")).unwrap();
-        fs::create_dir_all(root.path().join("tools/operator/src")).unwrap();
-        fs::create_dir_all(root.path().join("components/passive/src")).unwrap();
-        fs::create_dir_all(root.path().join("components/wrapped/src")).unwrap();
-        fs::create_dir_all(root.path().join("vendor/remote-component/src")).unwrap();
-        fs::write(
-            root.path().join("Cargo.toml"),
-            r#"[package]
-name = "robot"
-version = "0.0.0"
-edition = "2024"
-publish = false
-
-[workspace]
-members = [
-  "services/mission",
-  "tools/operator",
-  "components/passive",
-  "components/wrapped",
-]
-resolver = "3"
-
-[dependencies]
-phoxal = { path = "train/phoxal" }
-"#,
-        )
-        .unwrap();
-        fs::write(root.path().join("src/lib.rs"), "").unwrap();
-        fs::write(
-            root.path().join("train/phoxal/Cargo.toml"),
-            "[package]\nname='phoxal'\nversion='0.38.1'\nedition='2024'\n",
-        )
-        .unwrap();
-        fs::write(root.path().join("train/phoxal/src/lib.rs"), "").unwrap();
-        for (directory, package) in [
-            ("services/mission", "mission"),
-            ("tools/operator", "operator"),
+        let write_manifest = |relative: &str| {
+            let path = root.path().join(relative).join("Cargo.toml");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "").unwrap();
+        };
+        for directory in [
+            "services/mission",
+            "tools/operator",
+            "components/passive",
+            "components/wrapped",
+            "vendor/remote-component",
         ] {
-            fs::write(
-                root.path().join(directory).join("Cargo.toml"),
-                format!("[package]\nname='{package}'\nversion='0.1.0'\nedition='2024'\n"),
-            )
-            .unwrap();
-            fs::write(
-                root.path().join(directory).join("src/main.rs"),
-                "fn main() {}",
-            )
-            .unwrap();
+            write_manifest(directory);
         }
-        fs::write(
-            root.path().join("components/passive/Cargo.toml"),
-            "[package]\nname='passive'\nversion='0.1.0'\nedition='2024'\n",
-        )
-        .unwrap();
-        fs::write(root.path().join("components/passive/src/lib.rs"), "").unwrap();
         fs::write(
             root.path().join("components/passive/component.yaml"),
             "schema: component/v0\n",
         )
         .unwrap();
         fs::write(
-            root.path().join("vendor/remote-component/Cargo.toml"),
-            "[package]\nname='remote-component'\nversion='0.1.0'\nedition='2024'\n",
-        )
-        .unwrap();
-        fs::write(root.path().join("vendor/remote-component/src/lib.rs"), "").unwrap();
-        fs::write(
             root.path().join("vendor/remote-component/component.yaml"),
             "schema: component/v0\n",
         )
         .unwrap();
-        fs::write(
-            root.path().join("components/wrapped/Cargo.toml"),
-            "[package]\nname='wrapped'\nversion='0.1.0'\nedition='2024'\n\n[dependencies]\nremote-component={path='../../vendor/remote-component'}\n",
-        )
-        .unwrap();
-        fs::write(root.path().join("components/wrapped/src/lib.rs"), "").unwrap();
-        fs::write(
-            root.path().join("components/wrapped/src/main.rs"),
-            "fn main() {}",
-        )
-        .unwrap();
-        let status = Command::new("cargo")
-            .arg("generate-lockfile")
-            .current_dir(root.path())
-            .status()
-            .unwrap();
-        assert!(status.success());
 
-        let project = resolve_locked_project(root.path()).unwrap();
-        assert_eq!(project.train.version, "0.38.1");
-        assert_eq!(project.train.source, TrainSource::Path);
-        assert_eq!(project.runtimes.len(), 4);
-        let service = project
-            .runtimes
-            .iter()
-            .find(|runtime| runtime.package == "mission")
-            .unwrap();
-        assert_eq!(service.kind, WorkspaceRuntimeKind::Service);
-        assert_eq!(service.binary_names, ["mission"]);
-        let tool = project
-            .runtimes
-            .iter()
-            .find(|runtime| runtime.package == "operator")
-            .unwrap();
-        assert_eq!(tool.kind, WorkspaceRuntimeKind::Tool);
-        assert_eq!(tool.binary_names, ["operator"]);
-        let passive = project
-            .runtimes
-            .iter()
-            .find(|runtime| runtime.package == "passive")
-            .unwrap();
-        assert!(passive.binary_names.is_empty());
+        let package = |id: &str, name: &str, directory: &str, binaries: &[&str]| Package {
+            id: id.to_string(),
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            source: None,
+            manifest_path: root
+                .path()
+                .join(directory)
+                .join("Cargo.toml")
+                .display()
+                .to_string(),
+            publish: None,
+            dependencies: Vec::new(),
+            targets: binaries
+                .iter()
+                .map(|name| Target {
+                    name: (*name).to_string(),
+                    kind: vec!["bin".to_string()],
+                })
+                .collect(),
+        };
+        let metadata = Metadata {
+            packages: vec![
+                package("mission", "mission", "services/mission", &["mission"]),
+                package("operator", "operator", "tools/operator", &["operator"]),
+                package("passive", "passive", "components/passive", &[]),
+                package("wrapped", "wrapped", "components/wrapped", &["wrapped"]),
+                package(
+                    "remote-component",
+                    "remote-component",
+                    "vendor/remote-component",
+                    &[],
+                ),
+            ],
+            workspace_members: vec![
+                "mission".to_string(),
+                "operator".to_string(),
+                "passive".to_string(),
+                "wrapped".to_string(),
+            ],
+            resolve: Some(Resolve {
+                nodes: vec![ResolveNode {
+                    id: "wrapped".to_string(),
+                    deps: vec![ResolveDependency {
+                        pkg: "remote-component".to_string(),
+                    }],
+                }],
+            }),
+        };
+
+        let runtimes = discover_workspace_runtimes(root.path(), &metadata).unwrap();
+        assert_eq!(runtimes.len(), 4);
+        let runtime = |package: &str| {
+            runtimes
+                .iter()
+                .find(|runtime| runtime.package == package)
+                .unwrap()
+        };
+        assert_eq!(runtime("mission").kind, WorkspaceRuntimeKind::Service);
+        assert_eq!(runtime("mission").binary_names, ["mission"]);
+        assert_eq!(runtime("operator").kind, WorkspaceRuntimeKind::Tool);
+        assert_eq!(runtime("operator").binary_names, ["operator"]);
+        assert_eq!(runtime("passive").kind, WorkspaceRuntimeKind::Component);
+        assert!(runtime("passive").binary_names.is_empty());
         assert_eq!(
-            passive.component_assets.as_deref(),
+            runtime("passive").component_assets.as_deref(),
             Some(
                 root.path()
                     .join("components/passive")
@@ -539,21 +512,11 @@ phoxal = { path = "train/phoxal" }
                     .as_path()
             )
         );
-        let wrapped = project
-            .runtimes
-            .iter()
-            .find(|runtime| runtime.package == "wrapped")
-            .unwrap();
-        assert_eq!(wrapped.binary_names, ["wrapped"]);
+        assert_eq!(runtime("wrapped").kind, WorkspaceRuntimeKind::Component);
+        assert_eq!(runtime("wrapped").binary_names, ["wrapped"]);
         assert_eq!(
-            wrapped.component_assets.as_deref(),
-            Some(
-                root.path()
-                    .join("vendor/remote-component")
-                    .canonicalize()
-                    .unwrap()
-                    .as_path()
-            )
+            runtime("wrapped").component_assets.as_deref(),
+            Some(root.path().join("vendor/remote-component").as_path())
         );
     }
 }

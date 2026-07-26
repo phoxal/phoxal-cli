@@ -21,7 +21,6 @@ sha2 = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
-clap = { workspace = true, features = ["derive"] }
 object = { workspace = true, features = ["write"] }
 tempfile = { workspace = true }
 

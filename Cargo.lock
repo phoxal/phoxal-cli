@@ -2989,7 +2989,6 @@ name = "phoxal-cli-core"
 version = "0.25.1"
 dependencies = [
  "anyhow",
- "clap",
  "hex",
  "object",
  "phoxal",
