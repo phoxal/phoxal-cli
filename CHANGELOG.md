@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.25.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.25.1) - 2026-07-26
+
+
+### Refactored
+
+- *(router)* Probe Zenoh readiness from the CLI ([#207](https://github.com/phoxal/phoxal-cli/pull/207))
+
+
 ## [0.25.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.25.0) - 2026-07-26
 
 
