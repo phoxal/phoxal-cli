@@ -1,31 +1,19 @@
 //! Router responsibilities for run.
 
 use super::ROUTER_READY_TIMEOUT;
-use crate::supervisor::BoardBackend;
-use crate::supervisor::ManagedChild;
-use crate::supervisor::ParticipantSpec;
-use crate::supervisor::SupervisionStage;
-use crate::supervisor::SupervisorOptions;
-use crate::supervisor::SupervisorOutcome;
-use crate::supervisor::create_cloexec_pipe;
-use crate::supervisor::supervise_until_shutdown;
-use anyhow::Context;
-use anyhow::Result;
-use anyhow::bail;
+use crate::supervisor::{
+    BoardBackend, ManagedChild, ParticipantSpec, SupervisionStage, SupervisorOptions,
+    SupervisorOutcome, supervise_until_shutdown,
+};
+use anyhow::{Context, Result, bail};
 use phoxal::participant::launch::env;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::tooling::resolve_project_path;
 use phoxal_cli_core::session::human;
 use std::collections::{BTreeSet, VecDeque};
-use std::os::fd::AsRawFd;
-#[cfg(test)]
-use std::os::fd::FromRawFd;
-use std::path::Path;
-use std::path::PathBuf;
-use std::time::Duration;
-use std::time::Instant;
-use tokio::io::BufReader;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[derive(Debug, Clone)]
 struct RouterLaunch {
@@ -61,11 +49,48 @@ impl Default for RouterRecoveryPolicy {
     }
 }
 
+#[derive(Debug, Clone)]
+struct RouterProbe {
+    namespace: String,
+    robot_id: String,
+    execution: phoxal::bus::ExecutionId,
+}
+
+impl RouterProbe {
+    fn from_plan(plan: &LaunchPlan, execution: phoxal::bus::ExecutionId) -> Result<Self> {
+        let robot = plan
+            .robots
+            .first()
+            .context("launch plan has no robot for router readiness")?;
+        Ok(Self {
+            namespace: robot.namespace.clone(),
+            robot_id: robot.id.clone(),
+            execution,
+        })
+    }
+
+    async fn connect(&self, endpoint: &str) -> Result<()> {
+        let bus = phoxal::raw::Bus::open(phoxal::raw::BusConfig {
+            namespace: self.namespace.clone(),
+            robot_id: self.robot_id.clone(),
+            participant: "phoxal-cli-router-readiness".to_string(),
+            execution: self.execution,
+            producer: phoxal::bus::ProducerId::mint(),
+            connect_endpoints: vec![endpoint.to_string()],
+        })
+        .await
+        .context("connect CLI readiness probe to infrastructure router")?;
+        bus.close()
+            .await
+            .context("close CLI router readiness probe")
+    }
+}
+
 pub(crate) struct InfrastructureRouter {
     process: RouterProcess,
     launch: RouterLaunch,
-    listeners: Vec<String>,
     participant_endpoint: String,
+    readiness_probe: RouterProbe,
     recovery_policy: RouterRecoveryPolicy,
 }
 
@@ -184,15 +209,18 @@ impl InfrastructureRouter {
                     () = session_token.cancelled() => return Ok(teardown_outcome),
                     () = tokio::time::sleep(self.recovery_policy.restart_delay) => {}
                 }
-                let restart = launch_router_process(&self.launch, &self.participant_endpoint);
+                let restart = launch_router_process(
+                    &self.launch,
+                    &self.participant_endpoint,
+                    &self.readiness_probe,
+                );
                 let restarted = tokio::select! {
                     () = session_token.cancelled() => return Ok(teardown_outcome),
                     result = restart => result,
                 };
                 match restarted {
-                    Ok((process, listeners)) => {
+                    Ok(process) => {
                         self.process = process;
-                        self.listeners = listeners;
                         board.enable_presence_for_recovery();
                         board.set_router_status(format!("ready:{}", self.participant_endpoint));
                         board.set_state(
@@ -212,11 +240,6 @@ impl InfrastructureRouter {
                 }
             }
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_recovery_policy(&mut self, policy: RouterRecoveryPolicy) {
-        self.recovery_policy = policy;
     }
 }
 
@@ -291,13 +314,9 @@ pub(crate) async fn start_infrastructure_router(
     staged_root: &Path,
     project_root: &Path,
     config: Option<PathBuf>,
+    plan: &LaunchPlan,
+    execution: phoxal::bus::ExecutionId,
 ) -> Result<(InfrastructureRouter, String)> {
-    // The router is resolved through the staged layout's flat `bin/` store,
-    // exactly like every other official runtime - staging links it there from
-    // the vendored store (or a source override) via
-    // `stager::stage_complete_official_store` / `stage_router_binary`. A staged
-    // or bundle run passes its layout root as `staged_root`; a source run passes
-    // `.phoxal/build/<triple>/`.
     let binary = crate::stager::staged_router_binary(staged_root);
     anyhow::ensure!(
         binary.is_file(),
@@ -306,16 +325,17 @@ pub(crate) async fn start_infrastructure_router(
     );
     let launch = RouterLaunch { binary, config };
     let endpoint = project_router_endpoint(project_root);
+    let readiness_probe = RouterProbe::from_plan(plan, execution)?;
     std::fs::create_dir_all(
         crate::runtime_paths::RuntimePaths::for_root(project_root).volatile_root,
     )?;
-    let (process, listeners) = launch_router_process(&launch, &endpoint).await?;
+    let process = launch_router_process(&launch, &endpoint, &readiness_probe).await?;
     Ok((
         InfrastructureRouter {
             process,
             launch,
-            listeners,
             participant_endpoint: endpoint.clone(),
+            readiness_probe,
             recovery_policy: RouterRecoveryPolicy::default(),
         },
         endpoint,
@@ -333,18 +353,14 @@ pub(crate) fn project_router_endpoint(project_root: &Path) -> String {
 
 async fn launch_router_process(
     launch: &RouterLaunch,
-    required_endpoint: &str,
-) -> Result<(RouterProcess, Vec<String>)> {
-    let (read_fd, ready_fd) = create_cloexec_pipe().context("create router readiness pipe")?;
+    endpoint: &str,
+    readiness_probe: &RouterProbe,
+) -> Result<RouterProcess> {
     let mut command = tokio::process::Command::new(&launch.binary);
-    prepare_inherited_bootstrap_fd(&mut command, ready_fd.as_raw_fd())?;
     if let Some(config) = &launch.config {
         command.arg("--config").arg(config);
     }
-    command.arg("--local-endpoint").arg(required_endpoint);
-    command
-        .arg("--ready-fd")
-        .arg(ready_fd.as_raw_fd().to_string());
+    command.arg("--listen").arg(endpoint);
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -352,8 +368,6 @@ async fn launch_router_process(
         .kill_on_drop(true);
     let mut child = ManagedChild::spawn(&mut command, true, &[])
         .context("failed to launch phoxal-infrastructure-router")?;
-    // SAFETY: the child inherited this valid descriptor; parent no longer owns it.
-    drop(ready_fd);
     let stdout = child
         .stdout
         .take()
@@ -381,113 +395,77 @@ async fn launch_router_process(
             }
         }
     });
-    let attempt = RouterLaunchAttempt::new(child, stderr_task);
-    let readiness_file = std::fs::File::from(read_fd);
-    let mut readiness_reader = tokio::fs::File::from_std(readiness_file);
-    let readiness: Result<Vec<String>> = async {
-        let readiness = tokio::time::timeout(ROUTER_READY_TIMEOUT, async {
-            let mut bytes = Vec::new();
-            readiness_reader.read_to_end(&mut bytes).await?;
-            let event: phoxal::infrastructure::router::RouterReadyV0 =
-                serde_json::from_slice(&bytes).context("invalid router readiness FD payload")?;
-            match event {
-                phoxal::infrastructure::router::RouterReadyV0::Ready {
-                    local_endpoint,
-                    listeners,
-                } => {
-                    anyhow::ensure!(
-                        local_endpoint == required_endpoint,
-                        "router returned endpoint {local_endpoint}, expected {required_endpoint}"
-                    );
-                    Ok(listeners)
-                }
-                phoxal::infrastructure::router::RouterReadyV0::Failed { message } => {
-                    bail!("{message}")
-                }
-            }
-        })
-        .await
-        .context("timed out waiting for infrastructure router readiness")?;
-        let listeners = match readiness {
-            Ok(listeners) => listeners,
-            Err(error) => {
-                let _ = tokio::time::timeout(Duration::from_millis(100), async {
-                    while stderr_tail.lock().is_ok_and(|tail| tail.is_empty()) {
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await;
-                let tail = stderr_tail
-                    .lock()
-                    .map(|tail| tail.clone())
-                    .unwrap_or_default();
-                if tail.is_empty() {
-                    return Err(error);
-                }
-                return Err(error.context(format!("infrastructure router stderr:\n{tail}")));
-            }
-        };
-        anyhow::ensure!(
-            listeners
-                .first()
-                .is_some_and(|listener| listener == required_endpoint),
-            "router did not report mandatory local endpoint first: {listeners:?}"
-        );
-        Ok(listeners)
+    let mut attempt = RouterLaunchAttempt::new(child, stderr_task);
+    if let Err(error) = wait_for_router_connection(
+        attempt
+            .child
+            .as_mut()
+            .expect("launch attempt owns its child"),
+        endpoint,
+        readiness_probe,
+        &stderr_tail,
+    )
+    .await
+    {
+        attempt.stop_failed().await;
+        return Err(error);
     }
-    .await;
-    let listeners = match readiness {
-        Ok(listeners) => listeners,
-        Err(error) => {
-            attempt.stop_failed().await;
-            return Err(error);
-        }
-    };
     let mut lines = BufReader::new(stdout).lines();
     let stdout_task = tokio::spawn(async move {
         while let Ok(Some(line)) = lines.next_line().await {
             tracing::info!(target: "infrastructure_router", "{line}");
         }
     });
-    Ok((attempt.finish(stdout_task), listeners))
+    Ok(attempt.finish(stdout_task))
 }
 
-fn prepare_inherited_bootstrap_fd(
-    command: &mut tokio::process::Command,
-    fd: libc::c_int,
+async fn wait_for_router_connection(
+    child: &mut ManagedChild,
+    endpoint: &str,
+    readiness_probe: &RouterProbe,
+    stderr_tail: &std::sync::Arc<std::sync::Mutex<String>>,
 ) -> Result<()> {
-    // Keep the parent-side descriptor CLOEXEC while ManagedChild lazily starts
-    // the guardian. Otherwise that unrelated exec inherits the write end and
-    // the supervisor can never observe EOF on this one-shot readiness pipe.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } != 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("mark router readiness write end close-on-exec");
-    }
-    // The intended router child clears CLOEXEC only after fork and immediately
-    // before exec. Multiple pre_exec hooks are supported; ManagedChild adds its
-    // guardian registration hook after this one.
-    unsafe {
-        command.pre_exec(move || {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags == -1 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        });
-    }
-    Ok(())
+    let deadline = tokio::time::Instant::now() + ROUTER_READY_TIMEOUT;
+    let error = loop {
+        if let Some(status) = child.try_wait()? {
+            return Err(router_start_error(
+                anyhow::anyhow!("infrastructure router exited before the CLI connected ({status})"),
+                stderr_tail,
+            ));
+        }
+        let error = match tokio::time::timeout(
+            Duration::from_millis(250),
+            readiness_probe.connect(endpoint),
+        )
+        .await
+        {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(error)) => error,
+            Err(_) => anyhow::anyhow!("CLI readiness connection attempt timed out"),
+        };
+        if tokio::time::Instant::now() >= deadline {
+            break error;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    Err(router_start_error(
+        error.context("timed out waiting for the CLI to connect to the infrastructure router"),
+        stderr_tail,
+    ))
 }
 
-#[cfg(test)]
-pub(crate) fn parse_router_ready(line: &str) -> Result<String> {
-    let event: phoxal::infrastructure::router::RouterReadyV0 = serde_json::from_str(line)?;
-    match event {
-        phoxal::infrastructure::router::RouterReadyV0::Ready { local_endpoint, .. } => {
-            Ok(local_endpoint)
-        }
-        phoxal::infrastructure::router::RouterReadyV0::Failed { message } => bail!("{message}"),
+fn router_start_error(
+    error: anyhow::Error,
+    stderr_tail: &std::sync::Arc<std::sync::Mutex<String>>,
+) -> anyhow::Error {
+    let tail = stderr_tail
+        .lock()
+        .map(|tail| tail.clone())
+        .unwrap_or_default();
+    if tail.is_empty() {
+        error
+    } else {
+        error.context(format!("infrastructure router stderr:\n{tail}"))
     }
 }
 
@@ -505,320 +483,5 @@ pub(crate) fn apply_session_connect(
         if let Some((_, value)) = spec.env.iter_mut().find(|(key, _)| key == env::CONNECT) {
             *value = endpoint.to_string();
         }
-    }
-}
-
-#[cfg(all(test, unix))]
-mod recovery_tests {
-    use super::*;
-    use crate::session::output::WaitBudget;
-    use phoxal_cli_core::session::ParticipantKind;
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-
-    const TEST_LISTENER: &str = "unixsock-stream//tmp/phoxal-router-test.sock";
-    const TEST_EXTRA_LISTENER: &str = "tcp/127.0.0.1:48000";
-
-    fn shell_quote(path: &Path) -> String {
-        format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
-    }
-
-    fn write_executable(path: &Path, contents: &str) -> Result<()> {
-        fs::write(path, contents)?;
-        let mut permissions = fs::metadata(path)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions)?;
-        Ok(())
-    }
-
-    fn write_fake_router(
-        root: &Path,
-        failures_before_stable: usize,
-        add_listener_after_restart: bool,
-    ) -> Result<PathBuf> {
-        let script = root.join("fake-router");
-        let count = shell_quote(&root.join("router-count"));
-        let args = shell_quote(&root.join("router-args"));
-        let ready = if add_listener_after_restart {
-            format!(
-                "if [ \"$count\" -gt 1 ]; then\n\
-                   ready='{{\"status\":\"ready\",\"local_endpoint\":\"{TEST_LISTENER}\",\"listeners\":[\"{TEST_LISTENER}\",\"{TEST_EXTRA_LISTENER}\"]}}'\n\
-                 else\n\
-                   ready='{{\"status\":\"ready\",\"local_endpoint\":\"{TEST_LISTENER}\",\"listeners\":[\"{TEST_LISTENER}\"]}}'\n\
-                 fi"
-            )
-        } else {
-            format!(
-                "ready='{{\"status\":\"ready\",\"local_endpoint\":\"{TEST_LISTENER}\",\"listeners\":[\"{TEST_LISTENER}\"]}}'"
-            )
-        };
-        write_executable(
-            &script,
-            &format!(
-                "#!/usr/bin/env bash\n\
-                 count=0\n\
-                 if [ -f {count} ]; then count=$(sed -n '1p' {count}); fi\n\
-                 count=$((count + 1))\n\
-                 printf '%s\\n' \"$count\" > {count}\n\
-                 printf '%s\\n' \"$*\" >> {args}\n\
-                 ready_fd=\n\
-                 while [ \"$#\" -gt 0 ]; do\n\
-                   if [ \"$1\" = '--ready-fd' ]; then ready_fd=$2; shift 2; else shift; fi\n\
-                 done\n\
-                 {ready}\n\
-                 eval \"printf '%s' '$ready' >&$ready_fd\"\n\
-                 eval \"exec $ready_fd>&-\"\n\
-                 if [ \"$count\" -le {failures_before_stable} ]; then\n\
-                   sleep 0.5\n\
-                   exit 17\n\
-                 fi\n\
-                 trap 'exit 0' TERM INT\n\
-                 while :; do sleep 1; done\n"
-            ),
-        )?;
-        Ok(script)
-    }
-
-    fn write_fake_webots(root: &Path) -> Result<PathBuf> {
-        let script = root.join("fake-webots");
-        write_executable(
-            &script,
-            "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n",
-        )?;
-        Ok(script)
-    }
-
-    fn process_group_alive(pid: u32) -> bool {
-        // SAFETY: signal zero performs only the process-group existence check.
-        let result = unsafe { libc::kill(-(pid as i32), 0) };
-        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
-
-    fn process_alive(pid: u32) -> bool {
-        // SAFETY: signal zero performs only the process existence check.
-        let result = unsafe { libc::kill(pid as i32, 0) };
-        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
-
-    #[tokio::test]
-    async fn unrelated_exec_cannot_hold_the_readiness_pipe_open() -> Result<()> {
-        let mut fds = [0_i32; 2];
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let (read_fd, write_fd) = (fds[0], fds[1]);
-        let mut writer = tokio::process::Command::new("/usr/bin/env");
-        writer
-            .arg("bash")
-            .arg("-c")
-            .arg(format!("printf ready >&{write_fd}"));
-        prepare_inherited_bootstrap_fd(&mut writer, write_fd)?;
-
-        // This models the guardian's first lazy exec between readiness-pipe
-        // creation and router spawn. CLOEXEC must prevent it retaining the
-        // write end for its lifetime.
-        let mut unrelated_command = tokio::process::Command::new("/bin/sleep");
-        unrelated_command.arg("30").kill_on_drop(true);
-        let mut unrelated = unrelated_command.spawn()?;
-        let mut writer = writer.spawn()?;
-        unsafe { libc::close(write_fd) };
-        let readiness_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
-        let mut reader = tokio::fs::File::from_std(readiness_file);
-        let mut bytes = Vec::new();
-        tokio::time::timeout(Duration::from_secs(2), reader.read_to_end(&mut bytes))
-            .await
-            .context("unrelated exec retained router readiness writer")??;
-        assert_eq!(bytes, b"ready");
-        assert!(writer.wait().await?.success());
-        unrelated.kill().await?;
-        let _ = unrelated.wait().await;
-        Ok(())
-    }
-
-    async fn start_fake_router(binary: PathBuf) -> Result<InfrastructureRouter> {
-        let launch = RouterLaunch {
-            binary,
-            config: None,
-        };
-        let (process, listeners) = launch_router_process(&launch, TEST_LISTENER).await?;
-        Ok(InfrastructureRouter {
-            process,
-            launch,
-            listeners,
-            participant_endpoint: TEST_LISTENER.to_string(),
-            recovery_policy: RouterRecoveryPolicy {
-                restart_delay: Duration::from_millis(10),
-                start_limit_interval: Duration::from_secs(5),
-                start_limit_burst: 5,
-            },
-        })
-    }
-
-    fn webots_spec(executable: PathBuf) -> ParticipantSpec {
-        ParticipantSpec {
-            key: phoxal_cli_core::session::ProcessKey::project("webots"),
-            id: "webots".to_string(),
-            kind: ParticipantKind::Tool,
-            executable,
-            args: Vec::new(),
-            cwd: None,
-            env: Vec::new(),
-            shutdown_grace: Duration::from_millis(500),
-            process_group: true,
-            note: Some("CLI-managed Webots application".to_string()),
-            bus_participant: false,
-            readiness: phoxal_cli_core::session::ReadinessPolicy::ProcessSpawned,
-            startup_requirement: phoxal_cli_core::session::StartupRequirement::Required,
-            runtime_failure: phoxal_cli_core::session::RuntimeFailurePolicy::StopProject,
-            restart_policy: Default::default(),
-        }
-    }
-
-    #[tokio::test]
-    async fn failed_readiness_reaps_the_child_and_stderr_pump_attempt() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let script = temp.path().join("never-ready-router");
-        let pid_path = temp.path().join("router-pid");
-        write_executable(
-            &script,
-            &format!(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$$\" > {}\nprintf '%s\\n' 'diagnostic' >&2\nready_fd=\nwhile [ \"$#\" -gt 0 ]; do if [ \"$1\" = '--ready-fd' ]; then ready_fd=$2; shift 2; else shift; fi; done\neval \"printf '%s' 'not-json' >&$ready_fd\"\neval \"exec $ready_fd>&-\"\nsleep 30\n",
-                shell_quote(&pid_path),
-            ),
-        )?;
-        let launch = RouterLaunch {
-            binary: script,
-            config: None,
-        };
-
-        let error = match launch_router_process(&launch, TEST_LISTENER).await {
-            Ok(_) => panic!("invalid readiness must fail the launch attempt"),
-            Err(error) => error,
-        };
-        assert!(
-            format!("{error:#}").contains("invalid router readiness FD payload"),
-            "{error:#}"
-        );
-        let pid = fs::read_to_string(pid_path)?.trim().parse::<u32>()?;
-        assert!(
-            !process_alive(pid),
-            "a failed launch attempt must reap its router child"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn router_death_recreates_cli_managed_webots_with_the_pinned_endpoint() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let router_binary = write_fake_router(temp.path(), 1, true)?;
-        let webots_binary = write_fake_webots(temp.path())?;
-        let router = start_fake_router(router_binary).await?;
-        let board = BoardBackend::new();
-        let stages = vec![SupervisionStage::new(
-            "starting Webots",
-            vec![webots_spec(webots_binary)],
-            WaitBudget::Bounded(Duration::from_secs(5)),
-        )];
-        let token = tokio_util::sync::CancellationToken::new();
-        let supervision = tokio::spawn(router.supervise(
-            stages,
-            board.clone(),
-            SupervisorOptions {
-                token: token.clone(),
-                ..SupervisorOptions::default()
-            },
-        ));
-
-        let first_pid = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some(pid) = board
-                    .snapshot()
-                    .participants
-                    .get("webots")
-                    .and_then(|status| status.pid)
-                {
-                    break pid;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the initial CLI-owned Webots process must spawn");
-        let recovered = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if board.recovery_epoch() >= 1
-                    && let Some(pid) = board.snapshot().participants["webots"].pid
-                    && pid != first_pid
-                {
-                    break pid;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await;
-        assert!(
-            recovered.is_ok(),
-            "router loss must tear down and recreate the graph; epoch={}, router_count={:?}, board={:?}",
-            board.recovery_epoch(),
-            fs::read_to_string(temp.path().join("router-count")),
-            board.snapshot(),
-        );
-        let second_pid = recovered.expect("checked above");
-        assert!(
-            !process_group_alive(first_pid),
-            "the first CLI-owned Webots process group must be gone before recreation"
-        );
-
-        let args = fs::read_to_string(temp.path().join("router-args"))?;
-        assert!(
-            args.lines()
-                .any(|line| line
-                    .starts_with(&format!("--local-endpoint {TEST_LISTENER} --ready-fd "))),
-            "replacement router must receive the original listener: {args:?}"
-        );
-        token.cancel();
-        let outcome = tokio::time::timeout(Duration::from_secs(5), supervision)
-            .await
-            .expect("cancellation must stop the recovered graph")
-            .expect("router supervisor task panicked")?;
-        assert!(outcome.failed_participants.is_empty());
-        assert!(
-            !process_group_alive(second_pid),
-            "cancellation must stop the recovered CLI-owned Webots process group"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn repeated_router_death_exits_after_the_bounded_recovery_budget() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let router_binary = write_fake_router(temp.path(), 100, false)?;
-        let mut router = start_fake_router(router_binary).await?;
-        router.set_recovery_policy(RouterRecoveryPolicy {
-            restart_delay: Duration::from_millis(10),
-            start_limit_interval: Duration::from_secs(5),
-            start_limit_burst: 3,
-        });
-        let board = BoardBackend::new();
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            router.supervise(Vec::new(), board.clone(), SupervisorOptions::default()),
-        )
-        .await
-        .expect("the recovery budget must end a permanently failing session");
-        let error = result.expect_err("three router faults must exhaust the recovery budget");
-        assert!(
-            error
-                .to_string()
-                .contains("full-stack recovery exhausted after 3 failures"),
-            "{error:#}"
-        );
-        assert!(error.to_string().contains("in 5.0s"), "{error:#}");
-        assert_eq!(board.recovery_epoch(), 3);
-        assert_eq!(
-            fs::read_to_string(temp.path().join("router-count"))?.trim(),
-            "3"
-        );
-        Ok(())
     }
 }

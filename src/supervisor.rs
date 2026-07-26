@@ -41,7 +41,6 @@ mod process;
 pub(crate) use process::RunningParticipant;
 mod managed_child;
 pub(crate) use managed_child::ManagedChild;
-pub(crate) use managed_child::create_cloexec_pipe;
 pub(crate) use managed_child::materialize_plan_binaries;
 pub use managed_child::maybe_run_guardian;
 mod output;
@@ -65,8 +64,7 @@ pub use lock::active_execution;
 pub(crate) use lock::{ProjectLock, ProjectLockIdentity, ProjectLockStatus, ProjectOperation};
 mod bus;
 pub(crate) use bus::{
-    default_connect_endpoint, start_bus_log_subscriber, start_clock_feed,
-    start_liveliness_observer, wait_for_endpoint,
+    default_connect_endpoint, start_bus_log_subscriber, start_clock_feed, start_liveliness_observer,
 };
 
 #[cfg(test)]

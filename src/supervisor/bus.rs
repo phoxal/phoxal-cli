@@ -1,4 +1,4 @@
-//! Raw bus adapters for logs, Liveliness, clock, and endpoint reachability.
+//! Raw bus adapters for logs, Liveliness, and clock.
 
 #[cfg(test)]
 use super::ParticipantState;
@@ -17,40 +17,10 @@ use phoxal_cli_core::session::telemetry::{ClockObservation, ClockSample};
 use phoxal_cli_core::session::{LogScope, LogSeverity, RoutedLogLine};
 use phoxal_cli_core::session::{ParticipantInstanceKey, RobotKey};
 use std::convert::Infallible;
-use std::net::TcpStream;
-use std::net::ToSocketAddrs;
-use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-
-pub fn endpoint_reachable(endpoint: &str, timeout: Duration) -> bool {
-    if let Some(path) = endpoint.strip_prefix("unixsock-stream/") {
-        return UnixStream::connect(path).is_ok();
-    }
-    let Some(address) = endpoint.strip_prefix("tcp/") else {
-        return false;
-    };
-    let Ok(mut addresses) = address.to_socket_addrs() else {
-        return false;
-    };
-    let Some(address) = addresses.next() else {
-        return false;
-    };
-    TcpStream::connect_timeout(&address, timeout).is_ok()
-}
-
-/// Wait for a router endpoint before asking Zenoh to open a session.
-/// Managed sessions intentionally start their observer feeds before the
-/// router process so they cannot miss early readiness. A cheap socket preflight
-/// keeps those expected retries from producing Zenoh connection warnings on
-/// top of the alternate-screen TUI.
-pub(crate) async fn wait_for_endpoint(endpoint: &str) {
-    while !endpoint_reachable(endpoint, Duration::from_millis(50)) {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
 
 pub fn start_bus_log_subscriber(
     namespace: String,
@@ -66,7 +36,6 @@ pub fn start_bus_log_subscriber(
             robot_id: robot_id.clone(),
         };
         loop {
-            wait_for_endpoint(&connect).await;
             let bus = match Bus::open(BusConfig {
                 namespace: namespace.clone(),
                 robot_id: robot_id.clone(),
@@ -120,9 +89,9 @@ pub(crate) async fn bus_log_subscriber_loop(
     scope: &LogScope,
     board: BoardBackend,
 ) -> Result<Infallible> {
-    let follow_topic = api::topic::new().tool().log().follow();
+    let follow_topic = api::topic::client().tool().log().follow();
     let subscriber = Subscriber::<api::tool::log::Follow>::new(bus, &follow_topic, 256).await?;
-    let snapshot_topic = api::topic::new().tool().log().snapshot();
+    let snapshot_topic = api::topic::client().tool().log().snapshot();
     let querier = Querier::<api::tool::log::SnapshotRequest, api::tool::log::Snapshot>::new(
         bus.clone(),
         &snapshot_topic,
@@ -212,7 +181,6 @@ pub fn start_clock_feed(
     let (tx, rx) = watch::channel(ClockObservation::default());
     let handle = tokio::spawn(async move {
         loop {
-            wait_for_endpoint(&connect).await;
             match clock_feed_loop(
                 namespace.clone(),
                 robot_id.clone(),
@@ -419,7 +387,6 @@ pub fn start_liveliness_observer(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            wait_for_endpoint(&connect).await;
             match liveliness_observer_loop(
                 namespace.clone(),
                 robot_id.clone(),
@@ -511,24 +478,6 @@ mod tests {
     use super::*;
     use phoxal::raw::ParticipantLivelinessKey;
     use phoxal_cli_core::session::ParticipantKind;
-
-    #[test]
-    fn endpoint_reachability_supports_unix_socket_streams() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let socket = directory.path().join("zenoh.sock");
-        let _listener =
-            std::os::unix::net::UnixListener::bind(&socket).expect("bind temporary Unix socket");
-        let endpoint = format!("unixsock-stream/{}", socket.display());
-
-        assert!(endpoint_reachable(&endpoint, Duration::from_millis(50)));
-        assert!(!endpoint_reachable(
-            &format!(
-                "unixsock-stream/{}",
-                directory.path().join("absent.sock").display()
-            ),
-            Duration::from_millis(50)
-        ));
-    }
 
     fn event(participant: &str, status: ParticipantLivelinessStatus) -> ParticipantLivelinessEvent {
         ParticipantLivelinessEvent {

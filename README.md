@@ -52,8 +52,8 @@ phoxal update                 # verify, activate, and prune project-local artifa
 
 Interactive source sessions bind their infrastructure router at
 `<project>/.phoxal/zenoh.sock`; the installed runtime uses
-`/run/phoxal/zenoh.sock`. Router bootstrap readiness travels over
-an inherited one-shot file descriptor; stdout and stderr are logs only. Every
+`/run/phoxal/zenoh.sock`. The CLI considers the router ready only after it
+establishes a real Zenoh connection; stdout and stderr are logs only. Every
 launched graph process crosses the same environment-scrubbing `ManagedChild`
 boundary and is registered with an out-of-process guardian, so killing the CLI
 cannot leave its process graph behind. Shutdown drains graph participants

@@ -27,7 +27,6 @@ use phoxal_api::v0_1 as state_api;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::supervisor::wait_for_endpoint;
 use phoxal_cli_core::session::reconcile::{
     Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced,
 };
@@ -412,7 +411,6 @@ pub fn start_control_state_feed(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            wait_for_endpoint(&connect).await;
             if let Err(error) = control_state_feed_loop(
                 namespace.clone(),
                 robot_id.clone(),
@@ -476,7 +474,6 @@ pub fn start_device_feed(
             robot_id: robot_id.clone(),
         };
         loop {
-            wait_for_endpoint(&connect).await;
             let bus = match Bus::open(BusConfig {
                 namespace: namespace.clone(),
                 robot_id: robot_id.clone(),
@@ -523,10 +520,10 @@ async fn device_feed_loop(
     scope: &RobotScope,
     telemetry: &TelemetryBackend,
 ) -> Result<Infallible> {
-    let follow_topic = state_api::topic::new().tool().device().follow();
+    let follow_topic = state_api::topic::client().tool().device().follow();
     let subscriber =
         Subscriber::<state_api::tool::device::Follow>::new(bus, &follow_topic, 128).await?;
-    let snapshot_topic = state_api::topic::new().tool().device().snapshot();
+    let snapshot_topic = state_api::topic::client().tool().device().snapshot();
     let querier = Querier::<
         state_api::tool::device::SnapshotRequest,
         state_api::tool::device::Snapshot,
@@ -686,7 +683,6 @@ pub fn start_router_metrics_feed(
             robot_id: robot_id.clone(),
         };
         loop {
-            wait_for_endpoint(&connect).await;
             let bus = match Bus::open(BusConfig {
                 namespace: namespace.clone(),
                 robot_id: robot_id.clone(),
@@ -738,10 +734,10 @@ async fn router_metrics_feed_loop(
     scope: &RobotScope,
     telemetry: &TelemetryBackend,
 ) -> Result<Infallible> {
-    let follow_topic = state_api::topic::new().tool().bus().follow();
+    let follow_topic = state_api::topic::client().tool().bus().follow();
     let subscriber =
         Subscriber::<state_api::tool::bus::Follow>::new(bus, &follow_topic, 128).await?;
-    let snapshot_topic = state_api::topic::new().tool().bus().snapshot();
+    let snapshot_topic = state_api::topic::client().tool().bus().snapshot();
     let querier =
         Querier::<state_api::tool::bus::SnapshotRequest, state_api::tool::bus::Snapshot>::new(
             bus.clone(),
@@ -938,7 +934,6 @@ pub fn start_runtime_performance_feed(
         };
         let mut last_capacity_evictions = None;
         loop {
-            wait_for_endpoint(&connect).await;
             let bus = match Bus::open(BusConfig {
                 namespace: namespace.clone(),
                 robot_id: robot_id.clone(),
@@ -1004,10 +999,10 @@ async fn runtime_performance_feed_loop(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let follow_topic = state_api::topic::new().tool().runtime().follow();
+    let follow_topic = state_api::topic::client().tool().runtime().follow();
     let subscriber =
         Subscriber::<state_api::tool::runtime::Follow>::new(bus, &follow_topic, 512).await?;
-    let snapshot_topic = state_api::topic::new().tool().runtime().snapshot();
+    let snapshot_topic = state_api::topic::client().tool().runtime().snapshot();
     let querier = Querier::<
         state_api::tool::runtime::SnapshotRequest,
         state_api::tool::runtime::Snapshot,
@@ -1294,7 +1289,6 @@ pub fn start_joypad_devices_feed(
     telemetry.set_joypad_command_sender(command_tx);
     tokio::spawn(async move {
         loop {
-            wait_for_endpoint(&connect).await;
             match joypad_devices_feed_loop(
                 namespace.clone(),
                 robot_id.clone(),

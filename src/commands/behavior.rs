@@ -352,7 +352,7 @@ fn run_fake_node(
 async fn request(app: &AppContext, args: &RequestArgs) -> Result<()> {
     let bus = args.target.open(app, "phoxal-cli-behavior-request").await?;
     let topic = Topic::<Publish<api::behavior::Request>>::new_owned(
-        api::topic::new()
+        api::topic::client()
             .behavior()
             .request()
             .publish_key()?
@@ -410,7 +410,7 @@ async fn control(
 ) -> Result<()> {
     let bus = args.target.open(app, "phoxal-cli-behavior-control").await?;
     let topic = Topic::<Publish<api::behavior::Command>>::new_owned(
-        api::topic::new()
+        api::topic::client()
             .behavior()
             .command()
             .publish_key()?

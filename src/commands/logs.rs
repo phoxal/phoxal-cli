@@ -32,9 +32,9 @@ impl Logs {
 }
 
 async fn stream_logs(bus: Bus, participant: Option<String>, follow: bool) -> Result<()> {
-    let follow_topic = api::topic::new().tool().log().follow();
+    let follow_topic = api::topic::client().tool().log().follow();
     let subscriber = Subscriber::<api::tool::log::Follow>::new(&bus, &follow_topic, 256).await?;
-    let snapshot_topic = api::topic::new().tool().log().snapshot();
+    let snapshot_topic = api::topic::client().tool().log().snapshot();
     let querier = Querier::<api::tool::log::SnapshotRequest, api::tool::log::Snapshot>::new(
         bus.clone(),
         &snapshot_topic,
