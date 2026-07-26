@@ -4,6 +4,15 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.25.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.25.2) - 2026-07-26
+
+
+### Tests
+
+- *(core)* Remove integration test machinery
+- *(cli)* Remove integration test machinery ([#211](https://github.com/phoxal/phoxal-cli/pull/211))
+
+
 ## [0.25.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.25.1) - 2026-07-26
 
 
