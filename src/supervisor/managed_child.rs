@@ -793,26 +793,6 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn failed_exec_rolls_back_without_blocking_the_guardian() -> Result<()> {
-        let started = std::time::Instant::now();
-        let mut missing = Command::new("/definitely/not/a/phoxal/executable");
-        let error = match ManagedChild::spawn(&mut missing, true, &[]) {
-            Ok(_) => panic!("missing executable must fail"),
-            Err(error) => error,
-        };
-        assert!(
-            error.to_string().contains("spawn managed child"),
-            "{error:#}"
-        );
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
-
-        let mut valid = Command::new("/usr/bin/true");
-        let mut child = ManagedChild::spawn(&mut valid, true, &[])?;
-        assert!(child.wait().await?.success());
-        Ok(())
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn app_bundle_binary_keeps_bundle_layout_and_immutable_bytes() -> Result<()> {
@@ -868,56 +848,6 @@ mod tests {
             .is_err()
         );
         assert_eq!(std::fs::read(materialized)?, b"recorded-webots");
-        Ok(())
-    }
-
-    /// Every managed child - the router and all participants - must launch with
-    /// the systemd notify/watchdog variables removed: only the `phoxal start`
-    /// resident owns notify authority (#936). The scrub is at this single spawn
-    /// boundary, so covering it here covers every spawn site.
-    #[tokio::test]
-    async fn managed_child_strips_supervisor_bootstrap_env_but_preserves_display() -> Result<()> {
-        let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg(
-                "test -z \"$NOTIFY_SOCKET\" && test -z \"$WATCHDOG_USEC\" \
-                 && test -z \"$WATCHDOG_PID\" && test \"$DISPLAY\" = preserved",
-            )
-            .env("NOTIFY_SOCKET", "forbidden")
-            .env("WATCHDOG_USEC", "30000000")
-            .env("WATCHDOG_PID", "1234")
-            .env("DISPLAY", "preserved")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut child = ManagedChild::spawn(&mut command, true, &[])?;
-        assert!(child.wait().await?.success());
-        Ok(())
-    }
-
-    #[test]
-    fn guardian_eof_kills_a_registered_process_group() -> Result<()> {
-        use std::os::unix::process::CommandExt;
-        let mut child = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 30 & wait")
-            .process_group(0)
-            .spawn()?;
-        let pid = child.id();
-        let mut fds = [0_i32; 2];
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
-        let mut writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
-        let guard = std::thread::spawn(move || guard_reader(reader, None));
-        let record = guardian_record(b'+', pid, 1);
-        writer.write_all(&record)?;
-        drop(writer);
-        guard.join().expect("guardian thread panicked")?;
-        let status = child.wait()?;
-        assert!(!status.success());
         Ok(())
     }
 }

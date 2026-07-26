@@ -1,7 +1,7 @@
 schema: robot/v0
 
 robot:
-  id: robot-v1
+  id: testbot
   namespace: dev
   structure: structure.urdf
   motion_limits:

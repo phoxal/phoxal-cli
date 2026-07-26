@@ -73,11 +73,6 @@ impl Drop for RunningParticipant {
 }
 
 impl RunningParticipant {
-    #[cfg(test)]
-    pub(crate) async fn spawn(spec: ParticipantSpec, board: &BoardBackend) -> Result<Self> {
-        Self::spawn_in_phase(spec, board, "direct").await
-    }
-
     pub(crate) async fn spawn_in_phase(
         spec: ParticipantSpec,
         board: &BoardBackend,
@@ -380,11 +375,6 @@ impl RunningParticipant {
         );
         self.restart_at = Some(now + policy.restart_delay);
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_active(&self) -> bool {
-        !self.failed && (self.child.is_some() || self.restart_at.is_some())
     }
 
     pub(crate) async fn stop_current(&mut self, board: &BoardBackend) -> Result<()> {

@@ -3004,15 +3004,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoxal-cli-test-api-fixture"
-version = "0.0.0"
-dependencies = [
- "phoxal",
- "phoxal-api",
- "serde",
-]
-
-[[package]]
 name = "phoxal-cli-ui"
 version = "0.25.1"
 dependencies = [

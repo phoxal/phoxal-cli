@@ -615,7 +615,7 @@ fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<Resol
         // Every component outside the workspace must resolve its assets
         // package - driverless included. The old driverless `Err -> None`
         // swallow had no real producer (the one real driverless component,
-        // robot-v1's passive_caster, is a workspace crate) and hid unknown
+        // a driverless component is a workspace crate) and hid unknown
         // packages, unsupported targets, and malformed suite state behind a
         // silent "assetless" (#936). If genuinely assetless suite components
         // become real, the suite/catalog models that explicitly.
@@ -899,14 +899,10 @@ tools:
             "[package]\nname = \"phoxal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
         )?;
         std::fs::write(root.path().join("train/phoxal/src/lib.rs"), "")?;
-        anyhow::ensure!(
-            std::process::Command::new("cargo")
-                .arg("generate-lockfile")
-                .current_dir(root.path())
-                .status()?
-                .success(),
-            "failed to generate fixture Cargo.lock"
-        );
+        std::fs::write(
+            root.path().join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"phoxal\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"robot\"\nversion = \"0.1.0\"\ndependencies = [\"phoxal\"]\n",
+        )?;
         Ok(root)
     }
 
@@ -1107,8 +1103,7 @@ robot:
     #[test]
     fn driverless_component_absent_from_workspace_and_suite_fails_precisely() -> anyhow::Result<()>
     {
-        // Since #945, the real driverless component (robot-v1's
-        // `passive_caster`) is a workspace assets crate and resolves through
+        // A driverless component can be a workspace assets crate and resolves through
         // the workspace branch. A driverless component with NO workspace crate
         // and NO suite package has no real producer - it is a typo or a
         // missing crate - so resolution fails naming the package instead of

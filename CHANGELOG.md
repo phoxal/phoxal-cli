@@ -486,7 +486,7 @@ All notable changes documented here. The format follows
 - *(compose)* Hand-write router service on upstream zenoh + add local_zenoh module
 - *(simulate)* Two-stack bring-up via phoxal-link network + compose --wait readiness
 - *(simulate)* World becomes CLI arg; caches move to ~/.phoxal/
-- *(gate)* Add live split-recovery gate for robot-v1 simulate default (#11)
+- *(gate)* Add live split-recovery gate for the simulation default (#11)
 
 ### CI
 
@@ -575,4 +575,3 @@ All notable changes documented here. The format follows
 ### Tests
 
 - Inline plan_robot.yaml fixture so CI doesn't need sibling framework checkout
-

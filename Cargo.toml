@@ -15,14 +15,12 @@ members = [
     "crates/client",
     "crates/core",
     "crates/ui",
-    "tests/fixtures/api-fixture",
 ]
 default-members = [
     ".",
     "crates/client",
     "crates/core",
     "crates/ui",
-    "tests/fixtures/api-fixture",
 ]
 
 [workspace.dependencies]
