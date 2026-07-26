@@ -43,14 +43,6 @@ pub fn resolve(
         .official_target_triple
         .clone()
         .unwrap_or_else(host_target_triple);
-    let platform_names = artifacts_of_kind(suite, Kind::Service)
-        .into_iter()
-        .map(|artifact| short_name(&artifact.id, Kind::Service))
-        .collect::<Vec<_>>();
-    let platform_names = platform_names
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
     // Finding A3: robot.yaml structural/schema validation always genuinely
     // runs (never conditionally skipped like download/build), so it always
     // gets its own truthful "validate" phase rather than the old synthetic
@@ -60,7 +52,7 @@ pub fn resolve(
         "Validating robot.yaml".to_string(),
         || {
             robot
-                .validate_with(&platform_names)
+                .validate()
                 .map_err(|errors| anyhow!("Robot errors:\n{}", join_errors(errors)))
         },
     )?;

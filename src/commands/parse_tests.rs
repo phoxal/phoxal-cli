@@ -1,5 +1,9 @@
+//! Command-surface parsing tests: what the CLI accepts, and what it must keep
+//! rejecting. These exercise the clap definition directly, without running a
+//! command.
+
+use super::{Cli, RootCommand, behavior, self_cmd, status};
 use clap::{CommandFactory, Parser};
-use phoxal_cli::commands::{Cli, RootCommand, behavior, self_cmd, status};
 
 #[test]
 fn clap_definition_is_valid() {
@@ -192,8 +196,8 @@ fn parses_the_single_webots_run_surface() {
     let RootCommand::Simulation(simulation) = cli.command else {
         panic!("expected simulation command");
     };
-    let phoxal_cli::simulation::SimulationSubcommand::Webots(webots) = simulation.command;
-    let phoxal_cli::simulation::WebotsSubcommand::Run(run) = webots.command;
+    let crate::simulation::SimulationSubcommand::Webots(webots) = simulation.command;
+    let crate::simulation::WebotsSubcommand::Run(run) = webots.command;
     assert_eq!(run.world, "default");
     assert_eq!(
         run.project.as_deref(),
@@ -206,8 +210,8 @@ fn parses_the_single_webots_run_surface() {
     let RootCommand::Simulation(simulation) = short.command else {
         panic!("expected simulation command");
     };
-    let phoxal_cli::simulation::SimulationSubcommand::Webots(webots) = simulation.command;
-    let phoxal_cli::simulation::WebotsSubcommand::Run(run) = webots.command;
+    let crate::simulation::SimulationSubcommand::Webots(webots) = simulation.command;
+    let crate::simulation::WebotsSubcommand::Run(run) = webots.command;
     assert!(run.detach);
 }
 

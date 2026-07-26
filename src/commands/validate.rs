@@ -54,12 +54,8 @@ impl Validate {
             })
             .collect()
         });
-        let platform_name_refs = platform_names
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
         robot
-            .validate_with(&platform_name_refs)
+            .validate()
             .map_err(|errors| anyhow!("Robot errors:\n{}", join_errors(errors)))?;
         let workspace_problems = check_workspace_runtimes(app, &robot_path, &robot)?;
         anyhow::ensure!(

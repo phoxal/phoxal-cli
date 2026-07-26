@@ -324,6 +324,9 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
 }
 
 #[cfg(test)]
+mod parse_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::host_paths::test_support::ScratchPhoxalHome;
