@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.25.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.25.0) - 2026-07-26
+
+
+### Added
+
+- *(cli)* Adopt execution-scoped time and command model ([#205](https://github.com/phoxal/phoxal-cli/pull/205)) [**breaking**]
+
+
 ## [0.24.7](https://github.com/phoxal/phoxal-cli/releases/tag/v0.24.7) - 2026-07-25
 
 
