@@ -19,8 +19,8 @@ mod resolve;
 pub(crate) use resolve::{build_checked_sim_launch_plan, resolve_project};
 mod participants;
 pub(crate) use participants::{
-    driver_metadata_unavailable, official_simulator_participants, remap_simulator_participant_ids,
-    sim_checked_participants, sim_source_participants,
+    driver_metadata_unavailable, ensure_exactly_one_simulator, official_simulator_participants,
+    remap_simulator_participant_ids, sim_checked_participants, sim_source_participants,
 };
 mod stages;
 pub(crate) use stages::stages_for_simulate;
