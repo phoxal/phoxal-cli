@@ -546,12 +546,16 @@ mod tests {
     /// Synthesize a host-format object of a given architecture carrying the
     /// phoxal metadata section, so inspection is exercised against real object
     /// shapes without building a binary (mirrors the loader's own synthesis).
-    fn synthesize_binary(arch: object::Architecture) -> Vec<u8> {
+    /// `id` is the binary's own declared participant id (organization#957: a
+    /// staged binary's id must match the required runtime's identity, so a
+    /// caller staging more than one required runtime must give each its own
+    /// matching id rather than reusing a fixed payload).
+    fn synthesize_binary_with_id(arch: object::Architecture, id: &str) -> Vec<u8> {
         use object::write::Object;
         let format = phoxal_cli_core::check::participant_metadata::host_binary_format();
         let (segment, name): (&[u8], &[u8]) = match format {
             object::BinaryFormat::MachO => (b"__DATA", b"__phoxal_meta"),
-            _ => (b"", b".phoxal_api_meta"),
+            _ => (b"", b".phoxal_meta"),
         };
         let mut obj = Object::new(format, arch, object::Endianness::Little);
         let section = obj.add_section(
@@ -559,9 +563,15 @@ mod tests {
             name.to_vec(),
             object::SectionKind::ReadOnlyData,
         );
-        let payload = br#"{"participant_api":"()","contracts":[],"config_schema":{"type":"null"}}"#;
-        obj.append_section_data(section, payload, 1);
+        let payload = format!(r#"{{"id":"{id}","config_schema":{{"type":"null"}}}}"#);
+        obj.append_section_data(section, payload.as_bytes(), 1);
         obj.write().expect("synthesize object file")
+    }
+
+    /// [`synthesize_binary_with_id`] for a fixture whose only participant is
+    /// `mission`.
+    fn synthesize_binary(arch: object::Architecture) -> Vec<u8> {
+        synthesize_binary_with_id(arch, "mission")
     }
 
     fn user_service_record(id: &str) -> ParticipantLaunchRecord {
@@ -675,7 +685,7 @@ services:
             }
             std::fs::write(
                 bin.join(&required.binary_name),
-                synthesize_binary(host_architecture()),
+                synthesize_binary_with_id(host_architecture(), &required.identity),
             )?;
         }
 
@@ -736,7 +746,7 @@ services:
             }
             std::fs::write(
                 bin.join(&required.binary_name),
-                synthesize_binary(host_architecture()),
+                synthesize_binary_with_id(host_architecture(), &required.identity),
             )?;
         }
 

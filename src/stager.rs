@@ -33,7 +33,7 @@ use anyhow::{Context, Result, ensure};
 use phoxal_cli_core::artifacts::NativeArtifactDescriptor;
 use phoxal_cli_core::project::launch_plan::{ParticipantLaunchRecord, runtime_layout_dir};
 use phoxal_cli_core::project::resolver::{
-    ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, official_binary_name, tool_emit_apis_id,
+    ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, official_binary_name, tool_participant_id,
 };
 use phoxal_cli_core::project::suite::ArtifactKind;
 
@@ -295,7 +295,7 @@ pub fn resolve_tool_source(
     build_override: &mut impl FnMut(&Path, &str) -> Result<PathBuf>,
 ) -> Result<PathBuf> {
     if let Some(crate_dir) = &tool.path_override {
-        return build_override(crate_dir, tool_emit_apis_id(&tool.name));
+        return build_override(crate_dir, tool_participant_id(&tool.name));
     }
     let descriptor = NativeArtifactDescriptor::from_tool(tool)?.with_context(|| {
         format!(

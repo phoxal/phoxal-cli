@@ -577,7 +577,7 @@ robot:
         let host = "aarch64-apple-darwin";
         let device = "aarch64-unknown-linux-gnu";
 
-        let mut service = fixture_service_entry_for_tests("drive", "1.2.3", host, true, Vec::new());
+        let mut service = fixture_service_entry_for_tests("drive", "1.2.3", host, true);
         service.artifact.targets.insert(
             device.to_string(),
             fixture_blob_for_tests("https://example.invalid/device", &"b".repeat(64), 42),
@@ -654,7 +654,7 @@ robot:
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir("versions/1.1.0", package_dir.join("active"))?;
 
-        let mut entry = fixture_service_entry_for_tests("drive", "1.2.3", host, true, Vec::new());
+        let mut entry = fixture_service_entry_for_tests("drive", "1.2.3", host, true);
         entry.artifact.targets.insert(
             robot.to_string(),
             fixture_blob_for_tests("https://example.invalid/robot", &"b".repeat(64), 42),

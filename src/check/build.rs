@@ -1,6 +1,6 @@
 //! Build responsibilities for check.
 
-use super::{RawEmitApis, raw_emit_apis_from_extracted_metadata};
+use super::{RawParticipantReport, raw_participant_report_from_extracted_metadata};
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
@@ -14,30 +14,40 @@ use std::path::Path;
 use std::path::PathBuf;
 
 /// Build a source participant's contract report by compiling and inspecting it.
-pub(crate) fn build_emit_apis_from_source(participant: &SourceParticipant) -> Result<RawEmitApis> {
-    build_emit_apis_from_source_with_diagnostics(participant, build_emit_apis_by_building, None)
+pub(crate) fn build_participant_report_from_source(
+    participant: &SourceParticipant,
+) -> Result<RawParticipantReport> {
+    build_participant_report_from_source_with_diagnostics(
+        participant,
+        build_participant_report_by_building,
+        None,
+    )
 }
 
-pub(crate) fn build_emit_apis_from_source_for_check(
+pub(crate) fn build_participant_report_from_source_for_check(
     participant: &SourceParticipant,
     ui: &crate::Ui,
-) -> Result<RawEmitApis> {
-    build_emit_apis_from_source_with_diagnostics(participant, build_emit_apis_by_building, Some(ui))
+) -> Result<RawParticipantReport> {
+    build_participant_report_from_source_with_diagnostics(
+        participant,
+        build_participant_report_by_building,
+        Some(ui),
+    )
 }
 
-/// Core of [`build_emit_apis_from_source`], parameterized over the (expensive)
+/// Core of [`build_participant_report_from_source`], parameterized over the (expensive)
 /// builder so tests can exercise it against a fake build closure instead of
 /// spawning a real `cargo build`.
-pub(crate) fn build_emit_apis_from_source_with_diagnostics(
+pub(crate) fn build_participant_report_from_source_with_diagnostics(
     participant: &SourceParticipant,
-    mut build_by_building: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
+    mut build_by_building: impl FnMut(&SourceParticipant) -> Result<RawParticipantReport>,
     ui: Option<&crate::Ui>,
-) -> Result<RawEmitApis> {
+) -> Result<RawParticipantReport> {
     let raw = build_by_building(participant)?;
-    report_source_emit_apis_progress(
+    report_source_build_progress(
         ui,
         format!(
-            "built emit-apis for {} {}",
+            "built participant report for {} {}",
             participant.kind_label(),
             participant.name
         ),
@@ -45,14 +55,14 @@ pub(crate) fn build_emit_apis_from_source_with_diagnostics(
     Ok(raw)
 }
 
-pub(crate) fn report_source_emit_apis_progress(ui: Option<&crate::Ui>, message: String) {
+pub(crate) fn report_source_build_progress(ui: Option<&crate::Ui>, message: String) {
     if let Some(ui) = ui {
         ui.info(message);
     }
 }
 
 /// The expected `artifact.kind` label for a [`SourceParticipant`]'s kind -
-/// shared between [`build_emit_apis_by_building`] (which now supplies this
+/// shared between [`build_participant_report_by_building`] (which now supplies this
 /// identity itself, since extraction never self-reports it) and
 /// [`validate_source_artifact_identity`] (which still checks a fake/injected
 /// report against it in tests).
@@ -60,7 +70,9 @@ pub(crate) fn expected_kind_for_source_participant(kind: SourceParticipantKind) 
     kind.shared_kind().label()
 }
 
-pub(crate) fn build_emit_apis_by_building(participant: &SourceParticipant) -> Result<RawEmitApis> {
+pub(crate) fn build_participant_report_by_building(
+    participant: &SourceParticipant,
+) -> Result<RawParticipantReport> {
     let crate_dir = participant.crate_dir.canonicalize().with_context(|| {
         format!(
             "failed to canonicalize source crate {}",
@@ -77,11 +89,12 @@ pub(crate) fn build_emit_apis_by_building(participant: &SourceParticipant) -> Re
                 binary_path.display()
             )
         })?;
-    let mut raw = raw_emit_apis_from_extracted_metadata(
+    let mut raw = raw_participant_report_from_extracted_metadata(
         expected_kind_for_source_participant(participant.kind),
         &participant.expected_artifact_id,
+        &binary_path,
         meta,
-    );
+    )?;
     raw.participant_class = source_participant_class(participant.kind);
     Ok(raw)
 }
@@ -90,8 +103,8 @@ pub(crate) fn build_emit_apis_by_building(participant: &SourceParticipant) -> Re
 /// OFFICIAL-tool property, not a directory property: an official `Tool` (a
 /// source override of an official tool) stays privileged, while a declared user
 /// tool - which shares the `tool` kind - is an ordinary CHECKED participant
-/// (#950), with its contracts in the coherence set and its config validated.
-/// Every non-tool kind is checked by default.
+/// (#950), with its config validated. Every non-tool kind is checked by
+/// default.
 pub(crate) fn source_participant_class(kind: SourceParticipantKind) -> String {
     match kind {
         SourceParticipantKind::Tool => {
@@ -182,7 +195,7 @@ pub(crate) fn build_and_locate_binary(
 
 pub(crate) fn validate_source_artifact_identity(
     participant: &SourceParticipant,
-    raw: &RawEmitApis,
+    raw: &RawParticipantReport,
 ) -> Result<()> {
     validate_artifact_identity(
         participant.kind_label(),
@@ -196,18 +209,18 @@ pub(crate) fn validate_artifact_identity(
     label: &str,
     expected_id: &str,
     expected_kind: &str,
-    raw: &RawEmitApis,
+    raw: &RawParticipantReport,
 ) -> Result<()> {
     if raw.artifact.id != expected_id {
         bail!(
-            "{label} emit-apis artifact.id '{}' does not match expected artifact id '{}'",
+            "{label} participant report artifact.id '{}' does not match expected artifact id '{}'",
             raw.artifact.id,
             expected_id
         );
     }
     if raw.artifact.kind != expected_kind {
         bail!(
-            "{label} emit-apis artifact.kind '{}' does not match the expected kind '{}'",
+            "{label} participant report artifact.kind '{}' does not match the expected kind '{}'",
             raw.artifact.kind,
             expected_kind
         );
@@ -215,27 +228,14 @@ pub(crate) fn validate_artifact_identity(
     Ok(())
 }
 
-impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
+impl TryFrom<RawParticipantReport> for graph_check::ParticipantApis {
     type Error = anyhow::Error;
 
-    fn try_from(raw: RawEmitApis) -> Result<Self> {
+    fn try_from(raw: RawParticipantReport) -> Result<Self> {
         let artifact_id = raw.artifact.id;
         let participant_kind = graph_check::ParticipantKind::parse(&raw.artifact.kind);
         let participant_class =
             graph_check::ParticipantClass::parse(&raw.participant_class).unwrap_or_default();
-        // `role` is dropped here (D1): `phoxal::check::Contract` is
-        // `{family}` only - name identity alone decides compatibility, so
-        // there is nothing left for the graph checker to gate per-role.
-        // `role` remains in the binary metadata representation for callers
-        // that need to inspect participant intent.
-        let contracts = raw
-            .required_contracts
-            .into_iter()
-            .map(|contract| graph_check::Contract {
-                family: format!("{}::{}", contract.version, contract.contract),
-            })
-            .collect::<Vec<_>>();
-
         Ok(Self {
             // Default the participant id to the artifact id; callers that launch
             // one artifact per instance (component drivers) override it with the
@@ -244,10 +244,8 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
             artifact_id,
             participant_kind,
             participant_class,
-            api_version: raw.api_version,
             config_schema: raw.config_schema,
             scope: graph_check::ParticipantScope::Graph,
-            contracts,
         })
     }
 }

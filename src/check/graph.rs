@@ -1,9 +1,8 @@
 //! Graph responsibilities for check.
 
 use super::{
-    CheckGraphContext, CheckOutcome, MissingImageError, PlatformArtifactRef, RawEmitApis,
-    contract_surface, validate_artifact_identity, validate_source_artifact_identity,
-    validate_user_service_config,
+    CheckGraphContext, CheckOutcome, MissingImageError, PlatformArtifactRef, RawParticipantReport,
+    validate_artifact_identity, validate_source_artifact_identity, validate_user_service_config,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -11,16 +10,16 @@ use phoxal::check as graph_check;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
 use phoxal_cli_core::check::source::ToolParticipant;
-use phoxal_cli_core::project::resolver::tool_emit_apis_id;
+use phoxal_cli_core::project::resolver::tool_participant_id;
 use phoxal_cli_core::project::suite::ArtifactKind;
 
 pub fn run_check(
     resolved_platform_image_refs: &[(String, String)],
     tool_participants: &[ToolParticipant],
     source_participants: &[SourceParticipant],
-    fetch: impl FnMut(&str) -> Result<RawEmitApis>,
-    fetch_tool: impl FnMut(&ToolParticipant) -> Result<RawEmitApis>,
-    build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
+    fetch: impl FnMut(&str) -> Result<RawParticipantReport>,
+    fetch_tool: impl FnMut(&ToolParticipant) -> Result<RawParticipantReport>,
+    build: impl FnMut(&SourceParticipant) -> Result<RawParticipantReport>,
 ) -> Result<CheckOutcome> {
     let platform_artifact_refs = service_platform_artifact_refs(resolved_platform_image_refs);
     run_check_with_context(
@@ -53,13 +52,12 @@ pub fn run_check_with_context(
     tool_participants: &[ToolParticipant],
     source_participants: &[SourceParticipant],
     context: CheckGraphContext<'_>,
-    mut fetch: impl FnMut(&str) -> Result<RawEmitApis>,
-    mut fetch_tool: impl FnMut(&ToolParticipant) -> Result<RawEmitApis>,
-    mut build: impl FnMut(&SourceParticipant) -> Result<RawEmitApis>,
+    mut fetch: impl FnMut(&str) -> Result<RawParticipantReport>,
+    mut fetch_tool: impl FnMut(&ToolParticipant) -> Result<RawParticipantReport>,
+    mut build: impl FnMut(&SourceParticipant) -> Result<RawParticipantReport>,
 ) -> Result<CheckOutcome> {
     let mut missing_images = Vec::new();
     let mut participants = Vec::new();
-    let mut contract_surfaces = Vec::new();
     let mut config_problems = Vec::new();
 
     for artifact in resolved_platform_artifact_refs {
@@ -73,7 +71,7 @@ pub fn run_check_with_context(
             Err(error) => {
                 return Err(error).with_context(|| {
                     format!(
-                        "failed to obtain emit-apis for {} {} ({image_ref})",
+                        "failed to obtain participant report for {} {} ({image_ref})",
                         artifact.kind_label(),
                         artifact.name
                     )
@@ -81,26 +79,25 @@ pub fn run_check_with_context(
             }
         };
         let expected_artifact_id = if artifact.kind == ArtifactKind::Tool {
-            tool_emit_apis_id(&artifact.name)
+            tool_participant_id(&artifact.name)
         } else {
             &artifact.name
         };
         validate_artifact_identity(
             artifact.kind_label(),
             expected_artifact_id,
-            artifact.kind.emit_apis_kind(),
+            artifact.kind.wire_kind(),
             &raw,
         )?;
         let participant =
             graph_check::ParticipantApis::try_from(raw.clone()).with_context(|| {
                 format!(
-                    "failed to interpret emit-apis for {} {} ({image_ref})",
+                    "failed to interpret participant report for {} {} ({image_ref})",
                     artifact.kind_label(),
                     artifact.name
                 )
             })?;
         if artifact.instances.is_empty() {
-            contract_surfaces.push(contract_surface(&raw, artifact.name.clone()));
             participants.push(participant);
         } else {
             // A suite component driver is fetched once but launched once
@@ -113,7 +110,6 @@ pub fn run_check_with_context(
                 instance_participant.participant_id = instance.clone();
                 instance_participant.scope =
                     graph_check::ParticipantScope::ComponentInstance(instance.clone());
-                contract_surfaces.push(contract_surface(&raw, instance.clone()));
                 participants.push(instance_participant);
             }
         }
@@ -122,29 +118,28 @@ pub fn run_check_with_context(
     for tool in tool_participants {
         let raw = fetch_tool(tool).with_context(|| {
             format!(
-                "failed to obtain emit-apis for tool {} ({})",
+                "failed to obtain participant report for tool {} ({})",
                 tool.name,
                 tool.binary_path.display()
             )
         })?;
-        let expected_id = tool_emit_apis_id(&tool.name);
+        let expected_id = tool_participant_id(&tool.name);
         validate_artifact_identity("tool", expected_id, "tool", &raw)?;
         let participant =
             graph_check::ParticipantApis::try_from(raw.clone()).with_context(|| {
                 format!(
-                    "failed to interpret emit-apis for tool {} ({})",
+                    "failed to interpret participant report for tool {} ({})",
                     tool.name,
                     tool.binary_path.display()
                 )
             })?;
-        contract_surfaces.push(contract_surface(&raw, tool.name.clone()));
         participants.push(participant);
     }
 
     for participant in source_participants {
         let raw = build(participant).with_context(|| {
             format!(
-                "failed to obtain emit-apis for {} {} ({})",
+                "failed to obtain participant report for {} {} ({})",
                 participant.kind_label(),
                 participant.name,
                 participant.crate_dir.display()
@@ -154,7 +149,7 @@ pub fn run_check_with_context(
         let mut participant_apis = graph_check::ParticipantApis::try_from(raw.clone())
             .with_context(|| {
                 format!(
-                    "failed to interpret emit-apis for {} {} ({})",
+                    "failed to interpret participant report for {} {} ({})",
                     participant.kind_label(),
                     participant.name,
                     participant.crate_dir.display()
@@ -189,21 +184,19 @@ pub fn run_check_with_context(
         {
             config_problems.push(problem);
         }
-        let surface_participant_id = if participant.kind == SourceParticipantKind::Tool {
-            participant.name.clone()
-        } else {
-            participant_apis.participant_id.clone()
-        };
-        contract_surfaces.push(contract_surface(&raw, surface_participant_id));
         participants.push(participant_apis);
     }
 
-    let mut report = graph_check::check_graph(&participants);
+    // `phoxal::check::check_graph` is retired (organization#957): it ignored
+    // its input and always returned `Report::default()` once the
+    // API-coherence pass it used to run was deleted. Construct the (still
+    // real) report vehicle locally and append this pass's own
+    // `InvalidConfig` findings directly.
+    let mut report = graph_check::Report::default();
     report.problems.extend(config_problems);
     Ok(CheckOutcome {
         missing_images,
         report,
         checked_participants: participants,
-        contract_surfaces,
     })
 }

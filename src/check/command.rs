@@ -1,13 +1,13 @@
 //! Command responsibilities for check.
 
 use super::{
-    CheckGraphContext, CheckOptions, CheckOutcome, RobotCoherenceDiagnostic,
-    build_emit_apis_from_source_for_check, check_artifact_refs_from_resolved,
-    component_driver_runtimes_by_ref, ensure_suite_availability, evaluate_robot_coherence,
-    extract_emit_apis_from_staged_runtime, extract_emit_apis_from_staged_tool,
-    fetch_emit_apis_from_tool, run_check_with_context, source_participants_from_resolved,
-    tool_participants_from_resolved,
+    CheckGraphContext, CheckOptions, CheckOutcome, build_participant_report_from_source_for_check,
+    check_artifact_refs_from_resolved, component_driver_runtimes_by_ref, ensure_check_outcome_ok,
+    ensure_suite_availability, extract_participant_report_from_staged_runtime,
+    extract_participant_report_from_staged_tool, fetch_participant_report_from_tool,
+    run_check_with_context, source_participants_from_resolved, tool_participants_from_resolved,
 };
+use crate::AppContext;
 use crate::component_driver::component_driver_crate_dir;
 use crate::resolver::resolve;
 use anyhow::Context;
@@ -23,8 +23,31 @@ pub(super) struct CheckRunResult {
     pub(super) train: String,
     pub(super) participant_count: usize,
     pub(super) outcome: CheckOutcome,
-    pub(super) coherence: Vec<RobotCoherenceDiagnostic>,
-    pub(super) strict: bool,
+}
+
+impl super::CheckCmd {
+    pub async fn run(&self, app: &AppContext) -> Result<()> {
+        let project_root = app.project.root().to_path_buf();
+        let options = CheckOptions {
+            suite_source: app.suite_source.clone(),
+            target: self.target.clone(),
+        };
+        let ui = app.ui;
+        let result = tokio::task::spawn_blocking(move || run(&project_root, options, &ui))
+            .await
+            .context("check worker failed")??;
+
+        eprintln!(
+            "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
+        );
+
+        ensure_check_outcome_ok(&result.train, &result.outcome)?;
+        println!(
+            "ok: {} participants validated (framework train {})",
+            result.participant_count, result.train
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,28 +145,22 @@ pub(super) fn run(
         },
         |artifact_ref| {
             if let Some(runtime) = official_by_ref.get(artifact_ref) {
-                return extract_emit_apis_from_staged_runtime(runtime);
+                return extract_participant_report_from_staged_runtime(runtime);
             }
             if let Some(tool) = tools_by_ref.get(artifact_ref) {
-                return extract_emit_apis_from_staged_tool(tool);
+                return extract_participant_report_from_staged_tool(tool);
             }
             Err(anyhow!(
                 "resolved official artifact {artifact_ref} is not in the suite"
             ))
         },
-        fetch_emit_apis_from_tool,
-        |participant| build_emit_apis_from_source_for_check(participant, ui),
+        fetch_participant_report_from_tool,
+        |participant| build_participant_report_from_source_for_check(participant, ui),
     )?;
 
-    let coherence = vec![evaluate_robot_coherence(
-        &resolved.robot.robot.id,
-        &outcome.contract_surfaces,
-    )];
     Ok(CheckRunResult {
         train: resolved.train,
         participant_count,
         outcome,
-        coherence,
-        strict: options.strict,
     })
 }

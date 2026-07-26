@@ -3,7 +3,7 @@
 use anyhow::Result;
 
 use crate::project::resolver::{
-    ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, official_binary_name, tool_emit_apis_id,
+    ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, official_binary_name, tool_participant_id,
 };
 use crate::project::suite::ArtifactKind;
 
@@ -54,7 +54,7 @@ impl NativeArtifactDescriptor {
         Ok(Some(Self {
             package_id: tool.package.clone(),
             kind: tool.kind,
-            name: tool_emit_apis_id(&tool.name).to_string(),
+            name: tool_participant_id(&tool.name).to_string(),
             version: tool.resolved.clone(),
             url: tool.url.clone().unwrap_or_default(),
             sha256: tool.sha256.clone(),

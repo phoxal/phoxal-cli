@@ -15,19 +15,17 @@
 //! identities, policies, and plan digest - which is exactly what lets an
 //! extracted bundle run without ever re-resolving from source.
 //!
-//! The jsonschema validator and the coherence enforcer both live in the bin
-//! crate, so this module does not run them. It returns the *inputs* they need -
-//! a config-schema/config pairing per declared user runtime and one contract surface per
-//! checked participant - and the bin-side "validate through the loader" entry
-//! runs `validate_user_service_config` and `coherence_for_launch_plan` over
-//! them. That keeps the crate seam clean: core owns the derivation, the bin
-//! owns the two validators it already has.
+//! The jsonschema validator lives in the bin crate, so this module does not
+//! run it. It returns the *input* the bin needs - a config-schema/config
+//! pairing per declared user runtime - and the bin-side "validate through the
+//! loader" entry runs `validate_user_service_config` over it. That keeps the
+//! crate seam clean: core owns the derivation, the bin owns the validator it
+//! already has.
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use phoxal::bus::ProducerId;
-use phoxal::check::ParticipantContractSurface;
 use phoxal::participant::launch::{
     BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
 };
@@ -52,22 +50,16 @@ pub struct PlanOptions {
     pub drivers: DriverSelection,
 }
 
-/// The complete launch graph a staged layout derives, plus the two validation
-/// inputs the bin-side "validate through the loader" entry runs its own
-/// validators over. The plan is what the supervisor launches from; the surfaces
-/// and config pairings never enter the plan or its content digest.
+/// The complete launch graph a staged layout derives, plus the validation
+/// input the bin-side "validate through the loader" entry runs its own
+/// validator over. The plan is what the supervisor launches from; the config
+/// pairings never enter the plan or its content digest.
 #[derive(Debug, Clone)]
 pub struct ConstructedPlan {
     /// The launch plan, identical in shape and digest to the one the
     /// [`build_launch_plan`](super::super::launch_plan::build_launch_plan)
     /// leg builds for the same robot.
     pub plan: LaunchPlan,
-    /// One contract surface per checked (non-privileged, CLI-launched)
-    /// participant, keyed by its plan participant id and fed straight from the
-    /// selected binary's embedded metadata. Privileged tools and
-    /// Webots-owned participants contribute none, matching the coherence
-    /// pass's own in-set filter.
-    pub contract_surfaces: Vec<ParticipantContractSurface>,
     /// One schema pairing per declared user runtime (service or tool), so the
     /// bin can run its jsonschema validator (`validate_user_runtime_config`)
     /// against the config the compiled `robot.yaml` carries for that runtime.
@@ -97,10 +89,10 @@ impl RuntimeLayout {
     /// and construct the launch plan for `mode` - the exact "validate through
     /// the loader without supervising" entry `phoxal build` and the universal
     /// `run`/`start` share. This performs no supervisor, board, or socket
-    /// construction; it stops at the immutable plan plus the validation inputs.
+    /// construction; it stops at the immutable plan plus the validation input.
     ///
-    /// The jsonschema and coherence checks are the caller's to run (they live in
-    /// the bin crate); this returns their inputs on [`ConstructedPlan`].
+    /// The jsonschema check is the caller's to run (it lives in the bin
+    /// crate); this returns its input on [`ConstructedPlan`].
     pub fn construct_plan(
         root: &std::path::Path,
         options: &PlanOptions,
@@ -151,14 +143,6 @@ impl RuntimeLayout {
         let robot_root = self.root().to_path_buf();
         let service_clock = ClockMode::Real;
 
-        let meta_contracts = |binary_name: &str| -> Result<Vec<_>> {
-            Ok(selected
-                .get(binary_name)
-                .with_context(|| format!("no inspected binary for `{binary_name}`"))?
-                .meta
-                .contracts
-                .clone())
-        };
         let config_schema = |binary_name: &str| -> Result<serde_json::Value> {
             Ok(selected
                 .get(binary_name)
@@ -169,7 +153,6 @@ impl RuntimeLayout {
         };
 
         let mut participants = Vec::new();
-        let mut contract_surfaces = Vec::new();
         let mut user_runtime_configs = Vec::new();
 
         for required in self.required_runtimes(&options.drivers) {
@@ -196,16 +179,11 @@ impl RuntimeLayout {
                             run,
                         ),
                     ));
-                    contract_surfaces.push(ParticipantContractSurface {
-                        participant_id,
-                        contracts: meta_contracts(&required.binary_name)?,
-                    });
                 }
                 RequiredRuntimeKind::OfficialTool => {
                     // Tools are per-robot instances (`tool-<short>-<robot_id>`)
                     // and always run under the real clock, exactly like the
-                    // resolved-robot leg's tool loop. Privileged, so they
-                    // contribute no coherence surface.
+                    // resolved-robot leg's tool loop.
                     let artifact_id = format!("tool-{}", required.identity);
                     let participant_id = format!("{artifact_id}-{robot_id}");
                     participants.push(cli_managed_record(
@@ -243,10 +221,6 @@ impl RuntimeLayout {
                             run,
                         ),
                     ));
-                    contract_surfaces.push(ParticipantContractSurface {
-                        participant_id: participant_id.clone(),
-                        contracts: meta_contracts(&required.binary_name)?,
-                    });
                     user_runtime_configs.push(UserRuntimeConfig {
                         runtime_id: participant_id,
                         config_schema: config_schema(&required.binary_name)?,
@@ -272,10 +246,6 @@ impl RuntimeLayout {
                             run,
                         ),
                     ));
-                    contract_surfaces.push(ParticipantContractSurface {
-                        participant_id: participant_id.clone(),
-                        contracts: meta_contracts(&required.binary_name)?,
-                    });
                     // The tool's config validates against its embedded schema
                     // through the same pairing user services use (#950).
                     user_runtime_configs.push(UserRuntimeConfig {
@@ -315,10 +285,6 @@ impl RuntimeLayout {
                                 run,
                             ),
                         ));
-                        contract_surfaces.push(ParticipantContractSurface {
-                            participant_id: instance.clone(),
-                            contracts: meta_contracts(&required.binary_name)?,
-                        });
                     }
                 }
             }
@@ -337,12 +303,10 @@ impl RuntimeLayout {
                 id: robot_id,
                 namespace,
                 participants,
-                substitutions: Vec::new(),
             }],
         };
         Ok(ConstructedPlan {
             plan,
-            contract_surfaces,
             user_runtime_configs,
         })
     }
@@ -463,7 +427,7 @@ services:
         let format = crate::check::participant_metadata::host_binary_format();
         let (segment, name): (&[u8], &[u8]) = match format {
             object::BinaryFormat::MachO => (b"__DATA", b"__phoxal_meta"),
-            _ => (b"", b".phoxal_api_meta"),
+            _ => (b"", b".phoxal_meta"),
         };
         let mut obj = Object::new(format, arch, object::Endianness::Little);
         let section = obj.add_section(
@@ -475,13 +439,19 @@ services:
         obj.write().expect("synthesize object file")
     }
 
-    const NO_META: &[u8] =
-        br#"{"participant_api":"()","contracts":[],"config_schema":{"type":"null"}}"#;
+    /// A binary carries no known config-schema by default; its declared `id`
+    /// must still equal the required runtime's own identity, or `inspect_for`
+    /// rejects it (organization#957).
+    fn no_config_payload(id: &str) -> Vec<u8> {
+        format!(r#"{{"id":"{id}","config_schema":{{"type":"null"}}}}"#).into_bytes()
+    }
 
     /// Write the compiled `robot.yaml` and synthesize a host-architecture binary
     /// under every canonical `bin/` name the Native profile requires, so the
     /// layout is a complete, runnable-shaped store. `payloads` overrides the
-    /// metadata for named binaries; the rest carry an empty contract surface.
+    /// metadata for named binaries; the rest carry the default (no-config)
+    /// metadata, with the required runtime's own identity as `id` so
+    /// `inspect_for`'s identity check passes.
     fn stage_layout(root: &Path, payloads: &[(&str, &[u8])]) -> Result<()> {
         fs::create_dir_all(root)?;
         fs::write(root.join("robot.yaml"), ROBOT_YAML)?;
@@ -495,8 +465,11 @@ services:
             let payload = payloads
                 .iter()
                 .find(|(name, _)| *name == required.binary_name)
-                .map_or(NO_META, |(_, payload)| *payload);
-            fs::write(bin.join(&required.binary_name), synthesize_binary(payload))?;
+                .map_or_else(
+                    || no_config_payload(&required.identity),
+                    |(_, payload)| payload.to_vec(),
+                );
+            fs::write(bin.join(&required.binary_name), synthesize_binary(&payload))?;
         }
         Ok(())
     }
@@ -613,10 +586,8 @@ services:
             artifact_id: artifact_id.to_string(),
             participant_kind: kind,
             participant_class: graph_check::ParticipantClass::Checked,
-            api_version: String::new(),
             config_schema: None,
             scope,
-            contracts: Vec::new(),
         }
     }
 
@@ -682,7 +653,6 @@ services:
                 project_root: project.path(),
                 resolved: &resolved,
                 checked_participants: &checked_participants,
-                substitutions: &[],
                 source_participants: &source_participants,
             }],
             run,
@@ -890,7 +860,7 @@ services:
         let project = tempfile::tempdir()?;
         let layout_root = runtime_layout_dir(project.path(), "triple");
         // The `mission` user-service binary carries a real object schema.
-        let mission_meta = br#"{"participant_api":"Api","contracts":[],"config_schema":{"type":"object","properties":{"speed":{"type":"integer"}}}}"#;
+        let mission_meta = br#"{"id":"mission","config_schema":{"type":"object","properties":{"speed":{"type":"integer"}}}}"#;
         stage_layout(&layout_root, &[("mission", mission_meta)])?;
         let constructed = RuntimeLayout::construct_plan(
             &layout_root,
@@ -910,14 +880,6 @@ services:
         // Only user runtimes (here one user service) are paired for config
         // validation; officials are not.
         assert_eq!(constructed.user_runtime_configs.len(), 1);
-        // A contract surface exists for the checked user service, keyed by its
-        // plan participant id.
-        assert!(
-            constructed
-                .contract_surfaces
-                .iter()
-                .any(|surface| surface.participant_id == "mission")
-        );
         Ok(())
     }
 
@@ -934,7 +896,7 @@ services:
         };
         fs::write(
             layout_root.join("bin/mission"),
-            synthesize_binary_for(foreign, NO_META),
+            synthesize_binary_for(foreign, &no_config_payload("mission")),
         )?;
         let error = format!(
             "{:#}",
@@ -989,7 +951,7 @@ services:
         };
         fs::write(
             layout_root.join("bin/phoxal-component-ddsm115"),
-            synthesize_binary_for(foreign, NO_META),
+            synthesize_binary_for(foreign, &no_config_payload("ddsm115")),
         )?;
 
         // Drivers on: the foreign driver binary is required and inspected, so

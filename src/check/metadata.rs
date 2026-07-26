@@ -1,32 +1,34 @@
 //! Metadata responsibilities for check.
 
-use super::{RawArtifact, RawEmitApis, default_participant_class};
+use super::{RawArtifact, RawParticipantReport, default_participant_class};
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::bail;
 use phoxal_cli_core::check::participant_metadata;
 use phoxal_cli_core::check::source::ToolParticipant;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
+use std::path::Path;
 use std::path::PathBuf;
 
-pub(crate) fn extract_emit_apis_from_staged_runtime(
+pub(crate) fn extract_participant_report_from_staged_runtime(
     runtime: &ResolvedPlatformRuntime,
-) -> Result<RawEmitApis> {
+) -> Result<RawParticipantReport> {
     #[cfg(test)]
     if runtime
         .url
         .as_deref()
         .is_some_and(|url| url.starts_with("https://example.invalid/"))
     {
-        return Ok(raw_emit_apis_from_extracted_metadata(
-            runtime.kind.emit_apis_kind(),
+        return raw_participant_report_from_extracted_metadata(
+            runtime.kind.wire_kind(),
             &runtime.name,
+            Path::new("<fixture binary>"),
             participant_metadata::ParticipantMeta {
-                participant_api: "fixture".to_string(),
-                contracts: Vec::new(),
+                id: runtime.name.clone(),
                 config_schema: serde_json::json!({ "type": "null" }),
             },
-        ));
+        );
     }
     let binary = crate::native_artifacts::stage_runtime(
         None,
@@ -36,16 +38,17 @@ pub(crate) fn extract_emit_apis_from_staged_runtime(
     .ok_or_else(|| anyhow!("{} has no staged binary", runtime.package))?;
     let meta = participant_metadata::extract_participant_metadata(&binary)
         .with_context(|| format!("failed to extract API metadata from {}", binary.display()))?;
-    Ok(raw_emit_apis_from_extracted_metadata(
-        runtime.kind.emit_apis_kind(),
+    raw_participant_report_from_extracted_metadata(
+        runtime.kind.wire_kind(),
         &runtime.name,
+        &binary,
         meta,
-    ))
+    )
 }
 
-pub(crate) fn extract_emit_apis_from_staged_tool(
+pub(crate) fn extract_participant_report_from_staged_tool(
     tool: &phoxal_cli_core::project::resolver::ResolvedTool,
-) -> Result<RawEmitApis> {
+) -> Result<RawParticipantReport> {
     #[cfg(test)]
     if !tool.published
         || tool
@@ -53,15 +56,16 @@ pub(crate) fn extract_emit_apis_from_staged_tool(
             .as_deref()
             .is_some_and(|url| url.starts_with("https://example.invalid/"))
     {
-        return Ok(raw_emit_apis_from_extracted_metadata(
+        let expected_id = phoxal_cli_core::project::resolver::tool_participant_id(&tool.name);
+        return raw_participant_report_from_extracted_metadata(
             "tool",
-            phoxal_cli_core::project::resolver::tool_emit_apis_id(&tool.name),
+            expected_id,
+            Path::new("<fixture binary>"),
             participant_metadata::ParticipantMeta {
-                participant_api: "fixture".to_string(),
-                contracts: Vec::new(),
+                id: expected_id.to_string(),
                 config_schema: serde_json::json!({ "type": "null" }),
             },
-        ));
+        );
     }
     let binary = crate::native_artifacts::stage_tool(
         None,
@@ -71,11 +75,12 @@ pub(crate) fn extract_emit_apis_from_staged_tool(
     .ok_or_else(|| anyhow!("{} has no staged binary", tool.package))?;
     let meta = participant_metadata::extract_participant_metadata(&binary)
         .with_context(|| format!("failed to extract API metadata from {}", binary.display()))?;
-    Ok(raw_emit_apis_from_extracted_metadata(
+    raw_participant_report_from_extracted_metadata(
         "tool",
-        phoxal_cli_core::project::resolver::tool_emit_apis_id(&tool.name),
+        phoxal_cli_core::project::resolver::tool_participant_id(&tool.name),
+        &binary,
         meta,
-    ))
+    )
 }
 
 /// Every native tool (`tool-router`, `tool-joypad`) is privileged (host/root
@@ -91,14 +96,18 @@ pub(crate) fn default_participant_class_for_kind(artifact_kind: &str) -> String 
     }
 }
 
-/// Fetches a native tool binary's contract report by extracting its
+/// Fetches a native tool binary's config-schema report by extracting its
 /// compiled-in `#[derive(phoxal::Api)]` metadata section directly from the
 /// built artifact file - never by executing it (the `emit-apis` runtime
-/// subcommand this used to run is gone). A binary's own linker section
-/// carries only its contracts, not its artifact identity (`kind`/`id`) or a
-/// artifact identity, so the identity is supplied from what is already known
-/// about `tool`; contracts and the config schema both come from the section.
-pub(crate) fn fetch_emit_apis_from_tool(tool: &ToolParticipant) -> Result<RawEmitApis> {
+/// subcommand this used to run is gone). The section carries the
+/// participant's own declared `id` and its config schema, but not an
+/// artifact `kind` label; the kind is supplied from what is already known
+/// about `tool`, and the declared `id` is checked against `tool`'s own
+/// expected identity before the schema is trusted (see
+/// [`raw_participant_report_from_extracted_metadata`]).
+pub(crate) fn fetch_participant_report_from_tool(
+    tool: &ToolParticipant,
+) -> Result<RawParticipantReport> {
     let meta = participant_metadata::extract_participant_metadata(&tool.binary_path).with_context(
         || {
             format!(
@@ -107,36 +116,57 @@ pub(crate) fn fetch_emit_apis_from_tool(tool: &ToolParticipant) -> Result<RawEmi
             )
         },
     )?;
-    Ok(raw_emit_apis_from_extracted_metadata(
+    raw_participant_report_from_extracted_metadata(
         "tool",
-        phoxal_cli_core::project::resolver::tool_emit_apis_id(&tool.name),
+        phoxal_cli_core::project::resolver::tool_participant_id(&tool.name),
+        &tool.binary_path,
         meta,
-    ))
+    )
 }
 
-/// Builds a [`RawEmitApis`] from a binary's extracted [`ParticipantMeta`] plus
-/// already-known artifact identity - the shared tail of
-/// [`fetch_emit_apis_from_tool`] and [`build_emit_apis_by_building`].
+/// Builds a [`RawParticipantReport`] from a binary's extracted [`ParticipantMeta`] plus
+/// the artifact identity the caller already expects - the shared tail of
+/// [`fetch_participant_report_from_tool`] and [`build_participant_report_by_building`].
+///
+/// The embedded metadata carries no contract inventory anymore
+/// (organization#957: there is no API-coherence pass left to feed one); what
+/// it does carry is the participant's own declared `id` and its config
+/// schema. That `id` is the participant's own truth about which artifact this
+/// binary implements - the caller's `expected_artifact_id` is a claim made
+/// from context (a resolved runtime name, a suite package, an
+/// `expected_artifact_id` field) that could disagree with it, for instance if
+/// two staged binaries were swapped on disk. This function is the one place
+/// that reconciles the two: a mismatch fails here, naming both values and
+/// `binary_path`, BEFORE the extracted config schema is ever used to validate
+/// anything (organization#957 review). On success the returned
+/// [`RawArtifact::id`] is the binary's own declared `id`, not a copy of the
+/// caller's expectation - by this point the two are known to agree.
 ///
 /// [`ParticipantMeta`]: participant_metadata::ParticipantMeta
-pub(crate) fn raw_emit_apis_from_extracted_metadata(
+pub(crate) fn raw_participant_report_from_extracted_metadata(
     artifact_kind: &str,
-    artifact_id: &str,
+    expected_artifact_id: &str,
+    binary_path: &Path,
     meta: participant_metadata::ParticipantMeta,
-) -> RawEmitApis {
-    RawEmitApis {
+) -> Result<RawParticipantReport> {
+    if meta.id != expected_artifact_id {
+        bail!(
+            "{} at {} declares participant id '{}', but it was selected as the {artifact_kind} \
+             artifact '{expected_artifact_id}'; the staged/built binary does not match the \
+             identity that selected it",
+            artifact_kind,
+            binary_path.display(),
+            meta.id,
+        );
+    }
+    Ok(RawParticipantReport {
         artifact: RawArtifact {
             kind: artifact_kind.to_string(),
-            id: artifact_id.to_string(),
+            id: meta.id,
         },
         participant_class: default_participant_class_for_kind(artifact_kind),
-        // No single API version to report anymore (D1): a participant's
-        // `Api` may mix contracts from several versions freely, so there
-        // is no one dated value left to put here.
-        api_version: String::new(),
-        required_contracts: meta.contracts,
         config_schema: Some(meta.config_schema),
-    }
+    })
 }
 
 pub(crate) fn tool_env_override(
@@ -180,4 +210,74 @@ pub(crate) fn env_key(value: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(id: &str) -> participant_metadata::ParticipantMeta {
+        participant_metadata::ParticipantMeta {
+            id: id.to_string(),
+            config_schema: serde_json::json!({"type": "object", "properties": {"speed": {"type": "integer"}}}),
+        }
+    }
+
+    /// The core organization#957 regression: the binary's OWN declared `id`
+    /// must be compared against the identity that selected it, not discarded
+    /// in favor of trusting the caller's expectation unconditionally.
+    #[test]
+    fn matching_id_passes_and_carries_the_binarys_declared_id_and_schema() -> Result<()> {
+        let raw = raw_participant_report_from_extracted_metadata(
+            "service",
+            "drive",
+            Path::new("bin/phoxal-service-drive"),
+            meta("drive"),
+        )?;
+        assert_eq!(raw.artifact.id, "drive");
+        assert_eq!(raw.artifact.kind, "service");
+        assert_eq!(
+            raw.config_schema,
+            Some(
+                serde_json::json!({"type": "object", "properties": {"speed": {"type": "integer"}}})
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mismatched_id_fails_naming_both_values_and_the_binary_path() {
+        let error = raw_participant_report_from_extracted_metadata(
+            "service",
+            "drive",
+            Path::new("bin/phoxal-service-drive"),
+            meta("mission"),
+        )
+        .expect_err("a binary declaring the wrong id must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("mission"), "{message}");
+        assert!(message.contains("drive"), "{message}");
+        assert!(message.contains("bin/phoxal-service-drive"), "{message}");
+    }
+
+    /// A binary with no metadata section at all must be a hard error, not a
+    /// synthesized identity that then trivially "matches" nothing - covered at
+    /// the extraction layer itself:
+    /// `phoxal_cli_core::check::participant_metadata::tests::foreign_object_without_section_is_a_clear_error`.
+    /// Here we cover the same shape one layer up: `extract_participant_metadata`
+    /// on a file that is not a recognized object file at all fails before any
+    /// identity comparison is attempted.
+    #[test]
+    fn missing_metadata_extraction_fails_before_any_identity_comparison() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let not_an_object_file = dir.path().join("not-a-binary");
+        std::fs::write(&not_an_object_file, b"not an object file")?;
+        let error = participant_metadata::extract_participant_metadata(&not_an_object_file)
+            .expect_err("a non-object file must fail extraction");
+        assert!(
+            error.to_string().contains("not a recognized object file"),
+            "{error}"
+        );
+        Ok(())
+    }
 }

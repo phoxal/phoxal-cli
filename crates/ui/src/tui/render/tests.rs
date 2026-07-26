@@ -531,12 +531,7 @@ fn runtime_detail_renders_portable_summary_and_topic_pressure() {
         ..TelemetrySnapshot::default()
     };
     let logs = LogStore::new();
-    let mut runtime = RuntimeStore::new();
-    runtime.set_test_contracts(
-        "drive",
-        vec!["v1::drive/target".to_string()],
-        vec!["v1::drive/state".to_string()],
-    );
+    let runtime = RuntimeStore::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
     let mut state = AppState::default();
     state.page = Page::Runtimes;
@@ -548,8 +543,6 @@ fn runtime_detail_renders_portable_summary_and_topic_pressure() {
     assert!(rendered.contains("budget"), "{rendered}");
     assert!(rendered.contains("v1/drive/target"), "{rendered}");
     assert!(rendered.contains("DEPTH"), "{rendered}");
-    assert!(rendered.contains("Inputs"), "{rendered}");
-    assert!(rendered.contains("Outputs"), "{rendered}");
     assert!(rendered.contains("peak budget"), "{rendered}");
     assert!(rendered.contains("duration mean 8.0ms"), "{rendered}");
     assert!(rendered.contains("lateness mean 1.0ms"), "{rendered}");
@@ -558,16 +551,12 @@ fn runtime_detail_renders_portable_summary_and_topic_pressure() {
     assert!(rendered.contains("3 rows aggregated"), "{rendered}");
 
     let compact = render_model(&title(), &state, &model, 80, 30);
-    assert!(compact.contains("Contracts"), "{compact}");
-    assert!(compact.contains("v1::drive/target"), "{compact}");
-    assert!(compact.contains("v1::drive/state"), "{compact}");
     assert!(compact.contains("COUNT"), "{compact}");
     assert!(compact.contains("10"), "{compact}");
 
     let minimum = render_model(&title(), &state, &model, 44, 18);
     assert!(minimum.contains("performance"), "{minimum}");
     assert!(minimum.contains("Topics"), "{minimum}");
-    assert!(minimum.contains("Contracts"), "{minimum}");
     assert!(minimum.contains("v1/dri"), "{minimum}");
 }
 
@@ -621,7 +610,7 @@ fn runtime_topic_renderer_clamps_to_the_viewport_before_up_moves() {
     board.participants.insert(status.id.clone(), status);
     let mut sample = performance_sample("drive", now);
     let template = sample.value.topics[0].clone();
-    sample.value.topics = (0..5)
+    sample.value.topics = (0..40)
         .map(|index| RuntimeTopicSample {
             topic: format!("topic-{index}"),
             ..template.clone()
@@ -643,8 +632,12 @@ fn runtime_topic_renderer_clamps_to_the_viewport_before_up_moves() {
     state.runtime_detail_id = Some("drive".to_string());
     state.runtime_topic_offset = usize::MAX;
 
+    // 40 topics against a detail panel that shows 5 rows at 80x30, so the
+    // clamp lands at 35 and there is plenty of range left for `Up` to move
+    // through. The exact figure encodes the panel's capacity: if a layout
+    // change moves it, this is the test that should say so.
     let (_, mut rendered_state) = render_model_with_state(&title(), &state, &model, 80, 30);
-    assert_eq!(rendered_state.runtime_topic_offset, 3);
+    assert_eq!(rendered_state.runtime_topic_offset, 35);
     rendered_state.handle_key(
         crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Up,
@@ -652,7 +645,7 @@ fn runtime_topic_renderer_clamps_to_the_viewport_before_up_moves() {
         ),
         &model,
     );
-    assert_eq!(rendered_state.runtime_topic_offset, 2);
+    assert_eq!(rendered_state.runtime_topic_offset, 34);
 }
 
 #[test]

@@ -736,7 +736,7 @@ fn resolve_native_artifacts(
             {
                 return Ok(ResolvedTool {
                     kind,
-                    name: format!("{}-{artifact_name}", kind.emit_apis_kind()),
+                    name: format!("{}-{artifact_name}", kind.wire_kind()),
                     package: (*package).to_string(),
                     requested: runtime.version.clone(),
                     resolved: runtime.version,
@@ -760,7 +760,7 @@ fn resolve_native_artifacts(
             );
             Ok(ResolvedTool {
                 kind,
-                name: format!("{}-{artifact_name}", kind.emit_apis_kind()),
+                name: format!("{}-{artifact_name}", kind.wire_kind()),
                 package: entry.id.clone(),
                 requested: suite.version.clone(),
                 resolved: suite.version.clone(),
@@ -814,9 +814,8 @@ mod tests {
     use crate::host_paths::test_support::ScratchPhoxalHome;
     use phoxal_cli_core::project::resolver::load_robot;
     use phoxal_cli_core::project::suite::{
-        fixture_component_assets_entry_for_tests, fixture_contract_for_tests,
-        fixture_service_entry_for_tests, fixture_simulator_entry_for_tests,
-        fixture_suite_for_tests,
+        fixture_component_assets_entry_for_tests, fixture_service_entry_for_tests,
+        fixture_simulator_entry_for_tests, fixture_suite_for_tests,
     };
     use std::path::PathBuf;
 
@@ -871,7 +870,6 @@ tools:
                 // without robot.yaml needing any pin at all (D1: no
                 // `artifacts.generation` ceiling to auto-detect anymore).
                 true,
-                vec![fixture_contract_for_tests("v0.1::drive::Target", "publish")],
             ),
             fixture_component_assets_entry_for_tests("ddsm115", "0.1.0"),
         ])
@@ -903,17 +901,11 @@ tools:
         let _phoxal_home = ScratchPhoxalHome::new()?;
         let target = host_target_triple();
         let suite = fixture_suite_for_tests(vec![
-            fixture_service_entry_for_tests("drive", "0.1.0", &target, true, Vec::new()),
+            fixture_service_entry_for_tests("drive", "0.1.0", &target, true),
             // The catalog entry exists, but has no binary for this physical
             // target. Host resolution must notice that; Native build
             // resolution must omit the simulator before artifact selection.
-            fixture_simulator_entry_for_tests(
-                "webots-controller",
-                "0.1.0",
-                &target,
-                false,
-                Vec::new(),
-            ),
+            fixture_simulator_entry_for_tests("webots-controller", "0.1.0", &target, false),
             fixture_component_assets_entry_for_tests("ddsm115", "0.1.0"),
         ]);
         let robot = Robot::parse_from_string(

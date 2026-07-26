@@ -492,12 +492,7 @@ pub(super) fn draw_runtime_detail(
             vertical[0],
         );
         draw_runtime_performance(frame, theme, telemetry_state, model, vertical[1]);
-        let bottom = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-            .split(vertical[2]);
-        draw_runtime_topics(frame, theme, state, telemetry_state, bottom[0]);
-        draw_runtime_contracts_compact(frame, theme, metadata, bottom[1]);
+        draw_runtime_topics(frame, theme, state, telemetry_state, vertical[2]);
         return;
     }
     let vertical = Layout::default()
@@ -532,21 +527,7 @@ pub(super) fn draw_runtime_detail(
         top[1],
     );
     draw_runtime_performance(frame, theme, telemetry_state, model, vertical[1]);
-    if area.width >= 100 {
-        let bottom = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .split(vertical[2]);
-        draw_runtime_topics(frame, theme, state, telemetry_state, bottom[0]);
-        draw_runtime_contracts_wide(frame, theme, metadata, bottom[1]);
-    } else {
-        let bottom = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(5), Constraint::Length(4)])
-            .split(vertical[2]);
-        draw_runtime_topics(frame, theme, state, telemetry_state, bottom[0]);
-        draw_runtime_contracts_compact(frame, theme, metadata, bottom[1]);
-    }
+    draw_runtime_topics(frame, theme, state, telemetry_state, vertical[2]);
 }
 
 fn draw_runtime_performance(
@@ -771,106 +752,4 @@ fn draw_runtime_topics(
         })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), body);
-}
-
-fn draw_runtime_contracts_wide(
-    frame: &mut Frame,
-    theme: Theme,
-    metadata: Option<&phoxal_cli_core::session::stores::runtime::RuntimeParticipantMetadata>,
-    area: Rect,
-) {
-    let panels = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-    draw_contracts(
-        frame,
-        theme,
-        "Inputs",
-        metadata.map(|metadata| metadata.input_contracts.as_slice()),
-        panels[0],
-    );
-    draw_contracts(
-        frame,
-        theme,
-        "Outputs",
-        metadata.map(|metadata| metadata.output_contracts.as_slice()),
-        panels[1],
-    );
-}
-
-fn draw_runtime_contracts_compact(
-    frame: &mut Frame,
-    theme: Theme,
-    metadata: Option<&phoxal_cli_core::session::stores::runtime::RuntimeParticipantMetadata>,
-    area: Rect,
-) {
-    let inputs = metadata
-        .map(|metadata| metadata.input_contracts.as_slice())
-        .unwrap_or_default();
-    let outputs = metadata
-        .map(|metadata| metadata.output_contracts.as_slice())
-        .unwrap_or_default();
-    let value_width = usize::from(area.width).saturating_sub(7).max(1);
-    let identity = |contracts: &[String]| {
-        if contracts.is_empty() {
-            "none".to_string()
-        } else {
-            sanitize_and_ellipsize(&contracts.join(" · "), value_width)
-        }
-    };
-    let input_identity = identity(inputs);
-    let output_identity = identity(outputs);
-    let inner_height = area.height.saturating_sub(2);
-    let lines = if inner_height >= 2 {
-        vec![
-            Line::from(format!("in  {input_identity}")),
-            Line::from(format!("out {output_identity}")),
-        ]
-    } else {
-        vec![Line::from(format!(
-            "I {input_identity} · O {output_identity}"
-        ))]
-    };
-    frame.render_widget(
-        Paragraph::new(lines).block(shell_block(
-            theme,
-            &format!("Contracts · {} in · {} out", inputs.len(), outputs.len()),
-        )),
-        area,
-    );
-}
-
-fn draw_contracts(
-    frame: &mut Frame,
-    theme: Theme,
-    title: &str,
-    contracts: Option<&[String]>,
-    area: Rect,
-) {
-    let lines = contracts
-        .filter(|contracts| !contracts.is_empty())
-        .map_or_else(
-            || vec![Line::from("None declared")],
-            |contracts| {
-                contracts
-                    .iter()
-                    .map(|contract| {
-                        Line::from(format!(
-                            "• {}",
-                            sanitize_and_ellipsize(
-                                contract,
-                                usize::from(area.width).saturating_sub(4).max(1),
-                            )
-                        ))
-                    })
-                    .collect()
-            },
-        );
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(shell_block(theme, title))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
 }

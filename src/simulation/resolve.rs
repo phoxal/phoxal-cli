@@ -1,16 +1,16 @@
 //! Project resolution and checked simulation launch-plan construction.
 
 use super::{
-    ResolvedSimulation, SimulateOptions, driver_metadata_unavailable,
-    official_simulator_participants, remap_simulator_participant_ids, remap_simulator_surface_ids,
-    sim_checked_participants, sim_source_participants,
+    ResolvedSimulation, SimulateOptions, driver_metadata_unavailable, ensure_exactly_one_simulator,
+    official_simulator_participants, remap_simulator_participant_ids, sim_checked_participants,
+    sim_source_participants,
 };
 use crate::check::CheckGraphContext;
-use crate::check::build_emit_apis_from_source;
+use crate::check::build_participant_report_from_source;
 use crate::check::check_artifact_refs_from_resolved;
-use crate::check::extract_emit_apis_from_staged_runtime;
-use crate::check::extract_emit_apis_from_staged_tool;
-use crate::check::fetch_emit_apis_from_tool;
+use crate::check::extract_participant_report_from_staged_runtime;
+use crate::check::extract_participant_report_from_staged_tool;
+use crate::check::fetch_participant_report_from_tool;
 use crate::check::run_check_with_context;
 use crate::check::tool_participants_from_resolved;
 use crate::resolver::resolve;
@@ -30,43 +30,6 @@ use phoxal_cli_core::project::suite::Suite;
 use phoxal_cli_core::simulation::world;
 use std::collections::BTreeMap;
 use std::path::Path;
-
-/// A simulation has exactly one world authority: the participant publishing
-/// the world clock (#952 section C).
-///
-/// The framework's coherence pass rejects *two* authorities in any graph, but
-/// it cannot require *one*: a real robot legitimately has none. A simulation is
-/// the case where the mode is known, so this is where the stronger rule
-/// belongs - and it has to run over the complete simulation surface, because
-/// the controller is deliberately absent from the resident launch plan that the
-/// ordinary coherence pass filters down to.
-fn ensure_exactly_one_timeline_authority(
-    surfaces: &[graph_check::ParticipantContractSurface],
-) -> Result<()> {
-    let authorities = surfaces
-        .iter()
-        .filter(|surface| {
-            surface.contracts.iter().any(|contract| {
-                contract.role == "publish"
-                    && contract.contract == graph_check::TIMELINE_AUTHORITY_CONTRACT
-            })
-        })
-        .map(|surface| surface.participant_id.as_str())
-        .collect::<Vec<_>>();
-    match authorities.len() {
-        1 => Ok(()),
-        0 => Err(anyhow!(
-            "this simulation has no world authority: nothing publishes {}, so no participant \
-             would ever step",
-            graph_check::TIMELINE_AUTHORITY_CONTRACT
-        )),
-        _ => Err(anyhow!(
-            "this simulation has more than one world authority ({}): the participants between \
-             them would be stepped by two world histories at once",
-            authorities.join(", ")
-        )),
-    }
-}
 
 pub(crate) fn resolve_project(
     project_start: &Path,
@@ -106,19 +69,15 @@ pub(crate) fn resolve_project(
 
 /// Build the checked simulation launch plan. Every source participant
 /// (drivers, path-overridden services/simulators) rebuilds live - there is no
-/// disk cache for metadata extraction (`check::build_emit_apis_from_source`
+/// disk cache for metadata extraction (`check::build_participant_report_from_source`
 /// never caches).
-/// Also returns the (already sim-filtered/remapped) contract surfaces
-/// alongside the plan (finding A5) - the caller needs both to build a
-/// `RuntimeStore`, and re-deriving them separately would duplicate the whole
-/// metadata/check pass this function already ran.
 pub(crate) fn build_checked_sim_launch_plan(
     project_root: &Path,
     world: &Path,
     resolved: &ResolvedRobot,
     suite: Option<&Suite>,
     run: RunIdentity,
-) -> Result<(LaunchPlan, Vec<graph_check::ParticipantContractSurface>)> {
+) -> Result<LaunchPlan> {
     let source_participants = sim_source_participants(project_root, resolved, suite)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
     let metadata_source_participants = source_participants.clone();
@@ -149,44 +108,43 @@ pub(crate) fn build_checked_sim_launch_plan(
         },
         |artifact_ref| {
             if let Some(runtime) = official_by_ref.get(artifact_ref) {
-                return extract_emit_apis_from_staged_runtime(runtime);
+                return extract_participant_report_from_staged_runtime(runtime);
             }
             if let Some(tool) = tools_by_ref.get(artifact_ref) {
-                return extract_emit_apis_from_staged_tool(tool);
+                return extract_participant_report_from_staged_tool(tool);
             }
             Err(anyhow!(
                 "resolved official artifact {artifact_ref} is not in the suite"
             ))
         },
-        fetch_emit_apis_from_tool,
+        fetch_participant_report_from_tool,
         |participant| {
             if participant.kind == SourceParticipantKind::ComponentDriver {
-                return build_emit_apis_from_source(participant)
+                return build_participant_report_from_source(participant)
                     .map_err(|error| driver_metadata_unavailable(participant, error));
             }
-            build_emit_apis_from_source(participant)
+            build_participant_report_from_source(participant)
         },
     )?;
 
     let mut checked_participants = metadata_outcome.checked_participants.clone();
-    let mut contract_surfaces = metadata_outcome.contract_surfaces.clone();
     remap_simulator_participant_ids(&mut checked_participants, &resolved.robot.robot.id)?;
-    remap_simulator_surface_ids(&checked_participants, &mut contract_surfaces);
-    let (official_simulators, official_simulator_surfaces) =
-        official_simulator_participants(resolved)?;
+    let official_simulators = official_simulator_participants(resolved)?;
     checked_participants.extend(official_simulators);
-    contract_surfaces.extend(official_simulator_surfaces);
     let sim_participants = sim_checked_participants(&checked_participants);
-    let sim_ids = sim_participants
-        .iter()
-        .map(|participant| participant.participant_id.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    contract_surfaces.retain(|surface| sim_ids.contains(surface.participant_id.as_str()));
     // The complete simulation surface is the only place this can be asked:
     // the controller is validated here and then handed to Webots rather than
-    // entering the resident launch plan the ordinary coherence pass sees.
-    ensure_exactly_one_timeline_authority(&contract_surfaces)?;
-    let report = graph_check::check_graph(&sim_participants);
+    // entering the resident launch plan the ordinary graph check sees.
+    ensure_exactly_one_simulator(&sim_participants)?;
+    // `phoxal::check::check_graph` is retired (organization#957): it ignored
+    // its input and always returned `Report::default()` once the
+    // API-coherence pass it used to run was deleted, so this construction is
+    // behavior-preserving. Unlike `check::graph::run_check_with_context`, this
+    // call site appends no `InvalidConfig` problems of its own - config-schema
+    // validation for the sim graph already ran inside `run_check_with_context`
+    // above (`metadata_outcome`), whose own report this function currently
+    // does not consult.
+    let report = graph_check::Report::default();
     if !report.is_ok() {
         crate::check::ensure_check_outcome_ok(
             &resolved.train,
@@ -194,7 +152,6 @@ pub(crate) fn build_checked_sim_launch_plan(
                 missing_images: Vec::new(),
                 report: report.clone(),
                 checked_participants: sim_participants.clone(),
-                contract_surfaces: Vec::new(),
             },
         )?;
     }
@@ -207,63 +164,9 @@ pub(crate) fn build_checked_sim_launch_plan(
             project_root,
             resolved,
             checked_participants: &sim_participants,
-            substitutions: &[],
             source_participants: &source_participants,
         }],
         run,
     )?;
-    // The controller is validated in the complete graph above, but is launched
-    // by Webots rather than represented in the resident launch plan.
-    // Runtime-layout coherence therefore applies only to the ordinary resident
-    // graph and is checked during its normal staging path.
-    Ok((plan, contract_surfaces))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use phoxal::check::ParticipantContractSurface;
-    use phoxal::participant::metadata::ParticipantMetaContract;
-
-    fn surface(id: &str, publishes_clock: bool) -> ParticipantContractSurface {
-        ParticipantContractSurface {
-            participant_id: id.to_string(),
-            contracts: vec![ParticipantMetaContract {
-                role: if publishes_clock {
-                    "publish"
-                } else {
-                    "subscribe"
-                }
-                .to_string(),
-                version: "v0.1".to_string(),
-                contract: graph_check::TIMELINE_AUTHORITY_CONTRACT.to_string(),
-                external: false,
-            }],
-        }
-    }
-
-    #[test]
-    fn a_simulation_needs_exactly_one_world_authority() {
-        assert!(
-            ensure_exactly_one_timeline_authority(&[
-                surface("webots-controller", true),
-                surface("drive", false),
-            ])
-            .is_ok()
-        );
-
-        let none = ensure_exactly_one_timeline_authority(&[surface("drive", false)])
-            .expect_err("a simulation with no authority never steps");
-        assert!(none.to_string().contains("no world authority"), "{none:#}");
-
-        let two = ensure_exactly_one_timeline_authority(&[
-            surface("webots-controller", true),
-            surface("second-controller", true),
-        ])
-        .expect_err("two authorities are two worlds");
-        assert!(
-            two.to_string().contains("more than one world authority"),
-            "{two:#}"
-        );
-    }
+    Ok(plan)
 }

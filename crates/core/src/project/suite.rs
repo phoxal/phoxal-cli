@@ -174,7 +174,7 @@ pub enum ArtifactKind {
 
 impl ArtifactKind {
     #[must_use]
-    pub const fn emit_apis_kind(self) -> &'static str {
+    pub const fn wire_kind(self) -> &'static str {
         match self {
             Self::Service => "service",
             Self::ComponentAssets => "component_assets",
@@ -188,7 +188,7 @@ impl ArtifactKind {
 
 impl std::fmt::Display for ArtifactKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.emit_apis_kind())
+        formatter.write_str(self.wire_kind())
     }
 }
 
@@ -311,15 +311,6 @@ pub fn fixture_artifact_for_tests(filename: &str, sha256: &str) -> Blob {
     fixture_blob_for_tests(&format!("https://example.invalid/{filename}"), sha256, 1)
 }
 
-#[doc(hidden)]
-#[derive(Clone, Debug)]
-pub struct FixtureContract;
-
-#[doc(hidden)]
-pub fn fixture_contract_for_tests(_name: &str, _role: &str) -> FixtureContract {
-    FixtureContract
-}
-
 fn fixture_entry(
     id: String,
     kind: Kind,
@@ -353,7 +344,6 @@ pub fn fixture_service_entry_for_tests(
     version: &str,
     target: &str,
     published: bool,
-    _contracts: Vec<FixtureContract>,
 ) -> FixtureArtifact {
     fixture_entry(
         format!("phoxal/service-{name}"),
@@ -370,7 +360,6 @@ pub fn fixture_simulator_entry_for_tests(
     version: &str,
     target: &str,
     published: bool,
-    _contracts: Vec<FixtureContract>,
 ) -> FixtureArtifact {
     fixture_entry(
         format!("phoxal/simulator-{name}"),
@@ -387,7 +376,6 @@ pub fn fixture_tool_entry_for_tests(
     version: &str,
     target: &str,
     published: bool,
-    _contracts: Vec<FixtureContract>,
 ) -> FixtureArtifact {
     let kind = if name == "router" {
         Kind::Infrastructure
@@ -431,7 +419,6 @@ pub fn fixture_component_driver_entry_for_tests(
     version: &str,
     target: &str,
     published: bool,
-    _contracts: Vec<FixtureContract>,
 ) -> FixtureArtifact {
     fixture_entry(
         format!("phoxal/component-{name}"),

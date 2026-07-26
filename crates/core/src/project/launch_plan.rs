@@ -241,7 +241,6 @@ pub struct RobotLaunch {
     pub id: String,
     pub namespace: String,
     pub participants: Vec<ParticipantLaunchRecord>,
-    pub substitutions: Vec<SubstitutionRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -304,26 +303,11 @@ impl ParticipantExecution {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubstitutionRecord {
-    pub component_instance: String,
-    pub provider_participant_id: String,
-    pub provider_artifact_id: String,
-    pub provider_kind: String,
-    pub contracts: Vec<SubstitutedContract>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubstitutedContract {
-    pub family: String,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct CheckedRobotLaunchInput<'a> {
     pub project_root: &'a Path,
     pub resolved: &'a ResolvedRobot,
     pub checked_participants: &'a [graph_check::ParticipantApis],
-    pub substitutions: &'a [SubstitutionRecord],
     pub source_participants: &'a [SourceParticipant],
 }
 
@@ -507,7 +491,6 @@ fn build_robot_launch(
         id: input.resolved.robot.robot.id.clone(),
         namespace: input.resolved.robot.robot.namespace.clone(),
         participants,
-        substitutions: input.substitutions.to_vec(),
     })
 }
 
@@ -834,7 +817,6 @@ mod tests {
                 id: "testbot".to_string(),
                 namespace: "dev".to_string(),
                 participants: (0..participant_count).map(participant).collect(),
-                substitutions: Vec::new(),
             }],
         };
 
@@ -881,7 +863,6 @@ mod tests {
                 project_root: Path::new("/tmp/robot"),
                 resolved: &resolved,
                 checked_participants: &checked,
-                substitutions: &[],
                 source_participants: &sources,
             }],
             RunIdentity::default(),
@@ -962,7 +943,6 @@ mod tests {
                 project_root: Path::new("/tmp/robot"),
                 resolved: &resolved,
                 checked_participants: &checked,
-                substitutions: &[],
                 source_participants: &sources,
             }],
             RunIdentity::default(),
@@ -987,7 +967,7 @@ mod tests {
                 .iter()
                 .any(|participant| participant.launch.participant_id == controller_id)
         );
-        let runtime = crate::session::stores::runtime::RuntimeStore::from_launch_plan(&plan, &[]);
+        let runtime = crate::session::stores::runtime::RuntimeStore::from_launch_plan(&plan);
         assert!(
             runtime.metadata(&controller_id).is_none(),
             "a Webots controller must have no resident registry/control entry"
@@ -1113,7 +1093,6 @@ mod tests {
             project_root: Path::new("/tmp/robot"),
             resolved: &resolved,
             checked_participants: &[],
-            substitutions: &[],
             source_participants: &[],
         };
         let mode = LaunchMode::Webots {
@@ -1165,7 +1144,6 @@ mod tests {
                 project_root: Path::new("/tmp/robot"),
                 resolved: &resolved,
                 checked_participants: &checked,
-                substitutions: &[],
                 source_participants: &sources,
             }],
             RunIdentity::default(),
@@ -1187,10 +1165,8 @@ mod tests {
             artifact_id: artifact_id.to_string(),
             participant_kind: graph_check::ParticipantKind::Service,
             participant_class: graph_check::ParticipantClass::Checked,
-            api_version: "v1".to_string(),
             config_schema: None,
             scope,
-            contracts: Vec::new(),
         }
     }
 
@@ -1202,7 +1178,6 @@ mod tests {
             project_root,
             resolved,
             checked_participants: &[],
-            substitutions: &[],
             source_participants: &[],
         }
     }
