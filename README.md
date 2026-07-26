@@ -150,10 +150,9 @@ to disable network access and resolve from that immutable local descriptor plus
 already verified vendored artifacts. Offline mode never fetches or reconstructs
 the suite. `cargo update -p phoxal` is the explicit train-bump boundary.
 
-Every per-robot `tool-device` receives the same bounded identity derived from
-the canonical project root. Device samples remain attributed to their robot
-roots, while co-hosted robots expose the shared identity so clients can join or
-deduplicate those observations honestly.
+Every `tool-device` joins the supervised run's execution-scoped bus root. Device
+samples need no second path-derived identity: `ExecutionId` provides run
+attribution, while the robot root already identifies the robot.
 
 ## Install
 

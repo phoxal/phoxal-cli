@@ -723,10 +723,6 @@ services:
         Ok(())
     }
 
-    /// Erase the two intentionally deployment-scoped fields so a plan can be
-    /// compared for structural (content-determined) identity across two
-    /// extraction locations: the layout root every participant runs from, and
-    /// the observation-device identity derived from it.
     /// Erase what is deployment- or run-scoped rather than plan content: the
     /// deployment root, and the identities every supervised run mints fresh
     /// (#952 section B).
@@ -743,9 +739,8 @@ services:
     /// is determined by the staged layout's CONTENT (compiled `robot.yaml` plus
     /// `bin/` metadata), not by where it lives. Staging a layout, then
     /// "extracting" (copying) it to an arbitrary directory and constructing
-    /// again, yields the identical plan and content digest once the two
-    /// deliberately deployment-scoped fields - the layout root each participant
-    /// runs from and the observation-device identity derived from it - are
+    /// again, yields the identical plan and content digest once the
+    /// deployment-scoped layout root and freshly minted run identities are
     /// normalized. Nothing else is path-dependent, so a `build.phoxal` extracted
     /// anywhere runs the same process graph its source staged.
     #[test]
