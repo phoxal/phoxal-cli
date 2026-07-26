@@ -16,7 +16,7 @@ pub(crate) fn prepare(
     let resolved = resolve_project(project_start, options.clone())?;
     let descriptors = phoxal_cli_core::artifacts::descriptors_for(&resolved.resolved, true, true)?;
     crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, None)?;
-    let (plan, _contract_surfaces) = build_checked_sim_launch_plan(
+    let plan = build_checked_sim_launch_plan(
         &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,

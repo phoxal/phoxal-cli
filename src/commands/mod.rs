@@ -204,9 +204,9 @@ pub enum RootCommand {
     #[command(about = "Create a non-published root Cargo train anchor and committed lockfile.")]
     Init(init::Init),
     #[command(
-        about = "Check the robot graph's participants and config against phoxal::check.",
-        long_about = "Check the robot graph's participants and config against phoxal::check.\n\n\
-                      Resolves robot.yaml and the Cargo workspace, then reads every participant's compiled-in contract metadata (official artifacts from the suite and workspace-built services, tools, and component drivers) and validates the graph with phoxal::check. Contract compatibility is per-contract name identity (D1) - two participants naming the same version-qualified contract are compatible by construction, so there is no wire-shape hash to agree on. This also validates each user service's and user tool's manifest config against its emitted JSON Schema."
+        about = "Check the robot graph's participants and config.",
+        long_about = "Check the robot graph's participants and config.\n\n\
+                      Resolves robot.yaml and the Cargo workspace, then reads every participant's compiled-in identity metadata (official artifacts from the suite and workspace-built services, tools, and component drivers) and validates each artifact's declared identity against what robot.yaml expects. This also validates each user service's and user tool's manifest config against its emitted JSON Schema. There is no API-coherence pass: the framework train alone is the compatibility boundary (organization#957), so a version disagreement between two participants is not expressible."
     )]
     Check(check::CheckCmd),
     #[command(

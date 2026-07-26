@@ -1,12 +1,10 @@
 //! The shared "validate through the loader without supervising" entry (#936).
 //!
 //! The core [`RuntimeLayout::construct_plan`] derives the immutable launch plan
-//! from a staged runtime layout, plus the two validation inputs the bin crate
-//! owns the validators for: a config-schema pairing per declared user runtime (checked
-//! with the jsonschema validator) and a contract surface per checked
-//! participant (checked with the API-coherence pass). This module is the thin
-//! glue that runs those two validators over the constructor's output and
-//! returns the plan.
+//! from a staged runtime layout, plus the validation input the bin crate owns
+//! the validator for: a config-schema pairing per declared user runtime
+//! (checked with the jsonschema validator). This module is the thin glue that
+//! runs that validator over the constructor's output and returns the plan.
 //!
 //! It performs no supervisor, board, or socket construction: it is exactly the
 //! "validate the staged layout without running it" step `phoxal build` archives
@@ -29,8 +27,8 @@ use std::path::Path;
 /// binaries are checked against - the host for an in-place run/start, or a
 /// declared `--target` for a `phoxal build` cross bundle. Fails when a declared
 /// user runtime's (service or tool) compiled config does not match the schema
-/// embedded in its binary, or when the checked participants' API contracts are
-/// incoherent. Returns the immutable plan the supervisor would launch from.
+/// embedded in its binary. Returns the immutable plan the supervisor would
+/// launch from.
 pub fn validate_layout_plan(
     root: &Path,
     options: &PlanOptions,
@@ -59,19 +57,6 @@ pub fn validate_layout_plan(
             format_config_problems(&config_problems)
         );
     }
-
-    // Per-contract API coherence over the checked participants, fed from the
-    // binaries' embedded metadata. The constructor already keyed each surface by
-    // its plan participant id, so the coherence pass's in-set filter matches.
-    let robot_id = constructed
-        .plan
-        .robots
-        .first()
-        .map(|robot| robot.id.clone())
-        .unwrap_or_default();
-    let graph = crate::check::robot_contract_surfaces(&robot_id, &constructed.contract_surfaces);
-    let coherence = crate::check::coherence_for_launch_plan(&constructed.plan, &[graph])?;
-    crate::check::enforce_coherence(crate::check::CoherenceVerb::Run, &coherence)?;
 
     Ok(constructed.plan)
 }
@@ -166,12 +151,12 @@ services:
                 continue;
             }
             let payload = if required.binary_name == "mission" {
-                format!(
-                    r#"{{"participant_api":"Api","contracts":[],"config_schema":{mission_schema}}}"#
-                )
+                format!(r#"{{"id":"mission","config_schema":{mission_schema}}}"#)
             } else {
-                r#"{"participant_api":"()","contracts":[],"config_schema":{"type":"null"}}"#
-                    .to_string()
+                format!(
+                    r#"{{"id":"{}","config_schema":{{"type":"null"}}}}"#,
+                    required.binary_name
+                )
             };
             fs::write(
                 bin.join(&required.binary_name),
@@ -292,15 +277,12 @@ services:
                 continue;
             }
             let payload = match required.binary_name.as_str() {
-                "lidar-viz" => format!(
-                    r#"{{"participant_api":"Api","contracts":[],"config_schema":{tool_schema}}}"#
+                "lidar-viz" => format!(r#"{{"id":"lidar-viz","config_schema":{tool_schema}}}"#),
+                "mission" => r#"{"id":"mission","config_schema":{"type":"object"}}"#.to_string(),
+                _ => format!(
+                    r#"{{"id":"{}","config_schema":{{"type":"null"}}}}"#,
+                    required.binary_name
                 ),
-                "mission" => {
-                    r#"{"participant_api":"Api","contracts":[],"config_schema":{"type":"object"}}"#
-                        .to_string()
-                }
-                _ => r#"{"participant_api":"()","contracts":[],"config_schema":{"type":"null"}}"#
-                    .to_string(),
             };
             fs::write(
                 bin.join(&required.binary_name),

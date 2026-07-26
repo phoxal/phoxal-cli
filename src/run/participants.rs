@@ -559,7 +559,7 @@ mod tests {
             name.to_vec(),
             object::SectionKind::ReadOnlyData,
         );
-        let payload = br#"{"participant_api":"()","contracts":[],"config_schema":{"type":"null"}}"#;
+        let payload = br#"{"id":"mission","config_schema":{"type":"null"}}"#;
         obj.append_section_data(section, payload, 1);
         obj.write().expect("synthesize object file")
     }

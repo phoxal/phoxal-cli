@@ -1,29 +1,8 @@
 //! Config responsibilities for check.
 
-use super::RawEmitApis;
 use phoxal::check as graph_check;
 use phoxal::model::robot::RobotV0;
-use phoxal_cli_core::check::participant_metadata;
 use serde_json::Value;
-
-pub(crate) fn contract_surface(
-    raw: &RawEmitApis,
-    participant_id: String,
-) -> graph_check::ParticipantContractSurface {
-    graph_check::ParticipantContractSurface {
-        participant_id,
-        contracts: raw
-            .required_contracts
-            .iter()
-            .map(|contract| participant_metadata::ParticipantMetaContract {
-                role: contract.role.clone(),
-                version: contract.version.clone(),
-                contract: contract.contract.clone(),
-                external: contract.external,
-            })
-            .collect(),
-    }
-}
 
 pub(crate) fn validate_user_service_config(
     service_id: &str,

@@ -274,13 +274,10 @@ fn parses_bus_backed_status_commands() {
 }
 
 #[test]
-fn parses_check_strict_and_rejects_removed_service_scope() {
-    let cli =
-        Cli::try_parse_from(["phoxal", "check", "--strict"]).expect("check command should parse");
-    let RootCommand::Check(command) = cli.command else {
-        panic!("expected check command");
-    };
-    assert!(command.strict);
+fn rejects_removed_check_strict_and_service_scope() {
+    // `--strict` was the coherence pass's severity knob; the coherence pass
+    // is gone (organization#957), so the flag is gone with it.
+    assert!(Cli::try_parse_from(["phoxal", "check", "--strict"]).is_err());
     assert!(Cli::try_parse_from(["phoxal", "check", "--service", "avoid_obstacles",]).is_err());
 }
 

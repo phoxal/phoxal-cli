@@ -13,18 +13,13 @@ use phoxal_cli_core::project::launch_plan::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
 use phoxal_cli_core::project::launch_plan::simulator_controller_provider_id;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::suite::Suite;
-use std::collections::BTreeMap;
 use std::path::Path;
 
 pub(crate) fn official_simulator_participants(
     resolved: &ResolvedRobot,
-) -> Result<(
-    Vec<graph_check::ParticipantApis>,
-    Vec<graph_check::ParticipantContractSurface>,
-)> {
+) -> Result<Vec<graph_check::ParticipantApis>> {
     let robot_id = resolved.robot.robot.id.as_str();
     let mut participants = Vec::new();
-    let mut surfaces = Vec::new();
     for runtime in resolved.simulators.iter().filter(|runtime| {
         runtime.source_path().is_none() && runtime.name == SIMULATOR_CONTROLLER_ARTIFACT_NAME
     }) {
@@ -59,36 +54,9 @@ pub(crate) fn official_simulator_participants(
                     )
                 },
             )?;
-        surfaces.push(crate::check::contract_surface(
-            &raw,
-            participant.participant_id.clone(),
-        ));
         participants.push(participant);
     }
-    Ok((participants, surfaces))
-}
-
-pub(crate) fn remap_simulator_surface_ids(
-    participants: &[graph_check::ParticipantApis],
-    surfaces: &mut [graph_check::ParticipantContractSurface],
-) {
-    let simulator_ids = participants
-        .iter()
-        .filter(|participant| {
-            participant.participant_kind == graph_check::ParticipantKind::Simulator
-        })
-        .map(|participant| {
-            (
-                participant.artifact_id.as_str(),
-                participant.participant_id.as_str(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    for surface in surfaces {
-        if let Some(participant_id) = simulator_ids.get(surface.participant_id.as_str()) {
-            surface.participant_id = (*participant_id).to_string();
-        }
-    }
+    Ok(participants)
 }
 
 pub(crate) fn remap_simulator_participant_ids(

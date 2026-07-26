@@ -22,8 +22,7 @@ pub(crate) fn extract_emit_apis_from_staged_runtime(
             runtime.kind.emit_apis_kind(),
             &runtime.name,
             participant_metadata::ParticipantMeta {
-                participant_api: "fixture".to_string(),
-                contracts: Vec::new(),
+                id: "fixture".to_string(),
                 config_schema: serde_json::json!({ "type": "null" }),
             },
         ));
@@ -57,8 +56,7 @@ pub(crate) fn extract_emit_apis_from_staged_tool(
             "tool",
             phoxal_cli_core::project::resolver::tool_emit_apis_id(&tool.name),
             participant_metadata::ParticipantMeta {
-                participant_api: "fixture".to_string(),
-                contracts: Vec::new(),
+                id: "fixture".to_string(),
                 config_schema: serde_json::json!({ "type": "null" }),
             },
         ));
@@ -91,13 +89,13 @@ pub(crate) fn default_participant_class_for_kind(artifact_kind: &str) -> String 
     }
 }
 
-/// Fetches a native tool binary's contract report by extracting its
+/// Fetches a native tool binary's config-schema report by extracting its
 /// compiled-in `#[derive(phoxal::Api)]` metadata section directly from the
 /// built artifact file - never by executing it (the `emit-apis` runtime
 /// subcommand this used to run is gone). A binary's own linker section
-/// carries only its contracts, not its artifact identity (`kind`/`id`) or a
-/// artifact identity, so the identity is supplied from what is already known
-/// about `tool`; contracts and the config schema both come from the section.
+/// carries no artifact identity (`kind`/`id`), so the identity is supplied
+/// from what is already known about `tool`; the config schema comes from the
+/// section.
 pub(crate) fn fetch_emit_apis_from_tool(tool: &ToolParticipant) -> Result<RawEmitApis> {
     let meta = participant_metadata::extract_participant_metadata(&tool.binary_path).with_context(
         || {
@@ -116,7 +114,10 @@ pub(crate) fn fetch_emit_apis_from_tool(tool: &ToolParticipant) -> Result<RawEmi
 
 /// Builds a [`RawEmitApis`] from a binary's extracted [`ParticipantMeta`] plus
 /// already-known artifact identity - the shared tail of
-/// [`fetch_emit_apis_from_tool`] and [`build_emit_apis_by_building`].
+/// [`fetch_emit_apis_from_tool`] and [`build_emit_apis_by_building`]. The
+/// embedded metadata carries no contract inventory anymore (organization#957:
+/// there is no API-coherence pass left to feed one), so only its config
+/// schema survives into the report.
 ///
 /// [`ParticipantMeta`]: participant_metadata::ParticipantMeta
 pub(crate) fn raw_emit_apis_from_extracted_metadata(
@@ -134,7 +135,6 @@ pub(crate) fn raw_emit_apis_from_extracted_metadata(
         // `Api` may mix contracts from several versions freely, so there
         // is no one dated value left to put here.
         api_version: String::new(),
-        required_contracts: meta.contracts,
         config_schema: Some(meta.config_schema),
     }
 }

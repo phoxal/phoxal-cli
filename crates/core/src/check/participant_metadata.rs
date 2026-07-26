@@ -16,7 +16,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use object::{Object, ObjectSection};
-pub use phoxal::participant::metadata::{ParticipantMeta, ParticipantMetaContract};
+pub use phoxal::participant::metadata::ParticipantMeta;
 
 /// The linker section names a participant attribute places its metadata
 /// static under, tried in order. `object`'s generic [`Object::section_by_name`]
@@ -59,8 +59,7 @@ pub fn extract_participant_metadata_from_bytes(
 ) -> Result<ParticipantMeta> {
     let Some(bytes) = read_meta_section(object_bytes, describe)? else {
         return Ok(ParticipantMeta {
-            participant_api: "()".to_string(),
-            contracts: Vec::new(),
+            id: "()".to_string(),
             config_schema: serde_json::json!({ "type": "null" }),
         });
     };
@@ -364,14 +363,7 @@ mod tests {
 
     #[test]
     fn extracts_metadata_from_foreign_format_and_arch_object_files() -> Result<()> {
-        let payload =
-            br#"{"participant_api":"Api","contracts":[{"role":"publish","version":"v0.1","contract":"drive::Target","external":false}],"config_schema":{"type":"null"}}"#;
-        let expected = vec![ParticipantMetaContract {
-            role: "publish".to_string(),
-            version: "v0.1".to_string(),
-            contract: "drive::Target".to_string(),
-            external: false,
-        }];
+        let payload = br#"{"id":"drive","config_schema":{"type":"null"}}"#;
 
         // aarch64 ELF (Linux robot / release binary shape), `.phoxal_api_meta`.
         let elf = synthesize_object(
@@ -382,7 +374,7 @@ mod tests {
             payload,
         );
         let from_elf = extract_participant_metadata_from_bytes(&elf, "synthetic aarch64 ELF")?;
-        assert_eq!(from_elf.contracts, expected);
+        assert_eq!(from_elf.id, "drive");
 
         // x86_64 Mach-O (Apple release binary shape), `__DATA,__phoxal_meta`.
         let macho = synthesize_object(
@@ -394,7 +386,7 @@ mod tests {
         );
         let from_macho =
             extract_participant_metadata_from_bytes(&macho, "synthetic x86_64 Mach-O")?;
-        assert_eq!(from_macho.contracts, expected);
+        assert_eq!(from_macho.id, "drive");
         Ok(())
     }
 
@@ -521,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn foreign_object_without_section_is_zero_contracts() -> Result<()> {
+    fn foreign_object_without_section_gets_the_default_meta() -> Result<()> {
         let elf = synthesize_object(
             object::BinaryFormat::Elf,
             object::Architecture::Aarch64,
@@ -530,7 +522,8 @@ mod tests {
             b"unrelated",
         );
         let meta = extract_participant_metadata_from_bytes(&elf, "synthetic aarch64 ELF")?;
-        assert!(meta.contracts.is_empty());
+        assert_eq!(meta.id, "()");
+        assert_eq!(meta.config_schema, serde_json::json!({ "type": "null" }));
         Ok(())
     }
 }

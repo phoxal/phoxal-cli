@@ -987,7 +987,7 @@ mod tests {
                 .iter()
                 .any(|participant| participant.launch.participant_id == controller_id)
         );
-        let runtime = crate::session::stores::runtime::RuntimeStore::from_launch_plan(&plan, &[]);
+        let runtime = crate::session::stores::runtime::RuntimeStore::from_launch_plan(&plan);
         assert!(
             runtime.metadata(&controller_id).is_none(),
             "a Webots controller must have no resident registry/control entry"

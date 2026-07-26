@@ -28,51 +28,6 @@ use std::path::{Path, PathBuf};
 use crate::host_paths::test_support::ScratchPhoxalHome;
 use crate::resolver::resolve;
 
-fn coherence_surface(
-    participant_id: &str,
-    contracts: &[(&str, &str, &str)],
-) -> graph_check::ParticipantContractSurface {
-    graph_check::ParticipantContractSurface {
-        participant_id: participant_id.to_string(),
-        contracts: contracts
-            .iter()
-            .map(
-                |(role, version, contract)| participant_metadata::ParticipantMetaContract {
-                    role: (*role).to_string(),
-                    version: (*version).to_string(),
-                    contract: (*contract).to_string(),
-                    external: false,
-                },
-            )
-            .collect(),
-    }
-}
-
-fn assert_severity_matrix(diagnostics: &[RobotCoherenceDiagnostic], coherent: bool) {
-    let check = if coherent {
-        CoherenceDisposition::Pass
-    } else {
-        CoherenceDisposition::Warning
-    };
-    let hard = if coherent {
-        CoherenceDisposition::Pass
-    } else {
-        CoherenceDisposition::Failure
-    };
-    assert_eq!(
-        coherence_disposition(CoherenceVerb::Check, false, diagnostics),
-        check
-    );
-    assert_eq!(
-        coherence_disposition(CoherenceVerb::Check, true, diagnostics),
-        hard
-    );
-    assert_eq!(
-        coherence_disposition(CoherenceVerb::Run, false, diagnostics),
-        hard
-    );
-}
-
 #[test]
 fn launch_plan_covers_services_services_and_component_instances() -> Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;
@@ -276,7 +231,6 @@ fn launch_plan_raw_emit_apis(kind: &str, id: &str) -> RawEmitApis {
         },
         participant_class: "checked".to_string(),
         api_version: "v1".to_string(),
-        required_contracts: Vec::new(),
         config_schema: None,
     }
 }
@@ -430,75 +384,6 @@ fn robot_with_service_config(service_id: &str, config: Value) -> Result<Robot> {
     Ok(robot)
 }
 
-#[test]
-fn coherent_contract_set_passes_every_verb() {
-    let surfaces = vec![
-        coherence_surface("producer", &[("publish", "v1", "drive::Target")]),
-        coherence_surface("consumer", &[("subscribe", "v1", "drive::Target")]),
-        coherence_surface("server", &[("serve", "v1", "map::Get")]),
-        coherence_surface("client", &[("ask", "v1", "map::Get")]),
-    ];
-    let diagnostics = vec![evaluate_robot_coherence("robot-a", &surfaces)];
-    assert_severity_matrix(&diagnostics, true);
-}
-
-#[test]
-fn pub_sub_disjoint_warns_for_check_and_fails_strict_and_launch_verbs() {
-    let surfaces = vec![
-        coherence_surface("producer", &[("publish", "v1", "drive::Target")]),
-        coherence_surface("consumer", &[("subscribe", "v2", "drive::Target")]),
-    ];
-    let diagnostics = vec![evaluate_robot_coherence("robot-a", &surfaces)];
-    assert!(matches!(
-        diagnostics[0].mismatches.as_slice(),
-        [CoherenceMismatchDiagnostic::PubSubDisjoint { .. }]
-    ));
-    assert_severity_matrix(&diagnostics, false);
-}
-
-#[test]
-fn unserved_ask_warns_for_check_and_fails_strict_and_launch_verbs() {
-    let surfaces = vec![
-        coherence_surface("server", &[("serve", "v1", "map::Get")]),
-        coherence_surface("client", &[("ask", "v2", "map::Get")]),
-    ];
-    let diagnostics = vec![evaluate_robot_coherence("robot-a", &surfaces)];
-    assert!(matches!(
-        diagnostics[0].mismatches.as_slice(),
-        [CoherenceMismatchDiagnostic::UnservedAsk { .. }]
-    ));
-    assert_severity_matrix(&diagnostics, false);
-}
-
-#[test]
-fn robot_graphs_are_checked_independently_not_pooled() {
-    let robot_a = vec![
-        coherence_surface("a-producer", &[("publish", "v1", "drive::Target")]),
-        coherence_surface("a-consumer", &[("subscribe", "v2", "drive::Target")]),
-    ];
-    let robot_b = vec![coherence_surface(
-        "b-producer",
-        &[("publish", "v2", "drive::Target")],
-    )];
-
-    let diagnostics = [
-        evaluate_robot_coherence("robot-a", &robot_a),
-        evaluate_robot_coherence("robot-b", &robot_b),
-    ];
-    assert_eq!(diagnostics[0].mismatches.len(), 1);
-    assert!(diagnostics[1].mismatches.is_empty());
-
-    let pooled = robot_a
-        .into_iter()
-        .chain(robot_b)
-        .collect::<Vec<graph_check::ParticipantContractSurface>>();
-    assert!(
-        evaluate_robot_coherence("incorrect-pool", &pooled)
-            .mismatches
-            .is_empty()
-    );
-}
-
 fn fixture_component_package(
     package: &str,
     kind: phoxal_cli_core::project::suite::ArtifactKind,
@@ -559,14 +444,14 @@ fn healthy_graph_passes_with_fake_emit_apis() -> Result<()> {
         &[],
         &sources,
         |image_ref| match image_ref {
-            "mission:ok" => Ok(raw("mission", "v1", &["drive::Target"])),
+            "mission:ok" => Ok(raw("mission", "v1")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
         |_| bail!("no tools should be fetched"),
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/runtimes/drive") {
-                Ok(raw("drive", "v1", &["drive::Target"]))
+                Ok(raw("drive", "v1"))
             } else {
                 bail!("unexpected source dir {}", dir.display())
             }
@@ -591,14 +476,14 @@ fn healthy_graph_passes_with_platform_and_component_driver_source() -> Result<()
         &[],
         &sources,
         |image_ref| match image_ref {
-            "mission:ok" => Ok(raw("mission", "v1", &["drive::Target"])),
+            "mission:ok" => Ok(raw("mission", "v1")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
         |_| bail!("no tools should be fetched"),
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/components/ddsm115") {
-                Ok(raw_kind("driver", "ddsm115", "v1", &["drive::Target"]))
+                Ok(raw_kind("driver", "ddsm115", "v1"))
             } else {
                 bail!("unexpected source dir {}", dir.display())
             }
@@ -610,11 +495,10 @@ fn healthy_graph_passes_with_platform_and_component_driver_source() -> Result<()
 }
 
 #[test]
-fn privileged_tools_share_a_contract_family_with_no_agreement_gate() -> Result<()> {
-    // D1: a privileged tool and a checked source participant reporting
-    // different roles for the same `family` is not a mismatch - there is
-    // no `schema_id` axis left to disagree on; name identity alone
-    // decides compatibility.
+fn privileged_tools_and_checked_sources_coexist_in_one_graph() -> Result<()> {
+    // A privileged tool and a checked source participant appear in the same
+    // check run without incident - there is no contract-agreement axis left
+    // to gate on (organization#957 removed the API-coherence pass entirely).
     let tools = vec![ToolParticipant {
         name: "joypad".to_string(),
         binary_path: PathBuf::from("/fake/cache/joypad"),
@@ -632,13 +516,7 @@ fn privileged_tools_share_a_contract_family_with_no_agreement_gate() -> Result<(
         |tool| {
             let path = tool.binary_path.as_path();
             if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_with_role(
-                    "tool",
-                    "joypad",
-                    "v1",
-                    &[("drive::Target", "subscribe")],
-                    "privileged",
-                ))
+                Ok(raw_kind_class("tool", "joypad", "v1", "privileged"))
             } else {
                 bail!("unexpected tool path {}", path.display())
             }
@@ -646,11 +524,7 @@ fn privileged_tools_share_a_contract_family_with_no_agreement_gate() -> Result<(
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/runtimes/drive") {
-                Ok(raw_with_role(
-                    "drive",
-                    "v1",
-                    &[("drive::Target", "publish")],
-                ))
+                Ok(raw("drive", "v1"))
             } else {
                 bail!("unexpected source dir {}", dir.display())
             }
@@ -676,13 +550,7 @@ fn privileged_tools_are_exempt_from_topology() -> Result<()> {
         |tool| {
             let path = tool.binary_path.as_path();
             if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class(
-                    "tool",
-                    "joypad",
-                    "v1",
-                    &["drive::Target", "odometry::State"],
-                    "privileged",
-                ))
+                Ok(raw_kind_class("tool", "joypad", "v1", "privileged"))
             } else {
                 bail!("unexpected tool path {}", path.display())
             }
@@ -695,11 +563,10 @@ fn privileged_tools_are_exempt_from_topology() -> Result<()> {
 }
 
 #[test]
-fn source_and_platform_sharing_a_contract_family_is_a_healthy_graph() -> Result<()> {
-    // D1: a platform publisher and a source subscriber sharing
-    // `drive::Target` is healthy regardless of role - name identity
-    // alone decides compatibility, there is no wire-shape agreement axis
-    // left to gate on.
+fn source_and_platform_participants_coexist_in_a_healthy_graph() -> Result<()> {
+    // A platform publisher and a source subscriber both check clean - the
+    // graph checker no longer gates on contract agreement at all
+    // (organization#957).
     let images = vec![("mission".to_string(), "mission:ok".to_string())];
     let sources = vec![SourceParticipant::user_service(
         "drive".to_string(),
@@ -711,21 +578,11 @@ fn source_and_platform_sharing_a_contract_family_is_a_healthy_graph() -> Result<
         &[],
         &sources,
         |image_ref| match image_ref {
-            "mission:ok" => Ok(raw_with_role(
-                "mission",
-                "v1",
-                &[("drive::Target", "publish")],
-            )),
+            "mission:ok" => Ok(raw("mission", "v1")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
         |_| bail!("no tools should be fetched"),
-        |_| {
-            Ok(raw_with_role(
-                "drive",
-                "v1",
-                &[("drive::Target", "subscribe")],
-            ))
-        },
+        |_| Ok(raw("drive", "v1")),
     )?;
 
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
@@ -745,7 +602,7 @@ fn user_service_artifact_id_must_match_manifest_key() {
         &sources,
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
-        |_| Ok(raw("surprise", "v1", &[])),
+        |_| Ok(raw("surprise", "v1")),
     )
     .expect_err("mismatched user service artifact id should abort check");
 
@@ -766,7 +623,7 @@ fn official_service_artifact_identity_must_match_resolved_name() {
         &[],
         &[],
         |image_ref| match image_ref {
-            "drive:swapped" => Ok(raw("mission", "v1", &[])),
+            "drive:swapped" => Ok(raw("mission", "v1")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
         |_| bail!("no tools should be fetched"),
@@ -797,7 +654,7 @@ fn official_driver_artifact_identity_uses_driver_label() {
         &[],
         CheckGraphContext { robot: None },
         |artifact_ref| match artifact_ref {
-            "driver-bno085:swapped" => Ok(raw_kind("service", "bno085", "v1", &[])),
+            "driver-bno085:swapped" => Ok(raw_kind("service", "bno085", "v1")),
             unexpected => bail!("unexpected artifact {unexpected}"),
         },
         |_| bail!("no tools should be fetched"),
@@ -832,7 +689,6 @@ fn tool_artifact_identity_must_match_resolved_tool() {
                     "tool",
                     "simulator_webots_controller",
                     "v1",
-                    &[],
                     "privileged",
                 ))
             } else {
@@ -866,7 +722,7 @@ fn tool_artifact_kind_true_kind_is_accepted() -> Result<()> {
         |tool| {
             let path = tool.binary_path.as_path();
             if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class("tool", "joypad", "v1", &[], "privileged"))
+                Ok(raw_kind_class("tool", "joypad", "v1", "privileged"))
             } else {
                 bail!("unexpected tool path {}", path.display())
             }
@@ -893,7 +749,7 @@ fn tool_artifact_kind_legacy_runtime_is_rejected() {
         |tool| {
             let path = tool.binary_path.as_path();
             if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class("runtime", "joypad", "v1", &[], "privileged"))
+                Ok(raw_kind_class("runtime", "joypad", "v1", "privileged"))
             } else {
                 bail!("unexpected tool path {}", path.display())
             }
@@ -925,7 +781,7 @@ fn component_driver_artifact_kind_true_kind_is_accepted() -> Result<()> {
         &sources,
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
-        |_| Ok(raw_kind_class("driver", "ddsm115", "v1", &[], "checked")),
+        |_| Ok(raw_kind_class("driver", "ddsm115", "v1", "checked")),
     )?;
 
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
@@ -946,7 +802,7 @@ fn component_driver_artifact_kind_legacy_runtime_is_rejected() {
         &sources,
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
-        |_| Ok(raw_kind_class("runtime", "ddsm115", "v1", &[], "checked")),
+        |_| Ok(raw_kind_class("runtime", "ddsm115", "v1", "checked")),
     )
     .expect_err("component driver reporting legacy runtime kind should abort check");
 
@@ -974,13 +830,7 @@ fn tool_artifact_kind_garbage_is_rejected() {
         |tool| {
             let path = tool.binary_path.as_path();
             if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class(
-                    "nonsense",
-                    "joypad",
-                    "v1",
-                    &[],
-                    "privileged",
-                ))
+                Ok(raw_kind_class("nonsense", "joypad", "v1", "privileged"))
             } else {
                 bail!("unexpected tool path {}", path.display())
             }
@@ -1030,11 +880,11 @@ fn every_source_participant_always_builds_no_scoping_no_cache() -> Result<()> {
             let dir = participant.crate_dir.as_path();
             built.push(dir.to_path_buf());
             if dir == Path::new("/fake/project/runtimes/bad") {
-                Ok(raw("bad", "v1", &[]))
+                Ok(raw("bad", "v1"))
             } else if dir == Path::new("/fake/project/runtimes/other") {
-                Ok(raw("other", "v1", &[]))
+                Ok(raw("other", "v1"))
             } else if dir == Path::new("/fake/project/components/ddsm115") {
-                Ok(raw_kind("driver", "ddsm115", "v1", &[]))
+                Ok(raw_kind("driver", "ddsm115", "v1"))
             } else {
                 bail!("unexpected source participant: {}", dir.display())
             }
@@ -1079,9 +929,9 @@ fn component_driver_with_no_producer_is_a_legal_graph() -> Result<()> {
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/runtimes/other") {
-                Ok(raw("other", "v1", &[]))
+                Ok(raw("other", "v1"))
             } else if dir == Path::new("/fake/project/components/ddsm115") {
-                Ok(raw_kind("driver", "ddsm115", "v1", &["drive::Target"]))
+                Ok(raw_kind("driver", "ddsm115", "v1"))
             } else {
                 bail!("unexpected source dir {}", dir.display())
             }
@@ -1114,9 +964,9 @@ fn user_service_with_no_producer_is_a_legal_graph() -> Result<()> {
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/runtimes/bad") {
-                Ok(raw("bad", "v1", &["drive::Target"]))
+                Ok(raw("bad", "v1"))
             } else if dir == Path::new("/fake/project/runtimes/other") {
-                Ok(raw("other", "v1", &[]))
+                Ok(raw("other", "v1"))
             } else {
                 bail!("unexpected source dir {}", dir.display())
             }
@@ -1141,7 +991,7 @@ fn build_emit_apis_from_source_never_caches_across_calls() -> Result<()> {
         &participant,
         |_| {
             build_count += 1;
-            Ok(raw("sibling", "v1", &[]))
+            Ok(raw("sibling", "v1"))
         },
         None,
     )?;
@@ -1149,7 +999,7 @@ fn build_emit_apis_from_source_never_caches_across_calls() -> Result<()> {
         &participant,
         |_| {
             build_count += 1;
-            Ok(raw("sibling", "v1", &[]))
+            Ok(raw("sibling", "v1"))
         },
         None,
     )?;
@@ -1160,9 +1010,8 @@ fn build_emit_apis_from_source_never_caches_across_calls() -> Result<()> {
 }
 
 #[test]
-fn component_driver_and_platform_sharing_a_contract_family_is_a_healthy_graph() -> Result<()> {
-    // D1: a component driver (subscribing `drive::Target`) and a platform
-    // publisher sharing the family is healthy regardless of role. The
+fn component_driver_and_platform_participants_coexist_in_a_healthy_graph() -> Result<()> {
+    // A component driver and a platform publisher both check clean. The
     // driver still appears under its concrete instance id (`left_drive`),
     // not the shared driver artifact (`ddsm115`), so multiple instances
     // of one driver stay distinct.
@@ -1178,23 +1027,11 @@ fn component_driver_and_platform_sharing_a_contract_family_is_a_healthy_graph() 
         &[],
         &sources,
         |image_ref| match image_ref {
-            "mission:ok" => Ok(raw_with_role(
-                "mission",
-                "v1",
-                &[("drive::Target", "publish")],
-            )),
+            "mission:ok" => Ok(raw("mission", "v1")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
         |_| bail!("no tools should be fetched"),
-        |_| {
-            Ok(raw_kind_with_role(
-                "driver",
-                "ddsm115",
-                "v1",
-                &[("drive::Target", "subscribe")],
-                "checked",
-            ))
-        },
+        |_| Ok(raw_kind("driver", "ddsm115", "v1")),
     )?;
 
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
@@ -1318,7 +1155,7 @@ fn components_without_drivers_are_not_built() -> Result<()> {
         |participant| {
             let dir = participant.crate_dir.as_path();
             built.push(dir.to_path_buf());
-            Ok(raw_kind("driver", "ddsm115", "v1", &[]))
+            Ok(raw_kind("driver", "ddsm115", "v1"))
         },
     )?;
 
@@ -1443,7 +1280,7 @@ fn n_instances_of_one_suite_driver_fetch_once_and_validate_as_n_graph_participan
         |artifact_ref| {
             fetch_calls += 1;
             assert_eq!(artifact_ref, "ddsm115-driver-v0.1.0.tar.zst");
-            Ok(raw_kind("driver", "ddsm115", "v1", &[]))
+            Ok(raw_kind("driver", "ddsm115", "v1"))
         },
         |_| bail!("no tools should be fetched"),
         |_| bail!("no source participants should be built"),
@@ -1549,7 +1386,7 @@ fn path_overridden_service_enters_check_through_source_emit_apis() -> Result<()>
         |_| bail!("no tools in this fixture"),
         |participant| {
             assert_eq!(participant.kind, SourceParticipantKind::OfficialService);
-            Ok(raw_kind("service", "drive", "v1", &[]))
+            Ok(raw_kind("service", "drive", "v1"))
         },
     )?;
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
@@ -1568,7 +1405,7 @@ fn missing_image_is_reported_after_other_images_are_checked() -> Result<()> {
         &[],
         &[],
         |image_ref| match image_ref {
-            "mission:ok" => Ok(raw("mission", "v1", &[])),
+            "mission:ok" => Ok(raw("mission", "v1")),
             "service-drive:v1-stable" => Err(MissingImageError::new(anyhow!("not found")).into()),
             unexpected => bail!("unexpected image {unexpected}"),
         },
@@ -1585,19 +1422,11 @@ fn missing_image_is_reported_after_other_images_are_checked() -> Result<()> {
 }
 
 #[test]
-fn raw_emit_apis_accepts_required_contracts_json() -> Result<()> {
+fn raw_emit_apis_parses_from_json() -> Result<()> {
     let parsed: RawEmitApis = serde_json::from_str(
         r#"{
                 "artifact": { "kind": "service", "id": "drive", "ignored": true },
                 "api_version": "v1",
-                "required_contracts": [
-                    {
-                        "role": "publish",
-                        "version": "v0.1",
-                        "contract": "drive::Target",
-                        "external": false
-                    }
-                ],
                 "config_schema": { "type": "object" }
             }"#,
     )?;
@@ -1614,7 +1443,6 @@ fn raw_emit_apis_accepts_required_contracts_json() -> Result<()> {
             .and_then(Value::as_str),
         Some("object")
     );
-    assert_eq!(participant.contracts[0].family, "v0.1::drive::Target");
     Ok(())
 }
 
@@ -1624,8 +1452,7 @@ fn raw_emit_apis_threads_privileged_participant_class() -> Result<()> {
         r#"{
                 "artifact": { "kind": "tool", "id": "joypad" },
                 "participant_class": "privileged",
-                "api_version": "v1",
-                "required_contracts": []
+                "api_version": "v1"
             }"#,
     )?;
     let participant = graph_check::ParticipantApis::try_from(parsed)?;
@@ -1636,7 +1463,7 @@ fn raw_emit_apis_threads_privileged_participant_class() -> Result<()> {
 
 #[test]
 fn raw_emit_apis_unknown_participant_class_defaults_to_checked() -> Result<()> {
-    let mut raw = raw("drive", "v1", &[]);
+    let mut raw = raw("drive", "v1");
     raw.participant_class = "future".to_string();
     let participant = graph_check::ParticipantApis::try_from(raw)?;
 
@@ -1657,7 +1484,6 @@ fn user_service_config_is_validated_against_emitted_schema() -> Result<()> {
         },
         participant_class: "checked".to_string(),
         api_version: "v1".to_string(),
-        required_contracts: Vec::new(),
         config_schema: Some(serde_json::json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "title": "Config",
@@ -1745,7 +1571,7 @@ fn absent_user_service_config_validates_as_null() -> Result<()> {
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |_| {
-            let mut raw = raw("optional", "v1", &[]);
+            let mut raw = raw("optional", "v1");
             raw.config_schema = Some(serde_json::json!({ "type": "null" }));
             Ok(raw)
         },
@@ -1778,7 +1604,7 @@ fn absent_user_service_config_still_fails_required_object_schema() -> Result<()>
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |_| {
-            let mut raw = raw("required", "v1", &[]);
+            let mut raw = raw("required", "v1");
             raw.config_schema = Some(serde_json::json!({
                 "type": "object",
                 "required": ["gain"],
@@ -1829,7 +1655,7 @@ fn user_service_config_uses_full_json_schema_keywords() -> Result<()> {
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |_| {
-            let mut raw = raw("avoid", "v1", &[]);
+            let mut raw = raw("avoid", "v1");
             raw.config_schema = Some(serde_json::json!({
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
@@ -1892,26 +1718,15 @@ fn fixture_crate_dir(temp: &tempfile::TempDir, marker: &str) -> PathBuf {
     temp.path().to_path_buf()
 }
 
-fn raw(id: &str, api_version: &str, contracts: &[&str]) -> RawEmitApis {
-    raw_kind("service", id, api_version, contracts)
+fn raw(id: &str, api_version: &str) -> RawEmitApis {
+    raw_kind("service", id, api_version)
 }
 
-/// Like `raw`, but each contract carries an explicit `role` (D1: the
-/// wire-shape-agreement axis `schema_id` used to gate is gone - two
-/// participants naming the same `family` are compatible by construction
-/// regardless of role, so this only exists for tests that want to spell
-/// out a specific publish/subscribe/serve/ask role).
-fn raw_with_role(id: &str, api_version: &str, contracts: &[(&str, &str)]) -> RawEmitApis {
-    raw_kind_with_role("service", id, api_version, contracts, "checked")
+fn raw_kind(kind: &str, id: &str, api_version: &str) -> RawEmitApis {
+    raw_kind_class(kind, id, api_version, "checked")
 }
 
-fn raw_kind_with_role(
-    kind: &str,
-    id: &str,
-    api_version: &str,
-    contracts: &[(&str, &str)],
-    participant_class: &str,
-) -> RawEmitApis {
+fn raw_kind_class(kind: &str, id: &str, api_version: &str, participant_class: &str) -> RawEmitApis {
     RawEmitApis {
         artifact: RawArtifact {
             kind: kind.to_string(),
@@ -1919,63 +1734,6 @@ fn raw_kind_with_role(
         },
         participant_class: participant_class.to_string(),
         api_version: api_version.to_string(),
-        required_contracts: contracts
-            .iter()
-            .map(
-                |(family, role)| participant_metadata::ParticipantMetaContract {
-                    role: (*role).to_string(),
-                    version: family
-                        .split_once("::")
-                        .map_or(api_version, |(version, _)| version)
-                        .to_string(),
-                    contract: family
-                        .split_once("::")
-                        .map_or(*family, |(_, contract)| contract)
-                        .to_string(),
-                    external: false,
-                },
-            )
-            .collect(),
-        config_schema: None,
-    }
-}
-
-fn raw_kind(kind: &str, id: &str, api_version: &str, contracts: &[&str]) -> RawEmitApis {
-    raw_kind_class(kind, id, api_version, contracts, "checked")
-}
-
-fn raw_kind_class(
-    kind: &str,
-    id: &str,
-    api_version: &str,
-    contracts: &[&str],
-    participant_class: &str,
-) -> RawEmitApis {
-    RawEmitApis {
-        artifact: RawArtifact {
-            kind: kind.to_string(),
-            id: id.to_string(),
-        },
-        participant_class: participant_class.to_string(),
-        api_version: api_version.to_string(),
-        required_contracts: contracts
-            .iter()
-            .map(|family| participant_metadata::ParticipantMetaContract {
-                // A single default role: nothing in these fixtures cares
-                // about role identity (D1: only `family` decides
-                // compatibility), so every contract shares one.
-                role: "publish".to_string(),
-                version: family
-                    .split_once("::")
-                    .map_or(api_version, |(version, _)| version)
-                    .to_string(),
-                contract: family
-                    .split_once("::")
-                    .map_or(*family, |(_, contract)| contract)
-                    .to_string(),
-                external: false,
-            })
-            .collect(),
         config_schema: None,
     }
 }

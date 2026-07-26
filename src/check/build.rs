@@ -90,8 +90,8 @@ pub(crate) fn build_emit_apis_by_building(participant: &SourceParticipant) -> Re
 /// OFFICIAL-tool property, not a directory property: an official `Tool` (a
 /// source override of an official tool) stays privileged, while a declared user
 /// tool - which shares the `tool` kind - is an ordinary CHECKED participant
-/// (#950), with its contracts in the coherence set and its config validated.
-/// Every non-tool kind is checked by default.
+/// (#950), with its config validated. Every non-tool kind is checked by
+/// default.
 pub(crate) fn source_participant_class(kind: SourceParticipantKind) -> String {
     match kind {
         SourceParticipantKind::Tool => {
@@ -223,18 +223,11 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
         let participant_kind = graph_check::ParticipantKind::parse(&raw.artifact.kind);
         let participant_class =
             graph_check::ParticipantClass::parse(&raw.participant_class).unwrap_or_default();
-        // `role` is dropped here (D1): `phoxal::check::Contract` is
-        // `{family}` only - name identity alone decides compatibility, so
-        // there is nothing left for the graph checker to gate per-role.
-        // `role` remains in the binary metadata representation for callers
-        // that need to inspect participant intent.
-        let contracts = raw
-            .required_contracts
-            .into_iter()
-            .map(|contract| graph_check::Contract {
-                family: format!("{}::{}", contract.version, contract.contract),
-            })
-            .collect::<Vec<_>>();
+        // No contract inventory to carry anymore (organization#957 removed
+        // the API-coherence pass this fed): `contracts` stays empty. The
+        // field survives structurally on `ParticipantApis` for the framework
+        // type shape, but nothing populates or reads it here.
+        let contracts = Vec::new();
 
         Ok(Self {
             // Default the participant id to the artifact id; callers that launch

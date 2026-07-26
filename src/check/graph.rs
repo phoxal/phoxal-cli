@@ -2,8 +2,7 @@
 
 use super::{
     CheckGraphContext, CheckOutcome, MissingImageError, PlatformArtifactRef, RawEmitApis,
-    contract_surface, validate_artifact_identity, validate_source_artifact_identity,
-    validate_user_service_config,
+    validate_artifact_identity, validate_source_artifact_identity, validate_user_service_config,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -59,7 +58,6 @@ pub fn run_check_with_context(
 ) -> Result<CheckOutcome> {
     let mut missing_images = Vec::new();
     let mut participants = Vec::new();
-    let mut contract_surfaces = Vec::new();
     let mut config_problems = Vec::new();
 
     for artifact in resolved_platform_artifact_refs {
@@ -100,7 +98,6 @@ pub fn run_check_with_context(
                 )
             })?;
         if artifact.instances.is_empty() {
-            contract_surfaces.push(contract_surface(&raw, artifact.name.clone()));
             participants.push(participant);
         } else {
             // A suite component driver is fetched once but launched once
@@ -113,7 +110,6 @@ pub fn run_check_with_context(
                 instance_participant.participant_id = instance.clone();
                 instance_participant.scope =
                     graph_check::ParticipantScope::ComponentInstance(instance.clone());
-                contract_surfaces.push(contract_surface(&raw, instance.clone()));
                 participants.push(instance_participant);
             }
         }
@@ -137,7 +133,6 @@ pub fn run_check_with_context(
                     tool.binary_path.display()
                 )
             })?;
-        contract_surfaces.push(contract_surface(&raw, tool.name.clone()));
         participants.push(participant);
     }
 
@@ -189,12 +184,6 @@ pub fn run_check_with_context(
         {
             config_problems.push(problem);
         }
-        let surface_participant_id = if participant.kind == SourceParticipantKind::Tool {
-            participant.name.clone()
-        } else {
-            participant_apis.participant_id.clone()
-        };
-        contract_surfaces.push(contract_surface(&raw, surface_participant_id));
         participants.push(participant_apis);
     }
 
@@ -204,6 +193,5 @@ pub fn run_check_with_context(
         missing_images,
         report,
         checked_participants: participants,
-        contract_surfaces,
     })
 }

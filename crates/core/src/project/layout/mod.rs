@@ -736,7 +736,7 @@ tools:
 
     #[test]
     fn inspecting_a_host_binary_returns_its_embedded_metadata() -> Result<()> {
-        let payload = br#"{"participant_api":"Api","contracts":[{"role":"publish","version":"v0.1","contract":"drive::Target","external":false}],"config_schema":{"type":"null"}}"#;
+        let payload = br#"{"id":"drive","config_schema":{"type":"null"}}"#;
         let dir = write_layout(ROBOT_YAML)?;
         write_bin(
             dir.path(),
@@ -750,8 +750,11 @@ tools:
             .find(|runtime| runtime.identity == "mission")
             .expect("mission required");
         let selected = layout.inspect(mission)?;
-        assert_eq!(selected.meta.contracts.len(), 1);
-        assert_eq!(selected.meta.contracts[0].contract, "drive::Target");
+        assert_eq!(selected.meta.id, "drive");
+        assert_eq!(
+            selected.meta.config_schema,
+            serde_json::json!({"type": "null"})
+        );
         Ok(())
     }
 

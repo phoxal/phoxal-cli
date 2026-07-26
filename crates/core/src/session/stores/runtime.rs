@@ -4,8 +4,6 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use phoxal::check::ParticipantContractSurface;
-
 use crate::project::launch_plan::{LaunchPlan, ParticipantExecution};
 use crate::session::board::{BoardSnapshot, ParticipantState};
 use crate::session::{ProcessKey, RobotKey};
@@ -21,8 +19,6 @@ pub enum RuntimeOrigin {
 pub struct RuntimeParticipantMetadata {
     pub artifact_ref: Option<String>,
     pub origin: RuntimeOrigin,
-    pub input_contracts: Vec<String>,
-    pub output_contracts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -76,10 +72,7 @@ impl RuntimeStore {
     }
 
     #[must_use]
-    pub fn from_launch_plan(
-        plan: &LaunchPlan,
-        contract_surfaces: &[ParticipantContractSurface],
-    ) -> Self {
+    pub fn from_launch_plan(plan: &LaunchPlan) -> Self {
         let mut store = Self::new();
         for robot in &plan.robots {
             for participant in &robot.participants {
@@ -92,31 +85,8 @@ impl RuntimeStore {
                     RuntimeParticipantMetadata {
                         artifact_ref: artifact_ref_for_execution(&participant.execution),
                         origin: origin_for_execution(&participant.execution),
-                        ..RuntimeParticipantMetadata::default()
                     },
                 );
-            }
-        }
-        for surface in contract_surfaces {
-            for (key, entry) in &mut store.metadata {
-                let process_key = key
-                    .parse::<ProcessKey>()
-                    .expect("store inserted valid process key");
-                if process_key.id != surface.participant_id {
-                    continue;
-                }
-                for contract in &surface.contracts {
-                    let label = format!("{}::{}", contract.version, contract.contract);
-                    match contract.role.as_str() {
-                        "publish" | "serve" => entry.output_contracts.push(label),
-                        "subscribe" | "ask" => entry.input_contracts.push(label),
-                        _ => {}
-                    }
-                }
-                entry.input_contracts.sort();
-                entry.input_contracts.dedup();
-                entry.output_contracts.sort();
-                entry.output_contracts.dedup();
             }
         }
         store
@@ -147,13 +117,6 @@ impl RuntimeStore {
     #[doc(hidden)]
     pub fn set_test_origin(&mut self, id: &str, origin: RuntimeOrigin) {
         self.metadata.entry(id.to_string()).or_default().origin = origin;
-    }
-
-    #[doc(hidden)]
-    pub fn set_test_contracts(&mut self, id: &str, inputs: Vec<String>, outputs: Vec<String>) {
-        let metadata = self.metadata.entry(id.to_string()).or_default();
-        metadata.input_contracts = inputs;
-        metadata.output_contracts = outputs;
     }
 
     pub fn observe_board(&mut self, board: &BoardSnapshot) {

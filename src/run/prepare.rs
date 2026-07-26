@@ -389,7 +389,7 @@ fn register_router_process(board: &BoardBackend) {
 /// The source-time graph check: build every source participant's binary for its
 /// embedded metadata and validate the source graph, failing the run if the
 /// train's check gate rejects it. This is a staging-side gate; the loader
-/// re-validates config and contract coherence over the staged layout.
+/// re-validates config over the staged layout.
 fn run_source_check(
     project_root: &Path,
     robot: &phoxal::model::robot::v0::Robot,
