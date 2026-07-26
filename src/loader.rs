@@ -155,7 +155,7 @@ services:
             } else {
                 format!(
                     r#"{{"id":"{}","config_schema":{{"type":"null"}}}}"#,
-                    required.binary_name
+                    required.identity
                 )
             };
             fs::write(
@@ -281,7 +281,7 @@ services:
                 "mission" => r#"{"id":"mission","config_schema":{"type":"object"}}"#.to_string(),
                 _ => format!(
                     r#"{{"id":"{}","config_schema":{{"type":"null"}}}}"#,
-                    required.binary_name
+                    required.identity
                 ),
             };
             fs::write(

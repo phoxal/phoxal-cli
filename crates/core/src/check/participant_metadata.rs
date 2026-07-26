@@ -7,10 +7,12 @@
 //! `link_section_attrs`). `phoxal-cli` no longer executes a built artifact's
 //! `emit-apis` subcommand to learn its contract surface (that runtime
 //! subcommand is gone): it reads the section's bytes straight out of the
-//! object file, without ever executing the artifact. This module mirrors the
-//! framework's own `xtask::release::metadata` reference implementation
-//! (`phoxal/framework` `xtask/src/release/metadata.rs`) and is format- and
-//! architecture-agnostic (via the `object` crate).
+//! object file, without ever executing the artifact. This module targets the
+//! same linker-section shape `phoxal-macros` embeds; the framework's own
+//! workspace tooling (`phoxal/framework` `workspace-policy/`, the crate the
+//! `xtask` binary was renamed to) does not itself parse object-file sections,
+//! so there is no framework-side reference implementation this mirrors. This
+//! module is format- and architecture-agnostic (via the `object` crate).
 use std::fs;
 use std::path::Path;
 
@@ -29,10 +31,14 @@ pub const SECTION_NAMES: [&str; 2] = [".phoxal_meta", "__phoxal_meta"];
 /// Parses `object_bytes` as an object file and returns the bytes of its
 /// participant metadata section, trying each candidate section
 /// name in [`SECTION_NAMES`] in turn. `Ok(None)` means the object file parsed
-/// fine but carries no such section at all - the expected, valid shape for a
-/// binary with no participant attribute. A malformed/unrecognized *object
-/// file* is still a hard error. `describe` names the source (a file path) for
-/// error messages.
+/// fine but carries no such section at all. Every binary this module is asked
+/// to inspect is expected to be a compiled `#[phoxal::service]`/`driver`/
+/// `simulator`/`tool` participant, so a missing section is NOT a valid
+/// "no participant attribute" shape here - see
+/// [`extract_participant_metadata_from_bytes`], which turns `None` into a
+/// hard error rather than a synthesized identity. A malformed/unrecognized
+/// *object file* is still a hard error. `describe` names the source (a file
+/// path) for error messages.
 fn read_meta_section(object_bytes: &[u8], describe: &str) -> Result<Option<Vec<u8>>> {
     let file = object::File::parse(object_bytes)
         .with_context(|| format!("{describe} is not a recognized object file (ELF/Mach-O/...)"))?;
@@ -51,18 +57,29 @@ fn read_meta_section(object_bytes: &[u8], describe: &str) -> Result<Option<Vec<u
 
 /// Parses the embedded participant metadata out of an in-memory object file
 /// (an ELF/Mach-O binary of any target architecture). Reads nothing, runs
-/// nothing. A binary with no section at all (see `read_meta_section`) parses
-/// as an empty contract list and no-config schema, not an error.
+/// nothing.
+///
+/// A binary with no metadata section at all is a hard error, not a
+/// synthesized identity: every caller of this function inspects a binary it
+/// expects to be a compiled phoxal participant (a service, driver, simulator,
+/// or tool), and that participant's own declared `id` is what an identity
+/// check compares against an expected artifact/participant identity
+/// afterward. Silently returning a placeholder `id: "()"` here used to let a
+/// binary with no section at all sail through that check, because the
+/// placeholder was never compared against anything real - see
+/// organization#957's review.
 pub fn extract_participant_metadata_from_bytes(
     object_bytes: &[u8],
     describe: &str,
 ) -> Result<ParticipantMeta> {
-    let Some(bytes) = read_meta_section(object_bytes, describe)? else {
-        return Ok(ParticipantMeta {
-            id: "()".to_string(),
-            config_schema: serde_json::json!({ "type": "null" }),
-        });
-    };
+    let bytes = read_meta_section(object_bytes, describe)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{describe} carries no phoxal participant metadata section ({}); it is not a \
+             compiled #[phoxal::service]/#[phoxal::driver]/#[phoxal::simulator]/#[phoxal::tool] \
+             participant binary, or it is stale and needs rebuilding",
+            SECTION_NAMES.join(" or ")
+        )
+    })?;
     phoxal::participant::metadata::parse_participant_metadata(&bytes).with_context(|| {
         format!("phoxal participant metadata section in {describe} is not valid JSON")
     })
@@ -512,8 +529,13 @@ mod tests {
         assert!(expected_target_for_triple("x86_64-unknown-linux-gnu").is_ok());
     }
 
+    /// A missing metadata section must be a clear error, not a synthesized
+    /// identity (organization#957's review): the old `id: "()"` placeholder
+    /// let a binary with no section at all pass any identity check that
+    /// compares against it, because nothing real was ever on the other side
+    /// of that comparison.
     #[test]
-    fn foreign_object_without_section_gets_the_default_meta() -> Result<()> {
+    fn foreign_object_without_section_is_a_clear_error() {
         let elf = synthesize_object(
             object::BinaryFormat::Elf,
             object::Architecture::Aarch64,
@@ -521,9 +543,13 @@ mod tests {
             b"",
             b"unrelated",
         );
-        let meta = extract_participant_metadata_from_bytes(&elf, "synthetic aarch64 ELF")?;
-        assert_eq!(meta.id, "()");
-        assert_eq!(meta.config_schema, serde_json::json!({ "type": "null" }));
-        Ok(())
+        let error =
+            extract_participant_metadata_from_bytes(&elf, "synthetic aarch64 ELF").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("synthetic aarch64 ELF"), "{message}");
+        assert!(
+            message.contains("no phoxal participant metadata section"),
+            "{message}"
+        );
     }
 }

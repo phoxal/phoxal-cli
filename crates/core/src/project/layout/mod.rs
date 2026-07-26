@@ -332,6 +332,19 @@ impl RuntimeLayout {
     /// a declared `--target` for a cross build (#936). Reads the binary's
     /// embedded participant metadata straight from the object file; never
     /// executes it.
+    ///
+    /// The selected binary's own declared `meta.id` is checked against
+    /// `required.identity` before the caller ever sees its config schema
+    /// (organization#957 review): `required.identity` is the canonical
+    /// short/component id `required_runtimes` derived from the compiled
+    /// `robot.yaml` plus the CLI catalog - the official short name, the user
+    /// service/tool name, or the component id shared by every driven
+    /// instance - which is exactly the identity a matching binary's own
+    /// `#[phoxal::service]`/`driver`/`tool` attribute declares. A mismatch
+    /// here means the wrong binary landed at this canonical `bin/` path (a
+    /// stale rebuild, a hand-edited bundle, two artifacts swapped on disk),
+    /// and must fail before that binary's schema is used to validate
+    /// anything.
     pub fn inspect_for(
         &self,
         required: &RequiredRuntime,
@@ -346,6 +359,19 @@ impl RuntimeLayout {
                     path.display()
                 )
             })?;
+        if meta.id != required.identity {
+            bail!(
+                "staged runtime layout {} binary bin/{} at {} declares participant id `{}`, but \
+                 required runtime `{}` expects `{}`; the wrong binary is staged at this canonical \
+                 path",
+                self.root.display(),
+                required.binary_name,
+                path.display(),
+                meta.id,
+                required.identity,
+                required.identity,
+            );
+        }
         Ok(SelectedBinary { path, meta })
     }
 }
@@ -736,7 +762,7 @@ tools:
 
     #[test]
     fn inspecting_a_host_binary_returns_its_embedded_metadata() -> Result<()> {
-        let payload = br#"{"id":"drive","config_schema":{"type":"null"}}"#;
+        let payload = br#"{"id":"mission","config_schema":{"type":"null"}}"#;
         let dir = write_layout(ROBOT_YAML)?;
         write_bin(
             dir.path(),
@@ -750,11 +776,67 @@ tools:
             .find(|runtime| runtime.identity == "mission")
             .expect("mission required");
         let selected = layout.inspect(mission)?;
-        assert_eq!(selected.meta.id, "drive");
+        assert_eq!(selected.meta.id, "mission");
         assert_eq!(
             selected.meta.config_schema,
             serde_json::json!({"type": "null"})
         );
+        Ok(())
+    }
+
+    /// The regression the review caught (organization#957): a binary declaring
+    /// the WRONG participant id for the canonical `bin/` path it landed at must
+    /// fail inspection, naming both the declared and the expected identity -
+    /// not silently pass with its schema paired to the wrong runtime.
+    #[test]
+    fn inspecting_a_binary_declaring_the_wrong_id_is_rejected() -> Result<()> {
+        let payload = br#"{"id":"drive","config_schema":{"type":"null"}}"#;
+        let dir = write_layout(ROBOT_YAML)?;
+        write_bin(
+            dir.path(),
+            "mission",
+            &synthesize_binary(host_architecture(), payload),
+        )?;
+        let layout = RuntimeLayout::open(dir.path())?;
+        let required = layout.required_runtimes(&DriverSelection::All);
+        let mission = required
+            .iter()
+            .find(|runtime| runtime.identity == "mission")
+            .expect("mission required");
+        let error = layout
+            .inspect(mission)
+            .expect_err("a binary declaring a mismatched id must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("mission"), "{message}");
+        assert!(message.contains("drive"), "{message}");
+        Ok(())
+    }
+
+    /// A binary whose metadata section carries garbage instead of the
+    /// `{id, config_schema}` JSON shape must fail inspection with a clear
+    /// parse error, not synthesize a placeholder identity. Missing-section
+    /// coverage lives with the extractor itself:
+    /// `participant_metadata::tests::foreign_object_without_section_is_a_clear_error`
+    /// (organization#957 review).
+    #[test]
+    fn inspecting_a_binary_with_malformed_metadata_is_rejected() -> Result<()> {
+        let dir = write_layout(ROBOT_YAML)?;
+        write_bin(
+            dir.path(),
+            "mission",
+            &synthesize_binary(host_architecture(), b"not phoxal metadata"),
+        )?;
+        let layout = RuntimeLayout::open(dir.path())?;
+        let required = layout.required_runtimes(&DriverSelection::All);
+        let mission = required
+            .iter()
+            .find(|runtime| runtime.identity == "mission")
+            .expect("mission required");
+        let error = layout
+            .inspect(mission)
+            .expect_err("a binary with malformed metadata must be rejected");
+        let message = format!("{error:#}");
+        assert!(message.contains("not valid JSON"), "{message}");
         Ok(())
     }
 

@@ -303,7 +303,6 @@ impl RuntimeLayout {
                 id: robot_id,
                 namespace,
                 participants,
-                substitutions: Vec::new(),
             }],
         };
         Ok(ConstructedPlan {
@@ -440,13 +439,19 @@ services:
         obj.write().expect("synthesize object file")
     }
 
-    const NO_META: &[u8] = br#"{"id":"()","config_schema":{"type":"null"}}"#;
+    /// A binary carries no known config-schema by default; its declared `id`
+    /// must still equal the required runtime's own identity, or `inspect_for`
+    /// rejects it (organization#957).
+    fn no_config_payload(id: &str) -> Vec<u8> {
+        format!(r#"{{"id":"{id}","config_schema":{{"type":"null"}}}}"#).into_bytes()
+    }
 
     /// Write the compiled `robot.yaml` and synthesize a host-architecture binary
     /// under every canonical `bin/` name the Native profile requires, so the
     /// layout is a complete, runnable-shaped store. `payloads` overrides the
     /// metadata for named binaries; the rest carry the default (no-config)
-    /// metadata.
+    /// metadata, with the required runtime's own identity as `id` so
+    /// `inspect_for`'s identity check passes.
     fn stage_layout(root: &Path, payloads: &[(&str, &[u8])]) -> Result<()> {
         fs::create_dir_all(root)?;
         fs::write(root.join("robot.yaml"), ROBOT_YAML)?;
@@ -460,8 +465,11 @@ services:
             let payload = payloads
                 .iter()
                 .find(|(name, _)| *name == required.binary_name)
-                .map_or(NO_META, |(_, payload)| *payload);
-            fs::write(bin.join(&required.binary_name), synthesize_binary(payload))?;
+                .map_or_else(
+                    || no_config_payload(&required.identity),
+                    |(_, payload)| payload.to_vec(),
+                );
+            fs::write(bin.join(&required.binary_name), synthesize_binary(&payload))?;
         }
         Ok(())
     }
@@ -645,7 +653,6 @@ services:
                 project_root: project.path(),
                 resolved: &resolved,
                 checked_participants: &checked_participants,
-                substitutions: &[],
                 source_participants: &source_participants,
             }],
             run,
@@ -889,7 +896,7 @@ services:
         };
         fs::write(
             layout_root.join("bin/mission"),
-            synthesize_binary_for(foreign, NO_META),
+            synthesize_binary_for(foreign, &no_config_payload("mission")),
         )?;
         let error = format!(
             "{:#}",
@@ -944,7 +951,7 @@ services:
         };
         fs::write(
             layout_root.join("bin/phoxal-component-ddsm115"),
-            synthesize_binary_for(foreign, NO_META),
+            synthesize_binary_for(foreign, &no_config_payload("ddsm115")),
         )?;
 
         // Drivers on: the foreign driver binary is required and inspected, so
