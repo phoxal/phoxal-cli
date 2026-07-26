@@ -26,14 +26,15 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
+use phoxal::bus::ProducerId;
 use phoxal::check::ParticipantContractSurface;
 use phoxal::participant::launch::{
-    BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ExecutionDeviceId, ParticipantLaunch,
+    BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
 };
 
 use super::super::launch_plan::{
     DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
-    ROBOT_TOOL_DEVICE, RobotLaunch, execution_device_id,
+    RobotLaunch, RunIdentity,
 };
 use super::{
     DriverSelection, LayoutInspection, RequiredRuntimeKind, RuntimeLayout, SelectedBinary,
@@ -103,8 +104,9 @@ impl RuntimeLayout {
     pub fn construct_plan(
         root: &std::path::Path,
         options: &PlanOptions,
+        run: RunIdentity,
     ) -> Result<ConstructedPlan> {
-        Self::construct_plan_with_inspection(root, options, LayoutInspection::Host)
+        Self::construct_plan_with_inspection(root, options, LayoutInspection::Host, run)
     }
 
     /// [`Self::construct_plan`], inspecting each selected binary against the
@@ -115,6 +117,7 @@ impl RuntimeLayout {
         root: &std::path::Path,
         options: &PlanOptions,
         inspection: LayoutInspection,
+        run: RunIdentity,
     ) -> Result<ConstructedPlan> {
         let layout = Self::open(root)?;
         let required = layout.required_runtimes(&options.drivers);
@@ -130,7 +133,7 @@ impl RuntimeLayout {
                 layout.inspect_for(runtime, inspection)?,
             );
         }
-        layout.construct_plan_from_selected(options, &selected)
+        layout.construct_plan_from_selected(options, &selected, run)
     }
 
     /// Construct the launch plan from an already-inspected selected-binary set,
@@ -141,6 +144,7 @@ impl RuntimeLayout {
         &self,
         options: &PlanOptions,
         selected: &BTreeMap<String, SelectedBinary>,
+        run: RunIdentity,
     ) -> Result<ConstructedPlan> {
         let robot_id = self.robot().robot.id.clone();
         let namespace = self.robot().robot.namespace.clone();
@@ -189,7 +193,7 @@ impl RuntimeLayout {
                             required.config.clone(),
                             &robot_root,
                             None,
-                            None,
+                            run,
                         ),
                     ));
                     contract_surfaces.push(ParticipantContractSurface {
@@ -204,9 +208,6 @@ impl RuntimeLayout {
                     // contribute no coherence surface.
                     let artifact_id = format!("tool-{}", required.identity);
                     let participant_id = format!("{artifact_id}-{robot_id}");
-                    let execution_device = (artifact_id == ROBOT_TOOL_DEVICE)
-                        .then(|| execution_device_id(&robot_root))
-                        .transpose()?;
                     participants.push(cli_managed_record(
                         artifact_id,
                         ParticipantExecution::OfficialTool {
@@ -220,7 +221,7 @@ impl RuntimeLayout {
                             None,
                             &robot_root,
                             None,
-                            execution_device,
+                            run,
                         ),
                     ));
                 }
@@ -239,7 +240,7 @@ impl RuntimeLayout {
                             required.config.clone(),
                             &robot_root,
                             None,
-                            None,
+                            run,
                         ),
                     ));
                     contract_surfaces.push(ParticipantContractSurface {
@@ -268,7 +269,7 @@ impl RuntimeLayout {
                             required.config.clone(),
                             &robot_root,
                             None,
-                            None,
+                            run,
                         ),
                     ));
                     contract_surfaces.push(ParticipantContractSurface {
@@ -311,7 +312,7 @@ impl RuntimeLayout {
                                 None,
                                 &robot_root,
                                 Some(instance.clone()),
-                                None,
+                                run,
                             ),
                         ));
                         contract_surfaces.push(ParticipantContractSurface {
@@ -356,11 +357,13 @@ fn launch(
     config: Option<serde_json::Value>,
     robot_root: &std::path::Path,
     component_instance: Option<String>,
-    execution_device_id: Option<ExecutionDeviceId>,
+    run: RunIdentity,
 ) -> ParticipantLaunch {
     ParticipantLaunch {
         participant_id: participant_id.to_string(),
-        incarnation: 0,
+        execution: run.execution(),
+        producer: ProducerId::mint(),
+        execution_origin: Some(run.origin()),
         namespace: namespace.to_string(),
         robot_id: robot_id.to_string(),
         bus: BusProfile {
@@ -370,7 +373,6 @@ fn launch(
         config,
         robot_root: Some(robot_root.to_path_buf()),
         component_instance,
-        execution_device_id,
         shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
     }
 }
@@ -391,6 +393,7 @@ fn cli_managed_record(
 
 #[cfg(test)]
 mod tests {
+
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -671,6 +674,8 @@ services:
                 PathBuf::from("components/ddsm115"),
             ),
         ];
+        // Both legs share one run identity so the comparison is about content.
+        let run = RunIdentity::default();
         let legacy = build_launch_plan(
             LaunchMode::Run,
             &[CheckedRobotLaunchInput {
@@ -680,13 +685,18 @@ services:
                 substitutions: &[],
                 source_participants: &source_participants,
             }],
+            run,
         )?;
 
-        // The layout leg: read the same staged layout, source-free.
-        let constructed = RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())?;
+        // The layout leg: read the same staged layout, source-free. Both legs
+        // use the *same* run identity, since the identities are per supervised
+        // run by design (#952 section B) and say nothing about plan content.
+        let constructed =
+            RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default(), run)?;
 
         assert_eq!(
-            constructed.plan, legacy,
+            crate::project::launch_plan::content_only(constructed.plan.clone()),
+            crate::project::launch_plan::content_only(legacy.clone()),
             "the layout constructor must reproduce the resolved-robot plan exactly"
         );
         assert_eq!(
@@ -713,15 +723,14 @@ services:
         Ok(())
     }
 
-    /// Erase the two intentionally deployment-scoped fields so a plan can be
-    /// compared for structural (content-determined) identity across two
-    /// extraction locations: the layout root every participant runs from, and
-    /// the observation-device identity derived from it.
+    /// Erase what is deployment- or run-scoped rather than plan content: the
+    /// deployment root, and the identities every supervised run mints fresh
+    /// (#952 section B).
     fn normalize_deployment_paths(plan: &mut LaunchPlan) {
+        *plan = crate::project::launch_plan::content_only(plan.clone());
         for robot in &mut plan.robots {
             for participant in &mut robot.participants {
                 participant.launch.robot_root = None;
-                participant.launch.execution_device_id = None;
             }
         }
     }
@@ -730,9 +739,8 @@ services:
     /// is determined by the staged layout's CONTENT (compiled `robot.yaml` plus
     /// `bin/` metadata), not by where it lives. Staging a layout, then
     /// "extracting" (copying) it to an arbitrary directory and constructing
-    /// again, yields the identical plan and content digest once the two
-    /// deliberately deployment-scoped fields - the layout root each participant
-    /// runs from and the observation-device identity derived from it - are
+    /// again, yields the identical plan and content digest once the
+    /// deployment-scoped layout root and freshly minted run identities are
     /// normalized. Nothing else is path-dependent, so a `build.phoxal` extracted
     /// anywhere runs the same process graph its source staged.
     #[test]
@@ -740,15 +748,23 @@ services:
         let staged_project = tempfile::tempdir()?;
         let staged_root = runtime_layout_dir(staged_project.path(), "triple");
         stage_layout(&staged_root, &[])?;
-        let mut staged_plan =
-            RuntimeLayout::construct_plan(&staged_root, &PlanOptions::default())?.plan;
+        let mut staged_plan = RuntimeLayout::construct_plan(
+            &staged_root,
+            &PlanOptions::default(),
+            RunIdentity::default(),
+        )?
+        .plan;
 
         // "Extract the bundle" to an unrelated directory and construct again.
         let extracted = tempfile::tempdir()?;
         let extracted_root = extracted.path().join("build.phoxal.extracted");
         copy_dir(&staged_root, &extracted_root)?;
-        let mut extracted_plan =
-            RuntimeLayout::construct_plan(&extracted_root, &PlanOptions::default())?.plan;
+        let mut extracted_plan = RuntimeLayout::construct_plan(
+            &extracted_root,
+            &PlanOptions::default(),
+            RunIdentity::default(),
+        )?
+        .plan;
 
         // Before normalization the deployment root genuinely differs, proving the
         // two constructions ran against distinct locations.
@@ -776,7 +792,11 @@ services:
         let project = tempfile::tempdir()?;
         let layout_root = runtime_layout_dir(project.path(), "triple");
         stage_layout(&layout_root, &[])?;
-        let constructed = RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())?;
+        let constructed = RuntimeLayout::construct_plan(
+            &layout_root,
+            &PlanOptions::default(),
+            RunIdentity::default(),
+        )?;
         let robot = &constructed.plan.robots[0];
 
         // Every catalog service is a planned participant, dormant or not - the
@@ -835,7 +855,11 @@ services:
         let project = tempfile::tempdir()?;
         let layout_root = runtime_layout_dir(project.path(), "triple");
         stage_layout(&layout_root, &[])?;
-        let constructed = RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())?;
+        let constructed = RuntimeLayout::construct_plan(
+            &layout_root,
+            &PlanOptions::default(),
+            RunIdentity::default(),
+        )?;
         let robot = &constructed.plan.robots[0];
 
         let drivers = robot
@@ -868,7 +892,11 @@ services:
         // The `mission` user-service binary carries a real object schema.
         let mission_meta = br#"{"participant_api":"Api","contracts":[],"config_schema":{"type":"object","properties":{"speed":{"type":"integer"}}}}"#;
         stage_layout(&layout_root, &[("mission", mission_meta)])?;
-        let constructed = RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())?;
+        let constructed = RuntimeLayout::construct_plan(
+            &layout_root,
+            &PlanOptions::default(),
+            RunIdentity::default(),
+        )?;
 
         let mission = constructed
             .user_runtime_configs
@@ -910,8 +938,12 @@ services:
         )?;
         let error = format!(
             "{:#}",
-            RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())
-                .expect_err("a foreign-arch binary must fail construction")
+            RuntimeLayout::construct_plan(
+                &layout_root,
+                &PlanOptions::default(),
+                RunIdentity::default()
+            )
+            .expect_err("a foreign-arch binary must fail construction")
         );
         assert!(error.contains("mission"), "{error}");
         assert!(error.contains("built for"), "{error}");
@@ -926,8 +958,12 @@ services:
         fs::remove_file(layout_root.join("bin/phoxal-service-drive"))?;
         let error = format!(
             "{:#}",
-            RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())
-                .expect_err("a missing binary must fail construction")
+            RuntimeLayout::construct_plan(
+                &layout_root,
+                &PlanOptions::default(),
+                RunIdentity::default()
+            )
+            .expect_err("a missing binary must fail construction")
         );
         assert!(error.contains("drive"), "{error}");
         assert!(error.contains("phoxal-service-drive"), "{error}");
@@ -960,8 +996,12 @@ services:
         // construction hard-fails naming the driver identity.
         let on_error = format!(
             "{:#}",
-            RuntimeLayout::construct_plan(&layout_root, &PlanOptions::default())
-                .expect_err("a foreign-arch driver binary must fail with drivers on")
+            RuntimeLayout::construct_plan(
+                &layout_root,
+                &PlanOptions::default(),
+                RunIdentity::default()
+            )
+            .expect_err("a foreign-arch driver binary must fail with drivers on")
         );
         assert!(on_error.contains("ddsm115"), "{on_error}");
 
@@ -972,6 +1012,7 @@ services:
             &PlanOptions {
                 drivers: DriverSelection::None,
             },
+            RunIdentity::default(),
         )?;
         assert!(
             !constructed.plan.robots[0]
@@ -999,6 +1040,7 @@ services:
             &PlanOptions {
                 drivers: DriverSelection::Only(["left_drive".to_string()].into_iter().collect()),
             },
+            RunIdentity::default(),
         )?;
         let drivers = constructed.plan.robots[0]
             .participants

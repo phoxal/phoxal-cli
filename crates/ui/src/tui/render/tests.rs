@@ -177,7 +177,6 @@ fn responsive_header_and_tabs_cover_compact_expanded_and_too_small_sizes() {
         device: Some(Timestamped {
             received_at: now,
             value: DeviceSample {
-                device_id: "project-e2e".to_string(),
                 cpu_pct: Some(10.0),
                 ram_used_bytes: Some(2),
                 ram_total_bytes: Some(4),
@@ -218,7 +217,7 @@ fn responsive_header_and_tabs_cover_compact_expanded_and_too_small_sizes() {
     assert!(compact.contains("Input"), "{compact}");
 
     let expanded = render_model(&simulation_title, &AppState::default(), &model, 80, 24);
-    assert!(expanded.contains("Device · project-e2e"), "{expanded}");
+    assert!(expanded.contains("Device"), "{expanded}");
     assert!(expanded.contains("Simulation"), "{expanded}");
     assert!(expanded.contains("DISK (root)"), "{expanded}");
 
@@ -977,19 +976,18 @@ fn motion_panel_stays_compact_when_input_state_is_stale() {
         }),
         motion: Some(Timestamped {
             received_at: old,
-            value: phoxal_api::v0_2::motion::State {
-                manual_candidate_age_ns: None,
+            value: phoxal_api::v0_1::motion::State {
+                manual_observed_age_ns: None,
                 autonomous_candidate_age_ns: None,
                 safety_constraints_age_ns: None,
                 selected_source: None,
-                final_target: phoxal_api::v0_2::motion::Target {
+                final_target: phoxal_api::v0_1::motion::Target {
                     linear_x_mps: 0.0,
                     angular_z_radps: 0.0,
                     curvature_limit_radpm: None,
                 },
                 zero_reason: None,
-                safety_runtime: phoxal_api::v0_2::motion::SafetyRuntime::Absent,
-                software_estop_engaged: false,
+                safety_runtime: phoxal_api::v0_1::motion::SafetyRuntime::Absent,
                 component_estop_blocked: false,
                 active_safety_constraints: Vec::new(),
             },
@@ -1143,7 +1141,6 @@ fn header_renders_root_disk_and_staleness() {
     let unavailable = Timestamped {
         received_at: Instant::now(),
         value: DeviceSample {
-            device_id: "project-e2e".to_string(),
             ..DeviceSample::default()
         },
     };

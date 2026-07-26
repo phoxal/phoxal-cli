@@ -22,6 +22,7 @@ use phoxal_cli_core::check::source::SourceParticipantKind;
 use phoxal_cli_core::project::launch_plan::CheckedRobotLaunchInput;
 use phoxal_cli_core::project::launch_plan::LaunchMode;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
+use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::project::launch_plan::build_launch_plan;
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
@@ -29,6 +30,43 @@ use phoxal_cli_core::project::suite::Suite;
 use phoxal_cli_core::simulation::world;
 use std::collections::BTreeMap;
 use std::path::Path;
+
+/// A simulation has exactly one world authority: the participant publishing
+/// the world clock (#952 section C).
+///
+/// The framework's coherence pass rejects *two* authorities in any graph, but
+/// it cannot require *one*: a real robot legitimately has none. A simulation is
+/// the case where the mode is known, so this is where the stronger rule
+/// belongs - and it has to run over the complete simulation surface, because
+/// the controller is deliberately absent from the resident launch plan that the
+/// ordinary coherence pass filters down to.
+fn ensure_exactly_one_timeline_authority(
+    surfaces: &[graph_check::ParticipantContractSurface],
+) -> Result<()> {
+    let authorities = surfaces
+        .iter()
+        .filter(|surface| {
+            surface.contracts.iter().any(|contract| {
+                contract.role == "publish"
+                    && contract.contract == graph_check::TIMELINE_AUTHORITY_CONTRACT
+            })
+        })
+        .map(|surface| surface.participant_id.as_str())
+        .collect::<Vec<_>>();
+    match authorities.len() {
+        1 => Ok(()),
+        0 => Err(anyhow!(
+            "this simulation has no world authority: nothing publishes {}, so no participant \
+             would ever step",
+            graph_check::TIMELINE_AUTHORITY_CONTRACT
+        )),
+        _ => Err(anyhow!(
+            "this simulation has more than one world authority ({}): the participants between \
+             them would be stepped by two world histories at once",
+            authorities.join(", ")
+        )),
+    }
+}
 
 pub(crate) fn resolve_project(
     project_start: &Path,
@@ -79,6 +117,7 @@ pub(crate) fn build_checked_sim_launch_plan(
     world: &Path,
     resolved: &ResolvedRobot,
     suite: Option<&Suite>,
+    run: RunIdentity,
 ) -> Result<(LaunchPlan, Vec<graph_check::ParticipantContractSurface>)> {
     let source_participants = sim_source_participants(project_root, resolved, suite)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
@@ -143,6 +182,10 @@ pub(crate) fn build_checked_sim_launch_plan(
         .map(|participant| participant.participant_id.as_str())
         .collect::<std::collections::BTreeSet<_>>();
     contract_surfaces.retain(|surface| sim_ids.contains(surface.participant_id.as_str()));
+    // The complete simulation surface is the only place this can be asked:
+    // the controller is validated here and then handed to Webots rather than
+    // entering the resident launch plan the ordinary coherence pass sees.
+    ensure_exactly_one_timeline_authority(&contract_surfaces)?;
     let report = graph_check::check_graph(&sim_participants);
     if !report.is_ok() {
         crate::check::ensure_check_outcome_ok(
@@ -167,10 +210,60 @@ pub(crate) fn build_checked_sim_launch_plan(
             substitutions: &[],
             source_participants: &source_participants,
         }],
+        run,
     )?;
     // The controller is validated in the complete graph above, but is launched
     // by Webots rather than represented in the resident launch plan.
     // Runtime-layout coherence therefore applies only to the ordinary resident
     // graph and is checked during its normal staging path.
     Ok((plan, contract_surfaces))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phoxal::check::ParticipantContractSurface;
+    use phoxal::participant::metadata::ParticipantMetaContract;
+
+    fn surface(id: &str, publishes_clock: bool) -> ParticipantContractSurface {
+        ParticipantContractSurface {
+            participant_id: id.to_string(),
+            contracts: vec![ParticipantMetaContract {
+                role: if publishes_clock {
+                    "publish"
+                } else {
+                    "subscribe"
+                }
+                .to_string(),
+                version: "v0.1".to_string(),
+                contract: graph_check::TIMELINE_AUTHORITY_CONTRACT.to_string(),
+                external: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_simulation_needs_exactly_one_world_authority() {
+        assert!(
+            ensure_exactly_one_timeline_authority(&[
+                surface("webots-controller", true),
+                surface("drive", false),
+            ])
+            .is_ok()
+        );
+
+        let none = ensure_exactly_one_timeline_authority(&[surface("drive", false)])
+            .expect_err("a simulation with no authority never steps");
+        assert!(none.to_string().contains("no world authority"), "{none:#}");
+
+        let two = ensure_exactly_one_timeline_authority(&[
+            surface("webots-controller", true),
+            surface("second-controller", true),
+        ])
+        .expect_err("two authorities are two worlds");
+        assert!(
+            two.to_string().contains("more than one world authority"),
+            "{two:#}"
+        );
+    }
 }

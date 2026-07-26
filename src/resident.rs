@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use phoxal::bus::ExecutionId;
 use phoxal_cli_client::{
     FRAME_READ_TIMEOUT, FRAME_WRITE_TIMEOUT, read_frame, read_frame_after_idle, write_frame,
 };
@@ -23,7 +24,7 @@ use phoxal_cli_core::session::protocol::{
 };
 use phoxal_cli_core::session::{
     BootstrapResult, CommandAction, CommandError, CommandReply, CommandRequest, CommandSessionId,
-    ConnectionRole, HandshakeReply, HandshakeRequest, LaunchNonce,
+    ConnectionRole, HandshakeReply, HandshakeRequest,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
@@ -34,7 +35,7 @@ use crate::supervisor::{BoardBackend, SupervisorAction};
 const COMMAND_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_COMMAND_SESSIONS: usize = 64;
 const BOOTSTRAP_FD_ENV: &str = "PHOXAL_RESIDENT_BOOTSTRAP_FD";
-const BOOTSTRAP_NONCE_ENV: &str = "PHOXAL_RESIDENT_LAUNCH_NONCE";
+const BOOTSTRAP_EXECUTION_ENV: &str = "PHOXAL_RESIDENT_EXECUTION_ID";
 const RESIDENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const RESIDENT_LOG_ROTATIONS: usize = 3;
 static BOOTSTRAP_REPORTED: AtomicBool = AtomicBool::new(false);
@@ -51,8 +52,8 @@ struct CommandSessions {
     active: HashMap<CommandSessionId, CommandSessionState>,
     /// Restart acceptance must be fenced across command sessions. A client
     /// may reconnect after losing a reply, before the supervisor consumes the
-    /// first action and advances the board incarnation.
-    pending_restarts: HashMap<phoxal_cli_core::session::ProcessKey, u64>,
+    /// first action and advances the board's producer identity.
+    pending_restarts: HashMap<phoxal_cli_core::session::ProcessKey, phoxal::bus::ProducerId>,
 }
 
 #[derive(Clone)]
@@ -84,7 +85,8 @@ pub fn launch_detached() -> Result<LaunchedResident> {
         std::os::unix::net::UnixStream::pair().context("create resident bootstrap socketpair")?;
     parent.set_read_timeout(Some(Duration::from_secs(30)))?;
     let child_fd = child_socket.as_raw_fd();
-    let nonce = random_launch_nonce();
+    // The launcher mints the run identity; the resident adopts it.
+    let execution = ExecutionId::mint();
     let log = resident_log_file()?;
     let stderr = log.try_clone().context("clone resident log descriptor")?;
     let mut command = Command::new(std::env::current_exe()?);
@@ -94,7 +96,7 @@ pub fn launch_detached() -> Result<LaunchedResident> {
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr))
         .env(BOOTSTRAP_FD_ENV, child_fd.to_string())
-        .env(BOOTSTRAP_NONCE_ENV, hex::encode(nonce.0));
+        .env(BOOTSTRAP_EXECUTION_ENV, execution.to_string());
     // SAFETY: runs in the post-fork child before exec. It only invokes
     // async-signal-safe libc calls and reports failures through Command.
     unsafe {
@@ -118,26 +120,26 @@ pub fn launch_detached() -> Result<LaunchedResident> {
     )
     .context("resident did not complete private bootstrap")?;
     match &result {
-        BootstrapResult::Bound { launch_nonce, .. } if launch_nonce == &nonce => {}
-        BootstrapResult::Bound { .. } => bail!("resident bootstrap nonce did not match launcher"),
+        BootstrapResult::Bound {
+            execution: adopted, ..
+        } if adopted == &execution => {}
+        BootstrapResult::Bound { .. } => {
+            bail!("resident adopted a different execution than the launcher minted")
+        }
         BootstrapResult::Rejected { .. } => {}
     }
     Ok(LaunchedResident { child, result })
 }
 
-pub fn private_bootstrap_nonce() -> Result<Option<LaunchNonce>> {
-    let Some(value) = std::env::var_os(BOOTSTRAP_NONCE_ENV) else {
+/// The supervised run this resident was launched to adopt, if it was launched
+/// privately.
+pub fn private_bootstrap_execution() -> Result<Option<ExecutionId>> {
+    let Some(value) = std::env::var_os(BOOTSTRAP_EXECUTION_ENV) else {
         return Ok(None);
     };
-    let bytes = hex::decode(value.to_string_lossy().as_bytes())
-        .context("invalid private resident launch nonce")?;
-    anyhow::ensure!(
-        bytes.len() == 32,
-        "private resident launch nonce has invalid length"
-    );
-    let mut nonce = [0_u8; 32];
-    nonce.copy_from_slice(&bytes);
-    Ok(Some(LaunchNonce(nonce)))
+    ExecutionId::parse(&value.to_string_lossy())
+        .map(Some)
+        .map_err(|error| anyhow::anyhow!("invalid private resident execution id: {error}"))
 }
 
 pub fn report_private_bootstrap(result: &BootstrapResult) -> Result<()> {
@@ -158,12 +160,6 @@ pub fn report_private_bootstrap(result: &BootstrapResult) -> Result<()> {
         result,
         phoxal_cli_core::session::protocol::MAX_HANDSHAKE_FRAME_BYTES,
     )
-}
-
-fn random_launch_nonce() -> LaunchNonce {
-    let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes).expect("operating-system CSPRNG unavailable");
-    LaunchNonce(bytes)
 }
 
 fn resident_log_file() -> Result<File> {
@@ -441,12 +437,14 @@ fn process_command(
         .lock()
         .expect("command sessions mutex poisoned");
     expire_sessions(&mut sessions);
-    sessions.pending_restarts.retain(|key, incarnation| {
+    // A pending restart is settled once the board reports the producer the
+    // supervisor pre-minted for it; anything else is a stale expectation.
+    sessions.pending_restarts.retain(|key, expected| {
         current
             .processes
             .get(key)
-            .and_then(|entry| entry.status.incarnation)
-            == Some(*incarnation)
+            .and_then(|entry| entry.status.producer)
+            == Some(*expected)
     });
     {
         let Some(session) = sessions.active.get_mut(&connection_session) else {
@@ -468,22 +466,20 @@ fn process_command(
     let reply = match request.action {
         CommandAction::Restart {
             process,
-            expected_incarnation,
+            expected_producer,
         } => match current.processes.get(&process) {
             None => CommandReply::rejected(CommandError::UnknownProcess),
-            Some(entry) if entry.status.incarnation != Some(expected_incarnation) => {
-                CommandReply::rejected(CommandError::SupersededIncarnation)
+            Some(entry) if entry.status.producer != Some(expected_producer) => {
+                CommandReply::rejected(CommandError::SupersededProducer)
             }
-            Some(_) if sessions.pending_restarts.get(&process) == Some(&expected_incarnation) => {
+            Some(_) if sessions.pending_restarts.get(&process) == Some(&expected_producer) => {
                 CommandReply::rejected(CommandError::AlreadyProcessed)
             }
             Some(_) => match state.actions.try_send(SupervisorAction::Restart {
                 key: process.clone(),
             }) {
                 Ok(()) => {
-                    sessions
-                        .pending_restarts
-                        .insert(process, expected_incarnation);
+                    sessions.pending_restarts.insert(process, expected_producer);
                     CommandReply::accepted()
                 }
                 Err(_) => CommandReply::rejected(CommandError::SupervisorUnavailable),
@@ -557,6 +553,13 @@ fn expire_sessions(sessions: &mut CommandSessions) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A deterministic producer identity for tests, so a case can name the
+    /// exact restart it means.
+    fn producer(seed: u8) -> phoxal::bus::ProducerId {
+        phoxal::bus::ProducerId::parse(&format!("{:032x}", u128::from(seed)))
+            .expect("test producer id must parse")
+    }
     use super::*;
     use phoxal_cli_core::session::{
         ParticipantKind, ParticipantStatus, ProcessKey, StartupRequirement,
@@ -579,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn command_watermark_replays_and_fences_incarnations() {
+    fn command_watermark_replays_and_fences_producers() {
         let board = BoardBackend::new();
         let key = ProcessKey::project("worker");
         board.upsert_process(
@@ -591,7 +594,7 @@ mod tests {
             ),
             StartupRequirement::Required,
         );
-        board.set_incarnation(&key, 7);
+        board.set_producer(&key, producer(7));
         let (actions, mut action_rx) = mpsc::channel(4);
         let token = CancellationToken::new();
         let state = ServerState {
@@ -601,12 +604,12 @@ mod tests {
             sessions: Arc::default(),
         };
         let session = issue_or_resume_session(&state.sessions, None);
-        let request = |sequence, incarnation| CommandRequest {
+        let request = |sequence, restart_of| CommandRequest {
             supervisor_generation: board.supervisor_snapshot().supervisor_generation,
             key: phoxal_cli_core::session::CommandKey { session, sequence },
             action: CommandAction::Restart {
                 process: key.clone(),
-                expected_incarnation: incarnation,
+                expected_producer: producer(restart_of),
             },
         };
         assert!(process_command(&state, session, request(1, 7)).accepted);
@@ -622,12 +625,12 @@ mod tests {
         );
         assert_eq!(
             process_command(&state, session, request(2, 8)).error,
-            Some(CommandError::SupersededIncarnation)
+            Some(CommandError::SupersededProducer)
         );
     }
 
     #[test]
-    fn pending_restart_is_deduplicated_across_fresh_sessions_until_incarnation_advances() {
+    fn pending_restart_is_deduplicated_across_fresh_sessions_until_the_producer_advances() {
         let board = BoardBackend::new();
         let key = ProcessKey::project("worker");
         board.upsert_process(
@@ -639,7 +642,7 @@ mod tests {
             ),
             StartupRequirement::Required,
         );
-        board.set_incarnation(&key, 7);
+        board.set_producer(&key, producer(7));
         let (actions, mut action_rx) = mpsc::channel(4);
         let state = ServerState {
             board: board.clone(),
@@ -647,7 +650,7 @@ mod tests {
             supervisor_token: CancellationToken::new(),
             sessions: Arc::default(),
         };
-        let request = |session, incarnation| CommandRequest {
+        let request = |session, restart_of| CommandRequest {
             supervisor_generation: board.supervisor_snapshot().supervisor_generation,
             key: phoxal_cli_core::session::CommandKey {
                 session,
@@ -655,7 +658,7 @@ mod tests {
             },
             action: CommandAction::Restart {
                 process: key.clone(),
-                expected_incarnation: incarnation,
+                expected_producer: producer(restart_of),
             },
         };
 
@@ -673,7 +676,7 @@ mod tests {
             "fresh-session retry must not enqueue a duplicate restart"
         );
 
-        board.set_incarnation(&key, 8);
+        board.set_producer(&key, producer(8));
         let next_session = issue_or_resume_session(&state.sessions, None);
         assert!(process_command(&state, next_session, request(next_session, 8)).accepted);
         assert!(matches!(

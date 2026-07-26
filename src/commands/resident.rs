@@ -41,6 +41,10 @@ pub(crate) async fn drive_tui(
 ) -> Result<crate::session::controller::AttachmentOutcome> {
     let initial = client.snapshots().current();
     validate_entry(target, &initial.entry)?;
+    // Attaching means observing the *running* execution: the bus root is
+    // execution-scoped, so a fresh identity would subscribe an empty root.
+    let execution = crate::supervisor::active_execution(&target.project)?
+        .context("the attached project is not running an execution")?;
     let board = BoardBackend::new();
     board.replace_from_supervisor(initial.clone());
     let telemetry = crate::telemetry::TelemetryBackend::new();
@@ -52,6 +56,7 @@ pub(crate) async fn drive_tui(
             target.scope.namespace.clone(),
             target.scope.robot_id.clone(),
             connect.clone(),
+            execution,
             board.clone(),
         )
     }));
@@ -60,6 +65,7 @@ pub(crate) async fn drive_tui(
             target.scope.namespace.clone(),
             target.scope.robot_id.clone(),
             connect.clone(),
+            execution,
             board.clone(),
         )
     }));
@@ -67,6 +73,7 @@ pub(crate) async fn drive_tui(
         &targets,
         &telemetry,
         &connect,
+        execution,
         board.recovery_epoch_receiver(),
     ));
     if initial.execution == "simulation:webots"
@@ -76,6 +83,7 @@ pub(crate) async fn drive_tui(
             first.scope.namespace.clone(),
             first.scope.robot_id.clone(),
             connect.clone(),
+            execution,
         );
         telemetry.set_clock_feed(clock_rx);
         tasks.push(clock_task);

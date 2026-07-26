@@ -5,14 +5,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use phoxal::behavior::{BehaviorCatalog, Node, ValueType};
-use phoxal::bus::{ContractBody, LogicalTime, Publish, Publisher, Subscribe, Subscriber, Topic};
-use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::v0_2 as api;
+use phoxal::bus::{CommandPublisher, ContractBody, Publish, Subscribe, Subscriber, Topic};
+use phoxal_api::v0_1 as api;
 use serde::Serialize;
 use tokio::time::timeout;
 
 use crate::AppContext;
-use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
+use crate::commands::bus_target::BusTargetArgs;
 use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot};
 
 #[derive(Debug, Args)]
@@ -74,22 +73,24 @@ pub struct RequestArgs {
     pub priority: u8,
     #[arg(long, value_enum, default_value_t = ConflictPolicy::Reject)]
     pub conflict: ConflictPolicy,
-    #[arg(long, default_value = DEFAULT_ROUTER_CONNECT)]
-    pub connect: String,
+    #[command(flatten)]
+    pub target: BusTargetArgs,
 }
 
+// There is no behavior-execution selector here. `--execution` names the
+// supervised *run* whose bus this addresses (#952 section B), and the behavior
+// service publishes exactly one current snapshot on it; the old positional
+// argument accepted only `latest` anyway.
 #[derive(Debug, Args)]
 pub struct InspectArgs {
-    #[arg(default_value = "latest")]
-    pub execution: String,
-    #[arg(long, default_value = DEFAULT_ROUTER_CONNECT)]
-    pub connect: String,
+    #[command(flatten)]
+    pub target: BusTargetArgs,
 }
 
 #[derive(Debug, Args)]
 pub struct ControlArgs {
-    #[arg(long, default_value = DEFAULT_ROUTER_CONNECT)]
-    pub connect: String,
+    #[command(flatten)]
+    pub target: BusTargetArgs,
 }
 
 #[derive(Debug, Serialize)]
@@ -349,7 +350,7 @@ fn run_fake_node(
 }
 
 async fn request(app: &AppContext, args: &RequestArgs) -> Result<()> {
-    let (bus, at) = open_bus(app, &args.connect, "phoxal-cli-behavior-request").await?;
+    let bus = args.target.open(app, "phoxal-cli-behavior-request").await?;
     let topic = Topic::<Publish<api::behavior::Request>>::new_owned(
         api::topic::new()
             .behavior()
@@ -357,26 +358,23 @@ async fn request(app: &AppContext, args: &RequestArgs) -> Result<()> {
             .publish_key()?
             .to_owned(),
     );
-    let publisher = Publisher::new(bus.clone(), &topic)?;
-    let request_id = format!("cli-{}", at.time_ns());
-    publisher
-        .publish_at(
-            at,
-            api::behavior::Request {
-                request_id: api::behavior::RequestId {
-                    value: request_id.clone(),
-                },
-                behavior_id: args.behavior_id.clone(),
-                args: parse_args(&args.args)?,
-                priority: args.priority,
-                conflict_policy: match args.conflict {
-                    ConflictPolicy::Reject => api::behavior::ConflictPolicy::Reject,
-                    ConflictPolicy::Queue => api::behavior::ConflictPolicy::Queue,
-                    ConflictPolicy::Interrupt => api::behavior::ConflictPolicy::Interrupt,
-                },
-            },
-        )
-        .await?;
+    let publisher = CommandPublisher::new(bus.clone(), &topic)?;
+    // A request id only has to be unique among concurrent CLI invocations; the
+    // producer identity already distinguishes the sender.
+    let request_id = format!("cli-{}", phoxal::bus::WallTimestamp::now().unix_ns());
+    publisher.send(api::behavior::Request {
+        request_id: api::behavior::RequestId {
+            value: request_id.clone(),
+        },
+        behavior_id: args.behavior_id.clone(),
+        args: parse_args(&args.args)?,
+        priority: args.priority,
+        conflict_policy: match args.conflict {
+            ConflictPolicy::Reject => api::behavior::ConflictPolicy::Reject,
+            ConflictPolicy::Queue => api::behavior::ConflictPolicy::Queue,
+            ConflictPolicy::Interrupt => api::behavior::ConflictPolicy::Interrupt,
+        },
+    })?;
     bus.close().await?;
     app.ui
         .info(format!("behavior request {request_id} published"));
@@ -384,10 +382,7 @@ async fn request(app: &AppContext, args: &RequestArgs) -> Result<()> {
 }
 
 async fn inspect(app: &AppContext, args: &InspectArgs) -> Result<()> {
-    if args.execution != "latest" {
-        bail!("v0 supports only `behavior inspect latest`");
-    }
-    let (bus, _) = open_bus(app, &args.connect, "phoxal-cli-behavior-inspect").await?;
+    let bus = args.target.open(app, "phoxal-cli-behavior-inspect").await?;
     let topic = Topic::<Subscribe<api::behavior::Snapshot>>::new_static(
         <api::behavior::Snapshot as ContractBody>::TOPIC,
     );
@@ -413,7 +408,7 @@ async fn control(
     args: &ControlArgs,
     command: api::behavior::Command,
 ) -> Result<()> {
-    let (bus, at) = open_bus(app, &args.connect, "phoxal-cli-behavior-control").await?;
+    let bus = args.target.open(app, "phoxal-cli-behavior-control").await?;
     let topic = Topic::<Publish<api::behavior::Command>>::new_owned(
         api::topic::new()
             .behavior()
@@ -421,36 +416,10 @@ async fn control(
             .publish_key()?
             .to_owned(),
     );
-    Publisher::new(bus.clone(), &topic)?
-        .publish_at(at, command)
-        .await?;
+    CommandPublisher::new(bus.clone(), &topic)?.send(command)?;
     bus.close().await?;
     app.ui.info("behavior control command published");
     Ok(())
-}
-
-async fn open_bus(
-    app: &AppContext,
-    connect: &str,
-    participant: &str,
-) -> Result<(Bus, LogicalTime)> {
-    let robot_path = discover_robot_yaml(app.project.root())?;
-    let robot = load_robot(&robot_path)?;
-    let bus = Bus::open(BusConfig {
-        namespace: robot.robot.namespace,
-        robot_id: robot.robot.id,
-        participant: participant.to_string(),
-        incarnation: 0,
-        connect_endpoints: vec![connect.to_string()],
-    })
-    .await?;
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    Ok((
-        bus,
-        LogicalTime::new(0, u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)),
-    ))
 }
 
 fn explicit_root(app: &AppContext, explicit: Option<&PathBuf>) -> Result<PathBuf> {

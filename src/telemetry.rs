@@ -18,11 +18,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use phoxal::bus::{
-    ContractBody, DEFAULT_QUERY_TIMEOUT, Publish, Publisher, Querier, Subscribe, Subscriber, Topic,
+    CommandPublisher, ContractBody, DEFAULT_QUERY_TIMEOUT, Publish, Querier, Subscribe, Subscriber,
+    Topic,
 };
-use phoxal::raw::{Bus, BusConfig, host_time};
-use phoxal_api::v0_2 as api;
-use phoxal_api::v0_2 as state_api;
+use phoxal::raw::{Bus, BusConfig};
+use phoxal_api::v0_1 as api;
+use phoxal_api::v0_1 as state_api;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -65,7 +66,6 @@ fn device_sample_from(record: state_api::tool::device::Record) -> DeviceSample {
     let locally_truncated =
         received_disks.saturating_sub(disks.as_ref().map_or(0, |rows| rows.len()));
     DeviceSample {
-        device_id: bounded_remote_text(&body.device_id),
         cpu_pct: body.cpu_pct,
         ram_used_bytes: body.ram_used_bytes,
         ram_total_bytes: body.ram_total_bytes,
@@ -407,6 +407,7 @@ pub fn start_control_state_feed(
     namespace: String,
     robot_id: String,
     connect: String,
+    execution: phoxal::bus::ExecutionId,
     telemetry: TelemetryBackend,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -416,6 +417,7 @@ pub fn start_control_state_feed(
                 namespace.clone(),
                 robot_id.clone(),
                 connect.clone(),
+                execution,
                 &telemetry,
             )
             .await
@@ -431,13 +433,15 @@ async fn control_state_feed_loop(
     namespace: String,
     robot_id: String,
     connect: String,
+    execution: phoxal::bus::ExecutionId,
     telemetry: &TelemetryBackend,
 ) -> Result<()> {
     let bus = Bus::open(BusConfig {
         namespace,
         robot_id,
         participant: "phoxal-cli-control-state".to_string(),
-        incarnation: 0,
+        execution,
+        producer: phoxal::bus::ProducerId::mint(),
         connect_endpoints: vec![connect],
     })
     .await?;
@@ -462,6 +466,7 @@ pub fn start_device_feed(
     namespace: String,
     robot_id: String,
     connect: String,
+    execution: phoxal::bus::ExecutionId,
     telemetry: TelemetryBackend,
     mut recovery_epochs: watch::Receiver<u64>,
 ) -> JoinHandle<()> {
@@ -476,7 +481,8 @@ pub fn start_device_feed(
                 namespace: namespace.clone(),
                 robot_id: robot_id.clone(),
                 participant: "phoxal-cli-tool-device-consumer".to_string(),
-                incarnation: 0,
+                execution,
+                producer: phoxal::bus::ProducerId::mint(),
                 connect_endpoints: vec![connect.clone()],
             })
             .await
@@ -533,7 +539,6 @@ async fn device_feed_loop(
     'query: loop {
         reconciler.begin_query();
         let query = querier.query(state_api::tool::device::SnapshotRequest {
-            device_id: None,
             limit: 1,
             before_sequence: None,
         });
@@ -559,9 +564,10 @@ async fn device_feed_loop(
             sequence: snapshot.cursor.sequence,
         };
         if snapshot.records.len() > 1
-            || snapshot.records.first().is_some_and(|record| {
-                record.sequence != anchor.sequence || record.sample.device_id.is_empty()
-            })
+            || snapshot
+                .records
+                .first()
+                .is_some_and(|record| record.sequence != anchor.sequence)
         {
             tracing::warn!("tool-telemetry device snapshot violated its bounded query contract");
             let _ = reconciler.local_drop();
@@ -670,6 +676,7 @@ pub fn start_router_metrics_feed(
     namespace: String,
     robot_id: String,
     connect: String,
+    execution: phoxal::bus::ExecutionId,
     telemetry: TelemetryBackend,
     mut recovery_epochs: watch::Receiver<u64>,
 ) -> JoinHandle<()> {
@@ -684,7 +691,8 @@ pub fn start_router_metrics_feed(
                 namespace: namespace.clone(),
                 robot_id: robot_id.clone(),
                 participant: "phoxal-cli-tool-bus-consumer".to_string(),
-                incarnation: 0,
+                execution,
+                producer: phoxal::bus::ProducerId::mint(),
                 connect_endpoints: vec![connect.clone()],
             })
             .await
@@ -910,6 +918,7 @@ pub fn start_runtime_performance_feed(
     robot_id: String,
     expected_participant_ids: Vec<String>,
     connect: String,
+    execution: phoxal::bus::ExecutionId,
     telemetry: TelemetryBackend,
     mut recovery_epochs: watch::Receiver<u64>,
 ) -> JoinHandle<()> {
@@ -934,7 +943,8 @@ pub fn start_runtime_performance_feed(
                 namespace: namespace.clone(),
                 robot_id: robot_id.clone(),
                 participant: "phoxal-cli-tool-telemetry-consumer".to_string(),
-                incarnation: 0,
+                execution,
+                producer: phoxal::bus::ProducerId::mint(),
                 connect_endpoints: vec![connect.clone()],
             })
             .await
@@ -1277,6 +1287,7 @@ pub fn start_joypad_devices_feed(
     namespace: String,
     robot_id: String,
     connect: String,
+    execution: phoxal::bus::ExecutionId,
     telemetry: TelemetryBackend,
 ) -> JoinHandle<()> {
     let (command_tx, mut command_rx) = mpsc::channel(JOYPAD_COMMAND_CHANNEL_CAPACITY);
@@ -1288,6 +1299,7 @@ pub fn start_joypad_devices_feed(
                 namespace.clone(),
                 robot_id.clone(),
                 connect.clone(),
+                execution,
                 &telemetry,
                 &mut command_rx,
             )
@@ -1307,6 +1319,7 @@ async fn joypad_devices_feed_loop(
     namespace: String,
     robot_id: String,
     connect: String,
+    execution: phoxal::bus::ExecutionId,
     telemetry: &TelemetryBackend,
     command_rx: &mut mpsc::Receiver<JoypadCommand>,
 ) -> Result<()> {
@@ -1314,7 +1327,8 @@ async fn joypad_devices_feed_loop(
         namespace,
         robot_id,
         participant: "phoxal-cli-telemetry-joypad".to_string(),
-        incarnation: 0,
+        execution,
+        producer: phoxal::bus::ProducerId::mint(),
         connect_endpoints: vec![connect],
     })
     .await
@@ -1328,16 +1342,16 @@ async fn joypad_devices_feed_loop(
         let select_topic = Topic::<Publish<api::joypad::Select>>::new_static(
             <api::joypad::Select as ContractBody>::TOPIC,
         );
-        let select_publisher = Publisher::<api::joypad::Select>::new(bus.clone(), &select_topic)?;
+        let select_publisher = CommandPublisher::<api::joypad::Select>::new(bus.clone(), &select_topic)?;
         let enabled_topic = Topic::<Publish<api::joypad::SetEnabled>>::new_static(
             <api::joypad::SetEnabled as ContractBody>::TOPIC,
         );
         let enabled_publisher =
-            Publisher::<api::joypad::SetEnabled>::new(bus.clone(), &enabled_topic)?;
+            CommandPublisher::<api::joypad::SetEnabled>::new(bus.clone(), &enabled_topic)?;
         let rescan_topic = Topic::<Publish<api::joypad::Rescan>>::new_static(
             <api::joypad::Rescan as ContractBody>::TOPIC,
         );
-        let rescan_publisher = Publisher::<api::joypad::Rescan>::new(bus.clone(), &rescan_topic)?;
+        let rescan_publisher = CommandPublisher::<api::joypad::Rescan>::new(bus.clone(), &rescan_topic)?;
         loop {
             tokio::select! {
                 received = devices_subscriber.recv() => {
@@ -1347,17 +1361,17 @@ async fn joypad_devices_feed_loop(
                 command = command_rx.recv() => {
                     match command {
                         Some(JoypadCommand::Select(id)) => {
-                            if let Err(error) = select_publisher.publish_at(host_time(), api::joypad::Select { id }).await {
+                            if let Err(error) = select_publisher.send(api::joypad::Select { id }) {
                                 tracing::warn!("joypad select publish failed: {error:#}");
                             }
                         }
                         Some(JoypadCommand::SetEnabled(enabled)) => {
-                            if let Err(error) = enabled_publisher.publish_at(host_time(), api::joypad::SetEnabled { enabled }).await {
+                            if let Err(error) = enabled_publisher.send(api::joypad::SetEnabled { enabled }) {
                                 tracing::warn!("joypad enable publish failed: {error:#}");
                             }
                         }
                         Some(JoypadCommand::Rescan) => {
-                            if let Err(error) = rescan_publisher.publish_at(host_time(), api::joypad::Rescan {}).await {
+                            if let Err(error) = rescan_publisher.send(api::joypad::Rescan {}) {
                                 tracing::warn!("joypad rescan publish failed: {error:#}");
                             }
                         }
@@ -1536,7 +1550,6 @@ mod tests {
         telemetry.record_device(
             scope("r1"),
             DeviceSample {
-                device_id: "project-e2e".to_string(),
                 cpu_pct: Some(42.0),
                 ram_used_bytes: Some(100),
                 ram_total_bytes: Some(200),
@@ -1555,7 +1568,7 @@ mod tests {
 
     #[test]
     fn device_reconciliation_installs_the_latest_identity_derived_sample() {
-        fn item(sequence: u64, device_id: &str, cpu_pct: f32) -> DeviceRecordFollow {
+        fn item(sequence: u64, cpu_pct: f32) -> DeviceRecordFollow {
             DeviceRecordFollow {
                 cursor: Cursor {
                     generation: "generation-a".to_string(),
@@ -1564,7 +1577,6 @@ mod tests {
                 record: state_api::tool::device::Record {
                     sequence,
                     sample: state_api::tool::device::Sample {
-                        device_id: device_id.to_string(),
                         cpu_pct: Some(cpu_pct),
                         ram_used_bytes: None,
                         ram_total_bytes: None,
@@ -1588,16 +1600,16 @@ mod tests {
             &telemetry,
             &target,
             ReconcileOutcome::Installed {
-                snapshot: vec![item(1, "project-a", 10.0)],
-                replay: vec![item(3, "project-a", 30.0)],
+                snapshot: vec![item(1, 10.0)],
+                replay: vec![item(3, 30.0)],
             },
         ));
         assert_eq!(
             telemetry
                 .snapshot(&target)
                 .device
-                .map(|device| (device.value.device_id, device.value.cpu_pct)),
-            Some(("project-a".to_string(), Some(30.0)))
+                .map(|device| device.value.cpu_pct),
+            Some(Some(30.0))
         );
     }
 
@@ -1694,7 +1706,6 @@ mod tests {
         let device = device_sample_from(state_api::tool::device::Record {
             sequence: 1,
             sample: state_api::tool::device::Sample {
-                device_id: "project-e2e".to_string(),
                 cpu_pct: None,
                 ram_used_bytes: None,
                 ram_total_bytes: None,

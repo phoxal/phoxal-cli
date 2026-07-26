@@ -1,14 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Args;
 use phoxal::bus::{DEFAULT_QUERY_TIMEOUT, Querier, Subscriber};
-use phoxal::raw::{Bus, BusConfig};
-use phoxal_api::v0_2 as api;
-use std::path::Path;
+use phoxal::raw::Bus;
+use phoxal_api::v0_1 as api;
 use std::time::Duration;
 
 use crate::AppContext;
-use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
-use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot};
+use crate::commands::bus_target::BusTargetArgs;
 use phoxal_cli_core::session::reconcile::{
     Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced,
 };
@@ -22,80 +20,18 @@ pub struct Logs {
         help = "Participant id to show. Omit for all participants."
     )]
     pub participant: Option<String>,
-    #[arg(
-        long,
-        value_name = "ENDPOINT",
-        default_value = DEFAULT_ROUTER_CONNECT,
-        help = "Router endpoint to connect to."
-    )]
-    pub connect: String,
-    #[arg(
-        long,
-        value_name = "NAMESPACE",
-        help = "Robot namespace. Defaults to robot.yaml."
-    )]
-    pub namespace: Option<String>,
-    #[arg(
-        long = "robot-id",
-        value_name = "ID",
-        help = "Robot id. Defaults to robot.yaml."
-    )]
-    pub robot_id: Option<String>,
+    #[command(flatten)]
+    pub target: BusTargetArgs,
 }
 
 impl Logs {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let (namespace, robot_id) = resolve_identity(
-            app.project.root(),
-            self.namespace.clone(),
-            self.robot_id.clone(),
-        )?;
-        stream_logs(
-            namespace,
-            robot_id,
-            self.connect.clone(),
-            self.participant.clone(),
-            self.follow,
-        )
-        .await
+        let bus = self.target.open(app, "phoxal-cli-logs").await?;
+        stream_logs(bus, self.participant.clone(), self.follow).await
     }
 }
 
-fn resolve_identity(
-    project_start: &Path,
-    namespace: Option<String>,
-    robot_id: Option<String>,
-) -> Result<(String, String)> {
-    match (namespace, robot_id) {
-        (Some(namespace), Some(robot_id)) => Ok((namespace, robot_id)),
-        (namespace, robot_id) => {
-            let robot_path = discover_robot_yaml(project_start).with_context(|| {
-                format!("failed to find robot.yaml from {}", project_start.display())
-            })?;
-            let robot = load_robot(&robot_path)?;
-            Ok((
-                namespace.unwrap_or(robot.robot.namespace),
-                robot_id.unwrap_or(robot.robot.id),
-            ))
-        }
-    }
-}
-
-async fn stream_logs(
-    namespace: String,
-    robot_id: String,
-    connect: String,
-    participant: Option<String>,
-    follow: bool,
-) -> Result<()> {
-    let bus = Bus::open(BusConfig {
-        namespace,
-        robot_id,
-        participant: "phoxal-cli-logs".to_string(),
-        incarnation: 0,
-        connect_endpoints: vec![connect],
-    })
-    .await?;
+async fn stream_logs(bus: Bus, participant: Option<String>, follow: bool) -> Result<()> {
     let follow_topic = api::topic::new().tool().log().follow();
     let subscriber = Subscriber::<api::tool::log::Follow>::new(&bus, &follow_topic, 256).await?;
     let snapshot_topic = api::topic::new().tool().log().snapshot();

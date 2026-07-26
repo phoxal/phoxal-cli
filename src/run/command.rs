@@ -21,6 +21,7 @@ use clap::Args;
 use clap::ValueEnum;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::PlanContext;
+use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::project::layout::RuntimeLayout;
 use phoxal_cli_core::project::train::resolve_locked_train;
 use std::path::Path;
@@ -238,11 +239,11 @@ async fn run_resident_supervision_mode(
     mode: ResidentMode,
     notify: Option<crate::sd_notify::SdNotify>,
 ) -> Result<()> {
-    let nonce = crate::resident::private_bootstrap_nonce()?;
-    match resident_supervision_inner(app, project_root, mode, nonce.clone(), notify).await {
+    let execution = crate::resident::private_bootstrap_execution()?;
+    match resident_supervision_inner(app, project_root, mode, execution, notify).await {
         Ok(()) => Ok(()),
         Err(error) => {
-            if nonce.is_some() {
+            if execution.is_some() {
                 let _ = crate::resident::report_private_bootstrap(
                     &phoxal_cli_core::session::BootstrapResult::Rejected {
                         error: format!("{error:#}"),
@@ -258,21 +259,32 @@ async fn resident_supervision_inner(
     app: &AppContext,
     project_root: PathBuf,
     mode: ResidentMode,
-    launch_nonce: Option<phoxal_cli_core::session::LaunchNonce>,
+    bootstrap_execution: Option<phoxal::bus::ExecutionId>,
     notify: Option<crate::sd_notify::SdNotify>,
 ) -> Result<()> {
-    let identity = ProjectLockIdentity::resolve(&project_root, ProjectOperation::Run);
+    // One supervised run, one execution identity (#952 section B). A privately
+    // launched resident adopts the one its launcher minted; a foreground run
+    // mints its own. Recording it on the project lock is what lets an ad hoc
+    // inspector join the running execution rather than an empty root of its own.
+    let run =
+        phoxal_cli_core::project::launch_plan::RunIdentity::mint_or_adopt(bootstrap_execution);
+    let identity = ProjectLockIdentity::resolve(&project_root, ProjectOperation::Run)
+        .in_execution(run.execution());
     let _lock = ProjectLock::acquire(identity)?;
     let execution_root = match &mode {
         ResidentMode::Run(_) => crate::runtime_paths::pin_installed_release(&project_root)?,
         ResidentMode::Webots(_) => project_root.clone(),
     };
     let board = BoardBackend::new();
-    let execution = match &mode {
+    let board_execution = match &mode {
         ResidentMode::Run(_) => "run",
         ResidentMode::Webots(_) => "simulation:webots",
     };
-    board.configure(project_root.display().to_string(), "resolving", execution);
+    board.configure(
+        project_root.display().to_string(),
+        "resolving",
+        board_execution,
+    );
     board.begin_phase("prepare");
     let token = tokio_util::sync::CancellationToken::new();
     let (action_tx, action_rx) = mpsc::channel(16);
@@ -282,11 +294,11 @@ async fn resident_supervision_inner(
         action_tx.clone(),
         token.clone(),
     )?;
-    if let Some(launch_nonce) = launch_nonce {
+    if bootstrap_execution.is_some() {
         crate::resident::report_private_bootstrap(
             &phoxal_cli_core::session::BootstrapResult::Bound {
                 supervisor_generation: board.supervisor_snapshot().supervisor_generation,
-                launch_nonce,
+                execution: run.execution(),
             },
         )?;
     }
@@ -304,7 +316,13 @@ async fn resident_supervision_inner(
                 let prepare_options = options.clone();
                 let blocking_board = prepare_board.clone();
                 let prepared = tokio::task::spawn_blocking(move || {
-                    prepare_run(&prepare_root, prepare_options, &prepare_ui, blocking_board)
+                    prepare_run(
+                        &prepare_root,
+                        prepare_options,
+                        &prepare_ui,
+                        blocking_board,
+                        run,
+                    )
                 })
                 .await??;
                 prepare_board.complete_phase("prepare");
@@ -315,6 +333,7 @@ async fn resident_supervision_inner(
                     prepare_token,
                     events,
                     Some((action_tx, action_rx)),
+                    run,
                 )
                 .await
                 .map(|setup| ResidentSetup {
@@ -328,7 +347,7 @@ async fn resident_supervision_inner(
             ResidentMode::Webots(options) => {
                 let prepare_root = execution_root;
                 let sim = tokio::task::spawn_blocking(move || {
-                    crate::simulation::prepare(&prepare_root, options)
+                    crate::simulation::prepare(&prepare_root, options, run)
                 })
                 .await??;
                 prepare_board.complete_phase("prepare");
@@ -340,6 +359,7 @@ async fn resident_supervision_inner(
                     prepare_token,
                     prepare_output,
                     Some((action_tx, action_rx)),
+                    run,
                 )
                 .await
                 .map(|setup| ResidentSetup {
@@ -499,10 +519,11 @@ fn prepare_run(
     options: RunOptions,
     ui: &crate::Ui,
     board: BoardBackend,
+    run: RunIdentity,
 ) -> Result<PreparedRun> {
     match classify_run_root(root)? {
-        RunRoot::Source => prepare_run_on_board(root, options, ui, board),
-        RunRoot::Layout => prepare_layout_run_on_board(root, options, board),
+        RunRoot::Source => prepare_run_on_board(root, options, ui, board, run),
+        RunRoot::Layout => prepare_layout_run_on_board(root, options, board, run),
     }
 }
 
@@ -641,6 +662,7 @@ pub(crate) async fn live_run_setup(
         mpsc::Sender<crate::supervisor::SupervisorAction>,
         mpsc::Receiver<crate::supervisor::SupervisorAction>,
     )>,
+    run: RunIdentity,
 ) -> Result<LiveRunSetup> {
     let (router, connect) = start_infrastructure_router(
         &prepared.staged_root,
@@ -669,6 +691,7 @@ pub(crate) async fn live_run_setup(
     ui.info(format!("infrastructure router ready on {connect}"));
     report_launch_commands(&prepared.plan, &prepared.specs, &ui)?;
 
+    let execution = run.execution();
     let mut background_tasks = AbortTasks::default();
     background_tasks.extend(
         prepared
@@ -679,6 +702,7 @@ pub(crate) async fn live_run_setup(
                     target.scope.namespace.clone(),
                     target.scope.robot_id.clone(),
                     connect.clone(),
+                    execution,
                     prepared.board.clone(),
                 )
             })
@@ -689,6 +713,7 @@ pub(crate) async fn live_run_setup(
             target.scope.namespace.clone(),
             target.scope.robot_id.clone(),
             connect.clone(),
+            execution,
             prepared.board.clone(),
         )
     }));

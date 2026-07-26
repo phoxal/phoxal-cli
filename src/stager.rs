@@ -589,7 +589,9 @@ robot:
             execution,
             launch: ParticipantLaunch {
                 participant_id: participant_id.to_string(),
-                incarnation: 0,
+                execution: phoxal::bus::ExecutionId::mint(),
+                producer: phoxal::bus::ProducerId::mint(),
+                execution_origin: None,
                 namespace: "dev".to_string(),
                 robot_id: "robot_v1".to_string(),
                 bus: BusProfile {
@@ -599,7 +601,6 @@ robot:
                 config: None,
                 robot_root: None,
                 component_instance: component_instance.map(str::to_string),
-                execution_device_id: None,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
             startup_requirement: phoxal_cli_core::session::StartupRequirement::Required,

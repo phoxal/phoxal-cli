@@ -19,7 +19,7 @@ The root package is the adapter shell. It owns clap dispatch, child processes,
 raw bus sessions, SSH and sudo, filesystem mutation, artifact downloads,
 Webots process integration, terminal selection, and session-controller
 composition. The root supervisor also owns the per-user foreground authority
-and router recovery epochs: router loss tears down the CLI-owned process graph,
+and router recovery: router loss tears down the CLI-owned process graph,
 restarts the same endpoint, clears stale presence, and recreates the staged
 graph without replacing the operator's session controller.
 

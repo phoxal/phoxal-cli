@@ -26,6 +26,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use phoxal_cli_core::project::launch_plan::PlanContext;
+use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::project::layout::RuntimeLayout;
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
@@ -197,6 +198,7 @@ pub(crate) fn prepare_run_on_board(
     options: RunOptions,
     ui: &crate::Ui,
     board: BoardBackend,
+    run: RunIdentity,
 ) -> Result<PreparedRun> {
     let staged = refresh_staging(
         project_start,
@@ -215,6 +217,7 @@ pub(crate) fn prepare_run_on_board(
         &staged.staged_root,
         &plan_options,
         phoxal_cli_core::project::layout::LayoutInspection::Host,
+        run,
     )
     .context("failed to construct the launch plan from the staged runtime layout")?;
 
@@ -306,6 +309,7 @@ pub(crate) fn prepare_layout_run_on_board(
     layout_root: &Path,
     options: RunOptions,
     board: BoardBackend,
+    run: RunIdentity,
 ) -> Result<PreparedRun> {
     // A compiled root declares its whole typed-document contract before any
     // robot or participant metadata is interpreted.
@@ -329,6 +333,7 @@ pub(crate) fn prepare_layout_run_on_board(
         layout_root,
         &plan_options,
         phoxal_cli_core::project::layout::LayoutInspection::Host,
+        run,
     )
     .context("failed to construct the launch plan from the staged runtime layout")?;
 

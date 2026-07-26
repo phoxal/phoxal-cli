@@ -17,6 +17,7 @@
 use anyhow::{Result, bail};
 use phoxal::check::Problem;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
+use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::project::layout::{LayoutInspection, PlanOptions, RuntimeLayout};
 use std::path::Path;
 
@@ -34,8 +35,10 @@ pub fn validate_layout_plan(
     root: &Path,
     options: &PlanOptions,
     inspection: LayoutInspection,
+    run: RunIdentity,
 ) -> Result<LaunchPlan> {
-    let constructed = RuntimeLayout::construct_plan_with_inspection(root, options, inspection)?;
+    let constructed =
+        RuntimeLayout::construct_plan_with_inspection(root, options, inspection, run)?;
     // The constructor pairs each declared user runtime's authored config with
     // the schema from its binary; validate the carried value directly, so
     // services and tools each validate their own declaration (#950).
@@ -187,7 +190,12 @@ services:
             &root,
             r#"{"type":"object","properties":{"speed":{"type":"integer"}}}"#,
         )?;
-        let plan = validate_layout_plan(&root, &PlanOptions::default(), LayoutInspection::Host)?;
+        let plan = validate_layout_plan(
+            &root,
+            &PlanOptions::default(),
+            LayoutInspection::Host,
+            RunIdentity::default(),
+        )?;
         assert_eq!(plan.robots[0].id, "robot_v1");
         assert!(
             plan.robots[0]
@@ -207,9 +215,14 @@ services:
             &root,
             r#"{"type":"object","properties":{"speed":{"type":"string"}},"required":["speed"]}"#,
         )?;
-        let error = validate_layout_plan(&root, &PlanOptions::default(), LayoutInspection::Host)
-            .expect_err("an invalid config must fail validation")
-            .to_string();
+        let error = validate_layout_plan(
+            &root,
+            &PlanOptions::default(),
+            LayoutInspection::Host,
+            RunIdentity::default(),
+        )
+        .expect_err("an invalid config must fail validation")
+        .to_string();
         assert!(error.contains("mission"), "{error}");
         assert!(error.contains("invalid user runtime config"), "{error}");
         Ok(())
@@ -225,7 +238,12 @@ services:
             &root,
             r#"{"type":"object","properties":{"port":{"type":"integer"}},"required":["port"]}"#,
         )?;
-        let plan = validate_layout_plan(&root, &PlanOptions::default(), LayoutInspection::Host)?;
+        let plan = validate_layout_plan(
+            &root,
+            &PlanOptions::default(),
+            LayoutInspection::Host,
+            RunIdentity::default(),
+        )?;
         assert!(
             plan.robots[0]
                 .participants
@@ -245,9 +263,14 @@ services:
             &root,
             r#"{"type":"object","properties":{"port":{"type":"string"}},"required":["port"]}"#,
         )?;
-        let error = validate_layout_plan(&root, &PlanOptions::default(), LayoutInspection::Host)
-            .expect_err("an invalid tool config must fail validation")
-            .to_string();
+        let error = validate_layout_plan(
+            &root,
+            &PlanOptions::default(),
+            LayoutInspection::Host,
+            RunIdentity::default(),
+        )
+        .expect_err("an invalid tool config must fail validation")
+        .to_string();
         assert!(error.contains("tools.lidar-viz.config"), "{error}");
         Ok(())
     }
@@ -329,6 +352,7 @@ services:
             &root,
             &PlanOptions::default(),
             LayoutInspection::Target(elf_target(foreign)),
+            RunIdentity::default(),
         )?;
         assert_eq!(plan.robots[0].id, "robot_v1");
         Ok(())
@@ -356,6 +380,7 @@ services:
             LayoutInspection::Target(elf_target(
                 phoxal_cli_core::check::participant_metadata::host_architecture(),
             )),
+            RunIdentity::default(),
         )
         .expect_err("a wrong-arch binary for the declared target must fail");
         // The precise arch diagnostic lives in the error's source chain.
@@ -364,9 +389,13 @@ services:
         // And the default host inspection likewise rejects a foreign bundle -
         // on a wrong arch (Linux host) or wrong container format (macOS host,
         // whose native format is Mach-O, not the staged ELF).
-        let host_error =
-            validate_layout_plan(&root, &PlanOptions::default(), LayoutInspection::Host)
-                .expect_err("host inspection must reject a foreign bundle");
+        let host_error = validate_layout_plan(
+            &root,
+            &PlanOptions::default(),
+            LayoutInspection::Host,
+            RunIdentity::default(),
+        )
+        .expect_err("host inspection must reject a foreign bundle");
         let host_error = format!("{host_error:#}");
         assert!(
             host_error.contains("the selected target expects"),

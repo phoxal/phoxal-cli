@@ -71,6 +71,7 @@ pub(crate) fn start_telemetry_feeds_at(
     robot_targets: &[RobotFeedTarget],
     telemetry: &crate::telemetry::TelemetryBackend,
     connect: &str,
+    execution: phoxal::bus::ExecutionId,
     recovery_epochs: tokio::sync::watch::Receiver<u64>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let Some(first) = robot_targets.first() else {
@@ -83,12 +84,14 @@ pub(crate) fn start_telemetry_feeds_at(
             namespace.clone(),
             robot_id.clone(),
             connect.to_string(),
+            execution,
             telemetry.clone(),
         ),
         crate::telemetry::start_control_state_feed(
             namespace.clone(),
             robot_id.clone(),
             connect.to_string(),
+            execution,
             telemetry.clone(),
         ),
     ];
@@ -98,6 +101,7 @@ pub(crate) fn start_telemetry_feeds_at(
                 target.scope.namespace.clone(),
                 target.scope.robot_id.clone(),
                 connect.to_string(),
+                execution,
                 telemetry.clone(),
                 recovery_epochs.clone(),
             ),
@@ -105,6 +109,7 @@ pub(crate) fn start_telemetry_feeds_at(
                 target.scope.namespace.clone(),
                 target.scope.robot_id.clone(),
                 connect.to_string(),
+                execution,
                 telemetry.clone(),
                 recovery_epochs.clone(),
             ),
@@ -113,6 +118,7 @@ pub(crate) fn start_telemetry_feeds_at(
                 target.scope.robot_id.clone(),
                 target.participant_ids.clone(),
                 connect.to_string(),
+                execution,
                 telemetry.clone(),
                 recovery_epochs.clone(),
             ),

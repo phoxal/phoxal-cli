@@ -965,7 +965,7 @@ fn lost_before_first_appearance_keeps_starting_state() {
 }
 
 #[tokio::test]
-async fn respawn_requires_the_new_exact_incarnation_despite_stable_presence() -> Result<()> {
+async fn respawn_requires_the_new_exact_producer_despite_stable_presence() -> Result<()> {
     let board = BoardBackend::new();
     board.upsert(ParticipantStatus::new(
         "mission",
@@ -973,17 +973,17 @@ async fn respawn_requires_the_new_exact_incarnation_despite_stable_presence() ->
         ParticipantState::Starting,
     ));
     let mut participant = RunningParticipant::spawn(sleep_spec("mission"), &board).await?;
-    let first_incarnation = board.supervisor_snapshot().processes
+    let first_producer = board.supervisor_snapshot().processes
         [&phoxal_cli_core::session::ProcessKey::project("mission")]
         .status
-        .incarnation
-        .expect("the first spawn mints an incarnation");
+        .producer
+        .expect("the first spawn mints a producer");
     let robot = phoxal_cli_core::session::RobotKey::new("test", "robot");
     board.record_instance_presence(
         phoxal_cli_core::session::ParticipantInstanceKey {
             robot: robot.clone(),
             participant: "mission".to_string(),
-            incarnation: first_incarnation,
+            producer: first_producer,
         },
         true,
     );
@@ -1008,37 +1008,37 @@ async fn respawn_requires_the_new_exact_incarnation_despite_stable_presence() ->
         board.supervisor_snapshot().processes
             [&phoxal_cli_core::session::ProcessKey::project("mission")]
             .status
-            .incarnation,
-        Some(first_incarnation),
-        "the failed row keeps its incarnation until replacement spawn"
+            .producer,
+        Some(first_producer),
+        "the failed row keeps its producer until replacement spawn"
     );
     tokio::time::sleep(Duration::from_millis(5)).await;
     participant.poll(&board, &restart_policy).await?;
-    let second_incarnation = board.supervisor_snapshot().processes
+    let second_producer = board.supervisor_snapshot().processes
         [&phoxal_cli_core::session::ProcessKey::project("mission")]
         .status
-        .incarnation
-        .expect("the replacement spawn mints an incarnation");
-    assert_ne!(first_incarnation, second_incarnation);
+        .producer
+        .expect("the replacement spawn mints a producer");
+    assert_ne!(first_producer, second_producer);
 
     let snapshot = board.snapshot();
     assert_eq!(
         snapshot.participants["mission"].state,
         ParticipantState::Starting,
-        "a stale stable-key holder must not satisfy the replacement incarnation"
+        "a stale stable-key holder must not satisfy the replacement producer"
     );
     board.record_instance_presence(
         phoxal_cli_core::session::ParticipantInstanceKey {
             robot,
             participant: "mission".to_string(),
-            incarnation: second_incarnation,
+            producer: second_producer,
         },
         true,
     );
     assert_eq!(
         board.snapshot().participants["mission"].state,
         ParticipantState::Ready,
-        "only the replacement incarnation may satisfy readiness"
+        "only the replacement producer may satisfy readiness"
     );
 
     participant.stop_current(&board).await?;

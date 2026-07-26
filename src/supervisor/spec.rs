@@ -47,7 +47,7 @@ impl ParticipantSpec {
         ReadinessPolicy::ExactLiveliness(ParticipantInstanceKey {
             robot,
             participant: participant.to_string(),
-            incarnation: 0,
+            producer: phoxal::bus::ProducerId::mint(),
         })
     }
     #[must_use]

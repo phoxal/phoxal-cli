@@ -3,7 +3,7 @@
 //! This model deliberately excludes robot-bus presence, retained logs,
 //! telemetry, and terminal presentation. Those remain independent client-side
 //! authorities; the supervisor consumes exact Liveliness only while proving a
-//! newly spawned process incarnation ready.
+//! newly spawned producer ready.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -13,7 +13,14 @@ use serde::{Deserialize, Serialize};
 
 use super::ParticipantKind;
 
-pub type IncarnationId = u64;
+/// The identity a spawned participant publishes under: the framework's own
+/// `ProducerId` (#952 section G), pre-minted by the supervisor.
+///
+/// A restart is structurally a different producer, so supervisor restart
+/// fencing and bus-level producer fencing key on the same value rather than on
+/// two parallel numbering schemes. There is no separate incarnation counter to
+/// keep in step with it.
+pub use phoxal::bus::ProducerId;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RobotKey {
@@ -129,11 +136,13 @@ impl<'de> Deserialize<'de> for ProcessKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+// Identities compare only for equality (#952 section B), so this keys a
+// `HashSet` rather than an ordered container.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ParticipantInstanceKey {
     pub robot: RobotKey,
     pub participant: String,
-    pub incarnation: IncarnationId,
+    pub producer: ProducerId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,7 +288,7 @@ pub struct ProcessStatus {
     pub desired: DesiredProcessState,
     pub actual: ProcessState,
     pub pid: Option<u32>,
-    pub incarnation: Option<IncarnationId>,
+    pub producer: Option<ProducerId>,
     pub restart_count_in_generation: u32,
     pub restart_count_total: u64,
     pub last_failure: Option<ProcessFailure>,
@@ -291,7 +300,7 @@ impl Default for ProcessStatus {
             desired: DesiredProcessState::Running,
             actual: ProcessState::Starting,
             pid: None,
-            incarnation: None,
+            producer: None,
             restart_count_in_generation: 0,
             restart_count_total: 0,
             last_failure: None,

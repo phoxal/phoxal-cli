@@ -12,7 +12,10 @@ const ALLOWED_BASELINE: &[&str] = &[
     "phoxal-cli-ui",
 ];
 const ALLOWED_RAW_MODULE_IMPORTS: &[&str] = &[
-    "src/commands/behavior.rs",
+    // The one place that builds an ad hoc client session: every user-facing
+    // command reaches the bus through `BusTargetArgs`, so the raw session
+    // surface has one entry point rather than one per command.
+    "src/commands/bus_target.rs",
     "src/commands/logs.rs",
     "src/commands/status.rs",
     "src/supervisor/bus.rs",
@@ -103,6 +106,10 @@ fn extracted_crates_follow_the_one_way_dependency_rule() {
             .iter()
             .filter(|dependency| dependency["source"].is_null())
             .filter_map(|dependency| dependency["name"].as_str())
+            // The framework crates are path-pinned while the #952 train is
+            // unreleased. That is a version pin, not a workspace edge - the
+            // rule this test guards is about the CLI's own crates.
+            .filter(|name| !matches!(*name, "phoxal" | "phoxal-api"))
             .collect::<Vec<_>>();
         assert_eq!(
             path_dependencies, expected_path_dependencies,

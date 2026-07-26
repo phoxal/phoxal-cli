@@ -169,7 +169,7 @@ impl SupervisorClient {
     ///
     /// The retry always uses a newly issued command session. It is therefore
     /// suitable only for idempotent actions, or actions such as restart whose
-    /// expected-incarnation precondition makes replay safe. The ambiguous
+    /// expected-producer precondition makes replay safe. The ambiguous
     /// sequence from the failed session is never reused.
     pub async fn command_with_reconnect(&self, action: CommandAction) -> Result<CommandReply> {
         match self.command(action.clone()).await {

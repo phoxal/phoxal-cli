@@ -42,7 +42,8 @@ phoxal update                 # verify, activate, and prune project-local artifa
 | `deploy <user@host> [PROJECT]` | Snapshot source, build remotely, and invoke the installer. `--build <archive>` skips the source/toolchain leg; the robot needs neither Cargo nor Git. |
 | `simulation webots run <world> [--project PROJECT] [--detach\|-d]` | Run a source project with the ordinary resident router/services/tools graph, all physical drivers excluded, and Webots as the only simulator-side managed child. Each run deletes `.phoxal/webots/` and recreates the complete `worlds/`, `controllers/`, and `protos/` project before launching Webots. |
 | `logs [participant]` | Stream participant bus log events from a reachable robot. `-f`/`--follow` keeps streaming; omit `participant` for every participant. |
-| `status <safety|motion|localization>` | Inspect the latest domain state over the robot bus. `engage-estop` and `reset-estop` publish the robot-wide software emergency-stop request. |
+| Addressing another run | `logs`, `status`, and `behavior` default to the run active in this project. `--execution`, `--namespace`, and `--robot-id` address a run from outside its project root - the bus key root is execution-scoped, so all three are needed to hear anything. |
+| `status <safety\|motion\|localization>` | Inspect the latest domain state over the robot bus. There is no software emergency-stop verb: every emergency stop is a manifest-declared component under the ordinary rules. |
 | `service install\|uninstall\|status\|suite` | Manage exactly one `phoxal.service`, inspect it, or print official services from the configured artifact suite. Device-specific hardware provisioning remains explicit. |
 | `update` | Fetch and verify the immutable suite for the locked train, atomically retarget cached artifacts, and prune inactive cached versions after successful activation. Supports `--dry-run`; use `cargo update -p phoxal` to change trains. |
 | `doctor` | Check host prerequisites (Webots, Rust toolchain) without changing anything. |
@@ -149,10 +150,9 @@ to disable network access and resolve from that immutable local descriptor plus
 already verified vendored artifacts. Offline mode never fetches or reconstructs
 the suite. `cargo update -p phoxal` is the explicit train-bump boundary.
 
-Every per-robot `tool-device` receives the same bounded identity derived from
-the canonical project root. Device samples remain attributed to their robot
-roots, while co-hosted robots expose the shared identity so clients can join or
-deduplicate those observations honestly.
+Every `tool-device` joins the supervised run's execution-scoped bus root. Device
+samples need no second path-derived identity: `ExecutionId` provides run
+attribution, while the robot root already identifies the robot.
 
 ## Install
 

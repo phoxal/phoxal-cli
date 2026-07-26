@@ -252,19 +252,19 @@ impl SessionController {
                 return;
             }
         };
-        let Some(expected_incarnation) = board
+        let Some(expected_producer) = board
             .supervisor_snapshot()
             .processes
             .get(&key)
-            .and_then(|entry| entry.status.incarnation)
+            .and_then(|entry| entry.status.producer)
         else {
-            self.report_command_warning(format!("process `{id}` has no restartable incarnation"));
+            self.report_command_warning(format!("process `{id}` has no restartable producer"));
             return;
         };
         match client
             .command_with_reconnect(CommandAction::Restart {
                 process: key,
-                expected_incarnation,
+                expected_producer,
             })
             .await
         {

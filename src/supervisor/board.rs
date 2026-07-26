@@ -10,7 +10,7 @@ use phoxal_cli_core::session::{
     ProcessFailureKind, ProcessKey, ProcessState, ProjectLifecycle, RobotKey, StartupRequirement,
     SupervisorSnapshotV0,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,13 +50,12 @@ pub struct BoardBackend {
 #[derive(Debug, Default)]
 struct PresenceState {
     enabled: bool,
-    instances: BTreeSet<ParticipantInstanceKey>,
+    instances: HashSet<ParticipantInstanceKey>,
 }
 
 #[derive(Debug)]
 struct SupervisorStateActor {
     snapshot: SupervisorSnapshotV0,
-    used_incarnations: BTreeSet<u64>,
 }
 
 impl SupervisorStateActor {
@@ -76,14 +75,11 @@ impl Default for BoardBackend {
         let (snapshot_tx, _) = watch::channel(snapshot.clone());
         Self {
             inner: Arc::default(),
-            state: Arc::new(Mutex::new(SupervisorStateActor {
-                snapshot,
-                used_incarnations: BTreeSet::new(),
-            })),
+            state: Arc::new(Mutex::new(SupervisorStateActor { snapshot })),
             snapshot_tx,
             presence: Arc::new(Mutex::new(PresenceState {
                 enabled: true,
-                instances: BTreeSet::new(),
+                instances: HashSet::new(),
             })),
             recovery_epoch: Arc::default(),
             recovery_epoch_tx,
@@ -138,7 +134,7 @@ impl BoardBackend {
     /// starts. Presence for an unknown id is dropped rather than deferred, so
     /// untrusted bus keys cannot grow supervisor state.
     ///
-    /// Appearance of the exact expected incarnation is the sole transition
+    /// Appearance of the exact expected producer is the sole transition
     /// to `Ready`. Disappearance is observational and never mutates process
     /// lifecycle or commands a restart. Direct process lifecycle and startup
     /// timeouts retain that authority. Observations cannot resurrect terminal
@@ -186,7 +182,7 @@ impl BoardBackend {
         }
 
         // Exact Liveliness is a one-way startup proof. Once the exact minted
-        // incarnation is ready, later token loss remains observational and
+        // producer is ready, later token loss remains observational and
         // cannot mutate process lifecycle or invoke failure policy.
         if present {
             let exact = self
@@ -197,7 +193,7 @@ impl BoardBackend {
                 .processes
                 .get(&process_key)
                 .is_some_and(|entry| {
-                    entry.status.incarnation == Some(instance.incarnation)
+                    entry.status.producer == Some(instance.producer)
                         && entry.status.actual == ProcessState::Starting
                 });
             if exact {
@@ -742,21 +738,11 @@ impl BoardBackend {
         self.set_launch_command(&key.to_string(), command);
     }
 
-    pub fn set_incarnation(&self, key: &ProcessKey, incarnation: u64) {
+    pub fn set_producer(&self, key: &ProcessKey, producer: phoxal::bus::ProducerId) {
         let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
         if let Some(entry) = actor.snapshot.processes.get_mut(key) {
-            entry.status.incarnation = Some(incarnation);
+            entry.status.producer = Some(producer);
             actor.publish(&self.snapshot_tx);
-        }
-    }
-
-    pub fn mint_incarnation(&self) -> u64 {
-        let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
-        loop {
-            let incarnation = random_nonzero_u64();
-            if actor.used_incarnations.insert(incarnation) {
-                return incarnation;
-            }
         }
     }
 
@@ -846,6 +832,13 @@ fn bounded_snapshot_text(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A deterministic producer identity for tests, so a case can name the
+    /// exact restart it means.
+    fn producer(seed: u8) -> phoxal::bus::ProducerId {
+        phoxal::bus::ProducerId::parse(&format!("{:032x}", u128::from(seed)))
+            .expect("test producer id must parse")
+    }
     use super::*;
 
     #[test]
@@ -900,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_incarnation_readiness_rejects_stale_holder_and_aggregates_presence() {
+    fn exact_producer_readiness_rejects_stale_holder_and_aggregates_presence() {
         let board = BoardBackend::new();
         let robot = RobotKey::new("lab", "rover");
         let key = ProcessKey::robot(robot.clone(), "mission");
@@ -913,11 +906,11 @@ mod tests {
             ),
             StartupRequirement::Required,
         );
-        board.set_incarnation(&key, 22);
-        let instance = |incarnation| ParticipantInstanceKey {
+        board.set_producer(&key, producer(22));
+        let instance = |seed| ParticipantInstanceKey {
             robot: robot.clone(),
             participant: "mission".to_string(),
-            incarnation,
+            producer: producer(seed),
         };
 
         board.record_instance_presence(instance(11), true);
@@ -963,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_process_retains_incarnation_and_bounded_pre_bus_evidence() {
+    fn failed_process_retains_its_producer_and_bounded_pre_bus_evidence() {
         let board = BoardBackend::new();
         let key = ProcessKey::project("early-crash");
         board.upsert_process(
@@ -975,7 +968,7 @@ mod tests {
             ),
             StartupRequirement::Required,
         );
-        board.set_incarnation(&key, 91);
+        board.set_producer(&key, producer(91));
         board.append_log(&key, format!("stderr: {}", "x".repeat(10_000)));
         board.record_failure(
             &key,
@@ -988,7 +981,7 @@ mod tests {
         );
         let snapshot = board.supervisor_snapshot();
         let status = &snapshot.processes[&key].status;
-        assert_eq!(status.incarnation, Some(91));
+        assert_eq!(status.producer, Some(producer(91)));
         let failure = status.last_failure.as_ref().expect("failure evidence");
         assert_eq!(failure.exit.as_ref().and_then(|exit| exit.code), Some(7));
         assert!(
@@ -999,13 +992,13 @@ mod tests {
         );
     }
 
+    /// Producer identities are opaque and per-mint random, so distinctness is a
+    /// property of the type rather than something the board has to track.
     #[test]
-    fn minted_incarnations_are_nonzero_and_collision_checked() {
-        let board = BoardBackend::new();
+    fn minted_producer_identities_are_distinct() {
         let values = (0..1_024)
-            .map(|_| board.mint_incarnation())
-            .collect::<BTreeSet<_>>();
+            .map(|_| phoxal::bus::ProducerId::mint())
+            .collect::<std::collections::HashSet<_>>();
         assert_eq!(values.len(), 1_024);
-        assert!(!values.contains(&0));
     }
 }
