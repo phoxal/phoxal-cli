@@ -142,11 +142,14 @@ pub(crate) fn sim_checked_participants(
 /// complete simulation contract-surface set (organization#957). That
 /// per-contract inventory is gone along with the coherence pass; a simulator
 /// count over the checked participant KIND is the honest static
-/// approximation that remains expressible - any participant could in
-/// principle mint a clock publisher, so this cannot fully replace the old
-/// rule. The framework's own type system is what actually closes that gap
-/// now (only a `#[phoxal::simulator]` participant can hold the
-/// `WorldClockPublisher` capability, #952 section D); this check catches the
+/// approximation that remains expressible, and it cannot fully replace the
+/// old rule. The two halves cover different mistakes rather than one
+/// subsuming the other. The framework's type system closes the *accidental*
+/// route: `simulation::Clock` no longer satisfies the ordinary state-publisher
+/// bound, and the only documented builder is gated on a sealed `IsSimulator`
+/// marker. It is not an absolute seal - a participant that deliberately
+/// reaches through `phoxal::raw` can still mint an authority, and no static
+/// check here can see that. This check catches the
 /// static, CLI-visible mistake the type system cannot see - a project
 /// resolving/selecting the wrong number of simulator artifacts in the first
 /// place (zero: nothing steps the world; more than one: two world histories
