@@ -223,12 +223,6 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
         let participant_kind = graph_check::ParticipantKind::parse(&raw.artifact.kind);
         let participant_class =
             graph_check::ParticipantClass::parse(&raw.participant_class).unwrap_or_default();
-        // No contract inventory to carry anymore (organization#957 removed
-        // the API-coherence pass this fed): `contracts` stays empty. The
-        // field survives structurally on `ParticipantApis` for the framework
-        // type shape, but nothing populates or reads it here.
-        let contracts = Vec::new();
-
         Ok(Self {
             // Default the participant id to the artifact id; callers that launch
             // one artifact per instance (component drivers) override it with the
@@ -237,10 +231,8 @@ impl TryFrom<RawEmitApis> for graph_check::ParticipantApis {
             artifact_id,
             participant_kind,
             participant_class,
-            api_version: raw.api_version,
             config_schema: raw.config_schema,
             scope: graph_check::ParticipantScope::Graph,
-            contracts,
         })
     }
 }

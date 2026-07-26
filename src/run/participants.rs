@@ -551,7 +551,7 @@ mod tests {
         let format = phoxal_cli_core::check::participant_metadata::host_binary_format();
         let (segment, name): (&[u8], &[u8]) = match format {
             object::BinaryFormat::MachO => (b"__DATA", b"__phoxal_meta"),
-            _ => (b"", b".phoxal_api_meta"),
+            _ => (b"", b".phoxal_meta"),
         };
         let mut obj = Object::new(format, arch, object::Endianness::Little);
         let section = obj.add_section(

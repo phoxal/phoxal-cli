@@ -1187,10 +1187,8 @@ mod tests {
             artifact_id: artifact_id.to_string(),
             participant_kind: graph_check::ParticipantKind::Service,
             participant_class: graph_check::ParticipantClass::Checked,
-            api_version: "v1".to_string(),
             config_schema: None,
             scope,
-            contracts: Vec::new(),
         }
     }
 

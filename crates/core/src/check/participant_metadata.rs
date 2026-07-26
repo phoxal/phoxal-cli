@@ -3,7 +3,7 @@
 //! A `#[phoxal::service]`/driver/tool/simulator attribute embeds one JSON
 //! manifest per participant binary in a dedicated linker section -
 //! `__DATA,__phoxal_meta` on Mach-O,
-//! `.phoxal_api_meta` everywhere else (`phoxal-macros/src/authoring.rs`'s
+//! `.phoxal_meta` everywhere else (`phoxal-macros/src/authoring.rs`'s
 //! `link_section_attrs`). `phoxal-cli` no longer executes a built artifact's
 //! `emit-apis` subcommand to learn its contract surface (that runtime
 //! subcommand is gone): it reads the section's bytes straight out of the
@@ -24,7 +24,7 @@ pub use phoxal::participant::metadata::ParticipantMeta;
 /// part of the match), so no per-format branching is needed here - the two
 /// candidate names are simply disjoint across the object formats this
 /// framework ships binaries for.
-pub const SECTION_NAMES: [&str; 2] = [".phoxal_api_meta", "__phoxal_meta"];
+pub const SECTION_NAMES: [&str; 2] = [".phoxal_meta", "__phoxal_meta"];
 
 /// Parses `object_bytes` as an object file and returns the bytes of its
 /// participant metadata section, trying each candidate section
@@ -365,11 +365,11 @@ mod tests {
     fn extracts_metadata_from_foreign_format_and_arch_object_files() -> Result<()> {
         let payload = br#"{"id":"drive","config_schema":{"type":"null"}}"#;
 
-        // aarch64 ELF (Linux robot / release binary shape), `.phoxal_api_meta`.
+        // aarch64 ELF (Linux robot / release binary shape), `.phoxal_meta`.
         let elf = synthesize_object(
             object::BinaryFormat::Elf,
             object::Architecture::Aarch64,
-            b".phoxal_api_meta",
+            b".phoxal_meta",
             b"",
             payload,
         );
@@ -404,7 +404,7 @@ mod tests {
         };
         let (section, segment): (&[u8], &[u8]) = match host.format {
             object::BinaryFormat::MachO => (b"__phoxal_meta", b"__DATA"),
-            _ => (b".phoxal_api_meta", b""),
+            _ => (b".phoxal_meta", b""),
         };
         let host_object = synthesize_object_endian(
             host.format,
@@ -469,7 +469,7 @@ mod tests {
             object::BinaryFormat::Elf,
             object::Architecture::S390x,
             object::Endianness::Little,
-            b".phoxal_api_meta",
+            b".phoxal_meta",
             b"",
             b"payload",
         );
@@ -482,7 +482,7 @@ mod tests {
             object::BinaryFormat::Elf,
             object::Architecture::S390x,
             object::Endianness::Big,
-            b".phoxal_api_meta",
+            b".phoxal_meta",
             b"",
             b"payload",
         );

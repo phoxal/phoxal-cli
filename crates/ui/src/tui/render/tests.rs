@@ -610,7 +610,7 @@ fn runtime_topic_renderer_clamps_to_the_viewport_before_up_moves() {
     board.participants.insert(status.id.clone(), status);
     let mut sample = performance_sample("drive", now);
     let template = sample.value.topics[0].clone();
-    sample.value.topics = (0..5)
+    sample.value.topics = (0..40)
         .map(|index| RuntimeTopicSample {
             topic: format!("topic-{index}"),
             ..template.clone()
@@ -632,8 +632,12 @@ fn runtime_topic_renderer_clamps_to_the_viewport_before_up_moves() {
     state.runtime_detail_id = Some("drive".to_string());
     state.runtime_topic_offset = usize::MAX;
 
+    // 40 topics against a detail panel that shows 5 rows at 80x30, so the
+    // clamp lands at 35 and there is plenty of range left for `Up` to move
+    // through. The exact figure encodes the panel's capacity: if a layout
+    // change moves it, this is the test that should say so.
     let (_, mut rendered_state) = render_model_with_state(&title(), &state, &model, 80, 30);
-    assert_eq!(rendered_state.runtime_topic_offset, 3);
+    assert_eq!(rendered_state.runtime_topic_offset, 35);
     rendered_state.handle_key(
         crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Up,
@@ -641,7 +645,7 @@ fn runtime_topic_renderer_clamps_to_the_viewport_before_up_moves() {
         ),
         &model,
     );
-    assert_eq!(rendered_state.runtime_topic_offset, 2);
+    assert_eq!(rendered_state.runtime_topic_offset, 34);
 }
 
 #[test]

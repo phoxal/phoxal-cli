@@ -33,7 +33,6 @@ pub struct RawEmitApis {
     pub artifact: RawArtifact,
     #[serde(default = "default_participant_class")]
     pub participant_class: String,
-    pub api_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<Value>,
 }

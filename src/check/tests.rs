@@ -230,7 +230,6 @@ fn launch_plan_raw_emit_apis(kind: &str, id: &str) -> RawEmitApis {
             id: id.to_string(),
         },
         participant_class: "checked".to_string(),
-        api_version: "v1".to_string(),
         config_schema: None,
     }
 }
@@ -444,14 +443,14 @@ fn healthy_graph_passes_with_fake_emit_apis() -> Result<()> {
         &[],
         &sources,
         |image_ref| match image_ref {
-            "mission:ok" => Ok(raw("mission", "v1")),
+            "mission:ok" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
         |_| bail!("no tools should be fetched"),
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/runtimes/drive") {
-                Ok(raw("drive", "v1"))
+                Ok(raw("drive"))
             } else {
                 bail!("unexpected source dir {}", dir.display())
             }
@@ -476,14 +475,14 @@ fn healthy_graph_passes_with_platform_and_component_driver_source() -> Result<()
         &[],
         &sources,
         |image_ref| match image_ref {
-            "mission:ok" => Ok(raw("mission", "v1")),
+            "mission:ok" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
         |_| bail!("no tools should be fetched"),
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/components/ddsm115") {
-                Ok(raw_kind("driver", "ddsm115", "v1"))
+                Ok(raw_kind("driver", "ddsm115"))
             } else {
                 bail!("unexpected source dir {}", dir.display())
             }
@@ -516,7 +515,7 @@ fn privileged_tools_and_checked_sources_coexist_in_one_graph() -> Result<()> {
         |tool| {
             let path = tool.binary_path.as_path();
             if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class("tool", "joypad", "v1", "privileged"))
+                Ok(raw_kind_class("tool", "joypad", "privileged"))
             } else {
                 bail!("unexpected tool path {}", path.display())
             }
@@ -524,7 +523,7 @@ fn privileged_tools_and_checked_sources_coexist_in_one_graph() -> Result<()> {
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/runtimes/drive") {
-                Ok(raw("drive", "v1"))
+                Ok(raw("drive"))
             } else {
                 bail!("unexpected source dir {}", dir.display())
             }
@@ -550,7 +549,7 @@ fn privileged_tools_are_exempt_from_topology() -> Result<()> {
         |tool| {
             let path = tool.binary_path.as_path();
             if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class("tool", "joypad", "v1", "privileged"))
+                Ok(raw_kind_class("tool", "joypad", "privileged"))
             } else {
                 bail!("unexpected tool path {}", path.display())
             }
@@ -578,11 +577,11 @@ fn source_and_platform_participants_coexist_in_a_healthy_graph() -> Result<()> {
         &[],
         &sources,
         |image_ref| match image_ref {
-            "mission:ok" => Ok(raw("mission", "v1")),
+            "mission:ok" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
         |_| bail!("no tools should be fetched"),
-        |_| Ok(raw("drive", "v1")),
+        |_| Ok(raw("drive")),
     )?;
 
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
@@ -602,7 +601,7 @@ fn user_service_artifact_id_must_match_manifest_key() {
         &sources,
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
-        |_| Ok(raw("surprise", "v1")),
+        |_| Ok(raw("surprise")),
     )
     .expect_err("mismatched user service artifact id should abort check");
 
@@ -623,7 +622,7 @@ fn official_service_artifact_identity_must_match_resolved_name() {
         &[],
         &[],
         |image_ref| match image_ref {
-            "drive:swapped" => Ok(raw("mission", "v1")),
+            "drive:swapped" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
         |_| bail!("no tools should be fetched"),
@@ -654,7 +653,7 @@ fn official_driver_artifact_identity_uses_driver_label() {
         &[],
         CheckGraphContext { robot: None },
         |artifact_ref| match artifact_ref {
-            "driver-bno085:swapped" => Ok(raw_kind("service", "bno085", "v1")),
+            "driver-bno085:swapped" => Ok(raw_kind("service", "bno085")),
             unexpected => bail!("unexpected artifact {unexpected}"),
         },
         |_| bail!("no tools should be fetched"),
@@ -688,7 +687,6 @@ fn tool_artifact_identity_must_match_resolved_tool() {
                 Ok(raw_kind_class(
                     "tool",
                     "simulator_webots_controller",
-                    "v1",
                     "privileged",
                 ))
             } else {
@@ -722,7 +720,7 @@ fn tool_artifact_kind_true_kind_is_accepted() -> Result<()> {
         |tool| {
             let path = tool.binary_path.as_path();
             if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class("tool", "joypad", "v1", "privileged"))
+                Ok(raw_kind_class("tool", "joypad", "privileged"))
             } else {
                 bail!("unexpected tool path {}", path.display())
             }
@@ -749,7 +747,7 @@ fn tool_artifact_kind_legacy_runtime_is_rejected() {
         |tool| {
             let path = tool.binary_path.as_path();
             if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class("runtime", "joypad", "v1", "privileged"))
+                Ok(raw_kind_class("runtime", "joypad", "privileged"))
             } else {
                 bail!("unexpected tool path {}", path.display())
             }
@@ -781,7 +779,7 @@ fn component_driver_artifact_kind_true_kind_is_accepted() -> Result<()> {
         &sources,
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
-        |_| Ok(raw_kind_class("driver", "ddsm115", "v1", "checked")),
+        |_| Ok(raw_kind_class("driver", "ddsm115", "checked")),
     )?;
 
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
@@ -802,7 +800,7 @@ fn component_driver_artifact_kind_legacy_runtime_is_rejected() {
         &sources,
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
-        |_| Ok(raw_kind_class("runtime", "ddsm115", "v1", "checked")),
+        |_| Ok(raw_kind_class("runtime", "ddsm115", "checked")),
     )
     .expect_err("component driver reporting legacy runtime kind should abort check");
 
@@ -830,7 +828,7 @@ fn tool_artifact_kind_garbage_is_rejected() {
         |tool| {
             let path = tool.binary_path.as_path();
             if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class("nonsense", "joypad", "v1", "privileged"))
+                Ok(raw_kind_class("nonsense", "joypad", "privileged"))
             } else {
                 bail!("unexpected tool path {}", path.display())
             }
@@ -880,11 +878,11 @@ fn every_source_participant_always_builds_no_scoping_no_cache() -> Result<()> {
             let dir = participant.crate_dir.as_path();
             built.push(dir.to_path_buf());
             if dir == Path::new("/fake/project/runtimes/bad") {
-                Ok(raw("bad", "v1"))
+                Ok(raw("bad"))
             } else if dir == Path::new("/fake/project/runtimes/other") {
-                Ok(raw("other", "v1"))
+                Ok(raw("other"))
             } else if dir == Path::new("/fake/project/components/ddsm115") {
-                Ok(raw_kind("driver", "ddsm115", "v1"))
+                Ok(raw_kind("driver", "ddsm115"))
             } else {
                 bail!("unexpected source participant: {}", dir.display())
             }
@@ -929,9 +927,9 @@ fn component_driver_with_no_producer_is_a_legal_graph() -> Result<()> {
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/runtimes/other") {
-                Ok(raw("other", "v1"))
+                Ok(raw("other"))
             } else if dir == Path::new("/fake/project/components/ddsm115") {
-                Ok(raw_kind("driver", "ddsm115", "v1"))
+                Ok(raw_kind("driver", "ddsm115"))
             } else {
                 bail!("unexpected source dir {}", dir.display())
             }
@@ -964,9 +962,9 @@ fn user_service_with_no_producer_is_a_legal_graph() -> Result<()> {
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/runtimes/bad") {
-                Ok(raw("bad", "v1"))
+                Ok(raw("bad"))
             } else if dir == Path::new("/fake/project/runtimes/other") {
-                Ok(raw("other", "v1"))
+                Ok(raw("other"))
             } else {
                 bail!("unexpected source dir {}", dir.display())
             }
@@ -991,7 +989,7 @@ fn build_emit_apis_from_source_never_caches_across_calls() -> Result<()> {
         &participant,
         |_| {
             build_count += 1;
-            Ok(raw("sibling", "v1"))
+            Ok(raw("sibling"))
         },
         None,
     )?;
@@ -999,7 +997,7 @@ fn build_emit_apis_from_source_never_caches_across_calls() -> Result<()> {
         &participant,
         |_| {
             build_count += 1;
-            Ok(raw("sibling", "v1"))
+            Ok(raw("sibling"))
         },
         None,
     )?;
@@ -1027,11 +1025,11 @@ fn component_driver_and_platform_participants_coexist_in_a_healthy_graph() -> Re
         &[],
         &sources,
         |image_ref| match image_ref {
-            "mission:ok" => Ok(raw("mission", "v1")),
+            "mission:ok" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
         |_| bail!("no tools should be fetched"),
-        |_| Ok(raw_kind("driver", "ddsm115", "v1")),
+        |_| Ok(raw_kind("driver", "ddsm115")),
     )?;
 
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
@@ -1155,7 +1153,7 @@ fn components_without_drivers_are_not_built() -> Result<()> {
         |participant| {
             let dir = participant.crate_dir.as_path();
             built.push(dir.to_path_buf());
-            Ok(raw_kind("driver", "ddsm115", "v1"))
+            Ok(raw_kind("driver", "ddsm115"))
         },
     )?;
 
@@ -1280,7 +1278,7 @@ fn n_instances_of_one_suite_driver_fetch_once_and_validate_as_n_graph_participan
         |artifact_ref| {
             fetch_calls += 1;
             assert_eq!(artifact_ref, "ddsm115-driver-v0.1.0.tar.zst");
-            Ok(raw_kind("driver", "ddsm115", "v1"))
+            Ok(raw_kind("driver", "ddsm115"))
         },
         |_| bail!("no tools should be fetched"),
         |_| bail!("no source participants should be built"),
@@ -1386,7 +1384,7 @@ fn path_overridden_service_enters_check_through_source_emit_apis() -> Result<()>
         |_| bail!("no tools in this fixture"),
         |participant| {
             assert_eq!(participant.kind, SourceParticipantKind::OfficialService);
-            Ok(raw_kind("service", "drive", "v1"))
+            Ok(raw_kind("service", "drive"))
         },
     )?;
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
@@ -1405,7 +1403,7 @@ fn missing_image_is_reported_after_other_images_are_checked() -> Result<()> {
         &[],
         &[],
         |image_ref| match image_ref {
-            "mission:ok" => Ok(raw("mission", "v1")),
+            "mission:ok" => Ok(raw("mission")),
             "service-drive:v1-stable" => Err(MissingImageError::new(anyhow!("not found")).into()),
             unexpected => bail!("unexpected image {unexpected}"),
         },
@@ -1426,7 +1424,6 @@ fn raw_emit_apis_parses_from_json() -> Result<()> {
     let parsed: RawEmitApis = serde_json::from_str(
         r#"{
                 "artifact": { "kind": "service", "id": "drive", "ignored": true },
-                "api_version": "v1",
                 "config_schema": { "type": "object" }
             }"#,
     )?;
@@ -1434,7 +1431,6 @@ fn raw_emit_apis_parses_from_json() -> Result<()> {
 
     assert_eq!(participant.artifact_id, "drive");
     assert_eq!(participant.participant_class, ParticipantClass::Checked);
-    assert_eq!(participant.api_version, "v1");
     assert_eq!(
         participant
             .config_schema
@@ -1451,8 +1447,7 @@ fn raw_emit_apis_threads_privileged_participant_class() -> Result<()> {
     let parsed: RawEmitApis = serde_json::from_str(
         r#"{
                 "artifact": { "kind": "tool", "id": "joypad" },
-                "participant_class": "privileged",
-                "api_version": "v1"
+                "participant_class": "privileged"
             }"#,
     )?;
     let participant = graph_check::ParticipantApis::try_from(parsed)?;
@@ -1463,7 +1458,7 @@ fn raw_emit_apis_threads_privileged_participant_class() -> Result<()> {
 
 #[test]
 fn raw_emit_apis_unknown_participant_class_defaults_to_checked() -> Result<()> {
-    let mut raw = raw("drive", "v1");
+    let mut raw = raw("drive");
     raw.participant_class = "future".to_string();
     let participant = graph_check::ParticipantApis::try_from(raw)?;
 
@@ -1483,7 +1478,6 @@ fn user_service_config_is_validated_against_emitted_schema() -> Result<()> {
             id: "avoid".to_string(),
         },
         participant_class: "checked".to_string(),
-        api_version: "v1".to_string(),
         config_schema: Some(serde_json::json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "title": "Config",
@@ -1571,7 +1565,7 @@ fn absent_user_service_config_validates_as_null() -> Result<()> {
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |_| {
-            let mut raw = raw("optional", "v1");
+            let mut raw = raw("optional");
             raw.config_schema = Some(serde_json::json!({ "type": "null" }));
             Ok(raw)
         },
@@ -1604,7 +1598,7 @@ fn absent_user_service_config_still_fails_required_object_schema() -> Result<()>
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |_| {
-            let mut raw = raw("required", "v1");
+            let mut raw = raw("required");
             raw.config_schema = Some(serde_json::json!({
                 "type": "object",
                 "required": ["gain"],
@@ -1655,7 +1649,7 @@ fn user_service_config_uses_full_json_schema_keywords() -> Result<()> {
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |_| {
-            let mut raw = raw("avoid", "v1");
+            let mut raw = raw("avoid");
             raw.config_schema = Some(serde_json::json!({
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
@@ -1718,22 +1712,21 @@ fn fixture_crate_dir(temp: &tempfile::TempDir, marker: &str) -> PathBuf {
     temp.path().to_path_buf()
 }
 
-fn raw(id: &str, api_version: &str) -> RawEmitApis {
-    raw_kind("service", id, api_version)
+fn raw(id: &str) -> RawEmitApis {
+    raw_kind("service", id)
 }
 
-fn raw_kind(kind: &str, id: &str, api_version: &str) -> RawEmitApis {
-    raw_kind_class(kind, id, api_version, "checked")
+fn raw_kind(kind: &str, id: &str) -> RawEmitApis {
+    raw_kind_class(kind, id, "checked")
 }
 
-fn raw_kind_class(kind: &str, id: &str, api_version: &str, participant_class: &str) -> RawEmitApis {
+fn raw_kind_class(kind: &str, id: &str, participant_class: &str) -> RawEmitApis {
     RawEmitApis {
         artifact: RawArtifact {
             kind: kind.to_string(),
             id: id.to_string(),
         },
         participant_class: participant_class.to_string(),
-        api_version: api_version.to_string(),
         config_schema: None,
     }
 }

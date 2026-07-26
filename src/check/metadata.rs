@@ -113,11 +113,11 @@ pub(crate) fn fetch_emit_apis_from_tool(tool: &ToolParticipant) -> Result<RawEmi
 }
 
 /// Builds a [`RawEmitApis`] from a binary's extracted [`ParticipantMeta`] plus
-/// already-known artifact identity - the shared tail of
+/// the artifact identity the caller already knows - the shared tail of
 /// [`fetch_emit_apis_from_tool`] and [`build_emit_apis_by_building`]. The
 /// embedded metadata carries no contract inventory anymore (organization#957:
-/// there is no API-coherence pass left to feed one), so only its config
-/// schema survives into the report.
+/// there is no API-coherence pass left to feed one); what it does carry is the
+/// participant's own declared `id` and its config schema.
 ///
 /// [`ParticipantMeta`]: participant_metadata::ParticipantMeta
 pub(crate) fn raw_emit_apis_from_extracted_metadata(
@@ -131,10 +131,6 @@ pub(crate) fn raw_emit_apis_from_extracted_metadata(
             id: artifact_id.to_string(),
         },
         participant_class: default_participant_class_for_kind(artifact_kind),
-        // No single API version to report anymore (D1): a participant's
-        // `Api` may mix contracts from several versions freely, so there
-        // is no one dated value left to put here.
-        api_version: String::new(),
         config_schema: Some(meta.config_schema),
     }
 }
