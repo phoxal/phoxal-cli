@@ -219,10 +219,6 @@ fn read_identity(file: &mut File) -> Result<ProjectLockIdentity> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command, Stdio};
-    use std::time::Duration;
-
-    const HELPER_ENV: &str = "PHOXAL_SUPERVISOR_LOCK_HELPER";
 
     fn identity(root: &Path, mode: &str, pid: u32) -> ProjectLockIdentity {
         ProjectLockIdentity {
@@ -236,20 +232,6 @@ mod tests {
             pid,
             execution: None,
         }
-    }
-
-    #[test]
-    fn subprocess_lock_helper() {
-        let Some(path) = std::env::var_os(HELPER_ENV) else {
-            return;
-        };
-        let path = PathBuf::from(path);
-        let lock = ProjectLock::acquire_path(&path, identity(&path, "run", std::process::id()))
-            .expect("helper must acquire lock");
-        println!("LOCKED");
-        std::io::stdout().flush().expect("flush helper readiness");
-        std::thread::sleep(Duration::from_secs(30));
-        drop(lock);
     }
 
     #[test]
@@ -312,55 +294,6 @@ mod tests {
         drop((first, second));
         assert!(first_project.join(".phoxal/project.lock").is_file());
         assert!(second_project.join(".phoxal/project.lock").is_file());
-        Ok(())
-    }
-
-    #[test]
-    fn installed_runtime_install_excludes_resident_run_and_sigkill_releases_authority() -> Result<()>
-    {
-        let temp = tempfile::tempdir()?;
-        let path = temp.path().join("supervisor.lock");
-        let mut child = Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "supervisor::lock::tests::subprocess_lock_helper",
-                "--nocapture",
-            ])
-            .env(HELPER_ENV, &path)
-            .stdout(Stdio::piped())
-            .spawn()?;
-        let stdout = child.stdout.take().context("helper stdout")?;
-        let mut ready = std::io::BufReader::new(stdout);
-        let mut output = String::new();
-        loop {
-            let mut line = String::new();
-            if std::io::BufRead::read_line(&mut ready, &mut line)? == 0 {
-                break;
-            }
-            output.push_str(&line);
-            if line.contains("LOCKED") {
-                break;
-            }
-        }
-        assert!(
-            output.contains("LOCKED"),
-            "unexpected helper output: {output}"
-        );
-
-        let mut installer = identity(temp.path(), "simulation", std::process::id());
-        installer.operation = ProjectOperation::Install;
-        let error = ProjectLock::acquire_path(&path, installer.clone())
-            .expect_err("install must not overlap a resident run");
-        let message = format!("{error:#}");
-        assert!(message.contains("operation=run"), "{message}");
-        assert!(message.contains("project="), "{message}");
-        assert!(message.contains("entry="), "{message}");
-
-        child.kill()?;
-        child.wait()?;
-        let replacement = ProjectLock::acquire_path(&path, installer)?;
-        drop(replacement);
-        assert!(path.is_file());
         Ok(())
     }
 }

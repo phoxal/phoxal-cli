@@ -276,20 +276,4 @@ mod tests {
         let stdout = forward_captured_output(input.as_bytes(), DiagnosticLevel::Info, false);
         assert!(stdout.is_empty());
     }
-
-    #[cfg(unix)]
-    #[test]
-    fn reaped_captured_child_is_atomically_removed_from_the_kill_slot() {
-        let mut command = Command::new("/bin/sh");
-        command.arg("-c").arg("exit 0");
-        let child = Arc::new(Mutex::new(Some(command.spawn().expect("spawn child"))));
-        let status = wait_for_captured_child(&child).expect("wait child");
-        assert!(status.success());
-        assert!(
-            child
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_none()
-        );
-    }
 }

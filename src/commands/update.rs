@@ -513,7 +513,7 @@ mod tests {
             root.join("robot.yaml"),
             r#"schema: robot/v0
 robot:
-  id: robot_v1
+  id: testbot
   namespace: dev
   motion_limits:
     max_linear_speed_mps: 0.6
@@ -543,14 +543,10 @@ robot:
             "[package]\nname = \"phoxal\"\nversion = \"0.36.0\"\nedition = \"2024\"\n",
         )?;
         fs::write(root.join("train/phoxal/src/lib.rs"), "")?;
-        anyhow::ensure!(
-            std::process::Command::new("cargo")
-                .arg("generate-lockfile")
-                .current_dir(&root)
-                .status()?
-                .success(),
-            "failed to generate fixture Cargo.lock"
-        );
+        fs::write(
+            root.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"phoxal\"\nversion = \"0.36.0\"\n\n[[package]]\nname = \"robot\"\nversion = \"0.1.0\"\ndependencies = [\"phoxal\"]\n",
+        )?;
         let suite_path = root.join("suite.json");
         fs::write(
             &suite_path,

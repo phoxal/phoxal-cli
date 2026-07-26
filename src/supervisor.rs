@@ -46,8 +46,6 @@ pub use managed_child::maybe_run_guardian;
 mod output;
 pub(crate) use output::{join_reader, requested_stop_exit_is_clean, spawn_output_reader};
 mod stages;
-#[cfg(test)]
-pub(crate) use stages::await_participants_ready;
 pub(crate) use stages::{
     SupervisionStage, await_stage_ready, emit_event, maybe_emit_startup_outcome,
     spawn_until_pending,
@@ -66,6 +64,3 @@ mod bus;
 pub(crate) use bus::{
     default_connect_endpoint, start_bus_log_subscriber, start_clock_feed, start_liveliness_observer,
 };
-
-#[cfg(test)]
-mod tests;

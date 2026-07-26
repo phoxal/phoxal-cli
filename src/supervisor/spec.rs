@@ -217,11 +217,3 @@ impl SupervisorActionReceiver {
 pub struct SupervisorOutcome {
     pub failed_participants: Vec<String>,
 }
-
-impl SupervisorOutcome {
-    #[must_use]
-    #[cfg(test)]
-    pub fn graph_healthy(&self) -> bool {
-        self.failed_participants.is_empty()
-    }
-}

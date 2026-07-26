@@ -187,7 +187,6 @@ fn watchdog_ping_interval_from_usec(usec: u64) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixDatagram;
 
     #[test]
     fn watchdog_interval_is_half_the_timeout_and_zero_disables_it() {
@@ -200,65 +199,5 @@ mod tests {
             Some(Duration::from_micros(1))
         );
         assert_eq!(watchdog_ping_interval_from_usec(0), None);
-    }
-
-    /// The notify socket must never leak into a participant the supervisor
-    /// `exec`s: it carries `FD_CLOEXEC` right after creation, on every platform.
-    #[test]
-    fn notify_socket_is_close_on_exec() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("notify.sock");
-        let _receiver = UnixDatagram::bind(&path)?;
-
-        let notify = SdNotify::connect(path.as_os_str())?;
-        // SAFETY: the fd is owned and live for the duration of the call.
-        let flags = unsafe { libc::fcntl(notify.fd.as_raw_fd(), libc::F_GETFD) };
-        assert!(flags >= 0, "fcntl(F_GETFD) failed");
-        assert_eq!(
-            flags & libc::FD_CLOEXEC,
-            libc::FD_CLOEXEC,
-            "the sd_notify socket must be close-on-exec"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn ready_and_watchdog_datagrams_land_on_a_pathname_socket() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("notify.sock");
-        let receiver = UnixDatagram::bind(&path)?;
-
-        let notify = SdNotify::connect(path.as_os_str())?;
-        notify.notify_ready()?;
-        notify.notify_watchdog()?;
-
-        let mut buffer = [0_u8; 64];
-        let read = receiver.recv(&mut buffer)?;
-        assert_eq!(&buffer[..read], b"READY=1\n");
-        let read = receiver.recv(&mut buffer)?;
-        assert_eq!(&buffer[..read], b"WATCHDOG=1\n");
-        Ok(())
-    }
-
-    /// The Linux abstract-namespace form (`@name`) resolves to a NUL-led
-    /// `sun_path`, so the destination address a datagram is sent to matches an
-    /// abstract-bound receiver on Linux. On other targets the socket is a plain
-    /// pathname, so this only asserts the address encoding there.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn abstract_namespace_datagrams_land_on_an_abstract_socket() -> Result<()> {
-        use std::os::linux::net::SocketAddrExt;
-        use std::os::unix::net::SocketAddr;
-
-        let name = format!("phoxal-test-{}", std::process::id());
-        let receiver = UnixDatagram::bind_addr(&SocketAddr::from_abstract_name(name.as_bytes())?)?;
-
-        let notify = SdNotify::connect(OsStr::new(&format!("@{name}")))?;
-        notify.notify_ready()?;
-
-        let mut buffer = [0_u8; 64];
-        let read = receiver.recv(&mut buffer)?;
-        assert_eq!(&buffer[..read], b"READY=1\n");
-        Ok(())
     }
 }

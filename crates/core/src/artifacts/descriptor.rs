@@ -194,7 +194,7 @@ mod tests {
     fn resolved_with_two_drivers() -> Result<ResolvedRobot> {
         let yaml = r#"schema: robot/v0
 robot:
-  id: robot_v1
+  id: testbot
   namespace: dev
   motion_limits:
     max_linear_speed_mps: 0.6

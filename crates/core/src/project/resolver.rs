@@ -163,8 +163,7 @@ pub struct ResolvedComponent {
     /// The resolved `component_assets` package: the workspace assets crate
     /// for a workspace component, or the official `phoxal/component-<id>`
     /// assets package from the suite. Every component resolves its assets -
-    /// the one real driverless component (robot-v1's passive_caster) is a
-    /// workspace assets crate, and a component absent from both workspace and
+    /// a driverless workspace component is an assets crate, and a component absent from both workspace and
     /// suite is a resolution error, never a silent "assetless" (#936).
     pub assets: ResolvedComponentPackage,
     /// The resolved `component_driver` package. Present only when the

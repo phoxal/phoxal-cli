@@ -236,17 +236,6 @@ impl BoardBackend {
             .contains(instance)
     }
 
-    #[cfg(test)]
-    pub fn is_present(&self, id: &str) -> bool {
-        self.inner
-            .lock()
-            .expect("board mutex poisoned")
-            .participants
-            .get(id)
-            .and_then(|status| status.present)
-            .unwrap_or(false)
-    }
-
     /// Fence observations from the dead router and reset every graph-owned row
     /// before a replacement router or child is started. Wait-only readiness
     /// rows retain their authored notes because they have no spawned spec.
@@ -311,11 +300,6 @@ impl BoardBackend {
         self.recovery_epoch_tx.subscribe()
     }
 
-    #[cfg(test)]
-    pub(crate) fn recovery_epoch(&self) -> u64 {
-        self.recovery_epoch.load(Ordering::SeqCst)
-    }
-
     pub fn upsert_process(
         &self,
         key: ProcessKey,
@@ -346,12 +330,6 @@ impl BoardBackend {
             },
         );
         actor.publish(&self.snapshot_tx);
-    }
-
-    #[cfg(test)]
-    pub fn upsert(&self, status: ParticipantStatus) {
-        let key = ProcessKey::from(status.id.as_str());
-        self.upsert_process(key, status, StartupRequirement::Required);
     }
 
     pub(crate) fn register_planned(

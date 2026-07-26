@@ -815,7 +815,7 @@ mod tests {
                 producer: ProducerId::mint(),
                 execution_origin: None,
                 namespace: "dev".to_string(),
-                robot_id: "robot-v1".to_string(),
+                robot_id: "testbot".to_string(),
                 bus: BusProfile {
                     connect_endpoints: vec![DEFAULT_ROUTER_CONNECT.to_string()],
                 },
@@ -831,7 +831,7 @@ mod tests {
         let plan = |participant_count: usize| LaunchPlan {
             mode: LaunchMode::Run,
             robots: vec![RobotLaunch {
-                id: "robot-v1".to_string(),
+                id: "testbot".to_string(),
                 namespace: "dev".to_string(),
                 participants: (0..participant_count).map(participant).collect(),
                 substitutions: Vec::new(),
@@ -853,7 +853,7 @@ mod tests {
 
     #[test]
     fn launch_plan_covers_per_robot_tools_and_user_service_config() -> anyhow::Result<()> {
-        let mut resolved = empty_resolved_robot("robot_v1")?;
+        let mut resolved = empty_resolved_robot("testbot")?;
         add_robot_tools(&mut resolved);
         resolved.user_runtimes.push(ResolvedUserRuntime {
             name: "mission".to_string(),
@@ -899,11 +899,11 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
             vec![
-                "tool-bus-robot_v1",
-                "tool-device-robot_v1",
-                "tool-joypad-robot_v1",
-                "tool-log-robot_v1",
-                "tool-telemetry-robot_v1",
+                "tool-bus-testbot",
+                "tool-device-testbot",
+                "tool-joypad-testbot",
+                "tool-log-testbot",
+                "tool-telemetry-testbot",
             ]
         );
         let mission = plan.robots[0]
@@ -924,7 +924,7 @@ mod tests {
 
     #[test]
     fn webots_plan_keeps_declared_user_tools_in_the_resident_graph() -> anyhow::Result<()> {
-        let mut resolved = empty_resolved_robot("robot_v1")?;
+        let mut resolved = empty_resolved_robot("testbot")?;
         resolved.simulators.push(platform_runtime(
             "webots-controller",
             ArtifactKind::Simulator,
@@ -946,7 +946,7 @@ mod tests {
         )];
         let mut tool = participant("console", "console", graph_check::ParticipantScope::Graph);
         tool.participant_kind = graph_check::ParticipantKind::Tool;
-        let controller_id = simulator_controller_provider_id("robot_v1");
+        let controller_id = simulator_controller_provider_id("testbot");
         let mut controller = participant(
             &controller_id,
             SIMULATOR_CONTROLLER_ARTIFACT_NAME,
@@ -997,7 +997,7 @@ mod tests {
 
     #[test]
     fn webots_excludes_physical_drivers_from_expected_and_resident_sets() -> anyhow::Result<()> {
-        let mut resolved = empty_resolved_robot("robot_v1")?;
+        let mut resolved = empty_resolved_robot("testbot")?;
         let component_package = || ResolvedComponentPackage {
             package: "phoxal/component-ddsm115".to_string(),
             kind: ArtifactKind::ComponentAssets,
@@ -1108,7 +1108,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn webots_launch_records_need_no_simulator_clock_exception() -> anyhow::Result<()> {
-        let resolved = empty_resolved_robot("robot_v1")?;
+        let resolved = empty_resolved_robot("testbot")?;
         let input = CheckedRobotLaunchInput {
             project_root: Path::new("/tmp/robot"),
             resolved: &resolved,
@@ -1121,7 +1121,7 @@ mod tests {
         };
         let service = participant("mission", "mission", graph_check::ParticipantScope::Graph);
 
-        let participant_id = "simulator-webots-controller-robot_v1";
+        let participant_id = "simulator-webots-controller-testbot";
         let mut simulator = participant(
             participant_id,
             "webots-controller",
@@ -1143,7 +1143,7 @@ mod tests {
 
     #[test]
     fn parity_rejects_missing_and_extra_checked_metadata() -> anyhow::Result<()> {
-        let mut resolved = empty_resolved_robot("robot_v1")?;
+        let mut resolved = empty_resolved_robot("testbot")?;
         add_robot_tools(&mut resolved);
         resolved.user_runtimes.push(ResolvedUserRuntime {
             name: "mission".to_string(),

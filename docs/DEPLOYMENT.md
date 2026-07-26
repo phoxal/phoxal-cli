@@ -141,7 +141,7 @@ payload, builds in a remote temporary directory, and invokes the same installer:
 
 ```sh
 phoxal deploy robot@jetson-nano-orin
-phoxal deploy robot@jetson-nano-orin ../robot-v1
+phoxal deploy robot@jetson-nano-orin ../my-robot-project
 ```
 
 The remote host must already have `phoxal`, Cargo, and Rust for this mode. When

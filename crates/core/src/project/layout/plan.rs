@@ -416,7 +416,7 @@ mod tests {
 
     const ROBOT_YAML: &str = r#"schema: robot/v0
 robot:
-  id: robot_v1
+  id: testbot
   namespace: dev
   motion_limits:
     max_linear_speed_mps: 0.6

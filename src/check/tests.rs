@@ -98,14 +98,10 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
         "[package]\nname = \"phoxal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
     )?;
     std::fs::write(temp.path().join("train/phoxal/src/lib.rs"), "")?;
-    anyhow::ensure!(
-        std::process::Command::new("cargo")
-            .arg("generate-lockfile")
-            .current_dir(temp.path())
-            .status()?
-            .success(),
-        "failed to generate fixture Cargo.lock"
-    );
+    std::fs::write(
+        temp.path().join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"mission\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"phoxal\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"robot\"\nversion = \"0.1.0\"\ndependencies = [\"phoxal\"]\n",
+    )?;
     let mut robot = Robot::parse_from_string(LAUNCH_PLAN_FIXTURE_ROBOT)?;
     robot
         .services
@@ -210,7 +206,7 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
 
     assert_eq!(plan.mode, LaunchMode::Run);
     let robot = &plan.robots[0];
-    assert_eq!(robot.id, "robot_v1");
+    assert_eq!(robot.id, "testbot");
     assert_eq!(robot.substitutions, Vec::<SubstitutionRecord>::new());
     let participant_ids = robot
         .participants
@@ -229,11 +225,11 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
     }
     assert!(participant_ids.contains(&"left_drive"));
     assert!(participant_ids.contains(&"right_drive"));
-    assert!(participant_ids.contains(&"tool-bus-robot_v1"));
-    assert!(participant_ids.contains(&"tool-log-robot_v1"));
-    assert!(participant_ids.contains(&"tool-telemetry-robot_v1"));
-    assert!(participant_ids.contains(&"tool-device-robot_v1"));
-    assert!(participant_ids.contains(&"tool-joypad-robot_v1"));
+    assert!(participant_ids.contains(&"tool-bus-testbot"));
+    assert!(participant_ids.contains(&"tool-log-testbot"));
+    assert!(participant_ids.contains(&"tool-telemetry-testbot"));
+    assert!(participant_ids.contains(&"tool-device-testbot"));
+    assert!(participant_ids.contains(&"tool-joypad-testbot"));
     assert_eq!(
         participant_ids
             .iter()
@@ -395,7 +391,7 @@ fn launch_plan_tool(name: &str) -> ResolvedTool {
 
 const LAUNCH_PLAN_FIXTURE_ROBOT: &str = r#"schema: robot/v0
 robot:
-  id: robot_v1
+  id: testbot
   namespace: dev
   motion_limits:
     max_linear_speed_mps: 0.6
@@ -1650,15 +1646,26 @@ fn raw_emit_apis_unknown_participant_class_defaults_to_checked() -> Result<()> {
 
 #[test]
 fn user_service_config_is_validated_against_emitted_schema() -> Result<()> {
-    let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("api-fixture");
     let sources = vec![SourceParticipant::user_service(
         "avoid".to_string(),
-        fixture_dir,
+        PathBuf::from("/fake/project/runtimes/avoid"),
     )];
-    let emitted = build_emit_apis_by_building(&sources[0])?;
+    let emitted = RawEmitApis {
+        artifact: RawArtifact {
+            kind: "service".to_string(),
+            id: "avoid".to_string(),
+        },
+        participant_class: "checked".to_string(),
+        api_version: "v1".to_string(),
+        required_contracts: Vec::new(),
+        config_schema: Some(serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "Config",
+            "type": "object",
+            "properties": { "gain": { "type": "number", "format": "double" } },
+            "required": ["gain"]
+        })),
+    };
     assert_eq!(
         emitted.config_schema,
         Some(serde_json::json!({

@@ -576,7 +576,7 @@ mod tests {
                 producer: phoxal::bus::ProducerId::mint(),
                 execution_origin: None,
                 namespace: "dev".to_string(),
-                robot_id: "robot_v1".to_string(),
+                robot_id: "testbot".to_string(),
                 bus: BusProfile {
                     connect_endpoints: Vec::new(),
                 },
@@ -634,7 +634,7 @@ mod tests {
 
     const LAYOUT_ROBOT_YAML: &str = r#"schema: robot/v0
 robot:
-  id: robot_v1
+  id: testbot
   namespace: dev
   motion_limits:
     max_linear_speed_mps: 0.6
@@ -771,7 +771,7 @@ services:
         build_layout_specs(&plan, &layout, &board, &mut specs, &cwd_for)?;
 
         let snapshot = board.snapshot();
-        let key = ProcessKey::robot(RobotKey::new("dev", "robot_v1"), &overridden).to_string();
+        let key = ProcessKey::robot(RobotKey::new("dev", "testbot"), &overridden).to_string();
         let status = snapshot
             .participants
             .get(&key)

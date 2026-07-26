@@ -206,32 +206,6 @@ pub(crate) async fn spawn_until_pending(
     None
 }
 
-/// Wait until every id in `stage_ids` has been OBSERVED `Ready` on the
-/// board, or `timeout` elapses. Shared by host and simulation staged startup;
-/// returns `Ok(())` on
-/// success with no side effects; a direct process `Failed` state returns
-/// `Err` immediately (never waits out the timeout for a graph that already
-/// ended unhealthy); on timeout it marks every still-missing id
-/// `Failed` on the board (so `SupervisorOutcome::graph_healthy` reflects the
-/// stall) and returns `Err` naming exactly what never showed up.
-#[cfg(test)]
-pub async fn await_participants_ready<T>(
-    board: &BoardBackend,
-    stage_ids: &[T],
-    budget: crate::session::output::WaitBudget,
-    poll_interval: Duration,
-) -> Result<()>
-where
-    T: Clone + Into<ProcessKey>,
-{
-    let stage_ids = stage_ids
-        .iter()
-        .cloned()
-        .map(Into::into)
-        .collect::<Vec<_>>();
-    await_stage_ready(board, &stage_ids, &stage_ids, &[], budget, poll_interval).await
-}
-
 pub(crate) async fn await_stage_ready(
     board: &BoardBackend,
     ready_ids: &[ProcessKey],

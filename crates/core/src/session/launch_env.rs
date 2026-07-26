@@ -227,7 +227,7 @@ mod tests {
             producer: phoxal::bus::ProducerId::mint(),
             execution_origin: None,
             namespace: "dev".to_string(),
-            robot_id: "robot_v1".to_string(),
+            robot_id: "testbot".to_string(),
             bus: BusProfile {
                 connect_endpoints: vec!["tcp/localhost:7447".to_string()],
             },
@@ -262,7 +262,7 @@ mod tests {
             producer: phoxal::bus::ProducerId::mint(),
             execution_origin: Some(phoxal::participant::ExecutionOrigin::mint()),
             namespace: "dev".to_string(),
-            robot_id: "robot_v1".to_string(),
+            robot_id: "testbot".to_string(),
             bus: BusProfile {
                 connect_endpoints: vec!["tcp/localhost:7447".to_string()],
             },
@@ -317,7 +317,7 @@ mod tests {
             producer: phoxal::bus::ProducerId::mint(),
             execution_origin: None,
             namespace: "dev".to_string(),
-            robot_id: "robot_v1".to_string(),
+            robot_id: "testbot".to_string(),
             bus: BusProfile::default(),
             clock: ClockMode::Real,
             config: Some(serde_json::json!({

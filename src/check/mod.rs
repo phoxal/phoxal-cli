@@ -100,8 +100,6 @@ pub(crate) use metadata::{
     fetch_emit_apis_from_tool, raw_emit_apis_from_extracted_metadata, tool_env_override,
 };
 mod build;
-#[cfg(test)]
-pub(crate) use build::build_emit_apis_by_building;
 pub(crate) use build::{
     build_emit_apis_from_source, build_emit_apis_from_source_for_check, validate_artifact_identity,
     validate_source_artifact_identity,

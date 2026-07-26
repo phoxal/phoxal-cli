@@ -548,7 +548,7 @@ mod tests {
     fn resolved_robot() -> Result<ResolvedRobot> {
         let yaml = r#"schema: robot/v0
 robot:
-  id: robot_v1
+  id: testbot
   namespace: dev
   motion_limits:
     max_linear_speed_mps: 0.6
@@ -593,7 +593,7 @@ robot:
                 producer: phoxal::bus::ProducerId::mint(),
                 execution_origin: None,
                 namespace: "dev".to_string(),
-                robot_id: "robot_v1".to_string(),
+                robot_id: "testbot".to_string(),
                 bus: BusProfile {
                     connect_endpoints: Vec::new(),
                 },
@@ -948,7 +948,7 @@ robot:
         fs::write(&source, "MACHO")?;
 
         let record = launch_record(
-            "tool-joypad-robot_v1",
+            "tool-joypad-testbot",
             "tool-joypad",
             ParticipantExecution::OfficialTool {
                 binary_name: "phoxal-tool-joypad".to_string(),
@@ -994,7 +994,7 @@ robot:
         // An official tool: the kind-prefixed short name.
         assert_eq!(
             canonical_binary_name(&launch_record(
-                "tool-bus-robot_v1",
+                "tool-bus-testbot",
                 "tool-bus",
                 ParticipantExecution::OfficialTool {
                     binary_name: "phoxal-tool-bus".to_string()
