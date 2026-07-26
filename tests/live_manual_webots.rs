@@ -6,8 +6,7 @@
 use std::time::Duration;
 
 use phoxal::bus::{
-    CommandPublisher, ContractBody, Publish, StatePublisher, StepToken, Subscribe, Subscriber,
-    Topic,
+    CommandPublisher, ContractBody, StatePublisher, StepToken, Subscribe, Subscriber, Topic,
 };
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::v0_1 as api;
@@ -35,24 +34,12 @@ async fn manual_command_moves_then_stops_after_ttl() {
     })
     .await
     .expect("connect to the live simulation router");
-    let manual_topic = Topic::<Publish<api::motion::ManualCommand>>::new_owned(
-        api::topic::new()
-            .motion()
-            .manual()
-            .publish_key()
-            .expect("manual publish key")
-            .to_owned(),
-    );
+    let manual_topic = api::topic::client().motion().manual();
     let manual = CommandPublisher::new(bus.clone(), &manual_topic).expect("manual publisher");
-    let component_estop_topic = Topic::<Publish<api::component::emergency_stop::State>>::new_owned(
-        api::topic::new()
-            .component("simulation_estop")
-            .emergency_stop("emergency_stop")
-            .state()
-            .publish_key()
-            .expect("component e-stop publish key")
-            .to_owned(),
-    );
+    let component_estop_topic = api::topic::owner()
+        .component("simulation_estop")
+        .emergency_stop("emergency_stop")
+        .state();
     let component_estop = StatePublisher::new(bus.clone(), &component_estop_topic)
         .expect("component e-stop publisher");
     let clock = Subscriber::new(

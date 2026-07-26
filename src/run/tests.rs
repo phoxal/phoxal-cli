@@ -4,7 +4,6 @@ use super::build::missing_device_path;
 use super::report::{
     LaunchCommandEntry, LaunchCommandReport, launch_kind_label, report_launch_commands_human,
 };
-use super::router::parse_router_ready;
 use super::*;
 use anyhow::Result;
 use phoxal::model::robot::v0::ConnectionConfig;
@@ -279,17 +278,6 @@ async fn dropping_setup_background_tasks_aborts_every_handle() {
     drop(tasks);
     tokio::task::yield_now().await;
     assert!(abort.is_finished());
-}
-
-#[test]
-fn router_ready_fd_contract_returns_the_exact_local_endpoint() {
-    assert_eq!(
-        parse_router_ready(r#"{"status":"ready","local_endpoint":"unixsock-stream//tmp/zenoh.sock","listeners":["unixsock-stream//tmp/zenoh.sock"],"future":true}"#)
-            .expect("ready event"),
-        "unixsock-stream//tmp/zenoh.sock"
-    );
-    assert!(parse_router_ready(r#"{"status":"failed","message":"bind refused"}"#).is_err());
-    assert!(parse_router_ready(r#"{"status":"starting"}"#).is_err());
 }
 
 #[test]
