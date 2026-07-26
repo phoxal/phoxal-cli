@@ -56,10 +56,8 @@ tracing-subscriber = "0.3.23"
 unicode-width = "0.2"
 urdf-rs = "0.9.0"
 webots-proto = "0.2.0"
-# Local path pins while the #952 time/identity train is unreleased. These
-# revert to the published versions once the framework slice ships.
-phoxal = { path = "../../../../framework/.claude/worktrees/952-time-identity/phoxal" }
-phoxal-api = { path = "../../../../framework/.claude/worktrees/952-time-identity/phoxal-api" }
+phoxal = "=0.41.0"
+phoxal-api = "=0.41.0"
 phoxal-cli-client = { path = "crates/client" }
 phoxal-cli-core = { path = "crates/core" }
 phoxal-cli-ui = { path = "crates/ui" }
