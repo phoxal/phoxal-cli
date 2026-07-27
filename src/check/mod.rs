@@ -74,7 +74,7 @@ pub(crate) use participants::{
     source_participants_from_resolved, tool_participants_from_resolved,
 };
 mod graph;
-pub use graph::{run_check, run_check_with_context};
+pub use graph::run_check_with_context;
 mod config;
 pub(crate) use config::{validate_user_runtime_config, validate_user_service_config};
 mod metadata;

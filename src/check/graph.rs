@@ -13,40 +13,6 @@ use phoxal_cli_core::check::source::ToolParticipant;
 use phoxal_cli_core::project::resolver::tool_participant_id;
 use phoxal_cli_core::project::suite::ArtifactKind;
 
-pub fn run_check(
-    resolved_platform_image_refs: &[(String, String)],
-    tool_participants: &[ToolParticipant],
-    source_participants: &[SourceParticipant],
-    fetch: impl FnMut(&str) -> Result<RawParticipantReport>,
-    fetch_tool: impl FnMut(&ToolParticipant) -> Result<RawParticipantReport>,
-    build: impl FnMut(&SourceParticipant) -> Result<RawParticipantReport>,
-) -> Result<CheckOutcome> {
-    let platform_artifact_refs = service_platform_artifact_refs(resolved_platform_image_refs);
-    run_check_with_context(
-        &platform_artifact_refs,
-        tool_participants,
-        source_participants,
-        CheckGraphContext { robot: None },
-        fetch,
-        fetch_tool,
-        build,
-    )
-}
-
-pub(super) fn service_platform_artifact_refs(
-    resolved_platform_image_refs: &[(String, String)],
-) -> Vec<PlatformArtifactRef> {
-    resolved_platform_image_refs
-        .iter()
-        .map(|(name, artifact_ref)| PlatformArtifactRef {
-            name: name.clone(),
-            kind: ArtifactKind::Service,
-            artifact_ref: artifact_ref.clone(),
-            instances: Vec::new(),
-        })
-        .collect()
-}
-
 pub fn run_check_with_context(
     resolved_platform_artifact_refs: &[PlatformArtifactRef],
     tool_participants: &[ToolParticipant],
