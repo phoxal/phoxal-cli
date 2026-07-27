@@ -133,14 +133,9 @@ pub(crate) async fn live_simulate_setup(
     // finding 4).
     let router_config =
         crate::run::resolve_router_config(&sim_source(&sim).resolved.robot, &staged_root)?;
-    let (router, connect) = crate::run::start_infrastructure_router(
-        &staged_root,
-        &sim.ctx.project_root,
-        router_config,
-        &sim.plan,
-        run.execution(),
-    )
-    .await?;
+    let (router, connect) =
+        crate::run::start_infrastructure_router(&staged_root, &sim.ctx.project_root, router_config)
+            .await?;
     board.set_router_status(format!("ready:{connect}"));
     board.set_state(
         phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
