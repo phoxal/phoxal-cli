@@ -164,7 +164,6 @@ pub enum RuntimeFailurePolicy {
 #[serde(tag = "kind", content = "instance", rename_all = "snake_case")]
 pub enum ReadinessPolicy {
     ProcessSpawned,
-    EndpointReady,
     ExactLiveliness(ParticipantInstanceKey),
 }
 

@@ -16,11 +16,6 @@ pub struct EncodedParticipantEnv {
 
 impl EncodedParticipantEnv {
     #[must_use]
-    pub fn from_variables(variables: BTreeMap<String, String>) -> Self {
-        Self { variables }
-    }
-
-    #[must_use]
     pub fn variables(&self) -> &BTreeMap<String, String> {
         &self.variables
     }
@@ -31,18 +26,6 @@ impl EncodedParticipantEnv {
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
-    }
-
-    #[must_use]
-    pub fn environment_file(&self) -> String {
-        let mut rendered = String::new();
-        for (key, value) in &self.variables {
-            rendered.push_str(key);
-            rendered.push('=');
-            rendered.push_str(&escape_environment_file_value(value));
-            rendered.push('\n');
-        }
-        rendered
     }
 }
 
@@ -148,69 +131,6 @@ fn compact_config_json(launch: &ParticipantLaunch) -> Result<Option<String>> {
     Ok(Some(encoded))
 }
 
-fn escape_environment_file_value(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len() + 2);
-    escaped.push('"');
-    for ch in value.chars() {
-        match ch {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '$' => escaped.push_str("\\$"),
-            '`' => escaped.push_str("\\`"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            _ => escaped.push(ch),
-        }
-    }
-    escaped.push('"');
-    escaped
-}
-
-#[cfg(test)]
-pub(crate) fn parse_environment_file_for_tests(
-    contents: &str,
-) -> anyhow::Result<BTreeMap<String, String>> {
-    let mut parsed = BTreeMap::new();
-    for (line_index, line) in contents.lines().enumerate() {
-        let Some((key, value)) = line.split_once('=') else {
-            bail!("line {} is not KEY=VALUE", line_index + 1);
-        };
-        parsed.insert(key.to_string(), parse_quoted_value_for_tests(value)?);
-    }
-    Ok(parsed)
-}
-
-#[cfg(test)]
-fn parse_quoted_value_for_tests(value: &str) -> anyhow::Result<String> {
-    let Some(inner) = value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-    else {
-        bail!("value is not double quoted: {value}");
-    };
-    let mut parsed = String::new();
-    let mut chars = inner.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            parsed.push(ch);
-            continue;
-        }
-        match chars.next() {
-            Some('"') => parsed.push('"'),
-            Some('\\') => parsed.push('\\'),
-            Some('$') => parsed.push('$'),
-            Some('`') => parsed.push('`'),
-            Some('n') => parsed.push('\n'),
-            Some('r') => parsed.push('\r'),
-            Some(other) => {
-                bail!("unsupported escape in test EnvironmentFile parser: \\{other}");
-            }
-            None => bail!("trailing escape in EnvironmentFile value"),
-        }
-    }
-    Ok(parsed)
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -220,7 +140,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spawn_env_and_environment_file_carry_identical_variables() -> anyhow::Result<()> {
+    fn participant_env_config_is_compact_escaped_json() -> anyhow::Result<()> {
         let launch = ParticipantLaunch {
             participant_id: "mission".to_string(),
             execution: phoxal::bus::ExecutionId::mint(),
@@ -242,9 +162,6 @@ mod tests {
         };
 
         let encoded = encode_participant_env(&launch)?;
-        let from_env_file = parse_environment_file_for_tests(&encoded.environment_file())?;
-
-        assert_eq!(&from_env_file, encoded.variables());
         assert_eq!(
             encoded.variables().get(env::CONFIG).map(String::as_str),
             Some(
