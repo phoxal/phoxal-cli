@@ -24,17 +24,6 @@ pub(crate) fn build_participant_report_from_source(
     )
 }
 
-pub(crate) fn build_participant_report_from_source_for_check(
-    participant: &SourceParticipant,
-    ui: &crate::Ui,
-) -> Result<RawParticipantReport> {
-    build_participant_report_from_source_with_diagnostics(
-        participant,
-        build_participant_report_by_building,
-        Some(ui),
-    )
-}
-
 /// Core of [`build_participant_report_from_source`], parameterized over the (expensive)
 /// builder so tests can exercise it against a fake build closure instead of
 /// spawning a real `cargo build`.

@@ -876,8 +876,8 @@ fn tool_artifact_kind_garbage_is_rejected() {
 
 #[test]
 fn every_source_participant_always_builds_no_scoping_no_cache() -> Result<()> {
-    // Every source participant is rebuilt live on every `check` invocation.
-    // This proves
+    // Every source participant is rebuilt live on every `run_check_with_context`
+    // invocation. This proves
     // `run_check` invokes the build closure for every source participant,
     // not just a named one.
     let sources = vec![

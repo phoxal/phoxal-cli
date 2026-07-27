@@ -1,9 +1,8 @@
 //! Participants responsibilities for check.
 
-use super::{PlatformArtifactRef, tool_env_override};
+use super::tool_env_override;
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::bail;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::ToolParticipant;
 use phoxal_cli_core::project::resolver::ResolvedComponent;
@@ -15,6 +14,40 @@ use phoxal_cli_core::project::suite::ArtifactKind;
 use phoxal_cli_core::project::tooling::resolve_project_path;
 use std::path::Path;
 use std::path::PathBuf;
+
+/// One resolved official artifact `run_check_with_context` needs a
+/// participant report for: its resolved identity (`artifact_ref`) plus the
+/// caller-known identity (`name`/`kind`) that the fetched report's own
+/// declared id is checked against before its schema is trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformArtifactRef {
+    pub name: String,
+    pub kind: ArtifactKind,
+    pub artifact_ref: String,
+    /// The component instance ids launching this artifact, for a
+    /// `ComponentDriver` ref only. Empty for every other kind (a normal
+    /// robot runtime participant). A suite-resolved component
+    /// driver is fetched once but launched once per instance that declares
+    /// it (`left_drive`/`right_drive` sharing one `phoxal/component-<id>
+    /// -driver` package) - mirrors how
+    /// `SourceParticipant::component_driver_with_artifact_id` keys a
+    /// workspace-built driver's graph membership by instance, not by artifact
+    /// id. Must not be empty when `kind == ComponentDriver`.
+    pub instances: Vec<String>,
+}
+
+impl PlatformArtifactRef {
+    pub(super) fn kind_label(&self) -> &'static str {
+        match self.kind {
+            ArtifactKind::Service => "official service",
+            ArtifactKind::ComponentAssets => "official component assets",
+            ArtifactKind::ComponentDriver => "official driver",
+            ArtifactKind::Tool => "official tool",
+            ArtifactKind::Simulator => "official simulator",
+            ArtifactKind::Infrastructure => "official infrastructure",
+        }
+    }
+}
 
 pub(crate) fn tool_participants_from_resolved(
     resolved: &ResolvedRobot,
@@ -59,8 +92,8 @@ pub(crate) fn platform_artifact_refs_from_resolved(
 /// (`left_drive`/`right_drive` both resolving
 /// `phoxal/component-ddsm115`). A Path/Git-sourced driver is a source
 /// participant instead (see `source_participants_from_resolved`) and is not
-/// included here. Reused by every command that validates the graph like a
-/// service (`check`, `run`); `simulate` also fetches through this
+/// included here. Reused by every path that validates the graph like a
+/// service (`build`, `run`); `simulate` also fetches through this
 /// same function but discards a driver participant from its final launch set
 /// after validating its contracts (drivers are sim-substituted, never
 /// launched).
@@ -243,38 +276,4 @@ pub(crate) fn source_participants_from_resolved(
     }
 
     Ok(participants)
-}
-
-pub(crate) fn ensure_suite_availability(resolved: &ResolvedRobot) -> Result<()> {
-    let unavailable = resolved
-        .platform_runtimes
-        .iter()
-        .filter(|runtime| runtime.source_path().is_none())
-        .filter(|runtime| !runtime.published)
-        .collect::<Vec<_>>();
-    if unavailable.is_empty() {
-        return Ok(());
-    }
-
-    let mut message = format!(
-        "NotYetAvailable: {} is not deployable on {}",
-        resolved.robot.robot.id, resolved.target
-    );
-    message.push_str("\n\nframework train: ");
-    message.push_str(&resolved.train);
-    message.push_str("\n\nRequired artifacts not released:");
-    for runtime in unavailable {
-        message.push_str("\n  - ");
-        message.push_str(&runtime.package);
-        message.push_str(" is missing for ");
-        message.push_str(&resolved.target);
-        if !runtime.published_triples.is_empty() {
-            message.push_str("; published triples: ");
-            message.push_str(&runtime.published_triples.join(", "));
-        }
-    }
-    message.push_str(
-        "\n\nFix: wait for the listed official artifacts to publish, add a matching Cargo workspace override, or move the train with `cargo update -p phoxal`.",
-    );
-    bail!("{message}")
 }

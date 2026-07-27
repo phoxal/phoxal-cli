@@ -652,7 +652,7 @@ fn resolve_components(context: &ComponentResolveContext<'_>) -> Result<Vec<Resol
 /// [`resolved_runtime_from_expected_package`]. If the entry exists but has no
 /// built artifact for that scope yet (a metadata-only entry, or not yet
 /// published for this target), resolution still succeeds (the entry is real
-/// and versioned - a bare `check` on an older version must not hard-fail
+/// and versioned - graph validation on an older version must not hard-fail
 /// here), but `suite_runtime` carries `sha256: None, published: false` so a
 /// later staging attempt reports a clear diagnostic instead of silently
 /// succeeding with no bundle to fetch.
