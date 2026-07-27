@@ -222,11 +222,10 @@ pub(crate) fn build_layout_specs(
             if matches!(
                 participant.execution,
                 ParticipantExecution::ComponentDriver { .. }
-            ) {
-                if let Some(note) = layout_device_missing_note(layout, &id) {
-                    board.set_state(&key, ParticipantState::Failed, Some(note));
-                    continue;
-                }
+            ) && let Some(note) = layout_device_missing_note(layout, &id)
+            {
+                board.set_state(&key, ParticipantState::Failed, Some(note));
+                continue;
             }
             let executable = bin_dir.join(participant.execution.binary_name());
             inspect_selected_binary(&executable).with_context(|| {

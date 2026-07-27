@@ -396,10 +396,10 @@ impl ManagedChild {
     }
 
     fn unregister(&mut self) {
-        if let Some(pgid) = self.pgid.take() {
-            if let Err(error) = with_guardian(|guardian| guardian.record(b'-', pgid)) {
-                tracing::warn!(pgid, %error, "failed to unregister managed process group");
-            }
+        if let Some(pgid) = self.pgid.take()
+            && let Err(error) = with_guardian(|guardian| guardian.record(b'-', pgid))
+        {
+            tracing::warn!(pgid, %error, "failed to unregister managed process group");
         }
     }
 }
