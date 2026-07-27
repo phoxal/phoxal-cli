@@ -3,7 +3,7 @@
 use super::ROUTER_READY_TIMEOUT;
 use crate::supervisor::{
     BoardBackend, ManagedChild, ParticipantSpec, SupervisionStage, SupervisorOptions,
-    SupervisorOutcome, supervise_until_shutdown,
+    supervise_until_shutdown,
 };
 use anyhow::{Context, Result, bail};
 use phoxal::participant::launch::env;
@@ -164,7 +164,7 @@ impl InfrastructureRouter {
         stages: Vec<SupervisionStage>,
         board: BoardBackend,
         options: SupervisorOptions,
-    ) -> Result<SupervisorOutcome> {
+    ) -> Result<()> {
         let session_token = options.token.clone();
         let (spawned_rows, wait_only_rows) = recovery_rows(&stages);
         let mut failures = VecDeque::new();
@@ -174,23 +174,23 @@ impl InfrastructureRouter {
             epoch_options.token = epoch_token.clone();
             let supervisor = supervise_until_shutdown(stages.clone(), board.clone(), epoch_options);
             tokio::pin!(supervisor);
-            let (status, teardown_outcome) = tokio::select! {
+            let (status, teardown_result) = tokio::select! {
                 outcome = &mut supervisor => {
                     self.process.stop().await;
                     return outcome;
                 }
                 status = self.process.child.wait() => {
                     epoch_token.cancel();
-                    let teardown_outcome = supervisor.await;
+                    let teardown_result = supervisor.await;
                     self.process.stdout_task.abort();
                     self.process.stderr_task.abort();
-                    (status.context("failed to wait for infrastructure router")?, teardown_outcome)
+                    (status.context("failed to wait for infrastructure router")?, teardown_result)
                 }
             };
-            let teardown_outcome = teardown_outcome
+            teardown_result
                 .context("failed to tear down the graph after infrastructure router exit")?;
             if session_token.is_cancelled() {
-                return Ok(teardown_outcome);
+                return Ok(());
             }
 
             let epoch = board.begin_recovery_epoch(&spawned_rows, &wait_only_rows);
@@ -206,7 +206,7 @@ impl InfrastructureRouter {
 
             loop {
                 tokio::select! {
-                    () = session_token.cancelled() => return Ok(teardown_outcome),
+                    () = session_token.cancelled() => return Ok(()),
                     () = tokio::time::sleep(self.recovery_policy.restart_delay) => {}
                 }
                 let restart = launch_router_process(
@@ -215,7 +215,7 @@ impl InfrastructureRouter {
                     &self.readiness_probe,
                 );
                 let restarted = tokio::select! {
-                    () = session_token.cancelled() => return Ok(teardown_outcome),
+                    () = session_token.cancelled() => return Ok(()),
                     result = restart => result,
                 };
                 match restarted {

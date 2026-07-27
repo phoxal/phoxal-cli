@@ -437,7 +437,7 @@ async fn resident_supervision_inner(
     }
     drop(background_tasks);
     socket.close().await;
-    outcome.map(|_| ())
+    outcome
 }
 
 async fn drain_session_events(

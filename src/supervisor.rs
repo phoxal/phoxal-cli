@@ -35,7 +35,7 @@ pub(crate) use board::BoardBackend;
 mod spec;
 pub(crate) use spec::{
     ParticipantSpec, RequestedStop, RestartPolicy, SupervisorAction, SupervisorActionReceiver,
-    SupervisorOptions, SupervisorOutcome,
+    SupervisorOptions,
 };
 mod process;
 pub(crate) use process::RunningParticipant;
