@@ -27,7 +27,6 @@ fn parses_self_upgrade_with_normalized_version() {
 #[test]
 fn message_format_is_removed_from_every_former_surface() {
     for args in [
-        vec!["phoxal", "check", "--message-format", "json"],
         vec!["phoxal", "run", "--message-format", "json"],
         vec![
             "phoxal",
@@ -58,11 +57,10 @@ fn removed_command_surfaces_stay_removed() {
         vec!["phoxal", "service", "add", "avoid_obstacles"],
         vec!["phoxal", "service", "run", "avoid_obstacles"],
         vec!["phoxal", "runtime", "add", "avoid_obstacles"],
-        vec!["phoxal", "check", "--runtime", "avoid_obstacles"],
+        vec!["phoxal", "check", "avoid_obstacles"],
         vec!["phoxal", "simulate", "default"],
         vec!["phoxal", "simulation", "default"],
         vec!["phoxal", "simulation", "webots", "run", "default", "--pull"],
-        vec!["phoxal", "check", "--pull"],
         vec!["phoxal", "validate", "--allow-user-service-drift"],
         vec!["phoxal", "deploy", "--dry-run", "--target", "aarch64"],
         vec!["phoxal", "robot", "new", "rover"],
@@ -240,18 +238,10 @@ fn parses_bus_backed_status_commands() {
 }
 
 #[test]
-fn rejects_removed_check_strict_and_service_scope() {
-    // `--strict` was the coherence pass's severity knob; the coherence pass
-    // is gone (organization#957), so the flag is gone with it.
-    assert!(Cli::try_parse_from(["phoxal", "check", "--strict"]).is_err());
-    assert!(Cli::try_parse_from(["phoxal", "check", "--service", "avoid_obstacles",]).is_err());
-}
-
-#[test]
 fn parses_update() {
     assert!(Cli::try_parse_from(["phoxal", "update", "--dry-run"]).is_ok());
-    assert!(Cli::try_parse_from(["phoxal", "--plain", "check"]).is_err());
-    assert!(Cli::try_parse_from(["phoxal", "check", "--plain"]).is_err());
-    assert!(Cli::try_parse_from(["phoxal", "--quiet", "check"]).is_err());
-    assert!(Cli::try_parse_from(["phoxal", "--welcome", "check"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal", "--plain", "version"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal", "version", "--plain"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal", "--quiet", "version"]).is_err());
+    assert!(Cli::try_parse_from(["phoxal", "--welcome", "version"]).is_err());
 }

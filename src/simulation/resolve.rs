@@ -81,7 +81,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
     let metadata_source_participants = source_participants.clone();
     // A Suite-sourced component driver is a platform ref here too (docs
-    // #21), exactly like `check`/`run` - synthesized from suite
+    // #21), exactly like `build`/`run` - synthesized from suite
     // metadata rather than built from source. Only a Path/Git-overridden
     // driver crate reaches the `build` closure below.
     let platform_refs = check_artifact_refs_from_resolved(resolved);
@@ -135,12 +135,12 @@ pub(crate) fn build_checked_sim_launch_plan(
     // the controller is validated here and then handed to Webots rather than
     // entering the resident launch plan the ordinary graph check sees.
     ensure_exactly_one_simulator(&sim_participants)?;
-    // Reject exactly what `check`/`run` reject: `metadata_outcome` already
+    // Reject exactly what `build`/`run` reject: `metadata_outcome` already
     // carries the real config-schema validation (`InvalidConfig` problems)
     // and any official artifact that could not be obtained
     // (`missing_images`) from `run_check_with_context` above. Validate it
-    // through the same shared gate `check::command::run` and
-    // `run::prepare::run_source_check` use, rather than a locally
+    // through the same shared gate, `ensure_check_outcome_ok`, that
+    // `run::prepare::run_source_check` also uses, rather than a locally
     // reconstructed, always-empty report (organization: `phoxal simulate`
     // silently accepted invalid user config and missing images).
     crate::check::ensure_check_outcome_ok(&metadata_outcome)?;
@@ -292,7 +292,7 @@ services:
 
     /// Reproduces the organization-tracked defect: `phoxal simulate` silently
     /// accepted a robot whose `services.<id>.config` violates that
-    /// participant's own compiled-in config schema, while `phoxal check` and
+    /// participant's own compiled-in config schema, while `phoxal build` and
     /// `phoxal run` both correctly reject it. Drives a REAL fixture crate
     /// through the actual simulate resolution path end to end (a genuine
     /// `cargo build` of a participant binary, then
@@ -314,7 +314,7 @@ services:
 
         let error = result.expect_err(
             "a user service configured against its own emitted schema must be rejected by \
-             simulate, exactly like `phoxal check`/`phoxal run`",
+             simulate, exactly like `phoxal build`/`phoxal run`",
         );
         let message = error.to_string();
         assert!(

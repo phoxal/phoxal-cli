@@ -78,8 +78,8 @@ pub struct ResolvedRobot {
     pub user_tools: Vec<ResolvedUserRuntime>,
     /// Workspace runtime crates present under `services/`/`tools/` but not
     /// declared in robot.yaml (and not official-identity overrides). They are
-    /// not built or launched; `check` and the staging summary surface them as
-    /// drift diagnostics (#950).
+    /// not built or launched; graph validation and the staging summary
+    /// surface them as drift diagnostics (#950).
     pub undeclared_runtimes: Vec<UndeclaredRuntime>,
     pub components: Vec<ResolvedComponent>,
     pub tools: Vec<ResolvedTool>,
@@ -108,7 +108,7 @@ pub struct ResolvedPlatformRuntime {
     /// versioned), but there is nothing to fetch yet.
     pub published: bool,
     /// Every target triple the suite has a built tarball for, for
-    /// diagnostics (`ensure_suite_availability`).
+    /// availability diagnostics.
     pub published_triples: Vec<String>,
     pub path_override: Option<PathBuf>,
     /// Exact locked framework train this entry belongs to.

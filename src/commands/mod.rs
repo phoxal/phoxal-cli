@@ -8,7 +8,6 @@ use crate::AppContext;
 
 pub mod build;
 pub mod bus_target;
-pub mod check;
 pub mod deploy;
 pub mod doctor;
 pub mod init;
@@ -146,7 +145,7 @@ impl VersionArgs {
     version = long_version(),
     about = "Build, check, and simulate Phoxal robot projects.",
     long_about = "Build, check, and simulate Phoxal robot projects.\n\n\
-                  phoxal reads robot.yaml, resolves the graph against a verified generated artifact suite when official native artifacts are needed, and drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `check` and `simulate`."
+                  phoxal reads robot.yaml, resolves the graph against a verified generated artifact suite when official native artifacts are needed, and drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `build`, `run`, or `simulation webots run` - each validates the graph and every participant's config before it executes."
 )]
 pub struct Cli {
     #[arg(
@@ -160,7 +159,7 @@ pub struct Cli {
         env = phoxal_cli_core::project::suite::SUITE_SOURCE_ENV,
         global = true,
         value_name = "PATH_OR_HTTPS_URL",
-        help = "Artifact suite override. Local paths are read directly. run/start/build reject HTTPS values and otherwise use the suite `phoxal update` persisted into .phoxal/artifacts; check/validate/service/simulate fetch HTTPS sources fresh."
+        help = "Artifact suite override. Local paths are read directly. run/start/build reject HTTPS values and otherwise use the suite `phoxal update` persisted into .phoxal/artifacts; validate/service/simulate fetch HTTPS sources fresh."
     )]
     pub suite_source: Option<String>,
     #[arg(
@@ -178,12 +177,6 @@ pub struct Cli {
 pub enum RootCommand {
     #[command(about = "Create a non-published root Cargo train anchor and committed lockfile.")]
     Init(init::Init),
-    #[command(
-        about = "Check the robot graph's participants and config.",
-        long_about = "Check the robot graph's participants and config.\n\n\
-                      Resolves robot.yaml and the Cargo workspace, then reads every participant's compiled-in identity metadata (official artifacts from the suite and workspace-built services, tools, and component drivers) and validates each artifact's declared identity against what robot.yaml expects. This also validates each user service's and user tool's manifest config against its emitted JSON Schema. There is no API-coherence pass: the framework train alone is the compatibility boundary (organization#957), so a version disagreement between two participants is not expressible."
-    )]
-    Check(check::CheckCmd),
     #[command(
         about = "Stage a runtime layout for a target and archive it as build.phoxal.",
         long_about = "Stage a runtime layout for a target and archive it as a deterministic build.phoxal.\n\n\
@@ -248,7 +241,6 @@ impl RootCommand {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match self {
             Self::Init(command) => command.run(app).await,
-            Self::Check(command) => command.run(app).await,
             Self::Build(command) => command.run(app).await,
             Self::Deploy(command) => command.run(app).await,
             Self::Install(command) => command.run(app).await,
@@ -352,9 +344,6 @@ mod tests {
         ])
         .expect("detached simulation webots run should parse");
         assert!(!simulate_detached.command.enters_interactive_session());
-
-        let check = Cli::try_parse_from(["phoxal", "check"]).unwrap();
-        assert!(!check.command.enters_interactive_session());
     }
 
     /// The `phoxal build` clap surface parses the full flag set: the project

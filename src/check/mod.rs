@@ -1,24 +1,6 @@
-use clap::Args;
 use phoxal::check as graph_check;
-use serde_json::Value;
-
 use phoxal::model::robot::RobotV0;
-
-#[derive(Debug, Args)]
-pub struct CheckCmd {
-    #[arg(
-        long,
-        value_name = "TRIPLE",
-        help = "Resolve official artifacts for this target instead of the host (e.g. aarch64, x86_64, or a full triple). Use it to validate a Linux robot from a non-Linux host."
-    )]
-    pub target: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CheckOptions {
-    pub suite_source: Option<String>,
-    pub target: Option<String>,
-}
+use serde_json::Value;
 
 /// The CLI's own participant-report shape: `artifact.id` IS self-reported -
 /// a built binary's linker section carries the participant's own declared
@@ -66,11 +48,9 @@ impl CheckOutcome {
     }
 }
 
-mod command;
-pub use command::PlatformArtifactRef;
 mod participants;
 pub(crate) use participants::{
-    check_artifact_refs_from_resolved, component_driver_runtimes_by_ref, ensure_suite_availability,
+    PlatformArtifactRef, check_artifact_refs_from_resolved, component_driver_runtimes_by_ref,
     source_participants_from_resolved, tool_participants_from_resolved,
 };
 mod graph;
@@ -85,8 +65,8 @@ pub(crate) use metadata::{
 };
 mod build;
 pub(crate) use build::{
-    build_participant_report_from_source, build_participant_report_from_source_for_check,
-    validate_artifact_identity, validate_source_artifact_identity,
+    build_participant_report_from_source, validate_artifact_identity,
+    validate_source_artifact_identity,
 };
 mod errors;
 pub(crate) use errors::ensure_check_outcome_ok;

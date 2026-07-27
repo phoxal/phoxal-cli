@@ -8,11 +8,12 @@
 //!
 //! The command surface (see [`commands`]) is:
 //!
-//! - `check` - collect each participant's compiled-in contract metadata
-//!   (extracted straight from its built binary's linker section, never by
-//!   executing it - `participant_metadata`) and validate it with the shared
-//!   [`phoxal::check`] graph core; Cargo.lock resolves all project source.
-//! - `simulation webots run <world>` - stage and run a Webots simulation.
+//! - `build`/`run`/`simulation webots run <world>` - resolve the graph, then
+//!   collect each participant's compiled-in contract metadata (extracted
+//!   straight from its built binary's linker section, never by executing it -
+//!   `participant_metadata`) and validate it with the shared
+//!   [`phoxal::check`] graph core before staging or launching; Cargo.lock
+//!   resolves all project source.
 //! - `service suite` - print official services from the configured artifact suite.
 //! - `update` - resolve heads and atomically update the project-vendored set.
 //! - `doctor` - check host prerequisites; `self upgrade` - update the CLI.
@@ -20,7 +21,8 @@
 //! Official binaries are resolved into the project-local `.phoxal/` store by
 //! `update`; normal commands consume that vendored selection without mutating
 //! it. `validate` remains the lower-level structural/dependency predecessor of
-//! `check`.
+//! the participant identity and config validation that `build`, `run`, and
+//! `simulation webots run` perform.
 
 #![allow(clippy::module_name_repetitions)]
 
