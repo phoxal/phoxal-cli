@@ -297,9 +297,42 @@ impl ContainerBuildSpec {
         }
     }
 
-    /// The shell script run inside the container: the workspace build, then
-    /// one `cargo install` per official, stopping at the first failure
-    /// (`set -e`).
+    /// The Debian packages the official set needs to *build* from source, on
+    /// top of what the stock `rust:` image ships.
+    ///
+    /// This became necessary when officials stopped arriving as prebuilt
+    /// archives (organization#951 WS4): the container used to mount binaries
+    /// somebody else had already compiled, so it never needed their native
+    /// build dependencies. Now it compiles every official itself, and a
+    /// missing system library is a hard failure part-way through the set.
+    ///
+    /// Kept deliberately small and justified rather than a broad "build
+    /// essentials" sweep, so an addition here is a visible decision:
+    ///
+    /// - `libudev-dev` - `phoxal-tool-joypad` depends on `gilrs`, whose
+    ///   `libudev-sys` build script shells out to `pkg-config` for `libudev`.
+    /// - `pkg-config` - how that build script (and any future `*-sys` crate)
+    ///   locates system libraries at all.
+    const SYSTEM_BUILD_PACKAGES: [&'static str; 2] = ["libudev-dev", "pkg-config"];
+
+    /// Installs [`Self::SYSTEM_BUILD_PACKAGES`] before any compilation.
+    ///
+    /// Skipped entirely when offline: `apt-get` would fail without a network,
+    /// and an offline build is by definition running against a warm cache on
+    /// an image that already satisfied these once.
+    fn system_dependency_command(&self) -> Option<String> {
+        if self.offline {
+            return None;
+        }
+        Some(format!(
+            "apt-get update -qq && apt-get install -y --no-install-recommends {}",
+            Self::SYSTEM_BUILD_PACKAGES.join(" ")
+        ))
+    }
+
+    /// The shell script run inside the container: system build dependencies,
+    /// the workspace build, then one `cargo install` per official, stopping at
+    /// the first failure (`set -e`).
     fn container_script(&self) -> String {
         let mut workspace_build = format!(
             "cargo build --workspace --locked --target {}",
@@ -313,7 +346,9 @@ impl ContainerBuildSpec {
         if self.offline {
             workspace_build.push_str(" --offline");
         }
-        let mut commands = vec![workspace_build];
+        let mut commands = Vec::new();
+        commands.extend(self.system_dependency_command());
+        commands.push(workspace_build);
         for official in &self.officials {
             let package = official.package.clone();
             let install_args = crate::materialize::build_install_args(
@@ -420,6 +455,41 @@ mod tests {
             ],
             offline: false,
         }
+    }
+
+    #[test]
+    fn the_script_installs_system_build_dependencies_before_compiling() {
+        // Officials are compiled from source now, not mounted as prebuilt
+        // archives, so the image must be able to BUILD them. joypad's gilrs
+        // dependency needs libudev via pkg-config; without this the set fails
+        // part-way through with a pkg-config error that says nothing about
+        // Phoxal (organization#951 WS5, found by the first real cold build).
+        let script = spec().container_script();
+        let apt = script
+            .find("apt-get install")
+            .expect("system build dependencies must be installed");
+        let build = script
+            .find("cargo build --workspace")
+            .expect("the workspace build must be in the script");
+        assert!(
+            apt < build,
+            "dependencies must be installed before any compilation: {script}"
+        );
+        assert!(script.contains("libudev-dev"), "{script}");
+        assert!(script.contains("pkg-config"), "{script}");
+    }
+
+    #[test]
+    fn an_offline_script_skips_the_apt_step() {
+        // apt-get cannot work without a network, and an offline build is by
+        // definition running on an image that already satisfied these.
+        let mut offline = spec();
+        offline.offline = true;
+        let script = offline.container_script();
+        assert!(
+            !script.contains("apt-get"),
+            "offline must not shell out to apt: {script}"
+        );
     }
 
     #[test]
