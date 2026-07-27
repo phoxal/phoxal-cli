@@ -70,7 +70,7 @@ pub enum DriversMode {
 pub struct RunOptions {
     pub drivers: DriversMode,
     pub drivers_subset: Vec<String>,
-    pub suite_source: Option<String>,
+    pub offline: bool,
 }
 
 #[derive(Debug)]
@@ -81,7 +81,7 @@ pub(crate) struct PreparedRun {
     pub(crate) specs: Vec<ParticipantSpec>,
     pub(crate) robot_targets: Vec<RobotFeedTarget>,
     /// The staged runtime layout root the plan's `bin/` binaries (including the
-    /// infrastructure router) resolve from: `.phoxal/build/<triple>/` for a
+    /// infrastructure router) resolve from: `.phoxal/bundle/` for a
     /// source run, the layout root itself for a staged/bundle run.
     pub(crate) staged_root: PathBuf,
     /// The router's resolved config file, if the compiled `robot.yaml` declares
@@ -131,7 +131,7 @@ impl Run {
         let options = RunOptions {
             drivers: self.drivers,
             drivers_subset: self.drivers_subset.clone(),
-            suite_source: app.suite_source.clone(),
+            offline: app.offline,
         };
         if options.drivers == DriversMode::Off && !options.drivers_subset.is_empty() {
             bail!("--driver cannot be combined with --drivers off");
@@ -346,6 +346,7 @@ async fn resident_supervision_inner(
             }
             ResidentMode::Webots(options) => {
                 let prepare_root = execution_root;
+                let offline = options.offline;
                 let sim = tokio::task::spawn_blocking(move || {
                     crate::simulation::prepare(&prepare_root, options, run)
                 })
@@ -359,6 +360,7 @@ async fn resident_supervision_inner(
                     prepare_token,
                     prepare_output,
                     Some((action_tx, action_rx)),
+                    offline,
                     run,
                 )
                 .await

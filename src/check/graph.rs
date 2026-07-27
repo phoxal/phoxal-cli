@@ -10,8 +10,8 @@ use phoxal::check as graph_check;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
 use phoxal_cli_core::check::source::ToolParticipant;
+use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::resolver::tool_participant_id;
-use phoxal_cli_core::project::suite::ArtifactKind;
 
 pub fn run_check_with_context(
     resolved_platform_artifact_refs: &[PlatformArtifactRef],
@@ -26,7 +26,7 @@ pub fn run_check_with_context(
     let mut config_problems = Vec::new();
 
     for artifact in resolved_platform_artifact_refs {
-        let image_ref = &artifact.artifact_ref;
+        let image_ref = &artifact.binary_name;
         let raw = fetch(image_ref).with_context(|| {
             format!(
                 "failed to obtain participant report for {} {} ({image_ref})",

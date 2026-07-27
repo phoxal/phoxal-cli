@@ -127,9 +127,9 @@ impl ProjectLock {
                 return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
             }
         };
-        match crate::native_artifacts::try_advisory_lock(&file, true) {
+        match crate::advisory_lock::try_advisory_lock(&file, true) {
             Ok(()) => {
-                crate::native_artifacts::unlock_advisory(&file)?;
+                crate::advisory_lock::unlock_advisory(&file)?;
                 Ok(ProjectLockStatus::Free)
             }
             Err(_) => Ok(ProjectLockStatus::Held(
@@ -157,7 +157,7 @@ impl ProjectLock {
             .truncate(false)
             .open(path)
             .with_context(|| format!("failed to open project-operation lock {}", path.display()))?;
-        if let Err(error) = crate::native_artifacts::try_advisory_lock(&file, true) {
+        if let Err(error) = crate::advisory_lock::try_advisory_lock(&file, true) {
             let active = read_identity(&mut file).ok();
             if let Some(active) = active {
                 bail!(
@@ -196,7 +196,7 @@ impl Drop for ProjectLock {
     fn drop(&mut self) {
         // The inode is intentionally permanent. Unlinking a locked file lets a
         // competing process create and lock a different inode at the same path.
-        let _ = crate::native_artifacts::unlock_advisory(&self.file);
+        let _ = crate::advisory_lock::unlock_advisory(&self.file);
     }
 }
 

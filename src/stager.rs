@@ -1,11 +1,13 @@
 //! The unified runtime-layout stager.
 //!
 //! One stager materializes a source project into the runtime layout at
-//! `.phoxal/build/<triple>/` (host triple for `run` and live simulation):
+//! `.phoxal/bundle/` (organization#951 WS4 - no per-triple nesting, since one
+//! robot targets one platform at a time):
 //!
 //! ```text
 //! robot.yaml    # fully flattened, resolved robot/v0 with the complete service map
-//! bin/          # flat binary lookup store (hardlinks/copies, refreshed every pass)
+//! bin/          # flat binary lookup store, populated by `cargo install --root`
+//!               # (officials) and hardlinks/copies (workspace-built binaries)
 //! model/        # structure/URDF assets, when referenced
 //! components/   # compiled runtime component assets
 //! behaviors/    # when referenced
@@ -13,65 +15,75 @@
 //!
 //! The compiled `robot.yaml` + assets swap is atomic per refresh (stage into a
 //! sibling temp dir, then rename), so a crashed pass never leaves a
-//! half-written layout. `bin/` is (re)linked from the resolved binaries every
-//! refresh so it can never go stale. The staged layout contains no Cargo
-//! manifests, no source, and no `.phoxal` of its own; runtime state
-//! (project.lock, supervisor.sock, plans) stays in the project root's
-//! `.phoxal/`, never inside the staged layout.
+//! half-written layout. `bin/` is (re)populated from official packages and
+//! resolved binaries every refresh so it can never go stale. `cargo install
+//! --root <candidate>` targets the SAME candidate directory the robot.yaml
+//! and assets are staged into, so its `bin/` entries land directly at their
+//! final path with no separate harvest-then-link step; `cargo install` also
+//! leaves `.crates.toml`/`.crates2.json` dotfiles in the candidate root,
+//! which the archiver (`phoxal build`) excludes rather than fighting
+//! `--no-track` (organization#951 WS4: `--no-track` disables Cargo's own
+//! concurrent-invocation protection for no real benefit here).
 //!
-//! This replaces the previous source staging that published a single
-//! `.phoxal/run/robot` directory; `run` and live simulation now share this one
-//! stager. Building the flat `bin/` from an extracted bundle with no source
-//! present - the universal staged-root loader - is the next slice; `run` still
-//! requires a source project root today.
+//! The live `.phoxal/bundle/` is never deleted before every install and
+//! validation succeeds: staging always builds into a sibling candidate
+//! directory first, validates it, and only then atomically renames it over
+//! the previous complete layout. A build failure halfway through must never
+//! leave a robot with no runtime.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
-use phoxal_cli_core::artifacts::NativeArtifactDescriptor;
 use phoxal_cli_core::project::launch_plan::{ParticipantLaunchRecord, runtime_layout_dir};
 use phoxal_cli_core::project::resolver::{
     ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, official_binary_name, tool_participant_id,
 };
-use phoxal_cli_core::project::suite::ArtifactKind;
+
+use crate::materialize::{MaterializeSpec, cargo_install};
 
 const PREVIOUS_LAYOUT_SUFFIX: &str = ".previous";
 const BEHAVIORS_DIR: &str = "behaviors";
 const MESHES_DIR: &str = "meshes";
 const BIN_DIR: &str = "bin";
+const COMPONENT_FILE: &str = "component.yaml";
+const COMPONENT_OPTIONAL_FILES: [&str; 2] = ["structure.urdf", "simulation.yaml"];
 
-/// The staged runtime layout directory for this resolved robot's target under
-/// `project_root`. `run` and live simulation stage and execute the host triple.
+/// The staged runtime layout directory for this resolved robot under
+/// `project_root`. `run`, live simulation, and `build` all stage and execute
+/// this one root.
 #[must_use]
-pub fn layout_path(project_root: &Path, resolved: &ResolvedRobot) -> PathBuf {
-    runtime_layout_dir(project_root, &resolved.target)
+pub fn layout_path(project_root: &Path, _resolved: &ResolvedRobot) -> PathBuf {
+    runtime_layout_dir(project_root)
 }
 
-/// Stage the compiled `robot.yaml` and runtime assets into
-/// `.phoxal/build/<triple>/`, atomically replacing any previous layout. The
-/// caller owns the project run lock for the whole operation, so no participant
-/// observes the brief exchange between the previous complete layout and the
-/// newly validated candidate. `bin/` is created empty; callers that execute the
-/// layout populate it with [`stage_participant_binary`] and
-/// [`stage_complete_official_store`].
+/// Stage the compiled `robot.yaml` and runtime assets into `.phoxal/bundle/`,
+/// atomically replacing any previous layout. The caller owns the project run
+/// lock for the whole operation, so no participant observes the brief
+/// exchange between the previous complete layout and the newly validated
+/// candidate. `bin/` is created empty; callers that execute the layout
+/// populate it with [`stage_participant_binary`] and
+/// [`materialize_official_store`].
 pub fn stage_runtime_layout(project_root: &Path, resolved: &ResolvedRobot) -> Result<PathBuf> {
     let build_dir =
-        project_root.join(phoxal_cli_core::project::launch_plan::RUNTIME_BUILD_ROOT_RELATIVE);
-    fs::create_dir_all(&build_dir).with_context(|| {
+        project_root.join(phoxal_cli_core::project::launch_plan::RUNTIME_BUNDLE_ROOT_RELATIVE);
+    let parent = build_dir
+        .parent()
+        .context("runtime bundle directory has no parent")?;
+    fs::create_dir_all(parent).with_context(|| {
         format!(
             "failed to create runtime layout directory {}",
-            build_dir.display()
+            parent.display()
         )
     })?;
     let candidate = tempfile::Builder::new()
-        .prefix(&format!(".{}-candidate-", resolved.target))
-        .tempdir_in(&build_dir)
+        .prefix(".bundle-candidate-")
+        .tempdir_in(parent)
         .with_context(|| {
             format!(
                 "failed to create runtime layout candidate in {}",
-                build_dir.display()
+                parent.display()
             )
         })?;
 
@@ -80,7 +92,7 @@ pub fn stage_runtime_layout(project_root: &Path, resolved: &ResolvedRobot) -> Re
     validate_candidate(candidate.path(), resolved, &compiled)?;
 
     let target = layout_path(project_root, resolved);
-    let previous = build_dir.join(format!(".{}{PREVIOUS_LAYOUT_SUFFIX}", resolved.target));
+    let previous = parent.join(format!(".bundle{PREVIOUS_LAYOUT_SUFFIX}"));
     remove_if_present(&previous)?;
     let candidate = candidate.keep();
     let had_previous = fs::symlink_metadata(&target).is_ok();
@@ -129,20 +141,21 @@ fn canonical_binary_name(participant: &ParticipantLaunchRecord) -> String {
 
 /// Stage one launched CLI-managed participant's binary into the staged `bin/`
 /// under its canonical identity name, returning the flat `bin/` entry the
-/// participant runs from. `source` is the built or vendored binary the plan
-/// participant resolves to; `bin/` is a flat identity-keyed store, so one driver
+/// participant runs from. `source` is the built binary a workspace/source
+/// override resolves to; `bin/` is a flat identity-keyed store, so one driver
 /// binary shared by several component instances is linked once under its
 /// component id, and a source-overridden official lands at the same name a
-/// vendored one would - the loader resolves both identically.
+/// `cargo install`-materialized one would - the loader resolves both
+/// identically.
 ///
 /// No symlinks and no `.app` bundles: the staged layout holds real file
 /// identities that keep working if `target/` is later cleaned. Every
 /// participant, on every host, gets a flat `bin/` entry - a robot participant is
-/// always a plain executable (a cargo-built `target/` binary or a vendored flat
-/// artifact), never a macOS `.app` bundle. The only `.app` in the whole system
-/// is the Webots *application* on the `simulate` path, which is a CLI-managed
-/// host process outside the plan/layout contract entirely (its bundle is handled
-/// by the supervisor's `materialize_macos_app_binary`, never here).
+/// always a plain executable (a cargo-built `target/` binary), never a macOS
+/// `.app` bundle. The only `.app` in the whole system is the Webots
+/// *application* on the `simulate` path, which is a CLI-managed host process
+/// outside the plan/layout contract entirely (its bundle is handled by the
+/// supervisor's `materialize_macos_app_binary`, never here).
 pub(crate) fn stage_participant_binary(
     staged_root: &Path,
     participant: &ParticipantLaunchRecord,
@@ -170,13 +183,13 @@ pub(crate) fn stage_named_binary(
 
 /// The canonical `bin/` path the infrastructure router is staged under. The
 /// router launches from this staged entry at run time - like every other
-/// official runtime it is resolved through the layout's flat `bin/` store, not
-/// from the vendored artifact store directly.
+/// official runtime it is resolved through the layout's flat `bin/` store.
 #[must_use]
 pub fn staged_router_binary(staged_root: &Path) -> PathBuf {
-    staged_root
-        .join(BIN_DIR)
-        .join(official_binary_name(ArtifactKind::Infrastructure, "router"))
+    staged_root.join(BIN_DIR).join(official_binary_name(
+        phoxal_cli_core::project::catalog::ArtifactKind::Infrastructure,
+        "router",
+    ))
 }
 
 /// Complete the staged `bin/` into the loader's full required lookup store.
@@ -186,47 +199,48 @@ pub fn staged_router_binary(staged_root: &Path) -> PathBuf {
 /// ([`required_runtimes`](phoxal_cli_core::project::layout::RuntimeLayout::required_runtimes))
 /// requires *every* catalog official plus the infrastructure router: per #945
 /// every official always runs, an official with no active workload simply stays
-/// dormant. This links the remainder of that required native set - every
+/// dormant. This materializes the remainder of that required native set - every
 /// dormant catalog service and the router - into `bin/` under the same
-/// canonical identity names the loader resolves against, so `bin/` is the true
-/// complete store an extracted bundle can be executed from with no source.
+/// canonical identity names the loader resolves against.
 ///
 /// Entries already present (a referenced official, or a source override staged
-/// by [`stage_participant_binary`]) are left in place. A source-overridden dormant
-/// official is built through `build_override`; every other missing official is
-/// linked from the vendored `.phoxal/artifacts` store, and a store miss fails
-/// with the "run `phoxal update`" error without ever touching the network.
-pub fn stage_complete_official_store(
+/// by [`stage_participant_binary`]) are left in place. A source-overridden
+/// dormant official is built through `build_override`; every other missing
+/// official materializes via `cargo install <package>@<train> --registry
+/// phoxal --locked --root <staged_root>` straight into its final `bin/` path.
+pub fn materialize_official_store(
     staged_root: &Path,
     resolved: &ResolvedRobot,
+    offline: bool,
     mut build_override: impl FnMut(&Path, &str) -> Result<PathBuf>,
 ) -> Result<()> {
     let bin_dir = ensure_bin_dir(staged_root)?;
     for runtime in &resolved.platform_runtimes {
-        ensure_platform_staged(&bin_dir, runtime, &mut build_override)?;
+        materialize_platform_runtime(staged_root, &bin_dir, runtime, offline, &mut build_override)?;
     }
     for tool in &resolved.tools {
-        ensure_tool_staged(&bin_dir, tool, &mut build_override)?;
+        materialize_tool(staged_root, &bin_dir, tool, offline, &mut build_override)?;
     }
     Ok(())
 }
 
-/// Stage only the infrastructure router into `bin/`, so it launches from the
-/// normal build layout like every other official. Used by the Webots path,
-/// where the controller reads that same build layout; the router itself is
-/// CLI-supervised identically to a native run.
+/// Materialize only the infrastructure router into `bin/`, so it launches
+/// from the normal build layout like every other official. Used by the
+/// Webots path, where the controller reads that same build layout; the
+/// router itself is CLI-supervised identically to a native run.
 pub fn stage_router_binary(
     staged_root: &Path,
     resolved: &ResolvedRobot,
+    offline: bool,
     mut build_override: impl FnMut(&Path, &str) -> Result<PathBuf>,
 ) -> Result<()> {
     let bin_dir = ensure_bin_dir(staged_root)?;
     let router = resolved
         .tools
         .iter()
-        .find(|tool| tool.kind == ArtifactKind::Infrastructure)
-        .context("resolved graph is missing the infrastructure router; run `phoxal update`")?;
-    ensure_tool_staged(&bin_dir, router, &mut build_override)
+        .find(|tool| tool.kind == phoxal_cli_core::project::catalog::ArtifactKind::Infrastructure)
+        .context("resolved graph is missing the infrastructure router")?;
+    materialize_tool(staged_root, &bin_dir, router, offline, &mut build_override)
 }
 
 fn ensure_bin_dir(staged_root: &Path) -> Result<PathBuf> {
@@ -236,107 +250,79 @@ fn ensure_bin_dir(staged_root: &Path) -> Result<PathBuf> {
     Ok(bin_dir)
 }
 
-/// Ensure one official platform runtime (a service or simulator) has a canonical
-/// flat `bin/` entry, resolving it from a source override or the vendored store.
-fn ensure_platform_staged(
+/// Materialize one official platform runtime (a service or a simulator) into
+/// its canonical `bin/` entry, from a source override or `cargo install`.
+fn materialize_platform_runtime(
+    staged_root: &Path,
     bin_dir: &Path,
     runtime: &ResolvedPlatformRuntime,
+    offline: bool,
     build_override: &mut impl FnMut(&Path, &str) -> Result<PathBuf>,
 ) -> Result<()> {
     let staged = bin_dir.join(official_binary_name(runtime.kind, &runtime.name));
     if staged.is_file() {
         return Ok(());
     }
-    let source = resolve_platform_source(runtime, build_override)?;
-    link_official_source(&source, &staged)
+    if let Some(crate_dir) = &runtime.path_override {
+        let source = build_override(crate_dir, &runtime.name)?;
+        return link_or_copy(&source, &staged);
+    }
+    let spec = MaterializeSpec::new(runtime.package.clone(), runtime.train.clone());
+    cargo_install(staged_root, &spec, offline)
+        .with_context(|| format!("failed to materialize official runtime {}", runtime.package))?;
+    Ok(())
 }
 
-/// Ensure one official tool (or the infrastructure router) has a canonical
-/// `bin/` entry, resolving it from a source override or the vendored store.
-fn ensure_tool_staged(
+/// Materialize one official tool (or the infrastructure router) into its
+/// canonical `bin/` entry, from a source override or `cargo install`.
+fn materialize_tool(
+    staged_root: &Path,
     bin_dir: &Path,
     tool: &ResolvedTool,
+    offline: bool,
     build_override: &mut impl FnMut(&Path, &str) -> Result<PathBuf>,
 ) -> Result<()> {
     let staged = bin_dir.join(&tool.binary_name);
     if staged.is_file() {
         return Ok(());
     }
-    let source = resolve_tool_source(tool, build_override)?;
-    link_official_source(&source, &staged)
-}
-
-/// Resolve the source binary for one official platform runtime (a service,
-/// simulator, or suite-sourced component driver): its source override built
-/// through `build_override`, or the vendored artifact from `.phoxal/artifacts`.
-/// Hard-fails on a store miss ("run `phoxal update`") and never touches the
-/// network - the loader-driven execution path resolves every official binary
-/// this way, no env-var fallbacks.
-pub fn resolve_platform_source(
-    runtime: &ResolvedPlatformRuntime,
-    build_override: &mut impl FnMut(&Path, &str) -> Result<PathBuf>,
-) -> Result<PathBuf> {
-    if let Some(crate_dir) = &runtime.path_override {
-        return build_override(crate_dir, &runtime.name);
-    }
-    let descriptor = NativeArtifactDescriptor::from_runtime(runtime)?.with_context(|| {
-        format!(
-            "official runtime {} has no vendored artifact to stage; run `phoxal update`",
-            runtime.package
-        )
-    })?;
-    resolve_vendored_binary(&descriptor)
-}
-
-/// Resolve the source binary for one official tool (or the infrastructure
-/// router), the tool counterpart of [`resolve_platform_source`].
-pub fn resolve_tool_source(
-    tool: &ResolvedTool,
-    build_override: &mut impl FnMut(&Path, &str) -> Result<PathBuf>,
-) -> Result<PathBuf> {
     if let Some(crate_dir) = &tool.path_override {
-        return build_override(crate_dir, tool_participant_id(&tool.name));
+        let source = build_override(crate_dir, tool_participant_id(&tool.name))?;
+        return link_or_copy(&source, &staged);
     }
-    let descriptor = NativeArtifactDescriptor::from_tool(tool)?.with_context(|| {
-        format!(
-            "official runtime {} has no vendored artifact to stage; run `phoxal update`",
-            tool.package
-        )
-    })?;
-    resolve_vendored_binary(&descriptor)
+    let spec = MaterializeSpec::new(tool.package.clone(), tool.train.clone());
+    cargo_install(staged_root, &spec, offline)
+        .with_context(|| format!("failed to materialize official runtime {}", tool.package))?;
+    Ok(())
 }
 
-/// Hardlink a resolved official binary into its flat `bin/` entry. Every
-/// official, on every host, is a plain executable and is flattened - there is no
-/// `.app`-bundle carve-out (see [`stage_participant_binary`]).
-fn link_official_source(source: &Path, staged: &Path) -> Result<()> {
-    link_or_copy(source, staged)
-}
-
-/// Resolve a vendored official/tool binary from the project-local
-/// `.phoxal/artifacts` store, failing with a "run `phoxal update`" error and
-/// never touching the network when the store lacks it. Staging links from the
-/// vendored store only; it never fetches.
-pub(crate) fn resolve_vendored_binary(descriptor: &NativeArtifactDescriptor) -> Result<PathBuf> {
-    let binary = crate::native_artifacts::artifact_binary_path(descriptor).with_context(|| {
-        format!(
-            "vendored artifact {} is not in the project artifact store; run `phoxal update`",
-            descriptor.binary_name
-        )
-    })?;
-    ensure!(
-        binary.is_file(),
-        "vendored artifact {} is not in the project artifact store ({}); run `phoxal update`",
-        descriptor.binary_name,
-        binary.display()
-    );
-    Ok(binary)
+/// Materialize one registry-sourced component driver package straight into
+/// `bin/` via `cargo install`, exactly like a service. A workspace/path
+/// -overridden driver is staged by [`stage_participant_binary`] instead and
+/// never reaches this function - see `run::stage_complete_bin_store`.
+pub fn materialize_component_driver(
+    staged_root: &Path,
+    runtime: &ResolvedPlatformRuntime,
+    offline: bool,
+) -> Result<()> {
+    let spec = MaterializeSpec::new(runtime.package.clone(), runtime.train.clone());
+    cargo_install(staged_root, &spec, offline)
+        .with_context(|| format!("failed to materialize component driver {}", runtime.package))?;
+    Ok(())
 }
 
 /// Hardlink `source` to `dest`, falling back to a byte copy when hardlinking
 /// fails (e.g. `source` and `dest` are on different filesystems). Any existing
 /// `dest` is removed first so a refresh always relinks to the current bytes.
+///
+/// A no-op when `source` and `dest` are already the same path: `cargo
+/// install --root <staged_root>` writes officials straight into their final
+/// `bin/` entry, so a caller that resolves a materialized official's source
+/// as its own already-staged path must not remove-then-relink it to itself.
 fn link_or_copy(source: &Path, dest: &Path) -> Result<()> {
+    if source == dest {
+        return Ok(());
+    }
     remove_if_present(dest)?;
     if fs::hard_link(source, dest).is_ok() {
         return Ok(());
@@ -394,12 +380,89 @@ fn stage_candidate(
         copy_file_preserving_path(project_root, candidate, router_config, "router.config")?;
     }
 
-    crate::native_artifacts::stage_component_bundles_into_robot_root(
-        project_root,
-        candidate,
-        resolved,
-    )
-    .context("failed to stage component assets into the runtime layout")
+    stage_component_bundles(candidate, resolved)
+        .context("failed to stage component assets into the runtime layout")
+}
+
+/// Copy every distinct component's asset bundle (`component.yaml`, the
+/// optional `structure.urdf`/`simulation.yaml`, and `meshes/`) into the
+/// staged layout, from whichever on-disk directory resolution already
+/// settled for it - a workspace crate directory or a registry package's
+/// extraction directory `cargo metadata` reported. Both sources are read the
+/// same way: resolution is the only place that knows which is which.
+fn stage_component_bundles(candidate: &Path, resolved: &ResolvedRobot) -> Result<()> {
+    let mut staged = std::collections::BTreeSet::new();
+    for component in &resolved.components {
+        let component_id = &component.source_name;
+        if !staged.insert(component_id.clone()) {
+            continue;
+        }
+        let source_dir = component
+            .assets
+            .path_override()
+            .with_context(|| format!("failed to locate component assets for '{component_id}'"))?;
+        // Schema gate every referenced component document before it is
+        // staged: verify the declared `component/vX` revision this CLI
+        // supports, then strict-parse it, so an unknown field or unsupported
+        // revision fails here - naming the exact file - instead of being
+        // copied through silently (#936, finding 5).
+        gate_component_document(source_dir, component_id)?;
+        let dest_dir = candidate.join("components").join(component_id);
+        if source_dir == dest_dir {
+            continue;
+        }
+        copy_component_bundle_files(source_dir, &dest_dir)?;
+    }
+    Ok(())
+}
+
+fn gate_component_document(source_dir: &Path, component_id: &str) -> Result<()> {
+    let component_file = source_dir.join(COMPONENT_FILE);
+    phoxal_cli_core::schema::ensure_supported_revision(
+        &component_file,
+        phoxal_cli_core::schema::DocumentKind::Component,
+    )?;
+    phoxal::model::component::Component::read_from_dir(source_dir).with_context(|| {
+        format!(
+            "component '{component_id}' failed strict parsing of {}",
+            component_file.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn copy_component_bundle_files(source_dir: &Path, dest_dir: &Path) -> Result<()> {
+    fs::create_dir_all(dest_dir)
+        .with_context(|| format!("failed to create {}", dest_dir.display()))?;
+
+    let component_file = source_dir.join(COMPONENT_FILE);
+    fs::copy(&component_file, dest_dir.join(COMPONENT_FILE)).with_context(|| {
+        format!(
+            "failed to stage component metadata {} to {}",
+            component_file.display(),
+            dest_dir.display()
+        )
+    })?;
+
+    for optional_file in COMPONENT_OPTIONAL_FILES {
+        let source_file = source_dir.join(optional_file);
+        if !source_file.is_file() {
+            continue;
+        }
+        fs::copy(&source_file, dest_dir.join(optional_file)).with_context(|| {
+            format!(
+                "failed to stage {} to {}",
+                source_file.display(),
+                dest_dir.display()
+            )
+        })?;
+    }
+
+    let meshes_source = source_dir.join(MESHES_DIR);
+    if meshes_source.is_dir() {
+        copy_dir_recursive(&meshes_source, &dest_dir.join(MESHES_DIR))?;
+    }
+    Ok(())
 }
 
 fn ensure_safe_relative_path(path: &Path, label: &str) -> Result<()> {
@@ -419,10 +482,9 @@ fn validate_candidate(
     resolved: &ResolvedRobot,
     compiled: &phoxal::model::robot::v0::Robot,
 ) -> Result<()> {
-    // Resolution already ran the model's semantic validation against the
-    // suite's platform names. Reparse the serialized candidate here to prove
-    // the on-disk manifest is complete and strict without losing that
-    // owner-specific validation context.
+    // Resolution already ran the model's semantic validation. Reparse the
+    // serialized candidate here to prove the on-disk manifest is complete
+    // and strict without losing that owner-specific validation context.
     let staged = phoxal::model::robot::Robot::parse_from_dir(candidate)
         .context("compiled runtime robot.yaml failed strict parsing")?;
     ensure!(
@@ -537,12 +599,12 @@ mod tests {
     use super::*;
     use crate::host_paths::test_support::ScratchPhoxalHome;
     use crate::resolver::host_target_triple;
+    use phoxal_cli_core::project::catalog::ArtifactKind;
     use phoxal_cli_core::project::launch_plan::ParticipantExecution;
     use phoxal_cli_core::project::resolver::{
         ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource, ResolvedRobot,
         ResolvedUserRuntime,
     };
-    use phoxal_cli_core::project::suite::ArtifactKind;
     use std::os::unix::fs::MetadataExt;
 
     fn resolved_robot() -> Result<ResolvedRobot> {
@@ -627,7 +689,7 @@ robot:
         let resolved = resolved_robot()?;
         let staged = stage_runtime_layout(project.path(), &resolved)?;
         assert_eq!(staged, layout_path(project.path(), &resolved));
-        assert!(staged.starts_with(project.path().join(".phoxal/build")));
+        assert!(staged.starts_with(project.path().join(".phoxal/bundle")));
 
         assert!(staged.join("robot.yaml").is_file());
         assert_eq!(
@@ -646,12 +708,7 @@ robot:
         fs::write(staged.join("stale"), "old")?;
         stage_runtime_layout(project.path(), &resolved)?;
         assert!(!staged.join("stale").exists());
-        assert!(
-            !project
-                .path()
-                .join(format!(".phoxal/build/.{}.previous", resolved.target))
-                .exists()
-        );
+        assert!(!project.path().join(".phoxal/bundle.previous").exists());
         Ok(())
     }
 
@@ -809,7 +866,7 @@ robot:
             assert!(error.contains("robot structure must be a non-empty relative path"));
             assert!(!layout_path(project.path(), &resolved).exists());
 
-            let build_dir = project.path().join(".phoxal/build");
+            let build_dir = project.path().join(".phoxal");
             let candidates = fs::read_dir(&build_dir)?
                 .filter_map(std::result::Result::ok)
                 .filter(|entry| entry.file_name().to_string_lossy().contains("-candidate-"))
@@ -900,37 +957,12 @@ robot:
         Ok(())
     }
 
-    #[test]
-    fn resolve_vendored_binary_errors_with_update_hint_without_network() -> Result<()> {
-        let _scratch = ScratchPhoxalHome::new()?;
-        let descriptor = NativeArtifactDescriptor {
-            package_id: "phoxal/service-drive".to_string(),
-            kind: ArtifactKind::Service,
-            name: "drive".to_string(),
-            version: "0.36.0".to_string(),
-            url: String::new(),
-            sha256: String::new(),
-            size: 0,
-            binary_name: "phoxal-service-drive".to_string(),
-            target: Some(host_target_triple()),
-        };
-        let error = resolve_vendored_binary(&descriptor)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("phoxal update"),
-            "missing vendored artifact must point at `phoxal update`: {error}"
-        );
-        Ok(())
-    }
-
     /// Every participant, on every host - the darwin path included - gets a flat
     /// `bin/` entry; there is no `.app`-bundle carve-out (#936, finding D). A
-    /// robot participant is always a plain executable (a cargo-built binary or a
-    /// vendored flat artifact - vendored darwin artifacts are flat files too), so
-    /// even a tool whose source lives under a `.app`-shaped path is flattened
-    /// into `bin/` under its canonical identity, and the loader resolves it
-    /// there with no host-specific tolerance.
+    /// robot participant is always a plain executable (a cargo-built binary),
+    /// so even a tool whose source lives under a `.app`-shaped path is
+    /// flattened into `bin/` under its canonical identity, and the loader
+    /// resolves it there with no host-specific tolerance.
     #[test]
     fn a_participant_is_always_flattened_into_bin_even_on_darwin() -> Result<()> {
         let _scratch = ScratchPhoxalHome::new()?;
@@ -940,8 +972,8 @@ robot:
         let resolved = resolved_robot()?;
         let staged = stage_runtime_layout(project.path(), &resolved)?;
 
-        // A plain source executable, as a vendored darwin tool artifact or a
-        // cargo-built binary always is - never a `.app` bundle.
+        // A plain source executable, as a cargo-built binary always is -
+        // never a `.app` bundle.
         let source_dir = project.path().join("target/debug");
         fs::create_dir_all(&source_dir)?;
         let source = source_dir.join("phoxal-tool-joypad");
@@ -1004,7 +1036,8 @@ robot:
             "phoxal-tool-bus"
         );
         // A component driver is named by its component id and shared across
-        // every instance - whether built from source or resolved from the suite.
+        // every instance - whether built from source or resolved from the
+        // registry.
         for instance in ["left_drive", "right_drive"] {
             assert_eq!(
                 canonical_binary_name(&launch_record(
@@ -1038,7 +1071,7 @@ robot:
         let driver = target_dir.join("ddsm115-driver");
         fs::write(&driver, "DDSM")?;
 
-        // The source-overridden official lands at the vendored canonical name.
+        // The source-overridden official lands at the canonical name.
         let staged_drive = stage_participant_binary(
             &staged,
             &launch_record(
@@ -1114,8 +1147,8 @@ robot:
                 source: ResolvedComponentSource::Path {
                     path: PathBuf::from("components/ddsm115"),
                 },
-                path_override: None,
-                suite_runtime: None,
+                resolved_dir: Some(source.clone()),
+                registry_runtime: None,
             }),
             driver: None,
             has_driver: false,
@@ -1149,13 +1182,6 @@ robot:
             name: name.to_string(),
             package: format!("phoxal/{dir}-{name}"),
             kind,
-            version: "0.36.0".to_string(),
-            artifact_ref: "ref".to_string(),
-            sha256: None,
-            url: None,
-            size: None,
-            published: true,
-            published_triples: vec![host_target_triple()],
             path_override: None,
             train: "0.36.0".to_string(),
             target: Some(host_target_triple()),
@@ -1177,153 +1203,19 @@ robot:
             kind,
             name: short.to_string(),
             package: format!("phoxal/{dir}-{artifact}"),
-            requested: "0.36.0".to_string(),
-            resolved: "0.36.0".to_string(),
-            repo: "vendored".to_string(),
-            asset: "ref".to_string(),
             binary_name: official_binary_name(kind, artifact),
-            sha256: String::new(),
-            url: None,
-            size: None,
-            published: true,
             path_override: None,
             train: "0.36.0".to_string(),
             target: host_target_triple(),
         }
     }
 
-    /// Place a plain (non-`.app`) binary in the project-vendored artifact store
-    /// under the descriptor's active version, so `resolve_vendored_binary`
-    /// resolves it exactly as a `phoxal update` would have vendored it.
-    fn seed_vendored(descriptor: &NativeArtifactDescriptor, bytes: &[u8]) -> Result<()> {
-        let dir = crate::native_artifacts::artifact_exec_dir(descriptor)?;
-        fs::create_dir_all(&dir)?;
-        fs::write(dir.join(&descriptor.binary_name), bytes)?;
-        crate::native_artifacts::retarget_active(descriptor)?;
-        Ok(())
-    }
-
+    /// A source-overridden dormant official is built through `build_override`
+    /// and never reaches `cargo install` - this is the one materialization
+    /// path unit-testable with no network. The `cargo install` path itself is
+    /// covered by `crate::materialize`'s own command-construction tests.
     #[test]
-    fn complete_store_links_dormant_officials_and_router_and_keeps_participants() -> Result<()> {
-        let _scratch = ScratchPhoxalHome::new()?;
-        let project = tempfile::tempdir()?;
-        fs::create_dir_all(project.path().join("model"))?;
-        fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
-        let mut resolved = resolved_robot()?;
-        // `drive` is an active participant already linked into bin/; `motion` is
-        // a dormant official; the router and `tool-bus` are officials that never
-        // appear as plan participants.
-        resolved.platform_runtimes = vec![
-            platform_runtime("drive", ArtifactKind::Service),
-            platform_runtime("motion", ArtifactKind::Service),
-        ];
-        resolved.tools = vec![router_tool(), official_tool("tool-bus", ArtifactKind::Tool)];
-        let staged = stage_runtime_layout(project.path(), &resolved)?;
-
-        // The active participant is already present with distinctive bytes.
-        fs::create_dir_all(staged.join(BIN_DIR))?;
-        fs::write(staged.join("bin/phoxal-service-drive"), b"PARTICIPANT")?;
-
-        // Vendor the officials that are not already linked.
-        seed_vendored(
-            &NativeArtifactDescriptor::from_runtime(&resolved.platform_runtimes[1])?.unwrap(),
-            b"MOTION",
-        )?;
-        seed_vendored(
-            &NativeArtifactDescriptor::from_tool(&resolved.tools[0])?.unwrap(),
-            b"ROUTER",
-        )?;
-        seed_vendored(
-            &NativeArtifactDescriptor::from_tool(&resolved.tools[1])?.unwrap(),
-            b"BUS",
-        )?;
-
-        stage_complete_official_store(&staged, &resolved, |_, name| {
-            panic!("no source override expected for {name}")
-        })?;
-
-        // The pre-linked participant is left untouched.
-        assert_eq!(
-            fs::read_to_string(staged.join("bin/phoxal-service-drive"))?,
-            "PARTICIPANT"
-        );
-        // Every dormant official and the router are now present under their
-        // canonical identity names.
-        assert_eq!(
-            fs::read_to_string(staged.join("bin/phoxal-service-motion"))?,
-            "MOTION"
-        );
-        assert_eq!(
-            fs::read_to_string(staged.join("bin/phoxal-infrastructure-router"))?,
-            "ROUTER"
-        );
-        assert_eq!(
-            fs::read_to_string(staged.join("bin/phoxal-tool-bus"))?,
-            "BUS"
-        );
-        assert_eq!(
-            staged_router_binary(&staged),
-            staged.join("bin/phoxal-infrastructure-router")
-        );
-        Ok(())
-    }
-
-    /// `phoxal build --target <TRIPLE>` stages into `.phoxal/build/<triple>/` and
-    /// resolves the officials from the suite's per-target vendored blobs; when
-    /// those blobs are not vendored it fails with the "run `phoxal update`"
-    /// error, without ever touching the network - exactly like a host build.
-    #[test]
-    fn cross_target_official_store_points_at_phoxal_update_without_network() -> Result<()> {
-        let _scratch = ScratchPhoxalHome::new()?;
-        let project = tempfile::tempdir()?;
-        fs::create_dir_all(project.path().join("model"))?;
-        fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
-        let foreign = "aarch64-unknown-linux-gnu";
-        let mut resolved = resolved_robot()?;
-        resolved.target = foreign.to_string();
-        let mut drive = platform_runtime("drive", ArtifactKind::Service);
-        drive.target = Some(foreign.to_string());
-        resolved.platform_runtimes = vec![drive];
-
-        // Staging lands under the requested target triple, not the host.
-        let staged = stage_runtime_layout(project.path(), &resolved)?;
-        assert!(
-            staged.starts_with(project.path().join(".phoxal/build").join(foreign)),
-            "cross-target staging must land under .phoxal/build/{foreign}/: {}",
-            staged.display()
-        );
-
-        let error = stage_complete_official_store(&staged, &resolved, |_, name| {
-            panic!("no source override expected for {name}")
-        })
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("phoxal update"), "{error}");
-        Ok(())
-    }
-
-    #[test]
-    fn complete_store_errors_with_update_hint_for_a_missing_official() -> Result<()> {
-        let _scratch = ScratchPhoxalHome::new()?;
-        let project = tempfile::tempdir()?;
-        fs::create_dir_all(project.path().join("model"))?;
-        fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
-        let mut resolved = resolved_robot()?;
-        resolved.platform_runtimes = vec![platform_runtime("drive", ArtifactKind::Service)];
-        let staged = stage_runtime_layout(project.path(), &resolved)?;
-
-        let error = stage_complete_official_store(&staged, &resolved, |_, name| {
-            panic!("no source override expected for {name}")
-        })
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("phoxal update"), "{error}");
-        assert!(error.contains("phoxal-service-drive"), "{error}");
-        Ok(())
-    }
-
-    #[test]
-    fn complete_store_builds_source_overridden_dormant_officials() -> Result<()> {
+    fn materialize_builds_source_overridden_dormant_officials() -> Result<()> {
         let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
@@ -1338,7 +1230,7 @@ robot:
         let built = project.path().join("target/debug/robot-service-drive");
         fs::create_dir_all(built.parent().unwrap())?;
         fs::write(&built, "OVERRIDE")?;
-        stage_complete_official_store(&staged, &resolved, |crate_dir, name| {
+        materialize_official_store(&staged, &resolved, false, |crate_dir, name| {
             assert_eq!(crate_dir, Path::new("services/drive"));
             assert_eq!(name, "drive");
             Ok(built.clone())
@@ -1352,23 +1244,22 @@ robot:
     }
 
     #[test]
-    fn stage_router_binary_links_only_the_router() -> Result<()> {
+    fn stage_router_binary_links_only_the_router_when_source_overridden() -> Result<()> {
         let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
         let mut resolved = resolved_robot()?;
         resolved.platform_runtimes = vec![platform_runtime("drive", ArtifactKind::Service)];
-        resolved.tools = vec![router_tool()];
+        let mut router = router_tool();
+        router.path_override = Some(PathBuf::from("tools/infrastructure-router"));
+        resolved.tools = vec![router];
         let staged = stage_runtime_layout(project.path(), &resolved)?;
 
-        seed_vendored(
-            &NativeArtifactDescriptor::from_tool(&resolved.tools[0])?.unwrap(),
-            b"ROUTER",
-        )?;
-        stage_router_binary(&staged, &resolved, |_, name| {
-            panic!("no source override expected for {name}")
-        })?;
+        let built = project.path().join("target/debug/router");
+        fs::create_dir_all(built.parent().unwrap())?;
+        fs::write(&built, "ROUTER")?;
+        stage_router_binary(&staged, &resolved, false, |_, _| Ok(built.clone()))?;
 
         assert_eq!(
             fs::read_to_string(staged.join("bin/phoxal-infrastructure-router"))?,

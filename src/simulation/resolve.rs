@@ -25,7 +25,6 @@ use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::project::launch_plan::build_launch_plan;
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
-use phoxal_cli_core::project::suite::Suite;
 use phoxal_cli_core::simulation::world;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -42,27 +41,15 @@ pub(crate) fn resolve_project(
         .to_path_buf();
     let world_path = world::resolve_world(&project_root, &options.world)?;
     let robot = phoxal_cli_core::project::resolver::load_robot(&robot_path)?;
-    let suite = crate::commands::load_suite_for_robot_from_source(
-        options.suite_source.clone(),
-        &project_root,
-    )?;
 
     // Resolve Cargo-workspace component drivers for compile-time metadata and
     // for their crate-owned model assets. Physical drivers are never launched.
-    let resolved = resolve(
-        &robot,
-        &project_root,
-        suite.as_ref(),
-        ResolveOptions {
-            ..ResolveOptions::default()
-        },
-    )?;
+    let resolved = resolve(&robot, &project_root, ResolveOptions::default())?;
     Ok(ResolvedSimulation {
         robot_path,
         project_root,
         world_path,
         resolved,
-        suite,
     })
 }
 
@@ -74,28 +61,52 @@ pub(crate) fn build_checked_sim_launch_plan(
     project_root: &Path,
     world: &Path,
     resolved: &ResolvedRobot,
-    suite: Option<&Suite>,
+    offline: bool,
     run: RunIdentity,
 ) -> Result<LaunchPlan> {
-    let source_participants = sim_source_participants(project_root, resolved, suite)
+    let source_participants = sim_source_participants(project_root, resolved)
         .with_context(|| "failed to prepare source participants for simulation metadata")?;
     let metadata_source_participants = source_participants.clone();
-    // A Suite-sourced component driver is a platform ref here too (docs
-    // #21), exactly like `build`/`run` - synthesized from suite
-    // metadata rather than built from source. Only a Path/Git-overridden
-    // driver crate reaches the `build` closure below.
+    // A registry-sourced component driver is a platform ref here too (docs
+    // #21), exactly like `build`/`run` - materialized via `cargo install`
+    // rather than built from source. Only a Path/Git-overridden driver crate
+    // reaches the `build` closure below.
     let platform_refs = check_artifact_refs_from_resolved(resolved);
     let tool_participants = tool_participants_from_resolved(resolved)?;
-    let mut official_by_ref = resolved
+    let bundle_root = phoxal_cli_core::project::launch_plan::runtime_layout_dir(project_root);
+    // Materialize every official service, tool, and registry component
+    // driver this check needs metadata from, up front - the same
+    // `cargo install` path `run`/`build` use.
+    crate::stager::materialize_official_store(
+        &bundle_root,
+        resolved,
+        offline,
+        |crate_dir, name| {
+            crate::run::build_source_binary(crate_dir, name, &crate::Ui::from_env(), None)
+        },
+    )?;
+    for runtime in crate::check::component_driver_runtimes_by_ref(resolved).values() {
+        crate::stager::materialize_component_driver(&bundle_root, runtime, offline)?;
+    }
+    let bin_dir = bundle_root.join("bin");
+    let mut official_by_name = resolved
         .platform_runtimes
         .iter()
-        .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
+        .map(|runtime| {
+            (
+                phoxal_cli_core::project::resolver::official_binary_name(
+                    runtime.kind,
+                    &runtime.name,
+                ),
+                runtime,
+            )
+        })
         .collect::<BTreeMap<_, _>>();
-    official_by_ref.extend(crate::check::component_driver_runtimes_by_ref(resolved));
-    let tools_by_ref = resolved
+    official_by_name.extend(crate::check::component_driver_runtimes_by_ref(resolved));
+    let tools_by_name = resolved
         .tools
         .iter()
-        .map(|tool| (tool.asset.clone(), tool))
+        .map(|tool| (tool.binary_name.clone(), tool))
         .collect::<BTreeMap<_, _>>();
 
     let metadata_outcome = run_check_with_context(
@@ -105,15 +116,15 @@ pub(crate) fn build_checked_sim_launch_plan(
         CheckGraphContext {
             robot: Some(&resolved.robot),
         },
-        |artifact_ref| {
-            if let Some(runtime) = official_by_ref.get(artifact_ref) {
-                return extract_participant_report_from_staged_runtime(runtime);
+        |binary_name| {
+            if let Some(runtime) = official_by_name.get(binary_name) {
+                return extract_participant_report_from_staged_runtime(&bin_dir, runtime);
             }
-            if let Some(tool) = tools_by_ref.get(artifact_ref) {
-                return extract_participant_report_from_staged_tool(tool);
+            if let Some(tool) = tools_by_name.get(binary_name) {
+                return extract_participant_report_from_staged_tool(&bin_dir, tool);
             }
             Err(anyhow!(
-                "resolved official artifact {artifact_ref} is not in the suite"
+                "resolved official artifact {binary_name} was not materialized into bin/"
             ))
         },
         fetch_participant_report_from_tool,
@@ -128,7 +139,7 @@ pub(crate) fn build_checked_sim_launch_plan(
 
     let mut checked_participants = metadata_outcome.checked_participants.clone();
     remap_simulator_participant_ids(&mut checked_participants, &resolved.robot.robot.id)?;
-    let official_simulators = official_simulator_participants(resolved)?;
+    let official_simulators = official_simulator_participants(project_root, resolved, offline)?;
     checked_participants.extend(official_simulators);
     let sim_participants = sim_checked_participants(&checked_participants);
     // The complete simulation surface is the only place this can be asked:
@@ -164,12 +175,55 @@ pub(crate) fn build_checked_sim_launch_plan(
 mod tests {
     use super::*;
     use phoxal::model::robot::v0::Robot;
+    use phoxal_cli_core::project::catalog::ArtifactKind;
     use phoxal_cli_core::project::launch_plan::RunIdentity;
     use phoxal_cli_core::project::launch_plan::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
+    use phoxal_cli_core::project::resolver::ResolvedPathOverride;
+    use phoxal_cli_core::project::resolver::ResolvedPathOverrideKind;
     use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
     use phoxal_cli_core::project::resolver::ResolvedUserRuntime;
-    use phoxal_cli_core::project::suite::ArtifactKind;
     use std::path::PathBuf;
+
+    /// A minimal Webots-controller fixture crate: a real `cargo build`-able
+    /// binary carrying a hand-written participant metadata linker section,
+    /// exactly like `write_invalid_config_service_fixture`. Used as a PATH
+    /// -overridden simulator so `official_simulator_participants` never
+    /// touches the network in tests (a registry-resolved simulator would).
+    fn write_simulator_fixture(dir: &Path) -> PathBuf {
+        let crate_dir = dir.join(SIMULATOR_CONTROLLER_ARTIFACT_NAME);
+        std::fs::create_dir_all(crate_dir.join("src")).expect("create fixture crate dirs");
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"fixture-{SIMULATOR_CONTROLLER_ARTIFACT_NAME}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"phoxal-simulator-{SIMULATOR_CONTROLLER_ARTIFACT_NAME}\"\npath = \"src/main.rs\"\n"
+            ),
+        )
+        .expect("write fixture Cargo.toml");
+        std::fs::write(
+            crate_dir.join("Cargo.lock"),
+            format!(
+                "version = 4\n\n[[package]]\nname = \"fixture-{SIMULATOR_CONTROLLER_ARTIFACT_NAME}\"\nversion = \"0.1.0\"\n"
+            ),
+        )
+        .expect("write fixture Cargo.lock");
+        let json = format!(
+            r#"{{"id":"{SIMULATOR_CONTROLLER_ARTIFACT_NAME}","config_schema":{{"type":"null"}}}}"#
+        );
+        let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
+        let len = json.len();
+        std::fs::write(
+            crate_dir.join("src/main.rs"),
+            format!(
+                "#[used]\n\
+                 #[cfg_attr(target_os = \"macos\", unsafe(link_section = \"__DATA,__phoxal_meta\"))]\n\
+                 #[cfg_attr(not(target_os = \"macos\"), unsafe(link_section = \".phoxal_meta\"))]\n\
+                 static PHOXAL_META: [u8; {len}] = *b\"{escaped}\";\n\n\
+                 fn main() {{}}\n"
+            ),
+        )
+        .expect("write fixture main.rs");
+        crate_dir
+    }
 
     /// A minimal single-service robot. Cross-references between `kinematic`
     /// and `components` are never validated by `Robot::parse_from_string`
@@ -243,12 +297,14 @@ services:
     /// A `ResolvedRobot` carrying exactly one user service (`avoid`, built
     /// from `write_invalid_config_service_fixture`) whose robot.yaml config
     /// (`{"gain": "fast"}`) violates that service's own emitted schema
-    /// (`gain` must be a number), plus one official simulator (bypassed via
-    /// the `#[cfg(test)]` `https://example.invalid/` staging shortcut in
-    /// `check::extract_participant_report_from_staged_runtime`, the same
-    /// technique `check::tests` already uses) so `ensure_exactly_one_simulator`
-    /// is satisfied without touching the network.
-    fn resolved_robot_with_invalid_service_config(crate_dir: PathBuf) -> Result<ResolvedRobot> {
+    /// (`gain` must be a number), plus one PATH-overridden simulator (built
+    /// from `write_simulator_fixture`) so `ensure_exactly_one_simulator` is
+    /// satisfied without ever touching the network (a registry-resolved
+    /// simulator would `cargo install` for real).
+    fn resolved_robot_with_invalid_service_config(
+        crate_dir: PathBuf,
+        simulator_dir: PathBuf,
+    ) -> Result<ResolvedRobot> {
         let mut robot = Robot::parse_from_string(FIXTURE_ROBOT)?;
         robot
             .services
@@ -266,14 +322,7 @@ services:
                 name: SIMULATOR_CONTROLLER_ARTIFACT_NAME.to_string(),
                 package: "phoxal/simulator-webots-controller".to_string(),
                 kind: ArtifactKind::Simulator,
-                version: "0.1.0".to_string(),
-                artifact_ref: "simulator-webots-controller-v0.1.0.tar.zst".to_string(),
-                sha256: None,
-                url: Some("https://example.invalid/webots-controller".to_string()),
-                size: None,
-                published: true,
-                published_triples: vec![target.clone()],
-                path_override: None,
+                path_override: Some(simulator_dir.clone()),
                 train: "0.42.0".to_string(),
                 target: Some(target),
             }],
@@ -286,7 +335,12 @@ services:
             undeclared_runtimes: Vec::new(),
             components: Vec::new(),
             tools: Vec::new(),
-            path_overrides: Vec::new(),
+            path_overrides: vec![ResolvedPathOverride {
+                key: "phoxal/simulator-webots-controller".to_string(),
+                kind: ResolvedPathOverrideKind::Simulator,
+                artifact_name: SIMULATOR_CONTROLLER_ARTIFACT_NAME.to_string(),
+                path: simulator_dir,
+            }],
         })
     }
 
@@ -302,13 +356,14 @@ services:
     fn rejects_a_user_service_whose_config_violates_its_own_schema() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let crate_dir = write_invalid_config_service_fixture(temp.path());
-        let resolved = resolved_robot_with_invalid_service_config(crate_dir)?;
+        let simulator_dir = write_simulator_fixture(temp.path());
+        let resolved = resolved_robot_with_invalid_service_config(crate_dir, simulator_dir)?;
 
         let result = build_checked_sim_launch_plan(
             temp.path(),
             &temp.path().join("world.wbt"),
             &resolved,
-            None,
+            false,
             RunIdentity::default(),
         );
 

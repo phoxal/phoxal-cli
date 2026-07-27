@@ -110,7 +110,7 @@ fn driver_subset_is_strict() -> Result<()> {
         &RunOptions {
             drivers: DriversMode::On,
             drivers_subset: vec!["imu".to_string()],
-            suite_source: None,
+            offline: false,
         },
         &available,
     )?;
@@ -129,7 +129,7 @@ fn driver_subset_is_strict() -> Result<()> {
         &RunOptions {
             drivers: DriversMode::On,
             drivers_subset: vec!["missing".to_string()],
-            suite_source: None,
+            offline: false,
         },
         &available,
     )
@@ -147,7 +147,7 @@ fn drivers_off_selects_no_drivers() -> Result<()> {
         &RunOptions {
             drivers: DriversMode::Off,
             drivers_subset: Vec::new(),
-            suite_source: None,
+            offline: false,
         },
         &available_drivers(&["imu"]),
     )?;
@@ -174,7 +174,7 @@ fn excluded_drivers_are_summarized_with_reasons() -> Result<()> {
         &RunOptions {
             drivers: DriversMode::Off,
             drivers_subset: Vec::new(),
-            suite_source: None,
+            offline: false,
         },
         &available,
     )?;
@@ -193,7 +193,7 @@ fn excluded_drivers_are_summarized_with_reasons() -> Result<()> {
         &RunOptions {
             drivers: DriversMode::On,
             drivers_subset: vec!["imu".to_string()],
-            suite_source: None,
+            offline: false,
         },
         &available,
     )?;
@@ -218,7 +218,7 @@ fn excluded_drivers_are_summarized_with_reasons() -> Result<()> {
         &RunOptions {
             drivers: DriversMode::On,
             drivers_subset: Vec::new(),
-            suite_source: None,
+            offline: false,
         },
         &available,
     )?;

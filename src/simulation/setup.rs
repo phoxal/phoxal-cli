@@ -47,6 +47,7 @@ pub(crate) async fn live_simulate_setup(
         mpsc::Sender<SupervisorAction>,
         mpsc::Receiver<SupervisorAction>,
     )>,
+    offline: bool,
     run: RunIdentity,
 ) -> Result<LiveSimSetup> {
     let ensure_active = || {
@@ -95,6 +96,7 @@ pub(crate) async fn live_simulate_setup(
         &crate::run::DriverPolicy::drivers_off_for_sim(),
         &board,
         &mut specs,
+        offline,
         &ui,
     )?;
     // The router launches from the staged `bin/` entry like every other
@@ -102,6 +104,7 @@ pub(crate) async fn live_simulate_setup(
     crate::stager::stage_router_binary(
         &staged_root,
         &sim_source(&sim).resolved,
+        offline,
         |crate_dir, name| crate::run::build_source_binary(crate_dir, name, &ui, None),
     )
     .context("failed to stage the infrastructure router into the simulation bin store")?;
@@ -127,7 +130,7 @@ pub(crate) async fn live_simulate_setup(
     crate::run::apply_session_connect(&mut sim.plan, &mut specs, &connect);
     ensure_active()?;
     let webots_spec =
-        stage_and_prepare_webots_spec(&ui, &sim, &staged_root, &connect, run.execution())?;
+        stage_and_prepare_webots_spec(&ui, &sim, &staged_root, &connect, offline, run.execution())?;
     let mut background_tasks = crate::run::AbortTasks::default();
     ui.info(format!(
         "Webots profile: webots; world: {}; project: {}",

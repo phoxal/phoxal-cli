@@ -1,23 +1,20 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 
-use crate::native_artifacts;
-use phoxal_cli_core::artifacts::{NativeArtifactDescriptor, ProvisioningMode};
-use phoxal_cli_core::project::resolver::{
-    ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
-};
-use phoxal_cli_core::project::tooling::resolve_project_path;
+use phoxal_cli_core::project::resolver::ResolvedComponent;
 
 /// Locate the on-disk source directory for a component instance's resolved
-/// `component_driver` package (the crate `build`, `run`, and `simulation
-/// webots run` build). Errors
-/// if the instance has no resolved driver package (a driverless instance, or
-/// one whose `driver:` block failed to resolve - callers only reach this for
-/// instances known to have a driver).
+/// `component_driver` package: a workspace/path-overridden crate the CLI
+/// builds. Only reached for a `Path`-sourced driver - a registry-sourced
+/// driver materializes straight to a `bin/` binary via `cargo install` and
+/// never needs a directory (see `crate::stager::materialize_component_driver`).
+/// Errors if the instance has no resolved driver package (a driverless
+/// instance, or one whose `driver:` block failed to resolve - callers only
+/// reach this for instances known to have a driver).
 pub(crate) fn component_driver_crate_dir(
     component: &ResolvedComponent,
-    project_root: &Path,
+    _project_root: &Path,
 ) -> Result<PathBuf> {
     let driver = component.driver.as_ref().ok_or_else(|| {
         anyhow!(
@@ -25,55 +22,37 @@ pub(crate) fn component_driver_crate_dir(
             component.instance
         )
     })?;
-    resolved_component_package_dir(driver, project_root)
+    driver
+        .path_override()
+        .map(Path::to_path_buf)
+        .with_context(|| {
+            format!(
+                "component instance '{}' driver package has no on-disk directory; it materializes \
+             via `cargo install`, not from a crate directory",
+                component.instance
+            )
+        })
 }
 
 /// Locate the on-disk source directory for a component instance's resolved
 /// `component_assets` package (`component.yaml`, `structure.urdf`,
-/// `simulation.yaml`, `meshes/`). `None` when the component is driverless
+/// `simulation.yaml`, `meshes/`). Resolution already settled this directory -
+/// a workspace crate directory or a registry package's extraction directory
+/// `cargo metadata` reported against the generated
+/// `.phoxal/resolve/Cargo.toml` - so both sources collapse into the same
+/// single read.
 pub(crate) fn component_assets_dir(
     component: &ResolvedComponent,
-    project_root: &Path,
+    _project_root: &Path,
 ) -> Result<PathBuf> {
-    resolved_component_package_dir(&component.assets, project_root)
-}
-
-fn resolved_component_package_dir(
-    package: &ResolvedComponentPackage,
-    project_root: &Path,
-) -> Result<PathBuf> {
-    match &package.source {
-        ResolvedComponentSource::Path { path } => Ok(resolve_project_path(project_root, path)),
-        ResolvedComponentSource::Suite => suite_component_package_dir(package),
-    }
-}
-
-/// Fetch and unpack a suite-resolved component package's release asset via
-/// the identical native-staging path services/tools already use
-/// (`native_artifacts::stage_runtime`/`stage_descriptor`), and return its
-/// local exec directory: the unpacked assets bundle root
-/// (`component.yaml`, `structure.urdf`, `simulation.yaml`, `meshes/`) for a
-/// `component_assets` package, or the directory containing the staged driver
-/// binary for a `component_driver` package.
-/// `MissingOnly` mode: reuses an already-staged local unpack without touching
-/// the network again, matching how a service's cache is consulted.
-fn suite_component_package_dir(package: &ResolvedComponentPackage) -> Result<PathBuf> {
-    let Some(runtime) = &package.suite_runtime else {
-        bail!(
-            "component package {} resolves from the artifact suite but has no release asset for \
-             this target yet; it cannot be staged locally. Wait for it to publish or add a \
-             components/ workspace crate.",
-            package.package
-        );
-    };
-    let descriptor = NativeArtifactDescriptor::from_runtime(runtime)?.ok_or_else(|| {
-        anyhow!(
-            "component package {} has no release asset for this target yet; it cannot be staged locally. \
-             Wait for it to publish or add a components/ workspace crate.",
-            package.package
-        )
-    })?;
-    native_artifacts::stage_descriptor(None, &descriptor, ProvisioningMode::MissingOnly)
-        .with_context(|| format!("failed to stage component package {}", package.package))?;
-    native_artifacts::artifact_exec_dir(&descriptor)
+    component
+        .assets
+        .path_override()
+        .map(Path::to_path_buf)
+        .with_context(|| {
+            format!(
+                "component instance '{}' has no resolved component_assets directory",
+                component.instance
+            )
+        })
 }

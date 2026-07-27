@@ -1,14 +1,67 @@
 //! CLI-owned official runtime catalog.
 //!
-//! The immutable suite is only an inventory of bytes. Runtime membership
-//! belongs to this CLI release, which applies the CLI-internal failure policy.
+//! Official services, tools, and the infrastructure router are never
+//! discovered from a network inventory: they are compiled into this CLI
+//! release. `robot.yaml` declares USER services/tools and component
+//! instances; the official set comes from here alone (organization#951 WS4).
 
-use std::collections::{BTreeMap, BTreeSet};
+/// The registry name every `cargo install`/`cargo metadata` invocation
+/// against official packages registers under. Robot projects carry no
+/// registry configuration of their own - the CLI supplies it on every
+/// invocation via `--config`.
+pub const REGISTRY_NAME: &str = "phoxal";
 
-use anyhow::{Context, Result, bail};
-use semver::Version;
+/// The static margo registry official packages publish to
+/// (organization#951 WS1/WS3).
+pub const REGISTRY_INDEX: &str = "sparse+https://phoxal.github.io/registry/";
 
-use super::suite::{ArtifactKind, Kind, Suite};
+/// The `--config` argument that injects the registry index into a `cargo`
+/// invocation that never reads a project's own `.cargo/config.toml` for it.
+#[must_use]
+pub fn registry_config_arg() -> String {
+    format!("registries.{REGISTRY_NAME}.index=\"{REGISTRY_INDEX}\"")
+}
+
+/// Project the catalog's provider-qualified package identity
+/// (`phoxal/service-drive`) to the Cargo package name it is published under
+/// (`phoxal-service-drive`). Catalog identities are not Cargo package names.
+#[must_use]
+pub fn cargo_package_name(catalog_id: &str) -> String {
+    catalog_id.replace('/', "-")
+}
+
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    Service,
+    ComponentAssets,
+    ComponentDriver,
+    Tool,
+    Simulator,
+    Infrastructure,
+}
+
+impl ArtifactKind {
+    #[must_use]
+    pub const fn wire_kind(self) -> &'static str {
+        match self {
+            Self::Service => "service",
+            Self::ComponentAssets => "component_assets",
+            Self::ComponentDriver => "driver",
+            Self::Tool => "tool",
+            Self::Simulator => "simulator",
+            Self::Infrastructure => "infrastructure",
+        }
+    }
+}
+
+impl std::fmt::Display for ArtifactKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.wire_kind())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OfficialRuntime {
@@ -104,202 +157,33 @@ pub const WEBOTS: &[OfficialRuntime] = &[OfficialRuntime {
     kind: ArtifactKind::Simulator,
 }];
 
-/// First framework train whose inventory is defined by this complete catalog.
-/// This advances with the CLI's exact `phoxal` dependency; newer trains remain
-/// subject to the same completeness guarantee.
-const COMPLETE_CATALOG_SINCE: &str = phoxal::VERSION;
-
 pub fn for_webots(webots: bool) -> impl Iterator<Item = &'static OfficialRuntime> {
     NATIVE
         .iter()
         .chain(webots.then_some(WEBOTS).into_iter().flatten())
 }
 
-/// Refuse a train whose official inventory this CLI cannot interpret.
-pub fn validate_suite_inventory(suite: &Suite) -> Result<()> {
-    let known = for_webots(true)
-        .map(|runtime| (runtime.package, runtime.kind))
-        .collect::<BTreeMap<_, _>>();
-    let unknown = suite
-        .artifacts
-        .iter()
-        .filter(|artifact| artifact.kind != Kind::Component)
-        .filter(|artifact| !known.contains_key(artifact.id.as_str()))
-        .map(|artifact| artifact.id.as_str())
-        .collect::<Vec<_>>();
-    if !unknown.is_empty() {
-        bail!(
-            "framework train {} contains unknown official package(s): {}. Update phoxal-cli before using this train",
-            suite.version,
-            unknown.join(", ")
-        );
-    }
-    let mismatched = suite
-        .artifacts
-        .iter()
-        .filter(|artifact| artifact.kind != Kind::Component)
-        .filter_map(|artifact| {
-            let expected = known.get(artifact.id.as_str())?;
-            let actual = suite_kind(*expected);
-            (artifact.kind != actual).then(|| {
-                format!(
-                    "{} is {:?}, expected {:?}",
-                    artifact.id, artifact.kind, actual
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    if !mismatched.is_empty() {
-        bail!(
-            "framework train {} has incorrect official package kind(s): {}",
-            suite.version,
-            mismatched.join(", ")
-        );
-    }
-    let present = suite
-        .artifacts
-        .iter()
-        .filter(|artifact| artifact.kind != Kind::Component)
-        .map(|artifact| artifact.id.as_str())
-        .collect::<BTreeSet<_>>();
-    let missing = known
-        .keys()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .difference(&present)
-        .copied()
-        .collect::<Vec<_>>();
-    let version = Version::parse(&suite.version)
-        .with_context(|| format!("suite version {} is not semantic", suite.version))?;
-    let baseline =
-        Version::parse(COMPLETE_CATALOG_SINCE).expect("phoxal package version is semantic");
-    if version >= baseline && !missing.is_empty() {
-        bail!(
-            "framework train {} is missing CLI-required official package(s): {}",
-            suite.version,
-            missing.join(", ")
-        );
-    }
-    Ok(())
-}
-
-const fn suite_kind(kind: ArtifactKind) -> Kind {
-    match kind {
-        ArtifactKind::Service => Kind::Service,
-        ArtifactKind::Tool => Kind::Tool,
-        ArtifactKind::Simulator => Kind::Simulator,
-        ArtifactKind::Infrastructure => Kind::Infrastructure,
-        ArtifactKind::ComponentAssets | ArtifactKind::ComponentDriver => Kind::Component,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::suite::{fixture_blob_for_tests, fixture_suite_for_tests};
-    use phoxal::suite::Artifact;
 
     #[test]
-    fn unknown_official_package_requests_cli_update() {
-        let mut suite = fixture_suite_for_tests(Vec::new());
-        suite.artifacts.push(Artifact {
-            id: "phoxal/tool-future".to_string(),
-            kind: Kind::Tool,
-            targets: [(
-                "x86_64-unknown-linux-gnu".to_string(),
-                fixture_blob_for_tests("https://example.invalid/future.tar.gz", &"0".repeat(64), 1),
-            )]
-            .into_iter()
-            .collect(),
-            assets: None,
-        });
-        let error = validate_suite_inventory(&suite).unwrap_err();
-        assert!(error.to_string().contains("Update phoxal-cli"));
-        assert!(error.to_string().contains("phoxal/tool-future"));
-    }
-
-    #[test]
-    fn current_train_requires_every_catalog_package() {
-        let mut suite = fixture_suite_for_tests(Vec::new());
-        suite.version = COMPLETE_CATALOG_SINCE.to_string();
-        let error = validate_suite_inventory(&suite).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("missing CLI-required official package")
+    fn cargo_package_name_projects_catalog_identity() {
+        assert_eq!(
+            cargo_package_name("phoxal/service-drive"),
+            "phoxal-service-drive"
         );
-        assert!(error.to_string().contains("phoxal/service-drive"));
-        assert!(error.to_string().contains("phoxal/tool-joypad"));
-        assert!(
-            error
-                .to_string()
-                .contains("phoxal/simulator-webots-controller")
+        assert_eq!(
+            cargo_package_name("phoxal/component-ddsm115"),
+            "phoxal-component-ddsm115"
         );
     }
 
     #[test]
-    fn current_train_accepts_the_exact_controller_only_webots_catalog() {
-        let artifacts = for_webots(true)
-            .map(|runtime| Artifact {
-                id: runtime.package.to_string(),
-                kind: suite_kind(runtime.kind),
-                targets: [(
-                    "x86_64-unknown-linux-gnu".to_string(),
-                    fixture_blob_for_tests(
-                        &format!("https://example.invalid/{}.tar.gz", runtime.package),
-                        &"0".repeat(64),
-                        1,
-                    ),
-                )]
-                .into_iter()
-                .collect(),
-                assets: None,
-            })
-            .collect();
-        let suite = Suite::new(COMPLETE_CATALOG_SINCE.to_string(), artifacts);
-        validate_suite_inventory(&suite).expect("the new framework train is exact");
-        assert!(
-            !suite
-                .artifacts
-                .iter()
-                .any(|artifact| artifact.id == "phoxal/simulator-webots-supervisor")
+    fn registry_config_arg_carries_the_live_static_registry() {
+        assert_eq!(
+            registry_config_arg(),
+            "registries.phoxal.index=\"sparse+https://phoxal.github.io/registry/\""
         );
-    }
-
-    #[test]
-    fn newer_train_keeps_the_catalog_completeness_gate() {
-        let mut suite = fixture_suite_for_tests(Vec::new());
-        let mut next = Version::parse(COMPLETE_CATALOG_SINCE).unwrap();
-        next.patch += 1;
-        suite.version = next.to_string();
-        let error = validate_suite_inventory(&suite).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("missing CLI-required official package")
-        );
-    }
-
-    #[test]
-    fn official_package_kind_must_match_the_catalog() {
-        let mut suite = fixture_suite_for_tests(Vec::new());
-        suite.artifacts.push(Artifact {
-            id: "phoxal/service-drive".to_string(),
-            kind: Kind::Tool,
-            targets: [(
-                "x86_64-unknown-linux-gnu".to_string(),
-                fixture_blob_for_tests("https://example.invalid/drive.tar.gz", &"0".repeat(64), 1),
-            )]
-            .into_iter()
-            .collect(),
-            assets: None,
-        });
-        let error = validate_suite_inventory(&suite).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("incorrect official package kind")
-        );
-        assert!(error.to_string().contains("phoxal/service-drive"));
     }
 }

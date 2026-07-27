@@ -63,6 +63,10 @@ fn removed_command_surfaces_stay_removed() {
         vec!["phoxal", "simulation", "webots", "run", "default", "--pull"],
         vec!["phoxal", "validate", "--allow-user-service-drift"],
         vec!["phoxal", "deploy", "--dry-run", "--target", "aarch64"],
+        // `phoxal update` is deleted (organization#951 WS4): materialization
+        // is Cargo's job now, not a project-vendoring command.
+        vec!["phoxal", "update"],
+        vec!["phoxal", "update", "--dry-run"],
         vec!["phoxal", "robot", "new", "rover"],
         vec!["phoxal", "robot"],
         vec!["phoxal", "pull"],
@@ -238,8 +242,7 @@ fn parses_bus_backed_status_commands() {
 }
 
 #[test]
-fn parses_update() {
-    assert!(Cli::try_parse_from(["phoxal", "update", "--dry-run"]).is_ok());
+fn rejects_unknown_global_flags() {
     assert!(Cli::try_parse_from(["phoxal", "--plain", "version"]).is_err());
     assert!(Cli::try_parse_from(["phoxal", "version", "--plain"]).is_err());
     assert!(Cli::try_parse_from(["phoxal", "--quiet", "version"]).is_err());

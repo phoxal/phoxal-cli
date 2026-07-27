@@ -364,15 +364,16 @@ mod tests {
     use phoxal::check as graph_check;
 
     use super::super::super::catalog;
+    use super::super::super::catalog::ArtifactKind;
     use super::super::super::launch_plan::{
         CheckedRobotLaunchInput, LaunchMode, ParticipantExecution, PlanRevision, build_launch_plan,
         runtime_layout_dir,
     };
     use super::super::super::resolver::{
-        ResolvedComponent, ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool,
-        ResolvedUserRuntime, official_binary_name,
+        ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
+        ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, ResolvedUserRuntime,
+        official_binary_name,
     };
-    use super::super::super::suite::ArtifactKind;
     use super::super::RuntimeLayout;
     use super::*;
     use crate::check::participant_metadata::host_architecture;
@@ -525,13 +526,6 @@ services:
             name: short.to_string(),
             package: format!("phoxal/service-{short}"),
             kind: ArtifactKind::Service,
-            version: "0.36.0".to_string(),
-            artifact_ref: "ref".to_string(),
-            sha256: None,
-            url: None,
-            size: None,
-            published: true,
-            published_triples: Vec::new(),
             path_override: None,
             train: "0.36.0".to_string(),
             target: None,
@@ -544,15 +538,7 @@ services:
             kind: ArtifactKind::Tool,
             name: name.to_string(),
             package: format!("phoxal/tool-{short}"),
-            requested: "0.36.0".to_string(),
-            resolved: "0.36.0".to_string(),
-            repo: "vendored".to_string(),
-            asset: "ref".to_string(),
             binary_name: official_binary_name(ArtifactKind::Tool, short),
-            sha256: String::new(),
-            url: None,
-            size: None,
-            published: true,
             path_override: None,
             train: "0.36.0".to_string(),
             target: "triple".to_string(),
@@ -563,12 +549,12 @@ services:
         ResolvedComponent {
             instance: instance.to_string(),
             source_name: "ddsm115".to_string(),
-            assets: crate::project::resolver::ResolvedComponentPackage {
+            assets: ResolvedComponentPackage {
                 package: "phoxal/component-fixture".to_string(),
-                kind: crate::project::suite::ArtifactKind::ComponentAssets,
-                source: crate::project::resolver::ResolvedComponentSource::Suite,
-                path_override: None,
-                suite_runtime: None,
+                kind: ArtifactKind::ComponentAssets,
+                source: ResolvedComponentSource::Registry,
+                resolved_dir: None,
+                registry_runtime: None,
             },
             driver: None,
             has_driver: true,
@@ -598,7 +584,7 @@ services:
     #[test]
     fn source_and_bundle_produce_identical_process_graphs() -> Result<()> {
         let project = tempfile::tempdir()?;
-        let layout_root = runtime_layout_dir(project.path(), "triple");
+        let layout_root = runtime_layout_dir(project.path());
         stage_layout(&layout_root, &[])?;
 
         // The legacy leg: a resolved graph whose officials are the CLI catalog,
@@ -716,7 +702,7 @@ services:
     #[test]
     fn staged_and_extracted_layout_construct_identical_graphs() -> Result<()> {
         let staged_project = tempfile::tempdir()?;
-        let staged_root = runtime_layout_dir(staged_project.path(), "triple");
+        let staged_root = runtime_layout_dir(staged_project.path());
         stage_layout(&staged_root, &[])?;
         let mut staged_plan = RuntimeLayout::construct_plan(
             &staged_root,
@@ -760,7 +746,7 @@ services:
     #[test]
     fn dormant_officials_are_planned_and_no_source_path_leaks() -> Result<()> {
         let project = tempfile::tempdir()?;
-        let layout_root = runtime_layout_dir(project.path(), "triple");
+        let layout_root = runtime_layout_dir(project.path());
         stage_layout(&layout_root, &[])?;
         let constructed = RuntimeLayout::construct_plan(
             &layout_root,
@@ -823,7 +809,7 @@ services:
     #[test]
     fn one_driver_binary_serves_every_instance() -> Result<()> {
         let project = tempfile::tempdir()?;
-        let layout_root = runtime_layout_dir(project.path(), "triple");
+        let layout_root = runtime_layout_dir(project.path());
         stage_layout(&layout_root, &[])?;
         let constructed = RuntimeLayout::construct_plan(
             &layout_root,
@@ -858,7 +844,7 @@ services:
     #[test]
     fn user_service_config_schema_pairing_is_surfaced() -> Result<()> {
         let project = tempfile::tempdir()?;
-        let layout_root = runtime_layout_dir(project.path(), "triple");
+        let layout_root = runtime_layout_dir(project.path());
         // The `mission` user-service binary carries a real object schema.
         let mission_meta = br#"{"id":"mission","config_schema":{"type":"object","properties":{"speed":{"type":"integer"}}}}"#;
         stage_layout(&layout_root, &[("mission", mission_meta)])?;
@@ -886,7 +872,7 @@ services:
     #[test]
     fn a_foreign_arch_binary_fails_naming_the_identity() -> Result<()> {
         let project = tempfile::tempdir()?;
-        let layout_root = runtime_layout_dir(project.path(), "triple");
+        let layout_root = runtime_layout_dir(project.path());
         stage_layout(&layout_root, &[])?;
         // Replace the mission binary with a foreign-architecture object file.
         let foreign = if host_architecture() == object::Architecture::X86_64 {
@@ -915,7 +901,7 @@ services:
     #[test]
     fn a_missing_binary_fails_naming_the_identity() -> Result<()> {
         let project = tempfile::tempdir()?;
-        let layout_root = runtime_layout_dir(project.path(), "triple");
+        let layout_root = runtime_layout_dir(project.path());
         stage_layout(&layout_root, &[])?;
         fs::remove_file(layout_root.join("bin/phoxal-service-drive"))?;
         let error = format!(
@@ -941,7 +927,7 @@ services:
     #[test]
     fn drivers_off_excludes_drivers_and_never_inspects_them() -> Result<()> {
         let project = tempfile::tempdir()?;
-        let layout_root = runtime_layout_dir(project.path(), "triple");
+        let layout_root = runtime_layout_dir(project.path());
         stage_layout(&layout_root, &[])?;
         // A foreign-architecture driver binary: inspection would hard-fail.
         let foreign = if host_architecture() == object::Architecture::X86_64 {
@@ -995,7 +981,7 @@ services:
     #[test]
     fn a_driver_subset_plans_only_the_selected_instances() -> Result<()> {
         let project = tempfile::tempdir()?;
-        let layout_root = runtime_layout_dir(project.path(), "triple");
+        let layout_root = runtime_layout_dir(project.path());
         stage_layout(&layout_root, &[])?;
         let constructed = RuntimeLayout::construct_plan(
             &layout_root,

@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 use tar::{Archive, EntryType, Header};
 
 /// The conventional extension of a built bundle. The default output for
-/// `phoxal build --target <TRIPLE>` is `<project>/.phoxal/build/<triple>.build.phoxal`.
+/// `phoxal build --target <TRIPLE>` is `<project>/.phoxal/<triple>.build.phoxal`.
 pub const BUILD_ARCHIVE_EXTENSION: &str = "build.phoxal";
 
 /// A fixed timestamp stamped on every archived entry so mtime never varies the

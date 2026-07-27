@@ -12,23 +12,41 @@ use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::project::launch_plan::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
 use phoxal_cli_core::project::launch_plan::simulator_controller_provider_id;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
-use phoxal_cli_core::project::suite::Suite;
 use std::path::Path;
 
 pub(crate) fn official_simulator_participants(
+    project_root: &Path,
     resolved: &ResolvedRobot,
+    offline: bool,
 ) -> Result<Vec<graph_check::ParticipantApis>> {
     let robot_id = resolved.robot.robot.id.as_str();
+    let simulation_root = phoxal_cli_core::project::launch_plan::simulation_root_dir(project_root);
+    let simulation_bin_dir = simulation_root.join("bin");
     let mut participants = Vec::new();
     for runtime in resolved.simulators.iter().filter(|runtime| {
         runtime.source_path().is_none() && runtime.name == SIMULATOR_CONTROLLER_ARTIFACT_NAME
     }) {
-        let raw = extract_participant_report_from_staged_runtime(runtime).with_context(|| {
+        // Self-sufficient like every other check-time metadata fetch: the
+        // controller materializes here (idempotent - `cargo install` is a
+        // fast no-op once already installed) rather than requiring a
+        // separate staging pass to have already run first.
+        let spec = crate::materialize::MaterializeSpec::new(
+            runtime.package.clone(),
+            runtime.train.clone(),
+        );
+        crate::materialize::cargo_install(&simulation_root, &spec, offline).with_context(|| {
             format!(
-                "failed to synthesize suite participant report for simulator {}",
+                "failed to materialize official simulator '{}'",
                 runtime.name
             )
         })?;
+        let raw = extract_participant_report_from_staged_runtime(&simulation_bin_dir, runtime)
+            .with_context(|| {
+                format!(
+                    "failed to extract participant report for simulator {}",
+                    runtime.name
+                )
+            })?;
         if raw.artifact.kind != "simulator" || raw.artifact.id != runtime.name {
             bail!(
                 "official simulator participant report artifact {} '{}' does not match expected simulator '{}'",
@@ -93,14 +111,12 @@ pub(crate) fn simulator_participant_id_for_resolved_artifact(
 }
 
 /// Simulate's source participants: identical to
-/// `source_participants_from_resolved` (a Suite-sourced driver is never a
+/// `source_participants_from_resolved` (a registry-sourced driver is never a
 /// source participant - see `component_driver_platform_refs_from_resolved`),
-/// sorted for deterministic checking and staging. `suite` is accepted for
-/// signature symmetry with the other `sim_*` helpers but no longer consulted.
+/// sorted for deterministic checking and staging.
 pub(crate) fn sim_source_participants(
     project_root: &Path,
     resolved: &ResolvedRobot,
-    _suite: Option<&Suite>,
 ) -> Result<Vec<SourceParticipant>> {
     let mut participants =
         source_participants_from_resolved(project_root, resolved, component_driver_crate_dir)?;

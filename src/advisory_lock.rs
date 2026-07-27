@@ -1,60 +1,11 @@
-//! Cross-process artifact-store locking.
+//! Cross-platform advisory file locking.
+//!
+//! Used by [`crate::supervisor::lock`] for the project-operation lock -
+//! Phoxal-owned state (the generated resolve manifest, candidate
+//! publication, bundle/simulation root replacement, Webots staging) that
+//! Cargo's own build-directory locking does not cover.
 
-use anyhow::Context;
-use anyhow::Result;
 use std::fs;
-use std::path::PathBuf;
-
-pub struct ArtifactStoreLock {
-    file: fs::File,
-    path: PathBuf,
-    exclusive: bool,
-}
-
-impl ArtifactStoreLock {
-    pub fn exclusive(command: &str) -> Result<Self> {
-        Self::acquire(true, command)
-    }
-
-    pub fn shared() -> Result<Self> {
-        Self::acquire(false, "staging")
-    }
-
-    fn acquire(exclusive: bool, command: &str) -> Result<Self> {
-        let store = crate::host_paths::artifacts_dir()?;
-        fs::create_dir_all(&store)?;
-        let path = store.join(".lock");
-        let mut options = fs::OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
-            options.custom_flags(FILE_FLAG_DELETE_ON_CLOSE);
-        }
-        let file = options.open(&path)?;
-        try_advisory_lock(&file, exclusive)
-            .with_context(|| format!("artifact store lock is held (requested by {command})"))?;
-        Ok(Self {
-            file,
-            path,
-            exclusive,
-        })
-    }
-}
-
-impl Drop for ArtifactStoreLock {
-    fn drop(&mut self) {
-        if !self.exclusive {
-            let _ = unlock_advisory(&self.file);
-            if try_advisory_lock(&self.file, true).is_err() {
-                return;
-            }
-        }
-        fs::remove_file(&self.path).ok();
-        let _ = unlock_advisory(&self.file);
-    }
-}
 
 #[cfg(unix)]
 pub(crate) fn try_advisory_lock(file: &fs::File, exclusive: bool) -> std::io::Result<()> {

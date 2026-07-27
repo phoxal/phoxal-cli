@@ -22,7 +22,7 @@ impl Doctor {
         );
         println!("train anchor: Cargo.toml and Cargo.lock are coherent");
         if train.is_published() {
-            if app.offline || phoxal_cli_core::project::suite::offline_from_env() {
+            if app.offline || crate::context::offline_from_env() {
                 println!("framework facade: crates.io probe skipped in offline mode");
             } else {
                 match inspect_registry_train(train.version.clone()).await {

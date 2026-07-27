@@ -26,6 +26,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub(crate) mod advisory_lock;
 pub mod archive;
 pub mod check;
 pub mod commands;
@@ -34,7 +35,7 @@ pub(crate) mod context;
 pub(crate) mod host_doctor;
 pub mod host_paths;
 pub mod loader;
-pub(crate) mod native_artifacts;
+pub(crate) mod materialize;
 pub(crate) mod progress;
 pub(crate) mod resident;
 pub mod resolver;

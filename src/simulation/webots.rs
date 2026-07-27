@@ -22,6 +22,7 @@ pub(crate) fn stage_and_prepare_webots_spec(
     sim: &SimPlan,
     runtime_root: &Path,
     connect: &str,
+    offline: bool,
     execution: phoxal::bus::ExecutionId,
 ) -> Result<ParticipantSpec> {
     crate::webots_stage_root::wipe_and_recreate()?;
@@ -34,7 +35,12 @@ pub(crate) fn stage_and_prepare_webots_spec(
         &[connect.to_string()],
         runtime_root,
     )?;
-    stage_simulator_controller_binaries(&sim_source(sim).resolved, ui)?;
+    stage_simulator_controller_binaries(
+        &sim.ctx.project_root,
+        &sim_source(sim).resolved,
+        offline,
+        ui,
+    )?;
     let webots_path = crate::host_doctor::webots_executable_path()
         .map_err(|error| anyhow!("{error}"))
         .context("failed to locate the Webots executable for live simulate")?;

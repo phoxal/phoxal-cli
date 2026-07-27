@@ -3,39 +3,22 @@
 use super::{RawArtifact, RawParticipantReport, default_participant_class};
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::anyhow;
 use anyhow::bail;
 use phoxal_cli_core::check::participant_metadata;
 use phoxal_cli_core::check::source::ToolParticipant;
-use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
+use phoxal_cli_core::project::resolver::{ResolvedPlatformRuntime, official_binary_name};
 use std::path::Path;
 use std::path::PathBuf;
 
+/// Extract one official runtime's participant report straight from its
+/// already-materialized binary at `bin_dir/<canonical name>`. Materialization
+/// (`cargo install`, or a source override build) is the caller's
+/// responsibility - this never fetches or builds anything itself.
 pub(crate) fn extract_participant_report_from_staged_runtime(
+    bin_dir: &Path,
     runtime: &ResolvedPlatformRuntime,
 ) -> Result<RawParticipantReport> {
-    #[cfg(test)]
-    if runtime
-        .url
-        .as_deref()
-        .is_some_and(|url| url.starts_with("https://example.invalid/"))
-    {
-        return raw_participant_report_from_extracted_metadata(
-            runtime.kind.wire_kind(),
-            &runtime.name,
-            Path::new("<fixture binary>"),
-            participant_metadata::ParticipantMeta {
-                id: runtime.name.clone(),
-                config_schema: serde_json::json!({ "type": "null" }),
-            },
-        );
-    }
-    let binary = crate::native_artifacts::stage_runtime(
-        None,
-        runtime,
-        phoxal_cli_core::artifacts::ProvisioningMode::MissingOnly,
-    )?
-    .ok_or_else(|| anyhow!("{} has no staged binary", runtime.package))?;
+    let binary = bin_dir.join(official_binary_name(runtime.kind, &runtime.name));
     let meta = participant_metadata::extract_participant_metadata(&binary)
         .with_context(|| format!("failed to extract API metadata from {}", binary.display()))?;
     raw_participant_report_from_extracted_metadata(
@@ -47,32 +30,10 @@ pub(crate) fn extract_participant_report_from_staged_runtime(
 }
 
 pub(crate) fn extract_participant_report_from_staged_tool(
+    bin_dir: &Path,
     tool: &phoxal_cli_core::project::resolver::ResolvedTool,
 ) -> Result<RawParticipantReport> {
-    #[cfg(test)]
-    if !tool.published
-        || tool
-            .url
-            .as_deref()
-            .is_some_and(|url| url.starts_with("https://example.invalid/"))
-    {
-        let expected_id = phoxal_cli_core::project::resolver::tool_participant_id(&tool.name);
-        return raw_participant_report_from_extracted_metadata(
-            "tool",
-            expected_id,
-            Path::new("<fixture binary>"),
-            participant_metadata::ParticipantMeta {
-                id: expected_id.to_string(),
-                config_schema: serde_json::json!({ "type": "null" }),
-            },
-        );
-    }
-    let binary = crate::native_artifacts::stage_tool(
-        None,
-        tool,
-        phoxal_cli_core::artifacts::ProvisioningMode::MissingOnly,
-    )?
-    .ok_or_else(|| anyhow!("{} has no staged binary", tool.package))?;
+    let binary = bin_dir.join(&tool.binary_name);
     let meta = participant_metadata::extract_participant_metadata(&binary)
         .with_context(|| format!("failed to extract API metadata from {}", binary.display()))?;
     raw_participant_report_from_extracted_metadata(

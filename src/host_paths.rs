@@ -29,7 +29,7 @@ pub fn artifacts_dir() -> Result<PathBuf> {
 }
 
 /// Base directory holding the staged runtime layouts, one subdirectory per
-/// target triple (`.phoxal/build/<triple>/`). Written by the stager for `run`
+/// target triple (`.phoxal/bundle/`). Written by the stager for `run`
 /// and live simulation; never runtime state (project.lock, supervisor.sock,
 /// and plans stay in the selected [`crate::runtime_paths::RuntimePaths`] state
 /// root).

@@ -60,7 +60,7 @@ pub struct Build {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Write the bundle here. Defaults to <project>/.phoxal/build/<triple>.build.phoxal."
+        help = "Write the bundle here. Defaults to <project>/.phoxal/<triple>.build.phoxal."
     )]
     pub output: Option<PathBuf>,
     #[arg(
@@ -405,7 +405,7 @@ impl Build {
         let options = RunOptions {
             drivers: crate::run::DriversMode::On,
             drivers_subset: Vec::new(),
-            suite_source: app.suite_source.clone(),
+            offline: app.offline,
         };
         // A shippable bundle contains everything, so staging validates against
         // the full driver set (DriverSelection::All), never a `--drivers`
@@ -435,7 +435,7 @@ impl Build {
 
         // The container path staged under the frozen snapshot, which is
         // deleted when the snapshot guard drops. Publish the validated staged
-        // root into the real project's `.phoxal/build/<triple>/` so every
+        // root into the real project's `.phoxal/bundle/` so every
         // backend leaves the same persistent staged runtime layout the command
         // reports and the docs promise (#936); the archive is then written
         // from that published root.
@@ -463,11 +463,11 @@ impl Build {
 }
 
 /// Copy a validated staged runtime layout produced outside the project (the
-/// container snapshot) into the project's real `.phoxal/build/<triple>/`,
+/// container snapshot) into the project's real `.phoxal/bundle/`,
 /// replacing any previous layout via the same candidate-then-rename swap the
 /// stager uses, so a crashed publish never leaves a half-written layout.
 fn publish_staged_root(project_root: &Path, target: &str, source: &Path) -> Result<PathBuf> {
-    let destination = runtime_layout_dir(project_root, target);
+    let destination = runtime_layout_dir(project_root);
     let parent = destination
         .parent()
         .context("staged runtime layout has no parent directory")?;
@@ -517,10 +517,10 @@ fn publish_staged_root(project_root: &Path, target: &str, source: &Path) -> Resu
 }
 
 /// The default bundle path: a sibling of the staged directory,
-/// `<project>/.phoxal/build/<triple>.build.phoxal`, never inside the staged
-/// `.phoxal/build/<triple>/` tree it archives.
+/// `<project>/.phoxal/<triple>.build.phoxal`, never inside the staged
+/// `.phoxal/bundle/` tree it archives.
 fn default_output(project_root: &Path, target: &str) -> PathBuf {
-    let staged = runtime_layout_dir(project_root, target);
+    let staged = runtime_layout_dir(project_root);
     let parent = staged
         .parent()
         .map(Path::to_path_buf)
@@ -833,10 +833,10 @@ mod tests {
         let output = default_output(Path::new("/proj"), "aarch64-unknown-linux-gnu");
         assert_eq!(
             output,
-            Path::new("/proj/.phoxal/build/aarch64-unknown-linux-gnu.build.phoxal")
+            Path::new("/proj/.phoxal/aarch64-unknown-linux-gnu.build.phoxal")
         );
         // The sibling file is never inside the staged directory it archives.
-        let staged = runtime_layout_dir(Path::new("/proj"), "aarch64-unknown-linux-gnu");
+        let staged = runtime_layout_dir(Path::new("/proj"));
         assert!(!output.starts_with(&staged));
     }
 

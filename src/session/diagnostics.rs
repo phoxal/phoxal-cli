@@ -181,25 +181,6 @@ pub(crate) fn phase_finished(id: impl Into<PhaseId>, outcome: PhaseOutcome, elap
     }
 }
 
-/// Emit `SessionEvent::PhaseProgress` for the CURRENTLY ACTIVE phase `id`
-/// (finding C2: the startup surface's `PhaseRow::progress` only ever paired
-/// with a test-constructed event before this - see
-/// `native_artifacts::prepare_and_activate_descriptors`'s real
-/// per-batch-completed/total download progress for the first genuine
-/// producer). A no-op when no session is installed, exactly like
-/// [`try_route`]; the renderer itself also ignores a progress update whose
-/// `id` does not match its current phase (see `tui::startup::StartupState`).
-pub(crate) fn phase_progress(id: impl Into<PhaseId>, completed: u64, total: u64) {
-    if let Some(sender) = current_sender() {
-        let _ = sender.try_send(SessionEvent::PhaseProgress {
-            id: id.into(),
-            completed,
-            total,
-            detail: None,
-        });
-    }
-}
-
 /// Bracket `work` with a `PhaseStarted`/`PhaseFinished` pair through the
 /// active session's event channel, if any (finding A3) - the renderer then
 /// shows real per-operation progress (download/build/validate) instead of

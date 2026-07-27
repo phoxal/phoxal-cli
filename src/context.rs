@@ -6,11 +6,15 @@ use crate::session::output::OutputContext;
 use anyhow::Result;
 use phoxal_cli_core::Project;
 
+/// Disables network access for `cargo install`/`cargo metadata`
+/// materialization: every invocation this CLI makes passes `--offline` when
+/// set.
+pub(crate) const OFFLINE_ENV: &str = "PHOXAL_OFFLINE";
+
 #[derive(Debug, Clone)]
 pub struct AppContext {
     pub ui: Ui,
     pub project: Project,
-    pub suite_source: Option<String>,
     pub offline: bool,
     /// The output contract for `run`/`simulation webots run`'s `SessionController`.
     /// [`AppContext::new`] computes it once from stderr's terminal state.
@@ -18,27 +22,30 @@ pub struct AppContext {
 }
 
 impl AppContext {
-    pub fn new(
-        workspace_root: PathBuf,
-        suite_source: Option<String>,
-        offline: bool,
-    ) -> Result<Self> {
+    pub fn new(workspace_root: PathBuf, offline: bool) -> Result<Self> {
         // SAFETY: AppContext is constructed once during single-threaded CLI
         // startup, before workers are spawned. Path helpers use this to keep
         // every mutable artifact under the selected runtime's path policy.
         unsafe {
             std::env::set_var(crate::host_paths::PROJECT_ROOT_ENV, &workspace_root);
             if offline {
-                std::env::set_var(phoxal_cli_core::project::suite::OFFLINE_ENV, "1");
+                std::env::set_var(OFFLINE_ENV, "1");
             }
         }
         let output = OutputContext::compute(std::io::stderr().is_terminal());
         Ok(Self {
             ui: Ui::new(output.decorated()),
             project: Project::new(workspace_root)?,
-            suite_source,
             offline,
             output,
         })
     }
+}
+
+/// Whether `PHOXAL_OFFLINE` is set, for callers that only have the env (not
+/// an [`AppContext`]) to hand - the identical check `--offline` performs.
+#[must_use]
+pub(crate) fn offline_from_env() -> bool {
+    std::env::var(OFFLINE_ENV)
+        .is_ok_and(|value| !value.is_empty() && !matches!(value.as_str(), "0" | "false" | "no"))
 }

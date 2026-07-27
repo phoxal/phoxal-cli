@@ -8,7 +8,6 @@ use clap::Subcommand;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::PlanContext;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
-use phoxal_cli_core::project::suite::Suite;
 use std::path::PathBuf;
 
 /// The `simulation` command group.
@@ -70,7 +69,7 @@ pub struct SimulationRun {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SimulateOptions {
     pub world: String,
-    pub suite_source: Option<String>,
+    pub offline: bool,
 }
 
 /// Pairs the sim `LaunchPlan` with its `PlanContext` (Part 3/6): replaces the
@@ -100,7 +99,6 @@ pub(crate) struct ResolvedSimulation {
     pub(crate) project_root: PathBuf,
     pub(crate) world_path: PathBuf,
     pub(crate) resolved: ResolvedRobot,
-    pub(crate) suite: Option<Suite>,
 }
 
 impl SimulationRun {
@@ -121,7 +119,7 @@ impl SimulationRun {
         }
         let options = SimulateOptions {
             world: self.world.clone(),
-            suite_source: app.suite_source.clone(),
+            offline: app.offline,
         };
         let resident_in_process =
             crate::resident::has_private_bootstrap() || (!app.output.interactive && !self.detach);

@@ -21,6 +21,7 @@ use anyhow::anyhow;
 use phoxal_cli_core::check::participant_metadata::inspect_selected_binary;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
+use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
@@ -29,7 +30,6 @@ use phoxal_cli_core::project::layout::RuntimeLayout;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::resolver::official_binary_name;
-use phoxal_cli_core::project::suite::ArtifactKind;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::launch_env::{encode_participant_env, encode_tool_env};
 use phoxal_cli_core::session::stores::telemetry::RobotScope;
@@ -79,19 +79,22 @@ pub(crate) fn source_dirs_by_participant(
 /// does (#936): a driver the run excludes (drivers off, or an instance outside a
 /// `--driver` subset) is not built or linked here, so `--drivers off` never
 /// force-builds a driver crate the run will not launch.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stage_complete_bin_store(
     staged_root: &Path,
     resolved: &ResolvedRobot,
     source_participants: &[SourceParticipant],
     drivers: &DriverSelection,
+    offline: bool,
     build: &crate::run::StagingBuild,
     ui: &crate::Ui,
 ) -> Result<()> {
     let mut staged_names = BTreeSet::new();
     // Source-built user services and workspace/path-overridden component
-    // drivers. Official-service/tool/simulator source overrides are staged by
-    // `stage_complete_official_store` below (it owns the vendored-vs-override
-    // resolution for the official set), so they are skipped here.
+    // drivers. Official-service/tool/simulator source overrides are
+    // materialized by `materialize_official_store` below (it owns the
+    // cargo-install-vs-override resolution for the official set), so they are
+    // skipped here.
     for participant in source_participants {
         let binary_name = match participant.kind {
             SourceParticipantKind::UserService | SourceParticipantKind::UserTool => {
@@ -119,18 +122,18 @@ pub(crate) fn stage_complete_bin_store(
         let built = build.build_user_binary(&participant.crate_dir, &participant.name, ui)?;
         crate::stager::stage_named_binary(staged_root, &binary_name, &built)?;
     }
-    // Suite-provided component drivers: one binary per driven component id,
-    // resolved from the vendored store. A workspace/path-overridden driver for
-    // the same component id was already staged above (its binary name is in
-    // `staged_names`), so it is not re-linked here.
-    let mut build_override =
-        |crate_dir: &Path, name: &str| build.build_user_binary(crate_dir, name, ui);
+    // Registry-provided component drivers: one binary per driven component
+    // id, materialized straight into `bin/` via `cargo install`. A
+    // workspace/path-overridden driver for the same component id was already
+    // staged above (its binary name is in `staged_names`), so it is not
+    // re-materialized here.
     for component in &resolved.components {
         if !component.has_driver {
             continue;
         }
         // Skip a driver whose instance the policy excludes; a sibling instance
-        // that is selected still stages the shared binary through its own row.
+        // that is selected still materializes the shared binary through its
+        // own row.
         if !drivers.includes_instance(&component.instance) {
             continue;
         }
@@ -142,16 +145,17 @@ pub(crate) fn stage_complete_bin_store(
         let Some(runtime) = component
             .driver
             .as_ref()
-            .and_then(|driver| driver.suite_runtime.as_ref())
+            .and_then(|driver| driver.registry_runtime.as_ref())
         else {
             continue;
         };
-        let source = crate::stager::resolve_platform_source(runtime, &mut build_override)?;
-        crate::stager::stage_named_binary(staged_root, &binary_name, &source)?;
+        crate::stager::materialize_component_driver(staged_root, runtime, offline)?;
     }
     // Every official service, tool, and the infrastructure router.
-    crate::stager::stage_complete_official_store(staged_root, resolved, &mut build_override)
-        .context("failed to complete the staged bin store with the full official runtime set")?;
+    crate::stager::materialize_official_store(staged_root, resolved, offline, |crate_dir, name| {
+        build.build_user_binary(crate_dir, name, ui)
+    })
+    .context("failed to complete the staged bin store with the full official runtime set")?;
     Ok(())
 }
 
@@ -159,7 +163,7 @@ pub(crate) fn stage_complete_bin_store(
 /// the staged layout's flat `bin/` store, resolving every executable directly
 /// from `bin/` with no source, Cargo, or resolved graph (#936). This is the ONE
 /// execution-side spec builder for a staged runtime layout - a source project's
-/// `.phoxal/build/<triple>/` (after [`stage_complete_bin_store`] populated and
+/// `.phoxal/bundle/` (after [`stage_complete_bin_store`] populated and
 /// [`crate::loader::validate_layout_plan`] validated it) or an extracted
 /// `build.phoxal`. Because it reads the already-validated `bin/` and never
 /// rebuilds, the executed bytes are exactly the validated bytes - there is no
@@ -269,6 +273,7 @@ pub(crate) fn prepare_robot_participants(
     driver_policy: &DriverPolicy,
     board: &BoardBackend,
     specs: &mut Vec<ParticipantSpec>,
+    offline: bool,
     ui: &crate::Ui,
 ) -> Result<()> {
     let official_by_name = official_runtimes_by_name(resolved);
@@ -309,10 +314,12 @@ pub(crate) fn prepare_robot_participants(
                 }
             }
             let source = resolve_participant_source(
+                staged_root,
                 participant,
                 resolved,
                 &official_by_name,
                 source_dirs,
+                offline,
                 ui,
             )?;
             let executable = stage_and_inspect(staged_root, participant, &source)?;
@@ -350,12 +357,13 @@ pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (Participant
     }
 }
 
-/// Every official platform runtime the loader may need to resolve, keyed by its
-/// launch identity: the services and simulators in `platform_runtimes` plus the
-/// suite-sourced component drivers carried on `components[].driver.suite_runtime`
-/// (a suite driver projects onto the same `ResolvedPlatformRuntime` shape and is
-/// keyed by its component id). Source-sourced drivers are not here - they build
-/// from their crate through the source-execution path.
+/// Every official platform runtime the loader may need to resolve, keyed by
+/// its launch identity: the services and simulators in `platform_runtimes`
+/// plus the registry-sourced component drivers carried on
+/// `components[].driver.registry_runtime` (a registry driver projects onto
+/// the same `ResolvedPlatformRuntime` shape and is keyed by its component
+/// id). Source-sourced drivers are not here - they build from their crate
+/// through the source-execution path.
 fn official_runtimes_by_name(resolved: &ResolvedRobot) -> BTreeMap<&str, &ResolvedPlatformRuntime> {
     resolved
         .platform_runtimes
@@ -365,7 +373,7 @@ fn official_runtimes_by_name(resolved: &ResolvedRobot) -> BTreeMap<&str, &Resolv
                 .components
                 .iter()
                 .filter_map(|component| component.driver.as_ref())
-                .filter_map(|driver| driver.suite_runtime.as_ref()),
+                .filter_map(|driver| driver.registry_runtime.as_ref()),
         )
         .map(|runtime| (runtime.name.as_str(), runtime))
         .collect()
@@ -375,21 +383,21 @@ fn official_runtimes_by_name(resolved: &ResolvedRobot) -> BTreeMap<&str, &Resolv
 /// into the layout's `bin/`. The source-free plan (#936) names only the
 /// participant's role and `bin/` binary, so where its bytes come from is
 /// recovered here from the resolved graph and the staging-side `source_dirs`
-/// record: a user service and a workspace-built component driver build through
-/// `cargo` from their crate directory; an official artifact, tool, or
-/// suite-provided driver resolves from its own source override or the vendored
-/// `.phoxal/artifacts` store. Every path hard-fails - there is no graceful
+/// record: a user service and a workspace-built component driver build
+/// through `cargo` from their crate directory; an official artifact, tool, or
+/// registry-provided driver materializes via `cargo install`, straight into
+/// `staged_root/bin/`. Every path hard-fails - there is no graceful
 /// `None`/pending note - naming the required identity.
 fn resolve_participant_source(
+    staged_root: &Path,
     participant: &ParticipantLaunchRecord,
     resolved: &ResolvedRobot,
     official_by_name: &BTreeMap<&str, &ResolvedPlatformRuntime>,
     source_dirs: &BTreeMap<String, PathBuf>,
+    offline: bool,
     ui: &crate::Ui,
 ) -> Result<PathBuf> {
     let id = &participant.launch.participant_id;
-    let mut build_override =
-        |crate_dir: &Path, name: &str| build_source_binary(crate_dir, name, ui, None);
     match &participant.execution {
         ParticipantExecution::UserService { .. } | ParticipantExecution::UserTool { .. } => {
             let crate_dir = source_dirs.get(id).ok_or_else(|| {
@@ -399,8 +407,8 @@ fn resolve_participant_source(
         }
         ParticipantExecution::ComponentDriver { .. } => {
             // A workspace-built driver has a crate directory in the staging
-            // record; a suite-provided one does not and resolves from the
-            // vendored store by its component id, exactly like a service.
+            // record; a registry-provided one does not and materializes via
+            // `cargo install`, keyed by its component id.
             if let Some(crate_dir) = source_dirs.get(id) {
                 return build_source_binary(crate_dir, id, ui, None);
             }
@@ -412,7 +420,13 @@ fn resolve_participant_source(
                         participant.artifact_id
                     )
                 })?;
-            crate::stager::resolve_platform_source(runtime, &mut build_override)
+            crate::stager::materialize_component_driver(staged_root, runtime, offline)?;
+            Ok(staged_root.join("bin").join(
+                phoxal_cli_core::project::resolver::official_binary_name(
+                    runtime.kind,
+                    &runtime.name,
+                ),
+            ))
         }
         ParticipantExecution::OfficialTool { .. } => {
             let tool = resolved
@@ -422,7 +436,19 @@ fn resolve_participant_source(
                 .ok_or_else(|| {
                     anyhow!("resolved graph is missing tool {}", participant.artifact_id)
                 })?;
-            crate::stager::resolve_tool_source(tool, &mut build_override)
+            if let Some(crate_dir) = &tool.path_override {
+                return build_source_binary(
+                    crate_dir,
+                    phoxal_cli_core::project::resolver::tool_participant_id(&tool.name),
+                    ui,
+                    None,
+                );
+            }
+            crate::materialize::cargo_install(
+                staged_root,
+                &crate::materialize::MaterializeSpec::new(tool.package.clone(), tool.train.clone()),
+                offline,
+            )
         }
         ParticipantExecution::OfficialArtifact { .. } => {
             let runtime = official_by_name
@@ -433,7 +459,17 @@ fn resolve_participant_source(
                         participant.artifact_id
                     )
                 })?;
-            crate::stager::resolve_platform_source(runtime, &mut build_override)
+            if let Some(crate_dir) = &runtime.path_override {
+                return build_source_binary(crate_dir, &runtime.name, ui, None);
+            }
+            crate::materialize::cargo_install(
+                staged_root,
+                &crate::materialize::MaterializeSpec::new(
+                    runtime.package.clone(),
+                    runtime.train.clone(),
+                ),
+                offline,
+            )
         }
     }
 }

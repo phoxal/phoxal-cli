@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal::model::robot::RobotV0 as Robot;
 
-use super::suite::ArtifactKind;
+use super::catalog::ArtifactKind;
 
 const PHOXAL_PROVIDER: &str = "phoxal";
 const ROBOT_FILE: &str = "robot.yaml";
@@ -34,16 +34,16 @@ pub fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolveOptions {
-    /// Override the official service/driver target triple. `check --target`
-    /// resolves suite assets for that Linux triple instead of the host, so a
-    /// robot graph can be validated from a non-Linux host.
+    /// Override the official service/driver target triple. `build --target`
+    /// materializes for that triple instead of the host, so a robot graph can
+    /// be cross-compiled from a non-Linux host.
     pub official_target_triple: Option<String>,
     /// Override native tool asset target triple. Host-native run/sim use the
     /// host triple; an explicit target resolves robot-native tools instead.
     pub tool_target_triple: Option<String>,
     /// The component-driver instances resolution may resolve driver binaries
     /// for. `run`'s driver policy threads through here so an excluded driver is
-    /// never resolved - not even to select its suite target artifact (#936).
+    /// never resolved - not even to select its target artifact (#936).
     /// Everything except driver-filtered resident staging resolves `All`.
     pub drivers: crate::project::layout::DriverSelection,
     /// Whether simulator-only artifacts belong to this resolution.
@@ -86,45 +86,29 @@ pub struct ResolvedRobot {
     pub path_overrides: Vec<ResolvedPathOverride>,
 }
 
-/// One resolved official platform artifact (a service or a simulator). The
+/// One resolved official platform runtime (a service or a simulator). The
 /// public identity is the provider-qualified `package` id
 /// (`phoxal/service-drive`); there is no separate `artifact_id` (docs #21).
 ///
-/// Location and integrity come from the suite. Contract/config metadata is
-/// always extracted from the staged binary.
-#[derive(Debug, Clone, PartialEq)]
+/// The official catalog (organization#951 WS4) is CLI-internal, so location
+/// and integrity are Cargo's job: `package` at exactly `train` from the
+/// `phoxal` registry, materialized by `cargo install`. Contract/config
+/// metadata is always extracted from the materialized binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPlatformRuntime {
     pub name: String,
     pub package: String,
     pub kind: ArtifactKind,
-    pub version: String,
-    pub artifact_ref: String,
-    pub sha256: Option<String>,
-    pub url: Option<String>,
-    pub size: Option<u64>,
-    /// Whether the suite has a built [`crate::project::suite::Artifact`] (tarball)
-    /// for the resolved target triple. `false` for a metadata-only / not yet
-    /// published entry - resolution still succeeds (the package is real and
-    /// versioned), but there is nothing to fetch yet.
-    pub published: bool,
-    /// Every target triple the suite has a built tarball for, for
-    /// availability diagnostics.
-    pub published_triples: Vec<String>,
     pub path_override: Option<PathBuf>,
-    /// Exact locked framework train this entry belongs to.
+    /// Exact locked framework train this entry belongs to; every official
+    /// package is pinned to it exactly (`=<train>`).
     pub train: String,
-    /// The target triple this entry was resolved/built for. `None` identifies
-    /// the suite's distinct component-assets blob.
+    /// The target triple this entry was resolved/materialized for. `None`
+    /// identifies the distinct component-assets scope.
     pub target: Option<String>,
 }
 
 impl ResolvedPlatformRuntime {
-    /// The selected official service artifact identifier.
-    #[must_use]
-    pub fn artifact_ref(&self) -> &str {
-        &self.artifact_ref
-    }
-
     #[must_use]
     pub fn source_path(&self) -> Option<&Path> {
         self.path_override.as_deref()
@@ -155,16 +139,17 @@ pub struct UndeclaredRuntime {
 /// instance declares a `driver` block AND a matching driver package exists in
 /// the resolved graph (docs #21). Driverless components are valid: they still
 /// carry assets and may be simulated, but never launch a hardware driver.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedComponent {
     pub instance: String,
     /// The logical component id (`component: <id>` in `robot.yaml`).
     pub source_name: String,
     /// The resolved `component_assets` package: the workspace assets crate
     /// for a workspace component, or the official `phoxal/component-<id>`
-    /// assets package from the suite. Every component resolves its assets -
-    /// a driverless workspace component is an assets crate, and a component absent from both workspace and
-    /// suite is a resolution error, never a silent "assetless" (#936).
+    /// assets package. Every component resolves its assets - a driverless
+    /// workspace component is an assets crate, and a component absent from
+    /// both workspace and catalog is a resolution error, never a silent
+    /// "assetless" (#936).
     pub assets: ResolvedComponentPackage,
     /// The resolved `component_driver` package. Present only when the
     /// instance declares `driver` and a driver package resolves for this
@@ -187,27 +172,31 @@ impl ResolvedComponent {
 
 /// One resolved component package (either the `component_assets` or the
 /// `component_driver` half of a component instance).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedComponentPackage {
     /// The provider-qualified package id (`phoxal/component-ddsm115`).
     pub package: String,
     pub kind: ArtifactKind,
     pub source: ResolvedComponentSource,
-    pub path_override: Option<PathBuf>,
-    /// Present exactly when `source == Suite` and the suite resolved a
-    /// matching entry for the needed scope (assets or `context.target`).
-    /// Carries the same shape a
-    /// service/simulator resolves to ([`ResolvedPlatformRuntime`]) so
-    /// components stage through the identical native-artifact machinery
-    /// (`native_artifacts::NativeArtifactDescriptor`) instead of a parallel
-    /// bespoke path. `None` for `Path`/`Git` sources.
-    pub suite_runtime: Option<ResolvedPlatformRuntime>,
+    /// The on-disk directory this package resolves to, whichever source it
+    /// came from: the workspace crate directory for `Path`, or the
+    /// registry-package extraction directory `cargo metadata` reported for
+    /// `Registry` (resolved once, at resolution time, against the generated
+    /// `.phoxal/resolve/Cargo.toml`). `None` only for a `Registry` driver
+    /// package - a driver has no directory to read; it materializes straight
+    /// to a `bin/` binary via `cargo install`, exactly like a service.
+    pub resolved_dir: Option<PathBuf>,
+    /// Present exactly when `source == Registry`, carrying the identity a
+    /// service/simulator resolves to so a driver package materializes
+    /// through the identical `cargo install` path instead of a parallel
+    /// bespoke one.
+    pub registry_runtime: Option<ResolvedPlatformRuntime>,
 }
 
 impl ResolvedComponentPackage {
     #[must_use]
     pub fn path_override(&self) -> Option<&Path> {
-        self.path_override.as_deref()
+        self.resolved_dir.as_deref()
     }
 }
 
@@ -216,9 +205,9 @@ pub enum ResolvedComponentSource {
     Path {
         path: PathBuf,
     },
-    /// Resolves from the official artifact suite (no fork pin for this
-    /// package); staged from a suite release asset.
-    Suite,
+    /// Resolves from the official Cargo registry (no fork pin for this
+    /// package).
+    Registry,
 }
 
 /// A resolved native artifact (`tool-bus`, `tool-log`, `tool-joypad`, or
@@ -226,31 +215,17 @@ pub enum ResolvedComponentSource {
 /// launch-safe kind-qualified id used for participant ids, systemd unit
 /// names and env var keys; `package` is the
 /// canonical provider-qualified identity (`phoxal/tool-bus`) used for
-/// suite lookups and native-artifact provisioning.
-#[derive(Debug, Clone, PartialEq)]
+/// catalog lookups and `cargo install` materialization.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedTool {
     pub kind: ArtifactKind,
     pub name: String,
     pub package: String,
-    pub requested: String,
-    pub resolved: String,
-    pub repo: String,
-    pub asset: String,
     pub binary_name: String,
-    pub sha256: String,
-    pub url: Option<String>,
-    pub size: Option<u64>,
-    /// Whether the suite has a built [`crate::project::suite::Artifact`] (tarball)
-    /// for the resolved target triple; `false` for a metadata-only / not yet
-    /// published entry, in which case `sha256` is a placeholder
-    /// (`"0".repeat(64)`) rather than a real digest - mirrors
-    /// [`ResolvedPlatformRuntime::published`].
-    pub published: bool,
     pub path_override: Option<PathBuf>,
     /// Exact locked framework train this entry belongs to.
     pub train: String,
-    /// The target triple this entry was resolved/built for; see
-    /// [`ResolvedPlatformRuntime::target`].
+    /// The target triple this entry was resolved/materialized for.
     pub target: String,
 }
 
@@ -278,7 +253,7 @@ impl ResolvedPathOverrideKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ResolvedPathOverride {
     pub key: String,
     pub kind: ResolvedPathOverrideKind,
