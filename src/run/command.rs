@@ -670,8 +670,6 @@ pub(crate) async fn live_run_setup(
         &prepared.staged_root,
         &prepared.ctx.project_root,
         prepared.router_config.clone(),
-        &prepared.plan,
-        run.execution(),
     )
     .await?;
     apply_session_connect(&mut prepared.plan, &mut prepared.specs, &connect);

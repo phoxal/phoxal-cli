@@ -14,6 +14,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::net::UnixStream;
 
 #[derive(Debug, Clone)]
 struct RouterLaunch {
@@ -49,48 +50,49 @@ impl Default for RouterRecoveryPolicy {
     }
 }
 
-#[derive(Debug, Clone)]
-struct RouterProbe {
-    namespace: String,
-    robot_id: String,
-    execution: phoxal::bus::ExecutionId,
+/// Prove the router's unix-socket endpoint actually accepts a connection -
+/// not merely that its process has started or that the socket path exists on
+/// disk. A stale file, or a router still mid-initialization, is
+/// indistinguishable from a live one by `Path::exists()` alone; only a real
+/// connect attempt tells "nothing is listening yet" (`ENOENT`) apart from
+/// "something is listening and refusing" (`ECONNREFUSED`) apart from "ready".
+///
+/// This intentionally does not go through `phoxal::raw::Bus::open`: Zenoh's
+/// default client-mode config sets `connect/timeout_ms` to `0` ("no retry"),
+/// under which a single failed connect attempt is swallowed and `open()`
+/// still returns `Ok` with zero established transports (see
+/// `zenoh-config-*/DEFAULT_CONFIG.json5` and
+/// `zenoh-*/src/net/runtime/orchestrator.rs`'s `connect_peers_single_link`).
+/// That made the previous Zenoh-session probe succeed immediately regardless
+/// of whether the router was actually listening, which is exactly the race
+/// this gate exists to close. A bare socket connect has no such escape hatch:
+/// the OS refuses to lie about whether a peer is accepting.
+async fn probe_router_endpoint(endpoint: &str) -> Result<()> {
+    let path = unixsock_stream_path(endpoint)?;
+    let stream = UnixStream::connect(path)
+        .await
+        .with_context(|| format!("connect to infrastructure router at {endpoint}"))?;
+    drop(stream);
+    Ok(())
 }
 
-impl RouterProbe {
-    fn from_plan(plan: &LaunchPlan, execution: phoxal::bus::ExecutionId) -> Result<Self> {
-        let robot = plan
-            .robots
-            .first()
-            .context("launch plan has no robot for router readiness")?;
-        Ok(Self {
-            namespace: robot.namespace.clone(),
-            robot_id: robot.id.clone(),
-            execution,
+/// Extract the filesystem path a `unixsock-stream/<path>` router endpoint
+/// names, so the probe connects to the exact same socket a real participant
+/// (`phoxal::participant::launch::env::CONNECT`) would use - a proxy
+/// endpoint would prove nothing about the one dependents actually dial.
+fn unixsock_stream_path(endpoint: &str) -> Result<&Path> {
+    endpoint
+        .strip_prefix("unixsock-stream/")
+        .map(Path::new)
+        .with_context(|| {
+            format!("router endpoint {endpoint} is not a unixsock-stream endpoint understood by the readiness probe")
         })
-    }
-
-    async fn connect(&self, endpoint: &str) -> Result<()> {
-        let bus = phoxal::raw::Bus::open(phoxal::raw::BusConfig {
-            namespace: self.namespace.clone(),
-            robot_id: self.robot_id.clone(),
-            participant: "phoxal-cli-router-readiness".to_string(),
-            execution: self.execution,
-            producer: phoxal::bus::ProducerId::mint(),
-            connect_endpoints: vec![endpoint.to_string()],
-        })
-        .await
-        .context("connect CLI readiness probe to infrastructure router")?;
-        bus.close()
-            .await
-            .context("close CLI router readiness probe")
-    }
 }
 
 pub(crate) struct InfrastructureRouter {
     process: RouterProcess,
     launch: RouterLaunch,
     participant_endpoint: String,
-    readiness_probe: RouterProbe,
     recovery_policy: RouterRecoveryPolicy,
 }
 
@@ -209,11 +211,7 @@ impl InfrastructureRouter {
                     () = session_token.cancelled() => return Ok(()),
                     () = tokio::time::sleep(self.recovery_policy.restart_delay) => {}
                 }
-                let restart = launch_router_process(
-                    &self.launch,
-                    &self.participant_endpoint,
-                    &self.readiness_probe,
-                );
+                let restart = launch_router_process(&self.launch, &self.participant_endpoint);
                 let restarted = tokio::select! {
                     () = session_token.cancelled() => return Ok(()),
                     result = restart => result,
@@ -314,8 +312,6 @@ pub(crate) async fn start_infrastructure_router(
     staged_root: &Path,
     project_root: &Path,
     config: Option<PathBuf>,
-    plan: &LaunchPlan,
-    execution: phoxal::bus::ExecutionId,
 ) -> Result<(InfrastructureRouter, String)> {
     let binary = crate::stager::staged_router_binary(staged_root);
     anyhow::ensure!(
@@ -327,17 +323,15 @@ pub(crate) async fn start_infrastructure_router(
     );
     let launch = RouterLaunch { binary, config };
     let endpoint = project_router_endpoint(project_root);
-    let readiness_probe = RouterProbe::from_plan(plan, execution)?;
     std::fs::create_dir_all(
         crate::runtime_paths::RuntimePaths::for_root(project_root).volatile_root,
     )?;
-    let process = launch_router_process(&launch, &endpoint, &readiness_probe).await?;
+    let process = launch_router_process(&launch, &endpoint).await?;
     Ok((
         InfrastructureRouter {
             process,
             launch,
             participant_endpoint: endpoint.clone(),
-            readiness_probe,
             recovery_policy: RouterRecoveryPolicy::default(),
         },
         endpoint,
@@ -353,11 +347,7 @@ pub(crate) fn project_router_endpoint(project_root: &Path) -> String {
     )
 }
 
-async fn launch_router_process(
-    launch: &RouterLaunch,
-    endpoint: &str,
-    readiness_probe: &RouterProbe,
-) -> Result<RouterProcess> {
+async fn launch_router_process(launch: &RouterLaunch, endpoint: &str) -> Result<RouterProcess> {
     let mut command = tokio::process::Command::new(&launch.binary);
     if let Some(config) = &launch.config {
         command.arg("--config").arg(config);
@@ -404,7 +394,6 @@ async fn launch_router_process(
             .as_mut()
             .expect("launch attempt owns its child"),
         endpoint,
-        readiness_probe,
         &stderr_tail,
     )
     .await
@@ -424,7 +413,6 @@ async fn launch_router_process(
 async fn wait_for_router_connection(
     child: &mut ManagedChild,
     endpoint: &str,
-    readiness_probe: &RouterProbe,
     stderr_tail: &std::sync::Arc<std::sync::Mutex<String>>,
 ) -> Result<()> {
     let deadline = tokio::time::Instant::now() + ROUTER_READY_TIMEOUT;
@@ -435,16 +423,14 @@ async fn wait_for_router_connection(
                 stderr_tail,
             ));
         }
-        let error = match tokio::time::timeout(
-            Duration::from_millis(250),
-            readiness_probe.connect(endpoint),
-        )
-        .await
-        {
-            Ok(Ok(())) => return Ok(()),
-            Ok(Err(error)) => error,
-            Err(_) => anyhow::anyhow!("CLI readiness connection attempt timed out"),
-        };
+        let error =
+            match tokio::time::timeout(Duration::from_millis(250), probe_router_endpoint(endpoint))
+                .await
+            {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(error)) => error,
+                Err(_) => anyhow::anyhow!("CLI readiness connection attempt timed out"),
+            };
         if tokio::time::Instant::now() >= deadline {
             break error;
         }
@@ -485,5 +471,135 @@ pub(crate) fn apply_session_connect(
         if let Some((_, value)) = spec.env.iter_mut().find(|(key, _)| key == env::CONNECT) {
             *value = endpoint.to_string();
         }
+    }
+}
+
+#[cfg(test)]
+mod readiness_gate_tests {
+    use super::*;
+    use tokio::net::UnixListener;
+
+    /// `/tmp` directly, not the crate-wide temp dir: a unix socket address is
+    /// capped at 104 (macOS) / 108 (Linux) bytes, and the sandboxed test temp
+    /// root this crate otherwise runs under is long enough to blow that
+    /// budget on its own (see the project-lock/runtime-paths handling of the
+    /// same limit).
+    fn scratch_dir(label: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("phoxal-router-gate-{label}-"))
+            .tempdir_in("/tmp")
+            .expect("create a short-path temp dir for the unix-socket probe test")
+    }
+
+    /// A missing socket path (the router has not started at all yet) must
+    /// fail the probe - this is the "No such file or directory" phase from
+    /// the field bug.
+    #[tokio::test]
+    async fn probe_fails_when_nothing_is_at_the_endpoint() {
+        let dir = scratch_dir("missing");
+        let endpoint = format!(
+            "unixsock-stream/{}",
+            dir.path().join("router.sock").display()
+        );
+        probe_router_endpoint(&endpoint)
+            .await
+            .expect_err("a socket path nothing has bound must fail the probe");
+    }
+
+    /// The critical distinction the bug hinged on: a socket **file existing**
+    /// is not the same as something **accepting connections** on it. Binding
+    /// then dropping a listener leaves the file on disk with nothing behind
+    /// it (`ECONNREFUSED`) - exactly the "Connection refused" phase from the
+    /// field bug. A probe that only checked `Path::exists()` would pass this
+    /// case; ours must not.
+    #[tokio::test]
+    async fn probe_fails_when_the_socket_file_exists_but_nothing_is_listening() {
+        let dir = scratch_dir("stale");
+        let socket_path = dir.path().join("router.sock");
+        {
+            let listener =
+                std::os::unix::net::UnixListener::bind(&socket_path).expect("bind stale listener");
+            drop(listener);
+        }
+        assert!(
+            socket_path.exists(),
+            "the socket file must still be on disk once its listener is dropped"
+        );
+        let endpoint = format!("unixsock-stream/{}", socket_path.display());
+        probe_router_endpoint(&endpoint)
+            .await
+            .expect_err("a stale socket file with no listener must not be reported ready");
+    }
+
+    /// The positive case: once something is genuinely bound and accepting,
+    /// the probe succeeds.
+    #[tokio::test]
+    async fn probe_succeeds_once_a_listener_is_actually_accepting() {
+        let dir = scratch_dir("live");
+        let socket_path = dir.path().join("router.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind live listener");
+        let accept_task = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        let endpoint = format!("unixsock-stream/{}", socket_path.display());
+        let result = probe_router_endpoint(&endpoint).await;
+        accept_task.abort();
+        result.expect("a live, accepting listener must pass the probe");
+    }
+
+    /// The ordering invariant itself: `wait_for_router_connection` must not
+    /// report the router ready merely because its process is alive - only
+    /// once its endpoint actually accepts a connection. A stand-in child
+    /// process is spawned immediately (proving liveness alone is available
+    /// from t=0) while the listener is only bound after a deliberate delay;
+    /// if the gate were satisfied by "process started" (or by the socket
+    /// path merely existing), this would resolve near-instantly instead of
+    /// after the delay. This is the fact a "router starts before its
+    /// dependents" test cannot see: the router already starts first today,
+    /// but nothing previously proved it was connectable before dependents
+    /// were told to proceed.
+    #[tokio::test]
+    async fn wait_for_router_connection_does_not_report_ready_before_the_listener_accepts() {
+        let dir = scratch_dir("ordering");
+        let socket_path = dir.path().join("router.sock");
+        let endpoint = format!("unixsock-stream/{}", socket_path.display());
+
+        // A harmless long-lived process stands in for the router: what
+        // matters is that it is alive well before its listener exists.
+        let mut command = tokio::process::Command::new("sleep");
+        command
+            .arg("5")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child =
+            ManagedChild::spawn(&mut command, false, &[]).expect("spawn stand-in child process");
+
+        let stderr_tail = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let listen_delay = Duration::from_millis(500);
+        let delayed_listener = {
+            let socket_path = socket_path.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(listen_delay).await;
+                let listener =
+                    UnixListener::bind(&socket_path).expect("bind delayed router listener");
+                let _ = listener.accept().await;
+            })
+        };
+
+        let started = Instant::now();
+        let result = wait_for_router_connection(&mut child, &endpoint, &stderr_tail).await;
+        let elapsed = started.elapsed();
+
+        let _ = child.start_kill();
+        delayed_listener.abort();
+
+        result.expect("readiness must succeed once the listener actually accepts");
+        assert!(
+            elapsed >= listen_delay / 2,
+            "readiness resolved after {elapsed:?}, implausibly before the router's listener \
+             started accepting at {listen_delay:?} - the gate must prove connectivity, not \
+             merely that the router process is alive or that a socket path exists"
+        );
     }
 }
