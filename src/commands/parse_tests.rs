@@ -2,46 +2,12 @@
 //! rejecting. These exercise the clap definition directly, without running a
 //! command.
 
-use super::{Cli, RootCommand, behavior, self_cmd, status};
+use super::{Cli, RootCommand, self_cmd, status};
 use clap::{CommandFactory, Parser};
 
 #[test]
 fn clap_definition_is_valid() {
     Cli::command().debug_assert();
-}
-
-#[test]
-fn parses_behavior_validation_and_test_surface() {
-    let cli = Cli::try_parse_from(["phoxal", "behavior", "validate"])
-        .expect("behavior validate should parse");
-    let RootCommand::Behavior(command) = cli.command else {
-        panic!("expected behavior command");
-    };
-    assert!(matches!(
-        command.command,
-        behavior::BehaviorSubcommand::Validate(_)
-    ));
-
-    let cli = Cli::try_parse_from([
-        "phoxal",
-        "behavior",
-        "test",
-        "navigation.return_to_dock",
-        "--arg",
-        "dock=home",
-        "--scenario",
-        "timeout",
-    ])
-    .expect("behavior test should parse");
-    let RootCommand::Behavior(command) = cli.command else {
-        panic!("expected behavior command");
-    };
-    let behavior::BehaviorSubcommand::Test(test) = command.command else {
-        panic!("expected test subcommand");
-    };
-    assert_eq!(test.behavior_id, "navigation.return_to_dock");
-    assert_eq!(test.args, vec!["dock=home"]);
-    assert_eq!(test.scenario, "timeout");
 }
 
 #[test]

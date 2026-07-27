@@ -6,7 +6,6 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::AppContext;
 
-pub mod behavior;
 pub mod build;
 pub mod bus_target;
 pub mod check;
@@ -198,10 +197,6 @@ pub enum RootCommand {
     Install(install::Install),
     #[command(about = "Activate an older installed runtime release.")]
     Rollback(install::Rollback),
-    // Preserved prototype for the parked behavior-orchestration design. Keep it
-    // out of the supported command listing until that plan is rewritten.
-    #[command(about = "Experimental behavior-orchestration prototype.", hide = true)]
-    Behavior(behavior::Behavior),
     #[command(about = "Validate robot.yaml structure and Cargo workspace runtime ownership.")]
     Validate(validate::Validate),
     #[command(about = "Simulate a robot with `simulation webots run`.")]
@@ -258,7 +253,6 @@ impl RootCommand {
             Self::Deploy(command) => command.run(app).await,
             Self::Install(command) => command.run(app).await,
             Self::Rollback(command) => command.run(app).await,
-            Self::Behavior(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
             Self::Simulation(command) => command.run(app).await,
             Self::Run(command) => command.run(app).await,
