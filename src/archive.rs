@@ -70,15 +70,14 @@ pub fn write_build_archive(layout_root: &Path, output: &Path) -> Result<String> 
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .canonicalize()
+        && (canonical_parent == layout_root || canonical_parent.starts_with(&layout_root))
     {
-        if canonical_parent == layout_root || canonical_parent.starts_with(&layout_root) {
-            bail!(
-                "refusing to write build.phoxal inside the staged layout it archives ({}); \
+        bail!(
+            "refusing to write build.phoxal inside the staged layout it archives ({}); \
                  choose an --output outside {}",
-                output.display(),
-                layout_root.display()
-            );
-        }
+            output.display(),
+            layout_root.display()
+        );
     }
 
     let entries = collect_entries(&layout_root)?;
@@ -306,14 +305,14 @@ pub fn extract_build_archive(archive: &Path, dest: &Path) -> Result<()> {
         // (`dest` is empty and we create no symlinks, but a concurrent writer
         // could race one in). The `O_NOFOLLOW` open below is the authoritative
         // guard; this gives a clearer diagnostic.
-        if let Ok(meta) = fs::symlink_metadata(&out) {
-            if meta.file_type().is_symlink() {
-                bail!(
-                    "refusing to extract archive entry `{}`: {} is a symlink in the destination",
-                    safe.display(),
-                    out.display()
-                );
-            }
+        if let Ok(meta) = fs::symlink_metadata(&out)
+            && meta.file_type().is_symlink()
+        {
+            bail!(
+                "refusing to extract archive entry `{}`: {} is a symlink in the destination",
+                safe.display(),
+                out.display()
+            );
         }
         let mode = entry.header().mode().ok();
         write_stream_with_mode(&out, &mut entry, size, mode)?;
