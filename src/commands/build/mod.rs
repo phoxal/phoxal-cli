@@ -443,26 +443,18 @@ impl Build {
         // subset. `build` skips the host-native source check (`false`): the
         // loader's target-aware validation over the staged binaries is
         // authoritative, and a cross target's Linux-only crates need not compile
-        // on the build host.
-        let staged =
-            crate::run::refresh_staging(staging_source, &options, staging, false, &app.ui)?;
-
-        // Validate against the *declared* target signature (format + arch +
-        // endianness): a correct cross-built binary passes, while a same-CPU
-        // wrong-OS (Mach-O for a Linux triple), wrong-arch, or wrong-endian
-        // binary fails precisely, and an unmappable triple is rejected outright.
-        // Native bundles exclude simulator-only binaries (the Native profile /
-        // LaunchMode::Run already enforces this).
-        let expected_target = expected_target_for_triple(target)
-            .context("cannot validate the staged runtime layout for the requested target")?;
-        crate::runtime_header::RuntimeHeader::read_and_validate(&staged.staged_root)?;
-        crate::loader::validate_layout_plan(
-            &staged.staged_root,
-            &staged.plan_options(),
-            LayoutInspection::Target(expected_target),
+        // on the build host. `refresh_staging` already validates the compiled
+        // layout against the DECLARED target signature (via `staging.target()`)
+        // and publishes only after that succeeds (organization#951 WS4
+        // review) - there is no separate validation left to do here.
+        let staged = crate::run::refresh_staging(
+            staging_source,
+            &options,
+            staging,
+            false,
             RunIdentity::default(),
-        )
-        .context("failed to validate the staged runtime layout for the target")?;
+            &app.ui,
+        )?;
 
         // The container path staged under the frozen snapshot, which is
         // deleted when the snapshot guard drops. Publish the validated staged

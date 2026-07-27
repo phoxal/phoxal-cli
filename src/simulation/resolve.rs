@@ -73,12 +73,18 @@ pub(crate) fn build_checked_sim_launch_plan(
     // reaches the `build` closure below.
     let platform_refs = check_artifact_refs_from_resolved(resolved);
     let tool_participants = tool_participants_from_resolved(resolved)?;
-    let bundle_root = phoxal_cli_core::project::launch_plan::runtime_layout_dir(project_root);
     // Materialize every official service, tool, and registry component
     // driver this check needs metadata from, up front - the same
-    // `cargo install` path `run`/`build` use.
+    // `cargo install` path `run`/`build` use. This is a metadata read, not
+    // staging: it materializes into a SCRATCH candidate that is never
+    // published, never the live `.phoxal/bundle/` - the real staging pass
+    // (`live_simulate_setup`) runs later and owns publishing. Touching the
+    // live bundle here would violate the stager's atomicity promise for
+    // every prior run still using it while this check runs.
+    let scratch = crate::stager::begin_runtime_layout(project_root, resolved)
+        .context("failed to stage a scratch layout for simulation metadata")?;
     crate::stager::materialize_official_store(
-        &bundle_root,
+        scratch.path(),
         resolved,
         offline,
         None,
@@ -87,9 +93,9 @@ pub(crate) fn build_checked_sim_launch_plan(
         },
     )?;
     for runtime in crate::check::component_driver_runtimes_by_ref(resolved).values() {
-        crate::stager::materialize_component_driver(&bundle_root, runtime, offline)?;
+        crate::stager::materialize_component_driver(scratch.path(), runtime, offline, None)?;
     }
-    let bin_dir = bundle_root.join("bin");
+    let bin_dir = scratch.path().join("bin");
     let mut official_by_name = resolved
         .platform_runtimes
         .iter()
@@ -356,6 +362,11 @@ services:
     #[test]
     fn rejects_a_user_service_whose_config_violates_its_own_schema() -> Result<()> {
         let temp = tempfile::tempdir()?;
+        // `begin_runtime_layout` (organization#951 WS4 review) genuinely
+        // stages the candidate now, including the robot structure file the
+        // manifest declares - it must exist for staging to reach the config
+        // validation this test actually exercises.
+        std::fs::write(temp.path().join("structure.urdf"), "<robot/>")?;
         let crate_dir = write_invalid_config_service_fixture(temp.path());
         let simulator_dir = write_simulator_fixture(temp.path());
         let resolved = resolved_robot_with_invalid_service_config(crate_dir, simulator_dir)?;

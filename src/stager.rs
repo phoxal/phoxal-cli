@@ -30,6 +30,17 @@
 //! directory first, validates it, and only then atomically renames it over
 //! the previous complete layout. A build failure halfway through must never
 //! leave a robot with no runtime.
+//!
+//! This is why [`begin_runtime_layout`]/[`publish_runtime_layout`] are two
+//! functions, not one: everything between them - `cargo install` for every
+//! official, building every source/override binary, the source check, and
+//! the loader's own execution-time validation - runs against
+//! [`StagedCandidate::path`], a path nobody executes from yet. Only
+//! [`publish_runtime_layout`] ever touches the live path, and it is always
+//! the last call. [`stage_runtime_layout`] is the two collapsed into one for
+//! a caller that never populates `bin/`; a caller that does MUST use the
+//! split functions, not it - see `run::prepare::refresh_staging` and
+//! `simulation::setup::live_simulate_setup`.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -58,14 +69,45 @@ pub fn layout_path(project_root: &Path, _resolved: &ResolvedRobot) -> PathBuf {
     runtime_layout_dir(project_root)
 }
 
-/// Stage the compiled `robot.yaml` and runtime assets into `.phoxal/bundle/`,
-/// atomically replacing any previous layout. The caller owns the project run
-/// lock for the whole operation, so no participant observes the brief
-/// exchange between the previous complete layout and the newly validated
-/// candidate. `bin/` is created empty; callers that execute the layout
-/// populate it with [`stage_participant_binary`] and
-/// [`materialize_official_store`].
-pub fn stage_runtime_layout(project_root: &Path, resolved: &ResolvedRobot) -> Result<PathBuf> {
+/// An unpublished runtime-layout candidate: the compiled `robot.yaml` and
+/// runtime assets already staged (and manifest-shape validated), but NOT yet
+/// swapped into the live `.phoxal/bundle/`.
+///
+/// This is the type that makes the stager's atomicity promise real: every
+/// caller MUST materialize officials ([`materialize_official_store`]),
+/// build/stage source and override binaries, run its source/loader
+/// validation, and only THEN call [`publish_runtime_layout`]. A failure at
+/// any point before publish touches only this candidate's own temporary
+/// directory - the previous live bundle is untouched and still runnable.
+/// [`StagedCandidate::path`] is a plain filesystem path, so every existing
+/// staging function (`materialize_official_store`, `stage_named_binary`,
+/// `crate::loader::validate_layout_plan`, ...) that takes `staged_root: &Path`
+/// already works against it with no changes.
+pub struct StagedCandidate {
+    dir: tempfile::TempDir,
+    project_root: PathBuf,
+}
+
+impl StagedCandidate {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// Stage the compiled `robot.yaml` and runtime assets into a fresh,
+/// UNPUBLISHED candidate directory - a sibling of the live `.phoxal/bundle/`,
+/// never the live path itself. The caller owns the project run lock for the
+/// whole operation (candidate creation through [`publish_runtime_layout`]),
+/// so no participant observes anything until the single atomic rename at the
+/// end. `bin/` is created empty; the caller populates it (typically with
+/// [`materialize_official_store`] and [`stage_participant_binary`]) and runs
+/// its own validation against [`StagedCandidate::path`] BEFORE publishing -
+/// see the module docs.
+pub fn begin_runtime_layout(
+    project_root: &Path,
+    resolved: &ResolvedRobot,
+) -> Result<StagedCandidate> {
     let build_dir =
         project_root.join(phoxal_cli_core::project::launch_plan::RUNTIME_BUNDLE_ROOT_RELATIVE);
     let parent = build_dir
@@ -91,7 +133,29 @@ pub fn stage_runtime_layout(project_root: &Path, resolved: &ResolvedRobot) -> Re
     stage_candidate(project_root, candidate.path(), resolved, &compiled)?;
     validate_candidate(candidate.path(), resolved, &compiled)?;
 
-    let target = layout_path(project_root, resolved);
+    Ok(StagedCandidate {
+        dir: candidate,
+        project_root: project_root.to_path_buf(),
+    })
+}
+
+/// Atomically publish `candidate` as the live `.phoxal/bundle/`, replacing
+/// any previous layout. Call this ONLY after every install, source build,
+/// metadata read, and loader validation against `candidate.path()` has
+/// already succeeded - this is the exact promise the module docs make, and
+/// the only step allowed to touch the live path.
+pub fn publish_runtime_layout(
+    candidate: StagedCandidate,
+    resolved: &ResolvedRobot,
+) -> Result<PathBuf> {
+    let StagedCandidate {
+        dir: candidate,
+        project_root,
+    } = candidate;
+    let target = layout_path(&project_root, resolved);
+    let parent = target
+        .parent()
+        .context("runtime bundle directory has no parent")?;
     let previous = parent.join(format!(".bundle{PREVIOUS_LAYOUT_SUFFIX}"));
     remove_if_present(&previous)?;
     let candidate = candidate.keep();
@@ -119,6 +183,24 @@ pub fn stage_runtime_layout(project_root: &Path, resolved: &ResolvedRobot) -> Re
     }
     remove_if_present(&previous)?;
     Ok(target)
+}
+
+/// Stage the compiled `robot.yaml` and runtime assets into `.phoxal/bundle/`
+/// and publish immediately, with no materialization in between - the
+/// [`begin_runtime_layout`] + [`publish_runtime_layout`] pair collapsed into
+/// one call. Correct ONLY for a caller that never populates `bin/` (a bare
+/// manifest/assets refresh); every REAL caller installs officials or builds
+/// binaries, and MUST use the split functions directly instead, publishing
+/// only after that work and its validation succeed - see
+/// `refresh_staging`/`live_simulate_setup`. `#[cfg(test)]`-only: production
+/// code has no bin/-free staging pass left to use it for.
+#[cfg(test)]
+pub(crate) fn stage_runtime_layout(
+    project_root: &Path,
+    resolved: &ResolvedRobot,
+) -> Result<PathBuf> {
+    let candidate = begin_runtime_layout(project_root, resolved)?;
+    publish_runtime_layout(candidate, resolved)
 }
 
 /// The compiled `robot/v0` manifest for the staged layout. Under the
@@ -281,13 +363,20 @@ fn ensure_bin_dir(staged_root: &Path) -> Result<PathBuf> {
 }
 
 /// Look for `binary_name` already materialized under `officials_source`
-/// (`<officials_source>/bin/<binary_name>`), linking it into `staged` and
-/// returning `true` when found. `officials_source` is `None` for every
-/// staging pass except the container builder's, and even then only ever
-/// holds the deterministic, robot-independent catalog set (services, tools,
-/// the router) - never a robot-specific component driver.
+/// (`<officials_source>/bin/<binary_name>`) and link it into `staged`.
+///
+/// When `officials_source` is `Some`, it is the container builder's own
+/// `cargo install --root` output, and it is authoritative: a package this
+/// staging pass expects but does not find there is the container's output
+/// being INCOMPLETE, never a reason to fall back to a host-side install -
+/// that fallback is precisely the host cross-compilation risk the container
+/// exists to avoid, so silently taking it would defeat the whole point.
+/// Returns `false` only when `officials_source` itself is `None` (no
+/// container was involved in this staging pass at all), the caller's signal
+/// to fall through to `cargo install`.
 fn link_from_officials_source(
     officials_source: Option<&Path>,
+    package: &str,
     binary_name: &str,
     staged: &Path,
 ) -> Result<bool> {
@@ -295,9 +384,13 @@ fn link_from_officials_source(
         return Ok(false);
     };
     let candidate = source_dir.join(BIN_DIR).join(binary_name);
-    if !candidate.is_file() {
-        return Ok(false);
-    }
+    ensure!(
+        candidate.is_file(),
+        "the container did not materialize official runtime {package} (expected {}); its \
+         `cargo install` output is incomplete - this is a hard error, not a fallback to a \
+         host-side cross-compiled install",
+        candidate.display()
+    );
     link_or_copy(&candidate, staged)?;
     Ok(true)
 }
@@ -322,7 +415,7 @@ fn materialize_platform_runtime(
         let source = build_override(crate_dir, &runtime.name)?;
         return link_or_copy(&source, &staged);
     }
-    if link_from_officials_source(officials_source, &binary_name, &staged)? {
+    if link_from_officials_source(officials_source, &runtime.package, &binary_name, &staged)? {
         return Ok(());
     }
     let spec = MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
@@ -351,7 +444,7 @@ fn materialize_tool(
         let source = build_override(crate_dir, tool_participant_id(&tool.name))?;
         return link_or_copy(&source, &staged);
     }
-    if link_from_officials_source(officials_source, &tool.binary_name, &staged)? {
+    if link_from_officials_source(officials_source, &tool.package, &tool.binary_name, &staged)? {
         return Ok(());
     }
     let spec = MaterializeSpec::new(tool.package.clone(), tool.train.clone())
@@ -362,20 +455,34 @@ fn materialize_tool(
 }
 
 /// Materialize one registry-sourced component driver package straight into
-/// `bin/` via `cargo install`, exactly like a service. A workspace/path
-/// -overridden driver is staged by [`stage_participant_binary`] instead and
-/// never reaches this function - see `run::stage_complete_bin_store`.
+/// `bin/`, from an already-materialized `officials_source` or `cargo
+/// install`, exactly like a service. A workspace/path-overridden driver is
+/// staged by [`stage_participant_binary`] instead and never reaches this
+/// function - see `run::stage_complete_bin_store`.
 ///
 /// Component drivers are robot-specific (only the components a robot
-/// actually declares), so the container builder never pre-installs them the
-/// way it does the deterministic catalog set - this always calls `cargo
-/// install` (cross-compiling host-side when `runtime.target` differs from
-/// the host, with the same caveat any host cross build carries).
+/// actually declares), so the container builder cannot know them from the
+/// catalog alone - it resolves the robot graph first specifically to learn
+/// them, then installs them alongside the deterministic set (see
+/// `commands::build::container`), so `officials_source` covers them too
+/// whenever a container was involved. With no `officials_source` at all,
+/// this cross-compiles host-side when `runtime.target` differs from the
+/// host, with the same caveat any host cross build carries.
 pub fn materialize_component_driver(
     staged_root: &Path,
     runtime: &ResolvedPlatformRuntime,
     offline: bool,
+    officials_source: Option<&Path>,
 ) -> Result<()> {
+    let bin_dir = ensure_bin_dir(staged_root)?;
+    let binary_name = official_binary_name(runtime.kind, &runtime.name);
+    let staged = bin_dir.join(&binary_name);
+    if staged.is_file() {
+        return Ok(());
+    }
+    if link_from_officials_source(officials_source, &runtime.package, &binary_name, &staged)? {
+        return Ok(());
+    }
     let spec = MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
         .with_target(runtime.target.clone());
     cargo_install(staged_root, &spec, offline)
@@ -962,6 +1069,88 @@ robot:
         assert_eq!(
             fs::read_to_string(staged.join("model/structure.urdf"))?,
             "first"
+        );
+        Ok(())
+    }
+
+    /// The atomicity promise the module docs make, exercised past the point
+    /// [`failed_candidate_preserves_previous_layout`] stops at: a failure
+    /// during binary MATERIALIZATION (`materialize_official_store`, after
+    /// `begin_runtime_layout` already succeeded) must never touch the
+    /// previously published, running bundle. Uses the `officials_source`
+    /// hard-error path (organization#951 WS4 review, blocker 2) as the
+    /// deterministic, offline-safe failure trigger: a container-shaped
+    /// directory whose `bin/` is missing the expected official.
+    #[test]
+    fn materialization_failure_leaves_previous_bundle_intact_and_runnable() -> Result<()> {
+        let _scratch = ScratchPhoxalHome::new()?;
+        let project = tempfile::tempdir()?;
+        fs::create_dir_all(project.path().join("model"))?;
+        fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
+        let mut resolved = resolved_robot()?;
+        resolved.platform_runtimes = vec![platform_runtime("mission", ArtifactKind::Service)];
+        let binary_name = official_binary_name(ArtifactKind::Service, "mission");
+
+        // First refresh: a complete `officials_source` (the shape the
+        // container builder hands to host-side staging) materializes and
+        // publishes cleanly.
+        let complete_officials = tempfile::tempdir()?;
+        fs::create_dir_all(complete_officials.path().join("bin"))?;
+        fs::write(
+            complete_officials.path().join("bin").join(&binary_name),
+            "first-runnable-bundle",
+        )?;
+        let candidate = begin_runtime_layout(project.path(), &resolved)?;
+        materialize_official_store(
+            candidate.path(),
+            &resolved,
+            true,
+            Some(complete_officials.path()),
+            |_, _| unreachable!("no path-overridden official in this fixture"),
+        )?;
+        let staged_root = publish_runtime_layout(candidate, &resolved)?;
+        let published_binary = staged_root.join("bin").join(&binary_name);
+        assert_eq!(
+            fs::read_to_string(&published_binary)?,
+            "first-runnable-bundle"
+        );
+
+        // Second refresh: `officials_source` is present (as a container run
+        // would be) but incomplete - `bin/` is missing `mission` entirely.
+        // `materialize_official_store` must hard error rather than silently
+        // falling back to a host-side `cargo install`.
+        let incomplete_officials = tempfile::tempdir()?;
+        fs::create_dir_all(incomplete_officials.path().join("bin"))?;
+        let next_candidate = begin_runtime_layout(project.path(), &resolved)?;
+        let candidate_dir = next_candidate.path().to_path_buf();
+        let error = materialize_official_store(
+            next_candidate.path(),
+            &resolved,
+            true,
+            Some(incomplete_officials.path()),
+            |_, _| unreachable!("no path-overridden official in this fixture"),
+        )
+        .expect_err("an officials_source missing an expected official must hard error");
+        assert!(
+            error.to_string().contains("mission"),
+            "error should name the missing official: {error}"
+        );
+
+        // The caller never publishes on this error path (the same `?`
+        // early-return every real caller uses) - dropping the candidate here
+        // reproduces that, and its `TempDir` cleans itself up.
+        drop(next_candidate);
+        assert!(
+            !candidate_dir.exists(),
+            "a discarded candidate must not leak its temp directory"
+        );
+
+        // The previously published bundle is completely untouched: same
+        // path, same bytes, still runnable.
+        assert!(staged_root.is_dir());
+        assert_eq!(
+            fs::read_to_string(&published_binary)?,
+            "first-runnable-bundle"
         );
         Ok(())
     }

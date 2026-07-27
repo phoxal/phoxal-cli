@@ -149,7 +149,12 @@ pub(crate) fn stage_complete_bin_store(
         else {
             continue;
         };
-        crate::stager::materialize_component_driver(staged_root, runtime, offline)?;
+        crate::stager::materialize_component_driver(
+            staged_root,
+            runtime,
+            offline,
+            build.officials_source(),
+        )?;
     }
     // Every official service, tool, and the infrastructure router.
     crate::stager::materialize_official_store(
@@ -424,7 +429,10 @@ fn resolve_participant_source(
                         participant.artifact_id
                     )
                 })?;
-            crate::stager::materialize_component_driver(staged_root, runtime, offline)?;
+            // This resolution path (single-participant execution, used only
+            // by simulation) never runs through the container builder, so
+            // there is no pre-materialized officials directory to check.
+            crate::stager::materialize_component_driver(staged_root, runtime, offline, None)?;
             Ok(staged_root.join("bin").join(
                 phoxal_cli_core::project::resolver::official_binary_name(
                     runtime.kind,

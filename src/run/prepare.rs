@@ -25,9 +25,11 @@ use crate::supervisor::BoardBackend;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use phoxal_cli_core::check::participant_metadata::expected_target_for_triple;
+use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::PlanContext;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
-use phoxal_cli_core::project::layout::RuntimeLayout;
+use phoxal_cli_core::project::layout::{LayoutInspection, PlanOptions, RuntimeLayout};
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::resolver::discover_robot_yaml;
@@ -40,10 +42,14 @@ use std::path::Path;
 /// resolved graph and its source-participant records the staging step consumed,
 /// the resolved driver policy, and the staged runtime layout root every
 /// executable and the launch plan are then read from. Everything after staging -
-/// plan construction, spec building, `phoxal build`'s archive - reads only the
+/// spec building, `phoxal build`'s archive - reads only the
 /// staged layout; these fields are the staging-side inputs the source path still
 /// needs (crate directories for cwd/rebuild, the resolved graph for router
-/// config).
+/// config). `plan` is the loader's own validated launch plan, already
+/// constructed against `staged_root` BEFORE it was published (#951 WS4
+/// review) - callers must reuse it rather than re-running
+/// `loader::validate_layout_plan`, which would be a second, redundant
+/// validation pass over already-validated bytes.
 pub(crate) struct StagedProject {
     pub(crate) robot_path: std::path::PathBuf,
     pub(crate) project_root: std::path::PathBuf,
@@ -52,41 +58,36 @@ pub(crate) struct StagedProject {
     pub(crate) driver_policy: DriverPolicy,
     /// The staged runtime layout root - `.phoxal/bundle/`.
     pub(crate) staged_root: std::path::PathBuf,
-}
-
-impl StagedProject {
-    /// The plan-construction options this refresh resolved, so `run`, `start`,
-    /// and `build` all validate/construct the plan against the identical
-    /// driver policy the staging step honored.
-    pub(crate) fn plan_options(&self) -> phoxal_cli_core::project::layout::PlanOptions {
-        phoxal_cli_core::project::layout::PlanOptions {
-            drivers: self.driver_policy.selection(),
-        }
-    }
+    pub(crate) plan: LaunchPlan,
 }
 
 /// Refresh the host-triple staging for a buildable source project and return the
 /// staged layout plus the staging-side inputs (#936). This is the one staging
 /// entry `run`, `start`, and `phoxal build` all share, so they build and
 /// stage identically before diverging on what they do with the staged layout:
-/// resolve the locked graph, prepare native artifacts, resolve the driver policy,
-/// stage the runtime layout under `.phoxal/bundle/`, run the
-/// source-time check, and complete the flat `bin/` store. It never constructs the
-/// launch plan or touches the supervisor - the caller runs
-/// `loader::validate_layout_plan` over `staged_root` next.
+/// resolve the locked graph, materialize officials, resolve the driver policy,
+/// stage the runtime layout, run the source-time check, complete the flat
+/// `bin/` store, and validate the whole compiled layout through the loader -
+/// ALL of it against an unpublished candidate directory, exactly once, and
+/// ONLY THEN publish it as the live `.phoxal/bundle/` (organization#951 WS4
+/// review: the previous ordering published first and materialized/validated
+/// after, so any failure left the robot with its previous working bundle
+/// deleted and the live one empty or half-populated). A failure anywhere in
+/// this function therefore never touches the previous live bundle at all.
 ///
 /// `build` reuses this per target triple: `build` is a
 /// native-bundle [`StagingBuild`](crate::run::StagingBuild) carrying the
 /// requested `--target`,
 /// which threads through the resolve/stage/`bin/`-completion steps so the same
 /// code cross-compiles (or reuses container-built) workspace crates and links
-/// the suite's per-target official blobs into `.phoxal/bundle/`. `run`,
+/// the official set for that target. `run`,
 /// and `start` pass `StagingBuild::host_runtime()`.
 pub(crate) fn refresh_staging(
     project_start: &Path,
     options: &RunOptions,
     build: &crate::run::StagingBuild,
     check_source: bool,
+    run: RunIdentity,
     ui: &crate::Ui,
 ) -> Result<StagedProject> {
     let robot_path = discover_robot_yaml(project_start)
@@ -123,16 +124,20 @@ pub(crate) fn refresh_staging(
         },
     )?;
 
-    let staged_root = crate::stager::stage_runtime_layout(project_root, &resolved)
+    // Stage into an UNPUBLISHED candidate. Every install, source build,
+    // metadata read, and loader validation below runs against
+    // `candidate.path()`; only the final `publish_runtime_layout` call at the
+    // bottom of this function ever touches the live `.phoxal/bundle/`.
+    let candidate = crate::stager::begin_runtime_layout(project_root, &resolved)
         .context("failed to stage the runtime layout")?;
 
     // Materialize every official service, tool, and the infrastructure
-    // router into the staged `bin/` up front, via `cargo install`
+    // router into the candidate `bin/` up front, via `cargo install`
     // (organization#951 WS4). This is what makes the source check below able
     // to read every official's embedded metadata straight off disk, and
     // completes the flat `bin/` store the loader requires.
     crate::stager::materialize_official_store(
-        &staged_root,
+        candidate.path(),
         &resolved,
         options.offline,
         build.officials_source(),
@@ -145,21 +150,22 @@ pub(crate) fn refresh_staging(
 
     // Source/staging-time validation: build every source participant (for its
     // embedded metadata) and check the source graph before we stage and run.
-    // Execution-time validation is the loader's, over the staged layout below.
+    // Execution-time validation is the loader's, over the candidate layout
+    // below.
     //
     // `phoxal build` skips this host-native pass (`check_source == false`): a
     // cross or container target's Linux-only crates need not compile on the
     // build host, and the loader's target-aware validation over the staged
     // (cross-built) binaries is the authoritative check for a bundle (#936).
     if check_source {
-        run_source_check(&staged_root, &robot, &resolved, &source_participants)?;
+        run_source_check(candidate.path(), &robot, &resolved, &source_participants)?;
     }
 
-    // Complete the staged `bin/` store so the loader can inspect every required
-    // runtime off-disk. This is the last step that consumes the resolved graph;
-    // everything after it reads only the staged layout.
+    // Complete the candidate `bin/` store so the loader can inspect every
+    // required runtime off-disk. This is the last step that consumes the
+    // resolved graph; everything after it reads only the candidate layout.
     crate::run::stage_complete_bin_store(
-        &staged_root,
+        candidate.path(),
         &resolved,
         &source_participants,
         &driver_policy.selection(),
@@ -172,6 +178,33 @@ pub(crate) fn refresh_staging(
     // start and build all surface it exactly once.
     crate::run::report_undeclared_runtimes(&resolved.undeclared_runtimes, ui);
 
+    // The loader's own execution-time validation - config-schema pairing and
+    // architecture inspection - runs against the candidate too, still before
+    // publish. `run`/`start` inspect against the host; a `--target` build
+    // inspects against the declared target signature instead, since the
+    // staged binaries were cross-compiled (or container-built) for it, not
+    // for this host.
+    crate::runtime_header::RuntimeHeader::read_and_validate(candidate.path())?;
+    let plan_options = PlanOptions {
+        drivers: driver_policy.selection(),
+    };
+    let inspection = match build.target() {
+        Some(target) => {
+            LayoutInspection::Target(expected_target_for_triple(target).with_context(|| {
+                format!("cannot validate the staged runtime layout for target {target}")
+            })?)
+        }
+        None => LayoutInspection::Host,
+    };
+    let plan =
+        crate::loader::validate_layout_plan(candidate.path(), &plan_options, inspection, run)
+            .context("failed to validate the staged runtime layout")?;
+
+    // Every install, build, check, and validation above succeeded against the
+    // candidate alone - publish it as the live layout now, and only now.
+    let staged_root = crate::stager::publish_runtime_layout(candidate, &resolved)
+        .context("failed to publish the staged runtime layout")?;
+
     Ok(StagedProject {
         // `project_root` borrows `robot_path`, so clone rather than move it.
         robot_path: robot_path.clone(),
@@ -180,6 +213,7 @@ pub(crate) fn refresh_staging(
         source_participants,
         driver_policy,
         staged_root,
+        plan,
     })
 }
 
@@ -200,21 +234,16 @@ pub(crate) fn prepare_run_on_board(
         &options,
         &crate::run::StagingBuild::host_runtime(),
         true,
+        run,
         ui,
     )?;
-    let plan_options = staged.plan_options();
 
-    // The one execution path: construct and validate the launch plan from the
-    // staged layout alone. Byte-identical, for the same robot, to a plan built
-    // from an extracted bundle of this layout.
-    crate::runtime_header::RuntimeHeader::read_and_validate(&staged.staged_root)?;
-    let plan = crate::loader::validate_layout_plan(
-        &staged.staged_root,
-        &plan_options,
-        phoxal_cli_core::project::layout::LayoutInspection::Host,
-        run,
-    )
-    .context("failed to construct the launch plan from the staged runtime layout")?;
+    // The one execution path: `refresh_staging` already constructed and
+    // validated the launch plan against the candidate BEFORE publishing it
+    // (organization#951 WS4 review) - reuse it rather than re-validating the
+    // now-published bytes a second time. Byte-identical, for the same robot,
+    // to a plan built from an extracted bundle of this layout.
+    let plan = staged.plan.clone();
 
     board.configure(
         staged.project_root.display().to_string(),
