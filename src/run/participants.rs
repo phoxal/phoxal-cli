@@ -69,9 +69,9 @@ pub(crate) fn source_dirs_by_participant(
 /// records, never by a plan.
 ///
 /// It links: every user service and workspace/path-overridden component driver,
-/// built from its crate; every suite-provided component driver, from the
-/// vendored store; and every official service, tool, and the infrastructure
-/// router, from the vendored store or a source override. After it runs, `bin/`
+/// built from its crate; every registry-sourced component driver, via `cargo
+/// install`; and every official service, tool, and the infrastructure
+/// router, via `cargo install` or a source override. After it runs, `bin/`
 /// is the complete lookup store an extracted bundle would carry - the loader
 /// resolves every required runtime from it with no source present.
 ///

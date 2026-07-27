@@ -140,7 +140,8 @@ pub struct SelectedBinary {
 
 /// A parsed staged runtime layout: the flattened `robot/v0` document plus its
 /// root, from which the required runtime set and its `bin/` binaries are
-/// derived. Holds no source, no Cargo graph, and no suite.
+/// derived. Holds no source and no Cargo graph - everything it needs already
+/// materialized into `bin/` before this type is constructed.
 #[derive(Debug, Clone)]
 pub struct RuntimeLayout {
     root: PathBuf,

@@ -56,10 +56,10 @@ pub fn run_check_with_context(
         if artifact.instances.is_empty() {
             participants.push(participant);
         } else {
-            // A suite component driver is fetched once but launched once
-            // per instance that declares it - key each instance's graph
-            // membership by its own id, exactly like a workspace-built
-            // driver source participant does (see
+            // A registry-materialized component driver is installed once but
+            // launched once per instance that declares it - key each
+            // instance's graph membership by its own id, exactly like a
+            // workspace-built driver source participant does (see
             // `SourceParticipantKind::ComponentDriver` below).
             for instance in &artifact.instances {
                 let mut instance_participant = participant.clone();

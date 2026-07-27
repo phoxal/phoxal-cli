@@ -1081,8 +1081,16 @@ robot:
     /// hard-error path (organization#951 WS4 review, blocker 2) as the
     /// deterministic, offline-safe failure trigger: a container-shaped
     /// directory whose `bin/` is missing the expected official.
+    ///
+    /// "...and_runnable" is proven literally (organization#951 WS4 review,
+    /// round 2 nitpick): the marker is a real executable shell script, run
+    /// via `std::process::Command` both before and after the failed second
+    /// refresh, not just read as bytes - a test named "runnable" that only
+    /// ever read the file would claim more than it proved.
     #[test]
     fn materialization_failure_leaves_previous_bundle_intact_and_runnable() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
         let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
@@ -1093,13 +1101,14 @@ robot:
 
         // First refresh: a complete `officials_source` (the shape the
         // container builder hands to host-side staging) materializes and
-        // publishes cleanly.
+        // publishes cleanly. The marker is a real, executable shell script -
+        // not just bytes - so the "runnable" half of this test's name is
+        // literally exercised below, not merely asserted by content.
         let complete_officials = tempfile::tempdir()?;
         fs::create_dir_all(complete_officials.path().join("bin"))?;
-        fs::write(
-            complete_officials.path().join("bin").join(&binary_name),
-            "first-runnable-bundle",
-        )?;
+        let marker_script = complete_officials.path().join("bin").join(&binary_name);
+        fs::write(&marker_script, "#!/bin/sh\necho first-runnable-bundle\n")?;
+        fs::set_permissions(&marker_script, fs::Permissions::from_mode(0o755))?;
         let candidate = begin_runtime_layout(project.path(), &resolved)?;
         materialize_official_store(
             candidate.path(),
@@ -1110,10 +1119,7 @@ robot:
         )?;
         let staged_root = publish_runtime_layout(candidate, &resolved)?;
         let published_binary = staged_root.join("bin").join(&binary_name);
-        assert_eq!(
-            fs::read_to_string(&published_binary)?,
-            "first-runnable-bundle"
-        );
+        assert_eq!(run_marker(&published_binary)?, "first-runnable-bundle\n");
 
         // Second refresh: `officials_source` is present (as a container run
         // would be) but incomplete - `bin/` is missing `mission` entirely.
@@ -1146,13 +1152,28 @@ robot:
         );
 
         // The previously published bundle is completely untouched: same
-        // path, same bytes, still runnable.
+        // path, same bytes, and genuinely still executes successfully.
         assert!(staged_root.is_dir());
-        assert_eq!(
-            fs::read_to_string(&published_binary)?,
-            "first-runnable-bundle"
-        );
+        assert_eq!(run_marker(&published_binary)?, "first-runnable-bundle\n");
         Ok(())
+    }
+
+    /// Execute the marker script at `path` and return its captured stdout,
+    /// failing loudly if it did not exit successfully - the literal proof
+    /// half of [`materialization_failure_leaves_previous_bundle_intact_and_runnable`].
+    fn run_marker(path: &Path) -> Result<String> {
+        let output = std::process::Command::new(path)
+            .output()
+            .with_context(|| format!("failed to execute marker binary {}", path.display()))?;
+        ensure!(
+            output.status.success(),
+            "marker binary {} exited with {}: {}",
+            path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .with_context(|| format!("marker binary {} wrote non-UTF8 stdout", path.display()))
     }
 
     #[test]

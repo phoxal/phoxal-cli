@@ -1172,8 +1172,8 @@ fn components_without_drivers_are_not_built() -> Result<()> {
 }
 
 #[test]
-fn suite_component_driver_becomes_a_platform_ref_not_a_source_participant() -> Result<()> {
-    // A Suite-sourced driver is a first-class suite artifact - it
+fn registry_component_driver_becomes_a_platform_ref_not_a_source_participant() -> Result<()> {
+    // A registry-sourced driver is a first-class official artifact - it
     // must NOT enter `source_participants_from_resolved` (which would
     // later bail trying to build/locate a nonexistent local crate dir).
     let temp = tempfile::tempdir()?;
@@ -1196,13 +1196,13 @@ fn suite_component_driver_becomes_a_platform_ref_not_a_source_participant() -> R
     let source_participants =
         source_participants_from_resolved(temp.path(), &resolved, |component, _project_root| {
             panic!(
-                "a Suite-sourced driver for '{}' must never reach the source-crate locator",
+                "a registry-sourced driver for '{}' must never reach the source-crate locator",
                 component.instance
             )
         })?;
     assert!(
         source_participants.is_empty(),
-        "suite driver must not become a source participant: {source_participants:?}"
+        "registry driver must not become a source participant: {source_participants:?}"
     );
 
     let platform_refs = component_driver_platform_refs_from_resolved(&resolved);
@@ -1215,8 +1215,9 @@ fn suite_component_driver_becomes_a_platform_ref_not_a_source_participant() -> R
 }
 
 #[test]
-fn n_instances_of_one_suite_driver_fetch_once_and_validate_as_n_graph_participants() -> Result<()> {
-    // Two instances (`left_drive`/`right_drive`) share one suite
+fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_participants() -> Result<()>
+{
+    // Two instances (`left_drive`/`right_drive`) share one registry-sourced
     // driver package: the fetch closure must be called exactly once
     // (proving the driver is fetched once, not per instance), yet both
     // instances must appear as distinct, correctly-scoped graph
@@ -1271,7 +1272,7 @@ fn n_instances_of_one_suite_driver_fetch_once_and_validate_as_n_graph_participan
 
     let source_participants =
         source_participants_from_resolved(temp.path(), &resolved, |_component, _project_root| {
-            panic!("suite drivers never reach the source locator")
+            panic!("registry drivers never reach the source locator")
         })?;
     assert!(source_participants.is_empty());
 
@@ -1319,9 +1320,9 @@ fn n_instances_of_one_suite_driver_fetch_once_and_validate_as_n_graph_participan
 }
 
 #[test]
-fn driverless_suite_component_stages_assets_only_and_is_not_a_check_participant() -> Result<()> {
+fn driverless_registry_component_stages_assets_only_and_is_not_a_check_participant() -> Result<()> {
     // Component assets contribute no contracts and are never a check
-    // participant, suite-sourced or not; a driverless instance yields
+    // participant, registry-sourced or not; a driverless instance yields
     // no source participant and no platform ref.
     let temp = tempfile::tempdir()?;
     let resolved = resolved_with_components(vec![ResolvedComponent {
@@ -1379,7 +1380,7 @@ fn path_overridden_service_enters_check_through_source_participant_report() -> R
         &[],
         &source_participants,
         CheckGraphContext { robot: None },
-        |_| bail!("path-overridden service should not read suite metadata"),
+        |_| bail!("path-overridden service should not read registry metadata"),
         |_| bail!("no tools in this fixture"),
         |participant| {
             assert_eq!(participant.kind, SourceParticipantKind::OfficialService);

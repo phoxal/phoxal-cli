@@ -121,9 +121,9 @@ pub enum RootCommand {
     Status(status::Status),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
-    #[command(about = "Inspect the user-service suite.")]
+    #[command(about = "Manage the systemd phoxal.service and inspect the official catalog.")]
     Service(service::Service),
-    #[command(about = "Print the phoxal version and suite source defaults.")]
+    #[command(about = "Print the phoxal version and the official registry it installs from.")]
     Version(VersionArgs),
     #[command(name = "self", about = "Manage this phoxal installation.")]
     SelfCmd(self_cmd::SelfCmd),

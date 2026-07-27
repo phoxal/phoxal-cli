@@ -516,8 +516,9 @@ fn participant_execution(
 ) -> Result<ParticipantExecution> {
     // A component-instance-scoped participant is a driver: one binary named by
     // its component id serves every instance, whether it is a workspace-built
-    // (source) driver or a suite-provided one. The layout cannot tell the two
-    // apart - both are `bin/phoxal-component-<id>` - so neither does the plan.
+    // (source) driver or a registry-materialized one. The layout cannot tell
+    // the two apart - both are `bin/phoxal-component-<id>` - so neither does
+    // the plan.
     if let graph_check::ParticipantScope::ComponentInstance(_) = checked.scope {
         return Ok(ParticipantExecution::ComponentDriver {
             binary_name: official_binary_name(ArtifactKind::ComponentDriver, &checked.artifact_id),

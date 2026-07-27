@@ -2,9 +2,9 @@
 //!
 //! Execution derives the complete launch graph from a staged runtime layout
 //! alone: the compiled `robot.yaml`, the CLI-internal official catalog, and the
-//! embedded metadata of the binaries under `bin/`. Nothing here reads source,
-//! Cargo, or the suite - staging already produced the layout, and this module
-//! is the one place that turns that layout into the same
+//! embedded metadata of the binaries under `bin/`. Nothing here reads source
+//! or Cargo - staging already produced the layout, and this module is the
+//! one place that turns that layout into the same
 //! [`LaunchPlan`] the supervisor
 //! consumes, whether the layout was just staged from a source project or
 //! extracted from a `build.phoxal` bundle.

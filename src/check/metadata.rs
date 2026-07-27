@@ -45,7 +45,7 @@ pub(crate) fn extract_participant_report_from_staged_tool(
 }
 
 /// Every native tool (`tool-router`, `tool-joypad`) is privileged (host/root
-/// access); every other kind is a checked participant. Neither the suite
+/// access); every other kind is a checked participant. Neither the catalog
 /// nor a binary's extracted metadata carries `participant_class` anymore, so
 /// the kind -> class mapping (always fixed) is derived here instead of read
 /// off either source.
@@ -94,7 +94,7 @@ pub(crate) fn fetch_participant_report_from_tool(
 /// it does carry is the participant's own declared `id` and its config
 /// schema. That `id` is the participant's own truth about which artifact this
 /// binary implements - the caller's `expected_artifact_id` is a claim made
-/// from context (a resolved runtime name, a suite package, an
+/// from context (a resolved runtime name, a registry package, an
 /// `expected_artifact_id` field) that could disagree with it, for instance if
 /// two staged binaries were swapped on disk. This function is the one place
 /// that reconciles the two: a mismatch fails here, naming both values and

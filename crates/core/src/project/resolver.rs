@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn official_binary_name_uses_suite_kind_for_other_kinds() {
+    fn official_binary_name_prefixes_by_artifact_kind() {
         assert_eq!(
             official_binary_name(ArtifactKind::Service, "drive"),
             "phoxal-service-drive"

@@ -215,11 +215,11 @@ pub(crate) fn source_participants_from_resolved(
         )
     }));
 
-    // A Suite-sourced driver is a first-class suite artifact, not a
+    // A registry-sourced driver is a first-class official artifact, not a
     // build-from-source participant - it becomes a `PlatformArtifactRef`
-    // instead (see `component_driver_platform_refs_from_resolved`), fetched
-    // and validated like a service. Only a Path/Git (fork/dev-override)
-    // driver builds from source here.
+    // instead (see `component_driver_platform_refs_from_resolved`),
+    // materialized via `cargo install` and validated like a service. Only a
+    // Path/Git (fork/dev-override) driver builds from source here.
     for component in resolved.components.iter().filter(|component| {
         component
             .driver
