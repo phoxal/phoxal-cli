@@ -24,16 +24,9 @@ pub struct Rgb(pub u8, pub u8, pub u8);
 pub mod palette {
     use super::Rgb;
 
-    pub const BG: Rgb = Rgb(0x06, 0x08, 0x0b);
-    pub const SURFACE: Rgb = Rgb(0x0e, 0x14, 0x1b);
-    pub const SURFACE_STRONG: Rgb = Rgb(0x15, 0x1d, 0x26);
     pub const BORDER: Rgb = Rgb(0x22, 0x30, 0x3a);
-    pub const TEXT: Rgb = Rgb(0xff, 0xff, 0xff);
-    pub const TEXT_PRIMARY: Rgb = Rgb(0xb7, 0xc4, 0xcf);
     pub const MUTED: Rgb = Rgb(0x6e, 0x7b, 0x87);
-    pub const MUTED_STRONG: Rgb = Rgb(0x8b, 0x98, 0xa4);
     pub const ACCENT: Rgb = Rgb(0x7f, 0xe7, 0xe3);
-    pub const ACCENT_2: Rgb = Rgb(0x4c, 0xcb, 0xc5);
     pub const STEEL: Rgb = Rgb(0x87, 0xab, 0xc4);
     pub const SUCCESS: Rgb = Rgb(0x5f, 0xd3, 0x9c);
     pub const WARN: Rgb = Rgb(0xe3, 0xb3, 0x41);
@@ -44,16 +37,9 @@ pub mod palette {
 /// `console::Color`, so the palette can move in one place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    Bg,
-    Surface,
-    SurfaceStrong,
     Border,
-    Text,
-    TextPrimary,
     Muted,
-    MutedStrong,
     Accent,
-    Accent2,
     Steel,
     Success,
     Warn,
@@ -64,16 +50,9 @@ impl Role {
     #[must_use]
     pub const fn rgb(self) -> Rgb {
         match self {
-            Self::Bg => palette::BG,
-            Self::Surface => palette::SURFACE,
-            Self::SurfaceStrong => palette::SURFACE_STRONG,
             Self::Border => palette::BORDER,
-            Self::Text => palette::TEXT,
-            Self::TextPrimary => palette::TEXT_PRIMARY,
             Self::Muted => palette::MUTED,
-            Self::MutedStrong => palette::MUTED_STRONG,
             Self::Accent => palette::ACCENT,
-            Self::Accent2 => palette::ACCENT_2,
             Self::Steel => palette::STEEL,
             Self::Success => palette::SUCCESS,
             Self::Warn => palette::WARN,
@@ -192,33 +171,8 @@ impl Theme {
     }
 
     #[must_use]
-    pub fn text(self, text: &str) -> String {
-        self.paint(Role::Text, text)
-    }
-
-    #[must_use]
-    pub fn text_primary(self, text: &str) -> String {
-        self.paint(Role::TextPrimary, text)
-    }
-
-    #[must_use]
-    pub fn muted(self, text: &str) -> String {
-        self.paint(Role::Muted, text)
-    }
-
-    #[must_use]
-    pub fn muted_strong(self, text: &str) -> String {
-        self.paint(Role::MutedStrong, text)
-    }
-
-    #[must_use]
     pub fn accent(self, text: &str) -> String {
         self.paint(Role::Accent, text)
-    }
-
-    #[must_use]
-    pub fn accent2(self, text: &str) -> String {
-        self.paint(Role::Accent2, text)
     }
 
     #[must_use]
@@ -239,37 +193,6 @@ impl Theme {
     #[must_use]
     pub fn error(self, text: &str) -> String {
         self.paint(Role::Error, text)
-    }
-
-    #[must_use]
-    pub fn border(self, text: &str) -> String {
-        self.paint(Role::Border, text)
-    }
-
-    /// A resource-load meter fill: `load` (0.0-1.0) of `width` block
-    /// characters, colored accent -> warn -> error as load rises. The filled
-    /// count is itself the non-color signal (a screen reader or a
-    /// colorless terminal still sees "6 of 10 blocks filled").
-    #[must_use]
-    pub fn resource_meter(self, load: f64, width: usize) -> String {
-        let load = load.clamp(0.0, 1.0);
-        let filled = ((load * width as f64).round() as usize).min(width);
-        let role = resource_role(load);
-        let bar: String = "█".repeat(filled) + &"░".repeat(width - filled);
-        self.paint(role, &bar)
-    }
-}
-
-/// The resource-meter color band: accent under normal load, warn approaching
-/// saturation, error at/over it.
-#[must_use]
-pub const fn resource_role(load: f64) -> Role {
-    if load < 0.6 {
-        Role::Accent
-    } else if load < 0.85 {
-        Role::Warn
-    } else {
-        Role::Error
     }
 }
 
@@ -424,23 +347,5 @@ mod tests {
         assert_eq!(rgb_to_ansi256(Rgb(255, 255, 255)), 231);
         let mid = rgb_to_ansi256(Rgb(128, 128, 128));
         assert!((232..=255).contains(&mid));
-    }
-
-    #[test]
-    fn resource_meter_bands_accent_warn_and_error_by_load() {
-        assert_eq!(resource_role(0.0), Role::Accent);
-        assert_eq!(resource_role(0.59), Role::Accent);
-        assert_eq!(resource_role(0.6), Role::Warn);
-        assert_eq!(resource_role(0.84), Role::Warn);
-        assert_eq!(resource_role(0.85), Role::Error);
-        assert_eq!(resource_role(1.0), Role::Error);
-    }
-
-    #[test]
-    fn resource_meter_fill_count_is_the_non_color_signal() {
-        let theme = Theme::new(ColorCapability::None);
-        let meter = theme.resource_meter(0.5, 10);
-        assert_eq!(meter.chars().filter(|c| *c == '█').count(), 5);
-        assert_eq!(meter.chars().filter(|c| *c == '░').count(), 5);
     }
 }
