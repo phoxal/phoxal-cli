@@ -36,6 +36,11 @@ pub fn resolve(
     // workspace lock must not mask a dual/official declaration error.
     phoxal_cli_core::project::layout::validate_runtime_declarations(robot)?;
     let project = phoxal_cli_core::project::train::resolve_locked_project(project_root)?;
+    // The catalog below is one current snapshot, not per-train history
+    // (organization#951 WS4 review, medium 3): reject a locked train it
+    // predates before applying it, rather than silently resolving an
+    // official set that never existed for that train.
+    catalog::ensure_train_supported(&project.train)?;
     let train = project.train.version.clone();
     let target = options
         .official_target_triple
