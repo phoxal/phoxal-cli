@@ -36,12 +36,6 @@ impl SourceParticipant {
     }
 
     #[must_use]
-    pub fn component_driver(name: impl Into<String>, crate_dir: PathBuf) -> Self {
-        let name = name.into();
-        Self::component_driver_with_artifact_id(name.clone(), name, crate_dir)
-    }
-
-    #[must_use]
     pub fn component_driver_with_artifact_id(
         name: impl Into<String>,
         expected_artifact_id: impl Into<String>,
@@ -115,8 +109,8 @@ impl SourceParticipant {
 /// `crate::session::ParticipantKind`: every
 /// `SourceParticipant` already carries a `crate_dir`, so it is inherently
 /// "local" in the supervisor's sense - the real orthogonal bit this domain
-/// needs is "does an official/suite identity exist for this name" (see
-/// `official`), not "is it local". `UserService` has no suite counterpart
+/// needs is "does an official/suite identity exist for this name", not "is
+/// it local". `UserService` has no suite counterpart
 /// at all (a robot developer's own service); `OfficialService` is a known
 /// official service whose source the robot developer is locally overriding;
 /// `Tool`/`Simulator` are always the latter shape (a source override of a
@@ -144,15 +138,6 @@ impl SourceParticipantKind {
             Self::Tool | Self::UserTool => ParticipantKind::Tool,
             Self::Simulator => ParticipantKind::Simulator,
         }
-    }
-
-    /// Whether this source participant has a known official/suite identity
-    /// it is locally overriding, vs one invented purely by the user with no
-    /// suite counterpart at all (only `UserService`). See the type docs for
-    /// why this is named `official`, not `local`.
-    #[must_use]
-    pub const fn official(self) -> bool {
-        !matches!(self, Self::UserService | Self::UserTool)
     }
 }
 
