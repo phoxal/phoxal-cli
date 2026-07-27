@@ -73,6 +73,7 @@ fn stage_controller_runtime_with_home(
             ui,
             None,
             crate::run::Profile::Release,
+            offline,
         )
         .with_context(|| {
             format!(

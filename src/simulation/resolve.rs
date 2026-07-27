@@ -89,7 +89,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         offline,
         None,
         |crate_dir, name| {
-            crate::run::build_source_binary(crate_dir, name, &crate::Ui::from_env(), None)
+            crate::run::build_source_binary(crate_dir, name, &crate::Ui::from_env(), None, offline)
         },
     )?;
     for runtime in crate::check::component_driver_runtimes_by_ref(resolved).values() {
@@ -137,10 +137,10 @@ pub(crate) fn build_checked_sim_launch_plan(
         fetch_participant_report_from_tool,
         |participant| {
             if participant.kind == SourceParticipantKind::ComponentDriver {
-                return build_participant_report_from_source(participant)
+                return build_participant_report_from_source(participant, offline)
                     .map_err(|error| driver_metadata_unavailable(participant, error));
             }
-            build_participant_report_from_source(participant)
+            build_participant_report_from_source(participant, offline)
         },
     )?;
 

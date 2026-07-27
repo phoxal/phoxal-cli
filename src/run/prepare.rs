@@ -142,7 +142,7 @@ pub(crate) fn refresh_staging(
         &resolved,
         options.offline,
         build.officials_source(),
-        |crate_dir, name| build.build_user_binary(crate_dir, name, ui),
+        |crate_dir, name| build.build_user_binary(crate_dir, name, ui, options.offline),
     )
     .context("failed to materialize official runtimes")?;
 
@@ -159,7 +159,13 @@ pub(crate) fn refresh_staging(
     // build host, and the loader's target-aware validation over the staged
     // (cross-built) binaries is the authoritative check for a bundle (#936).
     if check_source {
-        run_source_check(candidate.path(), &robot, &resolved, &source_participants)?;
+        run_source_check(
+            candidate.path(),
+            &robot,
+            &resolved,
+            &source_participants,
+            options.offline,
+        )?;
     }
 
     // Complete the candidate `bin/` store so the loader can inspect every
@@ -419,6 +425,7 @@ fn run_source_check(
     robot: &phoxal::model::robot::v0::Robot,
     resolved: &ResolvedRobot,
     source_participants: &[phoxal_cli_core::check::source::SourceParticipant],
+    offline: bool,
 ) -> Result<()> {
     let bin_dir = staged_root.join("bin");
     let platform_refs = check_artifact_refs_from_resolved(resolved);
@@ -459,7 +466,7 @@ fn run_source_check(
             ))
         },
         fetch_participant_report_from_tool,
-        build_participant_report_from_source,
+        |participant| build_participant_report_from_source(participant, offline),
     )?;
     if !outcome.is_ok() {
         crate::check::ensure_check_outcome_ok(&outcome)?;

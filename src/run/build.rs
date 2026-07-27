@@ -109,14 +109,15 @@ impl StagingBuild {
         crate_dir: &Path,
         preferred_name: &str,
         ui: &crate::Ui,
+        offline: bool,
     ) -> Result<PathBuf> {
         match self {
-            Self::HostRuntime => build_source_binary(crate_dir, preferred_name, ui, None),
+            Self::HostRuntime => build_source_binary(crate_dir, preferred_name, ui, None, offline),
             Self::NativeBundle {
                 target,
                 prebuilt_target_dir: None,
                 ..
-            } => build_source_binary(crate_dir, preferred_name, ui, Some(target)),
+            } => build_source_binary(crate_dir, preferred_name, ui, Some(target), offline),
             Self::NativeBundle {
                 target,
                 prebuilt_target_dir: Some(target_dir),
@@ -140,8 +141,16 @@ pub(crate) fn build_source_binary(
     preferred_name: &str,
     ui: &crate::Ui,
     target: Option<&str>,
+    offline: bool,
 ) -> Result<PathBuf> {
-    build_source_binary_with_profile(crate_dir, preferred_name, ui, target, Profile::Debug)
+    build_source_binary_with_profile(
+        crate_dir,
+        preferred_name,
+        ui,
+        target,
+        Profile::Debug,
+        offline,
+    )
 }
 
 /// The Cargo build profile a source participant compiles under.
@@ -164,13 +173,22 @@ impl Profile {
     }
 }
 
-/// [`build_source_binary`] with an explicit build profile.
+/// [`build_source_binary`] with an explicit build profile. `offline` appends
+/// `--offline` to the underlying `cargo build` (organization#951 WS4 review,
+/// round 2): when the caller asked the whole CLI invocation to stay offline,
+/// that must hold for a user's own crate exactly as much as for official
+/// materialization - a build that quietly went online anyway despite
+/// `--offline` would be a real behavioral gap, not a convenience. If the
+/// local registry/git caches are not already warm, Cargo itself fails with
+/// its own precise offline error; that failure is honest, a silent network
+/// call would not have been.
 pub(crate) fn build_source_binary_with_profile(
     crate_dir: &Path,
     preferred_name: &str,
     ui: &crate::Ui,
     target: Option<&str>,
     profile: Profile,
+    offline: bool,
 ) -> Result<PathBuf> {
     let crate_dir = crate_dir.canonicalize().with_context(|| {
         format!(
@@ -212,14 +230,9 @@ pub(crate) fn build_source_binary_with_profile(
             // `--locked` pins the build to the committed `Cargo.lock`: staging
             // is reproducible and cargo never silently rewrites the lock, so a
             // stale or missing lock is a hard, actionable error instead of a
-            // quiet resolve. We deliberately do NOT add `--offline` here even
-            // when the caller requested it: `--offline` on official
-            // materialization (`cargo install`, organization#951 WS4)
-            // assumes the local Cargo registry cache is already warm from a
-            // prior online run, but this is the USER's own crate - there is
-            // no phoxal-level pre-fetch for its dependencies, so a first
-            // build in a fresh checkout must still be able to reach the
-            // network for them regardless of `--offline` elsewhere.
+            // quiet resolve. `--offline` is threaded from the caller, exactly
+            // like every other Cargo invocation this CLI makes (see
+            // [`build_source_binary_with_profile`]'s doc comment).
             command
                 .arg("build")
                 .arg("--locked")
@@ -233,6 +246,9 @@ pub(crate) fn build_source_binary_with_profile(
             }
             if matches!(profile, Profile::Release) {
                 command.arg("--release");
+            }
+            if offline {
+                command.arg("--offline");
             }
             let status = ui.command_status_captured(&mut command).with_context(|| {
                 format!(
@@ -251,7 +267,7 @@ pub(crate) fn build_source_binary_with_profile(
         },
     )?;
     Ok(profile_binary_path(
-        &cargo_target_dir(&crate_dir)?,
+        &cargo_target_dir(&crate_dir, offline)?,
         cross,
         profile,
         &binary_name,
@@ -329,16 +345,19 @@ fn ensure_cross_toolchain(triple: &str) -> Result<()> {
     )
 }
 
-pub(crate) fn cargo_target_dir(crate_dir: &Path) -> Result<PathBuf> {
+pub(crate) fn cargo_target_dir(crate_dir: &Path, offline: bool) -> Result<PathBuf> {
     // `--locked` keeps metadata reads on the committed `Cargo.lock` too, so
     // resolving the target directory never triggers a lock rewrite or a
-    // registry resolve (see the `cargo build` invocation above for why
-    // `--offline` is intentionally not added).
-    let output = crate::shell::run_stdout(
-        "cargo",
-        ["metadata", "--format-version", "1", "--no-deps", "--locked"],
-        Some(crate_dir),
-    )?;
+    // registry resolve. `--no-deps` already means this call has no real need
+    // to reach the network, but `--offline` is threaded through anyway
+    // (organization#951 WS4 review, round 2) so it holds on principle for
+    // every Cargo invocation this CLI makes, not just the ones that happen
+    // to need it today.
+    let mut args = vec!["metadata", "--format-version", "1", "--no-deps", "--locked"];
+    if offline {
+        args.push("--offline");
+    }
+    let output = crate::shell::run_stdout("cargo", args, Some(crate_dir))?;
     let json: Value = serde_json::from_str(&output).context("cargo metadata was not JSON")?;
     json.get("target_directory")
         .and_then(Value::as_str)

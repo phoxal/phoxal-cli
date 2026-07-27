@@ -119,7 +119,8 @@ pub(crate) fn stage_complete_bin_store(
         if !staged_names.insert(binary_name.clone()) {
             continue;
         }
-        let built = build.build_user_binary(&participant.crate_dir, &participant.name, ui)?;
+        let built =
+            build.build_user_binary(&participant.crate_dir, &participant.name, ui, offline)?;
         crate::stager::stage_named_binary(staged_root, &binary_name, &built)?;
     }
     // Registry-provided component drivers: one binary per driven component
@@ -162,7 +163,7 @@ pub(crate) fn stage_complete_bin_store(
         resolved,
         offline,
         build.officials_source(),
-        |crate_dir, name| build.build_user_binary(crate_dir, name, ui),
+        |crate_dir, name| build.build_user_binary(crate_dir, name, ui, offline),
     )
     .context("failed to complete the staged bin store with the full official runtime set")?;
     Ok(())
@@ -412,14 +413,14 @@ fn resolve_participant_source(
             let crate_dir = source_dirs.get(id).ok_or_else(|| {
                 anyhow!("staged plan is missing the source crate directory for user runtime {id}")
             })?;
-            build_source_binary(crate_dir, id, ui, None)
+            build_source_binary(crate_dir, id, ui, None, offline)
         }
         ParticipantExecution::ComponentDriver { .. } => {
             // A workspace-built driver has a crate directory in the staging
             // record; a registry-provided one does not and materializes via
             // `cargo install`, keyed by its component id.
             if let Some(crate_dir) = source_dirs.get(id) {
-                return build_source_binary(crate_dir, id, ui, None);
+                return build_source_binary(crate_dir, id, ui, None, offline);
             }
             let runtime = official_by_name
                 .get(participant.artifact_id.as_str())
@@ -454,6 +455,7 @@ fn resolve_participant_source(
                     phoxal_cli_core::project::resolver::tool_participant_id(&tool.name),
                     ui,
                     None,
+                    offline,
                 );
             }
             crate::materialize::cargo_install(
@@ -473,7 +475,7 @@ fn resolve_participant_source(
                     )
                 })?;
             if let Some(crate_dir) = &runtime.path_override {
-                return build_source_binary(crate_dir, &runtime.name, ui, None);
+                return build_source_binary(crate_dir, &runtime.name, ui, None, offline);
             }
             crate::materialize::cargo_install(
                 staged_root,

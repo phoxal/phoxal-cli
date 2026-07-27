@@ -87,13 +87,16 @@ impl Deploy {
         let source_dir = format!("{remote_dir}/source");
         let remote_archive = format!("{remote_dir}/build.phoxal");
         let command = format!(
-            "{}; {}; {} build {} --target {} --output {}; {}",
+            "{}; {}; {} build {} --target {} --output {}{}; {}",
             REMOTE_TOOLCHAIN_PATH,
             remote_unpack_source_command(remote_dir),
             REMOTE_PHOXAL,
             shell_quote(&source_dir),
             shell_quote(target_triple),
             shell_quote(&remote_archive),
+            // Forward --offline to the nested remote `phoxal build`
+            // invocation (organization#951 WS4 review, round 2).
+            if app.offline { " --offline" } else { "" },
             remote_install_command(&remote_archive),
         );
         run_remote(&self.target, &command).context("remote source build or install failed")

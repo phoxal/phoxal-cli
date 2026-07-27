@@ -110,7 +110,7 @@ pub(crate) async fn live_simulate_setup(
         candidate.path(),
         &sim_source(&sim).resolved,
         offline,
-        |crate_dir, name| crate::run::build_source_binary(crate_dir, name, &ui, None),
+        |crate_dir, name| crate::run::build_source_binary(crate_dir, name, &ui, None, offline),
     )
     .context("failed to stage the infrastructure router into the simulation bin store")?;
 

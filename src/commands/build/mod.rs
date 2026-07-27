@@ -227,13 +227,18 @@ impl Build {
             crate::commands::deploy::run_remote(
                 host,
                 &format!(
-                    "{}; {}; {} build {} --builder local --target {} --output {}",
+                    "{}; {}; {} build {} --builder local --target {} --output {}{}",
                     crate::commands::deploy::REMOTE_TOOLCHAIN_PATH,
                     crate::commands::deploy::remote_unpack_source_command(&remote_dir),
                     crate::commands::deploy::REMOTE_PHOXAL,
                     crate::commands::deploy::shell_quote(&source_dir),
                     crate::commands::deploy::shell_quote(&target),
                     crate::commands::deploy::shell_quote(&remote_archive),
+                    // Forward --offline to the nested remote `phoxal build`
+                    // invocation (organization#951 WS4 review, round 2): the
+                    // remote process has no way to know the local invocation
+                    // requested it otherwise.
+                    if app.offline { " --offline" } else { "" },
                 ),
             )?;
             let pulled = tempfile::Builder::new()
