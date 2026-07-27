@@ -13,30 +13,44 @@ use phoxal::participant::launch::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::catalog::ArtifactKind;
 use super::resolver::{ResolvedRobot, official_binary_name};
-use super::suite::ArtifactKind;
 use crate::check::source::{SourceParticipant, SourceParticipantKind};
 use crate::session::{RuntimeFailurePolicy, StartupRequirement};
 
 pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
 pub const ROBOT_TOOL_JOYPAD: &str = "tool-joypad";
 pub const ROBOT_TOOL_DEVICE: &str = "tool-device";
-/// Base directory holding one staged runtime layout per target triple.
-pub const RUNTIME_BUILD_ROOT_RELATIVE: &str = ".phoxal/build";
+/// The staged runtime layout / `cargo install --root` directory
+/// (organization#951 WS4). No per-triple nesting: one robot targets one
+/// platform at a time, so a second `--target` simply restages this same root.
+pub const RUNTIME_BUNDLE_ROOT_RELATIVE: &str = ".phoxal/bundle";
+/// The Webots controller's own materialization root - deliberately separate
+/// from `.phoxal/bundle/`: the controller is built only when a simulation is
+/// requested, and must never enter the deployed robot bundle
+/// (organization#951 WS4).
+pub const RUNTIME_SIMULATION_ROOT_RELATIVE: &str = ".phoxal/simulation";
 pub const SIMULATOR_CONTROLLER_ARTIFACT_NAME: &str = "webots-controller";
+
+/// The simulation materialization root - `cargo install --root`'s target for
+/// the Webots controller - under `project_root`.
+#[must_use]
+pub fn simulation_root_dir(project_root: &Path) -> PathBuf {
+    project_root.join(RUNTIME_SIMULATION_ROOT_RELATIVE)
+}
 
 #[must_use]
 pub fn simulator_controller_provider_id(robot_id: &str) -> String {
     format!("simulator-webots-controller-{robot_id}")
 }
 
-/// The staged runtime layout directory for `triple` under `project_root`:
-/// `.phoxal/build/<triple>/`. `run` and live simulation stage and execute the
-/// host triple; `build` stages any target into the same shape. This is the one
-/// runtime-root the participant launch records point at.
+/// The staged runtime layout directory under `project_root`:
+/// `.phoxal/bundle/`. `run`, live simulation, and `build` all stage into this
+/// one root - this is the one runtime-root the participant launch records
+/// point at.
 #[must_use]
-pub fn runtime_layout_dir(project_root: &Path, triple: &str) -> PathBuf {
-    project_root.join(RUNTIME_BUILD_ROOT_RELATIVE).join(triple)
+pub fn runtime_layout_dir(project_root: &Path) -> PathBuf {
+    project_root.join(RUNTIME_BUNDLE_ROOT_RELATIVE)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,7 +80,7 @@ pub struct PlanContext {
     pub project_root: PathBuf,
     /// The resolved source graph and its source-participant records - present
     /// only when the plan was prepared from a source project. A layout run (an
-    /// extracted `build.phoxal` or a staged `.phoxal/build/<triple>/` root) has
+    /// extracted `build.phoxal` or a staged `.phoxal/bundle/` root) has
     /// no source, so this is `None` there; a consumer that needs source state
     /// (such as simulation) checks this directly rather than reading a
     /// fabricated graph (#936).
@@ -443,10 +457,7 @@ fn build_robot_launch(
                 },
                 clock: ClockMode::Real,
                 config: None,
-                robot_root: Some(runtime_layout_dir(
-                    input.project_root,
-                    &input.resolved.target,
-                )),
+                robot_root: Some(runtime_layout_dir(input.project_root)),
                 component_instance: None,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
@@ -505,8 +516,9 @@ fn participant_execution(
 ) -> Result<ParticipantExecution> {
     // A component-instance-scoped participant is a driver: one binary named by
     // its component id serves every instance, whether it is a workspace-built
-    // (source) driver or a suite-provided one. The layout cannot tell the two
-    // apart - both are `bin/phoxal-component-<id>` - so neither does the plan.
+    // (source) driver or a registry-materialized one. The layout cannot tell
+    // the two apart - both are `bin/phoxal-component-<id>` - so neither does
+    // the plan.
     if let graph_check::ParticipantScope::ComponentInstance(_) = checked.scope {
         return Ok(ParticipantExecution::ComponentDriver {
             binary_name: official_binary_name(ArtifactKind::ComponentDriver, &checked.artifact_id),
@@ -598,10 +610,7 @@ fn participant_launch(
                     .get(&checked.participant_id)
                     .and_then(|tool| tool.config.clone())
             }),
-        robot_root: Some(runtime_layout_dir(
-            input.project_root,
-            &input.resolved.target,
-        )),
+        robot_root: Some(runtime_layout_dir(input.project_root)),
         component_instance,
         shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
     }
@@ -715,11 +724,11 @@ mod tests {
 
     use std::path::Path;
 
+    use crate::project::catalog::ArtifactKind;
     use crate::project::resolver::{
         ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
         ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, ResolvedUserRuntime,
     };
-    use crate::project::suite::ArtifactKind;
 
     use super::*;
 
@@ -954,8 +963,8 @@ mod tests {
             source: ResolvedComponentSource::Path {
                 path: PathBuf::from("/tmp/ddsm115"),
             },
-            path_override: Some(PathBuf::from("/tmp/ddsm115")),
-            suite_runtime: None,
+            resolved_dir: Some(PathBuf::from("/tmp/ddsm115")),
+            registry_runtime: None,
         };
         resolved.components.push(ResolvedComponent {
             instance: "left_drive".to_string(),
@@ -1197,13 +1206,6 @@ robot:
             name: name.to_string(),
             package: format!("phoxal/simulator-{name}"),
             kind,
-            version: "0.36.0".to_string(),
-            artifact_ref: format!("phoxal/simulator-{name}@0.36.0"),
-            sha256: None,
-            url: None,
-            size: None,
-            published: true,
-            published_triples: Vec::new(),
             path_override: None,
             train: "0.36.0".to_string(),
             target: Some(host_target_triple_for_tests()),
@@ -1215,15 +1217,7 @@ robot:
             kind: ArtifactKind::Tool,
             name: name.to_string(),
             package: format!("phoxal/{name}"),
-            requested: "0.1.0".to_string(),
-            resolved: "0.1.0".to_string(),
-            repo: "phoxal/framework".to_string(),
-            asset: format!("{name}-0.1.0-{}.tar.gz", host_target_triple_for_tests()),
             binary_name: name.to_string(),
-            sha256: "0".repeat(64),
-            url: None,
-            size: None,
-            published: false,
             path_override: None,
             train: "0.36.0".to_string(),
             target: host_target_triple_for_tests(),
@@ -1231,6 +1225,6 @@ robot:
     }
 
     fn host_target_triple_for_tests() -> String {
-        crate::project::suite::host_target_triple()
+        crate::project::host_target_triple()
     }
 }

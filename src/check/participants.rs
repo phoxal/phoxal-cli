@@ -5,31 +5,33 @@ use anyhow::Context;
 use anyhow::Result;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::ToolParticipant;
+use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::resolver::ResolvedComponent;
 use phoxal_cli_core::project::resolver::ResolvedComponentSource;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
+use phoxal_cli_core::project::resolver::official_binary_name;
 use phoxal_cli_core::project::resolver::tool_participant_id;
-use phoxal_cli_core::project::suite::ArtifactKind;
 use phoxal_cli_core::project::tooling::resolve_project_path;
 use std::path::Path;
 use std::path::PathBuf;
 
 /// One resolved official artifact `run_check_with_context` needs a
-/// participant report for: its resolved identity (`artifact_ref`) plus the
+/// participant report for: its canonical `bin/` file name (the key its
+/// materialized binary is looked up under, post-`cargo install`) plus the
 /// caller-known identity (`name`/`kind`) that the fetched report's own
 /// declared id is checked against before its schema is trusted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformArtifactRef {
     pub name: String,
     pub kind: ArtifactKind,
-    pub artifact_ref: String,
+    pub binary_name: String,
     /// The component instance ids launching this artifact, for a
     /// `ComponentDriver` ref only. Empty for every other kind (a normal
-    /// robot runtime participant). A suite-resolved component
+    /// robot runtime participant). A registry-resolved component
     /// driver is fetched once but launched once per instance that declares
-    /// it (`left_drive`/`right_drive` sharing one `phoxal/component-<id>
-    /// -driver` package) - mirrors how
+    /// it (`left_drive`/`right_drive` sharing one `phoxal/component-<id>`
+    /// package) - mirrors how
     /// `SourceParticipant::component_driver_with_artifact_id` keys a
     /// workspace-built driver's graph membership by instance, not by artifact
     /// id. Must not be empty when `kind == ComponentDriver`.
@@ -81,13 +83,13 @@ pub(crate) fn platform_artifact_refs_from_resolved(
         .map(|runtime| PlatformArtifactRef {
             name: runtime.name.clone(),
             kind: runtime.kind,
-            artifact_ref: runtime.artifact_ref().to_string(),
+            binary_name: official_binary_name(runtime.kind, &runtime.name),
             instances: Vec::new(),
         })
         .collect()
 }
 
-/// One `PlatformArtifactRef` per distinct Suite-sourced `component_driver`
+/// One `PlatformArtifactRef` per distinct registry-sourced `component_driver`
 /// package, `instances` listing every component instance that shares it
 /// (`left_drive`/`right_drive` both resolving
 /// `phoxal/component-ddsm115`). A Path/Git-sourced driver is a source
@@ -100,28 +102,28 @@ pub(crate) fn platform_artifact_refs_from_resolved(
 pub(crate) fn component_driver_platform_refs_from_resolved(
     resolved: &ResolvedRobot,
 ) -> Vec<PlatformArtifactRef> {
-    struct SuiteDriverRef {
+    struct RegistryDriverRef {
         name: String,
-        artifact_ref: String,
+        binary_name: String,
         instances: Vec<String>,
     }
 
-    let mut by_package = std::collections::BTreeMap::<String, SuiteDriverRef>::new();
+    let mut by_package = std::collections::BTreeMap::<String, RegistryDriverRef>::new();
     for component in &resolved.components {
         let Some(driver) = &component.driver else {
             continue;
         };
-        if !matches!(driver.source, ResolvedComponentSource::Suite) {
+        if !matches!(driver.source, ResolvedComponentSource::Registry) {
             continue;
         }
-        let Some(runtime) = &driver.suite_runtime else {
+        let Some(runtime) = &driver.registry_runtime else {
             continue;
         };
         by_package
             .entry(driver.package.clone())
-            .or_insert_with(|| SuiteDriverRef {
+            .or_insert_with(|| RegistryDriverRef {
                 name: runtime.name.clone(),
-                artifact_ref: runtime.artifact_ref().to_string(),
+                binary_name: official_binary_name(runtime.kind, &runtime.name),
                 instances: Vec::new(),
             })
             .instances
@@ -132,18 +134,19 @@ pub(crate) fn component_driver_platform_refs_from_resolved(
         .map(|driver_ref| PlatformArtifactRef {
             name: driver_ref.name,
             kind: ArtifactKind::ComponentDriver,
-            artifact_ref: driver_ref.artifact_ref,
+            binary_name: driver_ref.binary_name,
             instances: driver_ref.instances,
         })
         .collect()
 }
 
-/// Every distinct Suite-sourced component driver's `suite_runtime`, keyed
-/// by its `artifact_ref` - the same shape as the `official_by_ref` map every
-/// caller already builds from `resolved.platform_runtimes` for the shared
-/// `extract_participant_report_from_staged_runtime` closure. Callers merge this in so
-/// one fetch closure resolves services, simulators, AND suite component
-/// drivers identically.
+/// Every distinct registry-sourced component driver's `registry_runtime`,
+/// keyed by its canonical `bin/` file name - the same shape as the
+/// `official_by_ref` map every caller already builds from
+/// `resolved.platform_runtimes` for the shared
+/// `extract_participant_report_from_staged_runtime` closure. Callers merge
+/// this in so one fetch closure resolves services, simulators, AND registry
+/// component drivers identically.
 pub(crate) fn component_driver_runtimes_by_ref(
     resolved: &ResolvedRobot,
 ) -> std::collections::BTreeMap<String, &ResolvedPlatformRuntime> {
@@ -151,9 +154,9 @@ pub(crate) fn component_driver_runtimes_by_ref(
         .components
         .iter()
         .filter_map(|component| component.driver.as_ref())
-        .filter(|driver| matches!(driver.source, ResolvedComponentSource::Suite))
-        .filter_map(|driver| driver.suite_runtime.as_ref())
-        .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
+        .filter(|driver| matches!(driver.source, ResolvedComponentSource::Registry))
+        .filter_map(|driver| driver.registry_runtime.as_ref())
+        .map(|runtime| (official_binary_name(runtime.kind, &runtime.name), runtime))
         .collect()
 }
 
@@ -172,7 +175,7 @@ pub(crate) fn check_artifact_refs_from_resolved(
             .map(|tool| PlatformArtifactRef {
                 name: tool.name.clone(),
                 kind: tool.kind,
-                artifact_ref: tool.asset.clone(),
+                binary_name: tool.binary_name.clone(),
                 instances: Vec::new(),
             }),
     );
@@ -212,16 +215,16 @@ pub(crate) fn source_participants_from_resolved(
         )
     }));
 
-    // A Suite-sourced driver is a first-class suite artifact, not a
+    // A registry-sourced driver is a first-class official artifact, not a
     // build-from-source participant - it becomes a `PlatformArtifactRef`
-    // instead (see `component_driver_platform_refs_from_resolved`), fetched
-    // and validated like a service. Only a Path/Git (fork/dev-override)
-    // driver builds from source here.
+    // instead (see `component_driver_platform_refs_from_resolved`),
+    // materialized via `cargo install` and validated like a service. Only a
+    // Path/Git (fork/dev-override) driver builds from source here.
     for component in resolved.components.iter().filter(|component| {
         component
             .driver
             .as_ref()
-            .is_some_and(|driver| !matches!(driver.source, ResolvedComponentSource::Suite))
+            .is_some_and(|driver| !matches!(driver.source, ResolvedComponentSource::Registry))
     }) {
         let crate_dir = if let Some(path) = component.driver_path_override() {
             path.to_path_buf()

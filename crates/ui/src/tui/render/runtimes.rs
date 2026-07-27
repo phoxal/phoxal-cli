@@ -456,7 +456,7 @@ pub(super) fn draw_runtime_detail(
         Line::from(format!("type          {}", status.kind.label())),
         Line::from(format!(
             "source        {}",
-            if status.local { "local" } else { "suite" }
+            if status.local { "local" } else { "registry" }
         )),
         Line::from(format!("artifact      {artifact}")),
         Line::from(format!("artifact size {artifact_size}")),

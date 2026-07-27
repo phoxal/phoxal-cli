@@ -46,7 +46,7 @@ impl Start {
         let options = RunOptions {
             drivers: DriversMode::On,
             drivers_subset: Vec::new(),
-            suite_source: app.suite_source.clone(),
+            offline: app.offline,
         };
         let target = resolve_target(self.target.as_deref(), app.project.root())?;
         // SAFETY: command dispatch has not started worker threads for this run

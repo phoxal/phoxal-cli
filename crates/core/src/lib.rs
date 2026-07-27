@@ -5,7 +5,6 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-pub mod artifacts;
 pub mod check;
 pub mod project;
 pub mod schema;

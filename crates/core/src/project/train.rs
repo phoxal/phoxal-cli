@@ -58,13 +58,18 @@ impl LockedTrain {
     }
 }
 
-pub fn resolve_locked_train(project_root: &Path) -> Result<LockedTrain> {
-    Ok(resolve_locked_project(project_root)?.train)
+/// `offline` passes `--offline` to the underlying `cargo metadata`
+/// (organization#951 WS4 review, medium 4): `PHOXAL_OFFLINE` is a
+/// Phoxal-only env var Cargo does not read, so a caller that wants a
+/// genuinely offline resolution must set this explicitly.
+pub fn resolve_locked_train(project_root: &Path, offline: bool) -> Result<LockedTrain> {
+    Ok(resolve_locked_project(project_root, offline)?.train)
 }
 
 /// Resolve the framework train and every user runtime from the same immutable
-/// `cargo metadata --locked` graph.
-pub fn resolve_locked_project(project_root: &Path) -> Result<LockedProject> {
+/// `cargo metadata --locked` graph. See [`resolve_locked_train`] for
+/// `offline`.
+pub fn resolve_locked_project(project_root: &Path, offline: bool) -> Result<LockedProject> {
     let manifest = project_root.join("Cargo.toml");
     let lock = project_root.join("Cargo.lock");
     ensure!(
@@ -76,7 +81,7 @@ pub fn resolve_locked_project(project_root: &Path) -> Result<LockedProject> {
         "robot project is missing committed Cargo.lock; run `cargo generate-lockfile`, review it, and commit it before project-bound commands"
     );
 
-    let metadata = load_metadata(project_root)?;
+    let metadata = load_metadata(project_root, offline)?;
     let root_manifest = manifest
         .canonicalize()
         .with_context(|| format!("failed to canonicalize {}", manifest.display()))?;
@@ -129,10 +134,15 @@ pub fn resolve_locked_project(project_root: &Path) -> Result<LockedProject> {
     Ok(LockedProject { train, runtimes })
 }
 
-fn load_metadata(project_root: &Path) -> Result<Metadata> {
-    let output = Command::new("cargo")
+fn load_metadata(project_root: &Path, offline: bool) -> Result<Metadata> {
+    let mut command = Command::new("cargo");
+    command
         .args(["metadata", "--locked", "--format-version", "1"])
-        .current_dir(project_root)
+        .current_dir(project_root);
+    if offline {
+        command.arg("--offline");
+    }
+    let output = command
         .output()
         .context("Cargo is required to resolve the locked framework train; install a compatible Rust toolchain")?;
     if !output.status.success() {
@@ -387,7 +397,7 @@ mod tests {
             "[package]\nname='anchor'\nversion='0.0.0'\nedition='2024'\n",
         )
         .unwrap();
-        let error = resolve_locked_train(root.path()).unwrap_err();
+        let error = resolve_locked_train(root.path(), false).unwrap_err();
         assert!(error.to_string().contains("missing committed Cargo.lock"));
         assert!(!root.path().join("Cargo.lock").exists());
     }
@@ -402,7 +412,7 @@ mod tests {
         .unwrap();
         let lock = "# deliberately stale\nversion = 4\n";
         fs::write(root.path().join("Cargo.lock"), lock).unwrap();
-        let error = resolve_locked_train(root.path()).unwrap_err();
+        let error = resolve_locked_train(root.path(), false).unwrap_err();
         assert!(error.to_string().contains("never update it automatically"));
         assert_eq!(
             fs::read_to_string(root.path().join("Cargo.lock")).unwrap(),

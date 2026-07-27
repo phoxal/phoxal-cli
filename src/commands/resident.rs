@@ -241,7 +241,7 @@ mod tests {
     use std::fs;
 
     /// `attach`/`stop` are representation-agnostic: a staged runtime layout root
-    /// (an extracted `build.phoxal` or `.phoxal/build/<triple>/`) resolves to
+    /// (an extracted `build.phoxal` or `.phoxal/bundle/`) resolves to
     /// itself as the project, so their socket/lock lookups reach
     /// `<layout_root>/.phoxal/supervisor.sock` - the exact path a layout run's
     /// resident binds (#936).

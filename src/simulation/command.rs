@@ -8,7 +8,6 @@ use clap::Subcommand;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::PlanContext;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
-use phoxal_cli_core::project::suite::Suite;
 use std::path::PathBuf;
 
 /// The `simulation` command group.
@@ -70,7 +69,7 @@ pub struct SimulationRun {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SimulateOptions {
     pub world: String,
-    pub suite_source: Option<String>,
+    pub offline: bool,
 }
 
 /// Pairs the sim `LaunchPlan` with its `PlanContext` (Part 3/6): replaces the
@@ -100,28 +99,26 @@ pub(crate) struct ResolvedSimulation {
     pub(crate) project_root: PathBuf,
     pub(crate) world_path: PathBuf,
     pub(crate) resolved: ResolvedRobot,
-    pub(crate) suite: Option<Suite>,
 }
 
 impl SimulationRun {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let target =
             crate::commands::resident::resolve_target(self.project.as_deref(), app.project.root())?;
-        phoxal_cli_core::project::train::resolve_locked_train(&target.project).with_context(
-            || {
+        phoxal_cli_core::project::train::resolve_locked_train(&target.project, app.offline)
+            .with_context(|| {
                 format!(
                     "simulation requires a buildable source project; {} is not a source project",
                     target.project.display()
                 )
-            },
-        )?;
+            })?;
         // SAFETY: command dispatch has not started worker threads for this run.
         unsafe {
             std::env::set_var(crate::host_paths::PROJECT_ROOT_ENV, &target.project);
         }
         let options = SimulateOptions {
             world: self.world.clone(),
-            suite_source: app.suite_source.clone(),
+            offline: app.offline,
         };
         let resident_in_process =
             crate::resident::has_private_bootstrap() || (!app.output.interactive && !self.detach);

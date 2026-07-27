@@ -43,10 +43,12 @@ pub struct ParticipantStatus {
     pub id: String,
     pub kind: ParticipantKind,
     /// Whether this participant runs from a locally resolved directory
-    /// (user-authored source, or a local path-pin override) rather than a
-    /// fetched suite artifact. Orthogonal to `kind` - see
-    /// `phoxal_cli_core::session::participant_kind` module docs. Defaults to `false`
-    /// (suite) via [`Self::new`]; set explicitly with [`Self::with_local`].
+    /// (user-authored source, or a local path-pin override) rather than
+    /// having been materialized from the registry (`cargo install`, at the
+    /// locked train). Orthogonal to `kind` - see
+    /// `phoxal_cli_core::session::participant_kind` module docs. Defaults to
+    /// `false` (registry-materialized) via [`Self::new`]; set explicitly
+    /// with [`Self::with_local`].
     #[serde(default)]
     pub local: bool,
     pub state: ParticipantState,

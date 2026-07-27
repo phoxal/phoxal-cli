@@ -2,7 +2,7 @@
 //!
 //! `run` is universal (#936): it prepares the same [`PreparedRun`] whether the
 //! root is a buildable source project or an already-staged runtime layout (an
-//! extracted `build.phoxal` or a `.phoxal/build/<triple>/` directory). Both end
+//! extracted `build.phoxal` or a `.phoxal/bundle/` directory). Both end
 //! at the one execution path - [`RuntimeLayout::construct_plan`], surfaced here
 //! through `loader::validate_layout_plan` - which derives the launch graph from
 //! the staged layout alone. The two entry points differ only in the staging
@@ -25,9 +25,11 @@ use crate::supervisor::BoardBackend;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use phoxal_cli_core::check::participant_metadata::expected_target_for_triple;
+use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::PlanContext;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
-use phoxal_cli_core::project::layout::RuntimeLayout;
+use phoxal_cli_core::project::layout::{LayoutInspection, PlanOptions, RuntimeLayout};
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::resolver::discover_robot_yaml;
@@ -40,53 +42,52 @@ use std::path::Path;
 /// resolved graph and its source-participant records the staging step consumed,
 /// the resolved driver policy, and the staged runtime layout root every
 /// executable and the launch plan are then read from. Everything after staging -
-/// plan construction, spec building, `phoxal build`'s archive - reads only the
+/// spec building, `phoxal build`'s archive - reads only the
 /// staged layout; these fields are the staging-side inputs the source path still
 /// needs (crate directories for cwd/rebuild, the resolved graph for router
-/// config).
+/// config). `plan` is the loader's own validated launch plan, already
+/// constructed against `staged_root` BEFORE it was published (#951 WS4
+/// review) - callers must reuse it rather than re-running
+/// `loader::validate_layout_plan`, which would be a second, redundant
+/// validation pass over already-validated bytes.
 pub(crate) struct StagedProject {
     pub(crate) robot_path: std::path::PathBuf,
     pub(crate) project_root: std::path::PathBuf,
     pub(crate) resolved: ResolvedRobot,
     pub(crate) source_participants: Vec<phoxal_cli_core::check::source::SourceParticipant>,
     pub(crate) driver_policy: DriverPolicy,
-    /// The staged runtime layout root - `.phoxal/build/<host-triple>/`.
+    /// The staged runtime layout root - `.phoxal/bundle/`.
     pub(crate) staged_root: std::path::PathBuf,
-}
-
-impl StagedProject {
-    /// The plan-construction options this refresh resolved, so `run`, `start`,
-    /// and `build` all validate/construct the plan against the identical
-    /// driver policy the staging step honored.
-    pub(crate) fn plan_options(&self) -> phoxal_cli_core::project::layout::PlanOptions {
-        phoxal_cli_core::project::layout::PlanOptions {
-            drivers: self.driver_policy.selection(),
-        }
-    }
+    pub(crate) plan: LaunchPlan,
 }
 
 /// Refresh the host-triple staging for a buildable source project and return the
 /// staged layout plus the staging-side inputs (#936). This is the one staging
 /// entry `run`, `start`, and `phoxal build` all share, so they build and
 /// stage identically before diverging on what they do with the staged layout:
-/// resolve the locked graph, prepare native artifacts, resolve the driver policy,
-/// stage the runtime layout under `.phoxal/build/<host-triple>/`, run the
-/// source-time check, and complete the flat `bin/` store. It never constructs the
-/// launch plan or touches the supervisor - the caller runs
-/// `loader::validate_layout_plan` over `staged_root` next.
+/// resolve the locked graph, materialize officials, resolve the driver policy,
+/// stage the runtime layout, run the source-time check, complete the flat
+/// `bin/` store, and validate the whole compiled layout through the loader -
+/// ALL of it against an unpublished candidate directory, exactly once, and
+/// ONLY THEN publish it as the live `.phoxal/bundle/` (organization#951 WS4
+/// review: the previous ordering published first and materialized/validated
+/// after, so any failure left the robot with its previous working bundle
+/// deleted and the live one empty or half-populated). A failure anywhere in
+/// this function therefore never touches the previous live bundle at all.
 ///
 /// `build` reuses this per target triple: `build` is a
 /// native-bundle [`StagingBuild`](crate::run::StagingBuild) carrying the
 /// requested `--target`,
 /// which threads through the resolve/stage/`bin/`-completion steps so the same
 /// code cross-compiles (or reuses container-built) workspace crates and links
-/// the suite's per-target official blobs into `.phoxal/build/<triple>/`. `run`,
+/// the official set for that target. `run`,
 /// and `start` pass `StagingBuild::host_runtime()`.
 pub(crate) fn refresh_staging(
     project_start: &Path,
     options: &RunOptions,
     build: &crate::run::StagingBuild,
     check_source: bool,
+    run: RunIdentity,
     ui: &crate::Ui,
 ) -> Result<StagedProject> {
     let robot_path = discover_robot_yaml(project_start)
@@ -96,79 +97,86 @@ pub(crate) fn refresh_staging(
         .context("robot.yaml did not have a parent directory")?;
     let robot = load_robot(&robot_path)?;
 
-    // The driver policy is resolved from the parsed robot BEFORE any artifact or
-    // descriptor resolution (#936, finding 2): it must gate resolution itself, so
-    // an excluded driver is never resolved, checked for vendored presence, built,
-    // staged, required, inspected, or planned. It threads through both staging
-    // and plan construction from here.
+    // The driver policy is resolved from the parsed robot BEFORE resolution
+    // (#936, finding 2): it must gate resolution itself, so an excluded
+    // driver is never resolved, materialized, staged, required, inspected,
+    // or planned. It threads through both staging and plan construction from
+    // here.
     let driver_policy = DriverPolicy::from_options(options, &crate::run::driven_instances(&robot))?;
 
-    // `run`/`start`/`build` never touch the network (#936, finding 1):
-    // resolve against the suite `phoxal update` persisted into the vendored
-    // store, not a fresh fetch. A missing vendored suite fails with "run `phoxal
-    // update`".
-    let suite =
-        crate::commands::load_vendored_suite_for_robot(options.suite_source.clone(), project_root)?;
-    // A cross `--target` resolves the suite's per-target official blobs (the
-    // same per-target resolution `check --target` performs); a host pass leaves
-    // both `None` so resolution targets the host triple.
+    // A cross `--target` resolves official packages for that target (the
+    // same per-target resolution `phoxal build --target` performs); a host
+    // pass leaves both `None` so resolution targets the host triple.
     let official_target = build.target().map(str::to_string);
     let resolved = resolve(
         &robot,
         project_root,
-        suite.as_ref(),
         ResolveOptions {
             official_target_triple: official_target.clone(),
             tool_target_triple: official_target,
             // Finding 1 (#936): the driver policy gates resolution itself - an
-            // excluded driver is not resolved, so it cannot fail artifact
-            // selection, enter the source check, or be built.
+            // excluded driver is not resolved, so it cannot enter the source
+            // check or be built/materialized.
             drivers: driver_policy.selection(),
             // Native runtime bundles deliberately exclude operator-host Webots
             // simulators. Host run/start staging keeps them.
             include_simulators: build.include_simulators(),
+            offline: options.offline,
         },
     )?;
 
-    // Strict vendored-completeness in place of a download preflight (#936,
-    // findings 1 + 2): every required artifact, after filtering out the drivers
-    // the policy excludes, must already be present and digest-current in
-    // `.phoxal/artifacts`, else a precise "run `phoxal update`" error naming what
-    // is missing. Nothing here fetches; the vendored store is the only source.
-    let descriptors = phoxal_cli_core::artifacts::descriptors_for_drivers(
-        &resolved,
-        false,
-        true,
-        &driver_policy.selection(),
-    )?;
-    crate::native_artifacts::ensure_vendored_completeness(&descriptors)?;
-
-    let staged_root = crate::stager::stage_runtime_layout(project_root, &resolved)
+    // Stage into an UNPUBLISHED candidate. Every install, source build,
+    // metadata read, and loader validation below runs against
+    // `candidate.path()`; only the final `publish_runtime_layout` call at the
+    // bottom of this function ever touches the live `.phoxal/bundle/`.
+    let candidate = crate::stager::begin_runtime_layout(project_root, &resolved)
         .context("failed to stage the runtime layout")?;
+
+    // Materialize every official service, tool, and the infrastructure
+    // router into the candidate `bin/` up front, via `cargo install`
+    // (organization#951 WS4). This is what makes the source check below able
+    // to read every official's embedded metadata straight off disk, and
+    // completes the flat `bin/` store the loader requires.
+    crate::stager::materialize_official_store(
+        candidate.path(),
+        &resolved,
+        options.offline,
+        build.officials_source(),
+        |crate_dir, name| build.build_user_binary(crate_dir, name, ui, options.offline),
+    )
+    .context("failed to materialize official runtimes")?;
 
     let source_participants =
         source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
 
     // Source/staging-time validation: build every source participant (for its
     // embedded metadata) and check the source graph before we stage and run.
-    // Execution-time validation is the loader's, over the staged layout below.
+    // Execution-time validation is the loader's, over the candidate layout
+    // below.
     //
     // `phoxal build` skips this host-native pass (`check_source == false`): a
     // cross or container target's Linux-only crates need not compile on the
     // build host, and the loader's target-aware validation over the staged
     // (cross-built) binaries is the authoritative check for a bundle (#936).
     if check_source {
-        run_source_check(project_root, &robot, &resolved, &source_participants)?;
+        run_source_check(
+            candidate.path(),
+            &robot,
+            &resolved,
+            &source_participants,
+            options.offline,
+        )?;
     }
 
-    // Complete the staged `bin/` store so the loader can inspect every required
-    // runtime off-disk. This is the last step that consumes the resolved graph;
-    // everything after it reads only the staged layout.
+    // Complete the candidate `bin/` store so the loader can inspect every
+    // required runtime off-disk. This is the last step that consumes the
+    // resolved graph; everything after it reads only the candidate layout.
     crate::run::stage_complete_bin_store(
-        &staged_root,
+        candidate.path(),
         &resolved,
         &source_participants,
         &driver_policy.selection(),
+        options.offline,
         build,
         ui,
     )?;
@@ -176,6 +184,33 @@ pub(crate) fn refresh_staging(
     // Declaration drift (#950) is warned from THIS shared path, so run,
     // start and build all surface it exactly once.
     crate::run::report_undeclared_runtimes(&resolved.undeclared_runtimes, ui);
+
+    // The loader's own execution-time validation - config-schema pairing and
+    // architecture inspection - runs against the candidate too, still before
+    // publish. `run`/`start` inspect against the host; a `--target` build
+    // inspects against the declared target signature instead, since the
+    // staged binaries were cross-compiled (or container-built) for it, not
+    // for this host.
+    crate::runtime_header::RuntimeHeader::read_and_validate(candidate.path())?;
+    let plan_options = PlanOptions {
+        drivers: driver_policy.selection(),
+    };
+    let inspection = match build.target() {
+        Some(target) => {
+            LayoutInspection::Target(expected_target_for_triple(target).with_context(|| {
+                format!("cannot validate the staged runtime layout for target {target}")
+            })?)
+        }
+        None => LayoutInspection::Host,
+    };
+    let plan =
+        crate::loader::validate_layout_plan(candidate.path(), &plan_options, inspection, run)
+            .context("failed to validate the staged runtime layout")?;
+
+    // Every install, build, check, and validation above succeeded against the
+    // candidate alone - publish it as the live layout now, and only now.
+    let staged_root = crate::stager::publish_runtime_layout(candidate, &resolved)
+        .context("failed to publish the staged runtime layout")?;
 
     Ok(StagedProject {
         // `project_root` borrows `robot_path`, so clone rather than move it.
@@ -185,6 +220,7 @@ pub(crate) fn refresh_staging(
         source_participants,
         driver_policy,
         staged_root,
+        plan,
     })
 }
 
@@ -205,21 +241,16 @@ pub(crate) fn prepare_run_on_board(
         &options,
         &crate::run::StagingBuild::host_runtime(),
         true,
+        run,
         ui,
     )?;
-    let plan_options = staged.plan_options();
 
-    // The one execution path: construct and validate the launch plan from the
-    // staged layout alone. Byte-identical, for the same robot, to a plan built
-    // from an extracted bundle of this layout.
-    crate::runtime_header::RuntimeHeader::read_and_validate(&staged.staged_root)?;
-    let plan = crate::loader::validate_layout_plan(
-        &staged.staged_root,
-        &plan_options,
-        phoxal_cli_core::project::layout::LayoutInspection::Host,
-        run,
-    )
-    .context("failed to construct the launch plan from the staged runtime layout")?;
+    // The one execution path: `refresh_staging` already constructed and
+    // validated the launch plan against the candidate BEFORE publishing it
+    // (organization#951 WS4 review) - reuse it rather than re-validating the
+    // now-published bytes a second time. Byte-identical, for the same robot,
+    // to a plan built from an extracted bundle of this layout.
+    let plan = staged.plan.clone();
 
     board.configure(
         staged.project_root.display().to_string(),
@@ -298,13 +329,12 @@ pub(crate) fn prepare_run_on_board(
 }
 
 /// Prepare a run from an already-staged runtime layout at `layout_root` - an
-/// extracted `build.phoxal` or a `.phoxal/build/<triple>/` directory. There is
-/// nothing to build, resolve, or fetch: the launch plan and every executable
-/// come from the layout's flat `bin/` store, so this needs no Cargo, suite,
-/// toolchain, or network, and never touches `.phoxal/artifacts`. An arbitrary
-/// layout keeps runtime state under `<layout_root>/.phoxal`; the installed
-/// `/var/phoxal` identity maps persistent state to `/var/lib/phoxal/state` and
-/// sockets to `/run/phoxal`.
+/// extracted `build.phoxal` or a `.phoxal/bundle/` directory. There is
+/// nothing to build, resolve, or materialize: the launch plan and every
+/// executable come from the layout's flat `bin/` store, so this needs no
+/// Cargo, toolchain, or network. An arbitrary layout keeps runtime state
+/// under `<layout_root>/.phoxal`; the installed `/var/phoxal` identity maps
+/// persistent state to `/var/lib/phoxal/state` and sockets to `/run/phoxal`.
 pub(crate) fn prepare_layout_run_on_board(
     layout_root: &Path,
     options: RunOptions,
@@ -391,44 +421,53 @@ fn register_router_process(board: &BoardBackend) {
 /// train's check gate rejects it. This is a staging-side gate; the loader
 /// re-validates config over the staged layout.
 fn run_source_check(
-    project_root: &Path,
+    staged_root: &Path,
     robot: &phoxal::model::robot::v0::Robot,
     resolved: &ResolvedRobot,
     source_participants: &[phoxal_cli_core::check::source::SourceParticipant],
+    offline: bool,
 ) -> Result<()> {
+    let bin_dir = staged_root.join("bin");
     let platform_refs = check_artifact_refs_from_resolved(resolved);
     let tool_participants = tool_participants_from_resolved(resolved)?;
-    let mut official_by_ref = resolved
+    let mut official_by_name = resolved
         .platform_runtimes
         .iter()
-        .map(|runtime| (runtime.artifact_ref().to_string(), runtime))
+        .map(|runtime| {
+            (
+                phoxal_cli_core::project::resolver::official_binary_name(
+                    runtime.kind,
+                    &runtime.name,
+                ),
+                runtime,
+            )
+        })
         .collect::<BTreeMap<_, _>>();
-    official_by_ref.extend(crate::check::component_driver_runtimes_by_ref(resolved));
-    let tools_by_ref = resolved
+    official_by_name.extend(crate::check::component_driver_runtimes_by_ref(resolved));
+    let tools_by_name = resolved
         .tools
         .iter()
-        .map(|tool| (tool.asset.clone(), tool))
+        .map(|tool| (tool.binary_name.clone(), tool))
         .collect::<BTreeMap<_, _>>();
     let outcome = run_check_with_context(
         &platform_refs,
         &tool_participants,
         source_participants,
         CheckGraphContext { robot: Some(robot) },
-        |artifact_ref| {
-            if let Some(runtime) = official_by_ref.get(artifact_ref) {
-                return extract_participant_report_from_staged_runtime(runtime);
+        |binary_name| {
+            if let Some(runtime) = official_by_name.get(binary_name) {
+                return extract_participant_report_from_staged_runtime(&bin_dir, runtime);
             }
-            if let Some(tool) = tools_by_ref.get(artifact_ref) {
-                return extract_participant_report_from_staged_tool(tool);
+            if let Some(tool) = tools_by_name.get(binary_name) {
+                return extract_participant_report_from_staged_tool(&bin_dir, tool);
             }
             Err(anyhow!(
-                "resolved official artifact {artifact_ref} is not in the suite"
+                "resolved official artifact {binary_name} was not materialized into bin/"
             ))
         },
         fetch_participant_report_from_tool,
-        build_participant_report_from_source,
+        |participant| build_participant_report_from_source(participant, offline),
     )?;
-    let _ = project_root;
     if !outcome.is_ok() {
         crate::check::ensure_check_outcome_ok(&outcome)?;
     }

@@ -38,7 +38,8 @@ pub(crate) use participants::{
 };
 mod build;
 pub(crate) use build::{
-    StagingBuild, build_source_binary, device_missing_note, missing_device_path,
+    Profile, StagingBuild, build_source_binary, build_source_binary_with_profile,
+    device_missing_note, missing_device_path,
 };
 
 #[cfg(test)]

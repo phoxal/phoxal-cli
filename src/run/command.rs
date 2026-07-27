@@ -70,7 +70,7 @@ pub enum DriversMode {
 pub struct RunOptions {
     pub drivers: DriversMode,
     pub drivers_subset: Vec<String>,
-    pub suite_source: Option<String>,
+    pub offline: bool,
 }
 
 #[derive(Debug)]
@@ -81,7 +81,7 @@ pub(crate) struct PreparedRun {
     pub(crate) specs: Vec<ParticipantSpec>,
     pub(crate) robot_targets: Vec<RobotFeedTarget>,
     /// The staged runtime layout root the plan's `bin/` binaries (including the
-    /// infrastructure router) resolve from: `.phoxal/build/<triple>/` for a
+    /// infrastructure router) resolve from: `.phoxal/bundle/` for a
     /// source run, the layout root itself for a staged/bundle run.
     pub(crate) staged_root: PathBuf,
     /// The router's resolved config file, if the compiled `robot.yaml` declares
@@ -131,7 +131,7 @@ impl Run {
         let options = RunOptions {
             drivers: self.drivers,
             drivers_subset: self.drivers_subset.clone(),
-            suite_source: app.suite_source.clone(),
+            offline: app.offline,
         };
         if options.drivers == DriversMode::Off && !options.drivers_subset.is_empty() {
             bail!("--driver cannot be combined with --drivers off");
@@ -346,6 +346,7 @@ async fn resident_supervision_inner(
             }
             ResidentMode::Webots(options) => {
                 let prepare_root = execution_root;
+                let offline = options.offline;
                 let sim = tokio::task::spawn_blocking(move || {
                     crate::simulation::prepare(&prepare_root, options, run)
                 })
@@ -359,6 +360,7 @@ async fn resident_supervision_inner(
                     prepare_token,
                     prepare_output,
                     Some((action_tx, action_rx)),
+                    offline,
                     run,
                 )
                 .await
@@ -521,7 +523,7 @@ fn prepare_run(
     board: BoardBackend,
     run: RunIdentity,
 ) -> Result<PreparedRun> {
-    match classify_run_root(root)? {
+    match classify_run_root(root, options.offline)? {
         RunRoot::Source => prepare_run_on_board(root, options, ui, board, run),
         RunRoot::Layout => prepare_layout_run_on_board(root, options, board, run),
     }
@@ -537,8 +539,8 @@ enum RunRoot {
 /// (a Cargo train anchor resolves) is staged and run; an already-staged runtime
 /// layout (`robot.yaml` next to `bin/`, no source) runs in place; anything else
 /// is a precise error. There is no implicit `/var/phoxal` fallback.
-fn classify_run_root(root: &Path) -> Result<RunRoot> {
-    if resolve_locked_train(root).is_ok() {
+fn classify_run_root(root: &Path, offline: bool) -> Result<RunRoot> {
+    if resolve_locked_train(root, offline).is_ok() {
         return Ok(RunRoot::Source);
     }
     if RuntimeLayout::is_layout_root(root) {
@@ -843,14 +845,16 @@ mod run_root_tests {
         let layout = tempfile::tempdir().unwrap();
         write_layout(layout.path());
         assert!(matches!(
-            classify_run_root(layout.path()).unwrap(),
+            classify_run_root(layout.path(), false).unwrap(),
             RunRoot::Layout
         ));
 
         // Neither a buildable source project nor a staged layout: a precise
         // error, no implicit fallback.
         let bare = tempfile::tempdir().unwrap();
-        let error = classify_run_root(bare.path()).unwrap_err().to_string();
+        let error = classify_run_root(bare.path(), false)
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains("neither a buildable source project")
                 && error.contains("staged runtime layout"),

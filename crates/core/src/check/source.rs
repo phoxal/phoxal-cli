@@ -103,14 +103,14 @@ impl SourceParticipant {
     }
 }
 
-/// A source participant's role plus whether it has a known official/suite
+/// A source participant's role plus whether it has a known official/registry
 /// identity it locally overrides. Deliberately kept as its own enum rather
 /// than collapsed into the shared
 /// `crate::session::ParticipantKind`: every
 /// `SourceParticipant` already carries a `crate_dir`, so it is inherently
 /// "local" in the supervisor's sense - the real orthogonal bit this domain
-/// needs is "does an official/suite identity exist for this name", not "is
-/// it local". `UserService` has no suite counterpart
+/// needs is "does an official/registry identity exist for this name", not
+/// "is it local". `UserService` has no registry counterpart
 /// at all (a robot developer's own service); `OfficialService` is a known
 /// official service whose source the robot developer is locally overriding;
 /// `Tool`/`Simulator` are always the latter shape (a source override of a
@@ -121,7 +121,8 @@ impl SourceParticipant {
 pub enum SourceParticipantKind {
     UserService,
     /// A robot developer's own tool, declared under `tools:` in robot.yaml
-    /// with no suite counterpart (#950) - the tool analogue of `UserService`.
+    /// with no registry counterpart (#950) - the tool analogue of
+    /// `UserService`.
     UserTool,
     OfficialService,
     ComponentDriver,

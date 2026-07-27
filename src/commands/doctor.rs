@@ -10,7 +10,10 @@ pub struct Doctor {}
 impl Doctor {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         crate::host_doctor::report(app);
-        let train = phoxal_cli_core::project::train::resolve_locked_train(app.project.root())?;
+        let train = phoxal_cli_core::project::train::resolve_locked_train(
+            app.project.root(),
+            app.offline || crate::context::offline_from_env(),
+        )?;
         println!(
             "framework train: {} ({})",
             train.version,
@@ -22,7 +25,7 @@ impl Doctor {
         );
         println!("train anchor: Cargo.toml and Cargo.lock are coherent");
         if train.is_published() {
-            if app.offline || phoxal_cli_core::project::suite::offline_from_env() {
+            if app.offline || crate::context::offline_from_env() {
                 println!("framework facade: crates.io probe skipped in offline mode");
             } else {
                 match inspect_registry_train(train.version.clone()).await {

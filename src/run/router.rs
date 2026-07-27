@@ -287,7 +287,7 @@ fn recovery_rows(
 
 /// Resolve the router's optional config file against `root`, verifying it
 /// exists. `root` is always the staged runtime-layout root - a source run passes
-/// `.phoxal/build/<triple>/` and a staged/bundle run passes its layout root -
+/// `.phoxal/bundle/` and a staged/bundle run passes its layout root -
 /// because staging copies `router.config` into the layout under its relative
 /// path (#936, finding 4), so every mode resolves the same staged asset and an
 /// extracted `build.phoxal` carries its own router config.
@@ -320,7 +320,9 @@ pub(crate) async fn start_infrastructure_router(
     let binary = crate::stager::staged_router_binary(staged_root);
     anyhow::ensure!(
         binary.is_file(),
-        "phoxal-infrastructure-router is not staged at {}; run `phoxal update`",
+        "phoxal-infrastructure-router is not staged at {}; the staged runtime layout is \
+         incomplete. Run `phoxal run` from the source project so staging refreshes it, or \
+         rebuild the bundle with `phoxal build` if you are running from an extracted archive",
         binary.display()
     );
     let launch = RouterLaunch { binary, config };

@@ -29,7 +29,6 @@ pub struct ProjectLockIdentity {
 pub enum ProjectOperation {
     Run,
     Build,
-    Update,
     Install,
 }
 
@@ -38,7 +37,6 @@ impl std::fmt::Display for ProjectOperation {
         formatter.write_str(match self {
             Self::Run => "run",
             Self::Build => "build",
-            Self::Update => "update",
             Self::Install => "install",
         })
     }
@@ -127,9 +125,9 @@ impl ProjectLock {
                 return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
             }
         };
-        match crate::native_artifacts::try_advisory_lock(&file, true) {
+        match crate::advisory_lock::try_advisory_lock(&file, true) {
             Ok(()) => {
-                crate::native_artifacts::unlock_advisory(&file)?;
+                crate::advisory_lock::unlock_advisory(&file)?;
                 Ok(ProjectLockStatus::Free)
             }
             Err(_) => Ok(ProjectLockStatus::Held(
@@ -157,7 +155,7 @@ impl ProjectLock {
             .truncate(false)
             .open(path)
             .with_context(|| format!("failed to open project-operation lock {}", path.display()))?;
-        if let Err(error) = crate::native_artifacts::try_advisory_lock(&file, true) {
+        if let Err(error) = crate::advisory_lock::try_advisory_lock(&file, true) {
             let active = read_identity(&mut file).ok();
             if let Some(active) = active {
                 bail!(
@@ -196,7 +194,7 @@ impl Drop for ProjectLock {
     fn drop(&mut self) {
         // The inode is intentionally permanent. Unlinking a locked file lets a
         // competing process create and lock a different inode at the same path.
-        let _ = crate::native_artifacts::unlock_advisory(&self.file);
+        let _ = crate::advisory_lock::unlock_advisory(&self.file);
     }
 }
 
@@ -225,7 +223,7 @@ mod tests {
             project: root.join("project"),
             entry: root.join("project/robot.yaml"),
             operation: if mode == "stale" {
-                ProjectOperation::Update
+                ProjectOperation::Build
             } else {
                 ProjectOperation::Run
             },
@@ -286,7 +284,7 @@ mod tests {
         ))?;
         let second = ProjectLock::acquire(ProjectLockIdentity::resolve(
             &second_project,
-            ProjectOperation::Update,
+            ProjectOperation::Build,
         ))?;
 
         assert!(first_project.join(".phoxal/project.lock").is_file());

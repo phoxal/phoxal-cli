@@ -47,6 +47,7 @@ pub(crate) async fn live_simulate_setup(
         mpsc::Sender<SupervisorAction>,
         mpsc::Receiver<SupervisorAction>,
     )>,
+    offline: bool,
     run: RunIdentity,
 ) -> Result<LiveSimSetup> {
     let ensure_active = || {
@@ -61,8 +62,13 @@ pub(crate) async fn live_simulate_setup(
         .context("Webots preflight failed; live simulate cannot launch the simulator")?;
     ensure_active()?;
 
-    let staged_root =
-        crate::stager::stage_runtime_layout(&sim.ctx.project_root, &sim_source(&sim).resolved)
+    // Stage into an UNPUBLISHED candidate: every install, source build, and
+    // router materialization below runs against `candidate.path()`, never
+    // the live `.phoxal/bundle/`. Only the explicit publish call after they
+    // all succeed touches the live path - the same atomicity promise
+    // `run`/`build` keep (organization#951 WS4 review).
+    let candidate =
+        crate::stager::begin_runtime_layout(&sim.ctx.project_root, &sim_source(&sim).resolved)
             .context("failed to stage the simulation runtime layout")?;
     ensure_active()?;
     board.configure(
@@ -91,20 +97,37 @@ pub(crate) async fn live_simulate_setup(
         &sim.plan,
         &sim_source(&sim).resolved,
         &source_dirs,
-        &staged_root,
+        candidate.path(),
         &crate::run::DriverPolicy::drivers_off_for_sim(),
         &board,
         &mut specs,
+        offline,
         &ui,
     )?;
     // The router launches from the staged `bin/` entry like every other
     // official; stage it there before starting it.
     crate::stager::stage_router_binary(
-        &staged_root,
+        candidate.path(),
         &sim_source(&sim).resolved,
-        |crate_dir, name| crate::run::build_source_binary(crate_dir, name, &ui, None),
+        offline,
+        |crate_dir, name| crate::run::build_source_binary(crate_dir, name, &ui, None, offline),
     )
     .context("failed to stage the infrastructure router into the simulation bin store")?;
+
+    // `bin/` is now complete and every participant binary already inspected -
+    // publish. `fs::rename` preserves the relative structure exactly, so the
+    // specs built against the candidate path above are repointed at the
+    // published one rather than rebuilt.
+    let candidate_path = candidate.path().to_path_buf();
+    let staged_root = crate::stager::publish_runtime_layout(candidate, &sim_source(&sim).resolved)
+        .context("failed to publish the simulation runtime layout")?;
+    for spec in &mut specs {
+        repoint_after_publish(&mut spec.executable, &candidate_path, &staged_root);
+        if let Some(cwd) = &mut spec.cwd {
+            repoint_after_publish(cwd, &candidate_path, &staged_root);
+        }
+    }
+
     // Resolve the router config from the STAGED layout, matching `run`: staging
     // copied `router.config` into `staged_root` under its relative path (#936,
     // finding 4).
@@ -127,7 +150,7 @@ pub(crate) async fn live_simulate_setup(
     crate::run::apply_session_connect(&mut sim.plan, &mut specs, &connect);
     ensure_active()?;
     let webots_spec =
-        stage_and_prepare_webots_spec(&ui, &sim, &staged_root, &connect, run.execution())?;
+        stage_and_prepare_webots_spec(&ui, &sim, &staged_root, &connect, offline, run.execution())?;
     let mut background_tasks = crate::run::AbortTasks::default();
     ui.info(format!(
         "Webots profile: webots; world: {}; project: {}",
@@ -205,4 +228,19 @@ pub(crate) async fn live_simulate_setup(
         supervisor_options,
         background_tasks,
     })
+}
+
+/// Rewrite `path` from the candidate root to the published root when it
+/// falls under the candidate at all - a source participant's `cwd` is its own
+/// crate directory, never under either, and is correctly left untouched.
+/// `fs::rename` (the publish step) preserves the relative structure exactly,
+/// so this prefix swap is exact, never an approximation.
+fn repoint_after_publish(
+    path: &mut std::path::PathBuf,
+    candidate: &std::path::Path,
+    published: &std::path::Path,
+) {
+    if let Ok(relative) = path.strip_prefix(candidate) {
+        *path = published.join(relative);
+    }
 }

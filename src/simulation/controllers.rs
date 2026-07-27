@@ -1,32 +1,53 @@
 //! Webots controller binary discovery, build, and provisioning.
+//!
+//! The controller materializes into its own root, `.phoxal/simulation/`
+//! (organization#951 WS4) - separate from `.phoxal/bundle/`, the deployed
+//! robot bundle - and is built only when a simulation is requested. It is
+//! exposed to Webots by a SYMLINK at
+//! `.phoxal/webots/controllers/<name>/<name>`, never a copy: staging replaces
+//! binaries by atomic rename (a new inode every time), so a hardlink or copy
+//! would keep resolving to the previous build and silently run a stale
+//! controller, while a symlink resolves through the path on every exec.
 
 use crate::webots_stage_root;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use anyhow::bail;
-use phoxal_cli_core::project::launch_plan::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
+use phoxal_cli_core::project::launch_plan::{
+    SIMULATOR_CONTROLLER_ARTIFACT_NAME, simulation_root_dir,
+};
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use std::path::Path;
 use std::path::PathBuf;
 
-/// Stage resolved Webots controller binaries into its controller layout.
+/// Stage the resolved Webots controller binary into its controller layout:
+/// materialize it into `.phoxal/simulation/bin/`, then symlink it at
+/// `.phoxal/webots/controllers/<name>/<name>`.
 pub(crate) fn stage_simulator_controller_binaries(
+    project_root: &Path,
     resolved: &ResolvedRobot,
+    offline: bool,
     ui: &crate::Ui,
 ) -> Result<()> {
     let runtime = resolved_controller_runtime(&resolved.simulators)?;
-    stage_controller_runtime(runtime, ui)
+    stage_controller_runtime(project_root, runtime, offline, ui)
 }
 
-fn stage_controller_runtime(runtime: &ResolvedPlatformRuntime, ui: &crate::Ui) -> Result<()> {
+fn stage_controller_runtime(
+    project_root: &Path,
+    runtime: &ResolvedPlatformRuntime,
+    offline: bool,
+    ui: &crate::Ui,
+) -> Result<()> {
     let webots_home = detected_webots_home_for_build_env();
-    stage_controller_runtime_with_home(runtime, ui, webots_home.as_deref())
+    stage_controller_runtime_with_home(project_root, runtime, offline, ui, webots_home.as_deref())
 }
 
 fn stage_controller_runtime_with_home(
+    project_root: &Path,
     runtime: &ResolvedPlatformRuntime,
+    offline: bool,
     ui: &crate::Ui,
     webots_home: Option<&Path>,
 ) -> Result<()> {
@@ -38,20 +59,42 @@ fn stage_controller_runtime_with_home(
                 SIMULATOR_CONTROLLER_ARTIFACT_NAME
             )
         })?;
+    let simulation_root = simulation_root_dir(project_root);
     let resolved_binary = if let Some(crate_dir) = runtime.source_path() {
         let preferred_name = format!("phoxal-simulator-{}", runtime.name);
         let _env_guard = webots_home.map(WebotsHomeEnvGuard::set);
-        crate::run::build_source_binary(crate_dir, &preferred_name, ui, None).with_context(
-            || {
-                format!(
-                    "failed to build path-overridden simulator '{}' from {}",
-                    runtime.name,
-                    crate_dir.display()
-                )
-            },
-        )?
+        // Release, matching what a registry-materialized controller gets
+        // from `cargo install`'s own default (organization#951 WS4): the
+        // simulation root always carries the profile users deploy,
+        // regardless of whether the controller was source-overridden.
+        let built = crate::run::build_source_binary_with_profile(
+            crate_dir,
+            &preferred_name,
+            ui,
+            None,
+            crate::run::Profile::Release,
+            offline,
+        )
+        .with_context(|| {
+            format!(
+                "failed to build path-overridden simulator '{}' from {}",
+                runtime.name,
+                crate_dir.display()
+            )
+        })?;
+        crate::stager::stage_named_binary(&simulation_root, &preferred_name, &built)?
     } else {
-        provisioned_official_simulator_binary(runtime)?
+        let spec = crate::materialize::MaterializeSpec::new(
+            runtime.package.clone(),
+            runtime.train.clone(),
+        )
+        .with_target(runtime.target.clone());
+        crate::materialize::cargo_install(&simulation_root, &spec, offline).with_context(|| {
+            format!(
+                "failed to materialize official simulator '{}'",
+                runtime.name
+            )
+        })?
     };
     let staged_dir = webots_stage_root::controller_dir(controller_name)?;
     std::fs::create_dir_all(&staged_dir).with_context(|| {
@@ -61,19 +104,45 @@ fn stage_controller_runtime_with_home(
         )
     })?;
     let staged_binary = staged_dir.join(controller_name);
-    std::fs::copy(&resolved_binary, &staged_binary).with_context(|| {
-        format!(
-            "failed to copy simulator binary {} to staged controller path {}",
-            resolved_binary.display(),
-            staged_binary.display()
-        )
-    })?;
+    symlink_controller(&resolved_binary, &staged_binary)?;
     ui.info(format!(
-        "staged simulator controller binary {} at {} (copied from {})",
+        "staged simulator controller binary {} at {} (symlinked to {})",
         runtime.name,
         staged_binary.display(),
         resolved_binary.display()
     ));
+    Ok(())
+}
+
+/// Symlink `resolved_binary` at `staged_binary`, replacing any previous
+/// entry. A symlink - never a hardlink or copy - so a controller rebuild
+/// (which lands at a new inode via atomic rename) is picked up on the very
+/// next Webots exec instead of silently running the previous build.
+fn symlink_controller(resolved_binary: &Path, staged_binary: &Path) -> Result<()> {
+    if staged_binary.symlink_metadata().is_ok() {
+        std::fs::remove_file(staged_binary).with_context(|| {
+            format!(
+                "failed to remove stale controller symlink {}",
+                staged_binary.display()
+            )
+        })?;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(resolved_binary, staged_binary).with_context(|| {
+        format!(
+            "failed to symlink controller {} -> {}",
+            staged_binary.display(),
+            resolved_binary.display()
+        )
+    })?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(resolved_binary, staged_binary).with_context(|| {
+        format!(
+            "failed to symlink controller {} -> {}",
+            staged_binary.display(),
+            resolved_binary.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -106,43 +175,6 @@ pub(crate) fn webots_controller_name_for_simulator_artifact(
     } else {
         None
     }
-}
-
-/// Obtain the cached native-artifact binary path for a SUITE (non
-/// path-overridden) simulator runtime, mirroring how
-/// `crate::stager::resolve_platform_source` resolves every other official
-/// artifact. Errors clearly rather than leaving the controller silently
-/// unstaged when the artifact was never vendored into the project store.
-pub(crate) fn provisioned_official_simulator_binary(
-    runtime: &ResolvedPlatformRuntime,
-) -> Result<PathBuf> {
-    let descriptor = phoxal_cli_core::artifacts::NativeArtifactDescriptor::from_runtime(runtime)
-        .with_context(|| {
-            format!(
-                "failed to resolve native-artifact descriptor for simulator '{}'",
-                runtime.name
-            )
-        })?
-        .ok_or_else(|| {
-            anyhow!(
-                "simulator '{}' has no built native artifact for this target; run `phoxal update` or pin a path override",
-                runtime.name
-            )
-        })?;
-    let cached = crate::native_artifacts::artifact_binary_path(&descriptor).with_context(|| {
-        format!(
-            "failed to locate vendored simulator '{}' in the artifact store",
-            runtime.name
-        )
-    })?;
-    if !cached.is_file() {
-        bail!(
-            "NativePending: simulator '{}' binary is not vendored ({}); run `phoxal update` to fetch it",
-            runtime.name,
-            cached.display()
-        );
-    }
-    Ok(cached)
 }
 
 /// The Webots-linked simulator crates need `WEBOTS_HOME` to build (their
@@ -192,20 +224,13 @@ impl Drop for WebotsHomeEnvGuard {
 mod tests {
     use super::*;
     use crate::host_paths::test_support::ScratchPhoxalHome;
-    use phoxal_cli_core::project::suite::ArtifactKind;
+    use phoxal_cli_core::project::catalog::ArtifactKind;
 
     fn controller_runtime() -> ResolvedPlatformRuntime {
         ResolvedPlatformRuntime {
             name: SIMULATOR_CONTROLLER_ARTIFACT_NAME.to_string(),
             package: "phoxal/simulator-webots-controller".to_string(),
             kind: ArtifactKind::Simulator,
-            version: "0.40.2".to_string(),
-            artifact_ref: "phoxal/simulator-webots-controller@0.40.2".to_string(),
-            sha256: None,
-            url: None,
-            size: None,
-            published: true,
-            published_triples: Vec::new(),
             path_override: None,
             train: "0.40.2".to_string(),
             target: None,
@@ -227,26 +252,13 @@ mod tests {
     }
 
     #[test]
-    fn suite_controller_missing_from_cache_is_a_hard_error() -> Result<()> {
+    fn path_overridden_controller_is_built_and_symlinked_into_the_webots_layout() -> Result<()> {
         let _home = ScratchPhoxalHome::new()?;
-        webots_stage_root::wipe_and_recreate()?;
-        let error =
-            stage_controller_runtime_with_home(&controller_runtime(), &crate::Ui::from_env(), None)
-                .expect_err("missing suite controller must fail");
-        assert!(
-            format!("{error:#}").contains("failed to locate vendored simulator"),
-            "{error:#}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn path_overridden_controller_is_built_and_staged() -> Result<()> {
-        let _home = ScratchPhoxalHome::new()?;
-        let source = tempfile::tempdir()?;
-        std::fs::create_dir_all(source.path().join("src"))?;
+        let project = tempfile::tempdir()?;
+        let source = project.path().join("simulator-webots-controller");
+        std::fs::create_dir_all(source.join("src"))?;
         std::fs::write(
-            source.path().join("Cargo.toml"),
+            source.join("Cargo.toml"),
             r#"[package]
 name = "fixture-webots-controller"
 version = "0.1.0"
@@ -257,9 +269,9 @@ name = "phoxal-simulator-webots-controller"
 path = "src/main.rs"
 "#,
         )?;
-        std::fs::write(source.path().join("src/main.rs"), "fn main() {}\n")?;
+        std::fs::write(source.join("src/main.rs"), "fn main() {}\n")?;
         std::fs::write(
-            source.path().join("Cargo.lock"),
+            source.join("Cargo.lock"),
             r#"# This file is automatically @generated by Cargo.
 version = 4
 
@@ -269,18 +281,31 @@ version = "0.1.0"
 "#,
         )?;
         let mut runtime = controller_runtime();
-        runtime.path_override = Some(source.path().to_path_buf());
-        runtime.artifact_ref = format!("path:{}", source.path().display());
+        runtime.path_override = Some(source.clone());
         webots_stage_root::wipe_and_recreate()?;
-        stage_controller_runtime_with_home(&runtime, &crate::Ui::from_env(), None)?;
+        stage_controller_runtime_with_home(
+            project.path(),
+            &runtime,
+            false,
+            &crate::Ui::from_env(),
+            None,
+        )?;
         let staged =
             webots_stage_root::controller_dir(crate::simulate_staging::WEBOTS_CONTROLLER_NAME)?
                 .join(crate::simulate_staging::WEBOTS_CONTROLLER_NAME);
         assert!(
-            staged.is_file(),
-            "controller was not staged at {}",
+            staged
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.file_type().is_symlink()),
+            "controller must be exposed as a symlink at {}",
             staged.display()
         );
+        assert!(staged.is_file(), "the symlink must resolve to a real file");
+        // The symlink resolves into the SEPARATE simulation root, never the
+        // deployed bundle root.
+        assert!(std::fs::read_link(&staged)?.starts_with(
+            phoxal_cli_core::project::launch_plan::simulation_root_dir(project.path())
+        ));
         Ok(())
     }
 }

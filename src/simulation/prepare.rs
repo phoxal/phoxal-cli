@@ -13,21 +13,16 @@ pub(crate) fn prepare(
     options: SimulateOptions,
     run: RunIdentity,
 ) -> Result<SimPlan> {
-    let resolved = resolve_project(project_start, options.clone())?;
-    let descriptors = phoxal_cli_core::artifacts::descriptors_for(&resolved.resolved, true, true)?;
-    crate::native_artifacts::prepare_descriptors_with_preflight(&descriptors, None)?;
+    let offline = options.offline;
+    let resolved = resolve_project(project_start, options)?;
     let plan = build_checked_sim_launch_plan(
         &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,
-        resolved.suite.as_ref(),
+        offline,
         run,
     )?;
-    let source_participants = sim_source_participants(
-        &resolved.project_root,
-        &resolved.resolved,
-        resolved.suite.as_ref(),
-    )?;
+    let source_participants = sim_source_participants(&resolved.project_root, &resolved.resolved)?;
     Ok(SimPlan {
         plan,
         ctx: PlanContext {

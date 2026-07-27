@@ -1,14 +1,130 @@
 //! CLI-owned official runtime catalog.
 //!
-//! The immutable suite is only an inventory of bytes. Runtime membership
-//! belongs to this CLI release, which applies the CLI-internal failure policy.
+//! Official services, tools, and the infrastructure router are never
+//! discovered from a network inventory: they are compiled into this CLI
+//! release. `robot.yaml` declares USER services/tools and component
+//! instances; the official set comes from here alone (organization#951 WS4).
+//!
+//! ## One catalog, no per-train history (organization#951 WS4 review, medium 3)
+//!
+//! [`NATIVE`]/[`WEBOTS`] are a single, current snapshot - deliberately not a
+//! table keyed by train. The design this replaced enumerated official
+//! membership per train (a suite fetched per project); the whole point of
+//! the cutover was to stop carrying that history. But applying today's
+//! snapshot unchanged to an arbitrarily old locked train is not "no
+//! history", it is silently pretending history does not matter: an old
+//! train can be missing a package the catalog added since, or have carried
+//! one the catalog has since removed (concretely, `phoxal
+//! /simulator-webots-supervisor` existed in a past release's set and does
+//! not today). [`ensure_train_supported`] is the deliberately narrow fix -
+//! not per-train history, just a single floor below which this catalog is
+//! known NOT to apply, so a robot locked below it gets a clear, actionable
+//! error naming its train and the floor instead of a resolved set that never
+//! existed for it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use anyhow::{Context, Result, ensure};
 
-use anyhow::{Context, Result, bail};
-use semver::Version;
+use crate::project::train::{LockedTrain, TrainSource};
 
-use super::suite::{ArtifactKind, Kind, Suite};
+/// The oldest locked framework train this catalog snapshot is known to
+/// faithfully represent - the exact `phoxal` version phoxal-cli itself is
+/// pinned to (see the workspace `Cargo.toml`). Bump this alongside any
+/// change to [`NATIVE`]/[`WEBOTS`] (an official package added, removed, or
+/// renamed) and alongside every `phoxal` dependency bump, so it always
+/// names the true floor rather than lagging it.
+pub const CATALOG_FLOOR_TRAIN: &str = "0.42.0";
+
+/// Reject a locked framework train this catalog cannot faithfully represent:
+/// anything older than [`CATALOG_FLOOR_TRAIN`]. Every resolution entry point
+/// calls this immediately after reading the locked train and before
+/// applying [`NATIVE`]/[`WEBOTS`] to it, so a stale lock fails loudly -
+/// naming both the train it found and the floor it needs - instead of
+/// silently resolving an official set that never existed for that train.
+///
+/// A [`TrainSource::Path`] lock (a local `phoxal` path dependency - framework
+/// development, never a real deployed robot) is exempt: its version is
+/// whatever placeholder the local checkout happens to carry, not a real
+/// release the catalog needs to have existed for, and the developer working
+/// against a local framework checkout is already responsible for keeping it
+/// in sync.
+pub fn ensure_train_supported(train: &LockedTrain) -> Result<()> {
+    if matches!(train.source, TrainSource::Path) {
+        return Ok(());
+    }
+    let version = &train.version;
+    let locked = semver::Version::parse(version).with_context(|| {
+        format!("locked framework train `{version}` is not a valid semantic version")
+    })?;
+    let floor = semver::Version::parse(CATALOG_FLOOR_TRAIN)
+        .expect("CATALOG_FLOOR_TRAIN is a valid semantic version constant");
+    ensure!(
+        locked >= floor,
+        "the locked framework train {version} is older than this phoxal-cli release's official \
+         catalog supports (floor: {CATALOG_FLOOR_TRAIN}); resolving today's official package \
+         set against it would not faithfully represent what train {version} actually shipped. \
+         Upgrade the project's locked framework train to {CATALOG_FLOOR_TRAIN} or newer, or \
+         use a phoxal-cli release published for train {version}."
+    );
+    Ok(())
+}
+
+/// The registry name every `cargo install`/`cargo metadata` invocation
+/// against official packages registers under. Robot projects carry no
+/// registry configuration of their own - the CLI supplies it on every
+/// invocation via `--config`.
+pub const REGISTRY_NAME: &str = "phoxal";
+
+/// The static margo registry official packages publish to
+/// (organization#951 WS1/WS3).
+pub const REGISTRY_INDEX: &str = "sparse+https://phoxal.github.io/registry/";
+
+/// The `--config` argument that injects the registry index into a `cargo`
+/// invocation that never reads a project's own `.cargo/config.toml` for it.
+#[must_use]
+pub fn registry_config_arg() -> String {
+    format!("registries.{REGISTRY_NAME}.index=\"{REGISTRY_INDEX}\"")
+}
+
+/// Project the catalog's provider-qualified package identity
+/// (`phoxal/service-drive`) to the Cargo package name it is published under
+/// (`phoxal-service-drive`). Catalog identities are not Cargo package names.
+#[must_use]
+pub fn cargo_package_name(catalog_id: &str) -> String {
+    catalog_id.replace('/', "-")
+}
+
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    Service,
+    ComponentAssets,
+    ComponentDriver,
+    Tool,
+    Simulator,
+    Infrastructure,
+}
+
+impl ArtifactKind {
+    #[must_use]
+    pub const fn wire_kind(self) -> &'static str {
+        match self {
+            Self::Service => "service",
+            Self::ComponentAssets => "component_assets",
+            Self::ComponentDriver => "driver",
+            Self::Tool => "tool",
+            Self::Simulator => "simulator",
+            Self::Infrastructure => "infrastructure",
+        }
+    }
+}
+
+impl std::fmt::Display for ArtifactKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.wire_kind())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OfficialRuntime {
@@ -104,202 +220,78 @@ pub const WEBOTS: &[OfficialRuntime] = &[OfficialRuntime {
     kind: ArtifactKind::Simulator,
 }];
 
-/// First framework train whose inventory is defined by this complete catalog.
-/// This advances with the CLI's exact `phoxal` dependency; newer trains remain
-/// subject to the same completeness guarantee.
-const COMPLETE_CATALOG_SINCE: &str = phoxal::VERSION;
-
 pub fn for_webots(webots: bool) -> impl Iterator<Item = &'static OfficialRuntime> {
     NATIVE
         .iter()
         .chain(webots.then_some(WEBOTS).into_iter().flatten())
 }
 
-/// Refuse a train whose official inventory this CLI cannot interpret.
-pub fn validate_suite_inventory(suite: &Suite) -> Result<()> {
-    let known = for_webots(true)
-        .map(|runtime| (runtime.package, runtime.kind))
-        .collect::<BTreeMap<_, _>>();
-    let unknown = suite
-        .artifacts
-        .iter()
-        .filter(|artifact| artifact.kind != Kind::Component)
-        .filter(|artifact| !known.contains_key(artifact.id.as_str()))
-        .map(|artifact| artifact.id.as_str())
-        .collect::<Vec<_>>();
-    if !unknown.is_empty() {
-        bail!(
-            "framework train {} contains unknown official package(s): {}. Update phoxal-cli before using this train",
-            suite.version,
-            unknown.join(", ")
-        );
-    }
-    let mismatched = suite
-        .artifacts
-        .iter()
-        .filter(|artifact| artifact.kind != Kind::Component)
-        .filter_map(|artifact| {
-            let expected = known.get(artifact.id.as_str())?;
-            let actual = suite_kind(*expected);
-            (artifact.kind != actual).then(|| {
-                format!(
-                    "{} is {:?}, expected {:?}",
-                    artifact.id, artifact.kind, actual
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    if !mismatched.is_empty() {
-        bail!(
-            "framework train {} has incorrect official package kind(s): {}",
-            suite.version,
-            mismatched.join(", ")
-        );
-    }
-    let present = suite
-        .artifacts
-        .iter()
-        .filter(|artifact| artifact.kind != Kind::Component)
-        .map(|artifact| artifact.id.as_str())
-        .collect::<BTreeSet<_>>();
-    let missing = known
-        .keys()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .difference(&present)
-        .copied()
-        .collect::<Vec<_>>();
-    let version = Version::parse(&suite.version)
-        .with_context(|| format!("suite version {} is not semantic", suite.version))?;
-    let baseline =
-        Version::parse(COMPLETE_CATALOG_SINCE).expect("phoxal package version is semantic");
-    if version >= baseline && !missing.is_empty() {
-        bail!(
-            "framework train {} is missing CLI-required official package(s): {}",
-            suite.version,
-            missing.join(", ")
-        );
-    }
-    Ok(())
-}
-
-const fn suite_kind(kind: ArtifactKind) -> Kind {
-    match kind {
-        ArtifactKind::Service => Kind::Service,
-        ArtifactKind::Tool => Kind::Tool,
-        ArtifactKind::Simulator => Kind::Simulator,
-        ArtifactKind::Infrastructure => Kind::Infrastructure,
-        ArtifactKind::ComponentAssets | ArtifactKind::ComponentDriver => Kind::Component,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::suite::{fixture_blob_for_tests, fixture_suite_for_tests};
-    use phoxal::suite::Artifact;
 
     #[test]
-    fn unknown_official_package_requests_cli_update() {
-        let mut suite = fixture_suite_for_tests(Vec::new());
-        suite.artifacts.push(Artifact {
-            id: "phoxal/tool-future".to_string(),
-            kind: Kind::Tool,
-            targets: [(
-                "x86_64-unknown-linux-gnu".to_string(),
-                fixture_blob_for_tests("https://example.invalid/future.tar.gz", &"0".repeat(64), 1),
-            )]
-            .into_iter()
-            .collect(),
-            assets: None,
-        });
-        let error = validate_suite_inventory(&suite).unwrap_err();
-        assert!(error.to_string().contains("Update phoxal-cli"));
-        assert!(error.to_string().contains("phoxal/tool-future"));
-    }
-
-    #[test]
-    fn current_train_requires_every_catalog_package() {
-        let mut suite = fixture_suite_for_tests(Vec::new());
-        suite.version = COMPLETE_CATALOG_SINCE.to_string();
-        let error = validate_suite_inventory(&suite).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("missing CLI-required official package")
+    fn cargo_package_name_projects_catalog_identity() {
+        assert_eq!(
+            cargo_package_name("phoxal/service-drive"),
+            "phoxal-service-drive"
         );
-        assert!(error.to_string().contains("phoxal/service-drive"));
-        assert!(error.to_string().contains("phoxal/tool-joypad"));
-        assert!(
-            error
-                .to_string()
-                .contains("phoxal/simulator-webots-controller")
+        assert_eq!(
+            cargo_package_name("phoxal/component-ddsm115"),
+            "phoxal-component-ddsm115"
         );
     }
 
-    #[test]
-    fn current_train_accepts_the_exact_controller_only_webots_catalog() {
-        let artifacts = for_webots(true)
-            .map(|runtime| Artifact {
-                id: runtime.package.to_string(),
-                kind: suite_kind(runtime.kind),
-                targets: [(
-                    "x86_64-unknown-linux-gnu".to_string(),
-                    fixture_blob_for_tests(
-                        &format!("https://example.invalid/{}.tar.gz", runtime.package),
-                        &"0".repeat(64),
-                        1,
-                    ),
-                )]
-                .into_iter()
-                .collect(),
-                assets: None,
-            })
-            .collect();
-        let suite = Suite::new(COMPLETE_CATALOG_SINCE.to_string(), artifacts);
-        validate_suite_inventory(&suite).expect("the new framework train is exact");
-        assert!(
-            !suite
-                .artifacts
-                .iter()
-                .any(|artifact| artifact.id == "phoxal/simulator-webots-supervisor")
-        );
+    fn registry_train(version: &str) -> LockedTrain {
+        LockedTrain {
+            version: version.to_string(),
+            source: TrainSource::Registry,
+        }
     }
 
     #[test]
-    fn newer_train_keeps_the_catalog_completeness_gate() {
-        let mut suite = fixture_suite_for_tests(Vec::new());
-        let mut next = Version::parse(COMPLETE_CATALOG_SINCE).unwrap();
-        next.patch += 1;
-        suite.version = next.to_string();
-        let error = validate_suite_inventory(&suite).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("missing CLI-required official package")
-        );
+    fn ensure_train_supported_accepts_the_floor_and_newer() {
+        ensure_train_supported(&registry_train(CATALOG_FLOOR_TRAIN))
+            .expect("the floor itself is supported");
+        ensure_train_supported(&registry_train("99.0.0"))
+            .expect("anything newer than the floor is supported");
     }
 
     #[test]
-    fn official_package_kind_must_match_the_catalog() {
-        let mut suite = fixture_suite_for_tests(Vec::new());
-        suite.artifacts.push(Artifact {
-            id: "phoxal/service-drive".to_string(),
-            kind: Kind::Tool,
-            targets: [(
-                "x86_64-unknown-linux-gnu".to_string(),
-                fixture_blob_for_tests("https://example.invalid/drive.tar.gz", &"0".repeat(64), 1),
-            )]
-            .into_iter()
-            .collect(),
-            assets: None,
-        });
-        let error = validate_suite_inventory(&suite).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("incorrect official package kind")
+    fn ensure_train_supported_rejects_a_train_older_than_the_floor() {
+        let error = ensure_train_supported(&registry_train("0.23.0"))
+            .expect_err("a train older than the floor must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("0.23.0"), "{message}");
+        assert!(message.contains(CATALOG_FLOOR_TRAIN), "{message}");
+    }
+
+    #[test]
+    fn ensure_train_supported_rejects_a_non_semver_train() {
+        let error = ensure_train_supported(&registry_train("not-a-version"))
+            .expect_err("a non-semver locked train must be rejected, not panic");
+        assert!(error.to_string().contains("not-a-version"));
+    }
+
+    #[test]
+    fn ensure_train_supported_exempts_a_local_path_dependency() {
+        // Framework development against a local `phoxal` path dependency
+        // carries whatever placeholder version the checkout happens to have
+        // (often far below the floor) and is not a real deployed robot -
+        // the floor exists to protect against a stale REAL release, not a
+        // developer's local checkout.
+        ensure_train_supported(&LockedTrain {
+            version: "0.1.0".to_string(),
+            source: TrainSource::Path,
+        })
+        .expect("a local path-dependency train is exempt from the floor");
+    }
+
+    #[test]
+    fn registry_config_arg_carries_the_live_static_registry() {
+        assert_eq!(
+            registry_config_arg(),
+            "registries.phoxal.index=\"sparse+https://phoxal.github.io/registry/\""
         );
-        assert!(error.to_string().contains("phoxal/service-drive"));
     }
 }

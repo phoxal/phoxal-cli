@@ -87,56 +87,42 @@ impl Deploy {
         let source_dir = format!("{remote_dir}/source");
         let remote_archive = format!("{remote_dir}/build.phoxal");
         let command = format!(
-            "{}; {}; {} build {} --target {} --output {}; {}",
+            "{}; {}; {} build {} --target {} --output {}{}; {}",
             REMOTE_TOOLCHAIN_PATH,
             remote_unpack_source_command(remote_dir),
             REMOTE_PHOXAL,
             shell_quote(&source_dir),
             shell_quote(target_triple),
             shell_quote(&remote_archive),
+            // Forward --offline to the nested remote `phoxal build`
+            // invocation (organization#951 WS4 review, round 2).
+            if app.offline { " --offline" } else { "" },
             remote_install_command(&remote_archive),
         );
         run_remote(&self.target, &command).context("remote source build or install failed")
     }
 }
 
-/// Upload source and vendored artifacts as distinct payloads. The source
-/// snapshot itself therefore remains free of `.phoxal` build state.
+/// Upload the source snapshot. Official runtimes no longer vendor into the
+/// project (organization#951 WS4): the remote `phoxal build` this snapshot
+/// feeds materializes them itself, via `cargo install` against the registry,
+/// exactly like a local build - `deploy_source` already requires a native
+/// Cargo/rustc toolchain on the remote host (see `remote_toolchain_target`),
+/// so that install is native there too, never a host cross-compile.
 pub(crate) fn upload_source_payload(target: &str, project: &Path, remote_dir: &str) -> Result<()> {
     let snapshot = tempfile::Builder::new()
         .prefix("phoxal-deploy-source-")
         .tempdir()?;
     crate::commands::build::snapshot_source(project, snapshot.path())?;
-    let artifact_payload = tempfile::Builder::new()
-        .prefix("phoxal-deploy-artifacts-")
-        .tempdir()?;
-    let artifacts = project.join(".phoxal/artifacts");
-    // Archive the vendored store itself rather than copying it through the
-    // runtime-layout tree copier: each package's `active` entry is a relative
-    // symlink to its immutable version, and that activation link is required
-    // for remote resolution. `tar` preserves it verbatim. The empty temporary
-    // directory remains the payload when the project has no vendored store.
-    let artifact_root = if artifacts.is_dir() {
-        artifacts.as_path()
-    } else {
-        artifact_payload.path()
-    };
     let source_archive = archive_directory(snapshot.path(), "phoxal-source-")?;
-    let artifacts_archive = archive_directory(artifact_root, "phoxal-artifacts-")?;
-    for (local, remote_name) in [
-        (source_archive.path(), "source.tar.gz"),
-        (artifacts_archive.path(), "artifacts.tar.gz"),
-    ] {
-        run_local(
-            "scp",
-            &[
-                "-q",
-                local.to_string_lossy().as_ref(),
-                &format!("{target}:{remote_dir}/{remote_name}"),
-            ],
-        )?;
-    }
-    Ok(())
+    run_local(
+        "scp",
+        &[
+            "-q",
+            source_archive.path().to_string_lossy().as_ref(),
+            &format!("{target}:{remote_dir}/source.tar.gz"),
+        ],
+    )
 }
 
 fn archive_directory(root: &Path, prefix: &str) -> Result<tempfile::NamedTempFile> {
@@ -161,15 +147,11 @@ fn archive_directory(root: &Path, prefix: &str) -> Result<tempfile::NamedTempFil
 
 pub(crate) fn remote_unpack_source_command(remote_dir: &str) -> String {
     let source_dir = format!("{remote_dir}/source");
-    let artifacts_dir = format!("{source_dir}/.phoxal/artifacts");
     format!(
-        "set -eu; mkdir {}; tar -xzf {} -C {}; mkdir -p {}; tar -xzf {} -C {}",
+        "set -eu; mkdir {}; tar -xzf {} -C {}",
         shell_quote(&source_dir),
         shell_quote(&format!("{remote_dir}/source.tar.gz")),
         shell_quote(&source_dir),
-        shell_quote(&artifacts_dir),
-        shell_quote(&format!("{remote_dir}/artifacts.tar.gz")),
-        shell_quote(&artifacts_dir),
     )
 }
 
@@ -317,24 +299,30 @@ mod tests {
         );
     }
 
+    /// Officials no longer vendor into the project (organization#951 WS4):
+    /// `deploy_source` uploads only the source snapshot, and the remote
+    /// `phoxal build` it runs materializes officials itself via `cargo
+    /// install` - there is no second `artifacts.tar.gz` payload to unpack.
     #[test]
-    fn source_unpack_keeps_artifacts_outside_the_source_snapshot_payload() {
+    fn source_unpack_extracts_only_the_source_payload() {
         let command = remote_unpack_source_command("/tmp/phoxal-deploy.ABC");
         assert!(command.contains("source.tar.gz"));
-        assert!(command.contains("artifacts.tar.gz"));
-        assert!(command.contains("source/.phoxal/artifacts"));
+        assert!(command.contains("/tmp/phoxal-deploy.ABC/source"));
+        assert!(!command.contains("artifacts"));
     }
 
+    /// `archive_directory` (shared by the source payload and any future
+    /// payload) must preserve symlinks verbatim - a git-tracked source tree
+    /// can legitimately contain one.
     #[cfg(unix)]
     #[test]
-    fn artifact_payload_preserves_the_active_version_symlink() -> Result<()> {
-        let store = tempfile::tempdir()?;
-        let package = store.path().join("phoxal/service-asset");
-        std::fs::create_dir_all(package.join("versions/0.40.0"))?;
-        std::fs::write(package.join("versions/0.40.0/phoxal-service-asset"), b"ELF")?;
-        std::os::unix::fs::symlink("versions/0.40.0", package.join("active"))?;
+    fn archive_directory_preserves_symlinks() -> Result<()> {
+        let source = tempfile::tempdir()?;
+        std::fs::create_dir_all(source.path().join("real"))?;
+        std::fs::write(source.path().join("real/file"), b"ELF")?;
+        std::os::unix::fs::symlink("real", source.path().join("linked"))?;
 
-        let archive = archive_directory(store.path(), "phoxal-artifacts-test-")?;
+        let archive = archive_directory(source.path(), "phoxal-symlink-test-")?;
         let extracted = tempfile::tempdir()?;
         run_local(
             "tar",
@@ -346,13 +334,13 @@ mod tests {
             ],
         )?;
 
-        let active = extracted.path().join("phoxal/service-asset/active");
-        assert!(std::fs::symlink_metadata(&active)?.file_type().is_symlink());
+        let linked = extracted.path().join("linked");
+        assert!(std::fs::symlink_metadata(&linked)?.file_type().is_symlink());
         assert_eq!(
-            std::fs::read_link(&active)?,
-            std::path::PathBuf::from("versions/0.40.0")
+            std::fs::read_link(&linked)?,
+            std::path::PathBuf::from("real")
         );
-        assert_eq!(std::fs::read(active.join("phoxal-service-asset"))?, b"ELF");
+        assert_eq!(std::fs::read(linked.join("file"))?, b"ELF");
         Ok(())
     }
 

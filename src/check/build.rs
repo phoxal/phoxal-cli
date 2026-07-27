@@ -13,13 +13,18 @@ use serde_json::Value;
 use std::path::Path;
 use std::path::PathBuf;
 
-/// Build a source participant's contract report by compiling and inspecting it.
+/// Build a source participant's contract report by compiling and inspecting
+/// it. `offline` appends `--offline` to the underlying `cargo build`
+/// (organization#951 WS4 review, round 2): the check-time source build is a
+/// Cargo invocation like any other, and a caller that requested the whole
+/// operation stay offline must have that hold here too.
 pub(crate) fn build_participant_report_from_source(
     participant: &SourceParticipant,
+    offline: bool,
 ) -> Result<RawParticipantReport> {
     build_participant_report_from_source_with_diagnostics(
         participant,
-        build_participant_report_by_building,
+        |participant| build_participant_report_by_building(participant, offline),
         None,
     )
 }
@@ -61,6 +66,7 @@ pub(crate) fn expected_kind_for_source_participant(kind: SourceParticipantKind) 
 
 pub(crate) fn build_participant_report_by_building(
     participant: &SourceParticipant,
+    offline: bool,
 ) -> Result<RawParticipantReport> {
     let crate_dir = participant.crate_dir.canonicalize().with_context(|| {
         format!(
@@ -70,7 +76,7 @@ pub(crate) fn build_participant_report_by_building(
     })?;
     let binary_name = cargo_binary_name(&crate_dir, None)?;
     let package_name = cargo_package_name(&crate_dir)?;
-    let binary_path = build_and_locate_binary(&crate_dir, &package_name, &binary_name)?;
+    let binary_path = build_and_locate_binary(&crate_dir, &package_name, &binary_name, offline)?;
     let meta =
         participant_metadata::extract_participant_metadata(&binary_path).with_context(|| {
             format!(
@@ -114,6 +120,7 @@ pub(crate) fn build_and_locate_binary(
     crate_dir: &Path,
     package_name: &str,
     binary_name: &str,
+    offline: bool,
 ) -> Result<PathBuf> {
     // `run_output` fully captures the child's stdout/stderr, so emit one
     // append-only status line before starting the captured build.
@@ -121,21 +128,20 @@ pub(crate) fn build_and_locate_binary(
         "building `{binary_name}` in {}",
         crate_dir.display()
     ));
-    let result = crate::shell::run_output(
-        "cargo",
-        [
-            "build",
-            "--locked",
-            "--quiet",
-            "--message-format=json",
-            "-p",
-            package_name,
-            "--bin",
-            binary_name,
-        ],
-        Some(crate_dir),
-    )
-    .with_context(|| {
+    let mut args = vec![
+        "build",
+        "--locked",
+        "--quiet",
+        "--message-format=json",
+        "-p",
+        package_name,
+        "--bin",
+        binary_name,
+    ];
+    if offline {
+        args.push("--offline");
+    }
+    let result = crate::shell::run_output("cargo", args, Some(crate_dir)).with_context(|| {
         format!("failed to spawn `cargo build -p {package_name} --bin {binary_name}`")
     });
     let output = match result {

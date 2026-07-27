@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 
 use crate::AppContext;
@@ -20,91 +20,7 @@ pub mod service;
 pub mod simulate;
 pub mod start;
 pub mod status;
-pub mod update;
 pub mod validate;
-
-/// Load the artifact suite for a robot project. There is no `refresh`
-/// parameter anymore: [`phoxal_cli_core::project::suite::load_suite`] always fetches the
-/// remote suite fresh (no on-disk cache of the fetch) unless an explicit
-/// local/URL source is given. Offline resolution requires an explicit local
-/// suite and uses only already-vendored artifacts.
-pub(crate) fn load_suite_for_robot_from_source(
-    suite_source: Option<String>,
-    project_root: &std::path::Path,
-) -> Result<Option<phoxal_cli_core::project::suite::Suite>> {
-    let source = suite_source;
-    #[cfg(test)]
-    let locked_version = std::env::var("PHOXAL_TEST_LOCKED_TRAIN").ok().or_else(|| {
-        source.as_ref().and_then(|source| {
-            (!source.starts_with("https://"))
-                .then(|| {
-                    phoxal_cli_core::project::suite::read_suite_path(std::path::Path::new(source))
-                        .ok()
-                })
-                .flatten()
-                .map(|suite| suite.version)
-        })
-    });
-    #[cfg(not(test))]
-    let locked_version: Option<String> = None;
-    let locked = if let Some(version) = locked_version {
-        phoxal_cli_core::project::train::LockedTrain {
-            version,
-            source: phoxal_cli_core::project::train::TrainSource::Path,
-        }
-    } else {
-        phoxal_cli_core::project::train::resolve_locked_train(project_root)?
-    };
-    phoxal_cli_core::project::suite::load_suite(
-        phoxal_cli_core::project::suite::SuiteLoadOptions {
-            cli_source: source,
-            offline: false,
-        },
-        &locked.version,
-    )
-}
-
-/// The locked framework train version for `project_root`, honoring the test
-/// override so unit tests need no on-disk registry. This is the version the
-/// vendored suite and artifact blobs are keyed under.
-fn locked_train_version(project_root: &std::path::Path) -> Result<String> {
-    #[cfg(test)]
-    if let Ok(version) = std::env::var("PHOXAL_TEST_LOCKED_TRAIN") {
-        return Ok(version);
-    }
-    Ok(phoxal_cli_core::project::train::resolve_locked_train(project_root)?.version)
-}
-
-/// Load the suite the offline execution paths (`run`/`start`/`build`)
-/// resolve against, strictly without touching the network (#936, finding 1).
-///
-/// An explicit *local* `--suite` path is honored as a dev/test override and read
-/// directly; an HTTPS `--suite` is rejected, because these paths never fetch -
-/// `phoxal update` is the only fetcher. With no override the persisted suite that
-/// `phoxal update` vendored for the locked train is read from `.phoxal/artifacts`,
-/// and its absence is an actionable "run `phoxal update`" error, never a fetch.
-pub(crate) fn load_vendored_suite_for_robot(
-    suite_source: Option<String>,
-    project_root: &std::path::Path,
-) -> Result<Option<phoxal_cli_core::project::suite::Suite>> {
-    if let Some(source) = &suite_source {
-        if source.starts_with("https://") || source.starts_with("http://") {
-            bail!(
-                "`run`/`start`/`build` never fetch a suite over the network; pass a local --suite path, or run `phoxal update` to vendor the locked train"
-            );
-        }
-        return Ok(Some(phoxal_cli_core::project::suite::read_suite_path(
-            std::path::Path::new(source),
-        )?));
-    }
-    let locked_version = locked_train_version(project_root)?;
-    let suite = crate::native_artifacts::load_vendored_suite(&locked_version)?.with_context(|| {
-        format!(
-            "the locked train {locked_version} suite is not vendored for this project; run `phoxal update`"
-        )
-    })?;
-    Ok(Some(suite))
-}
 
 /// Version string shared by the `--version` flag and the `version` subcommand,
 /// e.g. `0.5.0 (macos-aarch64)`. clap prefixes `--version` with the binary name
@@ -129,11 +45,12 @@ impl VersionArgs {
     pub fn run(&self) -> Result<()> {
         println!("phoxal {}", long_version());
         println!(
-            "default suite URL: the immutable suite attached to the Cargo.lock-selected framework release"
+            "official packages: cargo install --registry {} at the Cargo.lock-selected framework train",
+            phoxal_cli_core::project::catalog::REGISTRY_NAME
         );
         println!(
-            "suite override env: {}",
-            phoxal_cli_core::project::suite::SUITE_SOURCE_ENV
+            "registry index: {}",
+            phoxal_cli_core::project::catalog::REGISTRY_INDEX
         );
         Ok(())
     }
@@ -145,7 +62,7 @@ impl VersionArgs {
     version = long_version(),
     about = "Build, check, and simulate Phoxal robot projects.",
     long_about = "Build, check, and simulate Phoxal robot projects.\n\n\
-                  phoxal reads robot.yaml, resolves the graph against a verified generated artifact suite when official native artifacts are needed, and drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `build`, `run`, or `simulation webots run` - each validates the graph and every participant's config before it executes."
+                  phoxal reads robot.yaml and materializes official services, tools, the infrastructure router, and component drivers with `cargo install` against the phoxal registry, pinned exactly to the Cargo.lock-selected framework train, then drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `build`, `run`, or `simulation webots run` - each validates the graph and every participant's config before it executes."
 )]
 pub struct Cli {
     #[arg(
@@ -155,18 +72,10 @@ pub struct Cli {
     )]
     pub project_path: Option<PathBuf>,
     #[arg(
-        long = "suite",
-        env = phoxal_cli_core::project::suite::SUITE_SOURCE_ENV,
-        global = true,
-        value_name = "PATH_OR_HTTPS_URL",
-        help = "Artifact suite override. Local paths are read directly. run/start/build reject HTTPS values and otherwise use the suite `phoxal update` persisted into .phoxal/artifacts; validate/service/simulate fetch HTTPS sources fresh."
-    )]
-    pub suite_source: Option<String>,
-    #[arg(
         long,
-        env = phoxal_cli_core::project::suite::OFFLINE_ENV,
+        env = crate::context::OFFLINE_ENV,
         global = true,
-        help = "Disable network access. Fetching commands then require --suite <local-path>; run/start/build are always offline, using the vendored suite and artifacts from `phoxal update`."
+        help = "Pass --offline to every cargo install/metadata invocation this command makes."
     )]
     pub offline: bool,
     #[command(subcommand)]
@@ -180,7 +89,7 @@ pub enum RootCommand {
     #[command(
         about = "Stage a runtime layout for a target and archive it as build.phoxal.",
         long_about = "Stage a runtime layout for a target and archive it as a deterministic build.phoxal.\n\n\
-                      `build` refreshes staging exactly as `run` would - but for the selected --target rather than the host - validates the staged layout through the shared loader against the declared target architecture (no execution), and archives the staged layout deterministically: identical contents always produce identical archive bytes. The default output is a sibling of the staged directory, <project>/.phoxal/build/<triple>.build.phoxal, and the path plus its sha256 are printed at the end.\n\n\
+                      `build` refreshes staging exactly as `run` would - but for the selected --target rather than the host - validates the staged layout through the shared loader against the declared target architecture (no execution), and archives the staged layout deterministically: identical contents always produce identical archive bytes. The default output is a sibling of the staged directory, <project>/.phoxal/<triple>.build.phoxal, and the path plus its sha256 are printed at the end.\n\n\
                       `--builder` selects where compilation happens, never a different output: `local` (the default) compiles on this host with `cargo build --target`; `container` compiles natively inside the pinned official rust image for the target platform; `ssh://user@host` snapshots the source, compiles in a remote temporary directory, and pulls back the same archive. Every backend produces the identical deterministic build.phoxal."
     )]
     Build(build::Build),
@@ -210,13 +119,11 @@ pub enum RootCommand {
     Logs(logs::Logs),
     #[command(about = "Inspect live robot state through typed bus contracts.")]
     Status(status::Status),
-    #[command(about = "Verify the locked train suite and atomically refresh cached artifacts.")]
-    Update(update::Update),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
-    #[command(about = "Inspect the user-service suite.")]
+    #[command(about = "Manage the systemd phoxal.service and inspect the official catalog.")]
     Service(service::Service),
-    #[command(about = "Print the phoxal version and suite source defaults.")]
+    #[command(about = "Print the phoxal version and the official registry it installs from.")]
     Version(VersionArgs),
     #[command(name = "self", about = "Manage this phoxal installation.")]
     SelfCmd(self_cmd::SelfCmd),
@@ -253,7 +160,6 @@ impl RootCommand {
             Self::Stop(command) => command.run(app).await,
             Self::Logs(command) => command.run(app).await,
             Self::Status(command) => command.run(app).await,
-            Self::Update(command) => command.run(app).await,
             Self::Doctor(command) => command.run(app).await,
             Self::Service(command) => command.run(app).await,
             Self::Version(command) => command.run(),
@@ -291,36 +197,6 @@ mod parse_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host_paths::test_support::ScratchPhoxalHome;
-
-    /// A cold vendored store (no `phoxal update` yet) makes the offline suite
-    /// loader fail with the actionable "run `phoxal update`" error, without ever
-    /// attempting a fetch (#936, finding 1).
-    #[test]
-    fn offline_suite_loader_points_a_cold_store_at_phoxal_update() {
-        let _scratch = ScratchPhoxalHome::new().expect("scratch home");
-        let root = crate::host_paths::project_root().expect("project root");
-
-        let error = load_vendored_suite_for_robot(None, &root)
-            .expect_err("a cold store has no vendored suite");
-        let message = format!("{error:#}");
-        assert!(message.contains("phoxal update"), "{message}");
-    }
-
-    /// The offline suite loader never fetches: an HTTPS `--suite` is rejected
-    /// outright rather than downloaded (#936, finding 1).
-    #[test]
-    fn offline_suite_loader_rejects_an_https_suite_source() {
-        let _scratch = ScratchPhoxalHome::new().expect("scratch home");
-        let root = crate::host_paths::project_root().expect("project root");
-
-        let error = load_vendored_suite_for_robot(
-            Some("https://example.com/suite.json".to_string()),
-            &root,
-        )
-        .expect_err("run/start/build never fetch a suite");
-        assert!(format!("{error:#}").contains("never fetch"), "{error:#}");
-    }
 
     /// `enters_interactive_session` decides whether dispatch must require a
     /// terminal. Detached Webots sessions and finite commands do not.

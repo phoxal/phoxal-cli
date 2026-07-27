@@ -24,7 +24,7 @@ pub enum ServiceSubcommand {
     Uninstall(ServiceUninstall),
     #[command(about = "Show the live systemd state for phoxal.service.")]
     Status(ServiceStatus),
-    #[command(about = "Print official services from the configured artifact suite.")]
+    #[command(about = "Print official services from the catalog at the project's locked train.")]
     Suite(Suite),
 }
 
@@ -445,11 +445,10 @@ fn is_confirmed_legacy_link(path: &Path, canonical_legacy_root: Option<&Path>) -
 impl Suite {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let root = app.project.root().to_path_buf();
-        let suite_source = app.suite_source.clone();
-        let summary =
-            tokio::task::spawn_blocking(move || service_suite_summary(&root, suite_source))
-                .await
-                .context("service suite worker failed")??;
+        let offline = app.offline;
+        let summary = tokio::task::spawn_blocking(move || service_suite_summary(&root, offline))
+            .await
+            .context("service suite worker failed")??;
         for entry in &summary.entries {
             println!(
                 "{} -> version {} ({})",
@@ -574,10 +573,7 @@ mod unit_tests {
     }
 }
 
-pub fn service_suite_summary(
-    project_start: &Path,
-    suite_source: Option<String>,
-) -> Result<ServiceSuiteSummary> {
+pub fn service_suite_summary(project_start: &Path, offline: bool) -> Result<ServiceSuiteSummary> {
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
     let project_root = robot_path
@@ -586,47 +582,42 @@ pub fn service_suite_summary(
     // Keep `service suite` project-bound: malformed robot intent must fail
     // before presenting an inventory for that project.
     let _ = load_robot(&robot_path)?;
-    let suite = crate::commands::load_suite_for_robot_from_source(suite_source, project_root)?
-        .ok_or_else(|| anyhow::anyhow!("artifact suite unavailable"))?;
+    let train =
+        phoxal_cli_core::project::train::resolve_locked_train(project_root, offline)?.version;
     Ok(ServiceSuiteSummary {
-        entries: phoxal_cli_core::project::suite::artifacts_of_kind(
-            &suite,
-            phoxal_cli_core::project::suite::Kind::Service,
-        )
-        .into_iter()
-        .map(|artifact| ServiceSuiteEntry {
-            id: artifact.id.clone(),
-            version: suite.version.clone(),
-            participant_kind: "service",
-        })
-        .collect(),
+        entries: phoxal_cli_core::project::catalog::NATIVE
+            .iter()
+            .filter(|official| {
+                official.kind == phoxal_cli_core::project::catalog::ArtifactKind::Service
+            })
+            .map(|official| ServiceSuiteEntry {
+                id: official.package.to_string(),
+                version: train.clone(),
+                participant_kind: "service",
+            })
+            .collect(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
 
     use super::*;
-    use phoxal_cli_core::project::suite::{
-        fixture_service_entry_for_tests, fixture_suite_for_tests,
-    };
 
     #[test]
     fn service_suite_summary_lists_official_services() -> Result<()> {
         let temp = tempfile::tempdir()?;
         fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
-        let suite = write_suite(temp.path())?;
+        write_locked_project(temp.path())?;
 
-        let summary = service_suite_summary(temp.path(), Some(suite))?;
+        let summary = service_suite_summary(temp.path(), false)?;
 
-        assert_eq!(summary.entries.len(), 1);
         let entry = summary
             .entries
             .iter()
             .find(|entry| entry.id == "phoxal/service-drive")
-            .expect("drive is part of the platform model");
+            .expect("drive is part of the catalog");
         assert_eq!(entry.id, "phoxal/service-drive");
         assert_eq!(entry.version, "0.1.0");
         assert_eq!(entry.participant_kind, "service");
@@ -654,15 +645,25 @@ robot:
 "#
     }
 
-    fn write_suite(root: &Path) -> Result<String> {
-        let suite = fixture_suite_for_tests(vec![fixture_service_entry_for_tests(
-            "drive",
-            "0.1.0",
-            &crate::resolver::host_target_triple(),
-            true,
-        )]);
-        let path = root.join("suite.json");
-        fs::write(&path, serde_json::to_string_pretty(&suite)?)?;
-        Ok(path.display().to_string())
+    /// A minimal locked Cargo project resolving to train `0.1.0` via a local
+    /// path dependency, so `resolve_locked_train` needs no network.
+    fn write_locked_project(root: &Path) -> Result<()> {
+        fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join("train/phoxal/src"))?;
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nphoxal = { path = \"train/phoxal\" }\n",
+        )?;
+        fs::write(root.join("src/lib.rs"), "")?;
+        fs::write(
+            root.join("train/phoxal/Cargo.toml"),
+            "[package]\nname = \"phoxal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )?;
+        fs::write(root.join("train/phoxal/src/lib.rs"), "")?;
+        fs::write(
+            root.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"phoxal\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"robot\"\nversion = \"0.1.0\"\ndependencies = [\"phoxal\"]\n",
+        )?;
+        Ok(())
     }
 }

@@ -4,8 +4,8 @@
 //! compiled, flattened `robot/v0` document), a flat `bin/` lookup store, and
 //! runtime assets. There is no source loader and no compiled loader: this one
 //! loader reads the same layout whether it was staged from a source project
-//! into `.phoxal/build/<triple>/` or extracted from a `build.phoxal` bundle
-//! (#936). Staging (Cargo, the vendored artifact store, `extends:` flattening)
+//! into `.phoxal/bundle/` or extracted from a `build.phoxal` bundle
+//! (#936). Staging (`cargo install` materialization, `extends:` flattening)
 //! is the only code that knows about source; the loader never does.
 //!
 //! The loader derives the required runtime set from two authorities - the
@@ -22,9 +22,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use phoxal::model::robot::{Robot as RobotDocument, v0::Robot as RobotModel};
 
-use super::catalog::{self, OfficialRuntime};
+use super::catalog::{self, ArtifactKind, OfficialRuntime};
 use super::resolver::official_binary_name;
-use super::suite::ArtifactKind;
 use crate::check::participant_metadata::{
     ExpectedTarget, ParticipantMeta, expected_target_for_host, inspect_selected_binary_for_target,
 };
@@ -141,7 +140,8 @@ pub struct SelectedBinary {
 
 /// A parsed staged runtime layout: the flattened `robot/v0` document plus its
 /// root, from which the required runtime set and its `bin/` binaries are
-/// derived. Holds no source, no Cargo graph, and no suite.
+/// derived. Holds no source and no Cargo graph - everything it needs already
+/// materialized into `bin/` before this type is constructed.
 #[derive(Debug, Clone)]
 pub struct RuntimeLayout {
     root: PathBuf,
@@ -152,7 +152,7 @@ impl RuntimeLayout {
     /// Whether `root` is shaped like a staged runtime layout - a `robot.yaml`
     /// next to a `bin/` store. Cheap existence checks only (no parse), used by
     /// universal `run` root classification to tell an extracted bundle / staged
-    /// `.phoxal/build/<triple>/` directory (run in place) from a source project
+    /// `.phoxal/bundle/` directory (run in place) from a source project
     /// (staged first).
     #[must_use]
     pub fn is_layout_root(root: &Path) -> bool {

@@ -8,7 +8,6 @@
 
 use crate::session::diagnostics::{RouteResult, try_route};
 use phoxal_cli_core::session::event::{DiagnosticLevel, DiagnosticSource};
-use phoxal_cli_ui::{Role, Theme};
 
 /// Status handle used to keep failure reporting on the same output route as
 /// the initial line.
@@ -17,88 +16,6 @@ pub enum Handle {
     Plain,
     /// An active session absorbed the start message.
     Routed,
-}
-
-/// A group of stable, append-only completion rows.
-pub struct Rows {
-    visible: bool,
-    theme: Theme,
-}
-
-/// One worker-owned completion row.
-pub enum Row {
-    Visible { theme: Theme },
-    Routed,
-    Silent,
-}
-
-impl Rows {
-    #[must_use]
-    pub fn new(interactive: bool) -> Self {
-        Self {
-            visible: interactive,
-            theme: Theme::detect_stderr(interactive),
-        }
-    }
-
-    #[must_use]
-    pub fn begin(&self, message: impl Into<String>) -> Row {
-        let message = message.into();
-        if !matches!(route_progress(&message), RouteResult::NoSession) {
-            return Row::Routed;
-        }
-        if self.visible {
-            Row::Visible { theme: self.theme }
-        } else {
-            Row::Silent
-        }
-    }
-
-    pub fn completed(&self, message: impl Into<String>) {
-        let message = message.into();
-        if !matches!(route_progress(&message), RouteResult::NoSession) {
-            return;
-        }
-        if self.visible {
-            eprintln!("{} {message}", self.theme.paint(Role::Success, "✓"));
-        }
-    }
-}
-
-impl Row {
-    pub fn finish(self, message: impl Into<String>) {
-        let message = message.into();
-        match self {
-            Self::Visible { theme } => {
-                eprintln!("{} {message}", theme.paint(Role::Success, "✓"));
-            }
-            Self::Routed => {
-                let _ = try_route(
-                    DiagnosticSource::Dependency,
-                    DiagnosticLevel::Info,
-                    &message,
-                );
-            }
-            Self::Silent => {}
-        }
-    }
-
-    pub fn abandon(self, message: impl Into<String>) {
-        let message = message.into();
-        match self {
-            Self::Visible { theme } => {
-                eprintln!("{} {message}", theme.paint(Role::Error, "✗"));
-            }
-            Self::Routed => {
-                let _ = try_route(
-                    DiagnosticSource::Dependency,
-                    DiagnosticLevel::Warn,
-                    &message,
-                );
-            }
-            Self::Silent => {}
-        }
-    }
 }
 
 fn route_progress(message: &str) -> RouteResult {
@@ -163,12 +80,5 @@ mod tests {
             messages.push(message);
         }
         assert_eq!(messages, ["building", "build failed"]);
-    }
-
-    #[test]
-    fn grouped_rows_remain_silent_for_batch_output() {
-        let _guard = DIAGNOSTICS_TEST_LOCK.blocking_lock();
-        let rows = Rows::new(false);
-        assert!(matches!(rows.begin("downloading"), Row::Silent));
     }
 }

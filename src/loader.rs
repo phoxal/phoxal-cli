@@ -9,7 +9,7 @@
 //! It performs no supervisor, board, or socket construction: it is exactly the
 //! "validate the staged layout without running it" step `phoxal build` archives
 //! behind, and the same plan the universal `run`/`start` will supervise from.
-//! Staging (Cargo, the vendored artifact store, `extends:` flattening) already
+//! Staging (`cargo install` materialization, `extends:` flattening) already
 //! ran; this only reads the compiled layout.
 
 use anyhow::{Result, bail};
