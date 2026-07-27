@@ -133,7 +133,7 @@ pub(crate) fn driver_metadata_unavailable(
     error: anyhow::Error,
 ) -> anyhow::Error {
     anyhow!(
-        "DriverMetadataUnavailable: component driver crate '{}' for instance '{}' could not build on this host to extract its compiled-in API metadata section: {error:#}\n\nCustom and git-sourced driver crates must compile far enough on the dev host to emit the `#[derive(phoxal::Api)]` linker section; keep hardware transport behind a target cfg boundary such as `cfg(target_os = \"linux\")`. Alternatively use a verified artifact suite entry with inlined driver metadata.",
+        "DriverMetadataUnavailable: component driver crate '{}' for instance '{}' could not build on this host to extract its compiled-in API metadata section: {error:#}\n\nCustom and git-sourced driver crates must compile far enough on the dev host to emit the `#[derive(phoxal::Api)]` linker section; keep hardware transport behind a target cfg boundary such as `cfg(target_os = \"linux\")`. Alternatively use a registry-published `phoxal/component-<id>` driver package, which materializes via `cargo install` instead of compiling from local source.",
         participant.expected_artifact_id,
         participant.name
     )

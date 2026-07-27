@@ -24,7 +24,7 @@ pub enum ServiceSubcommand {
     Uninstall(ServiceUninstall),
     #[command(about = "Show the live systemd state for phoxal.service.")]
     Status(ServiceStatus),
-    #[command(about = "Print official services from the configured artifact suite.")]
+    #[command(about = "Print official services from the catalog at the project's locked train.")]
     Suite(Suite),
 }
 

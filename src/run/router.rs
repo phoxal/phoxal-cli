@@ -320,7 +320,9 @@ pub(crate) async fn start_infrastructure_router(
     let binary = crate::stager::staged_router_binary(staged_root);
     anyhow::ensure!(
         binary.is_file(),
-        "phoxal-infrastructure-router is not staged at {}; run `phoxal update`",
+        "phoxal-infrastructure-router is not staged at {}; the staged runtime layout is \
+         incomplete. Run `phoxal run` from the source project so staging refreshes it, or \
+         rebuild the bundle with `phoxal build` if you are running from an extracted archive",
         binary.display()
     );
     let launch = RouterLaunch { binary, config };

@@ -7,8 +7,8 @@
 //! participant whose binary the staging step could not produce, or whose staged
 //! binary is built for a foreign architecture, is a HARD startup failure naming
 //! the required identity (#936). Staging (`crate::stager`) is the only code that
-//! knows about Cargo and the vendored artifact store; this module only reads
-//! what staging produced.
+//! knows about `cargo install` materialization; this module only reads what
+//! staging produced.
 
 use super::{DriverPolicy, build_source_binary, device_missing_note, missing_device_path};
 use crate::supervisor::BoardBackend;

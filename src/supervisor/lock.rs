@@ -29,7 +29,6 @@ pub struct ProjectLockIdentity {
 pub enum ProjectOperation {
     Run,
     Build,
-    Update,
     Install,
 }
 
@@ -38,7 +37,6 @@ impl std::fmt::Display for ProjectOperation {
         formatter.write_str(match self {
             Self::Run => "run",
             Self::Build => "build",
-            Self::Update => "update",
             Self::Install => "install",
         })
     }
@@ -225,7 +223,7 @@ mod tests {
             project: root.join("project"),
             entry: root.join("project/robot.yaml"),
             operation: if mode == "stale" {
-                ProjectOperation::Update
+                ProjectOperation::Build
             } else {
                 ProjectOperation::Run
             },
@@ -286,7 +284,7 @@ mod tests {
         ))?;
         let second = ProjectLock::acquire(ProjectLockIdentity::resolve(
             &second_project,
-            ProjectOperation::Update,
+            ProjectOperation::Build,
         ))?;
 
         assert!(first_project.join(".phoxal/project.lock").is_file());

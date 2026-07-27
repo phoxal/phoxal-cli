@@ -5,7 +5,7 @@
 //! runtime assets. There is no source loader and no compiled loader: this one
 //! loader reads the same layout whether it was staged from a source project
 //! into `.phoxal/bundle/` or extracted from a `build.phoxal` bundle
-//! (#936). Staging (Cargo, the vendored artifact store, `extends:` flattening)
+//! (#936). Staging (`cargo install` materialization, `extends:` flattening)
 //! is the only code that knows about source; the loader never does.
 //!
 //! The loader derives the required runtime set from two authorities - the

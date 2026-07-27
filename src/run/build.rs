@@ -212,11 +212,14 @@ pub(crate) fn build_source_binary_with_profile(
             // `--locked` pins the build to the committed `Cargo.lock`: staging
             // is reproducible and cargo never silently rewrites the lock, so a
             // stale or missing lock is a hard, actionable error instead of a
-            // quiet resolve. We deliberately do NOT add `--offline` here: #936's
-            // strict-offline guarantee governs the suite/artifact store (which
-            // has `phoxal update` to pre-vendor it), not the crate registry -
-            // there is no phoxal-level pre-fetch for Cargo dependencies, so a
-            // first build in a fresh checkout must still be able to fetch them.
+            // quiet resolve. We deliberately do NOT add `--offline` here even
+            // when the caller requested it: `--offline` on official
+            // materialization (`cargo install`, organization#951 WS4)
+            // assumes the local Cargo registry cache is already warm from a
+            // prior online run, but this is the USER's own crate - there is
+            // no phoxal-level pre-fetch for its dependencies, so a first
+            // build in a fresh checkout must still be able to reach the
+            // network for them regardless of `--offline` elsewhere.
             command
                 .arg("build")
                 .arg("--locked")
