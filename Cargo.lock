@@ -2990,22 +2990,18 @@ dependencies = [
  "phoxal-cli-client",
  "phoxal-cli-core",
  "phoxal-cli-ui",
- "ratatui",
  "reqwest",
  "self-replace",
  "semver",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2 0.11.0",
  "tar",
  "tempfile",
  "tokio",
  "tokio-util",
- "toml",
  "tracing",
  "tracing-subscriber",
- "unicode-width 0.2.0",
  "urdf-rs",
  "webots-proto",
 ]
@@ -3045,10 +3041,8 @@ dependencies = [
 name = "phoxal-cli-ui"
 version = "0.25.2"
 dependencies = [
- "anyhow",
  "console",
  "crossterm",
- "phoxal",
  "phoxal-api",
  "phoxal-cli-core",
  "ratatui",
