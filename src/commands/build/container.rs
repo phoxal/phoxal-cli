@@ -22,13 +22,21 @@
 //! reuses the identical `cargo install` invocation shape
 //! [`crate::materialize`] uses everywhere else.
 //!
-//! Component driver packages are the one exception: they are robot-specific
-//! (only the components a robot declares), so they are not known until the
-//! resolved graph exists, and materialize host-side afterward instead -
-//! cross-compiling like any other host build, with the same caveat that
-//! carries. The mounted Cargo registry/git caches (shared with the workspace
-//! build) accelerate that too, but do not eliminate the cross-compilation
-//! risk for a component driver with native dependencies.
+//! Component driver packages are robot-specific (only the components a robot
+//! declares), so they are not known from the catalog alone: `phoxal build
+//! --builder container` resolves the robot graph, from the same frozen
+//! source snapshot the container compiles, BEFORE invoking the container -
+//! specifically to learn them - and adds every registry-sourced driver it
+//! finds to the same `cargo install` batch the container runs (organization
+//! #951 WS4 review, blocker 2). This closes the gap the exception used to
+//! describe: a container build no longer leaves any official, including a
+//! component driver, to cross-compile host-side. A missing expected official
+//! in the container's own output is a hard error, never a silent fallback to
+//! a host-side cross-compiled install - see
+//! `stager::link_from_officials_source`. A workspace/path-overridden driver
+//! is the one thing that still never reaches `cargo install` at all (in the
+//! container or on the host): it is staged from its own build output
+//! instead, exactly like any other source-overridden participant.
 //!
 //! ## Default image strategy (human-decided 2026-07-24)
 //!
@@ -158,11 +166,13 @@ pub struct ContainerBuildSpec {
     /// and be empty before the container runs; its `bin/` subtree becomes
     /// the container build's `officials_source` for host-side staging.
     pub officials_root: PathBuf,
-    /// The deterministic catalog set (services, tools, the router) to
-    /// install via `cargo install` inside the container, at the resolved
-    /// train. Empty skips every official install (e.g. the train could not
-    /// be resolved ahead of time), leaving them to materialize host-side
-    /// like any other build.
+    /// The complete official set to install via `cargo install` inside the
+    /// container, at the resolved train: the deterministic catalog set
+    /// (services, tools, the router) plus every registry-sourced component
+    /// driver this robot declares (organization#951 WS4 review, blocker 2).
+    /// Empty skips every official install; the caller then has no
+    /// `officials_source` to hand to host-side staging, which materializes
+    /// the whole set itself instead.
     pub officials: Vec<ContainerOfficial>,
     pub offline: bool,
 }

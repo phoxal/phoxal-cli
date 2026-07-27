@@ -310,13 +310,13 @@ impl Build {
         // container compiled, never the live tree (#936, finding B): the container
         // wrote the target binaries into `<snapshot>/target`, and staging reads
         // robot.yaml and assets from `<snapshot>` too, so a bundle can never pair
-        // old binaries with newer live manifests. The deterministic official set
-        // (services, tools, the router) was materialized natively INSIDE the
-        // container too, into `officials_root`; host-side staging reads that
-        // instead of cross-compiling them (organization#951 WS4). Only
-        // robot-specific component driver packages, if any, still materialize
-        // host-side. The default output stays a sibling of the real project's
-        // staged directory.
+        // old binaries with newer live manifests. The COMPLETE official set -
+        // every catalog service/tool/the router, AND every registry-sourced
+        // component driver this robot declares - was materialized natively
+        // INSIDE the container too, into `officials_root`; host-side staging
+        // reads that and never cross-compiles anything itself (organization
+        // #951 WS4; blocker 2 of the review). The default output stays a
+        // sibling of the real project's staged directory.
         let staging = StagingBuild::prebuilt_native_bundle(
             target.to_string(),
             snapshot.path().join("target"),
@@ -325,15 +325,20 @@ impl Build {
         self.stage_validate_archive(app, project_root, snapshot.path(), target, &staging)
     }
 
-    /// Snapshot the source, validate its Cargo.lock, and compile the workspace
-    /// for `target` inside the toolchain image - which also materializes the
-    /// deterministic official set (services, tools, the router) via `cargo
+    /// Snapshot the source, validate its Cargo.lock, resolve the robot graph
+    /// to learn its component driver packages, and compile the workspace for
+    /// `target` inside the toolchain image - which also materializes the
+    /// COMPLETE official set (every catalog service/tool/router plus every
+    /// registry-sourced component driver this robot declares) via `cargo
     /// install`, natively on the container's own platform (organization#951
-    /// WS4) - returning the snapshot directory (with `<snapshot>/target`
-    /// populated by the container) and the officials root (with its `bin/`
-    /// populated the identical way). Assumes the Build lock is already held
-    /// (see [`Self::run`]); split out so the snapshot+compile ordering under
-    /// the lock is unit-testable with a fake [`EngineRunner`].
+    /// WS4; blocker 2 of the review closes the "component drivers install
+    /// host-side, cross-compiled" gap) - returning the snapshot directory
+    /// (with `<snapshot>/target` populated by the container) and the
+    /// officials root (with its `bin/` populated the identical way, so
+    /// host-side staging never needs to cross-compile anything). Assumes the
+    /// Build lock is already held (see [`Self::run`]); split out so the
+    /// snapshot+compile ordering under the lock is unit-testable with a fake
+    /// [`EngineRunner`].
     fn compile_in_container(
         &self,
         app: &AppContext,
@@ -382,18 +387,58 @@ impl Build {
         // The deterministic, robot-independent official set - every catalog
         // service, tool, and the router ("every official always runs" per
         // #945) - is known from the catalog alone; no `resolve()` (and no
-        // robot.yaml) is needed to compute it. Only component driver
-        // packages are robot-specific, and those stay host-side (see the
-        // module docs).
+        // robot.yaml) is needed to compute it.
         let train = phoxal_cli_core::project::train::resolve_locked_train(project_root)
             .context("failed to resolve the locked framework train for the container build")?
             .version;
-        let officials = phoxal_cli_core::project::catalog::for_webots(false)
+        let mut officials = phoxal_cli_core::project::catalog::for_webots(false)
             .map(|official| ContainerOfficial {
                 package: phoxal_cli_core::project::catalog::cargo_package_name(official.package),
                 train: train.clone(),
             })
             .collect::<Vec<_>>();
+
+        // Robot-specific component driver packages are NOT in the static
+        // catalog - the container cannot know them without resolving the
+        // robot graph, exactly as `refresh_staging` later will (organization
+        // #951 WS4 review, blocker 2). Resolve it here, from the SAME frozen
+        // snapshot the container compiles, with the same target/driver
+        // options `phoxal build` uses (`DriverSelection::All`, no
+        // simulators), and add every REGISTRY-sourced driver it finds so the
+        // container materializes them too; a workspace/path-overridden
+        // driver never reaches `cargo install` and is correctly left out
+        // (see `stager::materialize_component_driver`).
+        let robot_path = phoxal_cli_core::project::resolver::discover_robot_yaml(snapshot.path())
+            .with_context(|| {
+            format!(
+                "failed to find robot.yaml in the source snapshot {}",
+                snapshot.path().display()
+            )
+        })?;
+        let snapshot_root = robot_path
+            .parent()
+            .context("robot.yaml did not have a parent directory")?;
+        let robot = phoxal_cli_core::project::resolver::load_robot(&robot_path)?;
+        let driver_policy = crate::run::DriverPolicy::from_options(
+            &RunOptions {
+                drivers: crate::run::DriversMode::On,
+                drivers_subset: Vec::new(),
+                offline: app.offline,
+            },
+            &crate::run::driven_instances(&robot),
+        )?;
+        let resolved = crate::resolver::resolve(
+            &robot,
+            snapshot_root,
+            phoxal_cli_core::project::resolver::ResolveOptions {
+                official_target_triple: Some(target.to_string()),
+                tool_target_triple: Some(target.to_string()),
+                drivers: driver_policy.selection(),
+                include_simulators: false,
+            },
+        )
+        .context("failed to resolve the robot graph to learn its component driver packages")?;
+        officials.extend(component_driver_officials(&resolved));
         let spec = ContainerBuildSpec {
             engine: self.container_engine,
             image,
@@ -483,6 +528,30 @@ impl Build {
         println!("sha256:{digest}");
         Ok(())
     }
+}
+
+/// Every distinct registry-sourced component driver package a resolved robot
+/// declares, as [`ContainerOfficial`] entries at that driver's own resolved
+/// train - the pure decision half of blocker 2's fix (organization#951 WS4
+/// review): the container cannot know component drivers from the catalog
+/// alone, so `compile_in_container` resolves the robot graph first and hands
+/// the result here to learn which drivers to install alongside the static
+/// catalog set. Deduplicates by package (multiple component instances can
+/// share one driver package) and skips a workspace/path-overridden driver
+/// entirely - that one is staged from its own build output, in the container
+/// or on the host, and never reaches `cargo install` either way.
+fn component_driver_officials(
+    resolved: &phoxal_cli_core::project::resolver::ResolvedRobot,
+) -> Vec<ContainerOfficial> {
+    let mut seen_packages = std::collections::BTreeSet::new();
+    crate::check::component_driver_runtimes_by_ref(resolved)
+        .into_values()
+        .filter(|runtime| seen_packages.insert(runtime.package.clone()))
+        .map(|runtime| ContainerOfficial {
+            package: phoxal_cli_core::project::catalog::cargo_package_name(&runtime.package),
+            train: runtime.train.clone(),
+        })
+        .collect()
 }
 
 /// Copy a validated staged runtime layout produced outside the project (the
@@ -749,6 +818,133 @@ fn symlink_verbatim(_link_target: &Path, at: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phoxal_cli_core::project::catalog::ArtifactKind;
+    use phoxal_cli_core::project::resolver::{
+        ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
+        ResolvedPlatformRuntime, ResolvedRobot,
+    };
+
+    fn minimal_resolved_robot() -> ResolvedRobot {
+        let yaml = r#"schema: robot/v0
+robot:
+  id: testbot
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: omnidirectional
+    actuators: []
+    encoders: []
+  components: {}
+"#;
+        ResolvedRobot {
+            robot: phoxal::model::robot::v0::Robot::parse_from_string(yaml)
+                .expect("minimal fixture robot.yaml parses"),
+            train: "0.36.0".to_string(),
+            target: "aarch64-unknown-linux-gnu".to_string(),
+            platform_runtimes: Vec::new(),
+            simulators: Vec::new(),
+            user_runtimes: Vec::new(),
+            user_tools: Vec::new(),
+            undeclared_runtimes: Vec::new(),
+            components: Vec::new(),
+            tools: Vec::new(),
+            path_overrides: Vec::new(),
+        }
+    }
+
+    fn registry_driver_component(instance: &str, package: &str) -> ResolvedComponent {
+        let runtime = ResolvedPlatformRuntime {
+            name: package
+                .strip_prefix("phoxal/component-")
+                .unwrap_or(package)
+                .to_string(),
+            package: package.to_string(),
+            kind: ArtifactKind::ComponentDriver,
+            path_override: None,
+            train: "0.36.0".to_string(),
+            target: Some("aarch64-unknown-linux-gnu".to_string()),
+        };
+        ResolvedComponent {
+            instance: instance.to_string(),
+            source_name: instance.to_string(),
+            assets: ResolvedComponentPackage {
+                package: package.to_string(),
+                kind: ArtifactKind::ComponentAssets,
+                source: ResolvedComponentSource::Registry,
+                resolved_dir: Some(PathBuf::from("/nonexistent")),
+                registry_runtime: None,
+            },
+            driver: Some(ResolvedComponentPackage {
+                package: package.to_string(),
+                kind: ArtifactKind::ComponentDriver,
+                source: ResolvedComponentSource::Registry,
+                resolved_dir: None,
+                registry_runtime: Some(runtime),
+            }),
+            has_driver: true,
+        }
+    }
+
+    fn path_overridden_driver_component(instance: &str) -> ResolvedComponent {
+        ResolvedComponent {
+            instance: instance.to_string(),
+            source_name: instance.to_string(),
+            assets: ResolvedComponentPackage {
+                package: format!("workspace/{instance}"),
+                kind: ArtifactKind::ComponentAssets,
+                source: ResolvedComponentSource::Path {
+                    path: PathBuf::from("components").join(instance),
+                },
+                resolved_dir: Some(PathBuf::from("components").join(instance)),
+                registry_runtime: None,
+            },
+            driver: Some(ResolvedComponentPackage {
+                package: format!("workspace/{instance}"),
+                kind: ArtifactKind::ComponentDriver,
+                source: ResolvedComponentSource::Path {
+                    path: PathBuf::from("components").join(instance),
+                },
+                resolved_dir: Some(PathBuf::from("components").join(instance)),
+                registry_runtime: None,
+            }),
+            has_driver: true,
+        }
+    }
+
+    /// Blocker 2 of the organization#951 WS4 review: the container used to
+    /// materialize only the static catalog set, silently skipping
+    /// robot-specific component driver packages and leaving them to
+    /// cross-compile host-side. `component_driver_officials` is the pure
+    /// decision that closes the gap - proven here without touching a
+    /// container, `cargo install`, or the network.
+    #[test]
+    fn component_driver_officials_covers_registry_drivers_and_dedupes_and_skips_path_overrides() {
+        let mut resolved = minimal_resolved_robot();
+        resolved.components = vec![
+            registry_driver_component("left_wheel", "phoxal/component-ddsm115"),
+            // A second instance sharing the SAME driver package must not
+            // produce a second `cargo install` for it.
+            registry_driver_component("right_wheel", "phoxal/component-ddsm115"),
+            // A workspace/path-overridden driver never reaches `cargo
+            // install`, in the container or on the host - it must be absent.
+            path_overridden_driver_component("custom_gripper"),
+        ];
+
+        let officials = component_driver_officials(&resolved);
+
+        assert_eq!(
+            officials,
+            vec![ContainerOfficial {
+                package: "phoxal-component-ddsm115".to_string(),
+                train: "0.36.0".to_string(),
+            }],
+            "exactly one entry for the shared registry driver, deduped across both instances, \
+             and no entry at all for the path-overridden driver"
+        );
+    }
+
     #[test]
     fn parses_the_three_builder_kinds() {
         assert_eq!(parse_builder("local").unwrap(), BuilderKind::Local);
