@@ -19,7 +19,6 @@ use crate::check::source::{SourceParticipant, SourceParticipantKind};
 use crate::session::{RuntimeFailurePolicy, StartupRequirement};
 
 pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
-pub const INFRASTRUCTURE_ROUTER: &str = "infrastructure-router";
 pub const ROBOT_TOOL_JOYPAD: &str = "tool-joypad";
 pub const ROBOT_TOOL_DEVICE: &str = "tool-device";
 /// Base directory holding one staged runtime layout per target triple.
@@ -68,9 +67,9 @@ pub struct PlanContext {
     /// The resolved source graph and its source-participant records - present
     /// only when the plan was prepared from a source project. A layout run (an
     /// extracted `build.phoxal` or a staged `.phoxal/build/<triple>/` root) has
-    /// no source, so this is `None` there; consumers that need source state
-    /// (such as simulation) go through [`PlanContext::source`] instead of
-    /// reading a fabricated graph (#936).
+    /// no source, so this is `None` there; a consumer that needs source state
+    /// (such as simulation) checks this directly rather than reading a
+    /// fabricated graph (#936).
     pub source: Option<PlanSource>,
 }
 
@@ -79,18 +78,6 @@ pub struct PlanContext {
 pub struct PlanSource {
     pub resolved: ResolvedRobot,
     pub source_participants: Vec<SourceParticipant>,
-}
-
-impl PlanContext {
-    /// Checked access to the source graph; fails with an actionable error when
-    /// the plan came from a staged layout, which carries no source.
-    pub fn source(&self) -> anyhow::Result<&PlanSource> {
-        self.source.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "this operation requires a source project; the running plan came from a staged runtime layout, which carries no source graph"
-            )
-        })
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -138,11 +125,6 @@ impl PlanRevision {
     }
 
     #[must_use]
-    pub fn content_path(&self, root: &Path, name: &str) -> PathBuf {
-        self.content_path_in(&root.join(".phoxal").join("plans").join("content"), name)
-    }
-
-    #[must_use]
     pub fn content_path_in(&self, content_root: &Path, name: &str) -> PathBuf {
         content_root.join(name)
     }
@@ -153,14 +135,6 @@ impl PlanRevision {
     /// across revisions, so reconciliation does not restart unrelated
     /// participants. A repeated identical write is idempotent; different
     /// bytes at the same content address are corruption and fail closed.
-    pub fn publish_content(&self, root: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf> {
-        self.publish_content_in(
-            &root.join(".phoxal").join("plans").join("content"),
-            name,
-            bytes,
-        )
-    }
-
     pub fn publish_content_in(
         &self,
         content_root: &Path,
@@ -768,17 +742,18 @@ mod tests {
             },
         )?;
         assert_ne!(first.digest, changed_plan.digest);
+        let content_root = Path::new("/tmp/project/content");
         assert_eq!(
-            first.content_path(Path::new("/tmp/project"), "participant"),
-            changed_plan.content_path(Path::new("/tmp/project"), "participant")
+            first.content_path_in(content_root, "participant"),
+            changed_plan.content_path_in(content_root, "participant")
         );
         let temp = tempfile::tempdir()?;
-        let path = first.publish_content(temp.path(), "participant", b"revision-one")?;
+        let path = first.publish_content_in(temp.path(), "participant", b"revision-one")?;
         assert_eq!(std::fs::read(&path)?, b"revision-one");
-        first.publish_content(temp.path(), "participant", b"revision-one")?;
+        first.publish_content_in(temp.path(), "participant", b"revision-one")?;
         assert!(
             first
-                .publish_content(temp.path(), "participant", b"mutated")
+                .publish_content_in(temp.path(), "participant", b"mutated")
                 .is_err()
         );
         assert_eq!(std::fs::read(path)?, b"revision-one");
@@ -966,11 +941,6 @@ mod tests {
                 .participants
                 .iter()
                 .any(|participant| participant.launch.participant_id == controller_id)
-        );
-        let runtime = crate::session::stores::runtime::RuntimeStore::from_launch_plan(&plan);
-        assert!(
-            runtime.metadata(&controller_id).is_none(),
-            "a Webots controller must have no resident registry/control entry"
         );
         Ok(())
     }

@@ -321,13 +321,6 @@ impl RuntimeLayout {
     }
 
     /// Resolve and inspect a required runtime without executing it, against the
-    /// host architecture. A foreign-architecture binary fails here with a
-    /// precise diagnostic rather than crashing later with an exec-format error.
-    pub fn inspect(&self, required: &RequiredRuntime) -> Result<SelectedBinary> {
-        self.inspect_for(required, LayoutInspection::Host)
-    }
-
-    /// Resolve and inspect a required runtime without executing it, against the
     /// architecture `inspection` selects: the host for an in-place run/start, or
     /// a declared `--target` for a cross build (#936). Reads the binary's
     /// embedded participant metadata straight from the object file; never
@@ -753,7 +746,9 @@ tools:
             .iter()
             .find(|runtime| runtime.identity == "mission")
             .expect("mission required");
-        let error = layout.inspect(mission).expect_err("foreign arch rejected");
+        let error = layout
+            .inspect_for(mission, LayoutInspection::Host)
+            .expect_err("foreign arch rejected");
         let message = format!("{error:#}");
         assert!(message.contains("mission"), "{message}");
         assert!(message.contains("built for"), "{message}");
@@ -775,7 +770,7 @@ tools:
             .iter()
             .find(|runtime| runtime.identity == "mission")
             .expect("mission required");
-        let selected = layout.inspect(mission)?;
+        let selected = layout.inspect_for(mission, LayoutInspection::Host)?;
         assert_eq!(selected.meta.id, "mission");
         assert_eq!(
             selected.meta.config_schema,
@@ -804,7 +799,7 @@ tools:
             .find(|runtime| runtime.identity == "mission")
             .expect("mission required");
         let error = layout
-            .inspect(mission)
+            .inspect_for(mission, LayoutInspection::Host)
             .expect_err("a binary declaring a mismatched id must be rejected");
         let message = error.to_string();
         assert!(message.contains("mission"), "{message}");
@@ -833,7 +828,7 @@ tools:
             .find(|runtime| runtime.identity == "mission")
             .expect("mission required");
         let error = layout
-            .inspect(mission)
+            .inspect_for(mission, LayoutInspection::Host)
             .expect_err("a binary with malformed metadata must be rejected");
         let message = format!("{error:#}");
         assert!(message.contains("not valid JSON"), "{message}");
