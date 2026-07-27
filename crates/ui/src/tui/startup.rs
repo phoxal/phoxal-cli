@@ -220,10 +220,10 @@ mod tests {
     #[test]
     fn a_finish_for_an_unseen_phase_still_renders_a_row() {
         let mut state = StartupState::new();
-        state.apply_event(&finished("validate", PhaseOutcome::Skipped));
+        state.apply_event(&finished("validate", PhaseOutcome::Succeeded));
         let phase = state.phase.as_ref().expect("a fallback row must exist");
         assert_eq!(phase.label, "validate");
-        assert_eq!(phase.outcome.as_ref().unwrap().0, PhaseOutcome::Skipped);
+        assert_eq!(phase.outcome.as_ref().unwrap().0, PhaseOutcome::Succeeded);
     }
 
     /// Progress for an id that is NOT the current phase must be ignored

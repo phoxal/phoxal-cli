@@ -21,22 +21,9 @@
 use std::fmt;
 
 /// Why the session ended in `Failed`.
-///
-/// P4/C2 triage: `Terminal` is the real producer
-/// (`session::controller::SessionController::reflect_final_outcome`).
-/// `Participant`/`Timeout` are documented, tested design intent for a more
-/// specific failure attribution than `reflect_final_outcome` currently
-/// builds - kept rather than removed because they are useful terminal
-/// failure categories.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FailReason {
-    /// A named participant failed in a way the session cannot recover from.
-    #[allow(dead_code)]
-    Participant(String),
-    /// A bounded wait exceeded its explicit, non-interactive policy.
-    #[allow(dead_code)]
-    Timeout,
-    /// Any other terminal failure, carrying a short human message.
+    /// The terminal failure, carrying a short human message.
     Terminal(String),
 }
 
@@ -119,29 +106,6 @@ impl SessionState {
         }
     }
 
-    /// `true` once the session has reached a state no transition leaves.
-    ///
-    /// P4/C2 triage: no current caller needs this as a standalone predicate -
-    /// `reduce_state`/`reflect_final_outcome` reach `Stopped`/`Failed` through
-    /// the `to_*` transition methods' own `Result`, never by querying
-    /// terminality first. Kept (tested directly by
-    /// `terminal_states_reject_every_transition`) as the obvious, cheap
-    /// predicate any state-machine consumer would expect to exist.
-    #[must_use]
-    #[allow(dead_code)]
-    pub const fn is_terminal(&self) -> bool {
-        matches!(self, Self::Stopped | Self::Failed(_))
-    }
-
-    /// `true` while the session's lifecycle is still progressing, i.e. the
-    /// complement of [`Self::is_terminal`]. Same status as `is_terminal`
-    /// above.
-    #[must_use]
-    #[allow(dead_code)]
-    pub const fn is_active(&self) -> bool {
-        !self.is_terminal()
-    }
-
     /// `Preparing -> Starting`.
     pub fn start(self) -> Result<Self, InvalidTransition> {
         match self {
@@ -186,11 +150,8 @@ impl SessionState {
 }
 
 fn fail_reason_label(reason: &FailReason) -> String {
-    match reason {
-        FailReason::Participant(id) => format!("participant `{id}` failed"),
-        FailReason::Timeout => "timed out".to_string(),
-        FailReason::Terminal(message) => message.clone(),
-    }
+    let FailReason::Terminal(message) = reason;
+    message.clone()
 }
 
 #[cfg(test)]
@@ -209,9 +170,9 @@ mod tests {
         );
         assert_eq!(
             SessionState::Starting
-                .to_failed(FailReason::Timeout)
+                .to_failed(FailReason::Terminal("boom".into()))
                 .unwrap(),
-            SessionState::Failed(FailReason::Timeout)
+            SessionState::Failed(FailReason::Terminal("boom".into()))
         );
         assert_eq!(
             SessionState::Starting.to_stopping().unwrap(),
@@ -223,9 +184,9 @@ mod tests {
         );
         assert_eq!(
             SessionState::Running
-                .to_failed(FailReason::Timeout)
+                .to_failed(FailReason::Terminal("boom".into()))
                 .unwrap(),
-            SessionState::Failed(FailReason::Timeout)
+            SessionState::Failed(FailReason::Terminal("boom".into()))
         );
 
         assert_eq!(
@@ -256,7 +217,12 @@ mod tests {
         // Stopping resolves only to Stopped.
         let stopping = SessionState::Stopping;
         assert!(stopping.clone().to_running().is_err());
-        assert!(stopping.clone().to_failed(FailReason::Timeout).is_err());
+        assert!(
+            stopping
+                .clone()
+                .to_failed(FailReason::Terminal("boom".into()))
+                .is_err()
+        );
         assert!(stopping.to_stopping().is_err());
     }
 
@@ -267,25 +233,31 @@ mod tests {
         assert!(stopped.clone().to_running().is_err());
         assert!(stopped.clone().to_stopping().is_err());
         assert!(stopped.clone().to_stopped().is_err());
-        assert!(stopped.to_failed(FailReason::Timeout).is_err());
-        assert!(SessionState::Stopped.is_terminal());
-        assert!(!SessionState::Stopped.is_active());
+        assert!(
+            stopped
+                .to_failed(FailReason::Terminal("boom".into()))
+                .is_err()
+        );
 
-        let failed = SessionState::Failed(FailReason::Timeout);
+        let failed = SessionState::Failed(FailReason::Terminal("boom".into()));
         assert!(failed.clone().start().is_err());
         assert!(failed.clone().to_running().is_err());
         assert!(failed.clone().to_stopping().is_err());
         assert!(failed.clone().to_stopped().is_err());
-        assert!(failed.clone().to_failed(FailReason::Timeout).is_err());
-        assert!(failed.is_terminal());
+        assert!(
+            failed
+                .clone()
+                .to_failed(FailReason::Terminal("boom".into()))
+                .is_err()
+        );
     }
 
     #[test]
     fn labels_are_human_readable() {
         assert_eq!(SessionState::Running.label(), "running");
         assert_eq!(
-            SessionState::Failed(FailReason::Timeout).label(),
-            "failed: timed out"
+            SessionState::Failed(FailReason::Terminal("boom".into())).label(),
+            "failed: boom"
         );
     }
 
