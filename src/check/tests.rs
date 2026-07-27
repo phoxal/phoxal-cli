@@ -1055,7 +1055,7 @@ fn source_build_error_is_a_hard_error() {
         &sources,
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
-        |_| Err(MissingImageError::new(anyhow!("source build failed")).into()),
+        |_| Err(anyhow!("source build failed")),
     )
     .expect_err("source build failures should abort check");
 
@@ -1388,34 +1388,6 @@ fn path_overridden_service_enters_check_through_source_participant_report() -> R
         },
     )?;
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
-    Ok(())
-}
-
-#[test]
-fn missing_image_is_reported_after_other_images_are_checked() -> Result<()> {
-    let images = vec![
-        ("mission".to_string(), "mission:ok".to_string()),
-        ("drive".to_string(), "service-drive:v1-stable".to_string()),
-    ];
-
-    let outcome = run_check(
-        &images,
-        &[],
-        &[],
-        |image_ref| match image_ref {
-            "mission:ok" => Ok(raw("mission")),
-            "service-drive:v1-stable" => Err(MissingImageError::new(anyhow!("not found")).into()),
-            unexpected => bail!("unexpected image {unexpected}"),
-        },
-        |_| bail!("no tools should be fetched"),
-        |_| bail!("no source services should be built"),
-    )?;
-
-    assert_eq!(
-        outcome.missing_images,
-        vec!["service-drive:v1-stable".to_string()]
-    );
-    assert!(!outcome.is_ok());
     Ok(())
 }
 

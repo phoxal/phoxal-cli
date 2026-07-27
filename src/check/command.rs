@@ -41,7 +41,7 @@ impl super::CheckCmd {
             "warning: v0 is pre-stable: artifacts built at different times may not interoperate"
         );
 
-        ensure_check_outcome_ok(&result.train, &result.outcome)?;
+        ensure_check_outcome_ok(&result.outcome)?;
         println!(
             "ok: {} participants validated (framework train {})",
             result.participant_count, result.train

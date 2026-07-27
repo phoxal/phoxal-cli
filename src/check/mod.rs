@@ -1,6 +1,5 @@
 use clap::Args;
 use phoxal::check as graph_check;
-use serde::Serialize;
 use serde_json::Value;
 
 use phoxal::model::robot::RobotV0;
@@ -43,7 +42,7 @@ pub(crate) fn default_participant_class() -> String {
     "checked".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawArtifact {
     pub kind: String,
     pub id: String,
@@ -51,7 +50,6 @@ pub struct RawArtifact {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckOutcome {
-    pub missing_images: Vec<String>,
     pub report: graph_check::Report,
     pub checked_participants: Vec<graph_check::ParticipantApis>,
 }
@@ -64,7 +62,7 @@ pub struct CheckGraphContext<'a> {
 impl CheckOutcome {
     #[must_use]
     pub fn is_ok(&self) -> bool {
-        self.missing_images.is_empty() && self.report.is_ok()
+        self.report.is_ok()
     }
 }
 
@@ -91,7 +89,6 @@ pub(crate) use build::{
     validate_artifact_identity, validate_source_artifact_identity,
 };
 mod errors;
-pub use errors::MissingImageError;
 pub(crate) use errors::ensure_check_outcome_ok;
 
 #[cfg(test)]

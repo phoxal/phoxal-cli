@@ -1,7 +1,7 @@
 //! Graph responsibilities for check.
 
 use super::{
-    CheckGraphContext, CheckOutcome, MissingImageError, PlatformArtifactRef, RawParticipantReport,
+    CheckGraphContext, CheckOutcome, PlatformArtifactRef, RawParticipantReport,
     validate_artifact_identity, validate_source_artifact_identity, validate_user_service_config,
 };
 use anyhow::Context;
@@ -56,28 +56,18 @@ pub fn run_check_with_context(
     mut fetch_tool: impl FnMut(&ToolParticipant) -> Result<RawParticipantReport>,
     mut build: impl FnMut(&SourceParticipant) -> Result<RawParticipantReport>,
 ) -> Result<CheckOutcome> {
-    let mut missing_images = Vec::new();
     let mut participants = Vec::new();
     let mut config_problems = Vec::new();
 
     for artifact in resolved_platform_artifact_refs {
         let image_ref = &artifact.artifact_ref;
-        let raw = match fetch(image_ref) {
-            Ok(raw) => raw,
-            Err(error) if error.downcast_ref::<MissingImageError>().is_some() => {
-                missing_images.push(image_ref.clone());
-                continue;
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "failed to obtain participant report for {} {} ({image_ref})",
-                        artifact.kind_label(),
-                        artifact.name
-                    )
-                });
-            }
-        };
+        let raw = fetch(image_ref).with_context(|| {
+            format!(
+                "failed to obtain participant report for {} {} ({image_ref})",
+                artifact.kind_label(),
+                artifact.name
+            )
+        })?;
         let expected_artifact_id = if artifact.kind == ArtifactKind::Tool {
             tool_participant_id(&artifact.name)
         } else {
@@ -195,7 +185,6 @@ pub fn run_check_with_context(
     let mut report = graph_check::Report::default();
     report.problems.extend(config_problems);
     Ok(CheckOutcome {
-        missing_images,
         report,
         checked_participants: participants,
     })

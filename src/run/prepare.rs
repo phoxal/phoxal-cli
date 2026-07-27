@@ -430,7 +430,7 @@ fn run_source_check(
     )?;
     let _ = project_root;
     if !outcome.is_ok() {
-        crate::check::ensure_check_outcome_ok(&resolved.train, &outcome)?;
+        crate::check::ensure_check_outcome_ok(&outcome)?;
     }
     Ok(())
 }
