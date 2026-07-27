@@ -65,7 +65,8 @@ pub(crate) use metadata::{
 };
 mod build;
 pub(crate) use build::{
-    build_participant_report_from_source, validate_artifact_identity,
+    build_participant_report_by_building, build_participant_report_from_source,
+    build_participant_report_from_source_with_diagnostics, validate_artifact_identity,
     validate_source_artifact_identity,
 };
 mod errors;
