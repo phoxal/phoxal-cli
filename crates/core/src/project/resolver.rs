@@ -52,6 +52,14 @@ pub struct ResolveOptions {
     /// not: simulators execute beside Webots on an operator host and are never
     /// installed on the robot target.
     pub include_simulators: bool,
+    /// Pass `--offline` to every `cargo metadata`/`cargo install` invocation
+    /// resolution makes (organization#951 WS4 review, medium 4): the locked
+    /// train read and the generated `.phoxal/resolve/Cargo.toml` component
+    /// lookup. `PHOXAL_OFFLINE` is a Phoxal-only env var Cargo does not
+    /// recognize, so this must be threaded explicitly from the caller's own
+    /// `--offline`/`AppContext::offline`, not read back from the
+    /// environment.
+    pub offline: bool,
 }
 
 impl Default for ResolveOptions {
@@ -61,6 +69,7 @@ impl Default for ResolveOptions {
             tool_target_triple: None,
             drivers: crate::project::layout::DriverSelection::default(),
             include_simulators: true,
+            offline: false,
         }
     }
 }

@@ -36,7 +36,9 @@ impl Validate {
         let robot = phoxal_cli_core::project::resolver::load_robot(&robot_path)?;
         // Official services come from the CLI-internal catalog
         // (organization#951 WS4) - no suite fetch, no network.
-        let train = phoxal_cli_core::project::train::resolve_locked_train(project_root)?.version;
+        let train =
+            phoxal_cli_core::project::train::resolve_locked_train(project_root, app.offline)?
+                .version;
         let platform_names = catalog::NATIVE
             .iter()
             .filter(|official| official.kind == ArtifactKind::Service)
@@ -73,7 +75,7 @@ fn check_workspace_runtimes(
     let robot_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?;
-    let report = collect_user_service_dependency_report(robot_root, robot);
+    let report = collect_user_service_dependency_report(robot_root, robot, app.offline);
     for success in report.successes {
         app.ui.success(success);
     }
@@ -89,6 +91,7 @@ struct UserServiceDependencyReport {
 fn collect_user_service_dependency_report(
     robot_root: &Path,
     robot: &Robot,
+    offline: bool,
 ) -> UserServiceDependencyReport {
     use phoxal_cli_core::project::train::WorkspaceRuntimeKind;
 
@@ -100,7 +103,8 @@ fn collect_user_service_dependency_report(
         report.problems.push(format!("{error:#}"));
         return report;
     }
-    let project = match phoxal_cli_core::project::train::resolve_locked_project(robot_root) {
+    let project = match phoxal_cli_core::project::train::resolve_locked_project(robot_root, offline)
+    {
         Ok(project) => project,
         Err(error) => {
             report

@@ -10,7 +10,10 @@ pub struct Doctor {}
 impl Doctor {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         crate::host_doctor::report(app);
-        let train = phoxal_cli_core::project::train::resolve_locked_train(app.project.root())?;
+        let train = phoxal_cli_core::project::train::resolve_locked_train(
+            app.project.root(),
+            app.offline || crate::context::offline_from_env(),
+        )?;
         println!(
             "framework train: {} ({})",
             train.version,

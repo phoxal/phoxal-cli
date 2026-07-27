@@ -38,6 +38,19 @@
 //! container or on the host): it is staged from its own build output
 //! instead, exactly like any other source-overridden participant.
 //!
+//! ## Offline and proxy plumbing (organization#951 WS4 review, medium 4)
+//!
+//! `--offline` threads through EVERY Cargo invocation this module makes: the
+//! workspace `cargo build` line as well as every official's `cargo install`
+//! ([`ContainerBuildSpec::container_script`]) - a warm-cache "offline" build
+//! must not silently reach the network for one of them and not the other.
+//! The container also has no route to the host's own network configuration,
+//! so [`ContainerBuildSpec::invocation`] forwards every proxy environment
+//! variable ([`PROXY_ENV_VARS`]) the host process actually has set, via
+//! `-e VAR=value`; a build behind a corporate/lab proxy would otherwise fail
+//! network-side inside the container even though the host has connectivity
+//! through it.
+//!
 //! ## Default image strategy (human-decided 2026-07-24)
 //!
 //! The default image is the pinned official Docker Hub `rust` image
@@ -185,6 +198,36 @@ const CONTAINER_CARGO_GIT: &str = "/usr/local/cargo/git";
 /// [`ContainerBuildSpec::officials_root`]'s mount point.
 const CONTAINER_OFFICIALS: &str = "/phoxal/officials";
 
+/// Host proxy environment variable names forwarded into the container
+/// (organization#951 WS4 review, medium 4) - both the upper- and lower-case
+/// spellings different tools read, so whichever one a host's proxy setup
+/// actually exports is carried through.
+const PROXY_ENV_VARS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
+];
+
+/// The `-e VAR=value` engine arguments for every [`PROXY_ENV_VARS`] entry
+/// present in `env`. Takes an injectable iterator (rather than reading
+/// `std::env::vars()` itself) so it is unit-testable without mutating the
+/// real, test-shared process environment.
+fn proxy_engine_args(env: impl IntoIterator<Item = (String, String)>) -> Vec<String> {
+    let present = env
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    PROXY_ENV_VARS
+        .iter()
+        .filter_map(|name| present.get(*name).map(|value| (*name, value.as_str())))
+        .flat_map(|(name, value)| vec!["-e".to_string(), format!("{name}={value}")])
+        .collect()
+}
+
 /// A fully rendered engine command: the program (`docker`/`podman`) and its
 /// argv. Kept as data so tests can assert it without executing anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,6 +281,11 @@ impl ContainerBuildSpec {
                 CONTAINER_OFFICIALS
             ));
         }
+        // The container has no route to the host's own network configuration
+        // otherwise (organization#951 WS4 review, medium 4): a build behind
+        // a corporate/lab proxy would silently fail network-side inside the
+        // container even though the host itself has connectivity through it.
+        args.extend(proxy_engine_args(std::env::vars()));
         // The image already carries the target toolchain; the build never needs
         // to reach the network for a toolchain, only for crate dependencies (and
         // official packages) the mounted caches usually already hold.
@@ -253,10 +301,19 @@ impl ContainerBuildSpec {
     /// one `cargo install` per official, stopping at the first failure
     /// (`set -e`).
     fn container_script(&self) -> String {
-        let mut commands = vec![format!(
+        let mut workspace_build = format!(
             "cargo build --workspace --locked --target {}",
             crate::commands::deploy::shell_quote(&self.target)
-        )];
+        );
+        // The `cargo install` per official already threads `self.offline`
+        // through (below); the workspace build must too (organization#951
+        // WS4 review, medium 4) - without it, a warm-cache offline build
+        // could still reach the network here even though every other Cargo
+        // invocation in this same container run is genuinely offline.
+        if self.offline {
+            workspace_build.push_str(" --offline");
+        }
+        let mut commands = vec![workspace_build];
         for official in &self.officials {
             let package = official.package.clone();
             let install_args = crate::materialize::build_install_args(
@@ -496,6 +553,66 @@ mod tests {
         spec.offline = true;
         let joined = spec.invocation().args.join(" ");
         assert!(joined.contains("--offline"), "{joined}");
+    }
+
+    /// Organization#951 WS4 review, medium 4: the officials installs already
+    /// threaded `--offline` through; the workspace build line itself did
+    /// not, so a warm-cache "offline" container build could still reach the
+    /// network for the workspace's own crate dependencies. Asserts the
+    /// WORKSPACE BUILD command specifically, not just that `--offline`
+    /// appears anywhere in the rendered script (which the officials installs
+    /// alone would already satisfy).
+    #[test]
+    fn offline_appends_the_offline_flag_to_the_workspace_build_itself() {
+        let mut spec = spec();
+        spec.offline = true;
+        let script = spec.container_script();
+        let build_line = script
+            .split("; ")
+            .find(|line| line.starts_with("cargo build"))
+            .expect("the workspace build is the script's first command");
+        assert!(
+            build_line.contains("--offline"),
+            "workspace build line must itself carry --offline: {build_line}"
+        );
+    }
+
+    #[test]
+    fn online_omits_the_offline_flag_from_the_workspace_build() {
+        let spec = spec();
+        let script = spec.container_script();
+        let build_line = script
+            .split("; ")
+            .find(|line| line.starts_with("cargo build"))
+            .expect("the workspace build is the script's first command");
+        assert!(!build_line.contains("--offline"), "{build_line}");
+    }
+
+    #[test]
+    fn proxy_engine_args_forwards_only_the_variables_actually_set() {
+        let args = proxy_engine_args(vec![
+            (
+                "HTTPS_PROXY".to_string(),
+                "http://proxy.example:3128".to_string(),
+            ),
+            ("no_proxy".to_string(), "localhost,127.0.0.1".to_string()),
+            // Not a proxy variable - must be ignored entirely.
+            ("UNRELATED_VAR".to_string(), "value".to_string()),
+        ]);
+        assert_eq!(
+            args,
+            vec![
+                "-e".to_string(),
+                "HTTPS_PROXY=http://proxy.example:3128".to_string(),
+                "-e".to_string(),
+                "no_proxy=localhost,127.0.0.1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn proxy_engine_args_is_empty_with_no_proxy_variables_set() {
+        assert!(proxy_engine_args(Vec::new()).is_empty());
     }
 
     #[test]

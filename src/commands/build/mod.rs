@@ -388,9 +388,10 @@ impl Build {
         // service, tool, and the router ("every official always runs" per
         // #945) - is known from the catalog alone; no `resolve()` (and no
         // robot.yaml) is needed to compute it.
-        let train = phoxal_cli_core::project::train::resolve_locked_train(project_root)
-            .context("failed to resolve the locked framework train for the container build")?
-            .version;
+        let train =
+            phoxal_cli_core::project::train::resolve_locked_train(project_root, app.offline)
+                .context("failed to resolve the locked framework train for the container build")?
+                .version;
         let mut officials = phoxal_cli_core::project::catalog::for_webots(false)
             .map(|official| ContainerOfficial {
                 package: phoxal_cli_core::project::catalog::cargo_package_name(official.package),
@@ -435,6 +436,7 @@ impl Build {
                 tool_target_triple: Some(target.to_string()),
                 drivers: driver_policy.selection(),
                 include_simulators: false,
+                offline: app.offline,
             },
         )
         .context("failed to resolve the robot graph to learn its component driver packages")?;

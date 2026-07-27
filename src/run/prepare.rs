@@ -121,6 +121,7 @@ pub(crate) fn refresh_staging(
             // Native runtime bundles deliberately exclude operator-host Webots
             // simulators. Host run/start staging keeps them.
             include_simulators: build.include_simulators(),
+            offline: options.offline,
         },
     )?;
 

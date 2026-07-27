@@ -105,14 +105,13 @@ impl SimulationRun {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let target =
             crate::commands::resident::resolve_target(self.project.as_deref(), app.project.root())?;
-        phoxal_cli_core::project::train::resolve_locked_train(&target.project).with_context(
-            || {
+        phoxal_cli_core::project::train::resolve_locked_train(&target.project, app.offline)
+            .with_context(|| {
                 format!(
                     "simulation requires a buildable source project; {} is not a source project",
                     target.project.display()
                 )
-            },
-        )?;
+            })?;
         // SAFETY: command dispatch has not started worker threads for this run.
         unsafe {
             std::env::set_var(crate::host_paths::PROJECT_ROOT_ENV, &target.project);

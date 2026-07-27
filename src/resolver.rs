@@ -35,7 +35,8 @@ pub fn resolve(
     // Declaration invariants are the very first check (#950): an invalid
     // workspace lock must not mask a dual/official declaration error.
     phoxal_cli_core::project::layout::validate_runtime_declarations(robot)?;
-    let project = phoxal_cli_core::project::train::resolve_locked_project(project_root)?;
+    let project =
+        phoxal_cli_core::project::train::resolve_locked_project(project_root, options.offline)?;
     // The catalog below is one current snapshot, not per-train history
     // (organization#951 WS4 review, medium 3): reject a locked train it
     // predates before applying it, rather than silently resolving an
@@ -90,6 +91,7 @@ pub fn resolve(
         &target,
         &project.runtimes,
         &options.drivers,
+        options.offline,
     )?;
 
     let mut tools = catalog::NATIVE
@@ -188,6 +190,7 @@ fn resolve_components(
     target: &str,
     workspace_runtimes: &[phoxal_cli_core::project::train::WorkspaceRuntime],
     drivers: &phoxal_cli_core::project::layout::DriverSelection,
+    offline: bool,
 ) -> Result<Vec<ResolvedComponent>> {
     let workspace_component = |component_id: &str| {
         workspace_runtimes.iter().find(|runtime| {
@@ -218,7 +221,7 @@ fn resolve_components(
             .collect::<Vec<_>>();
         let manifest_path = write_resolve_manifest(project_root, &dependencies)
             .context("failed to write the generated component-resolution manifest")?;
-        resolve_manifest_package_dirs(&manifest_path)
+        resolve_manifest_package_dirs(&manifest_path, offline)
             .context("failed to resolve official component packages via `cargo metadata`")?
     };
 

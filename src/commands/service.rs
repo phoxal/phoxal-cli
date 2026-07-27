@@ -445,7 +445,8 @@ fn is_confirmed_legacy_link(path: &Path, canonical_legacy_root: Option<&Path>) -
 impl Suite {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let root = app.project.root().to_path_buf();
-        let summary = tokio::task::spawn_blocking(move || service_suite_summary(&root))
+        let offline = app.offline;
+        let summary = tokio::task::spawn_blocking(move || service_suite_summary(&root, offline))
             .await
             .context("service suite worker failed")??;
         for entry in &summary.entries {
@@ -572,7 +573,7 @@ mod unit_tests {
     }
 }
 
-pub fn service_suite_summary(project_start: &Path) -> Result<ServiceSuiteSummary> {
+pub fn service_suite_summary(project_start: &Path, offline: bool) -> Result<ServiceSuiteSummary> {
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
     let project_root = robot_path
@@ -581,7 +582,8 @@ pub fn service_suite_summary(project_start: &Path) -> Result<ServiceSuiteSummary
     // Keep `service suite` project-bound: malformed robot intent must fail
     // before presenting an inventory for that project.
     let _ = load_robot(&robot_path)?;
-    let train = phoxal_cli_core::project::train::resolve_locked_train(project_root)?.version;
+    let train =
+        phoxal_cli_core::project::train::resolve_locked_train(project_root, offline)?.version;
     Ok(ServiceSuiteSummary {
         entries: phoxal_cli_core::project::catalog::NATIVE
             .iter()
@@ -609,7 +611,7 @@ mod tests {
         fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
         write_locked_project(temp.path())?;
 
-        let summary = service_suite_summary(temp.path())?;
+        let summary = service_suite_summary(temp.path(), false)?;
 
         let entry = summary
             .entries

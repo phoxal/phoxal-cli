@@ -90,8 +90,16 @@ pub fn write_resolve_manifest(
 /// keyed by Cargo package name. Follows `resolve.nodes[].deps[].pkg` ids
 /// rather than matching by name, so a dependency renamed in the manifest
 /// still resolves to the right package.
-pub fn resolve_manifest_package_dirs(manifest_path: &Path) -> Result<BTreeMap<String, PathBuf>> {
-    let metadata = run_cargo_metadata(manifest_path)?;
+///
+/// `offline` passes `--offline` through to `cargo metadata` (organization
+/// #951 WS4 review, medium 4): `PHOXAL_OFFLINE` is a Phoxal-only env var
+/// Cargo does not read, so a caller that wants a genuinely offline
+/// resolution must set this explicitly rather than relying on it.
+pub fn resolve_manifest_package_dirs(
+    manifest_path: &Path,
+    offline: bool,
+) -> Result<BTreeMap<String, PathBuf>> {
+    let metadata = run_cargo_metadata(manifest_path, offline)?;
     let resolve = metadata
         .resolve
         .context("cargo metadata for the resolve manifest reported no resolve graph")?;
@@ -126,12 +134,17 @@ pub fn resolve_manifest_package_dirs(manifest_path: &Path) -> Result<BTreeMap<St
     Ok(result)
 }
 
-fn run_cargo_metadata(manifest_path: &Path) -> Result<Metadata> {
-    let output = Command::new("cargo")
+fn run_cargo_metadata(manifest_path: &Path, offline: bool) -> Result<Metadata> {
+    let mut command = Command::new("cargo");
+    command
         .args(["metadata", "--format-version", "1", "--manifest-path"])
         .arg(manifest_path)
         .arg("--config")
-        .arg(registry_config_arg())
+        .arg(registry_config_arg());
+    if offline {
+        command.arg("--offline");
+    }
+    let output = command
         .output()
         .context("cargo is required to resolve official component packages")?;
     if !output.status.success() {
@@ -247,7 +260,7 @@ mod tests {
         let resolve_dir = root.path().join("robot/.phoxal/resolve");
         write_nested_manifest(&resolve_dir, false);
 
-        let error = run_cargo_metadata(&resolve_dir.join("Cargo.toml"))
+        let error = run_cargo_metadata(&resolve_dir.join("Cargo.toml"), false)
             .expect_err("a nested manifest with no [workspace] table must fail resolution");
         let message = error.to_string();
         assert!(
@@ -279,7 +292,7 @@ mod tests {
         let resolve_dir = root.path().join("robot/.phoxal/resolve");
         write_nested_manifest(&resolve_dir, true);
 
-        let dirs = resolve_manifest_package_dirs(&resolve_dir.join("Cargo.toml"))
+        let dirs = resolve_manifest_package_dirs(&resolve_dir.join("Cargo.toml"), false)
             .expect("an empty [workspace] table resolves the manifest as its own root");
         let resolved = dirs
             .get("phoxal-component-fixture")
