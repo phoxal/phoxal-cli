@@ -30,8 +30,8 @@ use crate::AppContext;
 use crate::run::{RunOptions, StagingBuild};
 use crate::supervisor::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 use container::{
-    ContainerBuildSpec, ContainerEngine, EngineRunner, ProcessEngineRunner, default_builder_image,
-    host_cargo_caches, platform_for_triple, require_platform_for_triple, vendored_artifacts,
+    ContainerBuildSpec, ContainerEngine, ContainerOfficial, EngineRunner, ProcessEngineRunner,
+    default_builder_image, host_cargo_caches, platform_for_triple, require_platform_for_triple,
 };
 use phoxal_cli_core::check::participant_metadata::expected_target_for_triple;
 use phoxal_cli_core::project::launch_plan::runtime_layout_dir;
@@ -174,11 +174,10 @@ impl Build {
         let project_root =
             crate::commands::resident::resolve_target(self.project.as_deref(), app.project.root())?
                 .project;
-        // Scope every project-rooted path (vendored suite, artifact store and
-        // its lock, staging) to the RESOLVED project, exactly as `run`/`start`
-        // do (#936, finding 3): without this, `phoxal build /path/to/B` run
-        // from project A would compile B while loading A's vendored
-        // suite/artifacts.
+        // Scope every project-rooted path (the project lock, staging) to the
+        // RESOLVED project, exactly as `run`/`start` do (#936, finding 3):
+        // without this, `phoxal build /path/to/B` run from project A would
+        // compile B while writing A's staged state.
         unsafe {
             std::env::set_var(crate::host_paths::PROJECT_ROOT_ENV, &project_root);
         }
@@ -304,35 +303,45 @@ impl Build {
         target: &str,
         runner: &dyn EngineRunner,
     ) -> Result<()> {
-        let snapshot = self.compile_in_container(project_root, target, runner, &app.ui)?;
+        let (snapshot, officials_root) =
+            self.compile_in_container(app, project_root, target, runner, &app.ui)?;
 
         // Stage manifests, assets, AND binaries from the SAME frozen snapshot the
         // container compiled, never the live tree (#936, finding B): the container
         // wrote the target binaries into `<snapshot>/target`, and staging reads
         // robot.yaml and assets from `<snapshot>` too, so a bundle can never pair
-        // old binaries with newer live manifests. Officials still resolve from the
-        // host's vendored `.phoxal/artifacts` (host-path, unaffected by the
-        // snapshot). The default output stays a sibling of the real project's
+        // old binaries with newer live manifests. The deterministic official set
+        // (services, tools, the router) was materialized natively INSIDE the
+        // container too, into `officials_root`; host-side staging reads that
+        // instead of cross-compiling them (organization#951 WS4). Only
+        // robot-specific component driver packages, if any, still materialize
+        // host-side. The default output stays a sibling of the real project's
         // staged directory.
         let staging = StagingBuild::prebuilt_native_bundle(
             target.to_string(),
             snapshot.path().join("target"),
+            Some(officials_root.path().to_path_buf()),
         );
         self.stage_validate_archive(app, project_root, snapshot.path(), target, &staging)
     }
 
     /// Snapshot the source, validate its Cargo.lock, and compile the workspace
-    /// for `target` inside the toolchain image, returning the snapshot directory
-    /// (with `<snapshot>/target` populated by the container). Assumes the Build
-    /// lock is already held (see [`Self::run`]); split out so the snapshot+compile
-    /// ordering under the lock is unit-testable with a fake [`EngineRunner`].
+    /// for `target` inside the toolchain image - which also materializes the
+    /// deterministic official set (services, tools, the router) via `cargo
+    /// install`, natively on the container's own platform (organization#951
+    /// WS4) - returning the snapshot directory (with `<snapshot>/target`
+    /// populated by the container) and the officials root (with its `bin/`
+    /// populated the identical way). Assumes the Build lock is already held
+    /// (see [`Self::run`]); split out so the snapshot+compile ordering under
+    /// the lock is unit-testable with a fake [`EngineRunner`].
     fn compile_in_container(
         &self,
+        app: &AppContext,
         project_root: &Path,
         target: &str,
         runner: &dyn EngineRunner,
         ui: &crate::Ui,
-    ) -> Result<tempfile::TempDir> {
+    ) -> Result<(tempfile::TempDir, tempfile::TempDir)> {
         let snapshot = tempfile::Builder::new()
             .prefix("phoxal-build-snapshot-")
             .tempdir()
@@ -350,6 +359,11 @@ impl Build {
             );
         }
 
+        let officials_root = tempfile::Builder::new()
+            .prefix("phoxal-build-officials-")
+            .tempdir()
+            .context("failed to create an officials materialization directory")?;
+
         // The default image is the pinned official rust image with the container
         // platform derived from the target arch; a custom `--builder-image` owns
         // its own toolchain, so we only pass `--platform` when the arch is one we
@@ -365,6 +379,21 @@ impl Build {
             ),
         };
         let (cargo_registry, cargo_git) = host_cargo_caches();
+        // The deterministic, robot-independent official set - every catalog
+        // service, tool, and the router ("every official always runs" per
+        // #945) - is known from the catalog alone; no `resolve()` (and no
+        // robot.yaml) is needed to compute it. Only component driver
+        // packages are robot-specific, and those stay host-side (see the
+        // module docs).
+        let train = phoxal_cli_core::project::train::resolve_locked_train(project_root)
+            .context("failed to resolve the locked framework train for the container build")?
+            .version;
+        let officials = phoxal_cli_core::project::catalog::for_webots(false)
+            .map(|official| ContainerOfficial {
+                package: phoxal_cli_core::project::catalog::cargo_package_name(official.package),
+                train: train.clone(),
+            })
+            .collect::<Vec<_>>();
         let spec = ContainerBuildSpec {
             engine: self.container_engine,
             image,
@@ -373,10 +402,12 @@ impl Build {
             snapshot: snapshot.path().to_path_buf(),
             cargo_registry,
             cargo_git,
-            artifacts: vendored_artifacts(project_root),
+            officials_root: officials_root.path().to_path_buf(),
+            officials,
+            offline: app.offline,
         };
         ui.info(format!(
-            "compiling workspace for {target} inside {} ({}{})",
+            "compiling workspace and materializing officials for {target} inside {} ({}{})",
             spec.image,
             self.container_engine.program(),
             spec.platform
@@ -385,7 +416,7 @@ impl Build {
                 .unwrap_or_default(),
         ));
         runner.run(&spec.invocation())?;
-        Ok(snapshot)
+        Ok((snapshot, officials_root))
     }
 
     /// The shared tail every backend runs: refresh staging for the target from

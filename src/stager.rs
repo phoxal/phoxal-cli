@@ -208,18 +208,41 @@ pub fn staged_router_binary(staged_root: &Path) -> PathBuf {
 /// dormant official is built through `build_override`; every other missing
 /// official materializes via `cargo install <package>@<train> --registry
 /// phoxal --locked --root <staged_root>` straight into its final `bin/` path.
+///
+/// `officials_source`, when set, is an already-materialized directory
+/// (`<officials_source>/bin/<name>`) consulted BEFORE `cargo install`: the
+/// container builder installs the always-present catalog set natively
+/// inside the target-native container (see `commands::build::container`)
+/// and passes its output here, so host-side staging never re-installs (or
+/// cross-compiles) what the container already built correctly for the
+/// target.
 pub fn materialize_official_store(
     staged_root: &Path,
     resolved: &ResolvedRobot,
     offline: bool,
+    officials_source: Option<&Path>,
     mut build_override: impl FnMut(&Path, &str) -> Result<PathBuf>,
 ) -> Result<()> {
     let bin_dir = ensure_bin_dir(staged_root)?;
     for runtime in &resolved.platform_runtimes {
-        materialize_platform_runtime(staged_root, &bin_dir, runtime, offline, &mut build_override)?;
+        materialize_platform_runtime(
+            staged_root,
+            &bin_dir,
+            runtime,
+            offline,
+            officials_source,
+            &mut build_override,
+        )?;
     }
     for tool in &resolved.tools {
-        materialize_tool(staged_root, &bin_dir, tool, offline, &mut build_override)?;
+        materialize_tool(
+            staged_root,
+            &bin_dir,
+            tool,
+            offline,
+            officials_source,
+            &mut build_override,
+        )?;
     }
     Ok(())
 }
@@ -240,7 +263,14 @@ pub fn stage_router_binary(
         .iter()
         .find(|tool| tool.kind == phoxal_cli_core::project::catalog::ArtifactKind::Infrastructure)
         .context("resolved graph is missing the infrastructure router")?;
-    materialize_tool(staged_root, &bin_dir, router, offline, &mut build_override)
+    materialize_tool(
+        staged_root,
+        &bin_dir,
+        router,
+        offline,
+        None,
+        &mut build_override,
+    )
 }
 
 fn ensure_bin_dir(staged_root: &Path) -> Result<PathBuf> {
@@ -250,16 +280,41 @@ fn ensure_bin_dir(staged_root: &Path) -> Result<PathBuf> {
     Ok(bin_dir)
 }
 
+/// Look for `binary_name` already materialized under `officials_source`
+/// (`<officials_source>/bin/<binary_name>`), linking it into `staged` and
+/// returning `true` when found. `officials_source` is `None` for every
+/// staging pass except the container builder's, and even then only ever
+/// holds the deterministic, robot-independent catalog set (services, tools,
+/// the router) - never a robot-specific component driver.
+fn link_from_officials_source(
+    officials_source: Option<&Path>,
+    binary_name: &str,
+    staged: &Path,
+) -> Result<bool> {
+    let Some(source_dir) = officials_source else {
+        return Ok(false);
+    };
+    let candidate = source_dir.join(BIN_DIR).join(binary_name);
+    if !candidate.is_file() {
+        return Ok(false);
+    }
+    link_or_copy(&candidate, staged)?;
+    Ok(true)
+}
+
 /// Materialize one official platform runtime (a service or a simulator) into
-/// its canonical `bin/` entry, from a source override or `cargo install`.
+/// its canonical `bin/` entry, from a source override, an already
+/// -materialized `officials_source`, or `cargo install`.
 fn materialize_platform_runtime(
     staged_root: &Path,
     bin_dir: &Path,
     runtime: &ResolvedPlatformRuntime,
     offline: bool,
+    officials_source: Option<&Path>,
     build_override: &mut impl FnMut(&Path, &str) -> Result<PathBuf>,
 ) -> Result<()> {
-    let staged = bin_dir.join(official_binary_name(runtime.kind, &runtime.name));
+    let binary_name = official_binary_name(runtime.kind, &runtime.name);
+    let staged = bin_dir.join(&binary_name);
     if staged.is_file() {
         return Ok(());
     }
@@ -267,19 +322,25 @@ fn materialize_platform_runtime(
         let source = build_override(crate_dir, &runtime.name)?;
         return link_or_copy(&source, &staged);
     }
-    let spec = MaterializeSpec::new(runtime.package.clone(), runtime.train.clone());
+    if link_from_officials_source(officials_source, &binary_name, &staged)? {
+        return Ok(());
+    }
+    let spec = MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
+        .with_target(runtime.target.clone());
     cargo_install(staged_root, &spec, offline)
         .with_context(|| format!("failed to materialize official runtime {}", runtime.package))?;
     Ok(())
 }
 
 /// Materialize one official tool (or the infrastructure router) into its
-/// canonical `bin/` entry, from a source override or `cargo install`.
+/// canonical `bin/` entry, from a source override, an already-materialized
+/// `officials_source`, or `cargo install`.
 fn materialize_tool(
     staged_root: &Path,
     bin_dir: &Path,
     tool: &ResolvedTool,
     offline: bool,
+    officials_source: Option<&Path>,
     build_override: &mut impl FnMut(&Path, &str) -> Result<PathBuf>,
 ) -> Result<()> {
     let staged = bin_dir.join(&tool.binary_name);
@@ -290,7 +351,11 @@ fn materialize_tool(
         let source = build_override(crate_dir, tool_participant_id(&tool.name))?;
         return link_or_copy(&source, &staged);
     }
-    let spec = MaterializeSpec::new(tool.package.clone(), tool.train.clone());
+    if link_from_officials_source(officials_source, &tool.binary_name, &staged)? {
+        return Ok(());
+    }
+    let spec = MaterializeSpec::new(tool.package.clone(), tool.train.clone())
+        .with_target(Some(tool.target.clone()));
     cargo_install(staged_root, &spec, offline)
         .with_context(|| format!("failed to materialize official runtime {}", tool.package))?;
     Ok(())
@@ -300,12 +365,19 @@ fn materialize_tool(
 /// `bin/` via `cargo install`, exactly like a service. A workspace/path
 /// -overridden driver is staged by [`stage_participant_binary`] instead and
 /// never reaches this function - see `run::stage_complete_bin_store`.
+///
+/// Component drivers are robot-specific (only the components a robot
+/// actually declares), so the container builder never pre-installs them the
+/// way it does the deterministic catalog set - this always calls `cargo
+/// install` (cross-compiling host-side when `runtime.target` differs from
+/// the host, with the same caveat any host cross build carries).
 pub fn materialize_component_driver(
     staged_root: &Path,
     runtime: &ResolvedPlatformRuntime,
     offline: bool,
 ) -> Result<()> {
-    let spec = MaterializeSpec::new(runtime.package.clone(), runtime.train.clone());
+    let spec = MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
+        .with_target(runtime.target.clone());
     cargo_install(staged_root, &spec, offline)
         .with_context(|| format!("failed to materialize component driver {}", runtime.package))?;
     Ok(())
@@ -1230,7 +1302,7 @@ robot:
         let built = project.path().join("target/debug/robot-service-drive");
         fs::create_dir_all(built.parent().unwrap())?;
         fs::write(&built, "OVERRIDE")?;
-        materialize_official_store(&staged, &resolved, false, |crate_dir, name| {
+        materialize_official_store(&staged, &resolved, false, None, |crate_dir, name| {
             assert_eq!(crate_dir, Path::new("services/drive"));
             assert_eq!(name, "drive");
             Ok(built.clone())

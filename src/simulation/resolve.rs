@@ -81,6 +81,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         &bundle_root,
         resolved,
         offline,
+        None,
         |crate_dir, name| {
             crate::run::build_source_binary(crate_dir, name, &crate::Ui::from_env(), None)
         },

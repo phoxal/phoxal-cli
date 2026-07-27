@@ -36,6 +36,14 @@ pub(crate) enum StagingBuild {
         /// This is the cargo target directory of the container's snapshot; no
         /// cargo runs on the host in that case.
         prebuilt_target_dir: Option<PathBuf>,
+        /// The container builder's own `cargo install` output for the
+        /// deterministic, robot-independent catalog set (services, tools,
+        /// the router) - installed *natively inside the container* to avoid
+        /// host cross-compilation entirely (see
+        /// `commands::build::container`). `None` for every other staging
+        /// pass, and even for the container builder this never covers
+        /// robot-specific component driver packages.
+        officials_source: Option<PathBuf>,
     },
 }
 
@@ -50,14 +58,24 @@ impl StagingBuild {
         Self::NativeBundle {
             target,
             prebuilt_target_dir: None,
+            officials_source: None,
         }
     }
 
-    /// Stage a native robot bundle from binaries built in a container.
-    pub(crate) fn prebuilt_native_bundle(target: String, target_dir: PathBuf) -> Self {
+    /// Stage a native robot bundle from binaries built in a container -
+    /// workspace crates from `target_dir`, and the catalog's official set
+    /// from `officials_source` (`None` when the container did not
+    /// materialize officials, e.g. an older invocation or a custom
+    /// `--builder-image` that skipped it).
+    pub(crate) fn prebuilt_native_bundle(
+        target: String,
+        target_dir: PathBuf,
+        officials_source: Option<PathBuf>,
+    ) -> Self {
         Self::NativeBundle {
             target,
             prebuilt_target_dir: Some(target_dir),
+            officials_source,
         }
     }
 
@@ -74,6 +92,17 @@ impl StagingBuild {
         }
     }
 
+    /// The container builder's pre-materialized catalog-set directory, when
+    /// this staging pass has one. See [`Self::prebuilt_native_bundle`].
+    pub(crate) fn officials_source(&self) -> Option<&Path> {
+        match self {
+            Self::HostRuntime => None,
+            Self::NativeBundle {
+                officials_source, ..
+            } => officials_source.as_deref(),
+        }
+    }
+
     /// Produce one workspace user/driver crate binary for this staging pass.
     pub(crate) fn build_user_binary(
         &self,
@@ -86,10 +115,12 @@ impl StagingBuild {
             Self::NativeBundle {
                 target,
                 prebuilt_target_dir: None,
+                ..
             } => build_source_binary(crate_dir, preferred_name, ui, Some(target)),
             Self::NativeBundle {
                 target,
                 prebuilt_target_dir: Some(target_dir),
+                ..
             } => locate_prebuilt_binary(crate_dir, preferred_name, target_dir, Some(target)),
         }
     }
@@ -99,11 +130,47 @@ impl StagingBuild {
 /// session. `target` cross-compiles with `cargo build --target <TRIPLE>` when it
 /// is set and differs from the host; a missing cross toolchain fails with an
 /// actionable `rustup target add` error rather than an opaque cargo failure.
+/// Builds `debug` - the fast interactive dev-loop profile `run`/`start`/local
+/// `build` all want. [`build_source_binary_with_profile`] is the release-aware
+/// form a path-overridden simulation controller uses instead, to match the
+/// release profile its registry-installed counterpart gets from `cargo
+/// install`'s own default.
 pub(crate) fn build_source_binary(
     crate_dir: &Path,
     preferred_name: &str,
     ui: &crate::Ui,
     target: Option<&str>,
+) -> Result<PathBuf> {
+    build_source_binary_with_profile(crate_dir, preferred_name, ui, target, Profile::Debug)
+}
+
+/// The Cargo build profile a source participant compiles under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Profile {
+    /// `cargo build` (no flag): fast, unoptimized - the interactive dev loop.
+    Debug,
+    /// `cargo build --release`: matches what `cargo install` produces by
+    /// default, so a source-overridden participant runs under the identical
+    /// profile a registry-materialized one would.
+    Release,
+}
+
+impl Profile {
+    const fn dir_name(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Release => "release",
+        }
+    }
+}
+
+/// [`build_source_binary`] with an explicit build profile.
+pub(crate) fn build_source_binary_with_profile(
+    crate_dir: &Path,
+    preferred_name: &str,
+    ui: &crate::Ui,
+    target: Option<&str>,
+    profile: Profile,
 ) -> Result<PathBuf> {
     let crate_dir = crate_dir.canonicalize().with_context(|| {
         format!(
@@ -123,10 +190,13 @@ pub(crate) fn build_source_binary(
     }
     let cargo_target_flag = cross.map(str::to_string);
     ui.info(format!(
-        "building user participant {preferred_name} with cargo build -p {package_name} --bin {binary_name}{}",
+        "building user participant {preferred_name} with cargo build -p {package_name} --bin {binary_name}{}{}",
         cargo_target_flag
             .as_deref()
             .map(|triple| format!(" --target {triple}"))
+            .unwrap_or_default(),
+        matches!(profile, Profile::Release)
+            .then_some(" --release")
             .unwrap_or_default()
     ));
     // Finding A3: a source participant only ever gets here when it genuinely
@@ -158,6 +228,9 @@ pub(crate) fn build_source_binary(
             if let Some(triple) = cross {
                 command.arg("--target").arg(triple);
             }
+            if matches!(profile, Profile::Release) {
+                command.arg("--release");
+            }
             let status = ui.command_status_captured(&mut command).with_context(|| {
                 format!(
                     "failed to start cargo build for participant {preferred_name} in {}",
@@ -174,9 +247,10 @@ pub(crate) fn build_source_binary(
             Ok(())
         },
     )?;
-    Ok(debug_binary_path(
+    Ok(profile_binary_path(
         &cargo_target_dir(&crate_dir)?,
         cross,
+        profile,
         &binary_name,
     ))
 }
@@ -196,7 +270,8 @@ fn locate_prebuilt_binary(
     // its output is always under `target/<triple>/debug` - including when the
     // triple equals the CLI host triple (a Linux host building its own arch in
     // a container). Never collapse to the implicit `target/debug` here (#936).
-    let path = debug_binary_path(target_dir, target, &binary_name);
+    // The container's `cargo build --workspace` never passes `--release`.
+    let path = profile_binary_path(target_dir, target, Profile::Debug, &binary_name);
     if !path.is_file() {
         bail!(
             "container build did not produce the binary for `{preferred_name}` (expected {}); \
@@ -207,14 +282,20 @@ fn locate_prebuilt_binary(
     Ok(path)
 }
 
-/// The `debug` build output path for `binary_name` under `target_dir`, in the
-/// `<triple>/debug/` subtree when cross-compiling and plain `debug/` otherwise.
-fn debug_binary_path(target_dir: &Path, cross: Option<&str>, binary_name: &str) -> PathBuf {
-    let debug = match cross {
-        Some(triple) => target_dir.join(triple).join("debug"),
-        None => target_dir.join("debug"),
+/// The build output path for `binary_name` under `target_dir` for `profile`,
+/// in the `<triple>/<profile>/` subtree when cross-compiling and plain
+/// `<profile>/` otherwise.
+fn profile_binary_path(
+    target_dir: &Path,
+    cross: Option<&str>,
+    profile: Profile,
+    binary_name: &str,
+) -> PathBuf {
+    let dir = match cross {
+        Some(triple) => target_dir.join(triple).join(profile.dir_name()),
+        None => target_dir.join(profile.dir_name()),
     };
-    debug.join(binary_name_with_suffix(binary_name))
+    dir.join(binary_name_with_suffix(binary_name))
 }
 
 /// Fail with an actionable error when the cross target's standard library is not

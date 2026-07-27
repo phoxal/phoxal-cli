@@ -14,6 +14,15 @@
 //! `.crates.toml`/`.crates2.json` (both are created empty either way) and it
 //! disables Cargo's protection against concurrent invocations, so the
 //! archiving step excludes dotfiles instead of trading that away.
+//!
+//! `target` cross-compiles with `--target <triple>` when it differs from the
+//! host, exactly like [`crate::run::build_source_binary`] does for
+//! workspace-owned crates - the two mechanisms carry the identical
+//! cross-compilation caveat (a missing cross toolchain or a native
+//! dependency that cannot cross-link fails here too). The container builder
+//! avoids this caveat entirely for the always-present official set by
+//! running these same commands *inside* the target-native container instead
+//! of cross-compiling them from the host - see `commands::build::container`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,11 +32,15 @@ use anyhow::{Context, Result, ensure};
 use phoxal_cli_core::project::catalog::{REGISTRY_NAME, cargo_package_name, registry_config_arg};
 
 /// One official package to materialize: its catalog identity
-/// (`phoxal/service-drive`) and the exact framework train it is pinned to.
+/// (`phoxal/service-drive`), the exact framework train it is pinned to, and
+/// the target triple to build for (`None` builds for the host running the
+/// command - inside a container, that IS the target, so no cross flag is
+/// needed there either).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializeSpec {
     pub catalog_package: String,
     pub train: String,
+    pub target: Option<String>,
 }
 
 impl MaterializeSpec {
@@ -36,7 +49,17 @@ impl MaterializeSpec {
         Self {
             catalog_package: catalog_package.into(),
             train: train.into(),
+            target: None,
         }
+    }
+
+    /// Materialize for an explicit target triple. A triple equal to the
+    /// host's own is treated identically to `None` - see
+    /// [`build_install_args`].
+    #[must_use]
+    pub fn with_target(mut self, target: Option<String>) -> Self {
+        self.target = target;
+        self
     }
 
     /// The Cargo package name this catalog identity is published under, which
@@ -58,29 +81,44 @@ impl MaterializeSpec {
 /// stale by the time it would be read.
 pub fn cargo_install(root: &Path, spec: &MaterializeSpec, offline: bool) -> Result<PathBuf> {
     let package = spec.cargo_package_name();
-    let command = build_install_command(root, &package, &spec.train, offline);
+    let args = build_install_args(&package, &spec.train, spec.target.as_deref(), offline);
+    let mut command = Command::new("cargo");
+    command.arg("install").args(&args).arg("--root").arg(root);
     run_cargo_install(command, &package)?;
     harvest_binary(root, &package)
 }
 
-/// The exact argv `cargo_install` runs, split out so the command shape is
-/// independently testable without a network or a real `cargo` binary.
-fn build_install_command(root: &Path, package: &str, train: &str, offline: bool) -> Command {
-    let mut command = Command::new("cargo");
-    command
-        .arg("install")
-        .arg(format!("{package}@{train}"))
-        .arg("--registry")
-        .arg(REGISTRY_NAME)
-        .arg("--locked")
-        .arg("--root")
-        .arg(root)
-        .arg("--config")
-        .arg(registry_config_arg());
-    if offline {
-        command.arg("--offline");
+/// The exact `cargo install` arguments after `install` and before `--root
+/// <root>` (appended separately since `root` is a `Path`, not a `str`) - the
+/// part shared between a host [`std::process::Command`] and a shell command
+/// line embedded in a container/remote invocation. Cross-compiles with
+/// `--target <triple>` only when `target` is set AND differs from the host -
+/// an explicit host-triple target is the plain native build, matching
+/// [`crate::run::build_source_binary`]'s identical check.
+#[must_use]
+pub fn build_install_args(
+    package: &str,
+    train: &str,
+    target: Option<&str>,
+    offline: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        format!("{package}@{train}"),
+        "--registry".to_string(),
+        REGISTRY_NAME.to_string(),
+        "--locked".to_string(),
+        "--config".to_string(),
+        registry_config_arg(),
+    ];
+    let cross = target.filter(|triple| *triple != phoxal_cli_core::project::host_target_triple());
+    if let Some(triple) = cross {
+        args.push("--target".to_string());
+        args.push(triple.to_string());
     }
-    command
+    if offline {
+        args.push("--offline".to_string());
+    }
+    args
 }
 
 fn run_cargo_install(mut command: Command, package: &str) -> Result<()> {
@@ -96,6 +134,9 @@ fn run_cargo_install(mut command: Command, package: &str) -> Result<()> {
 }
 
 /// Harvest the binary `cargo install` moved into `<root>/bin/<package>`.
+/// `cargo install --target <triple>` still normalizes its final output to
+/// `<root>/bin/` - `--target` only changes the internal build directory
+/// shape (`target/<triple>/release/`), never the install destination.
 fn harvest_binary(root: &Path, package: &str) -> Result<PathBuf> {
     let binary = root.join("bin").join(package);
     ensure!(
@@ -116,6 +157,19 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    fn command_for(spec: &MaterializeSpec, root: &Path, offline: bool) -> Command {
+        let package = spec.cargo_package_name();
+        let install_args =
+            build_install_args(&package, &spec.train, spec.target.as_deref(), offline);
+        let mut command = Command::new("cargo");
+        command
+            .arg("install")
+            .args(&install_args)
+            .arg("--root")
+            .arg(root);
+        command
     }
 
     #[test]
@@ -146,12 +200,7 @@ mod tests {
     #[test]
     fn install_command_pins_the_exact_version_and_carries_every_required_flag() {
         let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0");
-        let command = build_install_command(
-            Path::new("/tmp/bundle"),
-            "phoxal-service-drive",
-            "0.42.0",
-            false,
-        );
+        let command = command_for(&spec, Path::new("/tmp/bundle"), false);
         let argv = args(&command);
         assert_eq!(argv[0], "install");
         assert_eq!(argv[1], "phoxal-service-drive@0.42.0");
@@ -172,17 +221,12 @@ mod tests {
             .map(|index| argv[index + 1].clone())
             .expect("--root is present");
         assert_eq!(root_index, "/tmp/bundle");
-        let _ = spec;
     }
 
     #[test]
     fn offline_appends_the_offline_flag() {
-        let command = build_install_command(
-            Path::new("/tmp/bundle"),
-            "phoxal-service-drive",
-            "0.42.0",
-            true,
-        );
+        let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0");
+        let command = command_for(&spec, Path::new("/tmp/bundle"), true);
         assert!(args(&command).contains(&"--offline".to_string()));
     }
 
@@ -190,17 +234,41 @@ mod tests {
     fn a_bare_package_name_is_never_installed_without_a_pinned_version() {
         // Regression for the empirically verified failure mode: a bare name
         // installs the newest train the moment one exists.
-        let command = build_install_command(
-            Path::new("/tmp/bundle"),
-            "phoxal-service-drive",
-            "0.42.0",
-            false,
-        );
+        let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0");
+        let command = command_for(&spec, Path::new("/tmp/bundle"), false);
         let argv = args(&command);
         assert!(
             argv[1].contains('@'),
             "the install spec must pin a version: {argv:?}"
         );
+    }
+
+    #[test]
+    fn a_foreign_target_appends_the_cross_flag() {
+        let foreign =
+            if phoxal_cli_core::project::host_target_triple() == "aarch64-unknown-linux-gnu" {
+                "x86_64-unknown-linux-gnu"
+            } else {
+                "aarch64-unknown-linux-gnu"
+            };
+        let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0")
+            .with_target(Some(foreign.to_string()));
+        let command = command_for(&spec, Path::new("/tmp/bundle"), false);
+        let argv = args(&command);
+        let target_index = argv
+            .iter()
+            .position(|arg| arg == "--target")
+            .map(|index| argv[index + 1].clone())
+            .expect("--target is present for a foreign triple");
+        assert_eq!(target_index, foreign);
+    }
+
+    #[test]
+    fn a_target_matching_the_host_omits_the_cross_flag() {
+        let host = phoxal_cli_core::project::host_target_triple();
+        let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0").with_target(Some(host));
+        let command = command_for(&spec, Path::new("/tmp/bundle"), false);
+        assert!(!args(&command).contains(&"--target".to_string()));
     }
 
     #[test]

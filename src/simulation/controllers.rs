@@ -63,20 +63,31 @@ fn stage_controller_runtime_with_home(
     let resolved_binary = if let Some(crate_dir) = runtime.source_path() {
         let preferred_name = format!("phoxal-simulator-{}", runtime.name);
         let _env_guard = webots_home.map(WebotsHomeEnvGuard::set);
-        let built = crate::run::build_source_binary(crate_dir, &preferred_name, ui, None)
-            .with_context(|| {
-                format!(
-                    "failed to build path-overridden simulator '{}' from {}",
-                    runtime.name,
-                    crate_dir.display()
-                )
-            })?;
+        // Release, matching what a registry-materialized controller gets
+        // from `cargo install`'s own default (organization#951 WS4): the
+        // simulation root always carries the profile users deploy,
+        // regardless of whether the controller was source-overridden.
+        let built = crate::run::build_source_binary_with_profile(
+            crate_dir,
+            &preferred_name,
+            ui,
+            None,
+            crate::run::Profile::Release,
+        )
+        .with_context(|| {
+            format!(
+                "failed to build path-overridden simulator '{}' from {}",
+                runtime.name,
+                crate_dir.display()
+            )
+        })?;
         crate::stager::stage_named_binary(&simulation_root, &preferred_name, &built)?
     } else {
         let spec = crate::materialize::MaterializeSpec::new(
             runtime.package.clone(),
             runtime.train.clone(),
-        );
+        )
+        .with_target(runtime.target.clone());
         crate::materialize::cargo_install(&simulation_root, &spec, offline).with_context(|| {
             format!(
                 "failed to materialize official simulator '{}'",

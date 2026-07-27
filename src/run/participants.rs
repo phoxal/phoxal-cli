@@ -152,9 +152,13 @@ pub(crate) fn stage_complete_bin_store(
         crate::stager::materialize_component_driver(staged_root, runtime, offline)?;
     }
     // Every official service, tool, and the infrastructure router.
-    crate::stager::materialize_official_store(staged_root, resolved, offline, |crate_dir, name| {
-        build.build_user_binary(crate_dir, name, ui)
-    })
+    crate::stager::materialize_official_store(
+        staged_root,
+        resolved,
+        offline,
+        build.officials_source(),
+        |crate_dir, name| build.build_user_binary(crate_dir, name, ui),
+    )
     .context("failed to complete the staged bin store with the full official runtime set")?;
     Ok(())
 }
@@ -446,7 +450,8 @@ fn resolve_participant_source(
             }
             crate::materialize::cargo_install(
                 staged_root,
-                &crate::materialize::MaterializeSpec::new(tool.package.clone(), tool.train.clone()),
+                &crate::materialize::MaterializeSpec::new(tool.package.clone(), tool.train.clone())
+                    .with_target(Some(tool.target.clone())),
                 offline,
             )
         }
@@ -467,7 +472,8 @@ fn resolve_participant_source(
                 &crate::materialize::MaterializeSpec::new(
                     runtime.package.clone(),
                     runtime.train.clone(),
-                ),
+                )
+                .with_target(runtime.target.clone()),
                 offline,
             )
         }
@@ -697,19 +703,19 @@ services:
 
     /// The layout execution path reads only the staged `bin/` store: every
     /// participant's executable is the flat `bin/<binary_name>` entry, resolved
-    /// with no source, Cargo, resolved graph, or artifact store (#936). A staged
-    /// layout that carries a stray `.phoxal/artifacts` directory proves the
-    /// layout path never consults it.
+    /// with no source, Cargo, resolved graph, or materialization state (#936,
+    /// organization#951 WS4). A staged layout that carries a stray `.phoxal/`
+    /// subdirectory proves the layout path never consults anything there.
     #[test]
-    fn layout_specs_resolve_every_executable_from_bin_with_no_artifact_store() -> Result<()> {
+    fn layout_specs_resolve_every_executable_from_bin_with_no_other_state() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = dir.path();
         std::fs::write(root.join("robot.yaml"), LAYOUT_ROBOT_YAML)?;
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin)?;
-        // A vendored artifact store the layout path must never touch: if it were
+        // Stray `.phoxal/` state the layout path must never touch: if it were
         // consulted the run would depend on it, defeating the bundle guarantee.
-        std::fs::create_dir_all(root.join(".phoxal/artifacts"))?;
+        std::fs::create_dir_all(root.join(".phoxal/resolve"))?;
 
         let layout = RuntimeLayout::open(root)?;
         for required in layout.required_runtimes(&DriverSelection::All) {

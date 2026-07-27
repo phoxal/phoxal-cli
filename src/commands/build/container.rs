@@ -4,10 +4,31 @@
 //! inside a pinned official Docker `rust` image, then hands the built binaries
 //! back to the same host-side staging + validation + deterministic archiving
 //! every other builder uses. The container is only a compilation environment: it
-//! mounts a deterministic source snapshot, the host's Cargo registry/git caches,
-//! and the vendored `.phoxal/artifacts`, runs one
-//! `cargo build --workspace --locked --target` inside the image, and never
-//! produces a Docker/OCI image.
+//! mounts a deterministic source snapshot and the host's Cargo registry/git
+//! caches, runs `cargo build --workspace --locked --target` inside the image,
+//! and never produces a Docker/OCI image.
+//!
+//! ## Officials materialize inside the container too (organization#951 WS4)
+//!
+//! The deterministic, robot-independent catalog set (every official service,
+//! tool, and the infrastructure router - "every official always runs" per
+//! #945) is installed with `cargo install` in the SAME container invocation,
+//! not host-side: the container already runs natively on the target
+//! architecture ([`platform_for_triple`]), which is exactly the property that
+//! makes cross-compiling from the host risky for a package with any native
+//! dependency - the very thing the container exists to avoid for the
+//! workspace build. Doing the same for officials keeps that guarantee for
+//! the *whole* deterministic set, not just the user's own crates, and
+//! reuses the identical `cargo install` invocation shape
+//! [`crate::materialize`] uses everywhere else.
+//!
+//! Component driver packages are the one exception: they are robot-specific
+//! (only the components a robot declares), so they are not known until the
+//! resolved graph exists, and materialize host-side afterward instead -
+//! cross-compiling like any other host build, with the same caveat that
+//! carries. The mounted Cargo registry/git caches (shared with the workspace
+//! build) accelerate that too, but do not eliminate the cross-compilation
+//! risk for a component driver with native dependencies.
 //!
 //! ## Default image strategy (human-decided 2026-07-24)
 //!
@@ -30,7 +51,7 @@
 //! (Rust 1.85). `--builder-image` overrides the default entirely - a user-provided
 //! image owns its own toolchain and glibc.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -98,9 +119,20 @@ pub fn require_platform_for_triple(triple: &str) -> Result<&'static str> {
     })
 }
 
+/// One official package [`ContainerBuildSpec::invocation`] installs inside
+/// the container - a Cargo package name (already projected from its catalog
+/// identity, e.g. `phoxal-service-drive`) at the exact train every official
+/// package is pinned to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerOfficial {
+    pub package: String,
+    pub train: String,
+}
+
 /// Everything one container build needs: the engine, image, the container
 /// platform (arch), target triple, the host source snapshot mounted as the
-/// workdir, and the read-through caches. All paths are host paths;
+/// workdir, the read-through caches, and the deterministic official set to
+/// materialize alongside the workspace build. All paths are host paths;
 /// [`Self::invocation`] renders them into engine arguments.
 #[derive(Debug, Clone)]
 pub struct ContainerBuildSpec {
@@ -115,20 +147,33 @@ pub struct ContainerBuildSpec {
     /// [`CONTAINER_WORKDIR`] and used as the cargo working directory.
     pub snapshot: PathBuf,
     /// Host Cargo registry cache (`$CARGO_HOME/registry`), mounted read-write so
-    /// the container reuses already-fetched crates.
+    /// the container reuses already-fetched crates AND official packages -
+    /// `cargo install --registry phoxal` writes into the identical
+    /// `$CARGO_HOME/registry` tree as the workspace's own dependencies.
     pub cargo_registry: Option<PathBuf>,
     /// Host Cargo git cache (`$CARGO_HOME/git`), mounted read-write.
     pub cargo_git: Option<PathBuf>,
-    /// The vendored per-train `.phoxal/artifacts` store, mounted read-only. The
-    /// container never fetches officials; staging links them host-side.
-    pub artifacts: Option<PathBuf>,
+    /// Host directory `cargo install --root` writes each official's `bin/`
+    /// entry into, mounted read-write at [`CONTAINER_OFFICIALS`]. Must exist
+    /// and be empty before the container runs; its `bin/` subtree becomes
+    /// the container build's `officials_source` for host-side staging.
+    pub officials_root: PathBuf,
+    /// The deterministic catalog set (services, tools, the router) to
+    /// install via `cargo install` inside the container, at the resolved
+    /// train. Empty skips every official install (e.g. the train could not
+    /// be resolved ahead of time), leaving them to materialize host-side
+    /// like any other build.
+    pub officials: Vec<ContainerOfficial>,
+    pub offline: bool,
 }
 
 /// Where the source snapshot is mounted inside the container.
 pub const CONTAINER_WORKDIR: &str = "/phoxal/src";
 const CONTAINER_CARGO_REGISTRY: &str = "/usr/local/cargo/registry";
 const CONTAINER_CARGO_GIT: &str = "/usr/local/cargo/git";
-const CONTAINER_ARTIFACTS: &str = "/phoxal/src/.phoxal/artifacts";
+/// Where official packages are installed inside the container -
+/// [`ContainerBuildSpec::officials_root`]'s mount point.
+const CONTAINER_OFFICIALS: &str = "/phoxal/officials";
 
 /// A fully rendered engine command: the program (`docker`/`podman`) and its
 /// argv. Kept as data so tests can assert it without executing anything.
@@ -139,10 +184,15 @@ pub struct EngineInvocation {
 }
 
 impl ContainerBuildSpec {
-    /// Render the engine invocation that compiles the workspace for the target
-    /// inside the image. The container runs, as a compilation environment only,
-    /// `cargo build --workspace --locked --target <triple>` against the mounted
-    /// snapshot, on the [`Self::platform`] architecture so compilation is native.
+    /// Render the engine invocation that compiles the workspace AND
+    /// materializes the deterministic official set inside the image. The
+    /// container runs, as a compilation environment only,
+    /// `cargo build --workspace --locked --target <triple>` against the
+    /// mounted snapshot, then one `cargo install <package>@<train>
+    /// --registry phoxal --locked --root <officials> --target <triple>
+    /// --config ...` per [`Self::officials`] entry - all on the
+    /// [`Self::platform`] architecture, so every one of them is native, not
+    /// cross-compiled.
     #[must_use]
     pub fn invocation(&self) -> EngineInvocation {
         let mut args = vec!["run".to_string(), "--rm".to_string()];
@@ -170,30 +220,54 @@ impl ContainerBuildSpec {
             args.push("-v".to_string());
             args.push(format!("{}:{}", git.display(), CONTAINER_CARGO_GIT));
         }
-        if let Some(artifacts) = &self.artifacts {
+        if !self.officials.is_empty() {
             args.push("-v".to_string());
             args.push(format!(
-                "{}:{}:ro",
-                artifacts.display(),
-                CONTAINER_ARTIFACTS
+                "{}:{}",
+                self.officials_root.display(),
+                CONTAINER_OFFICIALS
             ));
         }
         // The image already carries the target toolchain; the build never needs
-        // to reach the network for a toolchain, only for crate dependencies the
-        // mounted caches usually already hold.
+        // to reach the network for a toolchain, only for crate dependencies (and
+        // official packages) the mounted caches usually already hold.
         args.push(self.image.clone());
-        args.extend([
-            "cargo".to_string(),
-            "build".to_string(),
-            "--workspace".to_string(),
-            "--locked".to_string(),
-            "--target".to_string(),
-            self.target.clone(),
-        ]);
+        args.extend(["sh".to_string(), "-c".to_string(), self.container_script()]);
         EngineInvocation {
             program: self.engine.program().to_string(),
             args,
         }
+    }
+
+    /// The shell script run inside the container: the workspace build, then
+    /// one `cargo install` per official, stopping at the first failure
+    /// (`set -e`).
+    fn container_script(&self) -> String {
+        let mut commands = vec![format!(
+            "cargo build --workspace --locked --target {}",
+            crate::commands::deploy::shell_quote(&self.target)
+        )];
+        for official in &self.officials {
+            let package = official.package.clone();
+            let install_args = crate::materialize::build_install_args(
+                &package,
+                &official.train,
+                Some(&self.target),
+                self.offline,
+            );
+            let mut command = vec!["cargo".to_string(), "install".to_string()];
+            command.extend(install_args);
+            command.push("--root".to_string());
+            command.push(CONTAINER_OFFICIALS.to_string());
+            commands.push(
+                command
+                    .iter()
+                    .map(|arg| crate::commands::deploy::shell_quote(arg))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        format!("set -e; {}", commands.join("; "))
     }
 }
 
@@ -253,13 +327,6 @@ pub fn host_cargo_caches() -> (Option<PathBuf>, Option<PathBuf>) {
     )
 }
 
-/// The vendored `.phoxal/artifacts` store under `project_root`, when present.
-#[must_use]
-pub fn vendored_artifacts(project_root: &Path) -> Option<PathBuf> {
-    let path = project_root.join(".phoxal").join("artifacts");
-    path.is_dir().then_some(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,7 +340,18 @@ mod tests {
             snapshot: PathBuf::from("/tmp/snapshot"),
             cargo_registry: Some(PathBuf::from("/home/dev/.cargo/registry")),
             cargo_git: Some(PathBuf::from("/home/dev/.cargo/git")),
-            artifacts: Some(PathBuf::from("/proj/.phoxal/artifacts")),
+            officials_root: PathBuf::from("/tmp/officials"),
+            officials: vec![
+                ContainerOfficial {
+                    package: "phoxal-service-drive".to_string(),
+                    train: "0.42.0".to_string(),
+                },
+                ContainerOfficial {
+                    package: "phoxal-tool-bus".to_string(),
+                    train: "0.42.0".to_string(),
+                },
+            ],
+            offline: false,
         }
     }
 
@@ -330,7 +408,8 @@ mod tests {
             joined.contains(&format!("/tmp/snapshot:{CONTAINER_WORKDIR}")),
             "{joined}"
         );
-        // Cargo caches mounted read-write; artifacts read-only.
+        // Cargo caches mounted read-write; the officials root too, since
+        // officials materialize inside the container.
         assert!(
             joined.contains(&format!(
                 "/home/dev/.cargo/registry:{CONTAINER_CARGO_REGISTRY}"
@@ -342,16 +421,29 @@ mod tests {
             "{joined}"
         );
         assert!(
-            joined.contains(&format!("/proj/.phoxal/artifacts:{CONTAINER_ARTIFACTS}:ro")),
+            joined.contains(&format!("/tmp/officials:{CONTAINER_OFFICIALS}")),
             "{joined}"
         );
-        // The pinned official rust image precedes the cargo command.
+        // The pinned official rust image precedes the shell script.
         assert!(joined.contains("rust:1.88-bookworm"), "{joined}");
         // Native compilation for the target, with the locked lockfile enforced.
         assert!(
-            joined.contains("cargo build --workspace --locked --target aarch64-unknown-linux-gnu"),
+            joined.contains("cargo build --workspace --locked --target"),
             "{joined}"
         );
+        assert!(joined.contains("aarch64-unknown-linux-gnu"), "{joined}");
+        // Every official installs, pinned to its exact train, into the
+        // mounted officials root, cross-target-explicit like the workspace
+        // build.
+        assert!(joined.contains("phoxal-service-drive@0.42.0"), "{joined}");
+        assert!(joined.contains("phoxal-tool-bus@0.42.0"), "{joined}");
+        assert!(joined.contains(CONTAINER_OFFICIALS), "{joined}");
+        assert!(joined.contains("--registry"), "{joined}");
+        assert!(joined.contains("phoxal"), "{joined}");
+        assert!(joined.contains("--locked"), "{joined}");
+        // `set -e` so a failed official install stops the whole script rather
+        // than silently continuing with a partial officials root.
+        assert!(joined.contains("set -e"), "{joined}");
     }
 
     #[test]
@@ -366,17 +458,34 @@ mod tests {
         let mut spec = spec();
         spec.cargo_registry = None;
         spec.cargo_git = None;
-        spec.artifacts = None;
+        spec.officials = Vec::new();
         let joined = spec.invocation().args.join(" ");
         assert!(!joined.contains(".cargo/registry"), "{joined}");
         assert!(!joined.contains(".cargo/git"), "{joined}");
-        assert!(!joined.contains("artifacts"), "{joined}");
+        assert!(!joined.contains(CONTAINER_OFFICIALS), "{joined}");
         // The snapshot mount and cargo build survive.
         assert!(joined.contains(CONTAINER_WORKDIR), "{joined}");
         assert!(
             joined.contains("cargo build --workspace --locked"),
             "{joined}"
         );
+    }
+
+    #[test]
+    fn no_officials_omits_both_the_mount_and_any_install_command() {
+        let mut spec = spec();
+        spec.officials = Vec::new();
+        let joined = spec.invocation().args.join(" ");
+        assert!(!joined.contains("cargo install"), "{joined}");
+        assert!(!joined.contains(CONTAINER_OFFICIALS), "{joined}");
+    }
+
+    #[test]
+    fn offline_appends_the_offline_flag_to_every_official_install() {
+        let mut spec = spec();
+        spec.offline = true;
+        let joined = spec.invocation().args.join(" ");
+        assert!(joined.contains("--offline"), "{joined}");
     }
 
     #[test]

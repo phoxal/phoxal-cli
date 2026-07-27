@@ -135,6 +135,7 @@ pub(crate) fn refresh_staging(
         &staged_root,
         &resolved,
         options.offline,
+        build.officials_source(),
         |crate_dir, name| build.build_user_binary(crate_dir, name, ui),
     )
     .context("failed to materialize official runtimes")?;
@@ -293,12 +294,11 @@ pub(crate) fn prepare_run_on_board(
 
 /// Prepare a run from an already-staged runtime layout at `layout_root` - an
 /// extracted `build.phoxal` or a `.phoxal/bundle/` directory. There is
-/// nothing to build, resolve, or fetch: the launch plan and every executable
-/// come from the layout's flat `bin/` store, so this needs no Cargo, suite,
-/// toolchain, or network, and never touches `.phoxal/artifacts`. An arbitrary
-/// layout keeps runtime state under `<layout_root>/.phoxal`; the installed
-/// `/var/phoxal` identity maps persistent state to `/var/lib/phoxal/state` and
-/// sockets to `/run/phoxal`.
+/// nothing to build, resolve, or materialize: the launch plan and every
+/// executable come from the layout's flat `bin/` store, so this needs no
+/// Cargo, toolchain, or network. An arbitrary layout keeps runtime state
+/// under `<layout_root>/.phoxal`; the installed `/var/phoxal` identity maps
+/// persistent state to `/var/lib/phoxal/state` and sockets to `/run/phoxal`.
 pub(crate) fn prepare_layout_run_on_board(
     layout_root: &Path,
     options: RunOptions,
