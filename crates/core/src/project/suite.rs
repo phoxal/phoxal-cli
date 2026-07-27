@@ -192,18 +192,6 @@ impl std::fmt::Display for ArtifactKind {
     }
 }
 
-#[must_use]
-pub const fn artifact_kind(kind: Kind, assets: bool) -> ArtifactKind {
-    match kind {
-        Kind::Service => ArtifactKind::Service,
-        Kind::Component if assets => ArtifactKind::ComponentAssets,
-        Kind::Component => ArtifactKind::ComponentDriver,
-        Kind::Tool => ArtifactKind::Tool,
-        Kind::Simulator => ArtifactKind::Simulator,
-        Kind::Infrastructure => ArtifactKind::Infrastructure,
-    }
-}
-
 pub fn host_target_triple() -> String {
     std::env::var("PHOXAL_HOST_TARGET_TRIPLE").unwrap_or_else(|_| {
         let arch = std::env::consts::ARCH;
@@ -272,18 +260,6 @@ pub struct FixtureArtifact {
     version: String,
 }
 
-impl FixtureArtifact {
-    #[doc(hidden)]
-    pub fn as_asset_entry_mut(&mut self) -> &mut Artifact {
-        &mut self.artifact
-    }
-
-    #[doc(hidden)]
-    pub fn as_artifact_entry_mut(&mut self) -> &mut Artifact {
-        &mut self.artifact
-    }
-}
-
 #[doc(hidden)]
 pub fn fixture_suite_for_tests(entries: Vec<FixtureArtifact>) -> Suite {
     let version = entries
@@ -304,11 +280,6 @@ pub fn fixture_suite_for_tests(entries: Vec<FixtureArtifact>) -> Suite {
         }
     }
     Suite::new(version, artifacts)
-}
-
-#[doc(hidden)]
-pub fn fixture_artifact_for_tests(filename: &str, sha256: &str) -> Blob {
-    fixture_blob_for_tests(&format!("https://example.invalid/{filename}"), sha256, 1)
 }
 
 fn fixture_entry(
@@ -364,32 +335,6 @@ pub fn fixture_simulator_entry_for_tests(
     fixture_entry(
         format!("phoxal/simulator-{name}"),
         Kind::Simulator,
-        version,
-        target,
-        published,
-    )
-}
-
-#[doc(hidden)]
-pub fn fixture_tool_entry_for_tests(
-    name: &str,
-    version: &str,
-    target: &str,
-    published: bool,
-) -> FixtureArtifact {
-    let kind = if name == "router" {
-        Kind::Infrastructure
-    } else {
-        Kind::Tool
-    };
-    let prefix = if kind == Kind::Infrastructure {
-        "infrastructure"
-    } else {
-        "tool"
-    };
-    fixture_entry(
-        format!("phoxal/{prefix}-{name}"),
-        kind,
         version,
         target,
         published,

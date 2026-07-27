@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
@@ -116,21 +116,6 @@ pub fn stage_world(
             )
         }),
     }
-}
-
-/// P4/C2 triage: real, tested, complete validation logic (checks that every
-/// contact-material name a component declares actually exists in the staged
-/// world) that is not yet called from `crate::simulation`'s staging
-/// pipeline - a genuine integration gap, not speculative scaffolding. Wiring
-/// it needs a product decision on where `referenced_contact_materials` comes
-/// from (component `simulation.yaml` declarations), which is beyond this
-/// refactor's scope; kept and flagged as a follow-up rather than deleted.
-#[allow(dead_code)]
-pub fn validate_world_contact_materials(
-    staged_world: &str,
-    referenced_contact_materials: &BTreeSet<String>,
-) -> Result<()> {
-    world::validate_world_contact_materials(staged_world, referenced_contact_materials)
 }
 
 pub fn proto_name_for_robot(robot_model: &str) -> Result<String> {

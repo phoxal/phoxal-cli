@@ -212,8 +212,3 @@ impl SupervisorActionReceiver {
         action
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SupervisorOutcome {
-    pub failed_participants: Vec<String>,
-}

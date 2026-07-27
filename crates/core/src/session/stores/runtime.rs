@@ -4,9 +4,8 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use crate::project::launch_plan::{LaunchPlan, ParticipantExecution};
+use crate::session::ProcessKey;
 use crate::session::board::{BoardSnapshot, ParticipantState};
-use crate::session::{ProcessKey, RobotKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuntimeOrigin {
@@ -46,7 +45,6 @@ impl RuntimeObservation {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeStore {
-    session_started_at: Instant,
     metadata: BTreeMap<String, RuntimeParticipantMetadata>,
     observations: BTreeMap<String, RuntimeObservation>,
 }
@@ -60,36 +58,10 @@ impl Default for RuntimeStore {
 impl RuntimeStore {
     #[must_use]
     pub fn new() -> Self {
-        Self::new_at(Instant::now())
-    }
-
-    fn new_at(now: Instant) -> Self {
         Self {
-            session_started_at: now,
             metadata: BTreeMap::new(),
             observations: BTreeMap::new(),
         }
-    }
-
-    #[must_use]
-    pub fn from_launch_plan(plan: &LaunchPlan) -> Self {
-        let mut store = Self::new();
-        for robot in &plan.robots {
-            for participant in &robot.participants {
-                store.metadata.insert(
-                    ProcessKey::robot(
-                        RobotKey::new(&robot.namespace, &robot.id),
-                        &participant.launch.participant_id,
-                    )
-                    .to_string(),
-                    RuntimeParticipantMetadata {
-                        artifact_ref: artifact_ref_for_execution(&participant.execution),
-                        origin: origin_for_execution(&participant.execution),
-                    },
-                );
-            }
-        }
-        store
     }
 
     #[must_use]
@@ -107,11 +79,6 @@ impl RuntimeStore {
     #[must_use]
     pub fn observation(&self, id: &str) -> Option<&RuntimeObservation> {
         self.observations.get(id)
-    }
-
-    #[must_use]
-    pub fn session_uptime(&self, now: Instant) -> Duration {
-        now.saturating_duration_since(self.session_started_at)
     }
 
     #[doc(hidden)]
@@ -171,28 +138,11 @@ impl RuntimeStore {
     }
 }
 
-fn artifact_ref_for_execution(execution: &ParticipantExecution) -> Option<String> {
-    // The plan is source-free (#936): a participant is identified by the flat
-    // `bin/` binary it resolves to, so the runtime store's "artifact ref" is
-    // that canonical binary name rather than a suite ref or a crate path.
-    Some(format!("bin/{}", execution.binary_name()))
-}
-
-fn origin_for_execution(execution: &ParticipantExecution) -> RuntimeOrigin {
-    match execution {
-        ParticipantExecution::UserService { .. } | ParticipantExecution::UserTool { .. } => {
-            RuntimeOrigin::UserService
-        }
-        ParticipantExecution::OfficialArtifact { .. }
-        | ParticipantExecution::OfficialTool { .. }
-        | ParticipantExecution::ComponentDriver { .. } => RuntimeOrigin::Framework,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::ParticipantKind;
+    use crate::session::RobotKey;
     use crate::session::board::ParticipantStatus;
 
     fn board(state: ParticipantState, restarts: u32) -> BoardSnapshot {
@@ -206,7 +156,7 @@ mod tests {
     #[test]
     fn supervised_restart_resets_process_uptime() {
         let start = Instant::now();
-        let mut store = RuntimeStore::new_at(start);
+        let mut store = RuntimeStore::new();
         store.observe_board_at(&board(ParticipantState::Ready, 0), start);
         let restarted = start + Duration::from_secs(8);
         store.observe_board_at(&board(ParticipantState::Restarting, 1), restarted);
@@ -219,7 +169,7 @@ mod tests {
     #[test]
     fn terminal_runtime_state_freezes_uptime_until_a_restart() {
         let start = Instant::now();
-        let mut store = RuntimeStore::new_at(start);
+        let mut store = RuntimeStore::new();
         store.observe_board_at(&board(ParticipantState::Ready, 0), start);
         let failed_at = start + Duration::from_secs(4);
         store.observe_board_at(&board(ParticipantState::Failed, 0), failed_at);
@@ -245,7 +195,7 @@ mod tests {
     #[test]
     fn observations_are_pruned_when_participants_leave_the_board() {
         let start = Instant::now();
-        let mut store = RuntimeStore::new_at(start);
+        let mut store = RuntimeStore::new();
         store.observe_board_at(&board(ParticipantState::Ready, 0), start);
         assert!(store.observation("drive").is_some());
 

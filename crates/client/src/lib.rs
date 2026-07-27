@@ -43,11 +43,6 @@ impl SnapshotStore {
         self.snapshots.borrow().clone()
     }
 
-    #[must_use]
-    pub const fn snapshots(&self) -> &watch::Receiver<SupervisorSnapshotV0> {
-        &self.snapshots
-    }
-
     pub fn subscribe(&self) -> watch::Receiver<SupervisorSnapshotV0> {
         self.snapshots.clone()
     }

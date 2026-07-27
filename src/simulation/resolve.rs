@@ -143,7 +143,7 @@ pub(crate) fn build_checked_sim_launch_plan(
     // `run::prepare::run_source_check` use, rather than a locally
     // reconstructed, always-empty report (organization: `phoxal simulate`
     // silently accepted invalid user config and missing images).
-    crate::check::ensure_check_outcome_ok(&resolved.train, &metadata_outcome)?;
+    crate::check::ensure_check_outcome_ok(&metadata_outcome)?;
 
     let plan = build_launch_plan(
         LaunchMode::Webots {

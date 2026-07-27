@@ -288,14 +288,6 @@ pub fn ensure_target(object_bytes: &[u8], describe: &str, expected: &ExpectedTar
     Ok(())
 }
 
-/// Fails when `object_bytes` does not match the host target signature, so a
-/// foreign binary (a Mach-O offered on a Linux host, or an
-/// `aarch64-unknown-linux-gnu` bundle unpacked on an `x86_64` host) is rejected
-/// at inspection with a precise diagnostic. Reads and parses only.
-pub fn ensure_host_target(object_bytes: &[u8], describe: &str) -> Result<()> {
-    ensure_target(object_bytes, describe, &expected_target_for_host())
-}
-
 /// Reads `binary_path`, verifies it matches the `expected` target signature, and
 /// returns its embedded participant metadata - the two off-disk inspections a
 /// layout run performs on a selected binary, in one read.
@@ -431,7 +423,7 @@ mod tests {
             segment,
             b"payload",
         );
-        ensure_host_target(&host_object, "synthetic host object")?;
+        ensure_target(&host_object, "synthetic host object", &host)?;
 
         // Host format, foreign CPU: the arch gate (not the format gate) must
         // reject it.
@@ -443,7 +435,7 @@ mod tests {
             segment,
             b"payload",
         );
-        let error = ensure_host_target(&foreign_object, "bin/phoxal-service-drive")
+        let error = ensure_target(&foreign_object, "bin/phoxal-service-drive", &host)
             .expect_err("a foreign-arch binary must be rejected");
         let message = error.to_string();
         assert!(message.contains("bin/phoxal-service-drive"), "{message}");

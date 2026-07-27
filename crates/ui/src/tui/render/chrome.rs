@@ -32,7 +32,6 @@ pub(super) fn startup_phase_lines(phase: &PhaseRow) -> Vec<Line<'static>> {
         Some((PhaseOutcome::Succeeded, elapsed)) => {
             format!("done in {}", human::duration(*elapsed))
         }
-        Some((PhaseOutcome::Skipped, _)) => "skipped".to_string(),
         Some((PhaseOutcome::Failed { error }, _)) => {
             format!("failed: {}", sanitize_and_ellipsize(error, 52))
         }

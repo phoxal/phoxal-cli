@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use anyhow::{Context, Result, bail};
 use webots_proto::ast::proto::ast::{AstNode, ExternProto};
 use webots_proto::{Proto, ProtoExt, Severity};
@@ -45,36 +43,6 @@ pub fn stage_world_source_with_protos(
         .context("failed to parse staged world after serialization")?;
 
     Ok(staged)
-}
-
-/// P4/C2 triage: see `webots_staging::validate_world_contact_materials`'s own
-/// docs (the thin re-export this crate's callers would actually use) - real,
-/// tested logic awaiting a product decision on where to source
-/// `referenced_contact_materials` from, not speculative scaffolding.
-#[allow(dead_code)]
-pub fn validate_world_contact_materials(
-    staged_world: &str,
-    referenced_contact_materials: &BTreeSet<String>,
-) -> Result<()> {
-    if referenced_contact_materials.is_empty() {
-        return Ok(());
-    }
-
-    let defined_materials = collect_world_contact_materials(staged_world);
-    let missing_materials = referenced_contact_materials
-        .difference(&defined_materials)
-        .cloned()
-        .collect::<Vec<_>>();
-
-    if missing_materials.is_empty() {
-        return Ok(());
-    }
-
-    bail!(
-        "staged Webots world is missing contact material definitions for [{}]; defined materials: [{}]",
-        missing_materials.join(", "),
-        defined_materials.into_iter().collect::<Vec<_>>().join(", ")
-    );
 }
 
 pub fn stage_world_source_with_text_fallback(
@@ -132,56 +100,6 @@ pub fn stage_world_source_with_text_fallback(
     staged.push_str(root_nodes_source.trim_end());
     staged.push('\n');
     Ok(staged)
-}
-
-fn collect_world_contact_materials(world_source: &str) -> BTreeSet<String> {
-    ["material1", "material2"]
-        .into_iter()
-        .flat_map(|field| collect_quoted_field_values(world_source, field))
-        .collect()
-}
-
-fn collect_quoted_field_values(source: &str, field_name: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut search_start = 0usize;
-
-    while let Some(relative_index) = source[search_start..].find(field_name) {
-        let field_index = search_start + relative_index;
-        let mut cursor = field_index + field_name.len();
-        if !source[field_index..].chars().next().is_some_and(|_| {
-            field_index == 0 || !is_identifier_char(source[..field_index].chars().last())
-        }) {
-            search_start = cursor;
-            continue;
-        }
-        while let Some(ch) = source[cursor..].chars().next() {
-            if ch == '"' {
-                break;
-            }
-            cursor += ch.len_utf8();
-        }
-        let Some(_) = source[cursor..].chars().next().filter(|ch| *ch == '"') else {
-            search_start = cursor;
-            continue;
-        };
-        cursor += 1;
-        let value_start = cursor;
-        while let Some(ch) = source[cursor..].chars().next() {
-            if ch == '"' {
-                values.push(source[value_start..cursor].to_string());
-                cursor += 1;
-                break;
-            }
-            cursor += ch.len_utf8();
-        }
-        search_start = cursor;
-    }
-
-    values
-}
-
-fn is_identifier_char(ch: Option<char>) -> bool {
-    ch.is_some_and(|value| value.is_ascii_alphanumeric() || value == '_')
 }
 
 fn externproto_insertion_index(source: &str) -> usize {

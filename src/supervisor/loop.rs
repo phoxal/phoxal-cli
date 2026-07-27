@@ -2,9 +2,9 @@
 
 use super::{
     BoardBackend, ParticipantState, RequestedStop, RunningParticipant, SupervisionStage,
-    SupervisorAction, SupervisorOptions, SupervisorOutcome, await_stage_ready, emit_event,
-    join_reader, maybe_emit_startup_outcome, send_process_group_terminate, send_terminate,
-    spawn_until_pending, stop_child,
+    SupervisorAction, SupervisorOptions, await_stage_ready, emit_event, join_reader,
+    maybe_emit_startup_outcome, send_process_group_terminate, send_terminate, spawn_until_pending,
+    stop_child,
 };
 use crate::session::output::WaitBudget;
 use anyhow::Result;
@@ -18,7 +18,7 @@ pub async fn supervise_until_shutdown(
     stages: Vec<SupervisionStage>,
     board: BoardBackend,
     mut options: SupervisorOptions,
-) -> Result<SupervisorOutcome> {
+) -> Result<()> {
     let failed_required = board
         .supervisor_snapshot()
         .processes
@@ -168,9 +168,7 @@ pub async fn supervise_until_shutdown(
         return Err(error);
     }
     board.set_lifecycle(ProjectLifecycle::Stopped);
-    Ok(SupervisorOutcome {
-        failed_participants: board.snapshot().failed_participants(),
-    })
+    Ok(())
 }
 
 pub(crate) async fn request_participant_stop(

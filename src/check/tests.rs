@@ -27,6 +27,22 @@ use std::path::{Path, PathBuf};
 use crate::host_paths::test_support::ScratchPhoxalHome;
 use crate::resolver::resolve;
 
+/// Converts a fixture's `(name, artifact_ref)` pairs into the
+/// [`PlatformArtifactRef`]s `run_check_with_context` expects, all of kind
+/// [`ArtifactKind::Service`] - every caller in this file only ever exercises
+/// service-kind platform artifacts.
+fn platform_refs(images: &[(String, String)]) -> Vec<PlatformArtifactRef> {
+    images
+        .iter()
+        .map(|(name, artifact_ref)| PlatformArtifactRef {
+            name: name.clone(),
+            kind: ArtifactKind::Service,
+            artifact_ref: artifact_ref.clone(),
+            instances: Vec::new(),
+        })
+        .collect()
+}
+
 #[test]
 fn launch_plan_covers_services_services_and_component_instances() -> Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;
@@ -438,10 +454,11 @@ fn healthy_graph_passes_with_fake_participant_report() -> Result<()> {
         PathBuf::from("/fake/project/runtimes/drive"),
     )];
 
-    let outcome = run_check(
-        &images,
+    let outcome = run_check_with_context(
+        &platform_refs(&images),
         &[],
         &sources,
+        CheckGraphContext { robot: None },
         |image_ref| match image_ref {
             "mission:ok" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
@@ -470,10 +487,11 @@ fn healthy_graph_passes_with_platform_and_component_driver_source() -> Result<()
         PathBuf::from("/fake/project/components/ddsm115"),
     )];
 
-    let outcome = run_check(
-        &images,
+    let outcome = run_check_with_context(
+        &platform_refs(&images),
         &[],
         &sources,
+        CheckGraphContext { robot: None },
         |image_ref| match image_ref {
             "mission:ok" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
@@ -507,10 +525,11 @@ fn privileged_tools_and_checked_sources_coexist_in_one_graph() -> Result<()> {
         PathBuf::from("/fake/project/runtimes/drive"),
     )];
 
-    let outcome = run_check(
+    let outcome = run_check_with_context(
         &[],
         &tools,
         &sources,
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |tool| {
             let path = tool.binary_path.as_path();
@@ -541,10 +560,11 @@ fn privileged_tools_are_exempt_from_topology() -> Result<()> {
         binary_path: PathBuf::from("/fake/cache/joypad"),
     }];
 
-    let outcome = run_check(
+    let outcome = run_check_with_context(
         &[],
         &tools,
         &[],
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |tool| {
             let path = tool.binary_path.as_path();
@@ -572,10 +592,11 @@ fn source_and_platform_participants_coexist_in_a_healthy_graph() -> Result<()> {
         PathBuf::from("/fake/project/runtimes/drive"),
     )];
 
-    let outcome = run_check(
-        &images,
+    let outcome = run_check_with_context(
+        &platform_refs(&images),
         &[],
         &sources,
+        CheckGraphContext { robot: None },
         |image_ref| match image_ref {
             "mission:ok" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
@@ -595,10 +616,11 @@ fn user_service_artifact_id_must_match_manifest_key() {
         PathBuf::from("/fake/project/runtimes/avoid"),
     )];
 
-    let error = run_check(
+    let error = run_check_with_context(
         &[],
         &[],
         &sources,
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |_| Ok(raw("surprise")),
@@ -617,10 +639,11 @@ fn user_service_artifact_id_must_match_manifest_key() {
 fn official_service_artifact_identity_must_match_resolved_name() {
     let images = vec![("drive".to_string(), "drive:swapped".to_string())];
 
-    let error = run_check(
-        &images,
+    let error = run_check_with_context(
+        &platform_refs(&images),
         &[],
         &[],
+        CheckGraphContext { robot: None },
         |image_ref| match image_ref {
             "drive:swapped" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
@@ -676,10 +699,11 @@ fn tool_artifact_identity_must_match_resolved_tool() {
         binary_path: PathBuf::from("/fake/cache/joypad"),
     }];
 
-    let error = run_check(
+    let error = run_check_with_context(
         &[],
         &tools,
         &[],
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |tool| {
             let path = tool.binary_path.as_path();
@@ -712,10 +736,11 @@ fn tool_artifact_kind_true_kind_is_accepted() -> Result<()> {
         binary_path: PathBuf::from("/fake/cache/joypad"),
     }];
 
-    let outcome = run_check(
+    let outcome = run_check_with_context(
         &[],
         &tools,
         &[],
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |tool| {
             let path = tool.binary_path.as_path();
@@ -739,10 +764,11 @@ fn tool_artifact_kind_legacy_runtime_is_rejected() {
         binary_path: PathBuf::from("/fake/cache/joypad"),
     }];
 
-    let error = run_check(
+    let error = run_check_with_context(
         &[],
         &tools,
         &[],
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |tool| {
             let path = tool.binary_path.as_path();
@@ -773,10 +799,11 @@ fn component_driver_artifact_kind_true_kind_is_accepted() -> Result<()> {
         PathBuf::from("/fake/project/components/ddsm115"),
     )];
 
-    let outcome = run_check(
+    let outcome = run_check_with_context(
         &[],
         &[],
         &sources,
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |_| Ok(raw_kind_class("driver", "ddsm115", "checked")),
@@ -794,10 +821,11 @@ fn component_driver_artifact_kind_legacy_runtime_is_rejected() {
         PathBuf::from("/fake/project/components/ddsm115"),
     )];
 
-    let error = run_check(
+    let error = run_check_with_context(
         &[],
         &[],
         &sources,
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |_| Ok(raw_kind_class("runtime", "ddsm115", "checked")),
@@ -820,10 +848,11 @@ fn tool_artifact_kind_garbage_is_rejected() {
         binary_path: PathBuf::from("/fake/cache/joypad"),
     }];
 
-    let error = run_check(
+    let error = run_check_with_context(
         &[],
         &tools,
         &[],
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |tool| {
             let path = tool.binary_path.as_path();
@@ -868,10 +897,11 @@ fn every_source_participant_always_builds_no_scoping_no_cache() -> Result<()> {
     ];
 
     let mut built = Vec::new();
-    let outcome = run_check(
+    let outcome = run_check_with_context(
         &[],
         &[],
         &sources,
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |participant| {
@@ -918,10 +948,11 @@ fn component_driver_with_no_producer_is_a_legal_graph() -> Result<()> {
         ),
     ];
 
-    let outcome = run_check(
+    let outcome = run_check_with_context(
         &[],
         &[],
         &sources,
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |participant| {
@@ -953,10 +984,11 @@ fn user_service_with_no_producer_is_a_legal_graph() -> Result<()> {
         ),
     ];
 
-    let outcome = run_check(
+    let outcome = run_check_with_context(
         &[],
         &[],
         &sources,
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |participant| {
@@ -1020,10 +1052,11 @@ fn component_driver_and_platform_participants_coexist_in_a_healthy_graph() -> Re
         PathBuf::from("/fake/project/components/ddsm115"),
     )];
 
-    let outcome = run_check(
-        &images,
+    let outcome = run_check_with_context(
+        &platform_refs(&images),
         &[],
         &sources,
+        CheckGraphContext { robot: None },
         |image_ref| match image_ref {
             "mission:ok" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
@@ -1049,13 +1082,14 @@ fn source_build_error_is_a_hard_error() {
         PathBuf::from("/fake/project/runtimes/drive"),
     )];
 
-    let error = run_check(
+    let error = run_check_with_context(
         &[],
         &[],
         &sources,
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
-        |_| Err(MissingImageError::new(anyhow!("source build failed")).into()),
+        |_| Err(anyhow!("source build failed")),
     )
     .expect_err("source build failures should abort check");
 
@@ -1075,10 +1109,11 @@ fn component_driver_build_error_is_a_hard_error() {
         PathBuf::from("/fake/project/components/ddsm115"),
     )];
 
-    let error = run_check(
+    let error = run_check_with_context(
         &[],
         &[],
         &sources,
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |_| Err(anyhow!("component build failed")),
@@ -1144,10 +1179,11 @@ fn components_without_drivers_are_not_built() -> Result<()> {
     );
 
     let mut built = Vec::new();
-    let outcome = run_check(
+    let outcome = run_check_with_context(
         &[],
         &[],
         &source_participants,
+        CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
         |_| bail!("no tools should be fetched"),
         |participant| {
@@ -1388,34 +1424,6 @@ fn path_overridden_service_enters_check_through_source_participant_report() -> R
         },
     )?;
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
-    Ok(())
-}
-
-#[test]
-fn missing_image_is_reported_after_other_images_are_checked() -> Result<()> {
-    let images = vec![
-        ("mission".to_string(), "mission:ok".to_string()),
-        ("drive".to_string(), "service-drive:v1-stable".to_string()),
-    ];
-
-    let outcome = run_check(
-        &images,
-        &[],
-        &[],
-        |image_ref| match image_ref {
-            "mission:ok" => Ok(raw("mission")),
-            "service-drive:v1-stable" => Err(MissingImageError::new(anyhow!("not found")).into()),
-            unexpected => bail!("unexpected image {unexpected}"),
-        },
-        |_| bail!("no tools should be fetched"),
-        |_| bail!("no source services should be built"),
-    )?;
-
-    assert_eq!(
-        outcome.missing_images,
-        vec!["service-drive:v1-stable".to_string()]
-    );
-    assert!(!outcome.is_ok());
     Ok(())
 }
 

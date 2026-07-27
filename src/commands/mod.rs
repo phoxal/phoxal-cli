@@ -3,11 +3,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use serde::Serialize;
 
 use crate::AppContext;
 
-pub mod behavior;
 pub mod build;
 pub mod bus_target;
 pub mod check;
@@ -128,29 +126,6 @@ pub fn long_version() -> &'static str {
 #[derive(Debug, Args)]
 pub struct VersionArgs {}
 
-/// What the CLI itself supports, independent of any one robot graph.
-///
-/// Contract compatibility is per-contract name identity now (D1) - there is
-/// no single graph-wide API version ceiling to report. So
-/// this reports the CLI's own build identity instead: its version, the wire
-/// codec it speaks, and the linker-section names it reads a participant's
-/// compiled-in `#[derive(phoxal::Api)]` metadata from (see
-/// [`phoxal_cli_core::check::participant_metadata`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct VersionSummary {
-    pub cli_version: &'static str,
-    pub wire_codec: String,
-    pub participant_metadata_sections: &'static [&'static str],
-}
-
-pub fn version_summary() -> VersionSummary {
-    VersionSummary {
-        cli_version: env!("CARGO_PKG_VERSION"),
-        wire_codec: phoxal::bus::encoding_string(phoxal::bus::CodecId::MessagePack),
-        participant_metadata_sections: &phoxal_cli_core::check::participant_metadata::SECTION_NAMES,
-    }
-}
-
 impl VersionArgs {
     pub fn run(&self) -> Result<()> {
         println!("phoxal {}", long_version());
@@ -222,10 +197,6 @@ pub enum RootCommand {
     Install(install::Install),
     #[command(about = "Activate an older installed runtime release.")]
     Rollback(install::Rollback),
-    // Preserved prototype for the parked behavior-orchestration design. Keep it
-    // out of the supported command listing until that plan is rewritten.
-    #[command(about = "Experimental behavior-orchestration prototype.", hide = true)]
-    Behavior(behavior::Behavior),
     #[command(about = "Validate robot.yaml structure and Cargo workspace runtime ownership.")]
     Validate(validate::Validate),
     #[command(about = "Simulate a robot with `simulation webots run`.")]
@@ -282,7 +253,6 @@ impl RootCommand {
             Self::Deploy(command) => command.run(app).await,
             Self::Install(command) => command.run(app).await,
             Self::Rollback(command) => command.run(app).await,
-            Self::Behavior(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
             Self::Simulation(command) => command.run(app).await,
             Self::Run(command) => command.run(app).await,
@@ -358,36 +328,6 @@ mod tests {
         )
         .expect_err("run/start/build never fetch a suite");
         assert!(format!("{error:#}").contains("never fetch"), "{error:#}");
-    }
-
-    #[test]
-    fn version_summary_reports_cli_support_not_a_graph_wide_api_version() {
-        let summary = version_summary();
-
-        assert_eq!(summary.cli_version, env!("CARGO_PKG_VERSION"));
-        assert_eq!(
-            summary.wire_codec,
-            phoxal::bus::encoding_string(phoxal::bus::CodecId::MessagePack)
-        );
-        assert_eq!(
-            summary.participant_metadata_sections,
-            phoxal_cli_core::check::participant_metadata::SECTION_NAMES
-        );
-    }
-
-    #[test]
-    fn version_summary_serializes_to_the_documented_json_shape() {
-        let summary = version_summary();
-
-        let value = serde_json::to_value(&summary).expect("summary should serialize");
-        assert_eq!(
-            value,
-            serde_json::json!({
-                "cli_version": env!("CARGO_PKG_VERSION"),
-                "wire_codec": phoxal::bus::encoding_string(phoxal::bus::CodecId::MessagePack),
-                "participant_metadata_sections": phoxal_cli_core::check::participant_metadata::SECTION_NAMES,
-            })
-        );
     }
 
     /// `enters_interactive_session` decides whether dispatch must require a

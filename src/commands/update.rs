@@ -36,7 +36,6 @@ pub struct PackageUpdate {
     pub old: Option<String>,
     pub new: String,
     pub bytes: u64,
-    pub pinned: bool,
     pub refresh: bool,
 }
 
@@ -50,7 +49,6 @@ pub struct UpdateSummary {
     pub free_disk_bytes: Option<u64>,
     pub updates: Vec<PackageUpdate>,
     pub prune_versions: BTreeMap<String, Vec<String>>,
-    pub pins_skipped: Vec<String>,
 }
 
 impl Update {
@@ -160,7 +158,6 @@ fn update_locked_train(
                 old,
                 new: descriptor.version.clone(),
                 bytes: descriptor.size,
-                pinned: false,
             }
         })
         .collect::<Vec<_>>();
@@ -189,8 +186,6 @@ fn update_locked_train(
         );
     }
 
-    let pins_skipped = Vec::new();
-
     if !dry_run {
         let _lock = crate::native_artifacts::ArtifactStoreLock::exclusive("update")?;
         fs::create_dir_all(&destination)?;
@@ -214,7 +209,6 @@ fn update_locked_train(
         free_disk_bytes,
         updates,
         prune_versions,
-        pins_skipped,
     })
 }
 
@@ -346,14 +340,14 @@ fn print_human(summary: &UpdateSummary, interactive: bool) -> Result<()> {
 
 fn human_lines(summary: &UpdateSummary, interactive: bool) -> Vec<String> {
     if interactive && !summary.dry_run {
-        return if summary.updates.iter().any(|update| !update.pinned) {
+        return if summary.updates.is_empty() {
+            vec!["no updates available".to_string()]
+        } else {
             summary
                 .prune_versions
                 .iter()
                 .map(|(package, versions)| format!("pruned {package}: {}", versions.join(", ")))
                 .collect()
-        } else {
-            vec!["no updates available".to_string()]
         };
     }
     let marker = if summary.dry_run {
@@ -363,9 +357,6 @@ fn human_lines(summary: &UpdateSummary, interactive: bool) -> Vec<String> {
     };
     let mut lines = Vec::new();
     for update in &summary.updates {
-        if update.pinned {
-            continue;
-        }
         lines.push(format!("{marker} {}", update_result(update)));
     }
     for (package, versions) in &summary.prune_versions {
@@ -430,9 +421,6 @@ impl ArtifactProgressReporter for UpdateProgress {
         let Some(update) = self.update(descriptor) else {
             return crate::progress::Row::Silent;
         };
-        if update.pinned {
-            return crate::progress::Row::Silent;
-        }
         self.rows.begin(update_label(update))
     }
 
@@ -440,9 +428,6 @@ impl ArtifactProgressReporter for UpdateProgress {
         let Some(update) = self.update(descriptor) else {
             return;
         };
-        if update.pinned {
-            return;
-        }
         let message = update_result(update);
         if let Some(row) = row {
             row.finish(message);
@@ -684,12 +669,12 @@ robot:
     }
 
     #[test]
-    fn human_update_rows_replace_the_footer_and_hide_pins() {
+    fn human_update_rows_replace_the_interactive_footer() {
         let summary = UpdateSummary {
             dry_run: false,
             train: "0.36.0".to_string(),
             destination: PathBuf::from("/ignored"),
-            package_count: 3,
+            package_count: 2,
             download_bytes: 7_461_785,
             free_disk_bytes: Some(99),
             updates: vec![
@@ -699,16 +684,6 @@ robot:
                     old: Some("0.1.7".to_string()),
                     new: "0.1.9".to_string(),
                     bytes: 7_461_785,
-                    pinned: false,
-                    refresh: false,
-                },
-                PackageUpdate {
-                    package: "phoxal/component-passive_caster".to_string(),
-                    target: None,
-                    old: Some("0.1.0".to_string()),
-                    new: "0.1.0".to_string(),
-                    bytes: 123,
-                    pinned: true,
                     refresh: false,
                 },
                 PackageUpdate {
@@ -717,12 +692,10 @@ robot:
                     old: Some("0.19.8".to_string()),
                     new: "0.19.8".to_string(),
                     bytes: 7_356_930,
-                    pinned: false,
                     refresh: false,
                 },
             ],
             prune_versions: BTreeMap::new(),
-            pins_skipped: vec!["phoxal/component-passive_caster".to_string()],
         };
 
         assert_eq!(
@@ -734,6 +707,8 @@ robot:
                     .to_string(),
             ]
         );
+        // Interactive mode replaces the per-package rows with a prune-only
+        // footer; with nothing pruned, that footer is empty.
         assert!(human_lines(&summary, true).is_empty());
 
         let mut refresh = summary.clone();
@@ -743,7 +718,6 @@ robot:
             old: Some("0.19.8".to_string()),
             new: "0.19.8".to_string(),
             bytes: 7_356_930,
-            pinned: false,
             refresh: true,
         }];
         refresh.prune_versions.insert(
@@ -758,10 +732,10 @@ robot:
             ]
         );
 
-        let mut all_pinned = summary;
-        all_pinned.updates.retain(|update| update.pinned);
+        let mut no_updates = summary;
+        no_updates.updates.clear();
         assert_eq!(
-            human_lines(&all_pinned, true),
+            human_lines(&no_updates, true),
             vec!["no updates available".to_string()]
         );
     }

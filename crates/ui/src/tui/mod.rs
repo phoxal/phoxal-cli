@@ -69,15 +69,6 @@ impl Drop for Activated {
     }
 }
 
-impl std::fmt::Debug for TuiDisplay {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("TuiDisplay")
-            .field("activated", &self.activated.is_some())
-            .finish_non_exhaustive()
-    }
-}
-
 impl TuiDisplay {
     #[must_use]
     pub fn new(theme: Theme, title: TitleInfo) -> Self {
@@ -106,10 +97,6 @@ impl TuiDisplay {
 
     pub fn set_bus_endpoint(&mut self, endpoint: String) {
         self.title.bus_endpoint = endpoint;
-    }
-
-    pub fn set_runtime_store(&mut self, runtime: RuntimeStore) {
-        self.runtime = runtime;
     }
 
     pub fn apply_session_event(&mut self, event: &SessionEvent) {
