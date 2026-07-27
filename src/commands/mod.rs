@@ -99,7 +99,11 @@ pub enum RootCommand {
     Install(install::Install),
     #[command(about = "Activate an older installed runtime release.")]
     Rollback(install::Rollback),
-    #[command(about = "Validate robot.yaml structure and Cargo workspace runtime ownership.")]
+    #[command(
+        about = "Validate robot.yaml structure, Cargo workspace runtime ownership, and declared service/tool config.",
+        long_about = "Validate that this project is well-formed: robot.yaml structure, Cargo workspace runtime ownership (every declared services/tools entry has a matching workspace crate), and every declared service's/tool's config against the JSON Schema its own participant type embeds.\n\n\
+                      The config-schema check compiles the declared service/tool crates (never the official set, never a staged bundle) to read their embedded schema - the one part of `validate` that is not free. A robot.yaml with no declared services/tools compiles nothing."
+    )]
     Validate(validate::Validate),
     #[command(about = "Simulate a robot with `simulation webots run`.")]
     Simulation(simulate::Simulation),
