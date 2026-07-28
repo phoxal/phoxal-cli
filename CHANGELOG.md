@@ -4,6 +4,18 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.27.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.27.0) - 2026-07-28
+
+
+### Fixed
+
+- *(build)* Persist the container Cargo target cache ([#225](https://github.com/phoxal/phoxal-cli/pull/225))
+
+### Refactored
+
+- Finish Cargo-native runtime staging ([#223](https://github.com/phoxal/phoxal-cli/pull/223)) [**breaking**]
+
+
 ## [0.26.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.26.0) - 2026-07-27
 
 
