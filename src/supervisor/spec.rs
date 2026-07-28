@@ -1,6 +1,7 @@
 //! Participant process specifications and supervision policy.
 
 use super::{ParticipantLaunchCommand, RESTART_SEC, START_LIMIT_BURST, START_LIMIT_INTERVAL};
+use phoxal_cli_core::identity::ProducerId;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::launch_env;
 use phoxal_cli_core::session::{
@@ -47,7 +48,7 @@ impl ParticipantSpec {
         ReadinessPolicy::ExactLiveliness(ParticipantInstanceKey {
             robot,
             participant: participant.to_string(),
-            producer: phoxal::bus::ProducerId::mint(),
+            producer: ProducerId::mint(),
         })
     }
     #[must_use]

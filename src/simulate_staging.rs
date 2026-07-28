@@ -308,6 +308,7 @@ fn stage_component_protos(
 mod tests {
     use super::*;
     use clap::Parser;
+    use phoxal_cli_core::identity::ExecutionId;
 
     const BASE_WORLD: &str = "#VRML_SIM R2025a utf8\nWorldInfo {}\n";
 
@@ -399,10 +400,7 @@ robot:
         };
 
         let mut staged = Vec::new();
-        let executions = [
-            phoxal::bus::ExecutionId::mint(),
-            phoxal::bus::ExecutionId::mint(),
-        ];
+        let executions = [ExecutionId::mint(), ExecutionId::mint()];
         for _ in &executions {
             let temp = tempfile::tempdir()?;
             let world = temp.path().join("worlds/default.wbt");

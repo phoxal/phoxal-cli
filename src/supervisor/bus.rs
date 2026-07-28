@@ -9,6 +9,7 @@ use phoxal::bus::{DEFAULT_QUERY_TIMEOUT, Querier, Subscribe, Subscriber, Topic};
 use phoxal::raw::{Bus, BusConfig};
 use phoxal::raw::{ParticipantLivelinessEvent, ParticipantLivelinessStatus};
 use phoxal_api::v0_1 as api;
+use phoxal_cli_core::identity::{ExecutionId, ProducerId};
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
 use phoxal_cli_core::session::reconcile::{
     Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced,
@@ -26,7 +27,7 @@ pub fn start_bus_log_subscriber(
     namespace: String,
     robot_id: String,
     connect: String,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
     board: BoardBackend,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -41,7 +42,7 @@ pub fn start_bus_log_subscriber(
                 robot_id: robot_id.clone(),
                 participant: "phoxal-cli-supervisor".to_string(),
                 execution,
-                producer: phoxal::bus::ProducerId::mint(),
+                producer: ProducerId::mint(),
                 connect_endpoints: vec![connect.clone()],
             })
             .await
@@ -176,7 +177,7 @@ pub fn start_clock_feed(
     namespace: String,
     robot_id: String,
     connect: String,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
 ) -> (watch::Receiver<ClockObservation>, JoinHandle<()>) {
     let (tx, rx) = watch::channel(ClockObservation::default());
     let handle = tokio::spawn(async move {
@@ -205,7 +206,7 @@ pub(crate) async fn clock_feed_loop(
     namespace: String,
     robot_id: String,
     connect: String,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
     tx: &watch::Sender<ClockObservation>,
 ) -> Result<()> {
     let bus = Bus::open(BusConfig {
@@ -213,7 +214,7 @@ pub(crate) async fn clock_feed_loop(
         robot_id,
         participant: "phoxal-cli-clock-observer".to_string(),
         execution,
-        producer: phoxal::bus::ProducerId::mint(),
+        producer: ProducerId::mint(),
         connect_endpoints: vec![connect],
     })
     .await
@@ -382,7 +383,7 @@ pub fn start_liveliness_observer(
     namespace: String,
     robot_id: String,
     connect: String,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
     board: BoardBackend,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -410,7 +411,7 @@ pub(crate) async fn liveliness_observer_loop(
     namespace: String,
     robot_id: String,
     connect: String,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
     board: BoardBackend,
 ) -> Result<()> {
     let bus = Bus::open(BusConfig {
@@ -418,7 +419,7 @@ pub(crate) async fn liveliness_observer_loop(
         robot_id: robot_id.clone(),
         participant: LIVELINESS_OBSERVER_ID.to_string(),
         execution,
-        producer: phoxal::bus::ProducerId::mint(),
+        producer: ProducerId::mint(),
         connect_endpoints: vec![connect],
     })
     .await
@@ -471,8 +472,8 @@ mod tests {
 
     /// A deterministic producer identity for tests, so a case can name the
     /// exact restart it means.
-    fn producer(seed: u8) -> phoxal::bus::ProducerId {
-        phoxal::bus::ProducerId::parse(&format!("{:032x}", u128::from(seed)))
+    fn producer(seed: u8) -> ProducerId {
+        ProducerId::parse(&format!("{:032x}", u128::from(seed)))
             .expect("test producer id must parse")
     }
     use super::*;

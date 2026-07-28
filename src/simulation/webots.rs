@@ -9,6 +9,7 @@ use crate::webots_stage_root;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use phoxal_cli_core::identity::ExecutionId;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::WEBOTS_PROCESS_ID;
 use phoxal_cli_core::session::{
@@ -23,7 +24,7 @@ pub(crate) fn stage_and_prepare_webots_spec(
     runtime_root: &Path,
     connect: &str,
     offline: bool,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
 ) -> Result<ParticipantSpec> {
     crate::webots_stage_root::wipe_and_recreate()?;
     let world = webots_world(&sim.plan.mode);
@@ -90,7 +91,7 @@ pub(crate) fn stage_and_prepare_webots_spec(
 /// Nothing time-authoritative belongs here. The controller owns its own world
 /// history and mints its own timeline; handing it an execution *origin* would
 /// let it reconstruct real robot time it never reached.
-fn webots_spawn_env(execution: phoxal::bus::ExecutionId) -> Vec<(String, String)> {
+fn webots_spawn_env(execution: ExecutionId) -> Vec<(String, String)> {
     vec![(
         phoxal::participant::launch::env::EXECUTION_ID.to_string(),
         execution.to_string(),
@@ -129,7 +130,7 @@ mod tests {
     /// able to express.
     #[test]
     fn the_webots_process_receives_the_execution_and_nothing_time_authoritative() {
-        let execution = phoxal::bus::ExecutionId::mint();
+        let execution = ExecutionId::mint();
         let spawned = webots_spawn_env(execution);
 
         assert_eq!(
@@ -149,8 +150,8 @@ mod tests {
         let world = Path::new("/tmp/staged/worlds/rover.wbt");
         assert_eq!(webots_launch_args(world), webots_launch_args(world));
 
-        let first = phoxal::bus::ExecutionId::mint();
-        let second = phoxal::bus::ExecutionId::mint();
+        let first = ExecutionId::mint();
+        let second = ExecutionId::mint();
         assert_ne!(webots_spawn_env(first), webots_spawn_env(second));
         assert!(
             !webots_launch_args(world)

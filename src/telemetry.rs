@@ -24,6 +24,7 @@ use phoxal::bus::{
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::v0_1 as api;
 use phoxal_api::v0_1 as state_api;
+use phoxal_cli_core::identity::{ExecutionId, ProducerId};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -406,7 +407,7 @@ pub fn start_control_state_feed(
     namespace: String,
     robot_id: String,
     connect: String,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
     telemetry: TelemetryBackend,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -431,7 +432,7 @@ async fn control_state_feed_loop(
     namespace: String,
     robot_id: String,
     connect: String,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
     telemetry: &TelemetryBackend,
 ) -> Result<()> {
     let bus = Bus::open(BusConfig {
@@ -439,7 +440,7 @@ async fn control_state_feed_loop(
         robot_id,
         participant: "phoxal-cli-control-state".to_string(),
         execution,
-        producer: phoxal::bus::ProducerId::mint(),
+        producer: ProducerId::mint(),
         connect_endpoints: vec![connect],
     })
     .await?;
@@ -464,7 +465,7 @@ pub fn start_device_feed(
     namespace: String,
     robot_id: String,
     connect: String,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
     telemetry: TelemetryBackend,
     mut recovery_epochs: watch::Receiver<u64>,
 ) -> JoinHandle<()> {
@@ -479,7 +480,7 @@ pub fn start_device_feed(
                 robot_id: robot_id.clone(),
                 participant: "phoxal-cli-tool-device-consumer".to_string(),
                 execution,
-                producer: phoxal::bus::ProducerId::mint(),
+                producer: ProducerId::mint(),
                 connect_endpoints: vec![connect.clone()],
             })
             .await
@@ -673,7 +674,7 @@ pub fn start_router_metrics_feed(
     namespace: String,
     robot_id: String,
     connect: String,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
     telemetry: TelemetryBackend,
     mut recovery_epochs: watch::Receiver<u64>,
 ) -> JoinHandle<()> {
@@ -688,7 +689,7 @@ pub fn start_router_metrics_feed(
                 robot_id: robot_id.clone(),
                 participant: "phoxal-cli-tool-bus-consumer".to_string(),
                 execution,
-                producer: phoxal::bus::ProducerId::mint(),
+                producer: ProducerId::mint(),
                 connect_endpoints: vec![connect.clone()],
             })
             .await
@@ -914,7 +915,7 @@ pub fn start_runtime_performance_feed(
     robot_id: String,
     expected_participant_ids: Vec<String>,
     connect: String,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
     telemetry: TelemetryBackend,
     mut recovery_epochs: watch::Receiver<u64>,
 ) -> JoinHandle<()> {
@@ -939,7 +940,7 @@ pub fn start_runtime_performance_feed(
                 robot_id: robot_id.clone(),
                 participant: "phoxal-cli-tool-telemetry-consumer".to_string(),
                 execution,
-                producer: phoxal::bus::ProducerId::mint(),
+                producer: ProducerId::mint(),
                 connect_endpoints: vec![connect.clone()],
             })
             .await
@@ -1282,7 +1283,7 @@ pub fn start_joypad_devices_feed(
     namespace: String,
     robot_id: String,
     connect: String,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
     telemetry: TelemetryBackend,
 ) -> JoinHandle<()> {
     let (command_tx, mut command_rx) = mpsc::channel(JOYPAD_COMMAND_CHANNEL_CAPACITY);
@@ -1313,7 +1314,7 @@ async fn joypad_devices_feed_loop(
     namespace: String,
     robot_id: String,
     connect: String,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
     telemetry: &TelemetryBackend,
     command_rx: &mut mpsc::Receiver<JoypadCommand>,
 ) -> Result<()> {
@@ -1322,7 +1323,7 @@ async fn joypad_devices_feed_loop(
         robot_id,
         participant: "phoxal-cli-telemetry-joypad".to_string(),
         execution,
-        producer: phoxal::bus::ProducerId::mint(),
+        producer: ProducerId::mint(),
         connect_endpoints: vec![connect],
     })
     .await

@@ -6,7 +6,9 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod check;
+pub mod identity;
 pub mod project;
+pub mod runtime;
 pub mod schema;
 pub mod session;
 pub mod simulation;

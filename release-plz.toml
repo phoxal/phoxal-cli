@@ -25,5 +25,25 @@ name = "phoxal-cli-core"
 version_group = "phoxal-cli"
 
 [[package]]
+name = "phoxal-cli-protocol"
+version_group = "phoxal-cli"
+
+[[package]]
+name = "phoxal-cli-observation"
+version_group = "phoxal-cli"
+
+[[package]]
+name = "phoxal-cli-project"
+version_group = "phoxal-cli"
+
+[[package]]
+name = "phoxal-cli-supervisor"
+version_group = "phoxal-cli"
+
+[[package]]
+name = "phoxal-cli-client"
+version_group = "phoxal-cli"
+
+[[package]]
 name = "phoxal-cli-ui"
 version_group = "phoxal-cli"

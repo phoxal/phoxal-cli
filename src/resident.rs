@@ -14,10 +14,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use phoxal::bus::ExecutionId;
 use phoxal_cli_client::{
     FRAME_READ_TIMEOUT, FRAME_WRITE_TIMEOUT, read_frame, read_frame_after_idle, write_frame,
 };
+use phoxal_cli_core::identity::{ExecutionId, ProducerId};
 use phoxal_cli_core::session::protocol::{
     MAX_COMMAND_FRAME_BYTES, MAX_HANDSHAKE_FRAME_BYTES, MAX_RECENT_COMMAND_REPLIES,
     MAX_SNAPSHOT_FRAME_BYTES, SUPERVISOR_PROTOCOL_VERSION,
@@ -53,7 +53,7 @@ struct CommandSessions {
     /// Restart acceptance must be fenced across command sessions. A client
     /// may reconnect after losing a reply, before the supervisor consumes the
     /// first action and advances the board's producer identity.
-    pending_restarts: HashMap<phoxal_cli_core::session::ProcessKey, phoxal::bus::ProducerId>,
+    pending_restarts: HashMap<phoxal_cli_core::session::ProcessKey, ProducerId>,
 }
 
 #[derive(Clone)]
@@ -556,8 +556,8 @@ mod tests {
 
     /// A deterministic producer identity for tests, so a case can name the
     /// exact restart it means.
-    fn producer(seed: u8) -> phoxal::bus::ProducerId {
-        phoxal::bus::ProducerId::parse(&format!("{:032x}", u128::from(seed)))
+    fn producer(seed: u8) -> ProducerId {
+        ProducerId::parse(&format!("{:032x}", u128::from(seed)))
             .expect("test producer id must parse")
     }
     use super::*;

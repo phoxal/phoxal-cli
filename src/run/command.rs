@@ -19,6 +19,7 @@ use anyhow::bail;
 use anyhow::{Context, Result};
 use clap::Args;
 use clap::ValueEnum;
+use phoxal_cli_core::identity::ExecutionId;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::PlanContext;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
@@ -259,7 +260,7 @@ async fn resident_supervision_inner(
     app: &AppContext,
     project_root: PathBuf,
     mode: ResidentMode,
-    bootstrap_execution: Option<phoxal::bus::ExecutionId>,
+    bootstrap_execution: Option<ExecutionId>,
     notify: Option<crate::sd_notify::SdNotify>,
 ) -> Result<()> {
     // One supervised run, one execution identity (#952 section B). A privately

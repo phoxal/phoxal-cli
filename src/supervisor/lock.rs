@@ -1,7 +1,7 @@
 //! Stable project-operation authority for execution and artifact mutation.
 
 use anyhow::{Context, Result, bail};
-use phoxal::bus::ExecutionId;
+use phoxal_cli_core::identity::ExecutionId;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};

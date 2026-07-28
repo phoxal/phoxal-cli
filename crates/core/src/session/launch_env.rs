@@ -143,8 +143,8 @@ mod tests {
     fn participant_env_config_is_compact_escaped_json() -> anyhow::Result<()> {
         let launch = ParticipantLaunch {
             participant_id: "mission".to_string(),
-            execution: phoxal::bus::ExecutionId::mint(),
-            producer: phoxal::bus::ProducerId::mint(),
+            execution: crate::identity::ExecutionId::mint(),
+            producer: crate::identity::ProducerId::mint(),
             execution_origin: None,
             namespace: "dev".to_string(),
             robot_id: "testbot".to_string(),
@@ -175,8 +175,8 @@ mod tests {
     fn tool_environment_is_clockless() -> anyhow::Result<()> {
         let launch = ParticipantLaunch {
             participant_id: "tool-log".to_string(),
-            execution: phoxal::bus::ExecutionId::mint(),
-            producer: phoxal::bus::ProducerId::mint(),
+            execution: crate::identity::ExecutionId::mint(),
+            producer: crate::identity::ProducerId::mint(),
             execution_origin: Some(phoxal::participant::ExecutionOrigin::mint()),
             namespace: "dev".to_string(),
             robot_id: "testbot".to_string(),
@@ -230,8 +230,8 @@ mod tests {
     fn oversized_config_names_participant_size_and_limit() {
         let launch = ParticipantLaunch {
             participant_id: "huge_config".to_string(),
-            execution: phoxal::bus::ExecutionId::mint(),
-            producer: phoxal::bus::ProducerId::mint(),
+            execution: crate::identity::ExecutionId::mint(),
+            producer: crate::identity::ProducerId::mint(),
             execution_origin: None,
             namespace: "dev".to_string(),
             robot_id: "testbot".to_string(),

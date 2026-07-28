@@ -12,16 +12,9 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use super::ParticipantKind;
+use crate::identity::ProducerId;
 
-/// The identity a spawned participant publishes under: the framework's own
-/// `ProducerId` (#952 section G), pre-minted by the supervisor.
-///
-/// A restart is structurally a different producer, so supervisor restart
-/// fencing and bus-level producer fencing key on the same value rather than on
-/// two parallel numbering schemes. There is no separate incarnation counter to
-/// keep in step with it.
-pub use phoxal::bus::ProducerId;
-
+/// Namespace-scoped identity of one robot in the supervised project.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RobotKey {
     pub namespace: String,

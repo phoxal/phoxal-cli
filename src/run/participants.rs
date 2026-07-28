@@ -601,6 +601,7 @@ mod tests {
         BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
     };
     use phoxal_cli_core::check::participant_metadata::host_architecture;
+    use phoxal_cli_core::identity::{ExecutionId, ProducerId};
     use phoxal_cli_core::project::launch_plan::RunIdentity;
     use phoxal_cli_core::session::RuntimeFailurePolicy;
     use phoxal_cli_core::session::StartupRequirement;
@@ -644,8 +645,8 @@ mod tests {
             },
             launch: ParticipantLaunch {
                 participant_id: id.to_string(),
-                execution: phoxal::bus::ExecutionId::mint(),
-                producer: phoxal::bus::ProducerId::mint(),
+                execution: ExecutionId::mint(),
+                producer: ProducerId::mint(),
                 execution_origin: None,
                 namespace: "dev".to_string(),
                 robot_id: "testbot".to_string(),

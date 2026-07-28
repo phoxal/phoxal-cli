@@ -24,8 +24,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::identity::ProducerId;
 use anyhow::{Context, Result};
-use phoxal::bus::ProducerId;
 use phoxal::participant::launch::{
     BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
 };

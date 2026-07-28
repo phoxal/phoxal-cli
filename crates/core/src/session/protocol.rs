@@ -1,9 +1,9 @@
 //! Bounded, CLI-internal protocol for the project-local resident supervisor.
 
-use phoxal::bus::ExecutionId;
 use serde::{Deserialize, Serialize};
 
-use super::{ProcessKey, ProcessScope, ProducerId, SupervisorSnapshotV0};
+use super::{ProcessKey, ProcessScope, SupervisorSnapshotV0};
+use crate::identity::{ExecutionId, ProducerId};
 
 pub const SUPERVISOR_PROTOCOL_VERSION: u16 = 0;
 pub const MAX_SUPERVISED_PROCESSES: usize = 40;
@@ -324,7 +324,7 @@ mod tests {
                         desired: DesiredProcessState::Running,
                         actual: ProcessState::Failed,
                         pid: Some(u32::MAX),
-                        producer: Some(phoxal::bus::ProducerId::mint()),
+                        producer: Some(ProducerId::mint()),
                         restart_count_in_generation: u32::MAX,
                         restart_count_total: u64::MAX,
                         last_failure: Some(ProcessFailure {

@@ -14,12 +14,20 @@ members = [
     ".",
     "crates/client",
     "crates/core",
+    "crates/observation",
+    "crates/project",
+    "crates/protocol",
+    "crates/supervisor",
     "crates/ui",
 ]
 default-members = [
     ".",
     "crates/client",
     "crates/core",
+    "crates/observation",
+    "crates/project",
+    "crates/protocol",
+    "crates/supervisor",
     "crates/ui",
 ]
 
@@ -58,6 +66,10 @@ phoxal = "=0.43.2"
 phoxal-api = "=0.43.2"
 phoxal-cli-client = { path = "crates/client" }
 phoxal-cli-core = { path = "crates/core" }
+phoxal-cli-observation = { path = "crates/observation" }
+phoxal-cli-project = { path = "crates/project" }
+phoxal-cli-protocol = { path = "crates/protocol" }
+phoxal-cli-supervisor = { path = "crates/supervisor" }
 phoxal-cli-ui = { path = "crates/ui" }
 ratatui = "0.29"
 
