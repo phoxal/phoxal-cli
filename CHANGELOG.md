@@ -4,6 +4,35 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.26.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.26.0) - 2026-07-27
+
+
+### Added
+
+- *(validate)* Check user config against its participant's schema ([#220](https://github.com/phoxal/phoxal-cli/pull/220))
+
+### Fixed
+
+- *(simulate)* Validate the real check outcome, not a defaulted report ([#216](https://github.com/phoxal/phoxal-cli/pull/216))
+- *(build)* Install the system libraries officials need to compile ([#221](https://github.com/phoxal/phoxal-cli/pull/221))
+- *(run)* Gate the startup stage on a real router connect, not a Zenoh session ([#222](https://github.com/phoxal/phoxal-cli/pull/222))
+
+### Other
+
+- *(deps)* Raise MSRV to 1.88 and refresh the lockfile ([#215](https://github.com/phoxal/phoxal-cli/pull/215))
+
+### Refactored
+
+- Drop every API-coherence consumer ([#214](https://github.com/phoxal/phoxal-cli/pull/214)) [**breaking**]
+- Delete dead code ([#217](https://github.com/phoxal/phoxal-cli/pull/217))
+- Delete the phoxal check command, keep the validation engine ([#218](https://github.com/phoxal/phoxal-cli/pull/218))
+- Materialize official runtimes through Cargo ([#219](https://github.com/phoxal/phoxal-cli/pull/219)) [**breaking**]
+
+### Tests
+
+- Keep repository coverage to unit contracts ([#212](https://github.com/phoxal/phoxal-cli/pull/212))
+
+
 ## [0.25.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.25.2) - 2026-07-26
 
 

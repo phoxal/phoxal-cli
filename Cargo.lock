@@ -2968,7 +2968,7 @@ dependencies = [
 
 [[package]]
 name = "phoxal-cli"
-version = "0.25.2"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3008,7 +3008,7 @@ dependencies = [
 
 [[package]]
 name = "phoxal-cli-client"
-version = "0.25.2"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "phoxal-cli-core",
@@ -3019,7 +3019,7 @@ dependencies = [
 
 [[package]]
 name = "phoxal-cli-core"
-version = "0.25.2"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -3038,7 +3038,7 @@ dependencies = [
 
 [[package]]
 name = "phoxal-cli-ui"
-version = "0.25.2"
+version = "0.26.0"
 dependencies = [
  "console",
  "crossterm",
