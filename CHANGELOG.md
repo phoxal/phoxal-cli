@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.28.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.28.0) - 2026-07-28
+
+
+### Refactored
+
+- Align with participant authoring train ([#229](https://github.com/phoxal/phoxal-cli/pull/229)) [**breaking**]
+
+
 ## [0.27.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.27.1) - 2026-07-28
 
 
