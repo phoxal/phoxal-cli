@@ -86,7 +86,7 @@ impl MaterializeSettings {
         }
     }
 
-    fn apply(&self, mut spec: MaterializeSpec) -> MaterializeSpec {
+    pub(crate) fn apply(&self, mut spec: MaterializeSpec) -> MaterializeSpec {
         spec = spec.with_profile(self.profile);
         if let Some(target_dir) = &self.target_dir {
             spec = spec.with_target_dir(target_dir.clone());

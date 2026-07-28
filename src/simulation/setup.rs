@@ -93,6 +93,9 @@ pub(crate) async fn live_simulate_setup(
     // like `run`. The Webots-owned controller is copied into the Webots
     // project's controllers directory instead, so it is not resolved here.
     let source_dirs = crate::run::source_dirs_by_participant(&sim_source(&sim).source_participants);
+    let materialize_settings = crate::stager::MaterializeSettings::development(
+        crate::run::cargo_target_dir(&sim.ctx.project_root, offline)?,
+    );
     crate::run::prepare_robot_participants(
         &sim.plan,
         &sim_source(&sim).resolved,
@@ -102,6 +105,7 @@ pub(crate) async fn live_simulate_setup(
         &board,
         &mut specs,
         offline,
+        &materialize_settings,
         &ui,
     )?;
     // The router launches from the staged `bin/` entry like every other
@@ -110,10 +114,7 @@ pub(crate) async fn live_simulate_setup(
         candidate.path(),
         &sim_source(&sim).resolved,
         offline,
-        &crate::stager::MaterializeSettings::development(crate::run::cargo_target_dir(
-            &sim.ctx.project_root,
-            offline,
-        )?),
+        &materialize_settings,
         |crate_dir, name| crate::run::build_source_binary(crate_dir, name, &ui, None, offline),
     )
     .context("failed to stage the infrastructure router into the simulation bin store")?;
