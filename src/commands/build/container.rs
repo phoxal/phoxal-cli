@@ -4,9 +4,10 @@
 //! inside a pinned official Docker `rust` image, then hands the built binaries
 //! back to the same host-side staging + validation + deterministic archiving
 //! every other builder uses. The container is only a compilation environment: it
-//! mounts a deterministic source snapshot and the host's Cargo registry/git
-//! caches, runs `cargo build --workspace --locked --release --target` inside the image,
-//! and never produces a Docker/OCI image.
+//! mounts a deterministic source snapshot plus the project's persistent Cargo
+//! target directory and the host's Cargo registry/git caches, runs `cargo build
+//! --workspace --locked --release --target` inside the image, and never
+//! produces a Docker/OCI image.
 //!
 //! ## Officials materialize inside the container too (organization#951 WS4)
 //!
@@ -21,6 +22,12 @@
 //! the *whole* deterministic set, not just the user's own crates, and
 //! reuses the identical `cargo install` invocation shape
 //! [`crate::materialize`] uses everywhere else.
+//!
+//! On Linux with rootful Docker, container-written entries in the persistent
+//! Cargo target directory can be owned by root. Rootless Podman and Docker
+//! Desktop map those writes to the invoking user. Operators using rootful
+//! Docker should therefore keep the target directory container-owned or
+//! correct its ownership before switching back to host-side Cargo commands.
 //!
 //! Component driver packages are robot-specific (only the components a robot
 //! declares), so they are not known from the catalog alone: `phoxal build
@@ -167,6 +174,10 @@ pub struct ContainerBuildSpec {
     /// Host directory holding the deterministic source snapshot; mounted at
     /// [`CONTAINER_WORKDIR`] and used as the cargo working directory.
     pub snapshot: PathBuf,
+    /// The real project's Cargo target directory, mounted over the snapshot's
+    /// `target/` path. Both workspace builds and official installs reuse it
+    /// across container invocations.
+    pub cargo_target: PathBuf,
     /// Host Cargo registry cache (`$CARGO_HOME/registry`), mounted read-write so
     /// the container reuses already-fetched crates AND official packages -
     /// `cargo install --registry phoxal` writes into the identical
@@ -260,6 +271,8 @@ impl ContainerBuildSpec {
             CONTAINER_WORKDIR.to_string(),
             "-v".to_string(),
             format!("{}:{}", self.snapshot.display(), CONTAINER_WORKDIR),
+            "-v".to_string(),
+            format!("{}:{CONTAINER_WORKDIR}/target", self.cargo_target.display()),
         ]);
         if let Some(registry) = &self.cargo_registry {
             args.push("-v".to_string());
@@ -335,8 +348,8 @@ impl ContainerBuildSpec {
     /// the first failure (`set -e`).
     fn container_script(&self) -> String {
         let mut workspace_build = format!(
-            "cargo build --workspace --locked --release --target {}",
-            crate::commands::deploy::shell_quote(&self.target)
+            "cargo build --workspace --locked --release --target {} --target-dir {CONTAINER_WORKDIR}/target",
+            crate::commands::deploy::shell_quote(&self.target),
         );
         // The `cargo install` per official already threads `self.offline`
         // through (below); the workspace build must too (organization#951
@@ -445,6 +458,7 @@ mod tests {
             platform: Some("linux/arm64".to_string()),
             target: "aarch64-unknown-linux-gnu".to_string(),
             snapshot: PathBuf::from("/tmp/snapshot"),
+            cargo_target: PathBuf::from("/workspace/target"),
             cargo_registry: Some(PathBuf::from("/home/dev/.cargo/registry")),
             cargo_git: Some(PathBuf::from("/home/dev/.cargo/git")),
             officials_root: PathBuf::from("/tmp/officials"),
@@ -550,6 +564,10 @@ mod tests {
             joined.contains(&format!("/tmp/snapshot:{CONTAINER_WORKDIR}")),
             "{joined}"
         );
+        assert!(
+            joined.contains(&format!("/workspace/target:{CONTAINER_WORKDIR}/target")),
+            "{joined}"
+        );
         // Cargo caches mounted read-write; the officials root too, since
         // officials materialize inside the container.
         assert!(
@@ -570,10 +588,11 @@ mod tests {
         assert!(joined.contains("rust:1.88-bookworm"), "{joined}");
         // Native compilation for the target, with the locked lockfile enforced.
         assert!(
-            joined.contains("cargo build --workspace --locked --release --target"),
+            joined.contains(
+                "cargo build --workspace --locked --release --target 'aarch64-unknown-linux-gnu' --target-dir /phoxal/src/target"
+            ),
             "{joined}"
         );
-        assert!(joined.contains("aarch64-unknown-linux-gnu"), "{joined}");
         // Every official installs, pinned to its exact train, into the
         // mounted officials root, cross-target-explicit like the workspace
         // build.

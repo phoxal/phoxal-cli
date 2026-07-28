@@ -33,8 +33,9 @@ pub(crate) enum StagingBuild {
     NativeBundle {
         target: String,
         /// Reuse binaries already built by the container builder when present.
-        /// This is the cargo target directory of the container's snapshot; no
-        /// cargo runs on the host in that case.
+        /// This is the project's persistent Cargo target directory, bind-mounted
+        /// into the container at `/phoxal/src/target`; no cargo runs on the host
+        /// in that case.
         prebuilt_target_dir: Option<PathBuf>,
         /// The container builder's own `cargo install` output for the
         /// deterministic, robot-independent catalog set (services, tools,
@@ -298,9 +299,10 @@ pub(crate) fn build_source_binary_with_profile(
 }
 
 /// Resolve a user/driver crate binary the container builder already compiled
-/// into `target_dir` (the container snapshot's cargo target directory), for the
-/// same `target` a host build would have used. No cargo runs here - the binary
-/// must already exist, so a missing one is a precise error naming it.
+/// into `target_dir` (the project's persistent Cargo target directory,
+/// bind-mounted into the container at `/phoxal/src/target`), for the same
+/// `target` a host build would have used. No cargo runs here - the binary must
+/// already exist, so a missing one is a precise error naming it.
 fn locate_prebuilt_binary(
     crate_dir: &Path,
     preferred_name: &str,

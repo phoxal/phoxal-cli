@@ -308,12 +308,13 @@ impl Build {
         target: &str,
         runner: &dyn EngineRunner,
     ) -> Result<()> {
-        let (snapshot, officials_root) =
+        let (snapshot, officials_root, cargo_target) =
             self.compile_in_container(app, project_root, target, runner, &app.ui)?;
 
         // Stage manifests, assets, AND binaries from the SAME frozen snapshot the
         // container compiled, never the live tree (#936, finding B): the container
-        // wrote the target binaries into `<snapshot>/target`, and staging reads
+        // wrote the target binaries into the project's Cargo target directory,
+        // mounted at `<snapshot>/target`, and staging reads
         // robot.yaml and assets from `<snapshot>` too, so a bundle can never pair
         // old binaries with newer live manifests. The COMPLETE official set -
         // every catalog service/tool/the router, AND every registry-sourced
@@ -324,7 +325,7 @@ impl Build {
         // sibling of the real project's staged directory.
         let staging = StagingBuild::prebuilt_native_bundle(
             target.to_string(),
-            snapshot.path().join("target"),
+            cargo_target,
             Some(officials_root.path().to_path_buf()),
         );
         self.stage_validate_archive(app, project_root, snapshot.path(), target, &staging)
@@ -337,9 +338,9 @@ impl Build {
     /// registry-sourced component driver this robot declares) via `cargo
     /// install`, natively on the container's own platform (organization#951
     /// WS4; blocker 2 of the review closes the "component drivers install
-    /// host-side, cross-compiled" gap) - returning the snapshot directory
-    /// (with `<snapshot>/target` populated by the container) and the
-    /// officials root (with its `bin/` populated the identical way, so
+    /// host-side, cross-compiled" gap) - returning the snapshot directory,
+    /// persistent project Cargo target directory, and the officials root (with
+    /// its `bin/` populated the identical way, so
     /// host-side staging never needs to cross-compile anything). Assumes the
     /// Build lock is already held (see [`Self::run`]); split out so the
     /// snapshot+compile ordering under the lock is unit-testable with a fake
@@ -351,7 +352,7 @@ impl Build {
         target: &str,
         runner: &dyn EngineRunner,
         ui: &crate::Ui,
-    ) -> Result<(tempfile::TempDir, tempfile::TempDir)> {
+    ) -> Result<(tempfile::TempDir, tempfile::TempDir, PathBuf)> {
         let snapshot = tempfile::Builder::new()
             .prefix("phoxal-build-snapshot-")
             .tempdir()
@@ -373,6 +374,13 @@ impl Build {
             .prefix("phoxal-build-officials-")
             .tempdir()
             .context("failed to create an officials materialization directory")?;
+        let cargo_target = crate::run::cargo_target_dir(project_root, app.offline)?;
+        std::fs::create_dir_all(&cargo_target).with_context(|| {
+            format!(
+                "failed to create persistent Cargo target directory {}",
+                cargo_target.display()
+            )
+        })?;
 
         // The default image is the pinned official rust image with the container
         // platform derived from the target arch; a custom `--builder-image` owns
@@ -452,6 +460,7 @@ impl Build {
             platform,
             target: target.to_string(),
             snapshot: snapshot.path().to_path_buf(),
+            cargo_target: cargo_target.clone(),
             cargo_registry,
             cargo_git,
             officials_root: officials_root.path().to_path_buf(),
@@ -468,7 +477,7 @@ impl Build {
                 .unwrap_or_default(),
         ));
         runner.run(&spec.invocation())?;
-        Ok((snapshot, officials_root))
+        Ok((snapshot, officials_root, cargo_target))
     }
 
     /// The shared tail every backend runs: refresh staging for the target from
