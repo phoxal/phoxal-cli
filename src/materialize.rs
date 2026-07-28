@@ -111,8 +111,7 @@ impl MaterializeSpec {
 pub fn cargo_install(root: &Path, spec: &MaterializeSpec, offline: bool) -> Result<PathBuf> {
     let package = spec.cargo_package_name();
     let args = build_install_args(
-        &package,
-        &spec.train,
+        std::iter::once((package.as_str(), spec.train.as_str())),
         spec.target.as_deref(),
         spec.profile,
         offline,
@@ -135,21 +134,23 @@ pub fn cargo_install(root: &Path, spec: &MaterializeSpec, offline: bool) -> Resu
 /// an explicit host-triple target is the plain native build, matching
 /// [`crate::run::build_source_binary`]'s identical check.
 #[must_use]
-pub fn build_install_args(
-    package: &str,
-    train: &str,
+pub fn build_install_args<'a>(
+    packages: impl IntoIterator<Item = (&'a str, &'a str)>,
     target: Option<&str>,
     profile: MaterializeProfile,
     offline: bool,
 ) -> Vec<String> {
-    let mut args = vec![
-        format!("{package}@{train}"),
+    let mut args = packages
+        .into_iter()
+        .map(|(package, train)| format!("{package}@{train}"))
+        .collect::<Vec<_>>();
+    args.extend([
         "--registry".to_string(),
         REGISTRY_NAME.to_string(),
         "--locked".to_string(),
         "--config".to_string(),
         registry_config_arg(),
-    ];
+    ]);
     let cross = target.filter(|triple| *triple != phoxal_cli_core::project::host_target_triple());
     if let Some(triple) = cross {
         args.push("--target".to_string());
@@ -205,8 +206,7 @@ mod tests {
     fn command_for(spec: &MaterializeSpec, root: &Path, offline: bool) -> Command {
         let package = spec.cargo_package_name();
         let install_args = build_install_args(
-            &package,
-            &spec.train,
+            std::iter::once((package.as_str(), spec.train.as_str())),
             spec.target.as_deref(),
             spec.profile,
             offline,
@@ -269,6 +269,29 @@ mod tests {
             .map(|index| argv[index + 1].clone())
             .expect("--root is present");
         assert_eq!(root_index, "/tmp/bundle");
+    }
+
+    #[test]
+    fn install_args_batch_packages_at_independent_exact_versions() {
+        let args = build_install_args(
+            [
+                ("phoxal-service-drive", "0.42.3"),
+                ("phoxal-component-ddsm115", "0.41.7"),
+            ],
+            None,
+            MaterializeProfile::Release,
+            false,
+        );
+        assert_eq!(
+            &args[..2],
+            [
+                "phoxal-service-drive@0.42.3",
+                "phoxal-component-ddsm115@0.41.7",
+            ]
+        );
+        assert_eq!(args.iter().filter(|arg| *arg == "--registry").count(), 1);
+        assert_eq!(args.iter().filter(|arg| *arg == "--locked").count(), 1);
+        assert_eq!(args.iter().filter(|arg| *arg == "--config").count(), 1);
     }
 
     #[test]

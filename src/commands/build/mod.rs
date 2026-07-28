@@ -30,8 +30,8 @@ use crate::AppContext;
 use crate::run::{RunOptions, StagingBuild};
 use crate::supervisor::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 use container::{
-    ContainerBuildSpec, ContainerEngine, ContainerOfficial, EngineRunner, ProcessEngineRunner,
-    default_builder_image, host_cargo_caches, platform_for_triple, require_platform_for_triple,
+    ContainerBuildSpec, ContainerEngine, ContainerOfficial, default_builder_image,
+    host_cargo_caches, platform_for_triple, require_platform_for_triple,
 };
 use phoxal_cli_core::check::participant_metadata::expected_target_for_triple;
 use phoxal_cli_core::project::launch_plan::runtime_layout_dir;
@@ -196,10 +196,7 @@ impl Build {
 
         match backend {
             Backend::Local { target } => self.build_local(app, &project_root, &target),
-            Backend::Container { target } => {
-                let runner = ProcessEngineRunner { ui: &app.ui };
-                self.build_container(app, &project_root, &target, &runner)
-            }
+            Backend::Container { target } => self.build_container(app, &project_root, &target),
             Backend::Ssh { host, target } => {
                 self.build_ssh(app, &project_root, &host, target.as_deref())
             }
@@ -301,15 +298,9 @@ impl Build {
     /// Build lock is already held by [`Self::run`], so the snapshot, the compile,
     /// and the staging that reads that same frozen snapshot all happen under one
     /// lock (#936, finding B).
-    fn build_container(
-        &self,
-        app: &AppContext,
-        project_root: &Path,
-        target: &str,
-        runner: &dyn EngineRunner,
-    ) -> Result<()> {
+    fn build_container(&self, app: &AppContext, project_root: &Path, target: &str) -> Result<()> {
         let (snapshot, officials_root, cargo_target) =
-            self.compile_in_container(app, project_root, target, runner, &app.ui)?;
+            self.compile_in_container(app, project_root, target, &app.ui)?;
 
         // Stage manifests, assets, AND binaries from the SAME frozen snapshot the
         // container compiled, never the live tree (#936, finding B): the container
@@ -342,15 +333,13 @@ impl Build {
     /// persistent project Cargo target directory, and the officials root (with
     /// its `bin/` populated the identical way, so
     /// host-side staging never needs to cross-compile anything). Assumes the
-    /// Build lock is already held (see [`Self::run`]); split out so the
-    /// snapshot+compile ordering under the lock is unit-testable with a fake
-    /// [`EngineRunner`].
+    /// Build lock is already held (see [`Self::run`]); the rendered engine
+    /// invocation remains unit-testable without starting a container.
     fn compile_in_container(
         &self,
         app: &AppContext,
         project_root: &Path,
         target: &str,
-        runner: &dyn EngineRunner,
         ui: &crate::Ui,
     ) -> Result<(tempfile::TempDir, tempfile::TempDir, PathBuf)> {
         let snapshot = tempfile::Builder::new()
@@ -476,7 +465,7 @@ impl Build {
                 .map(|platform| format!(", {platform}"))
                 .unwrap_or_default(),
         ));
-        runner.run(&spec.invocation())?;
+        container::run_engine(ui, &spec.invocation())?;
         Ok((snapshot, officials_root, cargo_target))
     }
 

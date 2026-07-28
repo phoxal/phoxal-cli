@@ -4,16 +4,16 @@
 //! inside a pinned official Docker `rust` image, then hands the built binaries
 //! back to the same host-side staging + validation + deterministic archiving
 //! every other builder uses. The container is only a compilation environment: it
-//! mounts a deterministic source snapshot plus the project's persistent Cargo
-//! target directory and the host's Cargo registry/git caches, runs `cargo build
-//! --workspace --locked --release --target` inside the image, and never
-//! produces a Docker/OCI image.
+//! mounts a deterministic source snapshot plus Cargo's persistent target,
+//! registry, and git caches, builds the workspace, and installs every official
+//! package in one Cargo invocation. It never produces a Docker/OCI image.
 //!
 //! ## Officials materialize inside the container too (organization#951 WS4)
 //!
 //! The deterministic, robot-independent catalog set (every official service,
 //! tool, and the infrastructure router - "every official always runs" per
-//! #945) is installed with `cargo install` in the SAME container invocation,
+//! #945) is installed with one multi-package `cargo install` in the SAME
+//! container invocation,
 //! not host-side: the container already runs natively on the target
 //! architecture ([`platform_for_triple`]), which is exactly the property that
 //! makes cross-compiling from the host risky for a package with any native
@@ -48,7 +48,7 @@
 //! ## Offline and proxy plumbing (organization#951 WS4 review, medium 4)
 //!
 //! `--offline` threads through EVERY Cargo invocation this module makes: the
-//! workspace `cargo build` line as well as every official's `cargo install`
+//! workspace `cargo build` line as well as the officials' `cargo install`
 //! ([`ContainerBuildSpec::container_script`]) - a warm-cache "offline" build
 //! must not silently reach the network for one of them and not the other.
 //! The container also has no route to the host's own network configuration,
@@ -252,10 +252,9 @@ impl ContainerBuildSpec {
     /// materializes the deterministic official set inside the image. The
     /// container runs, as a compilation environment only,
     /// `cargo build --workspace --locked --release --target <triple>` against the
-    /// mounted snapshot, then one `cargo install <package>@<train>
-    /// --registry phoxal --locked --root <officials> --target <triple>
-    /// --config ...` per [`Self::officials`] entry - all on the
-    /// [`Self::platform`] architecture, so every one of them is native, not
+    /// mounted snapshot, then one `cargo install` carrying every exact
+    /// `<package>@<train>` operand. Shared Cargo flags are emitted once and the
+    /// whole build runs on [`Self::platform`], so it is native rather than
     /// cross-compiled.
     #[must_use]
     pub fn invocation(&self) -> EngineInvocation {
@@ -344,14 +343,13 @@ impl ContainerBuildSpec {
     }
 
     /// The shell script run inside the container: system build dependencies,
-    /// the workspace build, then one `cargo install` per official, stopping at
-    /// the first failure (`set -e`).
+    /// the workspace build, then one `cargo install` for all officials.
     fn container_script(&self) -> String {
         let mut workspace_build = format!(
             "cargo build --workspace --locked --release --target {} --target-dir {CONTAINER_WORKDIR}/target",
             crate::commands::deploy::shell_quote(&self.target),
         );
-        // The `cargo install` per official already threads `self.offline`
+        // The officials' `cargo install` already threads `self.offline`
         // through (below); the workspace build must too (organization#951
         // WS4 review, medium 4) - without it, a warm-cache offline build
         // could still reach the network here even though every other Cargo
@@ -362,11 +360,11 @@ impl ContainerBuildSpec {
         let mut commands = Vec::new();
         commands.extend(self.system_dependency_command());
         commands.push(workspace_build);
-        for official in &self.officials {
-            let package = official.package.clone();
+        if !self.officials.is_empty() {
             let install_args = crate::materialize::build_install_args(
-                &package,
-                &official.train,
+                self.officials
+                    .iter()
+                    .map(|official| (official.package.as_str(), official.train.as_str())),
                 Some(&self.target),
                 crate::materialize::MaterializeProfile::Release,
                 self.offline,
@@ -391,41 +389,26 @@ impl ContainerBuildSpec {
     }
 }
 
-/// Runs a rendered [`EngineInvocation`]. Behind a trait so the orchestration is
-/// unit-testable with a fake runner that records the invocation instead of
-/// spawning a container engine.
-pub trait EngineRunner {
-    fn run(&self, invocation: &EngineInvocation) -> Result<()>;
-}
-
-/// The production runner: shells out to the engine, streaming its output through
-/// the session UI exactly like a host `cargo build`.
-pub struct ProcessEngineRunner<'a> {
-    pub ui: &'a crate::Ui,
-}
-
-impl EngineRunner for ProcessEngineRunner<'_> {
-    fn run(&self, invocation: &EngineInvocation) -> Result<()> {
-        let mut command = Command::new(&invocation.program);
-        command.args(&invocation.args);
-        let status = self
-            .ui
-            .command_status_captured(&mut command)
-            .with_context(|| {
-                format!(
-                    "failed to start `{}` for the container build; is the engine installed?",
-                    invocation.program
-                )
-            })?;
-        if !status.success() {
-            bail!(
-                "container build failed: `{} {}` exited with {status}",
-                invocation.program,
-                invocation.args.join(" ")
-            );
-        }
-        Ok(())
+/// Execute a rendered invocation, streaming output through the session UI.
+/// Rendering stays separate so every engine argument remains unit-testable
+/// without starting a container.
+pub fn run_engine(ui: &crate::Ui, invocation: &EngineInvocation) -> Result<()> {
+    let mut command = Command::new(&invocation.program);
+    command.args(&invocation.args);
+    let status = ui.command_status_captured(&mut command).with_context(|| {
+        format!(
+            "failed to start `{}` for the container build; is the engine installed?",
+            invocation.program
+        )
+    })?;
+    if !status.success() {
+        bail!(
+            "container build failed: `{} {}` exited with {status}",
+            invocation.program,
+            invocation.args.join(" ")
+        );
     }
+    Ok(())
 }
 
 /// The host Cargo registry and git cache directories, from `$CARGO_HOME` (or the
@@ -469,7 +452,7 @@ mod tests {
                 },
                 ContainerOfficial {
                     package: "phoxal-tool-bus".to_string(),
-                    train: "0.42.0".to_string(),
+                    train: "0.41.7".to_string(),
                 },
             ],
             offline: false,
@@ -597,7 +580,7 @@ mod tests {
         // mounted officials root, cross-target-explicit like the workspace
         // build.
         assert!(joined.contains("phoxal-service-drive@0.42.0"), "{joined}");
-        assert!(joined.contains("phoxal-tool-bus@0.42.0"), "{joined}");
+        assert!(joined.contains("phoxal-tool-bus@0.41.7"), "{joined}");
         assert!(joined.contains(CONTAINER_OFFICIALS), "{joined}");
         assert!(joined.contains("--registry"), "{joined}");
         assert!(joined.contains("phoxal"), "{joined}");
@@ -606,6 +589,13 @@ mod tests {
             joined.contains("'--target-dir' '/phoxal/src/target'"),
             "{joined}"
         );
+        assert_eq!(
+            joined.matches("'cargo' 'install'").count(),
+            1,
+            "all officials must share one Cargo invocation: {joined}"
+        );
+        assert_eq!(joined.matches("'--registry'").count(), 1, "{joined}");
+        assert_eq!(joined.matches("'--locked'").count(), 1, "{joined}");
         // `set -e` so a failed official install stops the whole script rather
         // than silently continuing with a partial officials root.
         assert!(joined.contains("set -e"), "{joined}");
@@ -728,27 +718,5 @@ mod tests {
             joined.contains("cargo build --workspace --locked"),
             "{joined}"
         );
-    }
-
-    /// A fake runner proves the orchestration seam: command construction is
-    /// exercised end to end without a container engine present.
-    struct RecordingRunner {
-        recorded: std::cell::RefCell<Option<EngineInvocation>>,
-    }
-    impl EngineRunner for RecordingRunner {
-        fn run(&self, invocation: &EngineInvocation) -> Result<()> {
-            *self.recorded.borrow_mut() = Some(invocation.clone());
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn a_recording_runner_captures_the_invocation() {
-        let runner = RecordingRunner {
-            recorded: std::cell::RefCell::new(None),
-        };
-        let invocation = spec().invocation();
-        runner.run(&invocation).unwrap();
-        assert_eq!(runner.recorded.into_inner(), Some(invocation));
     }
 }
