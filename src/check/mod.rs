@@ -8,11 +8,8 @@ use serde_json::Value;
 /// `phoxal_cli_core::check::participant_metadata`) - and is checked against
 /// the identity that selected the binary before its schema is trusted
 /// (`raw_participant_report_from_extracted_metadata`). `artifact.kind` is still
-/// supplied by the caller: the section carries no kind label. No `bus_abi`
-/// (D1, X-tools slice: dissolved into the version-qualified contract key,
-/// `phoxal::check::ParticipantApis` no longer carries it either). No contract
-/// inventory (organization#957): there is no API-coherence pass left to
-/// feed.
+/// supplied by the caller: the section carries no kind label. Wire identity
+/// is fixed by the selected framework train and its version-qualified keys.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawParticipantReport {
     pub artifact: RawArtifact,

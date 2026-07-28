@@ -19,8 +19,12 @@ pub(crate) fn extract_participant_report_from_staged_runtime(
     runtime: &ResolvedPlatformRuntime,
 ) -> Result<RawParticipantReport> {
     let binary = bin_dir.join(official_binary_name(runtime.kind, &runtime.name));
-    let meta = participant_metadata::extract_participant_metadata(&binary)
-        .with_context(|| format!("failed to extract API metadata from {}", binary.display()))?;
+    let meta = participant_metadata::extract_participant_metadata(&binary).with_context(|| {
+        format!(
+            "failed to extract participant metadata from {}",
+            binary.display()
+        )
+    })?;
     raw_participant_report_from_extracted_metadata(
         runtime.kind.wire_kind(),
         &runtime.name,
@@ -34,8 +38,12 @@ pub(crate) fn extract_participant_report_from_staged_tool(
     tool: &phoxal_cli_core::project::resolver::ResolvedTool,
 ) -> Result<RawParticipantReport> {
     let binary = bin_dir.join(&tool.binary_name);
-    let meta = participant_metadata::extract_participant_metadata(&binary)
-        .with_context(|| format!("failed to extract API metadata from {}", binary.display()))?;
+    let meta = participant_metadata::extract_participant_metadata(&binary).with_context(|| {
+        format!(
+            "failed to extract participant metadata from {}",
+            binary.display()
+        )
+    })?;
     raw_participant_report_from_extracted_metadata(
         "tool",
         phoxal_cli_core::project::resolver::tool_participant_id(&tool.name),
@@ -58,9 +66,8 @@ pub(crate) fn default_participant_class_for_kind(artifact_kind: &str) -> String 
 }
 
 /// Fetches a native tool binary's config-schema report by extracting its
-/// compiled-in `#[derive(phoxal::Api)]` metadata section directly from the
-/// built artifact file - never by executing it (the `emit-apis` runtime
-/// subcommand this used to run is gone). The section carries the
+/// compiled-in participant metadata section directly from the built artifact
+/// file, never by executing it. The section carries the
 /// participant's own declared `id` and its config schema, but not an
 /// artifact `kind` label; the kind is supplied from what is already known
 /// about `tool`, and the declared `id` is checked against `tool`'s own
@@ -72,7 +79,7 @@ pub(crate) fn fetch_participant_report_from_tool(
     let meta = participant_metadata::extract_participant_metadata(&tool.binary_path).with_context(
         || {
             format!(
-                "failed to extract API metadata from {}",
+                "failed to extract participant metadata from {}",
                 tool.binary_path.display()
             )
         },
@@ -89,17 +96,15 @@ pub(crate) fn fetch_participant_report_from_tool(
 /// the artifact identity the caller already expects - the shared tail of
 /// [`fetch_participant_report_from_tool`] and [`build_participant_report_by_building`].
 ///
-/// The embedded metadata carries no contract inventory anymore
-/// (organization#957: there is no API-coherence pass left to feed one); what
-/// it does carry is the participant's own declared `id` and its config
-/// schema. That `id` is the participant's own truth about which artifact this
+/// The embedded metadata carries the participant's own declared `id` and its
+/// config schema. That `id` is the participant's own truth about which artifact this
 /// binary implements - the caller's `expected_artifact_id` is a claim made
 /// from context (a resolved runtime name, a registry package, an
 /// `expected_artifact_id` field) that could disagree with it, for instance if
 /// two staged binaries were swapped on disk. This function is the one place
 /// that reconciles the two: a mismatch fails here, naming both values and
 /// `binary_path`, BEFORE the extracted config schema is ever used to validate
-/// anything (organization#957 review). On success the returned
+/// anything. On success the returned
 /// [`RawArtifact::id`] is the binary's own declared `id`, not a copy of the
 /// caller's expectation - by this point the two are known to agree.
 ///
@@ -184,9 +189,9 @@ mod tests {
         }
     }
 
-    /// The core organization#957 regression: the binary's OWN declared `id`
-    /// must be compared against the identity that selected it, not discarded
-    /// in favor of trusting the caller's expectation unconditionally.
+    /// The binary's own declared `id` must be compared against the identity
+    /// that selected it, not discarded in favor of trusting the caller's
+    /// expectation unconditionally.
     #[test]
     fn matching_id_passes_and_carries_the_binarys_declared_id_and_schema() -> Result<()> {
         let raw = raw_participant_report_from_extracted_metadata(

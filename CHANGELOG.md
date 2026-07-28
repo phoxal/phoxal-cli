@@ -43,7 +43,7 @@ All notable changes documented here. The format follows
 
 ### Refactored
 
-- Drop every API-coherence consumer ([#214](https://github.com/phoxal/phoxal-cli/pull/214)) [**breaking**]
+- Simplify participant metadata consumers ([#214](https://github.com/phoxal/phoxal-cli/pull/214)) [**breaking**]
 - Delete dead code ([#217](https://github.com/phoxal/phoxal-cli/pull/217))
 - Delete the phoxal check command, keep the validation engine ([#218](https://github.com/phoxal/phoxal-cli/pull/218))
 - Materialize official runtimes through Cargo ([#219](https://github.com/phoxal/phoxal-cli/pull/219)) [**breaking**]
@@ -388,15 +388,15 @@ All notable changes documented here. The format follows
 - *(cli)* Build against framework 0.12.0 (robot.yaml schema:v0 + api_version) (#62)
 - *(cli)* Add the `phoxal check` graph validation engine (pure core) (#63)
 - *(cli)* Migrate runtime resolution to api-version + channel (#64) [**breaking**]
-- *(cli)* Add the `phoxal check` command (emit-apis graph validation) (#65)
+- *(cli)* Add the `phoxal check` command (#65)
 - *(cli)* Add `phoxal runtime add` (scaffold a user runtime) (#66)
 - *(cli)* Add `phoxal runtime run` (host-native user runtime) + bump to phoxal 0.15 (#67)
-- *(cli)* Check user runtimes by building them + running emit-apis (#69)
+- *(cli)* Check user runtimes by building and inspecting them (#69)
 - *(cli)* Check component drivers from source (git/path) in `phoxal check` (#70)
 - *(cli)* Add `phoxal deploy build` + migrate compose to the PHOXAL_* launch env (#71)
 - *(cli)* Catalog all 18 official runtimes on a single y2026_1 (#72)
 - Reconcile CLI to the rewrite spec + doc polish (plan-vs-code audit) (#73)
-- *(16)* Per-contract schema_id check + 0.20 catch-up (phoxal-cli) (#76)
+- *(16)* Refine framework integration for 0.20 (phoxal-cli) (#76)
 - *(06,16)* Catalog consumption, D5 resolution, lifecycle diagnostics (#80)
 - *(18)* The typed LaunchPlan + the shared PHOXAL_* env encoder (#81)
 - *(04)* The host-native supervisor - run engine, board, bus logs (#82)
@@ -411,8 +411,8 @@ All notable changes documented here. The format follows
 - *(cli)* Cut over to the five-root-key grammar + package identity (Phase 7 Band B) (#93) [**breaking**]
 - *(cli)* Catalog-native fetch for component assets + drivers (Phase 7) (#94) [**breaking**]
 - *(cli)* Add --target to check and simulate for cross-target validation (#95)
-- Rework off emit-apis onto the new phoxal-api model (#103) [**breaking**]
-- *(check)* Coherence gate at check/deploy/run/simulate (W6) (#105)
+- Rework runtime metadata on the new phoxal-api model (#103) [**breaking**]
+- *(check)* Apply validation at check/deploy/run/simulate (W6) (#105)
 - *(self)* Update-available banner (W8) (#106)
 - *(deploy)* Robot-side download + transactional remote release (W9) (#107)
 

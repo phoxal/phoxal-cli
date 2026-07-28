@@ -442,7 +442,7 @@ services:
 
     /// A binary carries no known config-schema by default; its declared `id`
     /// must still equal the required runtime's own identity, or `inspect_for`
-    /// rejects it (organization#957).
+    /// rejects it.
     fn no_config_payload(id: &str) -> Vec<u8> {
         format!(r#"{{"id":"{id}","config_schema":{{"type":"null"}}}}"#).into_bytes()
     }

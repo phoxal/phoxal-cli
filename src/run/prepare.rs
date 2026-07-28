@@ -542,7 +542,7 @@ robot:
 "#;
 
     /// Synthesize a host-format object carrying the phoxal metadata section a
-    /// required runtime's own identity must match (organization#957), so
+    /// required runtime's own identity must match, so
     /// `RuntimeLayout::construct_plan` can inspect a real object shape off-disk
     /// with no actual binary built (mirrors `run::participants`' own fixture).
     fn synthesize_binary_with_id(id: &str) -> Vec<u8> {

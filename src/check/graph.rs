@@ -143,10 +143,7 @@ pub fn run_check_with_context(
         participants.push(participant_apis);
     }
 
-    // `phoxal::check::check_graph` is retired (organization#957): it ignored
-    // its input and always returned `Report::default()` once the
-    // API-coherence pass it used to run was deleted. Construct the (still
-    // real) report vehicle locally and append this pass's own
+    // Construct the shared report vehicle and append this pass's
     // `InvalidConfig` findings directly.
     let mut report = graph_check::Report::default();
     report.problems.extend(config_problems);

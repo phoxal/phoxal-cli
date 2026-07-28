@@ -80,7 +80,7 @@ pub(crate) fn build_participant_report_by_building(
     let meta =
         participant_metadata::extract_participant_metadata(&binary_path).with_context(|| {
             format!(
-                "failed to extract API metadata from {}",
+                "failed to extract participant metadata from {}",
                 binary_path.display()
             )
         })?;

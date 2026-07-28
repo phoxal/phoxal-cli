@@ -608,8 +608,8 @@ mod tests {
     /// Synthesize a host-format object of a given architecture carrying the
     /// phoxal metadata section, so inspection is exercised against real object
     /// shapes without building a binary (mirrors the loader's own synthesis).
-    /// `id` is the binary's own declared participant id (organization#957: a
-    /// staged binary's id must match the required runtime's identity, so a
+    /// `id` is the binary's own declared participant id. A staged binary's id
+    /// must match the required runtime's identity, so a
     /// caller staging more than one required runtime must give each its own
     /// matching id rather than reusing a fixed payload).
     fn synthesize_binary_with_id(arch: object::Architecture, id: &str) -> Vec<u8> {
