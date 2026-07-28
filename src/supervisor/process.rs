@@ -9,6 +9,7 @@ use crate::supervisor::ManagedChild;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use phoxal_cli_core::identity::ProducerId;
 use phoxal_cli_core::session::human;
 use phoxal_cli_core::session::{ExitDescription, ProcessFailureKind, ReadinessPolicy};
 use std::collections::VecDeque;
@@ -108,7 +109,7 @@ impl RunningParticipant {
             // child will publish under and keys its own restart fencing on the
             // same value. The Liveliness key carries it too, which is what
             // makes "this exact restart is live" observable.
-            let producer = phoxal::bus::ProducerId::mint();
+            let producer = ProducerId::mint();
             instance.producer = producer;
             self.spec
                 .env

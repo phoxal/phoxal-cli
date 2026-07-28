@@ -1,5 +1,6 @@
 //! Telemetry responsibilities for run.
 
+use phoxal_cli_core::identity::ExecutionId;
 use phoxal_cli_core::project::launch_plan::{LaunchPlan, ParticipantExecution};
 use phoxal_cli_core::session::stores::telemetry::RobotScope;
 use phoxal_cli_core::session::{ProcessScope, SupervisorSnapshotV0};
@@ -71,7 +72,7 @@ pub(crate) fn start_telemetry_feeds_at(
     robot_targets: &[RobotFeedTarget],
     telemetry: &crate::telemetry::TelemetryBackend,
     connect: &str,
-    execution: phoxal::bus::ExecutionId,
+    execution: ExecutionId,
     recovery_epochs: tokio::sync::watch::Receiver<u64>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let Some(first) = robot_targets.first() else {

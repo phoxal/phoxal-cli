@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::identity::{ExecutionId, ProducerId};
 use anyhow::{Result, bail};
-use phoxal::bus::{ExecutionId, ProducerId};
 use phoxal::check as graph_check;
 use phoxal::participant::ExecutionOrigin;
 use phoxal::participant::launch::{
@@ -713,7 +713,7 @@ mod tests {
             "a new run is a new world history too"
         );
 
-        let launcher = phoxal::bus::ExecutionId::mint();
+        let launcher = ExecutionId::mint();
         let adopted = RunIdentity::mint_or_adopt(Some(launcher));
         assert_eq!(
             adopted.execution(),

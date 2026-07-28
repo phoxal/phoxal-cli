@@ -25,8 +25,8 @@ pub use protocol::{
 pub use supervisor::{
     BoundedString, DesiredProcessState, ExitDescription, ParticipantInstanceKey, ProcessDescriptor,
     ProcessEntry, ProcessFailure, ProcessFailureKind, ProcessKey, ProcessScope, ProcessState,
-    ProducerId, ProjectLifecycle, ReadinessPolicy, RobotKey, RuntimeFailurePolicy,
-    SimulationSessionInfo, StartupRequirement, SupervisorSnapshotV0,
+    ProjectLifecycle, ReadinessPolicy, RobotKey, RuntimeFailurePolicy, SimulationSessionInfo,
+    StartupRequirement, SupervisorSnapshotV0,
 };
 pub use telemetry::{
     ClockObservation, ClockSample, DeviceDiskSample, DeviceSample, JoypadCommand, JoypadDevice,

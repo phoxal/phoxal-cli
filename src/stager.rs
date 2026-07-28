@@ -833,6 +833,7 @@ mod tests {
     use super::*;
     use crate::host_paths::test_support::ScratchPhoxalHome;
     use crate::resolver::host_target_triple;
+    use phoxal_cli_core::identity::{ExecutionId, ProducerId};
     use phoxal_cli_core::project::catalog::ArtifactKind;
     use phoxal_cli_core::project::launch_plan::ParticipantExecution;
     use phoxal_cli_core::project::resolver::{
@@ -885,8 +886,8 @@ robot:
             execution,
             launch: ParticipantLaunch {
                 participant_id: participant_id.to_string(),
-                execution: phoxal::bus::ExecutionId::mint(),
-                producer: phoxal::bus::ProducerId::mint(),
+                execution: ExecutionId::mint(),
+                producer: ProducerId::mint(),
                 execution_origin: None,
                 namespace: "dev".to_string(),
                 robot_id: "testbot".to_string(),

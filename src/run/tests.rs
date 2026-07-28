@@ -11,6 +11,7 @@ use phoxal::participant::launch::env;
 use phoxal::participant::launch::{
     BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
 };
+use phoxal_cli_core::identity::{ExecutionId, ProducerId};
 use phoxal_cli_core::project::launch_plan::{
     LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
 };
@@ -57,8 +58,8 @@ fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRe
         execution,
         launch: ParticipantLaunch {
             participant_id: id.to_string(),
-            execution: phoxal::bus::ExecutionId::mint(),
-            producer: phoxal::bus::ProducerId::mint(),
+            execution: ExecutionId::mint(),
+            producer: ProducerId::mint(),
             execution_origin: None,
             namespace: "dev".to_string(),
             robot_id: "robot".to_string(),

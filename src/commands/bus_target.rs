@@ -13,8 +13,8 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use phoxal::bus::ExecutionId;
 use phoxal::raw::{Bus, BusConfig};
+use phoxal_cli_core::identity::{ExecutionId, ProducerId};
 
 use crate::AppContext;
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
@@ -80,7 +80,7 @@ impl BusTargetArgs {
             robot_id,
             execution,
             participant: participant.to_string(),
-            producer: phoxal::bus::ProducerId::mint(),
+            producer: ProducerId::mint(),
             connect_endpoints: vec![self.connect.clone()],
         })
     }

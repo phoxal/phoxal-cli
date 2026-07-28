@@ -1,4 +1,8 @@
-//! Project-local client for the resident Phoxal supervisor.
+//! Disposable client-side transport for the resident Phoxal supervisor.
+//!
+//! This crate owns supervisor connection and command transport. It must not own
+//! resident process authority or terminal presentation; later extraction moves
+//! retained client observation stores and source lifecycle here.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -4,6 +4,7 @@ use super::{
     BoardSnapshot, LogScope, LogSeverity, LogSource, ParticipantLaunchCommand, ParticipantState,
     ParticipantStatus, RoutedLogLine, RoutedLogUpdate, bounded_chars, bounded_log_text,
 };
+use phoxal_cli_core::identity::ProducerId;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::{
     BoundedString, ParticipantInstanceKey, ProcessDescriptor, ProcessEntry, ProcessFailure,
@@ -716,7 +717,7 @@ impl BoardBackend {
         self.set_launch_command(&key.to_string(), command);
     }
 
-    pub fn set_producer(&self, key: &ProcessKey, producer: phoxal::bus::ProducerId) {
+    pub fn set_producer(&self, key: &ProcessKey, producer: ProducerId) {
         let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
         if let Some(entry) = actor.snapshot.processes.get_mut(key) {
             entry.status.producer = Some(producer);
@@ -813,8 +814,8 @@ mod tests {
 
     /// A deterministic producer identity for tests, so a case can name the
     /// exact restart it means.
-    fn producer(seed: u8) -> phoxal::bus::ProducerId {
-        phoxal::bus::ProducerId::parse(&format!("{:032x}", u128::from(seed)))
+    fn producer(seed: u8) -> ProducerId {
+        ProducerId::parse(&format!("{:032x}", u128::from(seed)))
             .expect("test producer id must parse")
     }
     use super::*;
@@ -975,7 +976,7 @@ mod tests {
     #[test]
     fn minted_producer_identities_are_distinct() {
         let values = (0..1_024)
-            .map(|_| phoxal::bus::ProducerId::mint())
+            .map(|_| ProducerId::mint())
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(values.len(), 1_024);
     }
