@@ -328,7 +328,7 @@ impl RuntimeLayout {
     ///
     /// The selected binary's own declared `meta.id` is checked against
     /// `required.identity` before the caller ever sees its config schema
-    /// (organization#957 review): `required.identity` is the canonical
+    /// before the schema is trusted. `required.identity` is the canonical
     /// short/component id `required_runtimes` derived from the compiled
     /// `robot.yaml` plus the CLI catalog - the official short name, the user
     /// service/tool name, or the component id shared by every driven
@@ -779,8 +779,8 @@ tools:
         Ok(())
     }
 
-    /// The regression the review caught (organization#957): a binary declaring
-    /// the WRONG participant id for the canonical `bin/` path it landed at must
+    /// A binary declaring the wrong participant id for the canonical `bin/`
+    /// path it landed at must
     /// fail inspection, naming both the declared and the expected identity -
     /// not silently pass with its schema paired to the wrong runtime.
     #[test]
@@ -811,8 +811,7 @@ tools:
     /// `{id, config_schema}` JSON shape must fail inspection with a clear
     /// parse error, not synthesize a placeholder identity. Missing-section
     /// coverage lives with the extractor itself:
-    /// `participant_metadata::tests::foreign_object_without_section_is_a_clear_error`
-    /// (organization#957 review).
+    /// `participant_metadata::tests::foreign_object_without_section_is_a_clear_error`.
     #[test]
     fn inspecting_a_binary_with_malformed_metadata_is_rejected() -> Result<()> {
         let dir = write_layout(ROBOT_YAML)?;

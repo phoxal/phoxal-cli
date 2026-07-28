@@ -4,15 +4,10 @@
 //! manifest per participant binary in a dedicated linker section -
 //! `__DATA,__phoxal_meta` on Mach-O,
 //! `.phoxal_meta` everywhere else (`phoxal-macros/src/authoring.rs`'s
-//! `link_section_attrs`). `phoxal-cli` no longer executes a built artifact's
-//! `emit-apis` subcommand to learn its contract surface (that runtime
-//! subcommand is gone): it reads the section's bytes straight out of the
-//! object file, without ever executing the artifact. This module targets the
-//! same linker-section shape `phoxal-macros` embeds; the framework's own
-//! workspace tooling (`phoxal/framework` `workspace-policy/`, the crate the
-//! `xtask` binary was renamed to) does not itself parse object-file sections,
-//! so there is no framework-side reference implementation this mirrors. This
-//! module is format- and architecture-agnostic (via the `object` crate).
+//! `link_section_attrs`). The CLI reads the section's bytes straight out of
+//! the object file without ever executing the artifact. This module targets
+//! the same linker-section shape `phoxal-macros` embeds and is format- and
+//! architecture-agnostic through the `object` crate.
 use std::fs;
 use std::path::Path;
 
@@ -66,8 +61,7 @@ fn read_meta_section(object_bytes: &[u8], describe: &str) -> Result<Option<Vec<u
 /// check compares against an expected artifact/participant identity
 /// afterward. Silently returning a placeholder `id: "()"` here used to let a
 /// binary with no section at all sail through that check, because the
-/// placeholder was never compared against anything real - see
-/// organization#957's review.
+/// placeholder was never compared against anything real.
 pub fn extract_participant_metadata_from_bytes(
     object_bytes: &[u8],
     describe: &str,
@@ -522,10 +516,8 @@ mod tests {
     }
 
     /// A missing metadata section must be a clear error, not a synthesized
-    /// identity (organization#957's review): the old `id: "()"` placeholder
-    /// let a binary with no section at all pass any identity check that
-    /// compares against it, because nothing real was ever on the other side
-    /// of that comparison.
+    /// identity: a placeholder would let a binary with no section at all pass
+    /// an identity check without supplying any real evidence.
     #[test]
     fn foreign_object_without_section_is_a_clear_error() {
         let elf = synthesize_object(

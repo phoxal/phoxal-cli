@@ -488,8 +488,7 @@ fn healthy_graph_passes_with_platform_and_component_driver_source() -> Result<()
 #[test]
 fn privileged_tools_and_checked_sources_coexist_in_one_graph() -> Result<()> {
     // A privileged tool and a checked source participant appear in the same
-    // check run without incident - there is no contract-agreement axis left
-    // to gate on (organization#957 removed the API-coherence pass entirely).
+    // check run without incident.
     let tools = vec![ToolParticipant {
         name: "joypad".to_string(),
         binary_path: PathBuf::from("/fake/cache/joypad"),
@@ -557,9 +556,7 @@ fn privileged_tools_are_exempt_from_topology() -> Result<()> {
 
 #[test]
 fn source_and_platform_participants_coexist_in_a_healthy_graph() -> Result<()> {
-    // A platform publisher and a source subscriber both check clean - the
-    // graph checker no longer gates on contract agreement at all
-    // (organization#957).
+    // A platform participant and a source participant both check clean.
     let images = vec![("mission".to_string(), "mission:ok".to_string())];
     let sources = vec![SourceParticipant::user_service(
         "drive".to_string(),
@@ -983,9 +980,8 @@ fn user_service_with_no_producer_is_a_legal_graph() -> Result<()> {
 
 #[test]
 fn build_participant_report_from_source_never_caches_across_calls() -> Result<()> {
-    // The old `cache/emit-apis/` disk cache is gone: two back-to-back calls
-    // for the SAME crate dir each invoke the (fake) build closure - nothing
-    // is remembered between calls.
+    // Two back-to-back calls for the same crate dir each invoke the fake build
+    // closure; source inspection does not retain state between calls.
     let temp = tempfile::tempdir()?;
     let crate_dir = fixture_crate_dir(&temp, "sibling");
     let participant = SourceParticipant::user_service("sibling", crate_dir.clone());

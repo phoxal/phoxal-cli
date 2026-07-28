@@ -6,17 +6,13 @@
 //! dependency pointed one way so this module (and its tests) build and run
 //! without pulling in the terminal/process/runtime machinery.
 //!
-//! Finding A4/C2: this vocabulary used to also carry `ParticipantChanged` and
-//! `Telemetry` variants (plus their `ParticipantStatusLite`/
-//! `ParticipantLifecycle`/`TelemetrySampleLite` payload types) as forward-
-//! looking scaffolding for a "fully event-sourced" renderer. Neither was ever
-//! constructed by production code: participant rows are read straight off
+//! This vocabulary carries only events with real producers. Participant rows
+//! are read straight off
 //! `supervisor::BoardSnapshot` (board polling, not events - see
 //! the session controller's own docs on why that stays the source of truth)
 //! and live telemetry flows through
 //! `telemetry::TelemetryBackend`/`stores::telemetry_store::TelemetryStore`
-//! instead. Removed rather than kept "for later" (YAGNI) - this event
-//! vocabulary should only ever carry what a real producer emits.
+//! instead.
 
 use std::time::Duration;
 
