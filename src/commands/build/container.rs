@@ -5,7 +5,7 @@
 //! back to the same host-side staging + validation + deterministic archiving
 //! every other builder uses. The container is only a compilation environment: it
 //! mounts a deterministic source snapshot and the host's Cargo registry/git
-//! caches, runs `cargo build --workspace --locked --target` inside the image,
+//! caches, runs `cargo build --workspace --locked --release --target` inside the image,
 //! and never produces a Docker/OCI image.
 //!
 //! ## Officials materialize inside the container too (organization#951 WS4)
@@ -240,7 +240,7 @@ impl ContainerBuildSpec {
     /// Render the engine invocation that compiles the workspace AND
     /// materializes the deterministic official set inside the image. The
     /// container runs, as a compilation environment only,
-    /// `cargo build --workspace --locked --target <triple>` against the
+    /// `cargo build --workspace --locked --release --target <triple>` against the
     /// mounted snapshot, then one `cargo install <package>@<train>
     /// --registry phoxal --locked --root <officials> --target <triple>
     /// --config ...` per [`Self::officials`] entry - all on the
@@ -335,7 +335,7 @@ impl ContainerBuildSpec {
     /// the first failure (`set -e`).
     fn container_script(&self) -> String {
         let mut workspace_build = format!(
-            "cargo build --workspace --locked --target {}",
+            "cargo build --workspace --locked --release --target {}",
             crate::commands::deploy::shell_quote(&self.target)
         );
         // The `cargo install` per official already threads `self.offline`
@@ -355,10 +355,15 @@ impl ContainerBuildSpec {
                 &package,
                 &official.train,
                 Some(&self.target),
+                crate::materialize::MaterializeProfile::Release,
                 self.offline,
             );
             let mut command = vec!["cargo".to_string(), "install".to_string()];
             command.extend(install_args);
+            command.extend([
+                "--target-dir".to_string(),
+                format!("{CONTAINER_WORKDIR}/target"),
+            ]);
             command.push("--root".to_string());
             command.push(CONTAINER_OFFICIALS.to_string());
             commands.push(
@@ -565,7 +570,7 @@ mod tests {
         assert!(joined.contains("rust:1.88-bookworm"), "{joined}");
         // Native compilation for the target, with the locked lockfile enforced.
         assert!(
-            joined.contains("cargo build --workspace --locked --target"),
+            joined.contains("cargo build --workspace --locked --release --target"),
             "{joined}"
         );
         assert!(joined.contains("aarch64-unknown-linux-gnu"), "{joined}");
@@ -578,6 +583,10 @@ mod tests {
         assert!(joined.contains("--registry"), "{joined}");
         assert!(joined.contains("phoxal"), "{joined}");
         assert!(joined.contains("--locked"), "{joined}");
+        assert!(
+            joined.contains("'--target-dir' '/phoxal/src/target'"),
+            "{joined}"
+        );
         // `set -e` so a failed official install stops the whole script rather
         // than silently continuing with a partial officials root.
         assert!(joined.contains("set -e"), "{joined}");

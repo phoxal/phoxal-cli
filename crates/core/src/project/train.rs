@@ -74,7 +74,7 @@ pub fn resolve_locked_project(project_root: &Path, offline: bool) -> Result<Lock
     let lock = project_root.join("Cargo.lock");
     ensure!(
         manifest.is_file(),
-        "robot project is missing root Cargo.toml train anchor; run `phoxal init` or add a non-published root package depending on workspace phoxal"
+        "robot project is missing root Cargo.toml train anchor; add a non-published root package depending on workspace phoxal and commit its Cargo.lock"
     );
     ensure!(
         lock.is_file(),

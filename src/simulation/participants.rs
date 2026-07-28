@@ -21,6 +21,7 @@ pub(crate) fn official_simulator_participants(
 ) -> Result<Vec<graph_check::ParticipantApis>> {
     let robot_id = resolved.robot.robot.id.as_str();
     let simulation_root = phoxal_cli_core::project::launch_plan::simulation_root_dir(project_root);
+    let target_dir = crate::run::cargo_target_dir(project_root, offline).ok();
     let simulation_bin_dir = simulation_root.join("bin");
     let mut participants = Vec::new();
     for runtime in resolved.simulators.iter().filter(|runtime| {
@@ -30,10 +31,14 @@ pub(crate) fn official_simulator_participants(
         // controller materializes here (idempotent - `cargo install` is a
         // fast no-op once already installed) rather than requiring a
         // separate staging pass to have already run first.
-        let spec = crate::materialize::MaterializeSpec::new(
+        let mut spec = crate::materialize::MaterializeSpec::new(
             runtime.package.clone(),
             runtime.train.clone(),
-        );
+        )
+        .with_profile(crate::materialize::MaterializeProfile::Debug);
+        if let Some(target_dir) = &target_dir {
+            spec = spec.with_target_dir(target_dir.clone());
+        }
         crate::materialize::cargo_install(&simulation_root, &spec, offline).with_context(|| {
             format!(
                 "failed to materialize official simulator '{}'",

@@ -93,6 +93,9 @@ pub(crate) async fn live_simulate_setup(
     // like `run`. The Webots-owned controller is copied into the Webots
     // project's controllers directory instead, so it is not resolved here.
     let source_dirs = crate::run::source_dirs_by_participant(&sim_source(&sim).source_participants);
+    let materialize_settings = crate::stager::MaterializeSettings::development(
+        crate::run::cargo_target_dir(&sim.ctx.project_root, offline)?,
+    );
     crate::run::prepare_robot_participants(
         &sim.plan,
         &sim_source(&sim).resolved,
@@ -102,6 +105,7 @@ pub(crate) async fn live_simulate_setup(
         &board,
         &mut specs,
         offline,
+        &materialize_settings,
         &ui,
     )?;
     // The router launches from the staged `bin/` entry like every other
@@ -110,6 +114,7 @@ pub(crate) async fn live_simulate_setup(
         candidate.path(),
         &sim_source(&sim).resolved,
         offline,
+        &materialize_settings,
         |crate_dir, name| crate::run::build_source_binary(crate_dir, name, &ui, None, offline),
     )
     .context("failed to stage the infrastructure router into the simulation bin store")?;
@@ -122,9 +127,9 @@ pub(crate) async fn live_simulate_setup(
     let staged_root = crate::stager::publish_runtime_layout(candidate, &sim_source(&sim).resolved)
         .context("failed to publish the simulation runtime layout")?;
     for spec in &mut specs {
-        repoint_after_publish(&mut spec.executable, &candidate_path, &staged_root);
+        crate::run::repoint_after_publish(&mut spec.executable, &candidate_path, &staged_root);
         if let Some(cwd) = &mut spec.cwd {
-            repoint_after_publish(cwd, &candidate_path, &staged_root);
+            crate::run::repoint_after_publish(cwd, &candidate_path, &staged_root);
         }
     }
 
@@ -223,19 +228,4 @@ pub(crate) async fn live_simulate_setup(
         supervisor_options,
         background_tasks,
     })
-}
-
-/// Rewrite `path` from the candidate root to the published root when it
-/// falls under the candidate at all - a source participant's `cwd` is its own
-/// crate directory, never under either, and is correctly left untouched.
-/// `fs::rename` (the publish step) preserves the relative structure exactly,
-/// so this prefix swap is exact, never an approximation.
-fn repoint_after_publish(
-    path: &mut std::path::PathBuf,
-    candidate: &std::path::Path,
-    published: &std::path::Path,
-) {
-    if let Ok(relative) = path.strip_prefix(candidate) {
-        *path = published.join(relative);
-    }
 }

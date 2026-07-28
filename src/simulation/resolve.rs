@@ -83,17 +83,31 @@ pub(crate) fn build_checked_sim_launch_plan(
     // every prior run still using it while this check runs.
     let scratch = crate::stager::begin_runtime_layout(project_root, resolved)
         .context("failed to stage a scratch layout for simulation metadata")?;
+    // A valid Cargo robot shares its normal target directory. Keep metadata
+    // checking independent for deliberately incomplete validation fixtures:
+    // their later graph error is more useful than failing target discovery.
+    let materialize_settings = crate::stager::MaterializeSettings {
+        profile: crate::materialize::MaterializeProfile::Debug,
+        target_dir: crate::run::cargo_target_dir(project_root, offline).ok(),
+    };
     crate::stager::materialize_official_store(
         scratch.path(),
         resolved,
         offline,
         None,
+        &materialize_settings,
         |crate_dir, name| {
             crate::run::build_source_binary(crate_dir, name, &crate::Ui::from_env(), None, offline)
         },
     )?;
     for runtime in crate::check::component_driver_runtimes_by_ref(resolved).values() {
-        crate::stager::materialize_component_driver(scratch.path(), runtime, offline, None)?;
+        crate::stager::materialize_component_driver(
+            scratch.path(),
+            runtime,
+            offline,
+            None,
+            &materialize_settings,
+        )?;
     }
     let bin_dir = scratch.path().join("bin");
     let mut official_by_name = resolved

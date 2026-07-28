@@ -103,6 +103,18 @@ impl StagingBuild {
         }
     }
 
+    pub(crate) fn materialize_settings(
+        &self,
+        project_root: &Path,
+        offline: bool,
+    ) -> Result<crate::stager::MaterializeSettings> {
+        let target_dir = cargo_target_dir(project_root, offline)?;
+        Ok(match self {
+            Self::HostRuntime => crate::stager::MaterializeSettings::development(target_dir),
+            Self::NativeBundle { .. } => crate::stager::MaterializeSettings::release(target_dir),
+        })
+    }
+
     /// Produce one workspace user/driver crate binary for this staging pass.
     pub(crate) fn build_user_binary(
         &self,
@@ -117,12 +129,25 @@ impl StagingBuild {
                 target,
                 prebuilt_target_dir: None,
                 ..
-            } => build_source_binary(crate_dir, preferred_name, ui, Some(target), offline),
+            } => build_source_binary_with_profile(
+                crate_dir,
+                preferred_name,
+                ui,
+                Some(target),
+                Profile::Release,
+                offline,
+            ),
             Self::NativeBundle {
                 target,
                 prebuilt_target_dir: Some(target_dir),
                 ..
-            } => locate_prebuilt_binary(crate_dir, preferred_name, target_dir, Some(target)),
+            } => locate_prebuilt_binary(
+                crate_dir,
+                preferred_name,
+                target_dir,
+                Some(target),
+                Profile::Release,
+            ),
         }
     }
 }
@@ -131,11 +156,9 @@ impl StagingBuild {
 /// session. `target` cross-compiles with `cargo build --target <TRIPLE>` when it
 /// is set and differs from the host; a missing cross toolchain fails with an
 /// actionable `rustup target add` error rather than an opaque cargo failure.
-/// Builds `debug` - the fast interactive dev-loop profile `run`/`start`/local
-/// `build` all want. [`build_source_binary_with_profile`] is the release-aware
-/// form a path-overridden simulation controller uses instead, to match the
-/// release profile its registry-installed counterpart gets from `cargo
-/// install`'s own default.
+/// Builds `debug` for the fast interactive `run`/`start`/simulation loop.
+/// Deployable bundles call [`build_source_binary_with_profile`] with release
+/// explicitly.
 pub(crate) fn build_source_binary(
     crate_dir: &Path,
     preferred_name: &str,
@@ -283,14 +306,14 @@ fn locate_prebuilt_binary(
     preferred_name: &str,
     target_dir: &Path,
     target: Option<&str>,
+    profile: Profile,
 ) -> Result<PathBuf> {
     let binary_name = cargo_binary_name(crate_dir, Some(preferred_name))?;
     // The container always compiles with an explicit `--target <triple>`, so
-    // its output is always under `target/<triple>/debug` - including when the
+    // its output is always under `target/<triple>/<profile>` - including when the
     // triple equals the CLI host triple (a Linux host building its own arch in
     // a container). Never collapse to the implicit `target/debug` here (#936).
-    // The container's `cargo build --workspace` never passes `--release`.
-    let path = profile_binary_path(target_dir, target, Profile::Debug, &binary_name);
+    let path = profile_binary_path(target_dir, target, profile, &binary_name);
     if !path.is_file() {
         bail!(
             "container build did not produce the binary for `{preferred_name}` (expected {}); \
@@ -443,7 +466,7 @@ mod prebuilt_tests {
     use super::*;
 
     /// The container always compiles with an explicit `--target`, so the
-    /// prebuilt lookup must read `target/<triple>/debug` even when the triple
+    /// prebuilt lookup must read `target/<triple>/release` even when the triple
     /// equals the CLI host triple - a Linux host container-building its own
     /// arch previously collapsed to `target/debug` and missed the binary
     /// (#936, round-2 finding 2).
@@ -458,21 +481,34 @@ mod prebuilt_tests {
         )?;
         let host = crate::resolver::host_target_triple();
         let target_dir = dir.path().join("target");
-        let debug = target_dir.join(&host).join("debug");
-        std::fs::create_dir_all(&debug)?;
-        std::fs::write(debug.join(binary_name_with_suffix("svc")), b"bin")?;
+        let release = target_dir.join(&host).join("release");
+        std::fs::create_dir_all(&release)?;
+        std::fs::write(release.join(binary_name_with_suffix("svc")), b"bin")?;
 
-        let found = locate_prebuilt_binary(&crate_dir, "svc", &target_dir, Some(&host))?;
-        assert_eq!(found, debug.join(binary_name_with_suffix("svc")));
+        let found = locate_prebuilt_binary(
+            &crate_dir,
+            "svc",
+            &target_dir,
+            Some(&host),
+            Profile::Release,
+        )?;
+        assert_eq!(found, release.join(binary_name_with_suffix("svc")));
 
-        // The implicit `target/debug` location must NOT satisfy the lookup.
-        std::fs::remove_file(debug.join(binary_name_with_suffix("svc")))?;
-        let plain = target_dir.join("debug");
+        // The implicit `target/release` location must NOT satisfy the lookup.
+        std::fs::remove_file(release.join(binary_name_with_suffix("svc")))?;
+        let plain = target_dir.join("release");
         std::fs::create_dir_all(&plain)?;
         std::fs::write(plain.join(binary_name_with_suffix("svc")), b"bin")?;
         assert!(
-            locate_prebuilt_binary(&crate_dir, "svc", &target_dir, Some(&host)).is_err(),
-            "the prebuilt lookup must never collapse to the implicit target/debug"
+            locate_prebuilt_binary(
+                &crate_dir,
+                "svc",
+                &target_dir,
+                Some(&host),
+                Profile::Release,
+            )
+            .is_err(),
+            "the prebuilt lookup must never collapse to the implicit target/release"
         );
         Ok(())
     }

@@ -10,7 +10,6 @@ pub mod build;
 pub mod bus_target;
 pub mod deploy;
 pub mod doctor;
-pub mod init;
 pub mod install;
 pub mod logs;
 pub mod resident;
@@ -84,8 +83,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum RootCommand {
-    #[command(about = "Create a non-published root Cargo train anchor and committed lockfile.")]
-    Init(init::Init),
     #[command(
         about = "Stage a runtime layout for a target and archive it as build.phoxal.",
         long_about = "Stage a runtime layout for a target and archive it as a deterministic build.phoxal.\n\n\
@@ -151,7 +148,6 @@ impl RootCommand {
 
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match self {
-            Self::Init(command) => command.run(app).await,
             Self::Build(command) => command.run(app).await,
             Self::Deploy(command) => command.run(app).await,
             Self::Install(command) => command.run(app).await,

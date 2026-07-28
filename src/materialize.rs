@@ -41,6 +41,18 @@ pub struct MaterializeSpec {
     pub catalog_package: String,
     pub train: String,
     pub target: Option<String>,
+    pub profile: MaterializeProfile,
+    pub target_dir: Option<PathBuf>,
+}
+
+/// Cargo's two install profiles. Interactive staging uses debug builds so
+/// source and registry participants share one development profile; deployable
+/// bundles use Cargo's default release profile throughout.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MaterializeProfile {
+    Debug,
+    #[default]
+    Release,
 }
 
 impl MaterializeSpec {
@@ -50,6 +62,8 @@ impl MaterializeSpec {
             catalog_package: catalog_package.into(),
             train: train.into(),
             target: None,
+            profile: MaterializeProfile::Release,
+            target_dir: None,
         }
     }
 
@@ -59,6 +73,21 @@ impl MaterializeSpec {
     #[must_use]
     pub fn with_target(mut self, target: Option<String>) -> Self {
         self.target = target;
+        self
+    }
+
+    #[must_use]
+    pub fn with_profile(mut self, profile: MaterializeProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    /// Share Cargo's project target directory with source builds. The install
+    /// root still owns only the final runtime binary; compiler intermediates
+    /// stay in Cargo's standard cache.
+    #[must_use]
+    pub fn with_target_dir(mut self, target_dir: PathBuf) -> Self {
+        self.target_dir = Some(target_dir);
         self
     }
 
@@ -81,9 +110,19 @@ impl MaterializeSpec {
 /// stale by the time it would be read.
 pub fn cargo_install(root: &Path, spec: &MaterializeSpec, offline: bool) -> Result<PathBuf> {
     let package = spec.cargo_package_name();
-    let args = build_install_args(&package, &spec.train, spec.target.as_deref(), offline);
+    let args = build_install_args(
+        &package,
+        &spec.train,
+        spec.target.as_deref(),
+        spec.profile,
+        offline,
+    );
     let mut command = Command::new("cargo");
-    command.arg("install").args(&args).arg("--root").arg(root);
+    command.arg("install").args(&args);
+    if let Some(target_dir) = &spec.target_dir {
+        command.arg("--target-dir").arg(target_dir);
+    }
+    command.arg("--root").arg(root);
     run_cargo_install(command, &package)?;
     harvest_binary(root, &package)
 }
@@ -100,6 +139,7 @@ pub fn build_install_args(
     package: &str,
     train: &str,
     target: Option<&str>,
+    profile: MaterializeProfile,
     offline: bool,
 ) -> Vec<String> {
     let mut args = vec![
@@ -114,6 +154,9 @@ pub fn build_install_args(
     if let Some(triple) = cross {
         args.push("--target".to_string());
         args.push(triple.to_string());
+    }
+    if profile == MaterializeProfile::Debug {
+        args.push("--debug".to_string());
     }
     if offline {
         args.push("--offline".to_string());
@@ -161,14 +204,19 @@ mod tests {
 
     fn command_for(spec: &MaterializeSpec, root: &Path, offline: bool) -> Command {
         let package = spec.cargo_package_name();
-        let install_args =
-            build_install_args(&package, &spec.train, spec.target.as_deref(), offline);
+        let install_args = build_install_args(
+            &package,
+            &spec.train,
+            spec.target.as_deref(),
+            spec.profile,
+            offline,
+        );
         let mut command = Command::new("cargo");
-        command
-            .arg("install")
-            .args(&install_args)
-            .arg("--root")
-            .arg(root);
+        command.arg("install").args(&install_args);
+        if let Some(target_dir) = &spec.target_dir {
+            command.arg("--target-dir").arg(target_dir);
+        }
+        command.arg("--root").arg(root);
         command
     }
 
@@ -228,6 +276,21 @@ mod tests {
         let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0");
         let command = command_for(&spec, Path::new("/tmp/bundle"), true);
         assert!(args(&command).contains(&"--offline".to_string()));
+    }
+
+    #[test]
+    fn debug_profile_and_shared_target_directory_are_explicit() {
+        let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0")
+            .with_profile(MaterializeProfile::Debug)
+            .with_target_dir(PathBuf::from("/workspace/target"));
+        let argv = args(&command_for(&spec, Path::new("/tmp/bundle"), false));
+        assert!(argv.contains(&"--debug".to_string()));
+        let target_dir = argv
+            .iter()
+            .position(|arg| arg == "--target-dir")
+            .map(|index| argv[index + 1].clone())
+            .expect("--target-dir is present");
+        assert_eq!(target_dir, "/workspace/target");
     }
 
     #[test]

@@ -87,6 +87,7 @@ pub(crate) fn stage_complete_bin_store(
     drivers: &DriverSelection,
     offline: bool,
     build: &crate::run::StagingBuild,
+    materialize_settings: &crate::stager::MaterializeSettings,
     ui: &crate::Ui,
 ) -> Result<()> {
     let mut staged_names = BTreeSet::new();
@@ -155,6 +156,7 @@ pub(crate) fn stage_complete_bin_store(
             runtime,
             offline,
             build.officials_source(),
+            materialize_settings,
         )?;
     }
     // Every official service, tool, and the infrastructure router.
@@ -163,6 +165,7 @@ pub(crate) fn stage_complete_bin_store(
         resolved,
         offline,
         build.officials_source(),
+        materialize_settings,
         |crate_dir, name| build.build_user_binary(crate_dir, name, ui, offline),
     )
     .context("failed to complete the staged bin store with the full official runtime set")?;
@@ -284,6 +287,7 @@ pub(crate) fn prepare_robot_participants(
     board: &BoardBackend,
     specs: &mut Vec<ParticipantSpec>,
     offline: bool,
+    materialize_settings: &crate::stager::MaterializeSettings,
     ui: &crate::Ui,
 ) -> Result<()> {
     let official_by_name = official_runtimes_by_name(resolved);
@@ -330,6 +334,7 @@ pub(crate) fn prepare_robot_participants(
                 &official_by_name,
                 source_dirs,
                 offline,
+                materialize_settings,
                 ui,
             )?;
             let executable = stage_and_inspect(staged_root, participant, &source)?;
@@ -398,6 +403,7 @@ fn official_runtimes_by_name(resolved: &ResolvedRobot) -> BTreeMap<&str, &Resolv
 /// registry-provided driver materializes via `cargo install`, straight into
 /// `staged_root/bin/`. Every path hard-fails - there is no graceful
 /// `None`/pending note - naming the required identity.
+#[allow(clippy::too_many_arguments)]
 fn resolve_participant_source(
     staged_root: &Path,
     participant: &ParticipantLaunchRecord,
@@ -405,6 +411,7 @@ fn resolve_participant_source(
     official_by_name: &BTreeMap<&str, &ResolvedPlatformRuntime>,
     source_dirs: &BTreeMap<String, PathBuf>,
     offline: bool,
+    materialize_settings: &crate::stager::MaterializeSettings,
     ui: &crate::Ui,
 ) -> Result<PathBuf> {
     let id = &participant.launch.participant_id;
@@ -433,7 +440,13 @@ fn resolve_participant_source(
             // This resolution path (single-participant execution, used only
             // by simulation) never runs through the container builder, so
             // there is no pre-materialized officials directory to check.
-            crate::stager::materialize_component_driver(staged_root, runtime, offline, None)?;
+            crate::stager::materialize_component_driver(
+                staged_root,
+                runtime,
+                offline,
+                None,
+                materialize_settings,
+            )?;
             Ok(staged_root.join("bin").join(
                 phoxal_cli_core::project::resolver::official_binary_name(
                     runtime.kind,
@@ -458,12 +471,11 @@ fn resolve_participant_source(
                     offline,
                 );
             }
-            crate::materialize::cargo_install(
-                staged_root,
-                &crate::materialize::MaterializeSpec::new(tool.package.clone(), tool.train.clone())
+            let spec = materialize_settings.apply(
+                crate::materialize::MaterializeSpec::new(tool.package.clone(), tool.train.clone())
                     .with_target(Some(tool.target.clone())),
-                offline,
-            )
+            );
+            crate::materialize::cargo_install(staged_root, &spec, offline)
         }
         ParticipantExecution::OfficialArtifact { .. } => {
             let runtime = official_by_name
@@ -477,15 +489,14 @@ fn resolve_participant_source(
             if let Some(crate_dir) = &runtime.path_override {
                 return build_source_binary(crate_dir, &runtime.name, ui, None, offline);
             }
-            crate::materialize::cargo_install(
-                staged_root,
-                &crate::materialize::MaterializeSpec::new(
+            let spec = materialize_settings.apply(
+                crate::materialize::MaterializeSpec::new(
                     runtime.package.clone(),
                     runtime.train.clone(),
                 )
                 .with_target(runtime.target.clone()),
-                offline,
-            )
+            );
+            crate::materialize::cargo_install(staged_root, &spec, offline)
         }
     }
 }
