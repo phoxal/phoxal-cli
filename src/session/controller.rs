@@ -15,7 +15,8 @@ use phoxal_cli_core::session::event::{
 };
 use phoxal_cli_core::session::state::{FailReason, SessionState};
 use phoxal_cli_core::session::stores::telemetry::RobotScope;
-use phoxal_cli_core::session::{CommandAction, JoypadCommand, ProjectLifecycle, SessionMode};
+use phoxal_cli_core::session::{JoypadCommand, ProjectLifecycle, SessionMode};
+use phoxal_cli_protocol::{CommandAction, CommandError};
 use phoxal_cli_ui::tui::{
     DisplayAction, TerminalGuard, TuiDisplay, install_panic_hook, render::TitleInfo,
 };
@@ -95,7 +96,7 @@ impl SessionController {
         output: OutputContext,
         mode: SessionMode,
         project_root: &Path,
-        snapshot: &phoxal_cli_core::session::SupervisorSnapshotV0,
+        snapshot: &phoxal_cli_protocol::SupervisorSnapshotV0,
     ) -> io::Result<Self> {
         install_panic_hook();
         let mut title = session_title(project_root, mode);
@@ -338,11 +339,7 @@ impl SessionController {
         }
     }
 
-    fn report_command_rejection(
-        &mut self,
-        operation: &str,
-        error: Option<phoxal_cli_core::session::CommandError>,
-    ) {
+    fn report_command_rejection(&mut self, operation: &str, error: Option<CommandError>) {
         self.report_command_warning(format!(
             "supervisor rejected {operation}: {}",
             error.map_or_else(

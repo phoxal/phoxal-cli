@@ -116,15 +116,7 @@ pub struct PlanRevision {
 impl PlanRevision {
     pub fn compile(number: u64, plan: LaunchPlan) -> Result<Self> {
         anyhow::ensure!(number > 0, "plan revision numbers start at one");
-        let process_count = plan
-            .robots
-            .iter()
-            .map(|robot| robot.participants.len())
-            .sum::<usize>()
-            // Infrastructure router plus bounded supervisor-owned helpers.
-            .saturating_add(4);
-        crate::session::protocol::validate_snapshot_capacity(process_count)?;
-        validate_supervisor_identity_bounds(&plan)?;
+        validate_runtime_bounds(&plan)?;
         // The digest is the plan's *content* - what to launch - so it excludes
         // the run identities, which say *which run* rather than what (#952
         // section B). Two builds of the same layout must digest identically
@@ -185,39 +177,63 @@ impl PlanRevision {
     }
 }
 
-fn validate_supervisor_identity_bounds(plan: &LaunchPlan) -> Result<()> {
-    use crate::session::protocol::{MAX_ARTIFACT_ID_BYTES, MAX_SNAPSHOT_TEXT_BYTES};
+/// Reject a launch graph that cannot be represented by runtime state.
+///
+/// Preparation calls this before publishing participant rows; revision
+/// compilation repeats it as the domain-level invariant at its final choke
+/// point.
+pub fn validate_runtime_bounds(plan: &LaunchPlan) -> Result<()> {
+    let process_count = plan
+        .robots
+        .iter()
+        .map(|robot| robot.participants.len())
+        .sum::<usize>()
+        // Infrastructure router plus bounded supervisor-owned helpers.
+        .saturating_add(4);
+    anyhow::ensure!(
+        process_count <= crate::runtime::MAX_SUPERVISED_PROCESSES,
+        "execution plan has {process_count} supervised processes; runtime supports at most {}",
+        crate::runtime::MAX_SUPERVISED_PROCESSES
+    );
     let bounded = |label: &str, value: &str, maximum: usize| -> Result<()> {
         anyhow::ensure!(
             value.len() <= maximum,
-            "{label} is {} bytes; supervisor protocol v0 limit is {maximum}",
+            "{label} is {} bytes; runtime limit is {maximum}",
             value.len()
         );
         Ok(())
     };
     for robot in &plan.robots {
-        bounded("robot id", &robot.id, MAX_SNAPSHOT_TEXT_BYTES)?;
-        bounded("robot namespace", &robot.namespace, MAX_SNAPSHOT_TEXT_BYTES)?;
+        bounded(
+            "robot id",
+            &robot.id,
+            crate::runtime::MAX_RUNTIME_TEXT_BYTES,
+        )?;
+        bounded(
+            "robot namespace",
+            &robot.namespace,
+            crate::runtime::MAX_RUNTIME_TEXT_BYTES,
+        )?;
         for participant in &robot.participants {
             bounded(
                 "participant process id",
                 &participant.launch.participant_id,
-                MAX_ARTIFACT_ID_BYTES,
+                crate::runtime::MAX_RUNTIME_ARTIFACT_ID_BYTES,
             )?;
             bounded(
                 "participant artifact id",
                 &participant.artifact_id,
-                MAX_ARTIFACT_ID_BYTES,
+                crate::runtime::MAX_RUNTIME_ARTIFACT_ID_BYTES,
             )?;
             bounded(
                 "participant robot id",
                 &participant.launch.robot_id,
-                MAX_SNAPSHOT_TEXT_BYTES,
+                crate::runtime::MAX_RUNTIME_TEXT_BYTES,
             )?;
             bounded(
                 "participant namespace",
                 &participant.launch.namespace,
-                MAX_SNAPSHOT_TEXT_BYTES,
+                crate::runtime::MAX_RUNTIME_TEXT_BYTES,
             )?;
         }
     }
@@ -770,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_graph_process_count_fits_protocol_v0() {
+    fn reference_graph_process_count_fits_runtime_bound() {
         let participant = |index: usize| ParticipantLaunchRecord {
             artifact_id: format!("artifact-{index}"),
             execution: ParticipantExecution::UserService {
@@ -804,15 +820,11 @@ mod tests {
             }],
         };
 
-        // Thirty-six participants plus the router and three bounded
-        // supervisor-owned helpers is the 40-process reference graph.
-        PlanRevision::compile(1, plan(36)).expect("reference graph should fit protocol v0");
+        PlanRevision::compile(1, plan(36)).expect("40-process reference graph should fit");
         let error =
             PlanRevision::compile(1, plan(37)).expect_err("41 processes must remain bounded");
         assert!(
-            error
-                .to_string()
-                .contains("protocol v0 supports at most 40"),
+            error.to_string().contains("runtime supports at most 40"),
             "{error:#}"
         );
     }

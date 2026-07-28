@@ -3,11 +3,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use phoxal_cli_core::session::{CommandAction, ProjectLifecycle};
+use phoxal_cli_core::session::ProjectLifecycle;
+use phoxal_cli_protocol::CommandAction;
 
 use crate::AppContext;
 use crate::resident::supervisor_socket_path;
-use crate::run::{RobotFeedTarget, project_router_endpoint, start_telemetry_feeds_at};
+use crate::run::{RobotFeedTarget, start_telemetry_feeds_at};
 use crate::supervisor::{
     BoardBackend, ProjectLock, ProjectLockStatus, ProjectOperation, start_bus_log_subscriber,
     start_liveliness_observer,
@@ -23,6 +24,9 @@ pub struct Attach {
 pub struct Stop {
     #[arg(value_name = "PROJECT_OR_ENTRY")]
     target: Option<PathBuf>,
+    /// Stop through the owning process authority without using the resident protocol.
+    #[arg(long)]
+    force: bool,
 }
 
 impl Attach {
@@ -43,12 +47,11 @@ pub(crate) async fn drive_tui(
     validate_entry(target, &initial.entry)?;
     // Attaching means observing the *running* execution: the bus root is
     // execution-scoped, so a fresh identity would subscribe an empty root.
-    let execution = crate::supervisor::active_execution(&target.project)?
-        .context("the attached project is not running an execution")?;
+    let execution = initial.execution_id;
     let board = BoardBackend::new();
     board.replace_from_supervisor(initial.clone());
     let telemetry = crate::telemetry::TelemetryBackend::new();
-    let connect = project_router_endpoint(&target.project);
+    let connect = initial.router.clone();
     let targets = RobotFeedTarget::from_snapshot(&initial);
     let mut tasks = Vec::new();
     tasks.extend(targets.iter().map(|target| {
@@ -76,7 +79,7 @@ pub(crate) async fn drive_tui(
         execution,
         board.recovery_epoch_receiver(),
     ));
-    if initial.execution == "simulation:webots"
+    if initial.simulation.is_some()
         && let Some(first) = targets.first()
     {
         let (clock_rx, clock_task) = crate::supervisor::start_clock_feed(
@@ -90,7 +93,7 @@ pub(crate) async fn drive_tui(
     }
     let mut controller = crate::session::controller::SessionController::new_attachment(
         app.output,
-        if initial.execution == "simulation:webots" {
+        if initial.simulation.is_some() {
             phoxal_cli_core::session::SessionMode::Simulation
         } else {
             phoxal_cli_core::session::SessionMode::Run
@@ -111,6 +114,11 @@ pub(crate) async fn drive_tui(
 impl Stop {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let target = resolve_target(self.target.as_deref(), app.project.root())?;
+        if self.force {
+            let outcome = crate::force_stop::force_stop(&target.runtime_target()).await?;
+            app.ui.info(format!("resident stopped ({outcome})"));
+            return Ok(());
+        }
         let client = connect_running(&target).await?;
         validate_entry(&target, &client.snapshots().current().entry)?;
         let reply = client.command(CommandAction::Shutdown).await?;
@@ -146,6 +154,28 @@ impl Stop {
 pub(crate) struct ProjectTarget {
     pub(crate) project: PathBuf,
     requested_entry: Option<PathBuf>,
+}
+
+impl ProjectTarget {
+    fn runtime_target(&self) -> phoxal_cli_core::runtime::RuntimeTarget {
+        let paths = crate::runtime_paths::RuntimePaths::for_root(&self.project);
+        let router = paths.router_socket();
+        phoxal_cli_core::runtime::RuntimeTarget {
+            logical_root: self.project.clone(),
+            requested_entry: self.requested_entry.clone(),
+            project_lock: paths.project_lock(),
+            supervisor_socket: paths.supervisor_socket(),
+            zenoh_endpoint: format!("unixsock-stream/{}", router.display()),
+            zenoh_socket: router,
+            authority: if crate::runtime_paths::is_installed_root(&self.project) {
+                phoxal_cli_core::runtime::ResidentAuthority::SystemdUnit {
+                    unit: crate::runtime_paths::SYSTEMD_UNIT.to_string(),
+                }
+            } else {
+                phoxal_cli_core::runtime::ResidentAuthority::DetachedSession
+            },
+        }
+    }
 }
 
 pub(crate) fn resolve_target(explicit: Option<&Path>, fallback: &Path) -> Result<ProjectTarget> {
@@ -209,12 +239,13 @@ async fn connect_running(target: &ProjectTarget) -> Result<phoxal_cli_client::Su
         let path = supervisor_socket_path(&target.project)?;
         match phoxal_cli_client::SupervisorClient::connect(&path).await {
             Ok(client) => return Ok(client),
-            Err(_) => {
+            Err(error) if phoxal_cli_client::is_connection_unavailable(&error) => {
                 tokio::select! {
                     _ = tokio::signal::ctrl_c() => bail!("cancelled while waiting for the resident supervisor to finish startup"),
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {}
                 }
             }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -238,6 +269,7 @@ fn validate_entry(target: &ProjectTarget, running_entry: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phoxal_cli_core::identity::ExecutionId;
     use std::fs;
 
     /// `attach`/`stop` are representation-agnostic: a staged runtime layout root
@@ -257,6 +289,44 @@ mod tests {
         assert_eq!(
             supervisor_socket_path(&target.project)?,
             target.project.join(".phoxal/supervisor.sock")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn permanent_handshake_failure_is_returned_instead_of_retried() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        fs::write(
+            project.path().join("robot.yaml"),
+            "schema: robot/v0\nname: test\n",
+        )?;
+        let identity =
+            crate::supervisor::ProjectLockIdentity::resolve(project.path(), ProjectOperation::Run)
+                .in_execution(ExecutionId::mint());
+        let _lock = ProjectLock::acquire(identity)?;
+        let path = supervisor_socket_path(project.path())?;
+        fs::create_dir_all(path.parent().expect("socket has parent"))?;
+        let listener = tokio::net::UnixListener::bind(&path)?;
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
+        let target = ProjectTarget {
+            project: project.path().canonicalize()?,
+            requested_entry: None,
+        };
+
+        let result = tokio::time::timeout(Duration::from_secs(1), connect_running(&target))
+            .await
+            .expect("permanent handshake failure must not retry");
+        let error = match result {
+            Ok(_) => panic!("early-close peer unexpectedly connected"),
+            Err(error) => error,
+        };
+        peer.await.unwrap();
+        assert!(
+            format!("{error:#}")
+                .contains("resident rejected or disconnected during the supervisor handshake")
         );
         Ok(())
     }

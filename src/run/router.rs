@@ -197,7 +197,6 @@ impl InfrastructureRouter {
 
             let epoch = board.begin_recovery_epoch(&spawned_rows, &wait_only_rows);
             let fault = format!("infrastructure router exited with {status}");
-            board.set_router_status(format!("restarting:{fault}"));
             board.set_state(
                 phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
                 crate::supervisor::ParticipantState::Restarting,
@@ -220,7 +219,6 @@ impl InfrastructureRouter {
                     Ok(process) => {
                         self.process = process;
                         board.enable_presence_for_recovery();
-                        board.set_router_status(format!("ready:{}", self.participant_endpoint));
                         board.set_state(
                             phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
                             crate::supervisor::ParticipantState::Ready,

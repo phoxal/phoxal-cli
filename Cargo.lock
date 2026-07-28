@@ -2984,6 +2984,7 @@ dependencies = [
  "phoxal-api",
  "phoxal-cli-client",
  "phoxal-cli-core",
+ "phoxal-cli-protocol",
  "phoxal-cli-ui",
  "reqwest",
  "self-replace",
@@ -3007,8 +3008,8 @@ version = "0.28.2"
 dependencies = [
  "anyhow",
  "phoxal-cli-core",
- "serde",
- "serde_json",
+ "phoxal-cli-protocol",
+ "tempfile",
  "tokio",
 ]
 
@@ -3049,7 +3050,11 @@ dependencies = [
 name = "phoxal-cli-protocol"
 version = "0.28.2"
 dependencies = [
+ "anyhow",
  "phoxal-cli-core",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

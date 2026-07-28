@@ -7,25 +7,63 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{error::Error as StdError, fmt};
 
 use anyhow::{Context, Result, bail};
-use phoxal_cli_core::session::protocol::{
-    MAX_COMMAND_FRAME_BYTES, MAX_HANDSHAKE_FRAME_BYTES, MAX_SNAPSHOT_FRAME_BYTES,
-    SUPERVISOR_PROTOCOL_VERSION,
+use phoxal_cli_core::session::ProjectLifecycle;
+use phoxal_cli_protocol::codec::async_io::{read_frame, read_frame_after_idle, write_frame};
+use phoxal_cli_protocol::limits::{
+    FRAME_READ_TIMEOUT, FRAME_WRITE_TIMEOUT, MAX_COMMAND_FRAME_BYTES, MAX_HANDSHAKE_FRAME_BYTES,
+    MAX_SNAPSHOT_FRAME_BYTES,
 };
-use phoxal_cli_core::session::{
+use phoxal_cli_protocol::{
     CommandAction, CommandKey, CommandReply, CommandRequest, CommandSessionId, ConnectionRole,
-    HandshakeReply, HandshakeRequest, SupervisorSnapshotV0,
+    HandshakeReply, HandshakeRequest, SUPERVISOR_PROTOCOL_VERSION, SupervisorSnapshot,
+    SupervisorSnapshotV0,
 };
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{Mutex, watch};
 
-pub const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(5);
-pub const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const RECONNECT_DELAY: Duration = Duration::from_millis(200);
+const EARLY_CLOSE_RECOVERY: &str = concat!(
+    "the resident rejected or disconnected during the supervisor handshake.\n\n",
+    "It may have been started by an older Phoxal CLI, or it may be unhealthy.\n\n",
+    "Stop it without using the supervisor protocol:\n\n",
+    "    phoxal stop --force <target>\n\n",
+    "Then start or attach again."
+);
+
+#[derive(Debug)]
+struct ConnectionUnavailable {
+    path: PathBuf,
+    source: std::io::Error,
+}
+
+impl fmt::Display for ConnectionUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "connect to unavailable supervisor {}: {}",
+            self.path.display(),
+            self.source
+        )
+    }
+}
+
+impl StdError for ConnectionUnavailable {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Whether a connection attempt failed before any resident peer was reached.
+///
+/// Callers may retry this while a newly launched resident binds its socket.
+/// Handshake, version, and snapshot failures are terminal and must be shown.
+#[must_use]
+pub fn is_connection_unavailable(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ConnectionUnavailable>().is_some()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -75,20 +113,21 @@ impl SupervisorClient {
         let path = path.into();
         let (mut snapshot_stream, snapshot_handshake) =
             connect_role(&path, ConnectionRole::Snapshots, None).await?;
-        let initial = read_frame::<_, SupervisorSnapshotV0>(
+        let initial = read_frame::<_, SupervisorSnapshot>(
             &mut snapshot_stream,
             MAX_SNAPSHOT_FRAME_BYTES,
             FRAME_READ_TIMEOUT,
         )
         .await
-        .context("read initial supervisor snapshot")?;
+        .context("read initial supervisor snapshot")?
+        .into_v0();
         anyhow::ensure!(
             initial.supervisor_generation == snapshot_handshake.supervisor_generation,
             "snapshot generation does not match handshake"
         );
         let (snapshot_tx, snapshot_rx) = watch::channel(initial);
         let (connection_tx, connection_rx) = watch::channel(ConnectionState::Connected);
-        tokio::spawn(snapshot_loop(
+        let snapshot_task = tokio::spawn(snapshot_loop(
             path.clone(),
             snapshot_stream,
             snapshot_tx,
@@ -96,10 +135,20 @@ impl SupervisorClient {
         ));
 
         let (command_stream, command_handshake) =
-            connect_role(&path, ConnectionRole::Commands, None).await?;
-        let session = command_handshake
-            .command_session
-            .context("command handshake did not issue a session")?;
+            match connect_role(&path, ConnectionRole::Commands, None).await {
+                Ok(connected) => connected,
+                Err(error) => {
+                    snapshot_task.abort();
+                    return Err(error);
+                }
+            };
+        let session = match command_handshake.command_session {
+            Some(session) => session,
+            None => {
+                snapshot_task.abort();
+                bail!("command handshake did not issue a session")
+            }
+        };
         Ok(Self {
             path,
             snapshots: SnapshotStore {
@@ -218,8 +267,7 @@ async fn snapshot_loop(
             Err(_) => {
                 let terminal = matches!(
                     snapshots.borrow().lifecycle,
-                    phoxal_cli_core::session::ProjectLifecycle::Stopped
-                        | phoxal_cli_core::session::ProjectLifecycle::Failed
+                    ProjectLifecycle::Stopped | ProjectLifecycle::Failed
                 );
                 if terminal {
                     connection.send_replace(ConnectionState::Terminal);
@@ -258,7 +306,13 @@ async fn snapshot_loop(
 /// only once a frame header arrives; a partial/malicious frame remains
 /// bounded without inventing protocol heartbeat traffic.
 async fn read_snapshot_frame(stream: &mut UnixStream) -> Result<SupervisorSnapshotV0> {
-    read_frame_after_idle(stream, MAX_SNAPSHOT_FRAME_BYTES, FRAME_READ_TIMEOUT).await
+    read_frame_after_idle::<_, SupervisorSnapshot>(
+        stream,
+        MAX_SNAPSHOT_FRAME_BYTES,
+        FRAME_READ_TIMEOUT,
+    )
+    .await
+    .map(SupervisorSnapshot::into_v0)
 }
 
 pub async fn connect_role(
@@ -268,7 +322,10 @@ pub async fn connect_role(
 ) -> Result<(UnixStream, HandshakeReply)> {
     let mut stream = UnixStream::connect(path)
         .await
-        .with_context(|| format!("connect to {}", path.display()))?;
+        .map_err(|source| ConnectionUnavailable {
+            path: path.to_path_buf(),
+            source,
+        })?;
     write_frame(
         &mut stream,
         &HandshakeRequest {
@@ -281,10 +338,17 @@ pub async fn connect_role(
     )
     .await?;
     let reply: HandshakeReply =
-        read_frame(&mut stream, MAX_HANDSHAKE_FRAME_BYTES, FRAME_READ_TIMEOUT).await?;
+        read_frame(&mut stream, MAX_HANDSHAKE_FRAME_BYTES, FRAME_READ_TIMEOUT)
+            .await
+            .map_err(|_| anyhow::anyhow!(EARLY_CLOSE_RECOVERY))?;
     if reply.protocol_version != SUPERVISOR_PROTOCOL_VERSION {
         bail!(
-            "supervisor protocol version {} is not supported by this client (expected {})",
+            concat!(
+                "the running resident uses supervisor protocol {}, but this CLI requires protocol {}.\n\n",
+                "Stop the resident without using its protocol:\n\n",
+                "    phoxal stop --force <target>\n\n",
+                "Then start or attach again."
+            ),
             reply.protocol_version,
             SUPERVISOR_PROTOCOL_VERSION
         );
@@ -292,83 +356,145 @@ pub async fn connect_role(
     Ok((stream, reply))
 }
 
-pub async fn write_frame<W, T>(
-    writer: &mut W,
-    value: &T,
-    maximum: usize,
-    deadline: Duration,
-) -> Result<()>
-where
-    W: AsyncWrite + Unpin,
-    T: Serialize,
-{
-    let bytes = serde_json::to_vec(value).context("encode protocol frame")?;
-    anyhow::ensure!(
-        bytes.len() <= maximum,
-        "encoded protocol frame is {} bytes; limit is {maximum}",
-        bytes.len()
-    );
-    let length = u32::try_from(bytes.len()).context("protocol frame length exceeds u32")?;
-    tokio::time::timeout(deadline, async {
-        writer.write_all(&length.to_be_bytes()).await?;
-        writer.write_all(&bytes).await?;
-        writer.flush().await
-    })
-    .await
-    .context("protocol frame write timed out")??;
-    Ok(())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phoxal_cli_protocol::{SupervisorSnapshot, SupervisorSnapshotV0};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub async fn read_frame<R, T>(reader: &mut R, maximum: usize, deadline: Duration) -> Result<T>
-where
-    R: AsyncRead + Unpin,
-    T: DeserializeOwned,
-{
-    let mut length = [0_u8; 4];
-    tokio::time::timeout(deadline, reader.read_exact(&mut length))
-        .await
-        .context("protocol frame length read timed out")??;
-    let length = u32::from_be_bytes(length) as usize;
-    anyhow::ensure!(
-        length <= maximum,
-        "protocol frame declares {length} bytes; limit is {maximum}"
-    );
-    let mut bytes = vec![0_u8; length];
-    tokio::time::timeout(deadline, reader.read_exact(&mut bytes))
-        .await
-        .context("protocol frame body read timed out")??;
-    serde_json::from_slice(&bytes).context("decode protocol frame")
-}
+    #[tokio::test]
+    async fn old_peer_early_close_reports_protocol_independent_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("supervisor.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
 
-/// Read a frame from a connection that may be legitimately idle indefinitely.
-///
-/// Waiting for the first header byte is unbounded. Once any header byte
-/// arrives, the rest of the header and body must complete within `deadline`.
-pub async fn read_frame_after_idle<R, T>(
-    reader: &mut R,
-    maximum: usize,
-    deadline: Duration,
-) -> Result<T>
-where
-    R: AsyncRead + Unpin,
-    T: DeserializeOwned,
-{
-    let mut length = [0_u8; 4];
-    reader
-        .read_exact(&mut length[..1])
-        .await
-        .context("read protocol frame first length byte")?;
-    tokio::time::timeout(deadline, reader.read_exact(&mut length[1..]))
-        .await
-        .context("protocol frame length read timed out")??;
-    let length = u32::from_be_bytes(length) as usize;
-    anyhow::ensure!(
-        length <= maximum,
-        "protocol frame declares {length} bytes; limit is {maximum}"
-    );
-    let mut bytes = vec![0_u8; length];
-    tokio::time::timeout(deadline, reader.read_exact(&mut bytes))
-        .await
-        .context("protocol frame body read timed out")??;
-    serde_json::from_slice(&bytes).context("decode protocol frame")
+        let error = connect_role(&path, ConnectionRole::Snapshots, None)
+            .await
+            .unwrap_err();
+        peer.await.unwrap();
+        let message = format!("{error:#}");
+        assert_eq!(message, EARLY_CLOSE_RECOVERY);
+        assert!(
+            message.contains("    phoxal stop --force <target>"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nonexistent_socket_is_classified_as_retryable_unavailable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing.sock");
+        let error = connect_role(&path, ConnectionRole::Snapshots, None)
+            .await
+            .unwrap_err();
+        assert!(is_connection_unavailable(&error), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn decoded_remote_version_is_reported_exactly() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("supervisor.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _: HandshakeRequest =
+                read_frame(&mut stream, MAX_HANDSHAKE_FRAME_BYTES, FRAME_READ_TIMEOUT)
+                    .await
+                    .unwrap();
+            write_frame(
+                &mut stream,
+                &HandshakeReply {
+                    protocol_version: 7,
+                    supervisor_generation: 1,
+                    command_session: None,
+                },
+                MAX_HANDSHAKE_FRAME_BYTES,
+                FRAME_WRITE_TIMEOUT,
+            )
+            .await
+            .unwrap();
+        });
+
+        let error = connect_role(&path, ConnectionRole::Snapshots, None)
+            .await
+            .unwrap_err();
+        peer.await.unwrap();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(
+                "running resident uses supervisor protocol 7, but this CLI requires protocol 1"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("    phoxal stop --force <target>"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_command_handshake_aborts_the_started_snapshot_task() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("supervisor.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut snapshots, _) = listener.accept().await.unwrap();
+            let _: HandshakeRequest = read_frame(
+                &mut snapshots,
+                MAX_HANDSHAKE_FRAME_BYTES,
+                FRAME_READ_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut snapshots,
+                &HandshakeReply {
+                    protocol_version: SUPERVISOR_PROTOCOL_VERSION,
+                    supervisor_generation: 1,
+                    command_session: None,
+                },
+                MAX_HANDSHAKE_FRAME_BYTES,
+                FRAME_WRITE_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            let snapshot = SupervisorSnapshotV0 {
+                supervisor_generation: 1,
+                ..SupervisorSnapshotV0::default()
+            };
+            write_frame(
+                &mut snapshots,
+                &SupervisorSnapshot::V0(snapshot),
+                MAX_SNAPSHOT_FRAME_BYTES,
+                FRAME_WRITE_TIMEOUT,
+            )
+            .await
+            .unwrap();
+
+            let (mut commands, _) = listener.accept().await.unwrap();
+            let _: HandshakeRequest =
+                read_frame(&mut commands, MAX_HANDSHAKE_FRAME_BYTES, FRAME_READ_TIMEOUT)
+                    .await
+                    .unwrap();
+            commands.shutdown().await.unwrap();
+            drop(commands);
+
+            let mut byte = [0_u8; 1];
+            tokio::time::timeout(Duration::from_secs(1), snapshots.read(&mut byte))
+                .await
+                .expect("snapshot connection should close when command handshake fails")
+                .unwrap()
+        });
+
+        let error = match SupervisorClient::connect(&path).await {
+            Ok(_) => panic!("failed command handshake unexpectedly connected"),
+            Err(error) => error,
+        };
+        assert_eq!(format!("{error:#}"), EARLY_CLOSE_RECOVERY);
+        assert_eq!(peer.await.unwrap(), 0);
+    }
 }

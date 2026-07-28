@@ -124,6 +124,7 @@ phoxal = { workspace = true }
 phoxal-api = { workspace = true }
 phoxal-cli-client = { workspace = true }
 phoxal-cli-core = { workspace = true }
+phoxal-cli-protocol = { workspace = true }
 phoxal-cli-ui = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }

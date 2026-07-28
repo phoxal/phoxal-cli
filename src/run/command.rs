@@ -188,11 +188,11 @@ pub(crate) async fn connect_to_detached_resident(
 )> {
     let launched = crate::resident::launch_detached()?;
     let generation = match &launched.result {
-        phoxal_cli_core::session::BootstrapResult::Bound {
+        phoxal_cli_protocol::BootstrapResult::Bound {
             supervisor_generation,
             ..
         } => *supervisor_generation,
-        phoxal_cli_core::session::BootstrapResult::Rejected { error } => {
+        phoxal_cli_protocol::BootstrapResult::Rejected { error } => {
             bail!("{error}; use `phoxal attach` or `phoxal stop` if another run owns the project")
         }
     };
@@ -246,7 +246,7 @@ async fn run_resident_supervision_mode(
         Err(error) => {
             if execution.is_some() {
                 let _ = crate::resident::report_private_bootstrap(
-                    &phoxal_cli_core::session::BootstrapResult::Rejected {
+                    &phoxal_cli_protocol::BootstrapResult::Rejected {
                         error: format!("{error:#}"),
                     },
                 );
@@ -277,14 +277,11 @@ async fn resident_supervision_inner(
         ResidentMode::Webots(_) => project_root.clone(),
     };
     let board = BoardBackend::new();
-    let board_execution = match &mode {
-        ResidentMode::Run(_) => "run",
-        ResidentMode::Webots(_) => "simulation:webots",
-    };
     board.configure(
         project_root.display().to_string(),
         "resolving",
-        board_execution,
+        run.execution(),
+        crate::run::project_router_endpoint(&project_root),
     );
     board.begin_phase("prepare");
     let token = tokio_util::sync::CancellationToken::new();
@@ -296,12 +293,10 @@ async fn resident_supervision_inner(
         token.clone(),
     )?;
     if bootstrap_execution.is_some() {
-        crate::resident::report_private_bootstrap(
-            &phoxal_cli_core::session::BootstrapResult::Bound {
-                supervisor_generation: board.supervisor_snapshot().supervisor_generation,
-                execution: run.execution(),
-            },
-        )?;
+        crate::resident::report_private_bootstrap(&phoxal_cli_protocol::BootstrapResult::Bound {
+            supervisor_generation: board.supervisor_snapshot().supervisor_generation,
+            execution: run.execution(),
+        })?;
     }
 
     let (events, events_rx) = mpsc::channel(16);
@@ -592,7 +587,7 @@ pub(crate) enum Readiness {
 }
 
 pub(crate) fn required_readiness(
-    snapshot: &phoxal_cli_core::session::SupervisorSnapshotV0,
+    snapshot: &phoxal_cli_protocol::SupervisorSnapshotV0,
 ) -> Readiness {
     use phoxal_cli_core::session::{ProcessState, ProjectLifecycle, StartupRequirement};
     match snapshot.lifecycle {
@@ -681,7 +676,7 @@ pub(crate) async fn live_run_setup(
         &revision,
         &mut prepared.specs,
     )?;
-    prepared.board.set_router_status(format!("ready:{connect}"));
+    prepared.board.set_router_endpoint(connect.clone());
     prepared.board.set_state(
         phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
         crate::supervisor::ParticipantState::Ready,
@@ -776,7 +771,12 @@ mod readiness_tests {
     #[test]
     fn readiness_tracks_lifecycle_and_required_failures() {
         let board = BoardBackend::new();
-        board.configure("/tmp/project".to_string(), "v0.test", "run");
+        board.configure(
+            "/tmp/project".to_string(),
+            "v0.test",
+            phoxal_cli_core::identity::ExecutionId::mint(),
+            "unixsock-stream//tmp/project/.phoxal/zenoh.sock",
+        );
         // A freshly configured board is Starting - still pending.
         assert_eq!(
             required_readiness(&board.supervisor_snapshot()),
