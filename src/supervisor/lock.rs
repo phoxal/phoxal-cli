@@ -115,8 +115,15 @@ impl ProjectLock {
     }
 
     pub fn inspect(project: &Path) -> Result<ProjectLockStatus> {
-        let path = Self::lock_path(project);
-        let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
+        Self::inspect_path(&Self::lock_path(project))
+    }
+
+    pub fn inspect_path(path: &Path) -> Result<ProjectLockStatus> {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        options.write(true);
+        let mut file = match options.open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(ProjectLockStatus::Free);

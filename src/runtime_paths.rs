@@ -7,6 +7,7 @@ pub const INSTALL_ROOT: &str = "/var/lib/phoxal";
 pub const RELEASES_ROOT: &str = "/var/lib/phoxal/releases";
 pub const INSTALLED_STATE_ROOT: &str = "/var/lib/phoxal/state";
 pub const INSTALLED_VOLATILE_ROOT: &str = "/run/phoxal";
+pub const SYSTEMD_UNIT: &str = "phoxal.service";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePaths {

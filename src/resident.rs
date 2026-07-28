@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
@@ -14,17 +13,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use phoxal_cli_client::{
-    FRAME_READ_TIMEOUT, FRAME_WRITE_TIMEOUT, read_frame, read_frame_after_idle, write_frame,
-};
 use phoxal_cli_core::identity::{ExecutionId, ProducerId};
-use phoxal_cli_core::session::protocol::{
-    MAX_COMMAND_FRAME_BYTES, MAX_HANDSHAKE_FRAME_BYTES, MAX_RECENT_COMMAND_REPLIES,
-    MAX_SNAPSHOT_FRAME_BYTES, SUPERVISOR_PROTOCOL_VERSION,
+use phoxal_cli_protocol::codec::{
+    async_io::{read_frame, read_frame_after_idle, write_frame},
+    blocking_io,
 };
-use phoxal_cli_core::session::{
+use phoxal_cli_protocol::limits::{
+    FRAME_READ_TIMEOUT, FRAME_WRITE_TIMEOUT, MAX_COMMAND_FRAME_BYTES, MAX_HANDSHAKE_FRAME_BYTES,
+    MAX_RECENT_COMMAND_REPLIES, MAX_SNAPSHOT_FRAME_BYTES,
+};
+use phoxal_cli_protocol::{
     BootstrapResult, CommandAction, CommandError, CommandReply, CommandRequest, CommandSessionId,
-    ConnectionRole, HandshakeReply, HandshakeRequest,
+    ConnectionRole, HandshakeReply, HandshakeRequest, SUPERVISOR_PROTOCOL_VERSION,
+    SupervisorSnapshot, validate_snapshot_bounds,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
@@ -84,6 +85,9 @@ pub fn launch_detached() -> Result<LaunchedResident> {
     let (mut parent, child_socket) =
         std::os::unix::net::UnixStream::pair().context("create resident bootstrap socketpair")?;
     parent.set_read_timeout(Some(Duration::from_secs(30)))?;
+    parent.set_write_timeout(Some(Duration::from_secs(30)))?;
+    child_socket.set_read_timeout(Some(Duration::from_secs(30)))?;
+    child_socket.set_write_timeout(Some(Duration::from_secs(30)))?;
     let child_fd = child_socket.as_raw_fd();
     // The launcher mints the run identity; the resident adopts it.
     let execution = ExecutionId::mint();
@@ -114,11 +118,8 @@ pub fn launch_detached() -> Result<LaunchedResident> {
     }
     let child = command.spawn().context("spawn resident supervisor")?;
     drop(child_socket);
-    let result: BootstrapResult = read_sync_frame(
-        &mut parent,
-        phoxal_cli_core::session::protocol::MAX_HANDSHAKE_FRAME_BYTES,
-    )
-    .context("resident did not complete private bootstrap")?;
+    let result: BootstrapResult = blocking_io::read_frame(&mut parent, MAX_HANDSHAKE_FRAME_BYTES)
+        .context("resident did not complete private bootstrap")?;
     match &result {
         BootstrapResult::Bound {
             execution: adopted, ..
@@ -155,11 +156,7 @@ pub fn report_private_bootstrap(result: &BootstrapResult) -> Result<()> {
     // SAFETY: this descriptor was supplied by our launcher for this one-shot
     // bootstrap and ownership transfers to this File exactly once.
     let mut socket = unsafe { File::from_raw_fd(fd) };
-    write_sync_frame(
-        &mut socket,
-        result,
-        phoxal_cli_core::session::protocol::MAX_HANDSHAKE_FRAME_BYTES,
-    )
+    blocking_io::write_frame(&mut socket, result, MAX_HANDSHAKE_FRAME_BYTES)
 }
 
 fn resident_log_file() -> Result<File> {
@@ -193,38 +190,6 @@ fn resident_log_file() -> Result<File> {
         .append(true)
         .open(&path)
         .with_context(|| format!("open resident log {}", path.display()))
-}
-
-fn write_sync_frame<T: serde::Serialize>(
-    writer: &mut impl Write,
-    value: &T,
-    maximum: usize,
-) -> Result<()> {
-    let bytes = serde_json::to_vec(value)?;
-    anyhow::ensure!(
-        bytes.len() <= maximum,
-        "bootstrap frame exceeds {maximum} bytes"
-    );
-    writer.write_all(&(bytes.len() as u32).to_be_bytes())?;
-    writer.write_all(&bytes)?;
-    writer.flush()?;
-    Ok(())
-}
-
-fn read_sync_frame<T: serde::de::DeserializeOwned>(
-    reader: &mut impl Read,
-    maximum: usize,
-) -> Result<T> {
-    let mut length = [0_u8; 4];
-    reader.read_exact(&mut length)?;
-    let length = u32::from_be_bytes(length) as usize;
-    anyhow::ensure!(
-        length <= maximum,
-        "bootstrap frame declares {length} bytes; limit is {maximum}"
-    );
-    let mut bytes = vec![0; length];
-    reader.read_exact(&mut bytes)?;
-    Ok(serde_json::from_slice(&bytes)?)
 }
 
 impl ResidentSocket {
@@ -334,40 +299,41 @@ async fn handle_connection(mut stream: UnixStream, state: ServerState) -> Result
         read_frame(&mut stream, MAX_HANDSHAKE_FRAME_BYTES, FRAME_READ_TIMEOUT)
             .await
             .context("read supervisor handshake")?;
-    anyhow::ensure!(
-        request.protocol_version == SUPERVISOR_PROTOCOL_VERSION,
-        "unsupported supervisor protocol version {}",
-        request.protocol_version
-    );
     let generation = state.board.supervisor_snapshot().supervisor_generation;
+    if request.protocol_version != SUPERVISOR_PROTOCOL_VERSION {
+        write_frame(
+            &mut stream,
+            &HandshakeReply {
+                protocol_version: SUPERVISOR_PROTOCOL_VERSION,
+                supervisor_generation: generation,
+                command_session: None,
+            },
+            MAX_HANDSHAKE_FRAME_BYTES,
+            FRAME_WRITE_TIMEOUT,
+        )
+        .await?;
+        bail!(
+            "unsupported supervisor protocol version {}",
+            request.protocol_version
+        );
+    }
+    let session = matches!(request.role, ConnectionRole::Commands)
+        .then(|| issue_or_resume_session(&state.sessions, request.resume_command_session));
+    write_frame(
+        &mut stream,
+        &HandshakeReply {
+            protocol_version: SUPERVISOR_PROTOCOL_VERSION,
+            supervisor_generation: generation,
+            command_session: session,
+        },
+        MAX_HANDSHAKE_FRAME_BYTES,
+        FRAME_WRITE_TIMEOUT,
+    )
+    .await?;
     match request.role {
-        ConnectionRole::Snapshots => {
-            write_frame(
-                &mut stream,
-                &HandshakeReply {
-                    protocol_version: SUPERVISOR_PROTOCOL_VERSION,
-                    supervisor_generation: generation,
-                    command_session: None,
-                },
-                MAX_HANDSHAKE_FRAME_BYTES,
-                FRAME_WRITE_TIMEOUT,
-            )
-            .await?;
-            serve_snapshots(stream, state.board).await
-        }
+        ConnectionRole::Snapshots => serve_snapshots(stream, state.board).await,
         ConnectionRole::Commands => {
-            let session = issue_or_resume_session(&state.sessions, request.resume_command_session);
-            write_frame(
-                &mut stream,
-                &HandshakeReply {
-                    protocol_version: SUPERVISOR_PROTOCOL_VERSION,
-                    supervisor_generation: generation,
-                    command_session: Some(session),
-                },
-                MAX_HANDSHAKE_FRAME_BYTES,
-                FRAME_WRITE_TIMEOUT,
-            )
-            .await?;
+            let session = session.expect("command role issued a session");
             serve_commands(stream, state, session).await
         }
     }
@@ -377,20 +343,21 @@ async fn serve_snapshots(mut stream: UnixStream, board: BoardBackend) -> Result<
     let mut snapshots = board.subscribe();
     loop {
         let snapshot = snapshots.borrow_and_update().clone();
-        phoxal_cli_core::session::protocol::validate_snapshot_bounds(&snapshot)
+        validate_snapshot_bounds(&snapshot)
             .context("supervisor produced an out-of-bounds snapshot")?;
+        let terminal = matches!(
+            snapshot.lifecycle,
+            phoxal_cli_core::session::ProjectLifecycle::Stopped
+                | phoxal_cli_core::session::ProjectLifecycle::Failed
+        );
         write_frame(
             &mut stream,
-            &snapshot,
+            &SupervisorSnapshot::V0(snapshot),
             MAX_SNAPSHOT_FRAME_BYTES,
             FRAME_WRITE_TIMEOUT,
         )
         .await?;
-        if matches!(
-            snapshot.lifecycle,
-            phoxal_cli_core::session::ProjectLifecycle::Stopped
-                | phoxal_cli_core::session::ProjectLifecycle::Failed
-        ) {
+        if terminal {
             return Ok(());
         }
         snapshots
@@ -606,7 +573,7 @@ mod tests {
         let session = issue_or_resume_session(&state.sessions, None);
         let request = |sequence, restart_of| CommandRequest {
             supervisor_generation: board.supervisor_snapshot().supervisor_generation,
-            key: phoxal_cli_core::session::CommandKey { session, sequence },
+            key: phoxal_cli_protocol::CommandKey { session, sequence },
             action: CommandAction::Restart {
                 process: key.clone(),
                 expected_producer: producer(restart_of),
@@ -652,7 +619,7 @@ mod tests {
         };
         let request = |session, restart_of| CommandRequest {
             supervisor_generation: board.supervisor_snapshot().supervisor_generation,
-            key: phoxal_cli_core::session::CommandKey {
+            key: phoxal_cli_protocol::CommandKey {
                 session,
                 sequence: 1,
             },
@@ -703,7 +670,7 @@ mod tests {
                 session,
                 CommandRequest {
                     supervisor_generation: generation,
-                    key: phoxal_cli_core::session::CommandKey { session, sequence },
+                    key: phoxal_cli_protocol::CommandKey { session, sequence },
                     action: CommandAction::Shutdown,
                 },
             );
@@ -714,7 +681,7 @@ mod tests {
             session,
             CommandRequest {
                 supervisor_generation: generation,
-                key: phoxal_cli_core::session::CommandKey {
+                key: phoxal_cli_protocol::CommandKey {
                     session,
                     sequence: 1,
                 },
@@ -738,7 +705,7 @@ mod tests {
             session,
             CommandRequest {
                 supervisor_generation: generation,
-                key: phoxal_cli_core::session::CommandKey {
+                key: phoxal_cli_protocol::CommandKey {
                     session,
                     sequence: MAX_RECENT_COMMAND_REPLIES as u64 + 2,
                 },
@@ -746,5 +713,57 @@ mod tests {
             },
         );
         assert_eq!(expired.error, Some(CommandError::InvalidSession));
+    }
+
+    #[tokio::test]
+    async fn incompatible_handshake_receives_server_version_before_rejection() {
+        let board = BoardBackend::new();
+        let (actions, _action_rx) = mpsc::channel(1);
+        let state = ServerState {
+            board: board.clone(),
+            actions,
+            supervisor_token: CancellationToken::new(),
+            sessions: Arc::default(),
+        };
+        let healthy_session = issue_or_resume_session(&state.sessions, None);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(handle_connection(server, state.clone()));
+
+        write_frame(
+            &mut client,
+            &HandshakeRequest {
+                protocol_version: 0,
+                role: ConnectionRole::Commands,
+                resume_command_session: None,
+            },
+            MAX_HANDSHAKE_FRAME_BYTES,
+            FRAME_WRITE_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        let reply: HandshakeReply =
+            read_frame(&mut client, MAX_HANDSHAKE_FRAME_BYTES, FRAME_READ_TIMEOUT)
+                .await
+                .unwrap();
+        assert_eq!(reply.protocol_version, SUPERVISOR_PROTOCOL_VERSION);
+        assert_eq!(
+            reply.supervisor_generation,
+            board.supervisor_snapshot().supervisor_generation
+        );
+        assert!(reply.command_session.is_none());
+        assert!(
+            server_task
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported supervisor protocol version 0")
+        );
+        let sessions = state
+            .sessions
+            .lock()
+            .expect("command sessions mutex poisoned");
+        assert_eq!(sessions.active.len(), 1);
+        assert!(sessions.active.contains_key(&healthy_session));
     }
 }

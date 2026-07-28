@@ -2,8 +2,9 @@
 
 use phoxal_cli_core::identity::ExecutionId;
 use phoxal_cli_core::project::launch_plan::{LaunchPlan, ParticipantExecution};
+use phoxal_cli_core::session::ProcessScope;
 use phoxal_cli_core::session::stores::telemetry::RobotScope;
-use phoxal_cli_core::session::{ProcessScope, SupervisorSnapshotV0};
+use phoxal_cli_protocol::SupervisorSnapshotV0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RobotFeedTarget {

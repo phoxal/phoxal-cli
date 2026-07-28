@@ -268,11 +268,13 @@ pub(crate) fn prepare_run_on_board(
     // now-published bytes a second time. Byte-identical, for the same robot,
     // to a plan built from an extracted bundle of this layout.
     let plan = staged.plan.clone();
+    phoxal_cli_core::project::launch_plan::validate_runtime_bounds(&plan)?;
 
     board.configure(
         staged.project_root.display().to_string(),
         staged.resolved.train.clone(),
-        "run",
+        run.execution(),
+        crate::run::project_router_endpoint(&staged.project_root),
     );
     register_router_process(&board);
     // Explain any policy-excluded drivers as a session-level advisory: they are
@@ -383,6 +385,7 @@ pub(crate) fn prepare_layout_run_on_board(
         run,
     )
     .context("failed to construct the launch plan from the staged runtime layout")?;
+    phoxal_cli_core::project::launch_plan::validate_runtime_bounds(&plan)?;
 
     board.configure(
         crate::runtime_paths::RuntimePaths::for_root(layout_root)
@@ -390,7 +393,8 @@ pub(crate) fn prepare_layout_run_on_board(
             .display()
             .to_string(),
         "staged".to_string(),
-        "run",
+        run.execution(),
+        crate::run::project_router_endpoint(layout_root),
     );
     register_router_process(&board);
 

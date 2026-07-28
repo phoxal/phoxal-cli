@@ -50,6 +50,7 @@ pub(crate) async fn live_simulate_setup(
     offline: bool,
     run: RunIdentity,
 ) -> Result<LiveSimSetup> {
+    phoxal_cli_core::project::launch_plan::validate_runtime_bounds(&sim.plan)?;
     let ensure_active = || {
         if token.is_cancelled() {
             bail!("simulation setup cancelled");
@@ -74,7 +75,8 @@ pub(crate) async fn live_simulate_setup(
     board.configure(
         sim.ctx.project_root.display().to_string(),
         sim_source(&sim).resolved.train.clone(),
-        "simulation:webots",
+        run.execution(),
+        crate::run::project_router_endpoint(&sim.ctx.project_root),
     );
     board.upsert_process(
         phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
@@ -141,7 +143,7 @@ pub(crate) async fn live_simulate_setup(
     let (router, connect) =
         crate::run::start_infrastructure_router(&staged_root, &sim.ctx.project_root, router_config)
             .await?;
-    board.set_router_status(format!("ready:{connect}"));
+    board.set_router_endpoint(connect.clone());
     board.set_state(
         phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
         crate::supervisor::ParticipantState::Ready,

@@ -37,6 +37,7 @@ pub mod check;
 pub mod commands;
 pub(crate) mod component_driver;
 pub(crate) mod context;
+pub(crate) mod force_stop;
 pub(crate) mod host_doctor;
 pub mod host_paths;
 pub mod loader;

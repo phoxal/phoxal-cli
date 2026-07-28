@@ -9,9 +9,12 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 phoxal-cli-core = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
+phoxal-cli-protocol = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 
 [lints]
 workspace = true

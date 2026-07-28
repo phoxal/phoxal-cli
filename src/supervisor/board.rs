@@ -4,13 +4,14 @@ use super::{
     BoardSnapshot, LogScope, LogSeverity, LogSource, ParticipantLaunchCommand, ParticipantState,
     ParticipantStatus, RoutedLogLine, RoutedLogUpdate, bounded_chars, bounded_log_text,
 };
+use phoxal_cli_core::identity::ExecutionId;
 use phoxal_cli_core::identity::ProducerId;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::{
     BoundedString, ParticipantInstanceKey, ProcessDescriptor, ProcessEntry, ProcessFailure,
     ProcessFailureKind, ProcessKey, ProcessState, ProjectLifecycle, RobotKey, StartupRequirement,
-    SupervisorSnapshotV0,
 };
+use phoxal_cli_protocol::SupervisorSnapshotV0;
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -401,7 +402,7 @@ impl BoardBackend {
                     stderr_tail: self.stderr_tail(&key).map(|tail| {
                         BoundedString::with_max_bytes(
                             tail,
-                            phoxal_cli_core::session::protocol::MAX_PROCESS_STDERR_TAIL_BYTES,
+                            phoxal_cli_protocol::limits::MAX_PROCESS_STDERR_TAIL_BYTES,
                         )
                     }),
                 });
@@ -432,7 +433,7 @@ impl BoardBackend {
         let stderr_tail = self.stderr_tail(&key).map(|tail| {
             BoundedString::with_max_bytes(
                 tail,
-                phoxal_cli_core::session::protocol::MAX_PROCESS_STDERR_TAIL_BYTES,
+                phoxal_cli_protocol::limits::MAX_PROCESS_STDERR_TAIL_BYTES,
             )
         });
         let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
@@ -619,7 +620,8 @@ impl BoardBackend {
         &self,
         project: impl Into<String>,
         framework_train: impl Into<String>,
-        execution: impl Into<String>,
+        execution_id: ExecutionId,
+        router_endpoint: impl Into<String>,
     ) {
         let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
         actor.snapshot.project = bounded_snapshot_text(&project.into());
@@ -632,14 +634,15 @@ impl BoardBackend {
             .to_string(),
         );
         actor.snapshot.framework_train = bounded_snapshot_text(&framework_train.into());
-        actor.snapshot.execution = bounded_snapshot_text(&execution.into());
+        actor.snapshot.execution_id = execution_id;
+        actor.snapshot.router = bounded_snapshot_text(&router_endpoint.into());
         actor.snapshot.plan_revision = 1;
         actor.publish(&self.snapshot_tx);
     }
 
-    pub fn set_router_status(&self, status: impl Into<String>) {
+    pub fn set_router_endpoint(&self, endpoint: impl Into<String>) {
         let mut actor = self.state.lock().expect("supervisor state mutex poisoned");
-        actor.snapshot.router = bounded_snapshot_text(&status.into());
+        actor.snapshot.router = bounded_snapshot_text(&endpoint.into());
         actor.publish(&self.snapshot_tx);
     }
 
@@ -666,7 +669,7 @@ impl BoardBackend {
             .startup
             .completed_phases
             .push(bounded_snapshot_text(phase));
-        let maximum = phoxal_cli_core::session::protocol::MAX_STARTUP_PHASES;
+        let maximum = phoxal_cli_protocol::limits::MAX_STARTUP_PHASES;
         if actor.snapshot.startup.completed_phases.len() > maximum {
             let remove = actor.snapshot.startup.completed_phases.len() - maximum;
             actor.snapshot.startup.completed_phases.drain(..remove);
@@ -797,7 +800,7 @@ fn random_nonzero_u64() -> u64 {
 }
 
 fn bounded_snapshot_text(value: &str) -> String {
-    let maximum = phoxal_cli_core::session::protocol::MAX_SNAPSHOT_TEXT_BYTES;
+    let maximum = phoxal_cli_protocol::limits::MAX_SNAPSHOT_TEXT_BYTES;
     if value.len() <= maximum {
         return value.to_string();
     }

@@ -5,7 +5,6 @@
 //! authorities; the supervisor consumes exact Liveliness only while proving a
 //! newly spawned producer ready.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::time::SystemTime;
 
@@ -209,11 +208,12 @@ pub struct ExitDescription {
 pub struct BoundedString(String);
 
 impl BoundedString {
-    pub const MAX_BYTES: usize = super::protocol::MAX_PROCESS_STDERR_TAIL_BYTES;
+    pub const MAX_BYTES: usize = 32 * 1024;
+    pub const FAILURE_MAX_BYTES: usize = 4 * 1024;
 
     #[must_use]
     pub fn new(value: impl AsRef<str>) -> Self {
-        Self::with_max_bytes(value, super::protocol::MAX_PROCESS_FAILURE_DETAIL_BYTES)
+        Self::with_max_bytes(value, Self::FAILURE_MAX_BYTES)
     }
 
     #[must_use]
@@ -316,46 +316,4 @@ pub struct StartupStatus {
 pub struct SimulationSessionInfo {
     pub profile: String,
     pub world: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SupervisorSnapshotV0 {
-    pub supervisor_generation: u64,
-    pub revision: u64,
-    pub project: String,
-    #[serde(default)]
-    pub entry: String,
-    pub framework_train: String,
-    pub execution: String,
-    #[serde(default)]
-    pub simulation: Option<SimulationSessionInfo>,
-    pub lifecycle: ProjectLifecycle,
-    pub router: String,
-    pub plan_revision: u64,
-    pub graph_generation: u64,
-    pub startup: StartupStatus,
-    pub processes: BTreeMap<ProcessKey, ProcessEntry>,
-}
-
-impl Default for SupervisorSnapshotV0 {
-    fn default() -> Self {
-        Self {
-            supervisor_generation: 0,
-            revision: 0,
-            project: String::new(),
-            entry: String::new(),
-            framework_train: String::new(),
-            execution: String::new(),
-            simulation: None,
-            lifecycle: ProjectLifecycle::Starting,
-            router: String::new(),
-            plan_revision: 0,
-            graph_generation: 0,
-            startup: StartupStatus {
-                completed_phases: Vec::new(),
-                active_phase: None,
-            },
-            processes: BTreeMap::new(),
-        }
-    }
 }
