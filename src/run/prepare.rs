@@ -132,6 +132,7 @@ pub(crate) fn refresh_staging(
     // bottom of this function ever touches the live `.phoxal/bundle/`.
     let candidate = crate::stager::begin_runtime_layout(project_root, &resolved)
         .context("failed to stage the runtime layout")?;
+    let materialize_settings = build.materialize_settings(project_root, options.offline)?;
 
     // Materialize every official service, tool, and the infrastructure
     // router into the candidate `bin/` up front, via `cargo install`
@@ -143,6 +144,7 @@ pub(crate) fn refresh_staging(
         &resolved,
         options.offline,
         build.officials_source(),
+        &materialize_settings,
         |crate_dir, name| build.build_user_binary(crate_dir, name, ui, options.offline),
     )
     .context("failed to materialize official runtimes")?;
@@ -179,6 +181,7 @@ pub(crate) fn refresh_staging(
         &driver_policy.selection(),
         options.offline,
         build,
+        &materialize_settings,
         ui,
     )?;
 

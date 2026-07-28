@@ -52,7 +52,48 @@ use phoxal_cli_core::project::resolver::{
     ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, official_binary_name, tool_participant_id,
 };
 
-use crate::materialize::{MaterializeSpec, cargo_install};
+use crate::materialize::{MaterializeProfile, MaterializeSpec, cargo_install};
+
+#[derive(Debug, Clone)]
+pub(crate) struct MaterializeSettings {
+    pub(crate) profile: MaterializeProfile,
+    pub(crate) target_dir: Option<PathBuf>,
+}
+
+impl Default for MaterializeSettings {
+    fn default() -> Self {
+        Self {
+            profile: MaterializeProfile::Release,
+            target_dir: None,
+        }
+    }
+}
+
+impl MaterializeSettings {
+    #[must_use]
+    pub(crate) fn development(target_dir: PathBuf) -> Self {
+        Self {
+            profile: MaterializeProfile::Debug,
+            target_dir: Some(target_dir),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn release(target_dir: PathBuf) -> Self {
+        Self {
+            profile: MaterializeProfile::Release,
+            target_dir: Some(target_dir),
+        }
+    }
+
+    fn apply(&self, mut spec: MaterializeSpec) -> MaterializeSpec {
+        spec = spec.with_profile(self.profile);
+        if let Some(target_dir) = &self.target_dir {
+            spec = spec.with_target_dir(target_dir.clone());
+        }
+        spec
+    }
+}
 
 const PREVIOUS_LAYOUT_SUFFIX: &str = ".previous";
 const BEHAVIORS_DIR: &str = "behaviors";
@@ -303,6 +344,7 @@ pub fn materialize_official_store(
     resolved: &ResolvedRobot,
     offline: bool,
     officials_source: Option<&Path>,
+    settings: &MaterializeSettings,
     mut build_override: impl FnMut(&Path, &str) -> Result<PathBuf>,
 ) -> Result<()> {
     let bin_dir = ensure_bin_dir(staged_root)?;
@@ -313,6 +355,7 @@ pub fn materialize_official_store(
             runtime,
             offline,
             officials_source,
+            settings,
             &mut build_override,
         )?;
     }
@@ -323,6 +366,7 @@ pub fn materialize_official_store(
             tool,
             offline,
             officials_source,
+            settings,
             &mut build_override,
         )?;
     }
@@ -337,6 +381,7 @@ pub fn stage_router_binary(
     staged_root: &Path,
     resolved: &ResolvedRobot,
     offline: bool,
+    settings: &MaterializeSettings,
     mut build_override: impl FnMut(&Path, &str) -> Result<PathBuf>,
 ) -> Result<()> {
     let bin_dir = ensure_bin_dir(staged_root)?;
@@ -351,6 +396,7 @@ pub fn stage_router_binary(
         router,
         offline,
         None,
+        settings,
         &mut build_override,
     )
 }
@@ -404,6 +450,7 @@ fn materialize_platform_runtime(
     runtime: &ResolvedPlatformRuntime,
     offline: bool,
     officials_source: Option<&Path>,
+    settings: &MaterializeSettings,
     build_override: &mut impl FnMut(&Path, &str) -> Result<PathBuf>,
 ) -> Result<()> {
     let binary_name = official_binary_name(runtime.kind, &runtime.name);
@@ -418,8 +465,10 @@ fn materialize_platform_runtime(
     if link_from_officials_source(officials_source, &runtime.package, &binary_name, &staged)? {
         return Ok(());
     }
-    let spec = MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
-        .with_target(runtime.target.clone());
+    let spec = settings.apply(
+        MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
+            .with_target(runtime.target.clone()),
+    );
     cargo_install(staged_root, &spec, offline)
         .with_context(|| format!("failed to materialize official runtime {}", runtime.package))?;
     Ok(())
@@ -434,6 +483,7 @@ fn materialize_tool(
     tool: &ResolvedTool,
     offline: bool,
     officials_source: Option<&Path>,
+    settings: &MaterializeSettings,
     build_override: &mut impl FnMut(&Path, &str) -> Result<PathBuf>,
 ) -> Result<()> {
     let staged = bin_dir.join(&tool.binary_name);
@@ -447,8 +497,10 @@ fn materialize_tool(
     if link_from_officials_source(officials_source, &tool.package, &tool.binary_name, &staged)? {
         return Ok(());
     }
-    let spec = MaterializeSpec::new(tool.package.clone(), tool.train.clone())
-        .with_target(Some(tool.target.clone()));
+    let spec = settings.apply(
+        MaterializeSpec::new(tool.package.clone(), tool.train.clone())
+            .with_target(Some(tool.target.clone())),
+    );
     cargo_install(staged_root, &spec, offline)
         .with_context(|| format!("failed to materialize official runtime {}", tool.package))?;
     Ok(())
@@ -473,6 +525,7 @@ pub fn materialize_component_driver(
     runtime: &ResolvedPlatformRuntime,
     offline: bool,
     officials_source: Option<&Path>,
+    settings: &MaterializeSettings,
 ) -> Result<()> {
     let bin_dir = ensure_bin_dir(staged_root)?;
     let binary_name = official_binary_name(runtime.kind, &runtime.name);
@@ -483,8 +536,10 @@ pub fn materialize_component_driver(
     if link_from_officials_source(officials_source, &runtime.package, &binary_name, &staged)? {
         return Ok(());
     }
-    let spec = MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
-        .with_target(runtime.target.clone());
+    let spec = settings.apply(
+        MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
+            .with_target(runtime.target.clone()),
+    );
     cargo_install(staged_root, &spec, offline)
         .with_context(|| format!("failed to materialize component driver {}", runtime.package))?;
     Ok(())
@@ -1115,6 +1170,7 @@ robot:
             &resolved,
             true,
             Some(complete_officials.path()),
+            &MaterializeSettings::default(),
             |_, _| unreachable!("no path-overridden official in this fixture"),
         )?;
         let staged_root = publish_runtime_layout(candidate, &resolved)?;
@@ -1134,6 +1190,7 @@ robot:
             &resolved,
             true,
             Some(incomplete_officials.path()),
+            &MaterializeSettings::default(),
             |_, _| unreachable!("no path-overridden official in this fixture"),
         )
         .expect_err("an officials_source missing an expected official must hard error");
@@ -1512,11 +1569,18 @@ robot:
         let built = project.path().join("target/debug/robot-service-drive");
         fs::create_dir_all(built.parent().unwrap())?;
         fs::write(&built, "OVERRIDE")?;
-        materialize_official_store(&staged, &resolved, false, None, |crate_dir, name| {
-            assert_eq!(crate_dir, Path::new("services/drive"));
-            assert_eq!(name, "drive");
-            Ok(built.clone())
-        })?;
+        materialize_official_store(
+            &staged,
+            &resolved,
+            false,
+            None,
+            &MaterializeSettings::default(),
+            |crate_dir, name| {
+                assert_eq!(crate_dir, Path::new("services/drive"));
+                assert_eq!(name, "drive");
+                Ok(built.clone())
+            },
+        )?;
 
         assert_eq!(
             fs::read_to_string(staged.join("bin/phoxal-service-drive"))?,
@@ -1541,7 +1605,13 @@ robot:
         let built = project.path().join("target/debug/router");
         fs::create_dir_all(built.parent().unwrap())?;
         fs::write(&built, "ROUTER")?;
-        stage_router_binary(&staged, &resolved, false, |_, _| Ok(built.clone()))?;
+        stage_router_binary(
+            &staged,
+            &resolved,
+            false,
+            &MaterializeSettings::default(),
+            |_, _| Ok(built.clone()),
+        )?;
 
         assert_eq!(
             fs::read_to_string(staged.join("bin/phoxal-infrastructure-router"))?,

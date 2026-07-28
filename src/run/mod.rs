@@ -40,7 +40,7 @@ pub(crate) use participants::{
 };
 mod build;
 pub(crate) use build::{
-    Profile, StagingBuild, build_source_binary, build_source_binary_with_profile,
+    Profile, StagingBuild, build_source_binary, build_source_binary_with_profile, cargo_target_dir,
     device_missing_note, missing_device_path,
 };
 

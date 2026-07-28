@@ -87,6 +87,7 @@ pub(crate) fn stage_complete_bin_store(
     drivers: &DriverSelection,
     offline: bool,
     build: &crate::run::StagingBuild,
+    materialize_settings: &crate::stager::MaterializeSettings,
     ui: &crate::Ui,
 ) -> Result<()> {
     let mut staged_names = BTreeSet::new();
@@ -155,6 +156,7 @@ pub(crate) fn stage_complete_bin_store(
             runtime,
             offline,
             build.officials_source(),
+            materialize_settings,
         )?;
     }
     // Every official service, tool, and the infrastructure router.
@@ -163,6 +165,7 @@ pub(crate) fn stage_complete_bin_store(
         resolved,
         offline,
         build.officials_source(),
+        materialize_settings,
         |crate_dir, name| build.build_user_binary(crate_dir, name, ui, offline),
     )
     .context("failed to complete the staged bin store with the full official runtime set")?;
@@ -433,7 +436,13 @@ fn resolve_participant_source(
             // This resolution path (single-participant execution, used only
             // by simulation) never runs through the container builder, so
             // there is no pre-materialized officials directory to check.
-            crate::stager::materialize_component_driver(staged_root, runtime, offline, None)?;
+            crate::stager::materialize_component_driver(
+                staged_root,
+                runtime,
+                offline,
+                None,
+                &crate::stager::MaterializeSettings::default(),
+            )?;
             Ok(staged_root.join("bin").join(
                 phoxal_cli_core::project::resolver::official_binary_name(
                     runtime.kind,
