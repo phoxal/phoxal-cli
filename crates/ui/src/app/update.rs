@@ -884,6 +884,48 @@ mod tests {
     }
 
     #[test]
+    fn log_filter_editing_precedes_global_shortcuts() {
+        let mut model = AppModel {
+            route: FocusRoute::Content {
+                panel: PanelId::Logs(LogsPanelId::Filters),
+            },
+            ..AppModel::default()
+        };
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char('/').into())),
+        );
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char('q').into())),
+        );
+        assert_eq!(model.logs.text, "q");
+        assert_eq!(model.exit, None);
+    }
+
+    #[test]
+    fn log_follow_and_scroll_remain_page_local() {
+        let mut model = AppModel {
+            route: FocusRoute::Content {
+                panel: PanelId::Logs(LogsPanelId::Stream),
+            },
+            ..AppModel::default()
+        };
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Up.into())),
+        );
+        assert!(!model.logs.follow);
+        assert_eq!(model.logs.scroll, 1);
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::End.into())),
+        );
+        assert!(model.logs.follow);
+        assert_eq!(model.logs.scroll, 0);
+    }
+
+    #[test]
     fn modal_escape_restores_exact_route() {
         let return_to = FocusRoute::Content {
             panel: PanelId::Logs(LogsPanelId::Stream),
