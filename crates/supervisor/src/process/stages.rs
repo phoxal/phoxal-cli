@@ -159,7 +159,7 @@ pub(crate) struct PendingStage {
     pub(crate) started: Instant,
 }
 
-/// Send `event` to `events`, if a `SessionController` is listening. Awaits
+/// Send `event` to `events`, if attachment presentation is listening. Awaits
 /// the send so a lifecycle/control transition (a phase or session-state
 /// change) can never be silently dropped under channel backpressure (finding
 /// B5) - only [`crate::session::diagnostics`]'s much higher-volume, lower-

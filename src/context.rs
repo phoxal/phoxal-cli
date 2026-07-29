@@ -16,7 +16,7 @@ pub struct AppContext {
     pub ui: Ui,
     pub project: Project,
     pub offline: bool,
-    /// The output contract for `run`/`simulation webots run`'s `SessionController`.
+    /// The output contract for the `run`/`simulation webots run` attachment application.
     /// [`AppContext::new`] computes it once from stderr's terminal state.
     pub output: OutputContext,
 }

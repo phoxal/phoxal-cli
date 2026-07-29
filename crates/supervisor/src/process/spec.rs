@@ -16,8 +16,8 @@ use tokio::sync::mpsc;
 pub struct SupervisorOptions {
     pub action_rx: Option<SupervisorActionReceiver>,
     pub requested_stop: Option<RequestedStop>,
-    /// The session's root cancellation signal (`session::SessionController`
-    /// owns the sender half): a Ctrl-C observed by the controller cancels
+    /// The run's root cancellation signal (the application owns the sender
+    /// half): a Ctrl-C observed by the application cancels
     /// this, and this loop selects on it directly instead of its own private
     /// `tokio::signal::ctrl_c()` - the controller is the ONE place that
     /// decides what Ctrl-C means (first = cancel + orderly teardown, second =
@@ -26,7 +26,7 @@ pub struct SupervisorOptions {
     /// this module) does not have to construct one.
     pub token: tokio_util::sync::CancellationToken,
     /// Where this loop emits `SessionEvent`s (stage started/finished) for a
-    /// live `SessionController` to render - see `phoxal_cli_core::session::event`.
+    /// live attachment application to render - see `phoxal_cli_core::session::event`.
     /// `None` for a caller with no renderer to feed (every test in this
     /// module).
     pub events: Option<mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>>,
@@ -69,7 +69,7 @@ impl RequestedStop {
 #[derive(Debug)]
 pub enum SupervisorAction {
     /// Stop and respawn a participant from its own current spec, unchanged -
-    /// the TUI's `r restart` (see `crate::display::DisplayAction::Restart`).
+    /// the TUI's typed `Effect::Restart`.
     /// Handled the same way as `Swap` with the participant's own spec cloned
     /// back in, rather than a new field on `RunningParticipant`, so it reuses
     /// the exact same stop/spawn/board-note sequence a hot-reload swap

@@ -13,7 +13,7 @@
 //! state, e.g. Ctrl-C or a graceful stop request). The rest of the diagram
 //! (`Starting -> Running`, `Stopping -> Stopped`, `-> Failed`) is reflected
 //! directly from the resident supervisor's own `ProjectLifecycle` by
-//! `SessionController`, which already tracks those transitions; only the two
+//! the attachment application, which already tracks those transitions; only the two
 //! edges a caller can request out of band from that reflection carry their
 //! own validated API here.
 

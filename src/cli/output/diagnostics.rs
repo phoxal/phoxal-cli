@@ -44,7 +44,7 @@ fn sender_cell() -> &'static Mutex<Option<ActiveSession>> {
 }
 
 /// Start routing the CLI's own tracing output through `events` instead of
-/// stderr. Called once per session by `SessionController::new`.
+/// stderr. Called once by the attachment application.
 pub fn install(events: mpsc::Sender<SessionEvent>) {
     *sender_cell()
         .lock()
@@ -53,7 +53,7 @@ pub fn install(events: mpsc::Sender<SessionEvent>) {
 }
 
 /// Stop routing to a session channel; every subsequent tracing line writes
-/// directly to stderr again. Called by `SessionController` teardown so a
+/// directly to stderr again. Called by attachment teardown so a
 /// dropped session's tracing does not silently vanish into a closed channel.
 pub fn uninstall() {
     *sender_cell()
@@ -187,9 +187,9 @@ impl Write for SessionWriter {
 }
 
 /// The `sender_cell()` this module installs into is process-global, and it
-/// is now read from OTHER modules' tests too (`session::controller`, which
-/// constructs a real `SessionController` and so calls [`install`] from
-/// `#[tokio::test]` `async fn`s; `progress`, whose `status` calls
+/// is now read from other modules' tests too (the attachment application,
+/// which calls [`install`] from `#[tokio::test]` functions; finite output,
+/// whose `status` calls
 /// [`try_route`] and must see NO session installed to exercise their own
 /// `Silent`/`Plain`/`Routed` fallback from plain, synchronous `#[test]` `fn`s).
 /// Every test anywhere in the crate that installs, uninstalls, or depends on

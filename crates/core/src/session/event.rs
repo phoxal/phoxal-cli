@@ -80,7 +80,7 @@ pub enum DiagnosticLevel {
     Error,
 }
 
-/// The one typed lifecycle event stream a `SessionController` uses to drive
+/// The typed lifecycle event stream the attachment application uses to drive
 /// the TUI.
 ///
 /// The operation performing work emits its own phase events; nothing here

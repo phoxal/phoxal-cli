@@ -131,8 +131,8 @@ pub enum RootCommand {
 }
 
 impl RootCommand {
-    /// Whether this invocation drives a [`crate::session::controller::SessionController`]-owned
-    /// interactive session (`run` or foreground `simulation webots run`).
+    /// Whether this invocation drives an interactive attachment application
+    /// (`run`, `attach`, or foreground `simulation webots run`).
     fn enters_interactive_session(&self) -> bool {
         match self {
             Self::Run(run) => !run.detach,
@@ -285,7 +285,7 @@ mod tests {
     }
 
     /// `phoxal start` is headless: it never drives the interactive
-    /// `SessionController`/TUI, so it must never be classified as an interactive
+    /// attachment application, so it must never be classified as an interactive
     /// session (that classification is exactly what mounts the TUI for `run`).
     #[test]
     fn start_is_headless_and_never_enters_the_interactive_session() {

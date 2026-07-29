@@ -2,10 +2,11 @@
 
 use std::cmp::Ordering;
 
-use phoxal_cli_core::session::ProjectLifecycle;
+use phoxal_cli_core::session::{ParticipantKind, ProjectLifecycle};
 use phoxal_cli_observation::{
-    AttachmentEvent, BusQuery, BusRead, LogAnchor, LogFilters, LogQuery, LogRead, QueryToken,
-    RuntimeQuery, RuntimeRead, StoreChanged, StoreRevision, WindowDirection,
+    AttachmentEvent, BusQuery, BusRead, LogAnchor, LogFilters, LogQuery, LogRead, LogRow,
+    ProcessTable, QueryToken, RuntimeQuery, RuntimeRead, StoreChanged, StoreRevision,
+    WindowDirection,
 };
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 
@@ -182,7 +183,12 @@ fn accept_logs(model: &mut AppModel, window: phoxal_cli_observation::LogWindow) 
     if window.epoch != epoch || window.revision < observed_revision || window.token != token {
         return Vec::new();
     }
-    model.logs.rows = window.rows.iter().cloned().collect();
+    model.logs.rows = window
+        .rows
+        .iter()
+        .filter(|row| log_matches_source(model.logs.source, row, &model.overview.processes))
+        .cloned()
+        .collect();
     if !model.logs.text.is_empty() {
         let needle = model.logs.text.to_lowercase();
         model
@@ -194,6 +200,24 @@ fn accept_logs(model: &mut AppModel, window: phoxal_cli_observation::LogWindow) 
     model.logs.in_flight = None;
     model.logs.accepted_windows = model.logs.accepted_windows.saturating_add(1);
     issue_logs_if_idle(model).into_iter().collect()
+}
+
+fn log_matches_source(source: LogSourceFilter, row: &LogRow, processes: &ProcessTable) -> bool {
+    if source == LogSourceFilter::All {
+        return true;
+    }
+    let runtime = processes.iter().any(|(key, process)| {
+        (key.id == row.participant || key.to_string() == row.participant)
+            && matches!(
+                process.kind,
+                ParticipantKind::Service | ParticipantKind::Driver
+            )
+    });
+    match source {
+        LogSourceFilter::All => true,
+        LogSourceFilter::Runtimes => runtime,
+        LogSourceFilter::Tools => !runtime,
+    }
 }
 
 fn invalidate_bus(model: &mut AppModel, changed: StoreChanged) -> Vec<Effect> {
@@ -771,8 +795,9 @@ mod tests {
 
     use phoxal_cli_core::identity::ExecutionId;
     use phoxal_cli_core::session::{
-        JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, ParticipantKind, ParticipantState,
-        ProcessDescriptor, ProcessEntry, ProcessKey, ProcessStatus, StartupRequirement,
+        JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, LogSeverity, LogSource,
+        ParticipantKind, ParticipantState, ProcessDescriptor, ProcessEntry, ProcessKey,
+        ProcessStatus, StartupRequirement,
     };
     use phoxal_cli_observation::{
         AttachmentEpoch, AttachmentEvent, InputObservation, LogWindow, ObservationWindow,
@@ -932,6 +957,50 @@ mod tests {
         );
         assert!(model.logs.follow);
         assert_eq!(model.logs.scroll, 0);
+    }
+
+    #[test]
+    fn log_source_filter_separates_runtime_participants_from_tools() {
+        let runtime_key = ProcessKey::project("drive");
+        let tool_key = ProcessKey::project("infrastructure-router");
+        let processes = BTreeMap::from([
+            (
+                runtime_key.clone(),
+                process_with_kind(runtime_key, ParticipantKind::Service),
+            ),
+            (
+                tool_key.clone(),
+                process_with_kind(tool_key, ParticipantKind::Tool),
+            ),
+        ]);
+        let row = |participant: &str| LogRow {
+            participant: participant.to_string(),
+            source: LogSource::Raw,
+            severity: LogSeverity::Info,
+            text: String::new(),
+            event_time: std::time::SystemTime::UNIX_EPOCH,
+            scope: None,
+        };
+
+        assert!(log_matches_source(
+            LogSourceFilter::Runtimes,
+            &row("drive"),
+            &processes
+        ));
+        assert!(!log_matches_source(
+            LogSourceFilter::Tools,
+            &row("drive"),
+            &processes
+        ));
+        assert!(log_matches_source(
+            LogSourceFilter::Tools,
+            &row("infrastructure-router"),
+            &processes
+        ));
+        assert!(
+            log_matches_source(LogSourceFilter::Tools, &row("phoxal-cli"), &processes),
+            "unmatched local diagnostics belong to the tools stream"
+        );
     }
 
     #[test]
@@ -1120,19 +1189,23 @@ mod tests {
     }
 
     fn process(key: ProcessKey) -> ProcessObservation {
+        process_with_kind(key, ParticipantKind::Service)
+    }
+
+    fn process_with_kind(key: ProcessKey, kind: ParticipantKind) -> ProcessObservation {
         ProcessObservation {
             key: key.clone(),
             entry: ProcessEntry {
                 descriptor: ProcessDescriptor {
                     key,
-                    kind: ParticipantKind::Service,
+                    kind,
                     artifact: "service".to_string(),
                     owner: "test".to_string(),
                     startup_requirement: StartupRequirement::Required,
                 },
                 status: ProcessStatus::default(),
             },
-            kind: ParticipantKind::Service,
+            kind,
             state: ParticipantState::Ready,
             present: Some(true),
             robot: None,
