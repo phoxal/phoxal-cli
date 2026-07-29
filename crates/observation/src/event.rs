@@ -16,18 +16,42 @@ pub enum Freshness {
 
 pub type FreshnessSet = BTreeMap<String, Freshness>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionObservation {
+    Connected,
+    Reconnecting { attempt: u32 },
+    Terminal,
+    Lost { reason: Arc<str> },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttachmentEvent {
     EpochChanged(AttachmentEpoch),
+    ConnectionChanged(ConnectionObservation),
     SupervisorChanged(Arc<SupervisorObservation>),
-    ProcessesChanged(Arc<ProcessTable>),
-    DeviceChanged(Arc<DeviceObservation>),
-    InputChanged(Arc<InputObservation>),
-    SourceHealthChanged(Arc<SourceHealth>),
+    ProcessesChanged {
+        epoch: AttachmentEpoch,
+        values: Arc<ProcessTable>,
+    },
+    DeviceChanged {
+        epoch: AttachmentEpoch,
+        values: Arc<DeviceObservation>,
+    },
+    InputChanged {
+        epoch: AttachmentEpoch,
+        values: Arc<InputObservation>,
+    },
+    SourceHealthChanged {
+        epoch: AttachmentEpoch,
+        values: Arc<SourceHealth>,
+    },
     LogsChanged(StoreChanged),
     BusChanged(StoreChanged),
     RuntimesChanged(StoreChanged),
-    FreshnessChanged(FreshnessSet),
+    FreshnessChanged {
+        epoch: AttachmentEpoch,
+        values: FreshnessSet,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

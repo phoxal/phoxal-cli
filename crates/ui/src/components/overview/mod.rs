@@ -40,8 +40,9 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
                     |phase| format!("active: {}", sanitize(phase)),
                 );
             format!(
-                "Project: {}\nMode: {mode}\nLifecycle: {:?}\nStartup: {startup}\nFramework: {}\nRouter: {}\nProcesses: {}",
+                "Project: {}\nMode: {mode}\nConnection: {}\nLifecycle: {:?}\nStartup: {startup}\nFramework: {}\nRouter: {}\nProcesses: {}",
                 sanitize(&snapshot.project),
+                connection_label(model.overview.connection.as_ref()),
                 snapshot.lifecycle,
                 sanitize(&snapshot.framework_train),
                 sanitize(&snapshot.router),
@@ -69,16 +70,23 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         .flat_map(|health| health.sources.iter())
         .map(|(source, status)| format!("{}: {status:?}", sanitize(source)))
         .collect::<Vec<_>>();
+    let ingress_dropped = model
+        .overview
+        .source_health
+        .as_ref()
+        .map_or(0, |health| health.ingress_dropped);
     let devices = model
         .overview
         .devices
         .as_ref()
         .map_or(0, |devices| devices.robots.len());
     let health_text = if stale.is_empty() && source_states.is_empty() {
-        format!("All observed sources are fresh\nRobot devices: {devices}")
+        format!(
+            "All observed sources are fresh\nRobot devices: {devices}\nEpoch history shed: {ingress_dropped}"
+        )
     } else {
         format!(
-            "Stale: {}\nRobot devices: {devices}\n{}",
+            "Stale: {}\nRobot devices: {devices}\nEpoch history shed: {ingress_dropped}\n{}",
             stale.join(", "),
             source_states.join("\n")
         )
@@ -112,6 +120,21 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         ),
         diagnostics,
     );
+}
+
+fn connection_label(connection: Option<&phoxal_cli_observation::ConnectionObservation>) -> String {
+    use phoxal_cli_observation::ConnectionObservation;
+    match connection {
+        None => "waiting".to_string(),
+        Some(ConnectionObservation::Connected) => "connected".to_string(),
+        Some(ConnectionObservation::Reconnecting { attempt }) => {
+            format!("reconnecting (attempt {attempt})")
+        }
+        Some(ConnectionObservation::Terminal) => "terminal".to_string(),
+        Some(ConnectionObservation::Lost { reason }) => {
+            format!("lost: {}", sanitize(reason))
+        }
+    }
 }
 
 fn sanitize(value: &str) -> String {

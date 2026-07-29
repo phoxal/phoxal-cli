@@ -14,5 +14,5 @@ pub use attachment::{
 };
 pub use ports::{AttachmentEvents, BusReader, InputCommands, LogReader, RuntimeReader};
 pub use supervisor::{
-    ConnectionState, SupervisorCommands, SupervisorFeed, is_connection_unavailable,
+    ConnectionObservation, SupervisorCommands, SupervisorFeed, is_connection_unavailable,
 };

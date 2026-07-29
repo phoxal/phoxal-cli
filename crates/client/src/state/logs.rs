@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use phoxal_cli_observation::{
@@ -14,12 +14,6 @@ pub(crate) struct LogStore {
     revision: StoreRevision,
     invalidation_pending: bool,
     rows: VecDeque<LogRow>,
-    seen: BTreeSet<(
-        std::time::SystemTime,
-        Option<phoxal_cli_observation::LogScope>,
-        String,
-        String,
-    )>,
 }
 
 impl LogStore {
@@ -29,7 +23,6 @@ impl LogStore {
             revision: StoreRevision(0),
             invalidation_pending: false,
             rows: VecDeque::new(),
-            seen: BTreeSet::new(),
         }
     }
 
@@ -38,32 +31,15 @@ impl LogStore {
         self.revision = StoreRevision(self.revision.0.wrapping_add(1));
         self.invalidation_pending = false;
         self.rows.clear();
-        self.seen.clear();
     }
 
     pub fn record(&mut self, epoch: AttachmentEpoch, row: LogRow) -> Option<StoreRevision> {
         if epoch != self.epoch {
             return None;
         }
-        let key = (
-            row.event_time,
-            row.scope.clone(),
-            row.participant.clone(),
-            row.text.clone(),
-        );
-        if !self.seen.insert(key) {
-            return None;
-        }
         self.rows.push_back(row);
         while self.rows.len() > LOG_CAPACITY {
-            if let Some(evicted) = self.rows.pop_front() {
-                self.seen.remove(&(
-                    evicted.event_time,
-                    evicted.scope,
-                    evicted.participant,
-                    evicted.text,
-                ));
-            }
+            self.rows.pop_front();
         }
         self.revision = StoreRevision(self.revision.0.wrapping_add(1));
         if self.invalidation_pending {
@@ -94,18 +70,6 @@ impl LogStore {
         }
         let was_pending = self.invalidation_pending;
         self.rows.retain(|row| row.scope.as_ref() != Some(scope));
-        self.seen = self
-            .rows
-            .iter()
-            .map(|row| {
-                (
-                    row.event_time,
-                    row.scope.clone(),
-                    row.participant.clone(),
-                    row.text.clone(),
-                )
-            })
-            .collect();
         for row in rows {
             let _ = self.record(epoch, row);
         }
@@ -225,6 +189,38 @@ mod tests {
         store.replace_epoch(new);
         assert_eq!(store.record(old, row(1)), None);
         assert!(store.record(new, row(2)).is_some());
+    }
+
+    #[test]
+    fn content_identical_reconciled_records_are_preserved() {
+        let epoch = epoch(0);
+        let mut store = LogStore::new(epoch);
+        let repeated = row(1);
+        assert!(store.record(epoch, repeated.clone()).is_some());
+        store.read(ObservationQuery {
+            epoch,
+            observed_revision: StoreRevision(0),
+            token: QueryToken(1),
+            body: LogQuery {
+                filters: LogFilters::default(),
+                anchor: LogAnchor::Latest,
+                direction: WindowDirection::Backward,
+                limit: usize::MAX,
+            },
+        });
+        assert!(store.record(epoch, repeated).is_some());
+        let window = store.read(ObservationQuery {
+            epoch,
+            observed_revision: StoreRevision(0),
+            token: QueryToken(2),
+            body: LogQuery {
+                filters: LogFilters::default(),
+                anchor: LogAnchor::Latest,
+                direction: WindowDirection::Backward,
+                limit: usize::MAX,
+            },
+        });
+        assert_eq!(window.rows.len(), 2);
     }
 
     #[test]

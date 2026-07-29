@@ -10,4 +10,8 @@ impl AttachmentEvents {
     pub async fn recv(&mut self) -> Option<AttachmentEvent> {
         self.receiver.recv().await
     }
+
+    pub fn close(&mut self) {
+        self.receiver.close();
+    }
 }

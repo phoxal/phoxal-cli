@@ -213,11 +213,7 @@ fn dispatch(model: &Rc<RefCell<AppModel>>, effects: &EffectSenders, message: Msg
 fn is_guaranteed(effect: &Effect) -> bool {
     matches!(
         effect,
-        Effect::ReadLogs(_)
-            | Effect::ReadBus(_)
-            | Effect::ReadRuntimes(_)
-            | Effect::StopProject
-            | Effect::Detach
+        Effect::ReadLogs(_) | Effect::ReadBus(_) | Effect::ReadRuntimes(_) | Effect::StopProject
     )
 }
 

@@ -22,7 +22,7 @@ pub fn has_private_bootstrap() -> bool {
     std::env::var_os(BOOTSTRAP_FD_ENV).is_some()
 }
 
-pub fn launch_detached() -> Result<LaunchedResident> {
+pub fn launch_detached(offline: bool) -> Result<LaunchedResident> {
     let (mut parent, child_socket) =
         std::os::unix::net::UnixStream::pair().context("create resident bootstrap socketpair")?;
     parent.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -35,7 +35,7 @@ pub fn launch_detached() -> Result<LaunchedResident> {
     let stderr = log.try_clone().context("clone resident log descriptor")?;
     let mut command = Command::new(std::env::current_exe()?);
     command
-        .args(std::env::args_os().skip(1))
+        .args(detached_command_args(std::env::args_os().skip(1), offline))
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr))
@@ -70,4 +70,43 @@ pub fn launch_detached() -> Result<LaunchedResident> {
         BootstrapResult::Rejected { .. } => {}
     }
     Ok(LaunchedResident { child, result })
+}
+
+fn detached_command_args(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+    offline: bool,
+) -> Vec<std::ffi::OsString> {
+    let mut args = args.into_iter().collect::<Vec<_>>();
+    if offline && !args.iter().any(|argument| argument == "--offline") {
+        args.push("--offline".into());
+    }
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::detached_command_args;
+
+    #[test]
+    fn detached_offline_flag_is_explicit_and_unique() {
+        let base = [OsString::from("run"), OsString::from("-d")];
+        assert_eq!(
+            detached_command_args(base.clone(), true),
+            ["run", "-d", "--offline"]
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        );
+        let explicit = [OsString::from("run"), OsString::from("--offline")];
+        assert_eq!(
+            detached_command_args(explicit.clone(), true),
+            explicit.into_iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            detached_command_args(base.clone(), false),
+            base.into_iter().collect::<Vec<_>>()
+        );
+    }
 }

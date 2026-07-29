@@ -9,9 +9,9 @@ pub(crate) mod logs;
 pub(crate) mod motion;
 pub(crate) mod runtimes;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -22,7 +22,7 @@ use phoxal::bus::{
 use phoxal::raw::Bus;
 use phoxal_api::v0_1 as api;
 use phoxal_api::v0_1 as state_api;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use crate::reconcile::{Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced};
 use phoxal_cli_observation::{
@@ -248,7 +248,7 @@ fn runtime_record_from(body: state_api::tool::runtime::Record) -> RuntimePerform
 /// store updater. Retained values exist only in the stores behind the ports.
 #[derive(Debug, Clone)]
 pub struct TelemetryBackend {
-    updates: mpsc::UnboundedSender<TelemetryUpdate>,
+    updates: Arc<TelemetryMailbox>,
 }
 
 #[derive(Debug)]
@@ -264,13 +264,97 @@ pub(crate) enum TelemetryUpdate {
     Health(String, SourceStatus),
 }
 
+const TELEMETRY_HISTORY_CAPACITY: usize = 512;
+
+#[derive(Debug, Default)]
+struct TelemetryPending {
+    latest: BTreeMap<String, TelemetryUpdate>,
+    history: VecDeque<TelemetryUpdate>,
+    dropped: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TelemetryMailbox {
+    pending: Mutex<TelemetryPending>,
+    wake: Notify,
+}
+
+pub(crate) struct TelemetryBatch {
+    pub(crate) updates: Vec<TelemetryUpdate>,
+    pub(crate) dropped: u64,
+}
+
+impl TelemetryMailbox {
+    fn push(&self, update: TelemetryUpdate) {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        match telemetry_slot(&update) {
+            Some(slot) => {
+                pending.latest.insert(slot, update);
+            }
+            None => {
+                if pending.history.len() == TELEMETRY_HISTORY_CAPACITY {
+                    pending.history.pop_front();
+                    pending.dropped = pending.dropped.saturating_add(1);
+                }
+                pending.history.push_back(update);
+            }
+        }
+        drop(pending);
+        self.wake.notify_one();
+    }
+
+    pub(crate) async fn recv(&self) -> TelemetryBatch {
+        loop {
+            let notified = self.wake.notified();
+            {
+                let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+                if !pending.latest.is_empty() || !pending.history.is_empty() {
+                    let mut updates = pending.history.drain(..).collect::<Vec<_>>();
+                    updates.extend(std::mem::take(&mut pending.latest).into_values());
+                    return TelemetryBatch {
+                        updates,
+                        dropped: pending.dropped,
+                    };
+                }
+            }
+            notified.await;
+        }
+    }
+
+    #[cfg(test)]
+    fn pending_shape(&self) -> (usize, usize, u64) {
+        let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        (pending.latest.len(), pending.history.len(), pending.dropped)
+    }
+}
+
+fn telemetry_slot(update: &TelemetryUpdate) -> Option<String> {
+    match update {
+        TelemetryUpdate::Clock(_) => Some("clock".to_string()),
+        TelemetryUpdate::Device(scope, _) => {
+            Some(format!("device:{}/{}", scope.namespace, scope.robot_id))
+        }
+        TelemetryUpdate::Joypads(_) => Some("joypads".to_string()),
+        TelemetryUpdate::Motion(_) => Some("motion".to_string()),
+        TelemetryUpdate::Health(source, _) => Some(format!("health:{source}")),
+        TelemetryUpdate::Router(_, _)
+        | TelemetryUpdate::Routers(_, _)
+        | TelemetryUpdate::Runtimes(_, _, _)
+        | TelemetryUpdate::Runtime(_, _) => None,
+    }
+}
+
 impl TelemetryBackend {
-    pub(crate) fn with_updates(updates: mpsc::UnboundedSender<TelemetryUpdate>) -> Self {
+    pub(crate) fn with_updates(updates: Arc<TelemetryMailbox>) -> Self {
         Self { updates }
     }
 
+    pub(crate) fn record_clock(&self, sample: phoxal_cli_observation::ClockSample) {
+        self.updates.push(TelemetryUpdate::Clock(sample));
+    }
+
     pub(crate) fn record_device(&self, scope: RobotScope, sample: DeviceSample) {
-        let _ = self.updates.send(TelemetryUpdate::Device(scope, sample));
+        self.updates.push(TelemetryUpdate::Device(scope, sample));
     }
 
     pub(crate) fn record_router_at(
@@ -279,7 +363,7 @@ impl TelemetryBackend {
         received_at: Instant,
         sample: RouterMetricsSample,
     ) {
-        let _ = self.updates.send(TelemetryUpdate::Router(
+        self.updates.push(TelemetryUpdate::Router(
             scope,
             Timestamped::new(sample, received_at),
         ));
@@ -294,7 +378,7 @@ impl TelemetryBackend {
         if let Some(current) = current {
             samples.push(current);
         }
-        let _ = self.updates.send(TelemetryUpdate::Routers(scope, samples));
+        self.updates.push(TelemetryUpdate::Routers(scope, samples));
     }
 
     pub(crate) fn install_runtimes(
@@ -303,27 +387,144 @@ impl TelemetryBackend {
         samples: Vec<RuntimePerformanceSample>,
         status: RuntimeFeedStatus,
     ) {
-        let _ = self
-            .updates
-            .send(TelemetryUpdate::Runtimes(scope, samples, status));
+        self.updates
+            .push(TelemetryUpdate::Runtimes(scope, samples, status));
     }
 
     pub(crate) fn record_runtime(&self, scope: RobotScope, sample: RuntimePerformanceSample) {
-        let _ = self.updates.send(TelemetryUpdate::Runtime(scope, sample));
+        self.updates.push(TelemetryUpdate::Runtime(scope, sample));
     }
 
     pub(crate) fn record_joypad(&self, sample: JoypadDevicesSample) {
-        let _ = self.updates.send(TelemetryUpdate::Joypads(sample));
+        self.updates.push(TelemetryUpdate::Joypads(sample));
     }
 
     pub(crate) fn record_motion(&self, sample: state_api::motion::State) {
-        let _ = self.updates.send(TelemetryUpdate::Motion(sample));
+        self.updates.push(TelemetryUpdate::Motion(sample));
     }
 
     pub(crate) fn record_health(&self, source: impl Into<String>, status: SourceStatus) {
-        let _ = self
-            .updates
-            .send(TelemetryUpdate::Health(source.into(), status));
+        self.updates
+            .push(TelemetryUpdate::Health(source.into(), status));
+    }
+}
+
+#[cfg(test)]
+mod telemetry_mailbox_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn blocked_consumer_keeps_latest_state_and_bounded_history() {
+        let mailbox = Arc::new(TelemetryMailbox::default());
+        let telemetry = TelemetryBackend::with_updates(mailbox.clone());
+        for index in 0..100_000_u64 {
+            telemetry.record_clock(phoxal_cli_observation::ClockSample {
+                now_ns: index,
+                step: index,
+            });
+            telemetry.record_runtime(
+                RobotScope {
+                    namespace: "lab".into(),
+                    robot_id: "rover".into(),
+                },
+                RuntimePerformanceSample {
+                    sequence: index,
+                    participant_id: "drive".into(),
+                    truncated: 0,
+                    window_ns: 1,
+                    step: None,
+                    topics: Arc::new(Vec::new()),
+                    overflow: None,
+                },
+            );
+        }
+        let batch = mailbox.recv().await;
+        assert_eq!(batch.updates.len(), TELEMETRY_HISTORY_CAPACITY + 1);
+        assert_eq!(
+            batch.dropped,
+            100_000_u64.saturating_sub(TELEMETRY_HISTORY_CAPACITY as u64)
+        );
+        assert!(batch.updates.iter().any(|update| matches!(
+            update,
+            TelemetryUpdate::Clock(sample) if sample.now_ns == 99_999
+        )));
+    }
+
+    #[tokio::test]
+    async fn blocked_attachment_event_delivery_cannot_grow_ingress() {
+        let mailbox = Arc::new(TelemetryMailbox::default());
+        let telemetry = TelemetryBackend::with_updates(mailbox.clone());
+        let (event_tx, _event_rx) = mpsc::channel::<()>(1);
+        event_tx.send(()).await.unwrap();
+        let (blocked_tx, blocked_rx) = tokio::sync::oneshot::channel();
+        let consumer_mailbox = mailbox.clone();
+        let consumer = tokio::spawn(async move {
+            let _ = consumer_mailbox.recv().await;
+            let _ = blocked_tx.send(());
+            let _ = event_tx.send(()).await;
+        });
+        telemetry.record_clock(phoxal_cli_observation::ClockSample { now_ns: 1, step: 1 });
+        blocked_rx.await.unwrap();
+
+        for index in 0..100_000_u64 {
+            telemetry.record_clock(phoxal_cli_observation::ClockSample {
+                now_ns: index,
+                step: index,
+            });
+            telemetry.record_runtime(
+                RobotScope {
+                    namespace: "lab".into(),
+                    robot_id: "rover".into(),
+                },
+                RuntimePerformanceSample {
+                    sequence: index,
+                    participant_id: "drive".into(),
+                    truncated: 0,
+                    window_ns: 1,
+                    step: None,
+                    topics: Arc::new(Vec::new()),
+                    overflow: None,
+                },
+            );
+        }
+
+        let (latest, history, dropped) = mailbox.pending_shape();
+        assert_eq!(latest, 1);
+        assert_eq!(history, TELEMETRY_HISTORY_CAPACITY);
+        assert_eq!(
+            dropped,
+            100_000_u64.saturating_sub(TELEMETRY_HISTORY_CAPACITY as u64)
+        );
+        consumer.abort();
+    }
+
+    #[tokio::test]
+    async fn latest_health_is_applied_after_buffered_samples() {
+        let mailbox = Arc::new(TelemetryMailbox::default());
+        let telemetry = TelemetryBackend::with_updates(mailbox.clone());
+        let scope = RobotScope {
+            namespace: "lab".into(),
+            robot_id: "rover".into(),
+        };
+        telemetry.record_runtime(
+            scope,
+            RuntimePerformanceSample {
+                sequence: 1,
+                participant_id: "drive".into(),
+                truncated: 0,
+                window_ns: 1,
+                step: None,
+                topics: Arc::new(Vec::new()),
+                overflow: None,
+            },
+        );
+        telemetry.record_health("runtimes:lab/rover", SourceStatus::Failed);
+        let batch = mailbox.recv().await;
+        assert!(matches!(
+            batch.updates.last(),
+            Some(TelemetryUpdate::Health(source, SourceStatus::Failed))
+                if source == "runtimes:lab/rover"
+        ));
     }
 }
 
