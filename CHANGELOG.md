@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.28.7](https://github.com/phoxal/phoxal-cli/releases/tag/v0.28.7) - 2026-07-29
+
+
+### Added
+
+- *(ui)* Rebuild attachment console with tui-realm ([#243](https://github.com/phoxal/phoxal-cli/pull/243))
+
+
 ## [0.28.6](https://github.com/phoxal/phoxal-cli/releases/tag/v0.28.6) - 2026-07-29
 
 
