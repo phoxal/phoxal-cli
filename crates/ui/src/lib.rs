@@ -5,10 +5,8 @@
 
 pub mod app;
 pub mod components;
-pub mod ratatui;
 pub mod terminal;
 pub mod theme;
-pub mod tui;
 
 pub use app::{AttachmentOutcome, Effect, SessionInput, UiOptions, run};
 pub use theme::{ColorCapability, Role, Theme};

@@ -198,10 +198,10 @@ impl Run {
             return wait_for_required_readiness(&feed, &mut launched.child).await;
         }
         let (mut launched, feed, commands) = connect_to_detached_resident(&target.project).await?;
-        let result = crate::commands::resident::drive_tui(app, &target, feed, commands, true).await;
+        let result = crate::application::attachment::run(app, &target, feed, commands).await;
         if matches!(
             result,
-            Ok(crate::session::controller::AttachmentOutcome::Terminal)
+            Ok(phoxal_cli_ui::AttachmentOutcome::ResidentStopped)
         ) {
             let status = tokio::task::spawn_blocking(move || launched.child.wait()).await??;
             anyhow::ensure!(status.success(), "resident supervisor exited with {status}");
@@ -835,7 +835,7 @@ pub(crate) async fn wait_for_required_readiness(
 pub(crate) async fn live_run_setup(
     mut prepared: PreparedRun,
     ui: crate::Ui,
-    output: crate::session::output::OutputContext,
+    output: crate::cli::output::OutputContext,
     token: tokio_util::sync::CancellationToken,
     events: mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>,
     action_channel: Option<(

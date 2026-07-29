@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use phoxal_cli_core::project::launch_plan::{PlanRevision, RunIdentity};
 use tokio::sync::mpsc;
 
-use crate::session::output::OutputContext;
+use crate::cli::output::OutputContext;
 use phoxal_cli_supervisor::{
     RequestedStop, SupervisionStage, SupervisorAction, SupervisorOptions, SupervisorState,
     start_liveliness_observer,

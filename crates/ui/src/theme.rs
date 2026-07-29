@@ -349,3 +349,4 @@ mod tests {
         assert!((232..=255).contains(&mid));
     }
 }
+pub(crate) mod role;

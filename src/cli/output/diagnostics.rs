@@ -8,7 +8,7 @@
 //!
 //! Uses a process-global cell for the session's event sender. [`install`] is
 //! called once by
-//! [`super::controller::SessionController::new_attachment`] for the lifetime of one
+//! the attachment application for the lifetime of one
 //! `run`/`simulation webots run` session; [`uninstall`] restores direct stderr
 //! writing on teardown. Every OTHER verb (and any code running before a
 //! session starts) never calls [`install`], so [`SessionWriter`] simply

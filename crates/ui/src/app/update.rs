@@ -333,6 +333,11 @@ fn handle_key(model: &mut AppModel, key: KeyEvent) -> Vec<Effect> {
     if matches!(model.route, FocusRoute::Modal { .. }) {
         return handle_modal_key(model, key);
     }
+    if let FocusRoute::Content { panel } = model.route.clone()
+        && (model.logs.editing.is_some() || model.bus.editing)
+    {
+        return handle_content_key(model, panel, key);
+    }
     if key.code == Key::Char('?') {
         open_modal(model, ModalId::Help);
         return Vec::new();
@@ -575,7 +580,12 @@ fn handle_logs_key(model: &mut AppModel, panel: LogsPanelId, key: KeyEvent) -> V
                 model.logs.scroll = model.logs.scroll.saturating_add(1);
             }
             Key::Down => model.logs.scroll = model.logs.scroll.saturating_sub(1),
-            Key::End | Key::Char(' ') => toggle_follow(model),
+            Key::End => {
+                model.logs.follow = true;
+                model.logs.scroll = 0;
+                model.logs.pause_anchor = None;
+            }
+            Key::Char(' ') => toggle_follow(model),
             _ => {}
         },
     }

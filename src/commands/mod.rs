@@ -178,7 +178,7 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
             "interactive `run` and `simulation webots run` sessions require a terminal; run this command in a TTY"
         );
     }
-    let output = crate::session::output::OutputContext::compute(terminal);
+    let output = crate::cli::output::OutputContext::compute(terminal);
 
     // Compute terminal presentation once and thread it into every long-running
     // operation through `AppContext::output` and `AppContext::ui`.

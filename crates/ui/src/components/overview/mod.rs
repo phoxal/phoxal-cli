@@ -46,7 +46,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
     };
     frame.render_widget(
         Paragraph::new(health_text)
-            .style(crate::ratatui::fg(theme, crate::Role::Steel))
+            .style(crate::theme::role::fg(theme, crate::Role::Steel))
             .block(Block::default().title(" Health ").borders(Borders::ALL)),
         health,
     );

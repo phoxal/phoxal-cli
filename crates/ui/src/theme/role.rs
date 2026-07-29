@@ -6,7 +6,7 @@
 
 use tuirealm::ratatui::style::{Color, Modifier, Style};
 
-use crate::theme::{ColorCapability, Rgb, Role, Theme, rgb_to_ansi16, rgb_to_ansi256};
+use super::{ColorCapability, Rgb, Role, Theme, rgb_to_ansi16, rgb_to_ansi256};
 
 /// `role`'s color at `theme`'s capability - `Color::Reset` (no color at all)
 /// under [`ColorCapability::None`], matching [`Theme::paint`]'s own

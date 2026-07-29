@@ -100,10 +100,10 @@ impl SimulationRun {
         }
         let (mut launched, feed, commands) =
             crate::run::connect_to_detached_resident(&target.project).await?;
-        let result = crate::commands::resident::drive_tui(app, &target, feed, commands, true).await;
+        let result = crate::application::attachment::run(app, &target, feed, commands).await;
         if matches!(
             result,
-            Ok(crate::session::controller::AttachmentOutcome::Terminal)
+            Ok(phoxal_cli_ui::AttachmentOutcome::ResidentStopped)
         ) {
             let status = tokio::task::spawn_blocking(move || launched.child.wait()).await??;
             anyhow::ensure!(status.success(), "resident supervisor exited with {status}");

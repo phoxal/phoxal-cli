@@ -121,8 +121,8 @@ pub fn panel_block<'a>(
         .borders(Borders::ALL)
         .title(format!("{marker} {title}"))
         .border_style(if focused {
-            crate::ratatui::fg(theme, crate::Role::Accent)
+            crate::theme::role::fg(theme, crate::Role::Accent)
         } else {
-            crate::ratatui::muted(theme)
+            crate::theme::role::muted(theme)
         })
 }

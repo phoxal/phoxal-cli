@@ -37,9 +37,9 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
                         format!(" {control}")
                     },
                     if index == model.logs.control_candidate {
-                        crate::ratatui::candidate(theme, crate::Role::Accent)
+                        crate::theme::role::candidate(theme, crate::Role::Accent)
                     } else {
-                        crate::ratatui::muted(theme)
+                        crate::theme::role::muted(theme)
                     },
                 ),
                 Span::raw("  "),

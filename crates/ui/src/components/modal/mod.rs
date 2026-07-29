@@ -55,7 +55,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
-                    .border_style(crate::ratatui::fg(theme, crate::Role::Accent)),
+                    .border_style(crate::theme::role::fg(theme, crate::Role::Accent)),
             ),
         popup,
     );

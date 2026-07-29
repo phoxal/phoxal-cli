@@ -18,10 +18,13 @@ pub fn render_header(frame: &mut Frame, area: Rect, model: &AppModel, theme: The
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" phoxal ", crate::ratatui::selected(theme, Role::Accent)),
+            Span::styled(
+                " phoxal ",
+                crate::theme::role::selected(theme, Role::Accent),
+            ),
             Span::raw(project),
             Span::raw("  "),
-            Span::styled(lifecycle, crate::ratatui::fg(theme, Role::Steel)),
+            Span::styled(lifecycle, crate::theme::role::fg(theme, Role::Steel)),
         ]))
         .block(Block::default().borders(Borders::BOTTOM)),
         area,
@@ -47,9 +50,9 @@ pub fn render_tabs(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme
                 Span::styled(
                     format!("{marker}{} {}", index + 1, candidate.label()),
                     if selected {
-                        crate::ratatui::selected(theme, Role::Accent)
+                        crate::theme::role::selected(theme, Role::Accent)
                     } else {
-                        crate::ratatui::muted(theme)
+                        crate::theme::role::muted(theme)
                     },
                 ),
                 Span::raw("  "),
@@ -70,7 +73,7 @@ pub fn render_footer(frame: &mut Frame, area: Rect, model: &AppModel, theme: The
         Paragraph::new(format!(
             " {depth}  Enter descend  Esc ascend  ? help  i session  S stop  q detach"
         ))
-        .style(crate::ratatui::muted(theme))
+        .style(crate::theme::role::muted(theme))
         .block(Block::default().borders(Borders::TOP)),
         area,
     );

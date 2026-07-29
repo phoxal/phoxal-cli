@@ -10,9 +10,9 @@ use std::time::Duration;
 
 #[test]
 fn human_launch_report_enters_the_active_session_diagnostics() -> Result<()> {
-    let _guard = crate::session::diagnostics::DIAGNOSTICS_TEST_LOCK.blocking_lock();
+    let _guard = crate::cli::output::diagnostics::DIAGNOSTICS_TEST_LOCK.blocking_lock();
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    crate::session::diagnostics::install(tx);
+    crate::cli::output::diagnostics::install(tx);
     let plan = LaunchPlan {
         mode: LaunchMode::Run,
         robots: Vec::new(),
@@ -36,7 +36,7 @@ fn human_launch_report_enters_the_active_session_diagnostics() -> Result<()> {
     }];
 
     let result = super::command::report_launch_commands(&plan, &specs, &crate::Ui::new(true));
-    crate::session::diagnostics::uninstall();
+    crate::cli::output::diagnostics::uninstall();
     result?;
 
     let messages = std::iter::from_fn(|| rx.try_recv().ok())

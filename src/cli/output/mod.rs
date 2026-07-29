@@ -2,7 +2,7 @@
 //! interactive terminal and the theme selected for it.
 //!
 //! Built once in [`crate::commands::dispatch`] and threaded explicitly into
-//! [`super::controller::SessionController`], `AppContext::ui`, and helpers
+//! the attachment application, `AppContext::ui`, and helpers
 //! that may draw progress. Interactive foreground sessions are admitted only
 //! on a real TTY, so the controller itself has exactly one renderer: the TUI.
 
@@ -10,6 +10,8 @@ use std::time::Duration;
 
 pub use phoxal_cli_supervisor::WaitBudget;
 use phoxal_cli_ui::Theme;
+
+pub mod diagnostics;
 
 /// The immutable output contract for one `run`/`simulation webots run` invocation.
 #[derive(Debug, Clone, Copy)]
