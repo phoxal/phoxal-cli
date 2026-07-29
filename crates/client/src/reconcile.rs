@@ -1,4 +1,5 @@
-//! Transport-neutral snapshot-plus-follow reconciliation.
+//! Transport-neutral snapshot-plus-follow reconciliation owned by the
+//! disposable attachment client.
 
 use std::collections::VecDeque;
 use std::time::Duration;

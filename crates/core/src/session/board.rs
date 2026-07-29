@@ -1,11 +1,12 @@
 //! Persisted participant-board records and their terminal-neutral text form.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use super::ParticipantKind;
-use super::stores::telemetry::RobotScope;
+use super::telemetry::RobotScope;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,6 +72,16 @@ pub struct ParticipantStatus {
     /// persisted board rows predate and must not become a telemetry index.
     #[serde(skip)]
     pub scope: Option<RobotScope>,
+    #[serde(skip)]
+    pub runtime_started_at: Option<Instant>,
+    #[serde(skip)]
+    pub runtime_ended_at: Option<Instant>,
+    #[serde(skip)]
+    pub runtime_first_ready_at: Option<Instant>,
+    #[serde(skip)]
+    pub runtime_artifact_ref: Option<String>,
+    #[serde(skip)]
+    pub runtime_user_service: bool,
 }
 
 impl ParticipantStatus {
@@ -90,6 +101,11 @@ impl ParticipantStatus {
             artifact_size_bytes: None,
             present: None,
             scope: None,
+            runtime_started_at: None,
+            runtime_ended_at: None,
+            runtime_first_ready_at: None,
+            runtime_artifact_ref: None,
+            runtime_user_service: false,
         }
     }
 
@@ -103,6 +119,23 @@ impl ParticipantStatus {
     pub fn with_scope(mut self, scope: RobotScope) -> Self {
         self.scope = Some(scope);
         self
+    }
+
+    #[must_use]
+    pub fn uptime(&self, now: Instant) -> Option<Duration> {
+        Some(
+            self.runtime_ended_at
+                .unwrap_or(now)
+                .saturating_duration_since(self.runtime_started_at?),
+        )
+    }
+
+    #[must_use]
+    pub fn time_to_ready(&self) -> Option<Duration> {
+        Some(
+            self.runtime_first_ready_at?
+                .saturating_duration_since(self.runtime_started_at?),
+        )
     }
 }
 

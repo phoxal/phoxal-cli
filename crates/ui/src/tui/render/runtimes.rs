@@ -230,10 +230,7 @@ pub(super) fn runtime_row(
     model: &SessionViewModel<'_>,
     columns: RuntimeColumns,
 ) -> String {
-    let observation = model.runtime.observation(&status.id);
-    let restarts = observation.map_or(status.restart_count, |observation| {
-        observation.displayed_restarts()
-    });
+    let restarts = status.restart_count;
     let performance = runtime_telemetry_state(status, model);
     let cells = runtime_performance_cells(performance);
     match columns {
@@ -426,11 +423,7 @@ pub(super) fn draw_runtime_detail(
         );
         return;
     };
-    let metadata = model.runtime.metadata(&status.id);
-    let observation = model.runtime.observation(&status.id);
-    let artifact = metadata
-        .and_then(|metadata| metadata.artifact_ref.as_deref())
-        .unwrap_or("n/a");
+    let artifact = status.runtime_artifact_ref.as_deref().unwrap_or("n/a");
     let artifact = sanitize_and_ellipsize(
         artifact,
         usize::from(area.width / 2).saturating_sub(18).max(1),
@@ -441,17 +434,13 @@ pub(super) fn draw_runtime_detail(
     let pid = status
         .pid
         .map_or_else(|| "n/a".to_string(), |pid| pid.to_string());
-    let ready_after = model
-        .runtime
-        .time_to_ready(&status.id)
+    let ready_after = status
+        .time_to_ready()
         .map_or_else(|| "n/a".to_string(), human::duration);
-    let uptime = observation.map_or_else(
-        || "n/a".to_string(),
-        |observation| human::duration(observation.uptime(model.now)),
-    );
-    let restarts = observation.map_or(status.restart_count, |observation| {
-        observation.displayed_restarts()
-    });
+    let uptime = status
+        .uptime(model.now)
+        .map_or_else(|| "n/a".to_string(), human::duration);
+    let restarts = status.restart_count;
     let identity = vec![
         Line::from(format!("type          {}", status.kind.label())),
         Line::from(format!(

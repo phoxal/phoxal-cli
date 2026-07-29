@@ -29,9 +29,11 @@ use phoxal_cli_core::project::launch_plan::ROBOT_TOOL_JOYPAD;
 use phoxal_cli_core::session::JoypadDevicesSample;
 use phoxal_cli_core::session::SessionMode;
 use phoxal_cli_core::session::event::PhaseOutcome;
-use phoxal_cli_core::session::stores::log::sanitize_terminal_text;
-use phoxal_cli_core::session::stores::telemetry::{DEFAULT_FRESHNESS_TTL, Timestamped};
-use phoxal_cli_core::session::{ClockSample, LogSeverity, ParticipantState, ParticipantStatus};
+use phoxal_cli_core::session::sanitize_terminal_text;
+use phoxal_cli_core::session::{
+    ClockSample, DEFAULT_FRESHNESS_TTL, LogSeverity, ParticipantState, ParticipantStatus,
+    Timestamped,
+};
 use phoxal_cli_core::session::{
     DeviceSample, JoypadDeviceStatus, RuntimeBufferKind, RuntimeDirection,
     RuntimePerformanceSample, TelemetrySnapshot, TopicMetric,

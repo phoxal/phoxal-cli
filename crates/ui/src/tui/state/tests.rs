@@ -7,10 +7,10 @@ use std::time::Instant;
 use crossterm::event::{KeyEventKind, KeyEventState};
 
 use super::*;
+use crate::tui::log_view::LogView;
+use crate::tui::runtime_view::RuntimeView;
 use phoxal_cli_core::session::ParticipantKind;
-use phoxal_cli_core::session::stores::log::LogStore;
-use phoxal_cli_core::session::stores::runtime::RuntimeStore;
-use phoxal_cli_core::session::stores::telemetry::RobotScope;
+use phoxal_cli_core::session::RobotScope;
 
 #[test]
 fn non_ascii_filters_match_case_insensitively() {
@@ -18,7 +18,7 @@ fn non_ascii_filters_match_case_insensitively() {
     assert!(CaseInsensitiveNeedle::new("café").contains("CAFÉ"));
     assert!(CaseInsensitiveNeedle::new("σ").contains("ΟΔΟΣ"));
 }
-use phoxal_cli_core::session::stores::telemetry::Timestamped;
+use phoxal_cli_core::session::Timestamped;
 use phoxal_cli_core::session::{
     BoardSnapshot, LogSource, ParticipantState, ParticipantStatus, RoutedLogLine,
 };
@@ -38,8 +38,8 @@ fn key(code: KeyCode) -> KeyEvent {
 
 fn with_model<T>(telemetry: &TelemetrySnapshot, run: impl FnOnce(&SessionViewModel<'_>) -> T) -> T {
     let board = BoardSnapshot::default();
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, telemetry, Instant::now());
     run(&model)
 }
@@ -232,7 +232,7 @@ fn logs_keep_independent_filters_severity_and_follow_state() {
 fn paused_logs_exclude_lines_with_event_time_after_the_pause_anchor() {
     let started = Instant::now();
     let before_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
-    let mut logs = LogStore::new();
+    let mut logs = LogView::new();
     logs.record_at(
         RoutedLogLine {
             participant: "motion".to_string(),
@@ -245,7 +245,7 @@ fn paused_logs_exclude_lines_with_event_time_after_the_pause_anchor() {
         started,
     );
     let board = BoardSnapshot::default();
-    let runtime = RuntimeStore::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let mut state = AppState {
         page: Page::Logs,
@@ -279,8 +279,8 @@ fn paused_logs_exclude_lines_with_event_time_after_the_pause_anchor() {
 fn pausing_an_empty_log_view_freezes_before_the_first_matching_line() {
     let started = Instant::now();
     let board = BoardSnapshot::default();
-    let mut logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let mut logs = LogView::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let mut state = AppState {
         page: Page::Logs,
@@ -326,10 +326,10 @@ fn identical_bus_snapshot_replacement_preserves_paused_visibility() {
         event_time,
         scope: Some(scope.clone()),
     };
-    let mut logs = LogStore::new();
-    logs.replace_bus(scope.clone(), vec![retained()]);
+    let mut logs = LogView::new();
+    logs.replace_all(vec![retained()]);
     let board = BoardSnapshot::default();
-    let runtime = RuntimeStore::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let mut state = AppState {
         page: Page::Logs,
@@ -343,7 +343,7 @@ fn identical_bus_snapshot_replacement_preserves_paused_visibility() {
         assert_eq!(state.log_pause_anchor, Some(event_time));
         assert_eq!(state.filtered_log_count(&model), 1);
     }
-    logs.replace_bus(scope.clone(), vec![retained()]);
+    logs.replace_all(vec![retained()]);
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, started);
     assert_eq!(state.filtered_log_count(&model), 1);
 }
@@ -355,8 +355,8 @@ fn runtime_log_shortcut_uses_the_global_log_store_filter() {
         "motion".to_string(),
         ParticipantStatus::new("motion", ParticipantKind::Service, ParticipantState::Ready),
     );
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
     let mut state = AppState {
@@ -529,7 +529,7 @@ fn error_shortcut_exits_editing_and_reveals_the_new_error() {
 
 #[test]
 fn sync_leaves_page_window_clamping_to_the_renderer() {
-    let mut logs = LogStore::new();
+    let mut logs = LogView::new();
     logs.record(phoxal_cli_core::session::RoutedLogLine {
         participant: "motion".to_string(),
         source: phoxal_cli_core::session::LogSource::Bus,
@@ -539,7 +539,7 @@ fn sync_leaves_page_window_clamping_to_the_renderer() {
         scope: None,
     });
     let board = BoardSnapshot::default();
-    let runtime = RuntimeStore::new();
+    let runtime = RuntimeView::new();
     let now = Instant::now();
     let telemetry = TelemetrySnapshot {
         router: Some(Timestamped {
@@ -601,8 +601,8 @@ fn runtime_detail_requires_escape_before_arrows_change_runtime() {
             ParticipantStatus::new(id, ParticipantKind::Service, ParticipantState::Ready),
         );
     }
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
     let mut state = AppState {
@@ -622,8 +622,8 @@ fn runtime_detail_requires_escape_before_arrows_change_runtime() {
 
 #[test]
 fn runtime_cursor_tracks_identity_across_live_state_resorting() {
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let mut initial_board = BoardSnapshot::default();
     for id in ["alpha", "beta"] {
@@ -664,8 +664,8 @@ fn runtime_cursor_tracks_identity_across_live_state_resorting() {
 
 #[test]
 fn disappearing_runtime_does_not_retarget_restart_to_its_old_index() {
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let mut board = BoardSnapshot::default();
     for id in ["alpha", "beta", "gamma"] {
@@ -717,8 +717,8 @@ fn simulation_runtime_navigation_skips_physical_driver_rows() {
             ParticipantState::Ready,
         ),
     );
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
     let mut state = AppState {
@@ -747,8 +747,8 @@ fn runtime_detail_arrows_scroll_topics_and_escape_resets_offset() {
         ParticipantStatus::new("alpha", ParticipantKind::Service, ParticipantState::Ready)
             .with_scope(scope.clone()),
     );
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let topic = |name: &str| RuntimeTopicSample {
         topic: name.to_string(),
         direction: RuntimeDirection::Publish,
@@ -818,8 +818,8 @@ fn disappearing_frozen_runtime_returns_to_the_runtime_list() {
             ParticipantStatus::new(id, ParticipantKind::Service, ParticipantState::Ready),
         );
     }
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let mut state = AppState {
         page: Page::Runtimes,

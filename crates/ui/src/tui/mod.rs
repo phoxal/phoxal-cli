@@ -1,7 +1,9 @@
 //! Full-screen ratatui robot-developer session surface.
 
 mod input;
+pub(crate) mod log_view;
 pub mod render;
+pub(crate) mod runtime_view;
 mod startup;
 pub(crate) mod state;
 mod terminal;
@@ -19,13 +21,14 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
+use crate::tui::log_view::LogView;
 use crate::tui::render::TitleInfo;
+use crate::tui::runtime_view::RuntimeView;
 use crate::tui::state::AppState;
 use crate::tui::view_model::SessionViewModel;
 use phoxal_cli_core::session::TelemetrySnapshot;
 use phoxal_cli_core::session::event::{DiagnosticLevel, SessionEvent};
-use phoxal_cli_core::session::stores::log::{LogStore, sanitize_terminal_text};
-use phoxal_cli_core::session::stores::runtime::RuntimeStore;
+use phoxal_cli_core::session::sanitize_terminal_text;
 use phoxal_cli_core::session::{BoardSnapshot, RoutedLogUpdate};
 
 pub struct TuiDisplay {
@@ -33,10 +36,10 @@ pub struct TuiDisplay {
     title: TitleInfo,
     startup: startup::StartupState,
     state: AppState,
-    logs: LogStore,
+    logs: LogView,
     log_tx: mpsc::Sender<RoutedLogUpdate>,
     log_rx: mpsc::Receiver<RoutedLogUpdate>,
-    runtime: RuntimeStore,
+    runtime: RuntimeView,
     telemetry: phoxal_cli_core::session::TelemetrySnapshot,
     activated: Option<Activated>,
 }
@@ -78,10 +81,10 @@ impl TuiDisplay {
             state: AppState::for_mode(title.mode),
             title,
             startup: startup::StartupState::new(),
-            logs: LogStore::new(),
+            logs: LogView::new(),
             log_tx,
             log_rx,
-            runtime: RuntimeStore::new(),
+            runtime: RuntimeView::new(),
             telemetry: phoxal_cli_core::session::TelemetrySnapshot::default(),
             activated: None,
         }
@@ -151,8 +154,7 @@ impl TuiDisplay {
     ) -> io::Result<()> {
         while let Ok(update) = self.log_rx.try_recv() {
             match update {
-                RoutedLogUpdate::Replace { scope, lines } => self.logs.replace_bus(scope, lines),
-                RoutedLogUpdate::Append(line) => self.logs.record(line),
+                RoutedLogUpdate::ReplaceAll(lines) => self.logs.replace_all(lines),
             }
         }
         self.runtime.observe_board(board);
@@ -300,14 +302,14 @@ mod tests {
         assert!(
             display
                 .log_sender()
-                .try_send(RoutedLogUpdate::Append(RoutedLogLine {
+                .try_send(RoutedLogUpdate::ReplaceAll(vec![RoutedLogLine {
                     participant: "drive".to_string(),
                     source: LogSource::Bus,
                     severity: LogSeverity::Info,
                     text: "hello".to_string(),
                     event_time: SystemTime::UNIX_EPOCH,
                     scope: None,
-                }))
+                }]))
                 .is_ok()
         );
     }

@@ -3,12 +3,12 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::DisplayAction;
+use crate::tui::log_view::DisplayedLine;
 use crate::tui::view_model::SessionViewModel;
 use crate::tui::visibility::is_internal_id;
+use phoxal_cli_core::session::DEFAULT_FRESHNESS_TTL;
 use phoxal_cli_core::session::SessionMode;
 use phoxal_cli_core::session::TopicMetric;
-use phoxal_cli_core::session::stores::log::DisplayedLine;
-use phoxal_cli_core::session::stores::telemetry::DEFAULT_FRESHNESS_TTL;
 use phoxal_cli_core::session::{LogSeverity, ParticipantStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

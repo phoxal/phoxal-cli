@@ -7,16 +7,14 @@ pub mod launch_env;
 pub mod log;
 pub mod mode;
 pub mod participant_kind;
-pub mod reconcile;
 pub mod state;
-pub mod stores;
 pub mod supervisor;
 pub mod telemetry;
 
 pub use board::{BoardSnapshot, ParticipantLaunchCommand, ParticipantState, ParticipantStatus};
 pub use log::{
     LogScope, LogSeverity, LogSource, MAX_ROUTED_LOG_TEXT_CHARS, RoutedLogLine, RoutedLogUpdate,
-    bounded_log_text,
+    bounded_log_text, sanitize_terminal_text,
 };
 pub use mode::SessionMode;
 pub use participant_kind::ParticipantKind;
@@ -27,10 +25,11 @@ pub use supervisor::{
     SimulationSessionInfo, StartupRequirement, StartupStatus,
 };
 pub use telemetry::{
-    ClockObservation, ClockSample, DeviceDiskSample, DeviceSample, JoypadCommand, JoypadDevice,
-    JoypadDeviceStatus, JoypadDevicesSample, RouterMetricsSample, RuntimeBufferKind,
-    RuntimeDirection, RuntimeFeedStatus, RuntimePerformanceSample, RuntimePerformanceSummary,
-    RuntimeStepSample, RuntimeTopicSample, TelemetrySnapshot, TopicMetric,
+    ClockObservation, ClockSample, DEFAULT_FRESHNESS_TTL, DeviceDiskSample, DeviceSample,
+    JoypadCommand, JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, MotionSample, RobotScope,
+    RouterMetricsSample, RuntimeBufferKind, RuntimeDirection, RuntimeFeedStatus,
+    RuntimePerformanceSample, RuntimePerformanceSummary, RuntimeStepSample, RuntimeTopicSample,
+    TelemetrySnapshot, Timestamped, TopicMetric,
 };
 
 /// Board/process identity of the Webots application managed by the resident.

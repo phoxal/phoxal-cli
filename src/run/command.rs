@@ -1,6 +1,5 @@
 //! Command responsibilities for run.
 
-use super::RobotFeedTarget;
 use crate::AppContext;
 use anyhow::bail;
 use anyhow::{Context, Result};
@@ -24,6 +23,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RobotFeedTarget {
+    pub(crate) scope: phoxal_cli_core::session::RobotScope,
+}
+
+impl RobotFeedTarget {
+    fn from_plan(plan: &LaunchPlan) -> Vec<Self> {
+        plan.robots
+            .iter()
+            .map(|robot| Self {
+                scope: phoxal_cli_core::session::RobotScope {
+                    namespace: robot.namespace.clone(),
+                    robot_id: robot.id.clone(),
+                },
+            })
+            .collect()
+    }
+}
 
 const PREPARATION_CANCEL_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_millis(25)
@@ -174,11 +192,13 @@ impl Run {
         app: &AppContext,
         target: crate::commands::resident::ProjectTarget,
     ) -> Result<()> {
-        let (mut launched, client) = connect_to_detached_resident(&target.project).await?;
         if self.detach {
-            return wait_for_required_readiness(&client, &mut launched.child).await;
+            let (mut launched, feed, _) =
+                connect_to_detached_resident_feed(&target.project).await?;
+            return wait_for_required_readiness(&feed, &mut launched.child).await;
         }
-        let result = crate::commands::resident::drive_tui(app, &target, client, true).await;
+        let (mut launched, feed, commands) = connect_to_detached_resident(&target.project).await?;
+        let result = crate::commands::resident::drive_tui(app, &target, feed, commands, true).await;
         if matches!(
             result,
             Ok(crate::session::controller::AttachmentOutcome::Terminal)
@@ -198,7 +218,20 @@ pub(crate) async fn connect_to_detached_resident(
     project: &Path,
 ) -> Result<(
     phoxal_cli_supervisor::resident::LaunchedResident,
-    phoxal_cli_client::SupervisorClient,
+    phoxal_cli_client::SupervisorFeed,
+    phoxal_cli_client::SupervisorCommands,
+)> {
+    let (launched, feed, socket) = connect_to_detached_resident_feed(project).await?;
+    let commands = phoxal_cli_client::SupervisorCommands::connect(socket).await?;
+    Ok((launched, feed, commands))
+}
+
+pub(crate) async fn connect_to_detached_resident_feed(
+    project: &Path,
+) -> Result<(
+    phoxal_cli_supervisor::resident::LaunchedResident,
+    phoxal_cli_client::SupervisorFeed,
+    PathBuf,
 )> {
     let launched = phoxal_cli_supervisor::resident::launch_detached()?;
     let generation = match &launched.result {
@@ -211,12 +244,12 @@ pub(crate) async fn connect_to_detached_resident(
         }
     };
     let socket = phoxal_cli_supervisor::resident::supervisor_socket_path(project)?;
-    let client = phoxal_cli_client::SupervisorClient::connect(socket).await?;
+    let feed = phoxal_cli_client::SupervisorFeed::connect(socket.clone()).await?;
     anyhow::ensure!(
-        client.snapshots().current().supervisor_generation == generation,
+        feed.current().supervisor_generation == generation,
         "resident generation did not match private bootstrap"
     );
-    Ok((launched, client))
+    Ok((launched, feed, socket))
 }
 
 /// Drive a resident supervisor in this process: acquire the project lock, bind
@@ -765,10 +798,10 @@ pub(crate) fn required_readiness(
 }
 
 pub(crate) async fn wait_for_required_readiness(
-    client: &phoxal_cli_client::SupervisorClient,
+    feed: &phoxal_cli_client::SupervisorFeed,
     child: &mut std::process::Child,
 ) -> Result<()> {
-    let mut snapshots = client.snapshots().subscribe();
+    let mut snapshots = feed.subscribe();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5 * 60);
     loop {
         match required_readiness(&snapshots.borrow_and_update().clone()) {

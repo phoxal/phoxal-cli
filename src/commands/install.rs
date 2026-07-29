@@ -77,10 +77,10 @@ impl ServiceManager for SystemdService {
                 if let Some(failure) = systemd_failure()? {
                     bail!("phoxal.service failed before readiness: {failure}");
                 }
-                if let Ok(client) =
-                    phoxal_cli_client::SupervisorClient::connect(supervisor_socket).await
+                if let Ok(feed) =
+                    phoxal_cli_client::SupervisorFeed::connect(supervisor_socket).await
                 {
-                    match crate::run::required_readiness(&client.snapshots().current()) {
+                    match crate::run::required_readiness(&feed.current()) {
                         crate::run::Readiness::Ready => return Ok(()),
                         crate::run::Readiness::Failed(failures) => {
                             bail!(

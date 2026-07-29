@@ -9,8 +9,5 @@ publish = false
 [dependencies]
 phoxal-cli-core = { workspace = true }
 
-[package.metadata.cargo-machete]
-ignored = ["phoxal-cli-core"]
-
 [lints]
 workspace = true

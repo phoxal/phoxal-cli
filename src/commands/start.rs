@@ -26,10 +26,7 @@ use clap::Args;
 
 use crate::AppContext;
 use crate::commands::resident::resolve_target;
-use crate::run::{
-    DriversMode, RunOptions, connect_to_detached_resident, run_resident_supervision,
-    wait_for_required_readiness,
-};
+use crate::run::{DriversMode, RunOptions, run_resident_supervision, wait_for_required_readiness};
 use phoxal_cli_supervisor::systemd::notify::SdNotify;
 
 #[derive(Debug, Args)]
@@ -76,8 +73,9 @@ impl Start {
     }
 
     async fn start_detached(&self, app: &AppContext, project: &std::path::Path) -> Result<()> {
-        let (mut launched, client) = connect_to_detached_resident(project).await?;
-        wait_for_required_readiness(&client, &mut launched.child).await?;
+        let (mut launched, feed, _) =
+            crate::run::connect_to_detached_resident_feed(project).await?;
+        wait_for_required_readiness(&feed, &mut launched.child).await?;
         let display = project.display();
         app.ui.info(format!(
             "robot instance ready; attach with `phoxal attach {display}` or stop with `phoxal stop {display}`"

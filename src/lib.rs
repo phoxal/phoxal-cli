@@ -37,7 +37,6 @@ pub(crate) mod host_doctor;
 pub mod run;
 pub(crate) mod session;
 pub mod simulation;
-pub(crate) mod telemetry;
 pub(crate) mod ui;
 
 pub use context::AppContext;
