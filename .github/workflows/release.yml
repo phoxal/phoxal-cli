@@ -67,15 +67,17 @@ jobs:
         run: |
           set -euo pipefail
           # The shipped executable is `phoxal` (the package stays `phoxal-cli`).
-          # The published asset contract is shared with install.sh and
-          # `phoxal self upgrade`: archive `phoxal-<version>-<target>.tar.gz`
-          # containing a binary named `phoxal-<target>`.
+          # The published asset contract is shared with the phoxal.com installer
+          # (install.sh in phoxal/website) and `phoxal self upgrade`: archive
+          # `phoxal-<version>-<target>.tar.gz` containing a binary named
+          # `phoxal-<target>`.
           bin=phoxal
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/${bin}" "dist/${bin}-${{ matrix.target }}"
           archive="${bin}-${{ needs.plan.outputs.version }}-${{ matrix.target }}.tar.gz"
           tar -czf "dist/${archive}" -C dist "${bin}-${{ matrix.target }}"
-          # Sibling checksum asset, verified by install.sh and `self upgrade`.
+          # Sibling checksum asset, verified by the phoxal.com installer and
+          # `self upgrade`.
           # Format: "<hex>  <archive>" (sha256sum default).
           cd dist
           if command -v sha256sum >/dev/null 2>&1; then
