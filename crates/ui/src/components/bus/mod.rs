@@ -15,9 +15,25 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(4), Constraint::Min(4)])
         .areas(area);
+    let traffic = model
+        .bus
+        .rows
+        .iter()
+        .max_by_key(|row| row.observed_at)
+        .map_or_else(
+            || "traffic:waiting".to_string(),
+            |row| {
+                format!(
+                    "traffic:{:.1} msg/s  window:{:.1}s  capped:+{}",
+                    row.throughput_msg_s,
+                    std::time::Duration::from_nanos(row.window_ns).as_secs_f32(),
+                    row.topics_truncated
+                )
+            },
+        );
     frame.render_widget(
         Paragraph::new(format!(
-            "{}filter:{}   {}sort:{:?}   {}internal:{}",
+            "{}filter:{}   {}sort:{:?}   {}internal:{}\n{traffic}",
             marker(model.bus.control_candidate, 0),
             if model.bus.filter.is_empty() {
                 "*"

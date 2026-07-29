@@ -81,9 +81,9 @@ mod tests {
             rate_hz: 1.0,
             count: 1,
             aggregate_overflow: false,
-            topics_truncated: 0,
-            throughput_msg_s: 1.0,
-            window_ns: 1,
+            topics_truncated: 4,
+            throughput_msg_s: 12.5,
+            window_ns: 1_000_000_000,
         });
         model.runtimes.rows.push(RuntimeRow {
             scope,
@@ -145,6 +145,10 @@ mod tests {
                 .map(|cell| cell.symbol())
                 .collect::<String>();
             assert!(contents.contains(expected), "{page:?} missed {expected}");
+            if page == PageId::Bus {
+                assert!(contents.contains("traffic:12.5"));
+                assert!(contents.contains("capped:+4"));
+            }
         }
     }
 }

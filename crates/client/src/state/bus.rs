@@ -5,6 +5,8 @@ use phoxal_cli_observation::{
     AttachmentEpoch, BusRead, BusRow, BusWindow, StoreRevision, WindowDirection,
 };
 
+use super::contains_ascii_case_insensitive;
+
 // One maximal 256-topic sample per second for a full minute, plus headroom.
 const CAPACITY: usize = 16_384;
 
@@ -85,8 +87,8 @@ impl BusStore {
             .iter()
             .filter(|row| {
                 query.body.topic.as_ref().is_none_or(|filter| {
-                    contains_ignore_ascii_case(&row.topic, filter)
-                        || contains_ignore_ascii_case(&row.participant, filter)
+                    contains_ascii_case_insensitive(&row.topic, filter)
+                        || contains_ascii_case_insensitive(&row.participant, filter)
                 })
             })
             .cloned()
@@ -102,10 +104,6 @@ impl BusStore {
             rows: Arc::from(rows),
         }
     }
-}
-
-fn contains_ignore_ascii_case(value: &str, needle: &str) -> bool {
-    value.to_lowercase().contains(&needle.to_lowercase())
 }
 
 #[cfg(test)]

@@ -29,7 +29,7 @@ use crate::components::shared::{
 };
 use crate::terminal::{TerminalGuard, install_panic_hook};
 
-use super::effect::{AttachmentOutcome, Effect};
+use super::effect::{AttachmentOutcome, Effect, EffectSenders};
 use super::id::{ComponentId, PageId};
 use super::message::{Msg, NavigationMsg, SessionInput};
 use super::model::AppModel;
@@ -65,8 +65,9 @@ impl Component for InputComponent {
 impl AppComponent<Msg, UserEvent> for InputComponent {
     fn on(&mut self, event: &Event<UserEvent>) -> Option<Msg> {
         match event {
-            // tui-realm's crossterm adapter normalizes terminal input into this
-            // key vocabulary; no release/repeat variants reach the application.
+            // Verified in tui-realm 4.1.0's
+            // terminal/event_listener/crossterm.rs: only KeyEventKind::Press is
+            // mapped, while release/repeat events become Event::None.
             Event::Keyboard(key) => Some(Msg::Navigate(NavigationMsg::Key(*key))),
             Event::WindowResize(_, _) | Event::FocusGained => {
                 Some(Msg::Navigate(NavigationMsg::Refresh { clear: true }))
@@ -79,7 +80,7 @@ impl AppComponent<Msg, UserEvent> for InputComponent {
 
 pub async fn run(
     ingress: mpsc::Receiver<SessionInput>,
-    effects: mpsc::Sender<Effect>,
+    effects: EffectSenders,
     options: UiOptions,
 ) -> Result<AttachmentOutcome> {
     install_panic_hook();
@@ -97,7 +98,7 @@ pub async fn run(
 fn run_blocking(
     handle: Handle,
     ingress: mpsc::Receiver<SessionInput>,
-    effects: mpsc::Sender<Effect>,
+    effects: EffectSenders,
     options: UiOptions,
 ) -> Result<AttachmentOutcome> {
     let title = phoxal_cli_core::session::sanitize_terminal_text(&options.title);
@@ -155,6 +156,7 @@ fn render_requested(
     };
     if clear {
         terminal.clear()?;
+        model.borrow_mut().clear_requested = false;
     }
     if redraw {
         terminal.draw(|frame| {
@@ -175,22 +177,24 @@ fn render_requested(
         })?;
         let mut state = model.borrow_mut();
         state.redraw_requested = false;
-        state.clear_requested = false;
     }
     Ok(exit)
 }
 
-fn dispatch(
-    model: &Rc<RefCell<AppModel>>,
-    effects: &mpsc::Sender<Effect>,
-    message: Msg,
-) -> Result<()> {
+fn dispatch(model: &Rc<RefCell<AppModel>>, effects: &EffectSenders, message: Msg) -> Result<()> {
     let emitted = {
         let mut model = model.borrow_mut();
         update(&mut model, message)
     };
     for effect in emitted {
-        match effects.try_send(effect) {
+        if is_guaranteed(&effect) {
+            effects
+                .guaranteed
+                .send(effect)
+                .map_err(|_| anyhow::anyhow!("attachment effect router stopped"))?;
+            continue;
+        }
+        match effects.commands.try_send(effect) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 anyhow::bail!("attachment effect router stopped");
@@ -204,6 +208,17 @@ fn dispatch(
         }
     }
     Ok(())
+}
+
+fn is_guaranteed(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ReadLogs(_)
+            | Effect::ReadBus(_)
+            | Effect::ReadRuntimes(_)
+            | Effect::StopProject
+            | Effect::Detach
+    )
 }
 
 fn mount_components(
@@ -246,5 +261,36 @@ const fn component_for_page(page: PageId) -> ComponentId {
         PageId::Logs => ComponentId::Logs,
         PageId::Bus => ComponentId::Bus,
         PageId::Input => ComponentId::InputPage,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirmed_stop_uses_guaranteed_channel_when_command_queue_is_full() {
+        let (commands, mut command_rx) = mpsc::channel(1);
+        commands
+            .try_send(Effect::InputRescan)
+            .expect("fill command queue");
+        let (guaranteed, mut guaranteed_rx) = mpsc::unbounded_channel();
+        let effects = EffectSenders {
+            guaranteed,
+            commands,
+        };
+        let model = Rc::new(RefCell::new(AppModel {
+            route: super::super::route::FocusRoute::default()
+                .open_modal(super::super::id::ModalId::ConfirmStop),
+            ..AppModel::default()
+        }));
+        dispatch(
+            &model,
+            &effects,
+            Msg::Navigate(NavigationMsg::Key(tuirealm::event::Key::Enter.into())),
+        )
+        .expect("route confirmed stop");
+        assert!(matches!(guaranteed_rx.try_recv(), Ok(Effect::StopProject)));
+        assert!(matches!(command_rx.try_recv(), Ok(Effect::InputRescan)));
     }
 }

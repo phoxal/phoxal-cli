@@ -3,6 +3,7 @@
 use phoxal_cli_core::identity::ProducerId;
 use phoxal_cli_core::session::ProcessKey;
 use phoxal_cli_observation::{BusRead, LogRead, RuntimeRead};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceId(pub String);
@@ -21,6 +22,12 @@ pub enum Effect {
     ReadBus(BusRead),
     ReadRuntimes(RuntimeRead),
     Detach,
+}
+
+#[derive(Debug, Clone)]
+pub struct EffectSenders {
+    pub guaranteed: mpsc::UnboundedSender<Effect>,
+    pub commands: mpsc::Sender<Effect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

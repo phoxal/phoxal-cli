@@ -33,13 +33,17 @@ pub fn render_header(frame: &mut Frame, area: Rect, model: &AppModel, theme: The
 
 pub fn render_tabs(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
     let page = model.route.page();
-    let tab_focus = matches!(model.route, FocusRoute::Tabs { .. });
+    let tab_candidate = match model.route {
+        FocusRoute::Tabs { candidate, .. } => Some(candidate),
+        _ => None,
+    };
     let tabs = PageId::ALL
         .iter()
         .enumerate()
         .flat_map(|(index, candidate)| {
             let selected = *candidate == page;
-            let marker = if selected && tab_focus {
+            let focused = tab_candidate == Some(*candidate);
+            let marker = if focused {
                 ">"
             } else if selected {
                 "*"
@@ -49,8 +53,10 @@ pub fn render_tabs(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme
             [
                 Span::styled(
                     format!("{marker}{} {}", index + 1, candidate.label()),
-                    if selected {
+                    if focused {
                         crate::theme::role::selected(theme, Role::Accent)
+                    } else if selected {
+                        crate::theme::role::fg(theme, Role::Accent)
                     } else {
                         crate::theme::role::muted(theme)
                     },
@@ -87,4 +93,44 @@ pub fn render_footer(frame: &mut Frame, area: Rect, model: &AppModel, theme: The
         .block(Block::default().borders(Borders::TOP)),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use tuirealm::ratatui::Terminal;
+    use tuirealm::ratatui::backend::TestBackend;
+
+    use super::*;
+    use crate::ColorCapability;
+
+    #[test]
+    fn tab_focus_marker_moves_without_hiding_the_active_page() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 2)).expect("test terminal");
+        let model = AppModel {
+            route: FocusRoute::Tabs {
+                page: PageId::Overview,
+                candidate: PageId::Runtimes,
+            },
+            ..AppModel::default()
+        };
+        terminal
+            .draw(|frame| {
+                render_tabs(
+                    frame,
+                    frame.area(),
+                    &model,
+                    Theme::new(ColorCapability::None),
+                );
+            })
+            .expect("render tabs");
+        let contents = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(contents.contains("*1 Overview"));
+        assert!(contents.contains(">2 Runtimes"));
+    }
 }

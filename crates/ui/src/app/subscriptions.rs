@@ -28,12 +28,19 @@ impl PendingInputs {
         let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(slot) = queue
             .iter_mut()
-            .find(|queued| same_invalidation(queued, &input))
+            .find(|queued| same_coalescible_input(queued, &input))
         {
             *slot = input;
         } else {
             if queue.len() == PENDING_CAPACITY {
-                let drop_index = queue.iter().position(is_high_volume).unwrap_or_default();
+                let Some(drop_index) = queue.iter().position(|queued| !is_guaranteed(queued))
+                else {
+                    debug_assert!(
+                        false,
+                        "bounded input queue cannot contain only query replies and termination"
+                    );
+                    return false;
+                };
                 queue.remove(drop_index);
             }
             queue.push_back(input);
@@ -49,7 +56,7 @@ impl PendingInputs {
     }
 }
 
-fn same_invalidation(left: &SessionInput, right: &SessionInput) -> bool {
+fn same_coalescible_input(left: &SessionInput, right: &SessionInput) -> bool {
     use phoxal_cli_observation::AttachmentEvent;
     matches!(
         (left, right),
@@ -65,20 +72,17 @@ fn same_invalidation(left: &SessionInput, right: &SessionInput) -> bool {
         ) | (
             SessionInput::Client(AttachmentEvent::FreshnessChanged(_)),
             SessionInput::Client(AttachmentEvent::FreshnessChanged(_))
-        )
+        ) | (SessionInput::Terminate, SessionInput::Terminate)
     )
 }
 
-fn is_high_volume(input: &SessionInput) -> bool {
-    use phoxal_cli_observation::AttachmentEvent;
+fn is_guaranteed(input: &SessionInput) -> bool {
     matches!(
         input,
-        SessionInput::Client(
-            AttachmentEvent::LogsChanged(_)
-                | AttachmentEvent::BusChanged(_)
-                | AttachmentEvent::RuntimesChanged(_)
-                | AttachmentEvent::FreshnessChanged(_)
-        )
+        SessionInput::Logs(_)
+            | SessionInput::Bus(_)
+            | SessionInput::Runtimes(_)
+            | SessionInput::Terminate
     )
 }
 
@@ -121,8 +125,12 @@ impl PollAsync<UserEvent> for InputPort {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use phoxal_cli_core::identity::ExecutionId;
-    use phoxal_cli_observation::{AttachmentEpoch, AttachmentEvent, StoreChanged, StoreRevision};
+    use phoxal_cli_observation::{
+        AttachmentEpoch, AttachmentEvent, LogWindow, QueryToken, StoreChanged, StoreRevision,
+    };
 
     use super::*;
 
@@ -160,5 +168,34 @@ mod tests {
             pending.push(SessionInput::Diagnostic(index.to_string()));
         }
         assert_eq!(pending.drain().len(), PENDING_CAPACITY);
+    }
+
+    #[test]
+    fn a_query_reply_displaces_diagnostics_and_is_never_dropped() {
+        let pending = PendingInputs::default();
+        for index in 0..PENDING_CAPACITY {
+            pending.push(SessionInput::Diagnostic(index.to_string()));
+        }
+        let reply = SessionInput::Logs(LogWindow {
+            epoch: changed_epoch(),
+            revision: StoreRevision(1),
+            token: QueryToken(7),
+            rows: Arc::from([]),
+        });
+        assert!(!pending.push(reply));
+        let drained = pending.drain();
+        assert_eq!(drained.len(), PENDING_CAPACITY);
+        assert!(drained.iter().any(
+            |input| matches!(input, SessionInput::Logs(window) if window.token == QueryToken(7))
+        ));
+    }
+
+    fn changed_epoch() -> AttachmentEpoch {
+        AttachmentEpoch {
+            supervisor_generation: 1,
+            execution_id: ExecutionId::parse(&"0".repeat(ExecutionId::LEN))
+                .expect("fixed execution id"),
+            graph_generation: 1,
+        }
     }
 }

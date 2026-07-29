@@ -69,9 +69,13 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
             Vec::new()
         }
         AttachmentEvent::ProcessesChanged(processes) => {
-            preserve_process_candidate(model, &processes);
+            let detail_cleared = preserve_process_candidate(model, &processes);
             model.overview.processes = processes;
-            Vec::new()
+            if detail_cleared {
+                refresh_runtimes(model)
+            } else {
+                Vec::new()
+            }
         }
         AttachmentEvent::DeviceChanged(devices) => {
             model.overview.devices = Some(devices);
@@ -114,7 +118,7 @@ fn reset_queries(model: &mut AppModel) {
 fn preserve_process_candidate(
     model: &mut AppModel,
     processes: &phoxal_cli_observation::ProcessTable,
-) {
+) -> bool {
     if model
         .runtimes
         .candidate
@@ -126,14 +130,15 @@ fn preserve_process_candidate(
             .find(|(_, process)| process_is_runtime(process))
             .map(|(key, _)| key.clone());
     }
-    if model
+    let detail_cleared = model
         .runtimes
         .detail
         .as_ref()
-        .is_some_and(|detail| !processes.contains_key(detail))
-    {
+        .is_some_and(|detail| !processes.get(detail).is_some_and(process_is_runtime));
+    if detail_cleared {
         model.runtimes.detail = None;
     }
+    detail_cleared
 }
 
 pub(crate) fn process_is_runtime(process: &ProcessObservation) -> bool {
@@ -393,12 +398,7 @@ fn accept_runtimes(
         })
     }) {
         let key = (row.scope.clone(), row.sample.participant_id.clone());
-        if newest_rows
-            .get(&key)
-            .is_none_or(|current| row.sample.sequence >= current.sample.sequence)
-        {
-            newest_rows.insert(key, row.clone());
-        }
+        newest_rows.insert(key, row.clone());
     }
     model.runtimes.rows = newest_rows.into_values().collect();
     model.runtimes.known_revision = window.revision;
@@ -503,14 +503,16 @@ fn handle_key(model: &mut AppModel, key: KeyEvent) -> Vec<Effect> {
         },
         FocusRoute::Content { panel } => {
             if key.code == Key::Esc {
+                let mut effects = Vec::new();
                 if matches!(panel, PanelId::Runtimes(_)) {
                     model.runtimes.detail = None;
+                    effects = refresh_runtimes(model);
                 }
                 model.route = FocusRoute::Panels {
                     page: panel.page(),
                     candidate: Some(panel),
                 };
-                return Vec::new();
+                return effects;
             }
             handle_content_key(model, panel, key)
         }
@@ -532,11 +534,15 @@ fn page_for_digit(digit: char) -> Option<PageId> {
 fn enter_page(model: &mut AppModel, page: PageId) -> Vec<Effect> {
     model.runtimes.detail = None;
     model.route = FocusRoute::panels(page);
-    if page == PageId::Input {
-        vec![Effect::InputRescan]
+    let mut effects = if page == PageId::Runtimes {
+        refresh_runtimes(model)
     } else {
         Vec::new()
+    };
+    if page == PageId::Input {
+        effects.push(Effect::InputRescan);
     }
+    effects
 }
 
 fn handle_content_key(model: &mut AppModel, panel: PanelId, key: KeyEvent) -> Vec<Effect> {
@@ -1275,6 +1281,30 @@ mod tests {
     }
 
     #[test]
+    fn runtime_detail_clears_and_requeries_when_process_stops_qualifying() {
+        let key = ProcessKey::project("drive");
+        let mut model = AppModel {
+            epoch: Some(epoch()),
+            ..AppModel::default()
+        };
+        model.runtimes.candidate = Some(key.clone());
+        model.runtimes.detail = Some(key.clone());
+        let processes = Arc::new(BTreeMap::from([(
+            key.clone(),
+            process_with_kind(key, ParticipantKind::Tool),
+        )]));
+        let effects = update(
+            &mut model,
+            Msg::Client(AttachmentEvent::ProcessesChanged(processes)),
+        );
+        assert_eq!(model.runtimes.detail, None);
+        let Effect::ReadRuntimes(read) = &effects[0] else {
+            panic!("expected widened runtime read");
+        };
+        assert_eq!(read.body.participant, None);
+    }
+
+    #[test]
     fn restart_without_a_live_producer_is_a_visible_diagnostic() {
         let key = ProcessKey::project("drive");
         let mut process = process(key.clone());
@@ -1384,13 +1414,13 @@ mod tests {
                 revision: StoreRevision(2),
                 token: QueryToken(2),
                 rows: Arc::from([
+                    runtime_row(&scope, "drive", 9),
                     runtime_row(&scope, "drive", 1),
-                    runtime_row(&scope, "drive", 2),
                 ]),
             })),
         );
         assert_eq!(model.runtimes.rows.len(), 1);
-        assert_eq!(model.runtimes.rows[0].sample.sequence, 2);
+        assert_eq!(model.runtimes.rows[0].sample.sequence, 1);
     }
 
     #[test]
@@ -1413,11 +1443,16 @@ mod tests {
         };
         assert_eq!(read.body.participant.as_deref(), Some("drive"));
         assert_eq!(model.runtimes.detail, Some(key));
-        update(
+        model.runtimes.in_flight = None;
+        let effects = update(
             &mut model,
             Msg::Navigate(NavigationMsg::Key(Key::Esc.into())),
         );
         assert_eq!(model.runtimes.detail, None);
+        let Effect::ReadRuntimes(read) = &effects[0] else {
+            panic!("expected widened runtime read");
+        };
+        assert_eq!(read.body.participant, None);
     }
 
     #[test]

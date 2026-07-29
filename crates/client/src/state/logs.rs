@@ -5,6 +5,8 @@ use phoxal_cli_observation::{
     AttachmentEpoch, LogAnchor, LogRead, LogRow, LogWindow, StoreRevision, WindowDirection,
 };
 
+use super::contains_ascii_case_insensitive;
+
 pub(crate) const LOG_CAPACITY: usize = 2_000;
 
 pub(crate) struct LogStore {
@@ -126,7 +128,7 @@ impl LogStore {
                     .participant
                     .as_ref()
                     .is_none_or(|participant| {
-                        contains_ignore_ascii_case(&row.participant, participant)
+                        contains_ascii_case_insensitive(&row.participant, participant)
                     })
                     && query
                         .body
@@ -158,10 +160,6 @@ impl LogStore {
             rows: Arc::from(rows),
         }
     }
-}
-
-fn contains_ignore_ascii_case(value: &str, needle: &str) -> bool {
-    value.to_lowercase().contains(&needle.to_lowercase())
 }
 
 #[cfg(test)]

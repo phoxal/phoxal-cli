@@ -7,7 +7,7 @@ mod session;
 pub(crate) mod subscriptions;
 mod update;
 
-pub use effect::{AttachmentOutcome, DeviceId, Effect};
+pub use effect::{AttachmentOutcome, DeviceId, Effect, EffectSenders};
 pub use id::{BusPanelId, InputPanelId, LogsPanelId, ModalId, PageId, PanelId, RuntimesPanelId};
 pub use message::{BusMsg, LogsMsg, Msg, NavigationMsg, RuntimesMsg, SessionInput};
 pub use model::AppModel;

@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use phoxal_cli_client::{Attachment, AttachmentPorts, SupervisorCommands, SupervisorFeed};
 use phoxal_cli_protocol::CommandAction;
-use phoxal_cli_ui::{AttachmentOutcome, Effect, SessionInput, UiOptions};
+use phoxal_cli_ui::{AttachmentOutcome, Effect, EffectSenders, SessionInput, UiOptions};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
@@ -31,6 +31,11 @@ pub(crate) async fn run(
     drive(app, &target.project, attachment, shutdown_on_terminate).await
 }
 
+/// Drive the shared attachment UI.
+///
+/// SIGINT mirrors the UI's detach shortcut. For run-owned residents, the first
+/// SIGTERM or SIGHUP requests orderly shutdown and a second restores the
+/// terminal by detaching; attach-only sessions detach on the first signal.
 async fn drive(
     app: &AppContext,
     project: &Path,
@@ -47,7 +52,8 @@ async fn drive(
         runtimes,
     } = ports;
     let (ingress_tx, ingress_rx) = mpsc::channel(UI_INGRESS_CAPACITY);
-    let (effect_tx, mut effect_rx) = mpsc::channel(EFFECT_CAPACITY);
+    let (command_tx, mut command_rx) = mpsc::channel(EFFECT_CAPACITY);
+    let (guaranteed_tx, mut guaranteed_rx) = mpsc::unbounded_channel();
     let (diagnostic_tx, mut diagnostic_rx) = mpsc::channel(DIAGNOSTIC_CAPACITY);
     crate::cli::output::diagnostics::install(diagnostic_tx);
     let _diagnostics = DiagnosticGuard;
@@ -55,7 +61,14 @@ async fn drive(
         title: terminal_title(project),
         theme: app.output.theme,
     };
-    let ui = phoxal_cli_ui::run(ingress_rx, effect_tx, options);
+    let ui = phoxal_cli_ui::run(
+        ingress_rx,
+        EffectSenders {
+            guaranteed: guaranteed_tx,
+            commands: command_tx,
+        },
+        options,
+    );
     tokio::pin!(ui);
     let mut interrupts = signal(SignalKind::interrupt())?;
     let mut terminates = signal(SignalKind::terminate())?;
@@ -79,26 +92,34 @@ async fn drive(
             }
             _ = terminates.recv() => {
                 if shutdown_on_terminate {
-                    request_resident_shutdown(
-                        &mut shutdown_requested,
-                        &mut effect_tasks,
-                        &effect_slots,
-                        &effect_ports,
-                        &ingress_tx,
-                    );
+                    if shutdown_requested {
+                        send_input(&ingress_tx, SessionInput::Terminate).await?;
+                    } else {
+                        request_resident_shutdown(
+                            &mut shutdown_requested,
+                            &mut effect_tasks,
+                            &effect_slots,
+                            &effect_ports,
+                            &ingress_tx,
+                        );
+                    }
                 } else {
                     send_input(&ingress_tx, SessionInput::Terminate).await?;
                 }
             }
             _ = hangups.recv() => {
                 if shutdown_on_terminate {
-                    request_resident_shutdown(
-                        &mut shutdown_requested,
-                        &mut effect_tasks,
-                        &effect_slots,
-                        &effect_ports,
-                        &ingress_tx,
-                    );
+                    if shutdown_requested {
+                        send_input(&ingress_tx, SessionInput::Terminate).await?;
+                    } else {
+                        request_resident_shutdown(
+                            &mut shutdown_requested,
+                            &mut effect_tasks,
+                            &effect_slots,
+                            &effect_ports,
+                            &ingress_tx,
+                        );
+                    }
                 } else {
                     send_input(&ingress_tx, SessionInput::Terminate).await?;
                 }
@@ -119,9 +140,21 @@ async fn drive(
                 };
                 send_input(&ingress_tx, SessionInput::Client(event)).await?;
             }
-            effect = effect_rx.recv() => {
+            effect = guaranteed_rx.recv() => {
                 let Some(effect) = effect else {
-                    anyhow::bail!("attachment UI closed its effect channel unexpectedly");
+                    anyhow::bail!("attachment UI closed its guaranteed effect channel unexpectedly");
+                };
+                spawn_effect(
+                    &mut effect_tasks,
+                    &effect_slots,
+                    effect,
+                    &effect_ports,
+                    &ingress_tx,
+                );
+            }
+            effect = command_rx.recv() => {
+                let Some(effect) = effect else {
+                    anyhow::bail!("attachment UI closed its command effect channel unexpectedly");
                 };
                 spawn_effect(
                     &mut effect_tasks,
@@ -186,6 +219,19 @@ fn spawn_effect(
             let Ok(_permit) = slots.acquire_owned().await else {
                 return;
             };
+            if let Some(input) = route_effect(effect, &ports).await {
+                let _ = ingress.send(input).await;
+            }
+        });
+        return;
+    }
+    if matches!(
+        effect,
+        Effect::ReadLogs(_) | Effect::ReadBus(_) | Effect::ReadRuntimes(_)
+    ) {
+        let ports = ports.clone();
+        let ingress = ingress.clone();
+        tasks.spawn(async move {
             if let Some(input) = route_effect(effect, &ports).await {
                 let _ = ingress.send(input).await;
             }
