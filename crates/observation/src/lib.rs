@@ -15,14 +15,27 @@ pub mod runtimes;
 pub mod source_health;
 pub mod supervisor;
 
-pub use bus::{BusQuery, BusRead, BusRow, BusWindow};
-pub use device::DeviceObservation;
+pub use bus::{BusQuery, BusRead, BusRow, BusWindow, RobotScope, RouterMetricsSample, TopicMetric};
+pub use device::{ClockSample, DeviceDiskSample, DeviceObservation, DeviceSample};
 pub use epoch::AttachmentEpoch;
-pub use event::{AttachmentEvent, Freshness, FreshnessSet};
-pub use input::{InputObservation, MotionObservation};
-pub use logs::{LogAnchor, LogFilters, LogQuery, LogRead, LogRow, LogWindow, WindowDirection};
+pub use event::{
+    AttachmentEvent, DiagnosticLevel, DiagnosticSource, Freshness, FreshnessSet, PhaseId,
+    PhaseOutcome, RuntimeEvent,
+};
+pub use input::{
+    InputObservation, JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, MotionObservation,
+    MotionSample,
+};
+pub use logs::{
+    LogAnchor, LogFilters, LogQuery, LogRead, LogRow, LogScope, LogSeverity, LogSource, LogWindow,
+    WindowDirection, bounded_log_text, sanitize_terminal_text,
+};
 pub use processes::{ProcessObservation, ProcessTable};
 pub use revision::{ObservationQuery, ObservationWindow, QueryToken, StoreChanged, StoreRevision};
-pub use runtimes::{RuntimeQuery, RuntimeRead, RuntimeRow, RuntimeWindow};
+pub use runtimes::{
+    RuntimeBufferKind, RuntimeDirection, RuntimeFeedStatus, RuntimePerformanceSample,
+    RuntimePerformanceSummary, RuntimeQuery, RuntimeRead, RuntimeRow, RuntimeStepSample,
+    RuntimeTopicSample, RuntimeWindow,
+};
 pub use source_health::{SourceHealth, SourceStatus};
 pub use supervisor::SupervisorObservation;

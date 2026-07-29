@@ -3,12 +3,10 @@
 use super::{ParticipantSpec, RunningParticipant, SupervisorOptions, SupervisorState};
 use anyhow::Result;
 use anyhow::bail;
-use phoxal_cli_core::session::human;
-use phoxal_cli_core::session::{ProcessKey, ProcessState, ProjectLifecycle, StartupRequirement};
+use phoxal_cli_core::runtime::{ProcessKey, ProcessState, ProjectLifecycle, StartupRequirement};
 use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
-use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 /// Build the ordered resident startup stages for a physical run.
@@ -20,10 +18,10 @@ pub fn stages_for_run(
     let mut graph = Vec::new();
     for spec in specs {
         match spec.kind {
-            phoxal_cli_core::session::ParticipantKind::Tool => infrastructure.push(spec),
-            phoxal_cli_core::session::ParticipantKind::Driver
-            | phoxal_cli_core::session::ParticipantKind::Service
-            | phoxal_cli_core::session::ParticipantKind::Simulator => graph.push(spec),
+            phoxal_cli_core::runtime::ParticipantKind::Tool => infrastructure.push(spec),
+            phoxal_cli_core::runtime::ParticipantKind::Driver
+            | phoxal_cli_core::runtime::ParticipantKind::Service
+            | phoxal_cli_core::runtime::ParticipantKind::Simulator => graph.push(spec),
         }
     }
     vec![
@@ -41,8 +39,8 @@ pub fn stages_for_simulation(
     let mut infrastructure = Vec::new();
     let mut graph = Vec::new();
     for spec in specs {
-        if spec.id == phoxal_cli_core::session::WEBOTS_PROCESS_ID
-            || spec.kind == phoxal_cli_core::session::ParticipantKind::Tool
+        if spec.id == phoxal_cli_core::runtime::WEBOTS_PROCESS_ID
+            || spec.kind == phoxal_cli_core::runtime::ParticipantKind::Tool
         {
             infrastructure.push(spec);
         } else {
@@ -61,8 +59,8 @@ pub fn stages_for_simulation(
 #[derive(Debug, Clone, Default)]
 pub struct SupervisionStage {
     /// Human-readable name for this stage, used in the stalled-stage error
-    /// message and as the `PhaseId`/label of the `SessionEvent::PhaseStarted`/
-    /// `PhaseFinished` pair this stage emits (see `spawn_stage_emitting`).
+    /// message and as the `PhaseId` stored in the authoritative startup
+    /// snapshot while this stage runs.
     pub label: String,
     pub specs: Vec<ParticipantSpec>,
     /// Board ids that must be observed `Ready` before the next stage spawns.
@@ -117,7 +115,7 @@ impl SupervisionStage {
     }
 }
 
-pub(crate) async fn spawn_stage(
+pub(crate) async fn spawn_participants_in_stage(
     running: &mut Vec<RunningParticipant>,
     board: &SupervisorState,
     phase: &str,
@@ -144,10 +142,7 @@ pub(crate) async fn spawn_stage(
 }
 
 /// A stage currently being waited on: its expected ready ids, its deadline,
-/// and when it started (so the eventual `PhaseFinished` can report real
-/// elapsed time) - the loop's replacement for a raw
-/// `(String, Vec<String>, Instant)` tuple, which the finished-elapsed
-/// bookkeeping outgrew.
+/// and when it started.
 pub(crate) struct PendingStage {
     pub(crate) label: String,
     pub(crate) ready_ids: Vec<ProcessKey>,
@@ -156,39 +151,13 @@ pub(crate) struct PendingStage {
     /// `None` for an unbounded wait (Product decision 6/finding D2) - there is
     /// no `Instant` to ever compare against.
     pub(crate) deadline: Option<Instant>,
-    pub(crate) started: Instant,
-}
-
-/// Send `event` to `events`, if attachment presentation is listening. Awaits
-/// the send so a lifecycle/control transition (a phase or session-state
-/// change) can never be silently dropped under channel backpressure (finding
-/// B5) - only [`crate::session::diagnostics`]'s much higher-volume, lower-
-/// severity telemetry/log routing keeps a non-blocking `try_send`. The
-/// channel is generously bounded (`EVENT_CHANNEL_CAPACITY`) and the
-/// controller's own select loop drains it continuously, so this resolves
-/// promptly under normal operation; a truly gone/closed receiver (the
-/// controller already tore down) makes the send fail immediately rather than
-/// hang, which is why the result is still discarded here.
-pub(crate) async fn emit_event(
-    events: Option<&mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>>,
-    event: phoxal_cli_core::session::event::SessionEvent,
-) {
-    if let Some(sender) = events {
-        let _ = sender.send(event).await;
-    }
 }
 
 /// Spawn one stage's participants (if it has any work at all - Product
-/// decision 3: never emit a phase for a stage with nothing to start) and, when
-/// `events` is wired, emit its `PhaseStarted` immediately and `PhaseFinished`
-/// too IF the stage has nothing further to wait for (`ready_ids` empty and no
-/// router bus probe). A stage that DOES have readiness work returns its own
-/// [`PendingStage`] instead; the caller's own loop emits its `PhaseFinished`
-/// once `await_participants_ready` resolves.
-pub(crate) async fn spawn_stage_emitting(
+/// decision 3) and return the readiness barrier when it has work to await.
+pub(crate) async fn spawn_stage(
     running: &mut Vec<RunningParticipant>,
     board: &SupervisorState,
-    events: Option<&mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>>,
     stage: SupervisionStage,
 ) -> Option<PendingStage> {
     let SupervisionStage {
@@ -202,27 +171,9 @@ pub(crate) async fn spawn_stage_emitting(
     if specs.is_empty() && ready_ids.is_empty() {
         return None;
     }
-    let started = Instant::now();
-    emit_event(
-        events,
-        phoxal_cli_core::session::event::SessionEvent::PhaseStarted {
-            id: phoxal_cli_core::session::event::PhaseId::new(label.clone()),
-            label: label.clone(),
-        },
-    )
-    .await;
     board.begin_phase(&label);
-    spawn_stage(running, board, &label, specs).await;
+    spawn_participants_in_stage(running, board, &label, specs).await;
     if ready_ids.is_empty() {
-        emit_event(
-            events,
-            phoxal_cli_core::session::event::SessionEvent::PhaseFinished {
-                id: phoxal_cli_core::session::event::PhaseId::new(label.clone()),
-                outcome: phoxal_cli_core::session::event::PhaseOutcome::Succeeded,
-                elapsed: started.elapsed(),
-            },
-        )
-        .await;
         return None;
     }
     Some(PendingStage {
@@ -231,18 +182,16 @@ pub(crate) async fn spawn_stage_emitting(
         failure_ids,
         optional_ids,
         deadline: stage_timeout.deadline_from(Instant::now()),
-        started,
     })
 }
 
 pub(crate) async fn spawn_until_pending(
     running: &mut Vec<RunningParticipant>,
     board: &SupervisorState,
-    events: Option<&mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>>,
     stage_queue: &mut VecDeque<SupervisionStage>,
 ) -> Option<PendingStage> {
     while let Some(stage) = stage_queue.pop_front() {
-        if let Some(pending) = spawn_stage_emitting(running, board, events, stage).await {
+        if let Some(pending) = spawn_stage(running, board, stage).await {
             return Some(pending);
         }
     }
@@ -294,7 +243,7 @@ pub(crate) async fn await_stage_ready(
         // missing participant simply keeps waiting for as long as the
         // operator leaves the session open.
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            let waited = human::duration(started.elapsed());
+            let waited = crate::format_duration(started.elapsed());
             for key in &missing {
                 board.set_state(
                     key,
@@ -321,13 +270,12 @@ pub(crate) async fn await_stage_ready(
 
 /// Publish the state owner's derived Ready/Degraded startup outcome exactly
 /// when no phase remains to spawn or await.
-pub(crate) async fn maybe_emit_startup_outcome(
+pub(crate) async fn maybe_publish_startup_outcome(
     board: &SupervisorState,
     options: &SupervisorOptions,
-    events: Option<&mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>>,
     pending_stage: &Option<PendingStage>,
 ) {
-    if options.emits_running_on_startup_complete && pending_stage.is_none() {
+    if options.publishes_running_on_startup_complete && pending_stage.is_none() {
         let snapshot = board.supervisor_snapshot();
         let degraded = snapshot.processes.values().any(|entry| {
             matches!(
@@ -340,12 +288,5 @@ pub(crate) async fn maybe_emit_startup_outcome(
         } else {
             ProjectLifecycle::Ready
         });
-        emit_event(
-            events,
-            phoxal_cli_core::session::event::SessionEvent::SessionChanged {
-                state: phoxal_cli_core::session::state::SessionState::Running,
-            },
-        )
-        .await;
     }
 }

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::session::ParticipantKind;
+use crate::runtime::ParticipantKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceParticipant {
@@ -106,7 +106,7 @@ impl SourceParticipant {
 /// A source participant's role plus whether it has a known official/registry
 /// identity it locally overrides. Deliberately kept as its own enum rather
 /// than collapsed into the shared
-/// `crate::session::ParticipantKind`: every
+/// `crate::runtime::ParticipantKind`: every
 /// `SourceParticipant` already carries a `crate_dir`, so it is inherently
 /// "local" in the supervisor's sense - the real orthogonal bit this domain
 /// needs is "does an official/registry identity exist for this name", not

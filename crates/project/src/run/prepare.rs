@@ -113,7 +113,7 @@ pub(crate) fn refresh_staging(
     let official_target = build.target().map(str::to_string);
     let resolved = crate::progress::run_phase(
         ui,
-        phoxal_cli_core::session::event::PhaseId::new("validate"),
+        crate::PhaseId::new("validate"),
         "Validating robot.yaml",
         || {
             resolve(

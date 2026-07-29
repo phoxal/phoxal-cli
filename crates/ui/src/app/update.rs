@@ -4,11 +4,11 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
-use phoxal_cli_core::session::{ParticipantKind, ProcessScope, ProjectLifecycle, RobotScope};
+use phoxal_cli_core::runtime::{ParticipantKind, ProcessScope, ProjectLifecycle};
 use phoxal_cli_observation::{
     AttachmentEvent, BusQuery, BusRead, BusRow, LogAnchor, LogFilters, LogQuery, LogRead, LogRow,
-    ProcessObservation, ProcessTable, QueryToken, RuntimeQuery, RuntimeRead, RuntimeRow,
-    StoreChanged, StoreRevision, WindowDirection,
+    ProcessObservation, ProcessTable, QueryToken, RobotScope, RuntimeQuery, RuntimeRead,
+    RuntimeRow, StoreChanged, StoreRevision, WindowDirection,
 };
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 
@@ -163,7 +163,7 @@ fn is_known_internal_id(id: &str) -> bool {
         || starts_with_ignore_ascii_case(id, "phoxal-cli/")
         || starts_with_ignore_ascii_case(id, "tool-")
         || id.eq_ignore_ascii_case("supervisor")
-        || id.eq_ignore_ascii_case(phoxal_cli_core::session::WEBOTS_PROCESS_ID)
+        || id.eq_ignore_ascii_case(phoxal_cli_core::runtime::WEBOTS_PROCESS_ID)
         || starts_with_ignore_ascii_case(id, "webots-")
         || starts_with_ignore_ascii_case(id, "simulator-")
 }
@@ -856,7 +856,7 @@ fn handle_input_key(model: &mut AppModel, panel: InputPanelId, key: KeyEvent) ->
 
 fn move_device_candidate(
     input: &mut InputModel,
-    devices: &[phoxal_cli_core::session::JoypadDevice],
+    devices: &[phoxal_cli_observation::JoypadDevice],
     delta: isize,
 ) {
     if devices.is_empty() {
@@ -923,16 +923,15 @@ mod tests {
     use std::time::Instant;
 
     use phoxal_cli_core::identity::ExecutionId;
-    use phoxal_cli_core::session::{
-        JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, LogSeverity, LogSource,
+    use phoxal_cli_core::runtime::{
         ParticipantKind, ParticipantState, ProcessDescriptor, ProcessEntry, ProcessKey,
-        ProcessStatus, RobotKey, RobotScope, RuntimePerformanceSample, StartupRequirement,
-        StartupStatus,
+        ProcessStatus, RobotKey, StartupRequirement, StartupStatus,
     };
     use phoxal_cli_observation::{
         AttachmentEpoch, AttachmentEvent, BusRow, BusWindow, Freshness, InputObservation,
-        LogWindow, ObservationWindow, ProcessObservation, RuntimeRow, RuntimeWindow,
-        SupervisorObservation,
+        JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, LogSeverity, LogSource, LogWindow,
+        ObservationWindow, ProcessObservation, RobotScope, RuntimePerformanceSample, RuntimeRow,
+        RuntimeWindow, SupervisorObservation,
     };
 
     use super::*;

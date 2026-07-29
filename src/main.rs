@@ -3,17 +3,13 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 use dotenvy::Error as DotenvError;
-use phoxal::util::tracing_ansi_enabled;
 use tracing_subscriber::EnvFilter;
 
-use phoxal_cli::AppContext;
-use phoxal_cli::SessionAwareWriter;
-use phoxal_cli::Ui;
-use phoxal_cli::commands::Cli;
+use phoxal_cli::cli::{AppContext, Cli, SessionAwareWriter, Ui, tracing_ansi_enabled};
 
 #[tokio::main()]
 async fn main() -> ExitCode {
-    if let Some(exit) = phoxal_cli::maybe_run_guardian() {
+    if let Some(exit) = phoxal_cli_supervisor::maybe_run_guardian() {
         return exit;
     }
     let cli = Cli::parse();
@@ -63,5 +59,5 @@ async fn run(cli: Cli) -> Result<()> {
     })?;
     let app = AppContext::new(workspace_root, cli.offline)?;
 
-    phoxal_cli::commands::dispatch(cli, &app).await
+    phoxal_cli::cli::dispatch(cli, &app).await
 }

@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use super::catalog::ArtifactKind;
 use super::resolver::{ResolvedRobot, official_binary_name};
 use crate::check::source::{SourceParticipant, SourceParticipantKind};
-use crate::session::{RuntimeFailurePolicy, StartupRequirement};
+use crate::runtime::{RuntimeFailurePolicy, StartupRequirement};
 
 pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
 pub const ROBOT_TOOL_JOYPAD: &str = "tool-joypad";
@@ -888,7 +888,7 @@ mod tests {
             .iter()
             .find(|participant| participant.launch.participant_id == "mission")
             .expect("mission participant");
-        let encoded = crate::session::launch_env::encode_participant_env(&mission.launch)?;
+        let encoded = crate::runtime::launch::encode_participant_env(&mission.launch)?;
         assert_eq!(
             encoded
                 .variables()

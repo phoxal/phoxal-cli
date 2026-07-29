@@ -28,10 +28,10 @@ use phoxal_cli_core::project::layout::RuntimeLayout;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::resolver::official_binary_name;
+use phoxal_cli_core::runtime::ParticipantKind;
 use phoxal_cli_core::runtime::ParticipantSpec;
-use phoxal_cli_core::session::ParticipantKind;
-use phoxal_cli_core::session::launch_env::{encode_participant_env, encode_tool_env};
-use phoxal_cli_core::session::{ParticipantState, ProcessKey, RobotKey};
+use phoxal_cli_core::runtime::launch::{encode_participant_env, encode_tool_env};
+use phoxal_cli_core::runtime::{ParticipantState, ProcessKey, RobotKey};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -622,8 +622,8 @@ mod tests {
     use phoxal_cli_core::check::participant_metadata::host_architecture;
     use phoxal_cli_core::identity::{ExecutionId, ProducerId};
     use phoxal_cli_core::project::launch_plan::RunIdentity;
-    use phoxal_cli_core::session::RuntimeFailurePolicy;
-    use phoxal_cli_core::session::StartupRequirement;
+    use phoxal_cli_core::runtime::RuntimeFailurePolicy;
+    use phoxal_cli_core::runtime::StartupRequirement;
 
     /// Synthesize a host-format object of a given architecture carrying the
     /// phoxal metadata section, so inspection is exercised against real object

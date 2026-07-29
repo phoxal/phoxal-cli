@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod components;
+pub mod format;
 pub mod terminal;
 pub mod theme;
 

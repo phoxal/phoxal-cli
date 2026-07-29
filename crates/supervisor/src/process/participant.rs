@@ -10,8 +10,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use phoxal_cli_core::identity::ProducerId;
-use phoxal_cli_core::session::human;
-use phoxal_cli_core::session::{ExitDescription, ProcessFailureKind, ReadinessPolicy};
+use phoxal_cli_core::runtime::{ExitDescription, ProcessFailureKind, ReadinessPolicy};
 use std::collections::VecDeque;
 use std::process::Stdio;
 use std::time::Duration;
@@ -345,7 +344,7 @@ impl RunningParticipant {
                 format!(
                     "StartLimitBurst exhausted after {} failures in {}; last status {status}",
                     policy.start_limit_burst,
-                    human::duration(policy.start_limit_interval)
+                    crate::format_duration(policy.start_limit_interval)
                 ),
             );
             return Ok(());
@@ -358,7 +357,7 @@ impl RunningParticipant {
             ProcessState::Restarting,
             Some(format!(
                 "exited with {status}; restarting in {}",
-                human::duration(policy.restart_delay)
+                crate::format_duration(policy.restart_delay)
             )),
         );
         self.restart_at = Some(now + policy.restart_delay);

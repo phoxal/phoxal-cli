@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use phoxal::raw::{Bus, BusConfig, ParticipantLivelinessEvent, ParticipantLivelinessStatus};
 use phoxal_cli_core::identity::{ExecutionId, ProducerId};
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
-use phoxal_cli_core::session::{ParticipantInstanceKey, RobotKey};
+use phoxal_cli_core::runtime::{ParticipantInstanceKey, RobotKey};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
@@ -118,7 +118,7 @@ mod tests {
     }
     use super::*;
     use phoxal::raw::ParticipantLivelinessKey;
-    use phoxal_cli_core::session::ParticipantKind;
+    use phoxal_cli_core::runtime::ParticipantKind;
 
     fn event(participant: &str, status: ParticipantLivelinessStatus) -> ParticipantLivelinessEvent {
         ParticipantLivelinessEvent {
@@ -131,14 +131,14 @@ mod tests {
     #[test]
     fn observer_events_drive_presence_without_becoming_restart_authority() {
         let board = SupervisorState::new();
-        let key = phoxal_cli_core::session::ProcessKey::robot(
-            phoxal_cli_core::session::RobotKey::new("dev", "rover"),
+        let key = phoxal_cli_core::runtime::ProcessKey::robot(
+            phoxal_cli_core::runtime::RobotKey::new("dev", "rover"),
             "drive",
         );
         board.register_planned(
             &key,
             ParticipantKind::Service,
-            phoxal_cli_core::session::StartupRequirement::Required,
+            phoxal_cli_core::runtime::StartupRequirement::Required,
         );
         board.set_producer(&key, producer(7));
 
@@ -171,14 +171,14 @@ mod tests {
         // Synthetic guard coverage: the observer currently holds no
         // Liveliness token, but its reserved id must never become a board row.
         let board = SupervisorState::new();
-        let key = phoxal_cli_core::session::ProcessKey::robot(
-            phoxal_cli_core::session::RobotKey::new("dev", "rover"),
+        let key = phoxal_cli_core::runtime::ProcessKey::robot(
+            phoxal_cli_core::runtime::RobotKey::new("dev", "rover"),
             LIVELINESS_OBSERVER_ID,
         );
         board.register_planned(
             &key,
             ParticipantKind::Tool,
-            phoxal_cli_core::session::StartupRequirement::Optional,
+            phoxal_cli_core::runtime::StartupRequirement::Optional,
         );
         apply_liveliness_event(
             &board,

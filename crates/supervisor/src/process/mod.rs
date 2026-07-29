@@ -21,6 +21,4 @@ pub(crate) use signals::{
     send_process_group_terminate, send_process_signal, send_terminate, stop_child,
 };
 pub(crate) use spec::{RequestedStop, SupervisorActionReceiver};
-pub(crate) use stages::{
-    await_stage_ready, emit_event, maybe_emit_startup_outcome, spawn_until_pending,
-};
+pub(crate) use stages::{await_stage_ready, maybe_publish_startup_outcome, spawn_until_pending};

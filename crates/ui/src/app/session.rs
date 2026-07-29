@@ -101,7 +101,7 @@ fn run_blocking(
     effects: EffectSenders,
     options: UiOptions,
 ) -> Result<AttachmentOutcome> {
-    let title = phoxal_cli_core::session::sanitize_terminal_text(&options.title);
+    let title = crate::format::sanitize_terminal_text(&options.title);
     let _guard = TerminalGuard::enter(&title)?;
     let backend = CrosstermBackend::new(io::stderr());
     let mut terminal: Terminal<CrosstermBackend<Stderr>> = Terminal::new(backend)?;

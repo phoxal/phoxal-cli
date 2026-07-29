@@ -14,11 +14,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Instant, SystemTime};
 
-    use phoxal_cli_core::session::{
-        JoypadDevice, JoypadDevicesSample, LogSeverity, LogSource, RobotScope,
-        RuntimePerformanceSample,
+    use phoxal_cli_observation::{
+        BusRow, InputObservation, JoypadDevice, JoypadDevicesSample, LogRow, LogSeverity,
+        LogSource, RobotScope, RuntimePerformanceSample, RuntimeRow,
     };
-    use phoxal_cli_observation::{BusRow, InputObservation, LogRow, RuntimeRow};
     use tuirealm::ratatui::Terminal;
     use tuirealm::ratatui::backend::TestBackend;
     use tuirealm::ratatui::layout::Rect;

@@ -129,10 +129,7 @@ pub fn cargo_install(
     command.arg("--root").arg(root);
     crate::progress::run_phase(
         reporter,
-        phoxal_cli_core::session::event::PhaseId::new(format!(
-            "materialize-{}",
-            package.replace('/', "-")
-        )),
+        crate::PhaseId::new(format!("materialize-{}", package.replace('/', "-"))),
         format!("Materializing {package}"),
         || run_cargo_install(&mut command, &package, reporter),
     )?;

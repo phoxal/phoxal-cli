@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use phoxal::raw::{Bus, ParticipantLivelinessEvent, ParticipantLivelinessStatus};
-use phoxal_cli_core::session::RobotKey;
+use phoxal_cli_core::runtime::RobotKey;
 use phoxal_cli_observation::AttachmentEvent;
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;

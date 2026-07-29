@@ -1,17 +1,21 @@
 //! Composition root for the shared `run`/`attach` terminal application.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use phoxal_cli_client::{Attachment, AttachmentPorts, SupervisorCommands, SupervisorFeed};
+use phoxal_cli_core::identity::ExecutionId;
+use phoxal_cli_core::runtime::ProjectLifecycle;
 use phoxal_cli_protocol::CommandAction;
+use phoxal_cli_supervisor::resident::supervisor_socket_path;
+use phoxal_cli_supervisor::{ProjectLock, ProjectLockStatus, ProjectOperation};
 use phoxal_cli_ui::{AttachmentOutcome, Effect, EffectSenders, SessionInput, UiOptions};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 
-use crate::AppContext;
-use crate::commands::resident::ProjectTarget;
+use crate::cli::AppContext;
 
 const UI_INGRESS_CAPACITY: usize = 256;
 const EFFECT_CAPACITY: usize = 64;
@@ -316,11 +320,254 @@ fn terminal_title(project: &Path) -> String {
     format!("phoxal - {name}")
 }
 
-fn diagnostic_message(event: phoxal_cli_core::session::event::SessionEvent) -> String {
-    use phoxal_cli_core::session::event::SessionEvent;
+fn diagnostic_message(event: phoxal_cli_observation::RuntimeEvent) -> String {
+    use phoxal_cli_observation::RuntimeEvent;
     match event {
-        SessionEvent::Diagnostic { message, .. } => message,
+        RuntimeEvent::Diagnostic { message, .. } => message,
         other => format!("{other:?}"),
+    }
+}
+
+pub(crate) async fn attach_command(app: &AppContext, target: Option<&Path>) -> Result<()> {
+    let target = resolve_target(target, app.project.root())?;
+    let (feed, commands) = connect_running(&target).await?;
+    match run(app, &target, feed, commands, false).await? {
+        AttachmentOutcome::ResidentFailed => bail!("resident supervisor failed"),
+        AttachmentOutcome::Detached | AttachmentOutcome::ResidentStopped => Ok(()),
+    }
+}
+
+pub(crate) async fn stop_command(
+    app: &AppContext,
+    target: Option<&Path>,
+    force: bool,
+) -> Result<()> {
+    let target = resolve_target(target, app.project.root())?;
+    if force {
+        let outcome = phoxal_cli_supervisor::resident::force_stop(&target.runtime_target()).await?;
+        app.ui.info(format!("resident stopped ({outcome})"));
+        return Ok(());
+    }
+    let (feed, commands) = connect_running(&target).await?;
+    validate_entry(&target, &feed.current().entry)?;
+    let reply = commands.command(CommandAction::Shutdown).await?;
+    anyhow::ensure!(
+        reply.accepted,
+        "supervisor rejected shutdown: {:?}",
+        reply.error
+    );
+    let mut snapshots = feed.subscribe();
+    loop {
+        let snapshot = snapshots.borrow_and_update().clone();
+        if matches!(
+            snapshot.lifecycle,
+            ProjectLifecycle::Stopped | ProjectLifecycle::Failed
+        ) {
+            return if snapshot.lifecycle == ProjectLifecycle::Stopped {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "resident supervisor failed during shutdown"
+                ))
+            };
+        }
+        snapshots
+            .changed()
+            .await
+            .context("resident disconnected before terminal snapshot")?;
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ProjectTarget {
+    pub(crate) project: PathBuf,
+    runtime: phoxal_cli_core::runtime::RuntimeTarget,
+}
+
+impl ProjectTarget {
+    pub(crate) fn runtime_target(&self) -> phoxal_cli_core::runtime::RuntimeTarget {
+        self.runtime.clone()
+    }
+}
+
+pub(crate) fn resolve_target(explicit: Option<&Path>, fallback: &Path) -> Result<ProjectTarget> {
+    let runtime = phoxal_cli_project::resolve_target(explicit, fallback)?;
+    let project = runtime.logical_root.clone();
+    let _ = supervisor_socket_path(&project)?;
+    Ok(ProjectTarget { project, runtime })
+}
+
+async fn connect_running(target: &ProjectTarget) -> Result<(SupervisorFeed, SupervisorCommands)> {
+    loop {
+        match ProjectLock::inspect(&target.project)? {
+            ProjectLockStatus::Free => {
+                bail!("project is not running: {}", target.project.display())
+            }
+            ProjectLockStatus::Held(identity) if identity.operation != ProjectOperation::Run => {
+                bail!(
+                    "project is held by `{}` (pid {}), not a resident run",
+                    identity.operation,
+                    identity.pid
+                )
+            }
+            ProjectLockStatus::Held(_) => {}
+        }
+        let path = supervisor_socket_path(&target.project)?;
+        match SupervisorFeed::connect(&path).await {
+            Ok(feed) => {
+                let commands = SupervisorCommands::connect(&path).await?;
+                return Ok((feed, commands));
+            }
+            Err(error) if phoxal_cli_client::is_connection_unavailable(&error) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => bail!("cancelled while waiting for the resident supervisor to finish startup"),
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn validate_entry(target: &ProjectTarget, running_entry: &str) -> Result<()> {
+    phoxal_cli_client::validate_requested_entry(&target.runtime_target(), running_entry)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BusTargetRequest {
+    pub(crate) connect: String,
+    pub(crate) namespace: Option<String>,
+    pub(crate) robot_id: Option<String>,
+    pub(crate) execution: Option<ExecutionId>,
+}
+
+fn finite_bus_target(
+    app: &AppContext,
+    target: &BusTargetRequest,
+) -> Result<phoxal_cli_client::finite::BusTarget> {
+    let execution = match target.execution {
+        Some(execution) => execution,
+        None => phoxal_cli_supervisor::active_execution(app.project.root())?.context(
+            "no phoxal run is active in this project; start one, or name the run with --execution",
+        )?,
+    };
+    Ok(phoxal_cli_client::finite::BusTarget {
+        project_root: app.project.root().to_path_buf(),
+        connect: target.connect.clone(),
+        namespace: target.namespace.clone(),
+        robot_id: target.robot_id.clone(),
+        execution,
+    })
+}
+
+pub(crate) async fn logs_command(
+    app: &AppContext,
+    target: &BusTargetRequest,
+    participant: Option<String>,
+    follow: bool,
+) -> Result<()> {
+    let target = finite_bus_target(app, target)?;
+    phoxal_cli_client::finite::stream_logs(&target, participant, follow, render_log_event).await
+}
+
+fn render_log_event(event: phoxal_cli_client::finite::LogEvent) {
+    use phoxal_cli_client::finite::LogEvent;
+    match event {
+        LogEvent::Record {
+            participant_id,
+            level,
+            mut message,
+            dropped,
+            truncated,
+        } => {
+            if dropped > 0 {
+                message.push_str(&format!(" (producer dropped {dropped})"));
+            }
+            if truncated > 0 {
+                message.push_str(&format!(" (truncated {truncated})"));
+            }
+            println!("[{participant_id}] {level}: {message}");
+        }
+        LogEvent::Empty => eprintln!("no retained log events"),
+        LogEvent::NoMatch { participant } => {
+            eprintln!("no retained log events matched participant {participant}")
+        }
+        LogEvent::ToolLoss { delta, cumulative } => {
+            eprintln!("tool-log lost {delta} event(s) before retention ({cumulative} cumulative)")
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StatusQuery {
+    Safety,
+    Motion,
+    Localization,
+}
+
+pub(crate) async fn status_command(
+    app: &AppContext,
+    target: &BusTargetRequest,
+    query: StatusQuery,
+) -> Result<()> {
+    let target = finite_bus_target(app, target)?;
+    let query = match query {
+        StatusQuery::Safety => phoxal_cli_client::finite::StatusQuery::Safety,
+        StatusQuery::Motion => phoxal_cli_client::finite::StatusQuery::Motion,
+        StatusQuery::Localization => phoxal_cli_client::finite::StatusQuery::Localization,
+    };
+    let snapshot = phoxal_cli_client::finite::query_status(&target, query).await?;
+    render_status(snapshot);
+    Ok(())
+}
+
+fn render_status(snapshot: phoxal_cli_client::finite::StatusSnapshot) {
+    use phoxal_cli_client::finite::StatusSnapshot;
+    match snapshot {
+        StatusSnapshot::Safety {
+            clear,
+            sequence,
+            expires_at,
+            constraints,
+        } => {
+            println!(
+                "safety: {} (sequence {sequence}, expires at {expires_at})",
+                if clear { "clear" } else { "constrained" },
+            );
+            for constraint in constraints {
+                println!(
+                    "  {} from {} stop={} linear_limit={:?} observed={:?}",
+                    constraint.reason,
+                    constraint.participant_id,
+                    constraint.stop,
+                    constraint.max_linear_speed_mps,
+                    constraint.observed_value
+                );
+            }
+        }
+        StatusSnapshot::Motion {
+            selected_source,
+            linear_x_mps,
+            angular_z_radps,
+            zero_reason,
+            component_estop_blocked,
+            safety_constraints,
+        } => {
+            println!(
+                "motion: source={selected_source} target=({linear_x_mps:.3} m/s, {angular_z_radps:.3} rad/s) zero={zero_reason}"
+            );
+            println!(
+                "  component_estop_blocked={component_estop_blocked} safety_constraints={safety_constraints}"
+            );
+        }
+        StatusSnapshot::Localization {
+            x_m,
+            y_m,
+            yaw_rad,
+            confidence,
+        } => println!(
+            "localization: ({x_m:.3}, {y_m:.3}) yaw={yaw_rad:.3} confidence={confidence:.3}"
+        ),
     }
 }
 
@@ -329,5 +576,64 @@ struct DiagnosticGuard;
 impl Drop for DiagnosticGuard {
     fn drop(&mut self) {
         crate::cli::output::diagnostics::uninstall();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn resolve_target_reaches_a_layout_root_socket() -> Result<()> {
+        let layout = tempfile::tempdir()?;
+        fs::write(layout.path().join("robot.yaml"), "schema: robot/v0\n")?;
+        fs::create_dir_all(layout.path().join("bin"))?;
+
+        let target = resolve_target(Some(layout.path()), layout.path())?;
+        assert_eq!(target.project, layout.path().canonicalize()?);
+        assert!(target.runtime_target().requested_entry.is_none());
+        assert_eq!(
+            supervisor_socket_path(&target.project)?,
+            target.project.join(".phoxal/supervisor.sock")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn permanent_handshake_failure_is_returned_instead_of_retried() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        fs::write(
+            project.path().join("robot.yaml"),
+            "schema: robot/v0\nname: test\n",
+        )?;
+        let identity = phoxal_cli_supervisor::ProjectLockIdentity::resolve(
+            project.path(),
+            ProjectOperation::Run,
+        )
+        .in_execution(ExecutionId::mint());
+        let _lock = ProjectLock::acquire(identity)?;
+        let path = supervisor_socket_path(project.path())?;
+        fs::create_dir_all(path.parent().expect("socket has parent"))?;
+        let listener = tokio::net::UnixListener::bind(&path)?;
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
+        let target = resolve_target(Some(project.path()), Path::new("/unused"))?;
+
+        let result = tokio::time::timeout(Duration::from_secs(1), connect_running(&target))
+            .await
+            .expect("permanent handshake failure must not retry");
+        let error = match result {
+            Ok(_) => panic!("early-close peer unexpectedly connected"),
+            Err(error) => error,
+        };
+        peer.await.unwrap();
+        assert!(
+            format!("{error:#}")
+                .contains("resident rejected or disconnected during the supervisor handshake")
+        );
+        Ok(())
     }
 }

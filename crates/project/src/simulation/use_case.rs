@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::runtime::ParticipantSpec;
-use phoxal_cli_core::session::{
+use phoxal_cli_core::runtime::{
     ParticipantKind, ParticipantState, ProcessKey, ReadinessPolicy, RuntimeFailurePolicy,
     StartupRequirement, WEBOTS_PROCESS_ID,
 };

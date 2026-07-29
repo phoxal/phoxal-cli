@@ -58,7 +58,7 @@ impl BusStore {
     pub fn install(
         &mut self,
         epoch: AttachmentEpoch,
-        scope: &phoxal_cli_core::session::RobotScope,
+        scope: &phoxal_cli_observation::RobotScope,
         rows: impl IntoIterator<Item = BusRow>,
     ) -> Option<StoreRevision> {
         if epoch != self.epoch {
@@ -109,7 +109,7 @@ impl BusStore {
 #[cfg(test)]
 mod tests {
     use phoxal_cli_core::identity::ExecutionId;
-    use phoxal_cli_core::session::RobotScope;
+    use phoxal_cli_observation::RobotScope;
     use phoxal_cli_observation::{BusQuery, ObservationQuery, QueryToken, StoreRevision};
 
     use super::*;

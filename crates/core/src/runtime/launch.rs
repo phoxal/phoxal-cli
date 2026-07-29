@@ -1,11 +1,12 @@
 //! Pure process-launch values shared by project preparation and supervision.
 
 use crate::identity::ProducerId;
-use crate::session::launch_env;
-use crate::session::{
-    ParticipantInstanceKey, ParticipantKind, ParticipantLaunchCommand, ProcessKey, ReadinessPolicy,
-    RobotKey, RuntimeFailurePolicy, StartupRequirement,
+use crate::runtime::{
+    ParticipantInstanceKey, ParticipantKind, ProcessKey, ReadinessPolicy, RobotKey,
+    RuntimeFailurePolicy, StartupRequirement,
 };
+use anyhow::{Context, Result, bail};
+use phoxal::participant::launch::{ParticipantLaunch, env};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,6 +14,118 @@ use std::time::Duration;
 pub const RESTART_DELAY: Duration = Duration::from_secs(2);
 pub const START_LIMIT_INTERVAL: Duration = Duration::from_secs(60);
 pub const START_LIMIT_BURST: usize = 5;
+pub const MAX_CONFIG_ENV_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticipantLaunchCommand {
+    pub command_line: String,
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedParticipantEnv {
+    variables: BTreeMap<String, String>,
+}
+
+impl EncodedParticipantEnv {
+    #[must_use]
+    pub fn variables(&self) -> &BTreeMap<String, String> {
+        &self.variables
+    }
+
+    #[must_use]
+    pub fn spawn_env(&self) -> Vec<(String, String)> {
+        self.variables
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+}
+
+pub const ENV_TO_FLAG: &[(&str, &str)] = &[
+    (env::PARTICIPANT_ID, "--participant-id"),
+    (env::ROBOT_ID, "--robot-id"),
+    (env::NAMESPACE, "--namespace"),
+    (env::ROBOT_ROOT, "--robot-root"),
+    (env::COMPONENT_INSTANCE, "--component-instance"),
+    (env::EXECUTION_ID, "--execution-id"),
+    (env::PRODUCER_ID, "--producer-id"),
+    (env::EXECUTION_ORIGIN, "--execution-origin"),
+    (env::CONNECT, "--connect"),
+    (env::CONFIG, "--config"),
+    (env::CLOCK, "--clock"),
+];
+
+pub fn encode_participant_env(launch: &ParticipantLaunch) -> Result<EncodedParticipantEnv> {
+    let mut variables = encode_common_participant_variables(launch)?;
+    variables.insert(env::CLOCK.to_string(), launch.clock.to_string());
+    Ok(EncodedParticipantEnv { variables })
+}
+
+pub fn encode_tool_env(launch: &ParticipantLaunch) -> Result<EncodedParticipantEnv> {
+    let mut variables = encode_common_participant_variables(launch)?;
+    variables.remove(env::EXECUTION_ORIGIN);
+    Ok(EncodedParticipantEnv { variables })
+}
+
+fn encode_common_participant_variables(
+    launch: &ParticipantLaunch,
+) -> Result<BTreeMap<String, String>> {
+    let mut variables = BTreeMap::new();
+    variables.insert(
+        env::PARTICIPANT_ID.to_string(),
+        launch.participant_id.clone(),
+    );
+    variables.insert(env::ROBOT_ID.to_string(), launch.robot_id.clone());
+    variables.insert(env::NAMESPACE.to_string(), launch.namespace.clone());
+    if let Some(robot_root) = &launch.robot_root {
+        variables.insert(
+            env::ROBOT_ROOT.to_string(),
+            robot_root.display().to_string(),
+        );
+    }
+    if let Some(component_instance) = &launch.component_instance {
+        variables.insert(
+            env::COMPONENT_INSTANCE.to_string(),
+            component_instance.clone(),
+        );
+    }
+    variables.insert(env::EXECUTION_ID.to_string(), launch.execution.to_string());
+    variables.insert(env::PRODUCER_ID.to_string(), launch.producer.to_string());
+    if let Some(origin) = launch.execution_origin {
+        variables.insert(env::EXECUTION_ORIGIN.to_string(), origin.encode());
+    }
+    if !launch.bus.connect_endpoints.is_empty() {
+        variables.insert(
+            env::CONNECT.to_string(),
+            launch.bus.connect_endpoints.join(","),
+        );
+    }
+    if let Some(config) = compact_config_json(launch)? {
+        variables.insert(env::CONFIG.to_string(), config);
+    }
+    Ok(variables)
+}
+
+fn compact_config_json(launch: &ParticipantLaunch) -> Result<Option<String>> {
+    let Some(config) = launch.config.clone() else {
+        return Ok(None);
+    };
+    let encoded = serde_json::to_string(&config).with_context(|| {
+        format!(
+            "failed to encode PHOXAL_CONFIG for participant {}",
+            launch.participant_id
+        )
+    })?;
+    let size = encoded.len();
+    if size > MAX_CONFIG_ENV_BYTES {
+        bail!(
+            "participant {} PHOXAL_CONFIG is {size} bytes, above the {MAX_CONFIG_ENV_BYTES} byte limit",
+            launch.participant_id
+        );
+    }
+    Ok(Some(encoded))
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParticipantSpec {
@@ -64,7 +177,7 @@ pub fn render_manual_command_line(spec: &ParticipantSpec) -> String {
     let env = spec.env.iter().cloned().collect::<BTreeMap<_, _>>();
     let mut parts = vec![shell_quote(&spec.executable.display().to_string())];
     parts.extend(spec.args.iter().map(|arg| shell_quote(arg)));
-    for (env_key, flag) in launch_env::ENV_TO_FLAG {
+    for (env_key, flag) in ENV_TO_FLAG {
         if let Some(value) = env.get(*env_key) {
             parts.push((*flag).to_string());
             parts.push(shell_quote(value));
@@ -101,5 +214,87 @@ impl Default for RestartPolicy {
             start_limit_interval: START_LIMIT_INTERVAL,
             start_limit_burst: START_LIMIT_BURST,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use phoxal::participant::launch::{BusProfile, ClockMode};
+
+    use super::*;
+
+    fn launch(participant_id: &str) -> ParticipantLaunch {
+        ParticipantLaunch {
+            participant_id: participant_id.to_string(),
+            execution: crate::identity::ExecutionId::mint(),
+            producer: crate::identity::ProducerId::mint(),
+            execution_origin: None,
+            namespace: "dev".to_string(),
+            robot_id: "testbot".to_string(),
+            bus: BusProfile {
+                connect_endpoints: vec!["tcp/localhost:7447".to_string()],
+            },
+            clock: ClockMode::Real,
+            config: None,
+            robot_root: Some(PathBuf::from("/tmp/phoxal/robot")),
+            component_instance: None,
+            shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
+        }
+    }
+
+    #[test]
+    fn participant_env_config_is_compact_escaped_json() -> anyhow::Result<()> {
+        let mut launch = launch("mission");
+        launch.config = Some(serde_json::json!({
+            "message": "quoted \"value\" and backslash \\ with newline\nvisible",
+            "path": "/tmp/phoxal/robot's model",
+        }));
+        let encoded = encode_participant_env(&launch)?;
+        assert_eq!(
+            encoded.variables().get(env::CONFIG).map(String::as_str),
+            Some(
+                r#"{"message":"quoted \"value\" and backslash \\ with newline\nvisible","path":"/tmp/phoxal/robot's model"}"#
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tool_environment_is_clockless() -> anyhow::Result<()> {
+        let mut launch = launch("tool-log");
+        launch.execution_origin = Some(phoxal::participant::ExecutionOrigin::mint());
+        let encoded = encode_tool_env(&launch)?;
+        assert!(!encoded.variables().contains_key(env::CLOCK));
+        assert_eq!(
+            encoded.variables().get(env::EXECUTION_ORIGIN),
+            None,
+            "a tool must not receive the origin that would let it reconstruct robot time"
+        );
+        assert_eq!(
+            encoded
+                .variables()
+                .get(env::PARTICIPANT_ID)
+                .map(String::as_str),
+            Some("tool-log")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_config_names_participant_size_and_limit() {
+        let mut launch = launch("huge_config");
+        launch.config = Some(serde_json::json!({
+            "blob": "x".repeat(MAX_CONFIG_ENV_BYTES),
+        }));
+        let error = encode_participant_env(&launch).expect_err("config should exceed the limit");
+        let message = error.to_string();
+        assert!(message.contains("huge_config"), "{message}");
+        assert!(
+            message.contains(&MAX_CONFIG_ENV_BYTES.to_string()),
+            "{message}"
+        );
+        assert!(message.contains("bytes"), "{message}");
     }
 }

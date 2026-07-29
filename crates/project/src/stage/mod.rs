@@ -146,8 +146,8 @@ robot:
                 component_instance: component_instance.map(str::to_string),
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
-            startup_requirement: phoxal_cli_core::session::StartupRequirement::Required,
-            runtime_failure: phoxal_cli_core::session::RuntimeFailurePolicy::StopProject,
+            startup_requirement: phoxal_cli_core::runtime::StartupRequirement::Required,
+            runtime_failure: phoxal_cli_core::runtime::RuntimeFailurePolicy::StopProject,
         }
     }
 

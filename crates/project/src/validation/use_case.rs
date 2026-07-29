@@ -48,7 +48,7 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
     let robot = loaded.robot;
     crate::progress::run_phase(
         request.reporter.as_ref(),
-        phoxal_cli_core::session::event::PhaseId::new("validate"),
+        crate::PhaseId::new("validate"),
         "Validating robot.yaml",
         || {
             robot

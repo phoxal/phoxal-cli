@@ -1,7 +1,8 @@
 //! Typed progress emitted by project preparation without owning presentation.
 
-use phoxal_cli_core::session::event::{PhaseId, PhaseOutcome};
 use std::time::{Duration, Instant};
+
+pub use phoxal_cli_core::runtime::{PhaseId, PhaseOutcome};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreparationEvent {

@@ -1,8 +1,8 @@
 //! Routes the CLI's own `tracing` output through the session's
-//! [`phoxal_cli_core::session::event::SessionEvent`] channel instead of writing it directly to
+//! [`phoxal_cli_observation::RuntimeEvent`] channel instead of writing it directly to
 //! stderr, so a `tracing::warn!` mid-session (the reported "a Zenoh
 //! connection warning writes through the progress renderer" bug) becomes a
-//! typed [`phoxal_cli_core::session::event::SessionEvent::Diagnostic`] the renderer controls,
+//! typed [`phoxal_cli_observation::RuntimeEvent::Diagnostic`] the renderer controls,
 //! never a raw write racing an active redraw or corrupting the alternate
 //! screen.
 //!
@@ -15,7 +15,7 @@
 //! forwards to the real stderr - this module changes nothing for a caller
 //! that never opts in.
 //!
-//! Level is approximated as [`phoxal_cli_core::session::event::DiagnosticLevel::Warn`] for every
+//! Level is approximated as [`phoxal_cli_observation::DiagnosticLevel::Warn`] for every
 //! captured line: `tracing_subscriber::fmt`'s [`MakeWriter`] contract hands
 //! this only the already-formatted bytes for one event, not its
 //! `Level` - recovering the real level would need a full custom `Layer`
@@ -31,11 +31,11 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing_subscriber::fmt::MakeWriter;
 
-use phoxal_cli_core::session::event::{DiagnosticLevel, DiagnosticSource, SessionEvent};
-use phoxal_cli_core::session::event::{PhaseId, PhaseOutcome};
+use phoxal_cli_observation::{DiagnosticLevel, DiagnosticSource, RuntimeEvent};
+use phoxal_cli_observation::{PhaseId, PhaseOutcome};
 
 struct ActiveSession {
-    sender: mpsc::Sender<SessionEvent>,
+    sender: mpsc::Sender<RuntimeEvent>,
 }
 
 fn sender_cell() -> &'static Mutex<Option<ActiveSession>> {
@@ -45,7 +45,7 @@ fn sender_cell() -> &'static Mutex<Option<ActiveSession>> {
 
 /// Start routing the CLI's own tracing output through `events` instead of
 /// stderr. Called once by the attachment application.
-pub fn install(events: mpsc::Sender<SessionEvent>) {
+pub fn install(events: mpsc::Sender<RuntimeEvent>) {
     *sender_cell()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -61,7 +61,7 @@ pub fn uninstall() {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
-fn current_sender() -> Option<mpsc::Sender<SessionEvent>> {
+fn current_sender() -> Option<mpsc::Sender<RuntimeEvent>> {
     sender_cell()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -79,7 +79,7 @@ pub(crate) enum RouteResult {
     Dropped,
 }
 
-/// Try to route one operator-facing message (`crate::ui::Ui::info`/`warn`/
+/// Try to route one operator-facing message (`crate::cli::output::plain::Ui::info`/`warn`/
 /// `error`) through the active session's event channel instead of letting the
 /// caller write it directly to stderr. Diagnostics may be dropped under
 /// backpressure, but a live session's terminal ownership is never lost.
@@ -91,7 +91,7 @@ pub(crate) fn try_route(
     let Some(sender) = current_sender() else {
         return RouteResult::NoSession;
     };
-    match sender.try_send(SessionEvent::Diagnostic {
+    match sender.try_send(RuntimeEvent::Diagnostic {
         source,
         level,
         message: message.to_string(),
@@ -101,26 +101,26 @@ pub(crate) fn try_route(
     }
 }
 
-/// Emit `SessionEvent::PhaseStarted` for one real per-operation phase
+/// Emit `RuntimeEvent::PhaseStarted` for one real per-operation phase
 /// (`"download"`/`"build"`/`"validate"`/...) through the active session, if
 /// any (finding A3) - a no-op when no session is installed, exactly like
 /// [`try_route`]. Project preparation normally emits the paired typed events
 /// through its `Reporter`; this adapter maps those events into the session.
 pub(crate) fn phase_started(id: impl Into<PhaseId>, label: impl Into<String>) {
     if let Some(sender) = current_sender() {
-        let _ = sender.try_send(SessionEvent::PhaseStarted {
+        let _ = sender.try_send(RuntimeEvent::PhaseStarted {
             id: id.into(),
             label: label.into(),
         });
     }
 }
 
-/// Emit `SessionEvent::PhaseFinished` for a phase previously started with
+/// Emit `RuntimeEvent::PhaseFinished` for a phase previously started with
 /// [`phase_started`]. Project preparation normally emits this paired with its
 /// start event through the project reporter.
 pub(crate) fn phase_finished(id: impl Into<PhaseId>, outcome: PhaseOutcome, elapsed: Duration) {
     if let Some(sender) = current_sender() {
-        let _ = sender.try_send(SessionEvent::PhaseFinished {
+        let _ = sender.try_send(RuntimeEvent::PhaseFinished {
             id: id.into(),
             outcome,
             elapsed,
@@ -170,7 +170,7 @@ impl Write for SessionWriter {
                 // stalled log call. `try_send` also works from a plain sync
                 // context, which `tracing_subscriber::fmt` requires (no
                 // executor available at this call site).
-                let _ = sender.try_send(SessionEvent::Diagnostic {
+                let _ = sender.try_send(RuntimeEvent::Diagnostic {
                     source: DiagnosticSource::Tracing,
                     level: DiagnosticLevel::Warn,
                     message,
@@ -225,7 +225,7 @@ mod tests {
 
         let event = rx.try_recv().expect("a diagnostic event must be queued");
         match event {
-            SessionEvent::Diagnostic {
+            RuntimeEvent::Diagnostic {
                 source,
                 level,
                 message,
@@ -245,7 +245,7 @@ mod tests {
         let _guard = DIAGNOSTICS_TEST_LOCK.blocking_lock();
         let (tx, _rx) = mpsc::channel(1);
         install(tx.clone());
-        tx.try_send(SessionEvent::Diagnostic {
+        tx.try_send(RuntimeEvent::Diagnostic {
             source: DiagnosticSource::Cli,
             level: DiagnosticLevel::Info,
             message: "fill the channel".to_string(),

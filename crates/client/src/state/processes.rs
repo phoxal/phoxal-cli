@@ -1,4 +1,4 @@
-use phoxal_cli_core::session::{ParticipantState, ProcessScope, ProcessState, RobotKey};
+use phoxal_cli_core::runtime::{ParticipantState, ProcessScope, ProcessState, RobotKey};
 use phoxal_cli_observation::{ProcessObservation, ProcessTable};
 use phoxal_cli_protocol::SupervisorSnapshotV0;
 
@@ -97,7 +97,7 @@ fn participant_state(state: ProcessState) -> ParticipantState {
 
 #[cfg(test)]
 mod tests {
-    use phoxal_cli_core::session::{
+    use phoxal_cli_core::runtime::{
         ParticipantKind, ProcessDescriptor, ProcessEntry, ProcessKey, ProcessStatus,
         StartupRequirement,
     };

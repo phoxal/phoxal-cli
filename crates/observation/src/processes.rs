@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use phoxal_cli_core::session::{
+use phoxal_cli_core::runtime::{
     ParticipantKind, ParticipantState, ProcessEntry, ProcessKey, RobotKey,
 };
 

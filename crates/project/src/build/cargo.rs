@@ -89,7 +89,7 @@ pub(crate) fn build_source_binary_with_profile(
     // rather than the old synthetic single "Preparing" phase.
     crate::progress::run_phase(
         ui,
-        phoxal_cli_core::session::event::PhaseId::new("build"),
+        crate::PhaseId::new("build"),
         format!("Building {preferred_name}"),
         || {
             let mut command = Command::new("cargo");

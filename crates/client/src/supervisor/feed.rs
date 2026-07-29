@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use phoxal_cli_core::session::ProjectLifecycle;
+use phoxal_cli_core::runtime::ProjectLifecycle;
 use phoxal_cli_protocol::codec::async_io::{read_frame, read_frame_after_idle};
 use phoxal_cli_protocol::limits::{FRAME_READ_TIMEOUT, MAX_SNAPSHOT_FRAME_BYTES};
 use phoxal_cli_protocol::{ConnectionRole, SupervisorSnapshot, SupervisorSnapshotV0};

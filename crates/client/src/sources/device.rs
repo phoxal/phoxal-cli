@@ -2,7 +2,7 @@ use std::convert::Infallible;
 
 use anyhow::Result;
 use phoxal::raw::Bus;
-use phoxal_cli_core::session::RobotScope;
+use phoxal_cli_observation::RobotScope;
 
 use super::TelemetryBackend;
 

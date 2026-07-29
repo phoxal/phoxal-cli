@@ -12,7 +12,7 @@ use phoxal_cli_core::identity::{ExecutionId, ProducerId};
 use phoxal_cli_core::project::launch_plan::{
     LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
 };
-use phoxal_cli_core::session::{
+use phoxal_cli_core::runtime::{
     ParticipantKind, ParticipantState, RuntimeFailurePolicy, StartupRequirement,
 };
 use std::path::PathBuf;
@@ -210,7 +210,7 @@ fn serial_device_missing_is_loud() {
 fn selected_router_endpoint_reaches_plan_and_spawn_environment() {
     let mut plan = plan_with_drivers(&["imu"]);
     let spec = ParticipantSpec {
-        key: phoxal_cli_core::session::ProcessKey::project("tool-bus"),
+        key: phoxal_cli_core::runtime::ProcessKey::project("tool-bus"),
         id: "tool-bus".to_string(),
         kind: ParticipantKind::Tool,
         executable: PathBuf::from("/tmp/tool-bus"),
@@ -225,11 +225,11 @@ fn selected_router_endpoint_reaches_plan_and_spawn_environment() {
         note: None,
         bus_participant: true,
         readiness: ParticipantSpec::exact_liveliness_template(
-            phoxal_cli_core::session::RobotKey::new("test", "robot"),
+            phoxal_cli_core::runtime::RobotKey::new("test", "robot"),
             "tool-bus",
         ),
-        startup_requirement: phoxal_cli_core::session::StartupRequirement::Optional,
-        runtime_failure: phoxal_cli_core::session::RuntimeFailurePolicy::KeepProjectDegraded,
+        startup_requirement: phoxal_cli_core::runtime::StartupRequirement::Optional,
+        runtime_failure: phoxal_cli_core::runtime::RuntimeFailurePolicy::KeepProjectDegraded,
         restart_policy: Default::default(),
     };
     let mut participants = vec![crate::PreparedParticipant {

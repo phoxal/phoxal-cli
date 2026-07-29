@@ -1,17 +1,29 @@
 //! The explicit output contract for one invocation: whether stderr is an
 //! interactive terminal and the theme selected for it.
 //!
-//! Built once in [`crate::commands::dispatch`] and threaded explicitly into
+//! Built once in [`crate::cli::dispatch`] and threaded explicitly into
 //! the attachment application, `AppContext::ui`, and helpers
 //! that may draw progress. Interactive foreground sessions are admitted only
 //! on a real TTY, so the controller itself has exactly one renderer: the TUI.
 
+use std::io::IsTerminal;
 use std::time::Duration;
 
 pub use phoxal_cli_supervisor::WaitBudget;
 use phoxal_cli_ui::Theme;
 
 pub mod diagnostics;
+pub(crate) mod plain;
+pub(crate) mod progress;
+
+pub use diagnostics::SessionAwareWriter;
+pub use plain::Ui;
+
+#[must_use]
+pub fn tracing_ansi_enabled() -> bool {
+    std::io::stderr().is_terminal()
+        && std::env::var("NO_COLOR").map_or(true, |value| value.is_empty())
+}
 
 /// The immutable output contract for one `run`/`simulation webots run` invocation.
 #[derive(Debug, Clone, Copy)]
@@ -53,7 +65,7 @@ impl OutputContext {
     }
 
     /// Build from stderr's terminal state. Called once in
-    /// [`crate::commands::dispatch`]; other callers should prefer [`Self::new`]
+    /// [`crate::cli::dispatch`]; other callers should prefer [`Self::new`]
     /// so tests stay deterministic.
     #[must_use]
     pub fn compute(is_tty: bool) -> Self {
