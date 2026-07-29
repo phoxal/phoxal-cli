@@ -19,3 +19,9 @@ impl AttachmentRuntime {
         while self.tasks.join_next().await.is_some() {}
     }
 }
+
+impl Drop for AttachmentRuntime {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}

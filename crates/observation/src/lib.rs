@@ -19,8 +19,8 @@ pub use bus::{BusQuery, BusRead, BusRow, BusWindow, RobotScope, RouterMetricsSam
 pub use device::{ClockSample, DeviceDiskSample, DeviceObservation, DeviceSample};
 pub use epoch::AttachmentEpoch;
 pub use event::{
-    AttachmentEvent, DiagnosticLevel, DiagnosticSource, Freshness, FreshnessSet, PhaseId,
-    PhaseOutcome, RuntimeEvent,
+    AttachmentEvent, ConnectionObservation, DiagnosticLevel, DiagnosticSource, Freshness,
+    FreshnessSet, PhaseId, PhaseOutcome, RuntimeEvent,
 };
 pub use input::{
     InputObservation, JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, MotionObservation,

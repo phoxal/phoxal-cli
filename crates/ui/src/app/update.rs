@@ -49,7 +49,7 @@ pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
 
 fn detach(model: &mut AppModel) -> Vec<Effect> {
     model.exit = Some(AttachmentOutcome::Detached);
-    vec![Effect::Detach]
+    Vec::new()
 }
 
 fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
@@ -57,6 +57,17 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
         AttachmentEvent::EpochChanged(epoch) => {
             model.epoch = Some(epoch);
             reset_queries(model);
+            Vec::new()
+        }
+        AttachmentEvent::ConnectionChanged(connection) => {
+            if matches!(
+                &connection,
+                phoxal_cli_observation::ConnectionObservation::Lost { .. }
+            ) && model.exit.is_none()
+            {
+                model.exit = Some(AttachmentOutcome::ResidentFailed);
+            }
+            model.overview.connection = Some(connection);
             Vec::new()
         }
         AttachmentEvent::SupervisorChanged(supervisor) => {
@@ -68,7 +79,13 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
             model.overview.supervisor = Some(supervisor);
             Vec::new()
         }
-        AttachmentEvent::ProcessesChanged(processes) => {
+        AttachmentEvent::ProcessesChanged {
+            epoch,
+            values: processes,
+        } => {
+            if model.epoch != Some(epoch) {
+                return Vec::new();
+            }
             let detail_cleared = preserve_process_candidate(model, &processes);
             model.overview.processes = processes;
             if detail_cleared {
@@ -77,21 +94,41 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
                 Vec::new()
             }
         }
-        AttachmentEvent::DeviceChanged(devices) => {
+        AttachmentEvent::DeviceChanged {
+            epoch,
+            values: devices,
+        } => {
+            if model.epoch != Some(epoch) {
+                return Vec::new();
+            }
             model.overview.devices = Some(devices);
             Vec::new()
         }
-        AttachmentEvent::InputChanged(input) => {
+        AttachmentEvent::InputChanged {
+            epoch,
+            values: input,
+        } => {
+            if model.epoch != Some(epoch) {
+                return Vec::new();
+            }
             model.input.reconcile_authoritative((*input).clone());
             model.overview.input = Some(input);
             Vec::new()
         }
-        AttachmentEvent::SourceHealthChanged(health) => {
+        AttachmentEvent::SourceHealthChanged {
+            epoch,
+            values: health,
+        } => {
+            if model.epoch != Some(epoch) {
+                return Vec::new();
+            }
             model.overview.source_health = Some(health);
             Vec::new()
         }
-        AttachmentEvent::FreshnessChanged(freshness) => {
-            model.overview.freshness = freshness;
+        AttachmentEvent::FreshnessChanged { epoch, values } => {
+            if model.epoch == Some(epoch) {
+                model.overview.freshness = values;
+            }
             Vec::new()
         }
         AttachmentEvent::LogsChanged(changed) => invalidate_logs(model, changed),
@@ -947,7 +984,10 @@ mod tests {
 
     #[test]
     fn one_thousand_log_invalidations_coalesce_while_read_is_in_flight() {
-        let mut model = AppModel::default();
+        let mut model = AppModel {
+            epoch: Some(epoch()),
+            ..AppModel::default()
+        };
         update(
             &mut model,
             Msg::Client(AttachmentEvent::EpochChanged(epoch())),
@@ -1030,6 +1070,27 @@ mod tests {
             assert_eq!(recovery.len(), 1);
             assert!(model.logs.in_flight.is_some());
         }
+    }
+
+    #[test]
+    fn stale_epoch_latest_state_is_rejected() {
+        let current = epoch();
+        let stale = AttachmentEpoch {
+            graph_generation: current.graph_generation.saturating_sub(1),
+            ..current
+        };
+        let mut model = AppModel {
+            epoch: Some(current),
+            ..AppModel::default()
+        };
+        update(
+            &mut model,
+            Msg::Client(AttachmentEvent::DeviceChanged {
+                epoch: stale,
+                values: Arc::new(phoxal_cli_observation::DeviceObservation::default()),
+            }),
+        );
+        assert!(model.overview.devices.is_none());
     }
 
     #[test]
@@ -1211,7 +1272,7 @@ mod tests {
             &mut model,
             Msg::Navigate(NavigationMsg::Key(Key::Char('q').into())),
         );
-        assert_eq!(detach, vec![Effect::Detach]);
+        assert!(detach.is_empty());
         assert_eq!(model.exit, Some(AttachmentOutcome::Detached));
 
         let mut model = AppModel::default();
@@ -1248,6 +1309,45 @@ mod tests {
     }
 
     #[test]
+    fn permanently_lost_resident_is_a_failed_outcome() {
+        let mut model = AppModel::default();
+        update(
+            &mut model,
+            Msg::Client(AttachmentEvent::ConnectionChanged(
+                phoxal_cli_observation::ConnectionObservation::Lost {
+                    reason: "protocol mismatch".into(),
+                },
+            )),
+        );
+        assert_eq!(model.exit, Some(AttachmentOutcome::ResidentFailed));
+    }
+
+    #[test]
+    fn terminal_stop_wins_every_connection_closure_ordering() {
+        for lost_first in [false, true] {
+            for _ in 0..50 {
+                let mut model = AppModel::default();
+                let lost = Msg::Client(AttachmentEvent::ConnectionChanged(
+                    phoxal_cli_observation::ConnectionObservation::Lost {
+                        reason: "stream closed".into(),
+                    },
+                ));
+                let stopped = Msg::Client(AttachmentEvent::SupervisorChanged(Arc::new(
+                    supervisor(ProjectLifecycle::Stopped),
+                )));
+                if lost_first {
+                    update(&mut model, lost);
+                    update(&mut model, stopped);
+                } else {
+                    update(&mut model, stopped);
+                    update(&mut model, lost);
+                }
+                assert_eq!(model.exit, Some(AttachmentOutcome::ResidentStopped));
+            }
+        }
+    }
+
+    #[test]
     fn runtime_candidate_tracks_identity_and_never_retargets_a_removed_row() {
         let alpha = ProcessKey::project("alpha");
         let beta = ProcessKey::project("beta");
@@ -1255,26 +1355,34 @@ mod tests {
             (alpha.clone(), process(alpha.clone())),
             (beta.clone(), process(beta.clone())),
         ]);
-        let mut model = AppModel::default();
+        let mut model = AppModel {
+            epoch: Some(epoch()),
+            ..AppModel::default()
+        };
         update(
             &mut model,
-            Msg::Client(AttachmentEvent::ProcessesChanged(Arc::new(
-                processes.clone(),
-            ))),
+            Msg::Client(AttachmentEvent::ProcessesChanged {
+                epoch: epoch(),
+                values: Arc::new(processes.clone()),
+            }),
         );
         model.runtimes.candidate = Some(beta.clone());
         update(
             &mut model,
-            Msg::Client(AttachmentEvent::ProcessesChanged(Arc::new(
-                processes.clone(),
-            ))),
+            Msg::Client(AttachmentEvent::ProcessesChanged {
+                epoch: epoch(),
+                values: Arc::new(processes.clone()),
+            }),
         );
         assert_eq!(model.runtimes.candidate, Some(beta.clone()));
 
         processes.remove(&beta);
         update(
             &mut model,
-            Msg::Client(AttachmentEvent::ProcessesChanged(Arc::new(processes))),
+            Msg::Client(AttachmentEvent::ProcessesChanged {
+                epoch: epoch(),
+                values: Arc::new(processes),
+            }),
         );
         assert_eq!(model.runtimes.candidate, Some(alpha));
     }
@@ -1294,7 +1402,10 @@ mod tests {
         )]));
         let effects = update(
             &mut model,
-            Msg::Client(AttachmentEvent::ProcessesChanged(processes)),
+            Msg::Client(AttachmentEvent::ProcessesChanged {
+                epoch: epoch(),
+                values: processes,
+            }),
         );
         assert_eq!(model.runtimes.detail, None);
         let Effect::ReadRuntimes(read) = &effects[0] else {
@@ -1309,6 +1420,7 @@ mod tests {
         let mut process = process(key.clone());
         process.entry.status.producer = None;
         let mut model = AppModel {
+            epoch: Some(epoch()),
             route: FocusRoute::Content {
                 panel: PanelId::Runtimes(RuntimesPanelId::Processes),
             },
@@ -1487,6 +1599,7 @@ mod tests {
     #[test]
     fn input_candidate_is_distinct_from_authoritative_selection_and_acknowledgement() {
         let mut model = AppModel {
+            epoch: Some(epoch()),
             route: FocusRoute::Content {
                 panel: PanelId::Input(InputPanelId::Devices),
             },
@@ -1494,10 +1607,10 @@ mod tests {
         };
         update(
             &mut model,
-            Msg::Client(AttachmentEvent::InputChanged(Arc::new(input_observation(
-                Some("pad-a"),
-                true,
-            )))),
+            Msg::Client(AttachmentEvent::InputChanged {
+                epoch: epoch(),
+                values: Arc::new(input_observation(Some("pad-a"), true)),
+            }),
         );
         update(
             &mut model,
@@ -1528,10 +1641,10 @@ mod tests {
 
         update(
             &mut model,
-            Msg::Client(AttachmentEvent::InputChanged(Arc::new(input_observation(
-                Some("pad-b"),
-                true,
-            )))),
+            Msg::Client(AttachmentEvent::InputChanged {
+                epoch: epoch(),
+                values: Arc::new(input_observation(Some("pad-b"), true)),
+            }),
         );
         assert_eq!(model.input.pending_selection, None);
     }

@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use phoxal_cli_observation::{
-    DeviceObservation, Freshness, InputObservation, ProcessTable, SourceHealth,
-    SupervisorObservation,
+    ConnectionObservation, DeviceObservation, Freshness, InputObservation, ProcessTable,
+    SourceHealth, SupervisorObservation,
 };
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OverviewModel {
+    pub connection: Option<ConnectionObservation>,
     pub supervisor: Option<Arc<SupervisorObservation>>,
     pub processes: Arc<ProcessTable>,
     pub devices: Option<Arc<DeviceObservation>>,

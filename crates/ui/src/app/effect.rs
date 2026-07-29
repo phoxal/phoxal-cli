@@ -21,7 +21,6 @@ pub enum Effect {
     ReadLogs(LogRead),
     ReadBus(BusRead),
     ReadRuntimes(RuntimeRead),
-    Detach,
 }
 
 #[derive(Debug, Clone)]

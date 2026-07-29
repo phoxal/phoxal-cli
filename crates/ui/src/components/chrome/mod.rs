@@ -25,10 +25,28 @@ pub fn render_header(frame: &mut Frame, area: Rect, model: &AppModel, theme: The
             Span::raw(project),
             Span::raw("  "),
             Span::styled(lifecycle, crate::theme::role::fg(theme, Role::Steel)),
+            Span::raw("  "),
+            Span::styled(
+                connection_label(model.overview.connection.as_ref()),
+                crate::theme::role::fg(theme, Role::Steel),
+            ),
         ]))
         .block(Block::default().borders(Borders::BOTTOM)),
         area,
     );
+}
+
+fn connection_label(connection: Option<&phoxal_cli_observation::ConnectionObservation>) -> String {
+    use phoxal_cli_observation::ConnectionObservation;
+    match connection {
+        None => "connection waiting".to_string(),
+        Some(ConnectionObservation::Connected) => "connected".to_string(),
+        Some(ConnectionObservation::Reconnecting { attempt }) => {
+            format!("reconnecting #{attempt}")
+        }
+        Some(ConnectionObservation::Terminal) => "terminal".to_string(),
+        Some(ConnectionObservation::Lost { .. }) => "connection lost".to_string(),
+    }
 }
 
 pub fn render_tabs(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {

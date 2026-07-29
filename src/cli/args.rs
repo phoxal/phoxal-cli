@@ -26,13 +26,19 @@ pub struct Cli {
     pub project_path: Option<PathBuf>,
     #[arg(
         long,
-        env = crate::cli::context::OFFLINE_ENV,
         global = true,
-        help = "Pass --offline to every cargo install/metadata invocation this command makes."
+        help = "Pass --offline to every cargo install/metadata invocation this command makes (also PHOXAL_OFFLINE)."
     )]
     pub offline: bool,
     #[command(subcommand)]
     pub command: RootCommand,
+}
+
+impl Cli {
+    #[must_use]
+    pub fn offline(&self) -> bool {
+        self.offline || crate::cli::context::offline_from_env()
+    }
 }
 
 #[derive(Debug, Subcommand)]

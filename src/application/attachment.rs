@@ -87,17 +87,25 @@ async fn drive(
     let effect_slots = std::sync::Arc::new(Semaphore::new(EFFECT_CAPACITY));
     let mut effect_tasks = JoinSet::new();
     let mut shutdown_requested = false;
+    let mut events_open = true;
+    let mut guaranteed_open = true;
+    let mut commands_open = true;
+    let mut diagnostics_open = true;
 
-    let outcome = loop {
+    let outcome: Result<AttachmentOutcome> = loop {
         tokio::select! {
-            result = &mut ui => break result?,
+            result = &mut ui => break result,
             _ = interrupts.recv() => {
-                send_input(&ingress_tx, SessionInput::Terminate).await?;
+                if let Err(error) = send_input(&ingress_tx, SessionInput::Terminate).await {
+                    break Err(error);
+                }
             }
             _ = terminates.recv() => {
                 if shutdown_on_terminate {
                     if shutdown_requested {
-                        send_input(&ingress_tx, SessionInput::Terminate).await?;
+                        if let Err(error) = send_input(&ingress_tx, SessionInput::Terminate).await {
+                            break Err(error);
+                        }
                     } else {
                         request_resident_shutdown(
                             &mut shutdown_requested,
@@ -108,13 +116,17 @@ async fn drive(
                         );
                     }
                 } else {
-                    send_input(&ingress_tx, SessionInput::Terminate).await?;
+                    if let Err(error) = send_input(&ingress_tx, SessionInput::Terminate).await {
+                        break Err(error);
+                    }
                 }
             }
             _ = hangups.recv() => {
                 if shutdown_on_terminate {
                     if shutdown_requested {
-                        send_input(&ingress_tx, SessionInput::Terminate).await?;
+                        if let Err(error) = send_input(&ingress_tx, SessionInput::Terminate).await {
+                            break Err(error);
+                        }
                     } else {
                         request_resident_shutdown(
                             &mut shutdown_requested,
@@ -125,48 +137,68 @@ async fn drive(
                         );
                     }
                 } else {
-                    send_input(&ingress_tx, SessionInput::Terminate).await?;
+                    if let Err(error) = send_input(&ingress_tx, SessionInput::Terminate).await {
+                        break Err(error);
+                    }
                 }
             }
-            diagnostic = diagnostic_rx.recv() => {
+            diagnostic = diagnostic_rx.recv(), if diagnostics_open => {
                 if let Some(diagnostic) = diagnostic {
-                    send_input(
+                    if let Err(error) = send_input(
                         &ingress_tx,
                         SessionInput::Diagnostic(diagnostic_message(diagnostic)),
-                    ).await?;
+                    ).await {
+                        break Err(error);
+                    }
+                } else {
+                    diagnostics_open = false;
                 }
             }
-            event = events.recv() => {
-                let Some(event) = event else {
-                    anyhow::bail!(
-                        "resident supervisor disconnected before a terminal observation"
+            event = events.recv(), if events_open => {
+                if let Some(event) = event {
+                    if let Err(error) = send_input(&ingress_tx, SessionInput::Client(event)).await {
+                        break Err(error);
+                    }
+                } else {
+                    events_open = false;
+                    let disconnected = phoxal_cli_observation::AttachmentEvent::ConnectionChanged(
+                        phoxal_cli_observation::ConnectionObservation::Lost {
+                            reason: "attachment event stream ended before a terminal observation"
+                                .into(),
+                        },
                     );
-                };
-                send_input(&ingress_tx, SessionInput::Client(event)).await?;
+                    if let Err(error) =
+                        send_input(&ingress_tx, SessionInput::Client(disconnected)).await
+                    {
+                        break Err(error);
+                    }
+                }
             }
-            effect = guaranteed_rx.recv() => {
-                let Some(effect) = effect else {
-                    anyhow::bail!("attachment UI closed its guaranteed effect channel unexpectedly");
-                };
-                spawn_effect(
-                    &mut effect_tasks,
-                    &effect_slots,
-                    effect,
-                    &effect_ports,
-                    &ingress_tx,
-                );
+            effect = guaranteed_rx.recv(), if guaranteed_open => {
+                if let Some(effect) = effect {
+                    spawn_effect(
+                        &mut effect_tasks,
+                        &effect_slots,
+                        effect,
+                        &effect_ports,
+                        &ingress_tx,
+                    );
+                } else {
+                    guaranteed_open = false;
+                }
             }
-            effect = command_rx.recv() => {
-                let Some(effect) = effect else {
-                    anyhow::bail!("attachment UI closed its command effect channel unexpectedly");
-                };
-                spawn_effect(
-                    &mut effect_tasks,
-                    &effect_slots,
-                    effect,
-                    &effect_ports,
-                    &ingress_tx,
-                );
+            effect = command_rx.recv(), if commands_open => {
+                if let Some(effect) = effect {
+                    spawn_effect(
+                        &mut effect_tasks,
+                        &effect_slots,
+                        effect,
+                        &effect_ports,
+                        &ingress_tx,
+                    );
+                } else {
+                    commands_open = false;
+                }
             }
             completed = effect_tasks.join_next(), if !effect_tasks.is_empty() => {
                 if let Some(Err(error)) = completed {
@@ -177,10 +209,11 @@ async fn drive(
             }
         }
     };
+    events.close();
     effect_tasks.abort_all();
     while effect_tasks.join_next().await.is_some() {}
     runtime.shutdown().await;
-    Ok(outcome)
+    outcome
 }
 
 #[derive(Clone)]
@@ -293,7 +326,6 @@ async fn route_effect(effect: Effect, ports: &EffectPorts) -> Option<SessionInpu
         Effect::ReadRuntimes(query) => Ok(Some(SessionInput::Runtimes(
             ports.runtimes.read(query).await,
         ))),
-        Effect::Detach => Ok(None),
     };
     match result {
         Ok(input) => input,

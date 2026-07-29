@@ -4,4 +4,5 @@ mod feed;
 
 pub use commands::SupervisorCommands;
 pub use connection::is_connection_unavailable;
-pub use feed::{ConnectionState, SupervisorFeed};
+pub use feed::SupervisorFeed;
+pub use phoxal_cli_observation::ConnectionObservation;

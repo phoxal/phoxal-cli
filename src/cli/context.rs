@@ -28,9 +28,6 @@ impl AppContext {
         // context is fully constructed.
         unsafe {
             std::env::set_var(phoxal_cli_project::PROJECT_ROOT_ENV, &workspace_root);
-            if offline {
-                std::env::set_var(OFFLINE_ENV, "1");
-            }
         }
         let output = OutputContext::compute(std::io::stderr().is_terminal());
         Ok(Self {
@@ -46,6 +43,28 @@ impl AppContext {
 /// an [`AppContext`]) to hand - the identical check `--offline` performs.
 #[must_use]
 pub(crate) fn offline_from_env() -> bool {
-    std::env::var(OFFLINE_ENV)
-        .is_ok_and(|value| !value.is_empty() && !matches!(value.as_str(), "0" | "false" | "no"))
+    offline_from_value(std::env::var(OFFLINE_ENV).ok().as_deref())
+}
+
+#[must_use]
+pub(crate) fn offline_from_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        !value.is_empty() && !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::offline_from_value;
+
+    #[test]
+    fn offline_environment_accepts_shell_friendly_boolean_values() {
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(offline_from_value(Some(value)), "{value}");
+        }
+        for value in ["", "0", "false", "FALSE", "no"] {
+            assert!(!offline_from_value(Some(value)), "{value}");
+        }
+        assert!(!offline_from_value(None));
+    }
 }

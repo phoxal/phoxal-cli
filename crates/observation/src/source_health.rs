@@ -10,4 +10,5 @@ pub enum SourceStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceHealth {
     pub sources: BTreeMap<String, SourceStatus>,
+    pub ingress_dropped: u64,
 }

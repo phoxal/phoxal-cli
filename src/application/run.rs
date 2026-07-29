@@ -188,7 +188,8 @@ pub(crate) async fn start_command(app: &AppContext, requested_target: Option<&Pa
     if let Some(notify) = phoxal_cli_supervisor::systemd::notify::SdNotify::from_env()? {
         return run_resident_supervision(app, target.project, options, Some(notify)).await;
     }
-    let (mut launched, feed, _) = connect_to_detached_resident_feed(&target.project).await?;
+    let (mut launched, feed, _) =
+        connect_to_detached_resident_feed(&target.project, app.offline).await?;
     wait_for_required_readiness(&feed, &mut launched.child).await?;
     let display = target.project.display();
     app.ui.info(format!(
@@ -250,10 +251,12 @@ async fn launch_client(
     detach: bool,
 ) -> Result<()> {
     if detach {
-        let (mut launched, feed, _) = connect_to_detached_resident_feed(&target.project).await?;
+        let (mut launched, feed, _) =
+            connect_to_detached_resident_feed(&target.project, app.offline).await?;
         return wait_for_required_readiness(&feed, &mut launched.child).await;
     }
-    let (mut launched, feed, commands) = connect_to_detached_resident(&target.project).await?;
+    let (mut launched, feed, commands) =
+        connect_to_detached_resident(&target.project, app.offline).await?;
     let result = crate::application::attachment::run(app, &target, feed, commands, true).await;
     match result? {
         phoxal_cli_ui::AttachmentOutcome::ResidentFailed => {
@@ -275,24 +278,26 @@ async fn launch_client(
 /// either drive the TUI or wait for required readiness and return.
 pub(crate) async fn connect_to_detached_resident(
     project: &Path,
+    offline: bool,
 ) -> Result<(
     phoxal_cli_supervisor::resident::LaunchedResident,
     phoxal_cli_client::SupervisorFeed,
     phoxal_cli_client::SupervisorCommands,
 )> {
-    let (launched, feed, socket) = connect_to_detached_resident_feed(project).await?;
+    let (launched, feed, socket) = connect_to_detached_resident_feed(project, offline).await?;
     let commands = phoxal_cli_client::SupervisorCommands::connect(socket).await?;
     Ok((launched, feed, commands))
 }
 
 pub(crate) async fn connect_to_detached_resident_feed(
     project: &Path,
+    offline: bool,
 ) -> Result<(
     phoxal_cli_supervisor::resident::LaunchedResident,
     phoxal_cli_client::SupervisorFeed,
     PathBuf,
 )> {
-    let launched = phoxal_cli_supervisor::resident::launch_detached()?;
+    let launched = phoxal_cli_supervisor::resident::launch_detached(offline)?;
     let generation = match &launched.result {
         phoxal_cli_protocol::BootstrapResult::Bound {
             supervisor_generation,
@@ -2742,7 +2747,7 @@ mod doctor {
             }
             let train = phoxal_cli_core::project::train::resolve_locked_train(
                 app.project.root(),
-                app.offline || crate::cli::context::offline_from_env(),
+                app.offline,
             )?;
             println!(
                 "framework train: {} ({})",
@@ -2755,7 +2760,7 @@ mod doctor {
             );
             println!("train anchor: Cargo.toml and Cargo.lock are coherent");
             if train.is_published() {
-                if app.offline || crate::cli::context::offline_from_env() {
+                if app.offline {
                     println!("framework facade: crates.io probe skipped in offline mode");
                 } else {
                     match inspect_registry_train(train.version.clone()).await {
