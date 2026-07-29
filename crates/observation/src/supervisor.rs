@@ -15,4 +15,6 @@ pub struct SupervisorObservation {
     pub plan_revision: u64,
     pub graph_generation: u64,
     pub startup: StartupStatus,
+    /// Why `lifecycle` reached `Failed`; `None` for every other lifecycle.
+    pub failure: Option<String>,
 }

@@ -47,6 +47,20 @@ pub fn is_connection_unavailable(error: &anyhow::Error) -> bool {
     error.downcast_ref::<ConnectionUnavailable>().is_some()
 }
 
+/// Whether `error` reflects the resident's socket pathname being entirely
+/// gone (`ENOENT`), as opposed to merely not yet accepting connections (e.g.
+/// `ECONNREFUSED` while a resident is mid-restart, which is retryable).
+/// `ResidentSocket::close` only removes the pathname after delivering its
+/// terminal snapshot, so `ENOENT` here means the resident is not coming
+/// back - a caller retrying `connect_role` in a loop must treat this as
+/// permanent rather than keep waiting forever.
+#[must_use]
+pub(crate) fn is_connection_permanently_gone(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ConnectionUnavailable>()
+        .is_some_and(|unavailable| unavailable.source.kind() == std::io::ErrorKind::NotFound)
+}
+
 pub(crate) async fn connect_role(
     path: &Path,
     role: ConnectionRole,
@@ -103,5 +117,28 @@ mod tests {
         .await
         .unwrap_err();
         assert!(is_connection_unavailable(&error), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn only_a_missing_socket_pathname_is_classified_as_permanently_gone() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let missing = directory.path().join("missing.sock");
+        let error = connect_role(&missing, ConnectionRole::Snapshots, None)
+            .await
+            .unwrap_err();
+        assert!(is_connection_permanently_gone(&error), "{error:#}");
+
+        // A pathname whose listener has gone away but was never removed -
+        // exactly what a resident mid-restart leaves behind before
+        // `ResidentSocket::bind` recreates it - must stay retryable, not
+        // permanently gone.
+        let stale = directory.path().join("stale.sock");
+        drop(tokio::net::UnixListener::bind(&stale).unwrap());
+        let error = connect_role(&stale, ConnectionRole::Snapshots, None)
+            .await
+            .unwrap_err();
+        assert!(is_connection_unavailable(&error), "{error:#}");
+        assert!(!is_connection_permanently_gone(&error), "{error:#}");
     }
 }

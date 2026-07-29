@@ -12,7 +12,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
-use super::connection::{connect_role, is_connection_unavailable};
+use super::connection::{connect_role, is_connection_permanently_gone, is_connection_unavailable};
 use crate::reconcile::RetryBackoff;
 
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(100);
@@ -151,6 +151,19 @@ async fn snapshot_loop(
                     let connected = connect_role(&path, ConnectionRole::Snapshots, None).await;
                     let (new_stream, handshake) = match connected {
                         Ok(connected) => connected,
+                        Err(error) if is_connection_permanently_gone(&error) => {
+                            // The resident only removes its socket pathname in
+                            // `ResidentSocket::close`, after delivering its
+                            // terminal snapshot - so `ENOENT` here means it is
+                            // never coming back. Retrying forever would strand
+                            // an interactive client with no terminal snapshot
+                            // and no way to exit, so surface a permanent loss
+                            // instead of looping.
+                            connection.send_replace(ConnectionObservation::Lost {
+                                reason: "the resident's supervisor socket no longer exists".into(),
+                            });
+                            return;
+                        }
                         Err(error) if is_connection_unavailable(&error) => {
                             // An attached session remains authoritative until
                             // cancellation or a permanent identity/protocol

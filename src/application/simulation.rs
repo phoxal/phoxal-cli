@@ -53,16 +53,23 @@ pub(crate) async fn run_command(
             app.offline,
         )
         .await?;
-        return crate::application::run::wait_for_required_readiness(&feed, &mut launched.child)
-            .await;
+        return crate::application::run::wait_for_required_readiness(
+            &target.project,
+            &feed,
+            &mut launched.child,
+        )
+        .await;
     }
     let (mut launched, feed, commands) =
         crate::application::run::connect_to_detached_resident(&target.project, app.offline).await?;
     let result = crate::application::attachment::run(app, &target, feed, commands, true).await;
     match result? {
-        phoxal_cli_ui::AttachmentOutcome::ResidentFailed => {
+        phoxal_cli_ui::AttachmentOutcome::ResidentFailed { reason } => {
             let _status = tokio::task::spawn_blocking(move || launched.child.wait()).await??;
-            anyhow::bail!("resident supervisor failed")
+            anyhow::bail!(crate::application::attachment::resident_failure_message(
+                &target.project,
+                reason.as_deref()
+            ))
         }
         phoxal_cli_ui::AttachmentOutcome::ResidentStopped => {
             let status = tokio::task::spawn_blocking(move || launched.child.wait()).await??;

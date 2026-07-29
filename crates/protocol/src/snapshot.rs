@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::limits::{
     MAX_ARTIFACT_ID_BYTES, MAX_PROCESS_FAILURE_DETAIL_BYTES, MAX_PROCESS_STDERR_TAIL_BYTES,
-    MAX_SNAPSHOT_TEXT_BYTES, MAX_STARTUP_PHASES, validate_snapshot_capacity,
+    MAX_SNAPSHOT_TEXT_BYTES, MAX_STARTUP_PHASES, MAX_SUPERVISOR_FAILURE_REASON_BYTES,
+    validate_snapshot_capacity,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +53,11 @@ pub struct SupervisorSnapshotV0 {
     pub graph_generation: u64,
     pub startup: StartupStatus,
     pub processes: BTreeMap<ProcessKey, ProcessEntry>,
+    /// Why `lifecycle` reached `Failed`, set only alongside that transition.
+    /// Populated for a resident-level failure (preparation or supervision
+    /// error with no single process to blame); a single process's own
+    /// failure lives on that process's `ProcessFailure.detail` instead.
+    pub failure: Option<String>,
 }
 
 impl Default for SupervisorSnapshotV0 {
@@ -73,6 +79,7 @@ impl Default for SupervisorSnapshotV0 {
                 active_phase: None,
             },
             processes: BTreeMap::new(),
+            failure: None,
         }
     }
 }
@@ -89,6 +96,13 @@ pub fn validate_snapshot_bounds(snapshot: &SupervisorSnapshotV0) -> anyhow::Resu
             value.len() <= MAX_SNAPSHOT_TEXT_BYTES,
             "supervisor snapshot {name} is {} bytes; limit is {MAX_SNAPSHOT_TEXT_BYTES}",
             value.len()
+        );
+    }
+    if let Some(failure) = &snapshot.failure {
+        anyhow::ensure!(
+            failure.len() <= MAX_SUPERVISOR_FAILURE_REASON_BYTES,
+            "supervisor snapshot failure reason is {} bytes; limit is {MAX_SUPERVISOR_FAILURE_REASON_BYTES}",
+            failure.len()
         );
     }
     if let Some(simulation) = &snapshot.simulation {

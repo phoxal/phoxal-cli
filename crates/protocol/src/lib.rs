@@ -50,6 +50,7 @@ mod tests {
                 active_phase: None,
             },
             processes: std::collections::BTreeMap::new(),
+            failure: None,
         })
     }
 
@@ -76,7 +77,8 @@ mod tests {
                     "completed_phases": [],
                     "active_phase": null
                 },
-                "processes": {}
+                "processes": {},
+                "failure": null
             })
         );
         let decoded: SupervisorSnapshot = serde_json::from_value(value).unwrap();
@@ -93,6 +95,13 @@ mod tests {
         let mut value = serde_json::to_value(sample_snapshot()).unwrap();
         value["legacy_execution"] = serde_json::json!("simulation:webots");
         assert!(serde_json::from_value::<SupervisorSnapshot>(value).is_err());
+    }
+
+    #[test]
+    fn failure_reason_beyond_the_bound_is_rejected() {
+        let mut snapshot = sample_snapshot().into_v0();
+        snapshot.failure = Some("f".repeat(limits::MAX_SUPERVISOR_FAILURE_REASON_BYTES + 1));
+        assert!(validate_snapshot_bounds(&snapshot).is_err());
     }
 
     #[test]
@@ -213,6 +222,7 @@ mod tests {
                 active_phase: Some("s".repeat(limits::MAX_SNAPSHOT_TEXT_BYTES)),
             },
             processes,
+            failure: Some("f".repeat(limits::MAX_SUPERVISOR_FAILURE_REASON_BYTES)),
         };
         validate_snapshot_bounds(&snapshot).unwrap();
         let frame = codec::encode_frame(

@@ -406,6 +406,7 @@ mod tests {
                     completed_phases: Vec::new(),
                     active_phase: None,
                 },
+                failure: None,
             }),
         )));
         assert!(pending.drain().iter().any(|input| matches!(
