@@ -53,7 +53,7 @@ impl Start {
         // yet; every project-local path helper must agree on the selected root,
         // and the detached child inherits it.
         unsafe {
-            std::env::set_var(crate::host_paths::PROJECT_ROOT_ENV, &target.project);
+            std::env::set_var(phoxal_cli_project::PROJECT_ROOT_ENV, &target.project);
         }
 
         // The detached child of an interactive `start` re-execs `phoxal start`

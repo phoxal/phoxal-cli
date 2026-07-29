@@ -1,9 +1,3 @@
-use std::time::Duration;
-
-pub const RESTART_SEC: Duration = Duration::from_secs(2);
-pub const START_LIMIT_INTERVAL: Duration = Duration::from_secs(60);
-pub const START_LIMIT_BURST: usize = 5;
-
 const MAX_LOG_TEXT_CHARS: usize = 4_096;
 /// Four bytes per Unicode scalar keeps a complete display line bounded before
 /// lossy UTF-8 decoding. Bytes beyond this limit are drained and represented
@@ -33,9 +27,9 @@ pub use phoxal_cli_core::session::log::{
 mod board;
 pub(crate) use board::BoardBackend;
 mod spec;
+pub(crate) use phoxal_cli_core::runtime::{ParticipantSpec, RestartPolicy};
 pub(crate) use spec::{
-    ParticipantSpec, RequestedStop, RestartPolicy, SupervisorAction, SupervisorActionReceiver,
-    SupervisorOptions,
+    RequestedStop, SupervisorAction, SupervisorActionReceiver, SupervisorOptions,
 };
 mod process;
 pub(crate) use process::RunningParticipant;

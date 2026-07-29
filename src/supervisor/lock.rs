@@ -45,11 +45,7 @@ impl std::fmt::Display for ProjectOperation {
 impl ProjectLockIdentity {
     #[must_use]
     pub fn resolve(project: &Path, operation: ProjectOperation) -> Self {
-        let project = if crate::runtime_paths::is_installed_root(project) {
-            crate::runtime_paths::RuntimePaths::for_root(project).ownership_root
-        } else {
-            best_effort_absolute(project)
-        };
+        let project = best_effort_absolute(project);
         let entry = phoxal_cli_core::project::resolver::discover_robot_yaml(&project)
             .map(|entry| best_effort_absolute(&entry))
             .unwrap_or_else(|_| project.join("robot.yaml"));
@@ -111,7 +107,7 @@ pub enum ProjectLockStatus {
 impl ProjectLock {
     #[must_use]
     pub fn lock_path(project: &Path) -> PathBuf {
-        crate::runtime_paths::RuntimePaths::for_root(project).project_lock()
+        phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project).project_lock()
     }
 
     pub fn inspect(project: &Path) -> Result<ProjectLockStatus> {

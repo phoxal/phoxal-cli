@@ -1,7 +1,10 @@
 //! Pure runtime domain values shared by CLI owners.
 
+pub mod launch;
+pub mod paths;
 mod target;
 
+pub use launch::{ParticipantSpec, RestartPolicy};
 pub use target::{ResidentAuthority, RuntimeTarget};
 
 /// Domain bounds shared by launch-plan construction and its wire projection.

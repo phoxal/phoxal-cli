@@ -3,9 +3,24 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::AppContext;
-use crate::shell;
 
 const WEBOTS_FALLBACK: &str = "phoxal simulation webots run <world>";
+
+fn run_stdout(
+    executable: impl AsRef<std::ffi::OsStr>,
+    args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+) -> anyhow::Result<String> {
+    let output = std::process::Command::new(executable)
+        .args(args)
+        .output()
+        .map_err(anyhow::Error::from)?;
+    anyhow::ensure!(
+        output.status.success(),
+        "host probe exited with {}",
+        output.status
+    );
+    Ok(String::from_utf8(output.stdout)?)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeStatus {
@@ -124,8 +139,8 @@ pub fn probe_version() -> ProbeStatus {
 }
 
 pub fn probe_rust_tools() -> ProbeStatus {
-    let rustup = shell::run_stdout("rustup", ["--version"], None);
-    let cargo = shell::run_stdout("cargo", ["--version"], None);
+    let rustup = run_stdout("rustup", ["--version"]);
+    let cargo = run_stdout("cargo", ["--version"]);
     match (rustup, cargo) {
         (Ok(rustup), Ok(cargo)) => ProbeStatus::Ok(format!(
             "Rust tools: {}, {}",
@@ -230,7 +245,7 @@ fn detect_webots_executable() -> Result<WebotsExecutable, HostError> {
         return Ok(found);
     }
 
-    if let Ok(version) = shell::run_stdout("webots", ["--version"], None) {
+    if let Ok(version) = run_stdout("webots", ["--version"]) {
         return Ok(WebotsExecutable {
             path: executable_on_path("webots").unwrap_or_else(|| PathBuf::from("webots")),
             version: Some(first_line(&version, "version unavailable").to_string()),
@@ -256,7 +271,7 @@ fn first_working_executable(
         let Some(executable) = candidate.to_str() else {
             continue;
         };
-        if let Ok(version) = shell::run_stdout(executable, ["--version"], None) {
+        if let Ok(version) = run_stdout(executable, ["--version"]) {
             return Some(WebotsExecutable {
                 path: candidate,
                 version: Some(first_line(&version, "version unavailable").to_string()),

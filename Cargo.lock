@@ -2969,21 +2969,17 @@ dependencies = [
  "clap",
  "console",
  "crossterm",
- "dirs 5.0.1",
  "dotenvy",
  "flate2",
  "getrandom 0.3.4",
- "heck",
  "hex",
- "jsonschema",
  "libc",
- "nalgebra",
- "object",
  "pathdiff",
  "phoxal",
  "phoxal-api",
  "phoxal-cli-client",
  "phoxal-cli-core",
+ "phoxal-cli-project",
  "phoxal-cli-protocol",
  "phoxal-cli-ui",
  "reqwest",
@@ -2998,8 +2994,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "urdf-rs",
- "webots-proto",
 ]
 
 [[package]]
@@ -3043,7 +3037,27 @@ dependencies = [
 name = "phoxal-cli-project"
 version = "0.28.3"
 dependencies = [
+ "anyhow",
+ "clap",
+ "dirs 5.0.1",
+ "flate2",
+ "heck",
+ "hex",
+ "jsonschema",
+ "libc",
+ "nalgebra",
+ "object",
+ "pathdiff",
+ "phoxal",
  "phoxal-cli-core",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "tokio",
+ "urdf-rs",
+ "webots-proto",
 ]
 
 [[package]]

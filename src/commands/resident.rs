@@ -154,70 +154,26 @@ impl Stop {
 pub(crate) struct ProjectTarget {
     pub(crate) project: PathBuf,
     requested_entry: Option<PathBuf>,
+    runtime: phoxal_cli_core::runtime::RuntimeTarget,
 }
 
 impl ProjectTarget {
     fn runtime_target(&self) -> phoxal_cli_core::runtime::RuntimeTarget {
-        let paths = crate::runtime_paths::RuntimePaths::for_root(&self.project);
-        let router = paths.router_socket();
-        phoxal_cli_core::runtime::RuntimeTarget {
-            logical_root: self.project.clone(),
-            requested_entry: self.requested_entry.clone(),
-            project_lock: paths.project_lock(),
-            supervisor_socket: paths.supervisor_socket(),
-            zenoh_endpoint: format!("unixsock-stream/{}", router.display()),
-            zenoh_socket: router,
-            authority: if crate::runtime_paths::is_installed_root(&self.project) {
-                phoxal_cli_core::runtime::ResidentAuthority::SystemdUnit {
-                    unit: crate::runtime_paths::SYSTEMD_UNIT.to_string(),
-                }
-            } else {
-                phoxal_cli_core::runtime::ResidentAuthority::DetachedSession
-            },
-        }
+        self.runtime.clone()
     }
 }
 
 pub(crate) fn resolve_target(explicit: Option<&Path>, fallback: &Path) -> Result<ProjectTarget> {
-    let selected = explicit.unwrap_or(fallback);
-    let preserve_installed_identity =
-        selected == Path::new(crate::runtime_paths::ACTIVE_RUNTIME_ROOT);
-    let selected = if preserve_installed_identity {
-        selected.to_path_buf()
-    } else {
-        selected
-            .canonicalize()
-            .with_context(|| format!("failed to resolve {}", selected.display()))?
-    };
-    let (project, requested_entry) = if selected.is_file() {
-        (
-            selected
-                .parent()
-                .context("entry file has no parent project")?
-                .to_path_buf(),
-            Some(selected),
-        )
-    } else {
-        let entry = phoxal_cli_core::project::resolver::discover_robot_yaml(&selected)
-            .with_context(|| format!("failed to find robot.yaml from {}", selected.display()))?;
-        (
-            if preserve_installed_identity {
-                selected
-            } else {
-                entry
-                    .parent()
-                    .context("robot.yaml has no parent project")?
-                    .canonicalize()?
-            },
-            None,
-        )
-    };
+    let runtime = phoxal_cli_project::resolve_target(explicit, fallback)?;
+    let project = runtime.logical_root.clone();
+    let requested_entry = runtime.requested_entry.clone();
     // Validate the platform path limit before inspecting ownership so attach,
     // stop, and run all report the same actionable diagnostic.
     let _ = supervisor_socket_path(&project)?;
     Ok(ProjectTarget {
         project,
         requested_entry,
+        runtime,
     })
 }
 
@@ -311,10 +267,7 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             drop(stream);
         });
-        let target = ProjectTarget {
-            project: project.path().canonicalize()?,
-            requested_entry: None,
-        };
+        let target = resolve_target(Some(project.path()), Path::new("/unused"))?;
 
         let result = tokio::time::timeout(Duration::from_secs(1), connect_running(&target))
             .await

@@ -1,10 +1,7 @@
 //! Command responsibilities for run.
 
 use super::RobotFeedTarget;
-use super::{
-    InfrastructureRouter, apply_session_connect, prepare_layout_run_on_board, prepare_run_on_board,
-    report_launch_commands, stages_for_run, start_infrastructure_router,
-};
+use super::{InfrastructureRouter, stages_for_run, start_infrastructure_router};
 use crate::AppContext;
 use crate::supervisor::BoardBackend;
 use crate::supervisor::ParticipantSpec;
@@ -21,12 +18,11 @@ use clap::Args;
 use clap::ValueEnum;
 use phoxal_cli_core::identity::ExecutionId;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
-use phoxal_cli_core::project::launch_plan::PlanContext;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
-use phoxal_cli_core::project::layout::RuntimeLayout;
-use phoxal_cli_core::project::train::resolve_locked_train;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -76,18 +72,12 @@ pub struct RunOptions {
 
 #[derive(Debug)]
 pub(crate) struct PreparedRun {
-    pub(crate) ctx: PlanContext,
+    pub(crate) project_root: PathBuf,
     pub(crate) plan: LaunchPlan,
     pub(crate) board: BoardBackend,
     pub(crate) specs: Vec<ParticipantSpec>,
     pub(crate) robot_targets: Vec<RobotFeedTarget>,
-    /// The staged runtime layout root the plan's `bin/` binaries (including the
-    /// infrastructure router) resolve from: `.phoxal/bundle/` for a
-    /// source run, the layout root itself for a staged/bundle run.
-    pub(crate) staged_root: PathBuf,
-    /// The router's resolved config file, if the compiled `robot.yaml` declares
-    /// one.
-    pub(crate) router_config: Option<PathBuf>,
+    pub(crate) router: phoxal_cli_project::PreparedRouter,
 }
 
 /// Resources assembled after preparation but before the controller enters
@@ -142,7 +132,7 @@ impl Run {
         // SAFETY: command dispatch has not started worker threads for this run
         // yet; all project-local path helpers must agree on the selected root.
         unsafe {
-            std::env::set_var(crate::host_paths::PROJECT_ROOT_ENV, &target.project);
+            std::env::set_var(phoxal_cli_project::PROJECT_ROOT_ENV, &target.project);
         }
         if should_run_resident_in_process(
             app.output.interactive,
@@ -272,16 +262,13 @@ async fn resident_supervision_inner(
     let identity = ProjectLockIdentity::resolve(&project_root, ProjectOperation::Run)
         .in_execution(run.execution());
     let _lock = ProjectLock::acquire(identity)?;
-    let execution_root = match &mode {
-        ResidentMode::Run(_) => crate::runtime_paths::pin_installed_release(&project_root)?,
-        ResidentMode::Webots(_) => project_root.clone(),
-    };
+    let runtime_target = phoxal_cli_project::resolve_target(Some(&project_root), &project_root)?;
     let board = BoardBackend::new();
     board.configure(
         project_root.display().to_string(),
         "resolving",
         run.execution(),
-        crate::run::project_router_endpoint(&project_root),
+        runtime_target.zenoh_endpoint.clone(),
     );
     board.begin_phase("prepare");
     let token = tokio_util::sync::CancellationToken::new();
@@ -308,19 +295,16 @@ async fn resident_supervision_inner(
     let mut preparation = tokio::spawn(async move {
         match mode {
             ResidentMode::Run(options) => {
-                let prepare_root = execution_root;
                 let prepare_options = options.clone();
-                let blocking_board = prepare_board.clone();
-                let prepared = tokio::task::spawn_blocking(move || {
-                    prepare_run(
-                        &prepare_root,
-                        prepare_options,
-                        &prepare_ui,
-                        blocking_board,
-                        run,
-                    )
-                })
-                .await??;
+                let prepared = prepare_run(
+                    runtime_target,
+                    prepare_options,
+                    prepare_ui,
+                    prepare_board.clone(),
+                    run,
+                    prepare_token.clone(),
+                )
+                .await?;
                 prepare_board.complete_phase("prepare");
                 live_run_setup(
                     prepared,
@@ -341,12 +325,33 @@ async fn resident_supervision_inner(
                 })
             }
             ResidentMode::Webots(options) => {
-                let prepare_root = execution_root;
+                crate::host_doctor::preflight()
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+                    .context(
+                        "Webots preflight failed; live simulate cannot launch the simulator",
+                    )?;
+                let executable = crate::host_doctor::webots_executable_path()
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                let home = crate::host_doctor::webots_home_path()
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
                 let offline = options.offline;
-                let sim = tokio::task::spawn_blocking(move || {
-                    crate::simulation::prepare(&prepare_root, options, run)
-                })
-                .await??;
+                let sim = phoxal_cli_project::prepare_simulation(
+                    phoxal_cli_project::PrepareSimulationRequest {
+                        target: runtime_target,
+                        run,
+                        world: options.world,
+                        offline,
+                        webots: phoxal_cli_project::WebotsHost {
+                            executable,
+                            home: Some(home),
+                        },
+                        reporter: Arc::new(crate::ui::PreparationReporter::new(
+                            prepare_ui,
+                            prepare_token.clone(),
+                        )),
+                    },
+                )
+                .await?;
                 prepare_board.complete_phase("prepare");
                 crate::simulation::live_simulate_setup(
                     prepare_ui,
@@ -356,7 +361,6 @@ async fn resident_supervision_inner(
                     prepare_token,
                     prepare_output,
                     Some((action_tx, action_rx)),
-                    offline,
                     run,
                 )
                 .await
@@ -383,7 +387,7 @@ async fn resident_supervision_inner(
     };
     signal_task.abort();
     let Some(prepared_result) = prepared_result else {
-        finish_cancelled_preparation(&board, &mut preparation, true).await;
+        finish_cancelled_preparation(&board, &mut preparation).await;
         event_drain.abort();
         socket.close().await;
         return Ok(());
@@ -447,11 +451,7 @@ async fn drain_session_events(
 async fn finish_cancelled_preparation<T>(
     board: &BoardBackend,
     preparation: &mut tokio::task::JoinHandle<T>,
-    terminate_children: bool,
 ) {
-    if terminate_children {
-        crate::session::diagnostics::kill_active_children();
-    }
     if tokio::time::timeout(PREPARATION_CANCEL_TIMEOUT, &mut *preparation)
         .await
         .is_err()
@@ -512,40 +512,180 @@ fn spawn_readiness_notify(
 /// runs it; a staged runtime layout runs in place; anything else is a precise
 /// error. Both paths end at the same execution: the loader constructs the plan
 /// from the staged layout.
-fn prepare_run(
-    root: &Path,
+async fn prepare_run(
+    target: phoxal_cli_core::runtime::RuntimeTarget,
     options: RunOptions,
-    ui: &crate::Ui,
+    ui: crate::Ui,
     board: BoardBackend,
     run: RunIdentity,
+    cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<PreparedRun> {
-    match classify_run_root(root, options.offline)? {
-        RunRoot::Source => prepare_run_on_board(root, options, ui, board, run),
-        RunRoot::Layout => prepare_layout_run_on_board(root, options, board, run),
+    let prepared = phoxal_cli_project::prepare_run(phoxal_cli_project::PrepareRunRequest {
+        target,
+        run,
+        drivers: phoxal_cli_project::DriverRequest {
+            mode: match options.drivers {
+                DriversMode::On => phoxal_cli_project::DriverMode::On,
+                DriversMode::Off => phoxal_cli_project::DriverMode::Off,
+            },
+            subset: options.drivers_subset,
+        },
+        offline: options.offline,
+        reporter: Arc::new(crate::ui::PreparationReporter::new(ui, cancellation)),
+    })
+    .await?;
+    board.configure(
+        prepared.target.logical_root.display().to_string(),
+        prepared.train.clone(),
+        run.execution(),
+        prepared.router.endpoint.clone(),
+    );
+    board.upsert_process(
+        phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
+        crate::supervisor::ParticipantStatus::new(
+            "infrastructure-router",
+            phoxal_cli_core::session::ParticipantKind::Tool,
+            crate::supervisor::ParticipantState::Starting,
+        ),
+        phoxal_cli_core::session::StartupRequirement::Required,
+    );
+    for participant in &prepared.participants {
+        let mut status = crate::supervisor::ParticipantStatus::new(
+            &participant.id,
+            participant.kind,
+            crate::supervisor::ParticipantState::Starting,
+        )
+        .with_local(participant.local);
+        if let Some(robot) = &participant.robot {
+            status = status.with_scope(phoxal_cli_core::session::stores::telemetry::RobotScope {
+                namespace: robot.namespace.clone(),
+                robot_id: robot.robot_id.clone(),
+            });
+        }
+        board.upsert_process(
+            participant.key.clone(),
+            status,
+            participant.startup_requirement,
+        );
+        if participant.initial_state != crate::supervisor::ParticipantState::Starting
+            || participant.note.is_some()
+        {
+            board.set_state(
+                participant.key.clone(),
+                participant.initial_state,
+                participant.note.clone(),
+            );
+        }
+    }
+    let specs = prepared
+        .participants
+        .iter()
+        .filter_map(|participant| participant.launch.clone())
+        .collect();
+    Ok(PreparedRun {
+        project_root: prepared.project_root,
+        robot_targets: RobotFeedTarget::from_plan(&prepared.plan),
+        plan: prepared.plan,
+        board,
+        specs,
+        router: prepared.router,
+    })
+}
+
+pub(crate) fn report_launch_commands(
+    plan: &LaunchPlan,
+    specs: &[ParticipantSpec],
+    ui: &crate::Ui,
+) -> Result<()> {
+    let executions = plan
+        .robots
+        .iter()
+        .flat_map(|robot| &robot.participants)
+        .map(|participant| {
+            (
+                participant.launch.participant_id.as_str(),
+                &participant.execution,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    ui.info("resolved launch participants:");
+    for spec in specs {
+        let kind = launch_kind_label(executions.get(spec.id.as_str()).copied());
+        ui.info(format!(
+            "  - {} ({kind}) -> {}",
+            spec.id,
+            spec.launch_command().command_line
+        ));
+    }
+    ui.info(
+        "motion guarantees: e-stop, source freshness, finite values, and robot-authored limits; autonomous motion also requires fresh typed safety constraints",
+    );
+    Ok(())
+}
+
+fn launch_kind_label(
+    execution: Option<&phoxal_cli_core::project::launch_plan::ParticipantExecution>,
+) -> &'static str {
+    match execution {
+        None => "robot-tool",
+        Some(
+            phoxal_cli_core::project::launch_plan::ParticipantExecution::OfficialArtifact {
+                ..
+            }
+            | phoxal_cli_core::project::launch_plan::ParticipantExecution::OfficialTool { .. },
+        ) => "official",
+        Some(phoxal_cli_core::project::launch_plan::ParticipantExecution::UserService {
+            ..
+        }) => "user-service",
+        Some(phoxal_cli_core::project::launch_plan::ParticipantExecution::UserTool { .. }) => {
+            "user-tool"
+        }
+        Some(phoxal_cli_core::project::launch_plan::ParticipantExecution::ComponentDriver {
+            ..
+        }) => "driver",
     }
 }
 
-#[derive(Debug)]
-enum RunRoot {
-    Source,
-    Layout,
-}
+#[cfg(test)]
+mod launch_kind_tests {
+    use super::launch_kind_label;
+    use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 
-/// Classify a run root the way universal `run` does: a buildable source project
-/// (a Cargo train anchor resolves) is staged and run; an already-staged runtime
-/// layout (`robot.yaml` next to `bin/`, no source) runs in place; anything else
-/// is a precise error. There is no implicit `/var/phoxal` fallback.
-fn classify_run_root(root: &Path, offline: bool) -> Result<RunRoot> {
-    if resolve_locked_train(root, offline).is_ok() {
-        return Ok(RunRoot::Source);
+    #[test]
+    fn launch_kind_labels_cover_every_execution_variant_and_robot_tools() {
+        let binary_name = || "fixture".to_string();
+        assert_eq!(launch_kind_label(None), "robot-tool");
+        assert_eq!(
+            launch_kind_label(Some(&ParticipantExecution::OfficialArtifact {
+                binary_name: binary_name()
+            })),
+            "official"
+        );
+        assert_eq!(
+            launch_kind_label(Some(&ParticipantExecution::OfficialTool {
+                binary_name: binary_name()
+            })),
+            "official"
+        );
+        assert_eq!(
+            launch_kind_label(Some(&ParticipantExecution::UserService {
+                binary_name: binary_name()
+            })),
+            "user-service"
+        );
+        assert_eq!(
+            launch_kind_label(Some(&ParticipantExecution::UserTool {
+                binary_name: binary_name()
+            })),
+            "user-tool"
+        );
+        assert_eq!(
+            launch_kind_label(Some(&ParticipantExecution::ComponentDriver {
+                binary_name: binary_name()
+            })),
+            "driver"
+        );
     }
-    if RuntimeLayout::is_layout_root(root) {
-        return Ok(RunRoot::Layout);
-    }
-    bail!(
-        "{} is neither a buildable source project (no Cargo train anchor) nor a staged runtime layout (no robot.yaml next to bin/); run from a robot project or extract a build.phoxal bundle first",
-        root.display()
-    )
 }
 
 /// Keep private/headless residents in process; interactive foreground clients
@@ -662,17 +802,12 @@ pub(crate) async fn live_run_setup(
     )>,
     run: RunIdentity,
 ) -> Result<LiveRunSetup> {
-    let (router, connect) = start_infrastructure_router(
-        &prepared.staged_root,
-        &prepared.ctx.project_root,
-        prepared.router_config.clone(),
-    )
-    .await?;
-    apply_session_connect(&mut prepared.plan, &mut prepared.specs, &connect);
+    let connect = prepared.router.endpoint.clone();
+    let router = start_infrastructure_router(&prepared.router).await?;
     let revision =
         phoxal_cli_core::project::launch_plan::PlanRevision::compile(1, prepared.plan.clone())?;
     crate::supervisor::materialize_plan_binaries(
-        &prepared.ctx.project_root,
+        &prepared.project_root,
         &revision,
         &mut prepared.specs,
     )?;
@@ -828,41 +963,6 @@ mod readiness_tests {
 }
 
 #[cfg(test)]
-mod run_root_tests {
-    use super::{RunRoot, classify_run_root};
-    use std::fs;
-
-    /// A staged runtime layout: `robot.yaml` next to a `bin/` store, no Cargo
-    /// train anchor.
-    fn write_layout(root: &std::path::Path) {
-        fs::write(root.join("robot.yaml"), "schema: robot/v0\n").unwrap();
-        fs::create_dir_all(root.join("bin")).unwrap();
-    }
-
-    #[test]
-    fn classify_routes_layout_and_rejects_neither() {
-        let layout = tempfile::tempdir().unwrap();
-        write_layout(layout.path());
-        assert!(matches!(
-            classify_run_root(layout.path(), false).unwrap(),
-            RunRoot::Layout
-        ));
-
-        // Neither a buildable source project nor a staged layout: a precise
-        // error, no implicit fallback.
-        let bare = tempfile::tempdir().unwrap();
-        let error = classify_run_root(bare.path(), false)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("neither a buildable source project")
-                && error.contains("staged runtime layout"),
-            "{error}"
-        );
-    }
-}
-
-#[cfg(test)]
 mod preparation_cancellation_tests {
     use super::{BoardBackend, drain_session_events, finish_cancelled_preparation};
     use phoxal_cli_core::session::ProjectLifecycle;
@@ -876,7 +976,7 @@ mod preparation_cancellation_tests {
         // Other unit tests may be building fixtures concurrently in this
         // process. The production call passes `true`; this lifecycle-only test
         // avoids killing unrelated test-owned cargo process groups.
-        finish_cancelled_preparation(&board, &mut preparation, false).await;
+        finish_cancelled_preparation(&board, &mut preparation).await;
         assert_eq!(
             board.supervisor_snapshot().lifecycle,
             ProjectLifecycle::Stopped

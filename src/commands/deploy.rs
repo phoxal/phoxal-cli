@@ -8,10 +8,7 @@ use clap::Args;
 
 use crate::AppContext;
 
-pub(crate) const REMOTE_TOOLCHAIN_PATH: &str = r#"export PATH="$HOME/.cargo/bin:$PATH""#;
 pub(crate) const REMOTE_PHOXAL: &str = "/usr/local/bin/phoxal";
-const ARCHIVE_TAR_OPTIONS: [&str; 2] = ["--no-xattrs", "-czf"];
-const ARCHIVE_TAR_ENV: (&str, &str) = ("COPYFILE_DISABLE", "1");
 
 #[derive(Debug, Args)]
 pub struct Deploy {
@@ -35,30 +32,34 @@ impl Deploy {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         validate_ssh_target(&self.target)?;
         require_remote_phoxal(&self.target)?;
-        // Prove source-build capability before creating even a temporary
-        // directory on the robot. The prebuilt path deliberately skips this.
-        let source_target = if self.build.is_none() {
-            Some(remote_toolchain_target(&self.target)?)
+        if let Some(archive) = &self.build {
+            self.deploy_archive(archive)?;
         } else {
-            None
-        };
-        let remote_dir = create_remote_temp(&self.target)?;
-        let result = if let Some(archive) = &self.build {
-            self.deploy_prebuilt(archive, &remote_dir)
-        } else {
-            self.deploy_source(
-                app,
-                &remote_dir,
-                source_target
-                    .as_deref()
-                    .expect("source target was preflighted"),
-            )
-        };
-        let cleanup = cleanup_remote_temp(&self.target, &remote_dir);
-        result?;
-        cleanup?;
+            let output = tempfile::Builder::new()
+                .prefix("phoxal-deploy-build-")
+                .suffix(".build.phoxal")
+                .tempfile()?;
+            let built = self.build_source(app, output.path()).await?;
+
+            // The project build use case deliberately returns one locally
+            // verified archive regardless of backend. Deploy sends that exact
+            // artifact through the same remote installer as `--build`, trading
+            // one remote-local-remote transfer for a single validation and
+            // installation contract.
+            self.deploy_archive(&built.archive)?;
+        }
         app.ui.info(format!("deployed runtime to {}", self.target));
         Ok(())
+    }
+
+    fn deploy_archive(&self, archive: &Path) -> Result<()> {
+        // Create the remote deploy directory only after all source-build
+        // capability checks and compilation have succeeded.
+        let remote_dir = create_remote_temp(&self.target)?;
+        let result = self.deploy_prebuilt(archive, &remote_dir);
+        let cleanup = cleanup_remote_temp(&self.target, &remote_dir);
+        result?;
+        cleanup
     }
 
     fn deploy_prebuilt(&self, archive: &Path, remote_dir: &str) -> Result<()> {
@@ -79,80 +80,36 @@ impl Deploy {
             .context("remote installer rejected the prebuilt runtime")
     }
 
-    fn deploy_source(&self, app: &AppContext, remote_dir: &str, target_triple: &str) -> Result<()> {
-        let project =
-            crate::commands::resident::resolve_target(self.project.as_deref(), app.project.root())?
-                .project;
-        upload_source_payload(&self.target, &project, remote_dir)?;
-        let source_dir = format!("{remote_dir}/source");
-        let remote_archive = format!("{remote_dir}/build.phoxal");
-        let command = format!(
-            "{}; {}; {} build {} --target {} --output {}{}; {}",
-            REMOTE_TOOLCHAIN_PATH,
-            remote_unpack_source_command(remote_dir),
-            REMOTE_PHOXAL,
-            shell_quote(&source_dir),
-            shell_quote(target_triple),
-            shell_quote(&remote_archive),
-            // Forward --offline to the nested remote `phoxal build`
-            // invocation (organization#951 WS4 review, round 2).
-            if app.offline { " --offline" } else { "" },
-            remote_install_command(&remote_archive),
-        );
-        run_remote(&self.target, &command).context("remote source build or install failed")
+    async fn build_source(
+        &self,
+        app: &AppContext,
+        output: &Path,
+    ) -> Result<phoxal_cli_project::BuiltBundle> {
+        let target =
+            phoxal_cli_project::resolve_target(self.project.as_deref(), app.project.root())?;
+        let _lock = crate::supervisor::ProjectLock::acquire(
+            crate::supervisor::ProjectLockIdentity::resolve(
+                &target.logical_root,
+                crate::supervisor::ProjectOperation::Build,
+            ),
+        )
+        .context("failed to acquire the project lock for deploy")?;
+        let (reporter, signal_task) = crate::ui::cancellable_preparation_reporter(app.ui);
+        let built = phoxal_cli_project::build_bundle(phoxal_cli_project::BuildBundleRequest {
+            target,
+            backend: phoxal_cli_project::BuildBackend::Ssh {
+                host: self.target.clone(),
+                target: None,
+            },
+            output: Some(output.to_path_buf()),
+            publish: false,
+            offline: app.offline,
+            reporter,
+        })
+        .await;
+        signal_task.abort();
+        built.context("remote source build failed")
     }
-}
-
-/// Upload the source snapshot. Official runtimes no longer vendor into the
-/// project (organization#951 WS4): the remote `phoxal build` this snapshot
-/// feeds materializes them itself, via `cargo install` against the registry,
-/// exactly like a local build - `deploy_source` already requires a native
-/// Cargo/rustc toolchain on the remote host (see `remote_toolchain_target`),
-/// so that install is native there too, never a host cross-compile.
-pub(crate) fn upload_source_payload(target: &str, project: &Path, remote_dir: &str) -> Result<()> {
-    let snapshot = tempfile::Builder::new()
-        .prefix("phoxal-deploy-source-")
-        .tempdir()?;
-    crate::commands::build::snapshot_source(project, snapshot.path())?;
-    let source_archive = archive_directory(snapshot.path(), "phoxal-source-")?;
-    run_local(
-        "scp",
-        &[
-            "-q",
-            source_archive.path().to_string_lossy().as_ref(),
-            &format!("{target}:{remote_dir}/source.tar.gz"),
-        ],
-    )
-}
-
-fn archive_directory(root: &Path, prefix: &str) -> Result<tempfile::NamedTempFile> {
-    let archive = tempfile::Builder::new()
-        .prefix(prefix)
-        .suffix(".tar.gz")
-        .tempfile()?;
-    let status = Command::new("tar")
-        .env(ARCHIVE_TAR_ENV.0, ARCHIVE_TAR_ENV.1)
-        .args(ARCHIVE_TAR_OPTIONS)
-        .arg(archive.path())
-        .arg("-C")
-        .arg(root)
-        .arg(".")
-        .status()?;
-    anyhow::ensure!(
-        status.success(),
-        "tar archive creation failed with {status}"
-    );
-    Ok(archive)
-}
-
-pub(crate) fn remote_unpack_source_command(remote_dir: &str) -> String {
-    let source_dir = format!("{remote_dir}/source");
-    format!(
-        "set -eu; mkdir {}; tar -xzf {} -C {}",
-        shell_quote(&source_dir),
-        shell_quote(&format!("{remote_dir}/source.tar.gz")),
-        shell_quote(&source_dir),
-    )
 }
 
 pub(crate) fn remote_install_command(archive: &str) -> String {
@@ -187,33 +144,6 @@ pub(crate) fn require_remote_phoxal(target: &str) -> Result<()> {
          `/usr/local/bin/phoxal service status`; deploy never provisions the device"
     );
     Ok(())
-}
-
-pub(crate) fn remote_toolchain_target(target: &str) -> Result<String> {
-    let output = remote_output(
-        target,
-        &format!(
-            "{REMOTE_TOOLCHAIN_PATH}; command -v cargo >/dev/null && command -v rustc >/dev/null && rustc -vV"
-        ),
-    )?;
-    if !output.status.success() {
-        let arch = remote_output(target, "uname -m")?;
-        let arch = String::from_utf8_lossy(&arch.stdout).trim().to_string();
-        let triple = match arch.as_str() {
-            "aarch64" | "arm64" => "aarch64-unknown-linux-gnu",
-            "x86_64" | "amd64" => "x86_64-unknown-linux-gnu",
-            _ => "<robot-triple>",
-        };
-        bail!(
-            "{target} is missing Cargo or rustc; run `phoxal build --target {triple}`, then `phoxal deploy {target} --build <archive>`"
-        );
-    }
-    let stdout = String::from_utf8(output.stdout)?;
-    stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("host: "))
-        .map(str::to_string)
-        .context("remote `rustc -vV` did not report a host target triple")
 }
 
 pub(crate) fn create_remote_temp(target: &str) -> Result<String> {
@@ -297,56 +227,5 @@ mod tests {
             remote_install_command("/tmp/phoxal-deploy.ABC/build.phoxal"),
             "sudo -n /usr/local/bin/phoxal install '/tmp/phoxal-deploy.ABC/build.phoxal'"
         );
-    }
-
-    /// Officials no longer vendor into the project (organization#951 WS4):
-    /// `deploy_source` uploads only the source snapshot, and the remote
-    /// `phoxal build` it runs materializes officials itself via `cargo
-    /// install` - there is no second `artifacts.tar.gz` payload to unpack.
-    #[test]
-    fn source_unpack_extracts_only_the_source_payload() {
-        let command = remote_unpack_source_command("/tmp/phoxal-deploy.ABC");
-        assert!(command.contains("source.tar.gz"));
-        assert!(command.contains("/tmp/phoxal-deploy.ABC/source"));
-        assert!(!command.contains("artifacts"));
-    }
-
-    /// `archive_directory` (shared by the source payload and any future
-    /// payload) must preserve symlinks verbatim - a git-tracked source tree
-    /// can legitimately contain one.
-    #[cfg(unix)]
-    #[test]
-    fn archive_directory_preserves_symlinks() -> Result<()> {
-        let source = tempfile::tempdir()?;
-        std::fs::create_dir_all(source.path().join("real"))?;
-        std::fs::write(source.path().join("real/file"), b"ELF")?;
-        std::os::unix::fs::symlink("real", source.path().join("linked"))?;
-
-        let archive = archive_directory(source.path(), "phoxal-symlink-test-")?;
-        let extracted = tempfile::tempdir()?;
-        run_local(
-            "tar",
-            &[
-                "-xzf",
-                archive.path().to_string_lossy().as_ref(),
-                "-C",
-                extracted.path().to_string_lossy().as_ref(),
-            ],
-        )?;
-
-        let linked = extracted.path().join("linked");
-        assert!(std::fs::symlink_metadata(&linked)?.file_type().is_symlink());
-        assert_eq!(
-            std::fs::read_link(&linked)?,
-            std::path::PathBuf::from("real")
-        );
-        assert_eq!(std::fs::read(linked.join("file"))?, b"ELF");
-        Ok(())
-    }
-
-    #[test]
-    fn transfer_archives_disable_host_extended_metadata() {
-        assert_eq!(ARCHIVE_TAR_OPTIONS, ["--no-xattrs", "-czf"]);
-        assert_eq!(ARCHIVE_TAR_ENV, ("COPYFILE_DISABLE", "1"));
     }
 }

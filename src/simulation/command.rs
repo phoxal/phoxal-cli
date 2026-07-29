@@ -5,9 +5,6 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Args;
 use clap::Subcommand;
-use phoxal_cli_core::project::launch_plan::LaunchPlan;
-use phoxal_cli_core::project::launch_plan::PlanContext;
-use phoxal_cli_core::project::resolver::ResolvedRobot;
 use std::path::PathBuf;
 
 /// The `simulation` command group.
@@ -72,35 +69,6 @@ pub(crate) struct SimulateOptions {
     pub offline: bool,
 }
 
-/// Pairs the sim `LaunchPlan` with its `PlanContext` (Part 3/6): replaces the
-/// old `SimulatePlan` wrapper, which re-declared `resolved`/`project_root`/
-/// `source_participants`/`robot_path` fields `PlanContext` now owns, plus a
-/// sim-only `world_path` now carried directly by `LaunchMode::Webots` and a
-/// `bus_connect` that was always just `DEFAULT_ROUTER_CONNECT`, and a
-/// `native_tools` display list now computed from the plan at print time (see
-/// `native_tool_labels_from_plan`).
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SimPlan {
-    pub plan: LaunchPlan,
-    pub ctx: PlanContext,
-}
-
-/// Simulation always prepares from a source project, so its `PlanContext`
-/// always carries the source graph; this is the one checked unwrap (#936).
-pub(crate) fn sim_source(sim: &SimPlan) -> &phoxal_cli_core::project::launch_plan::PlanSource {
-    sim.ctx
-        .source
-        .as_ref()
-        .expect("simulation always prepares from a source project")
-}
-
-pub(crate) struct ResolvedSimulation {
-    pub(crate) robot_path: PathBuf,
-    pub(crate) project_root: PathBuf,
-    pub(crate) world_path: PathBuf,
-    pub(crate) resolved: ResolvedRobot,
-}
-
 impl SimulationRun {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let target =
@@ -114,7 +82,7 @@ impl SimulationRun {
             })?;
         // SAFETY: command dispatch has not started worker threads for this run.
         unsafe {
-            std::env::set_var(crate::host_paths::PROJECT_ROOT_ENV, &target.project);
+            std::env::set_var(phoxal_cli_project::PROJECT_ROOT_ENV, &target.project);
         }
         let options = SimulateOptions {
             world: self.world.clone(),

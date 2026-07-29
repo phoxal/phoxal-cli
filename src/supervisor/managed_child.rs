@@ -433,7 +433,7 @@ pub(crate) fn materialize_plan_binaries(
     specs: &mut [crate::supervisor::ParticipantSpec],
 ) -> Result<()> {
     let content_root =
-        crate::runtime_paths::RuntimePaths::for_root(project_root).plan_content_root();
+        phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project_root).plan_content_root();
     for spec in specs {
         if !spec.executable.is_file() {
             continue;

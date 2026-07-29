@@ -1,6 +1,5 @@
 //! Install and roll back immutable compiled runtime releases.
 
-use phoxal_cli_core::project::launch_plan::RunIdentity;
 use std::future::Future;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -12,9 +11,6 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use sha2::{Digest, Sha256};
 
-use crate::runtime_paths::{
-    ACTIVE_RUNTIME_ROOT, INSTALLED_STATE_ROOT, INSTALLED_VOLATILE_ROOT, RELEASES_ROOT, RuntimePaths,
-};
 use crate::supervisor::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 
 const READINESS_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -42,18 +38,10 @@ struct InstallRoots {
 impl InstallRoots {
     fn system() -> Self {
         Self {
-            active: PathBuf::from(ACTIVE_RUNTIME_ROOT),
-            releases: PathBuf::from(RELEASES_ROOT),
-            state: PathBuf::from(INSTALLED_STATE_ROOT),
-            volatile: PathBuf::from(INSTALLED_VOLATILE_ROOT),
-        }
-    }
-
-    fn runtime_paths(&self) -> RuntimePaths {
-        RuntimePaths {
-            ownership_root: self.active.clone(),
-            state_root: self.state.clone(),
-            volatile_root: self.volatile.clone(),
+            active: PathBuf::from(phoxal_cli_project::ACTIVE_RUNTIME_ROOT),
+            releases: PathBuf::from(phoxal_cli_project::RELEASES_ROOT),
+            state: PathBuf::from(phoxal_cli_project::INSTALLED_STATE_ROOT),
+            volatile: PathBuf::from(phoxal_cli_project::INSTALLED_VOLATILE_ROOT),
         }
     }
 }
@@ -63,7 +51,7 @@ trait ServiceManager {
     fn start(&self) -> Result<()>;
     fn wait_ready<'a>(
         &'a self,
-        paths: &'a RuntimePaths,
+        supervisor_socket: &'a Path,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 }
 
@@ -71,17 +59,17 @@ struct SystemdService;
 
 impl ServiceManager for SystemdService {
     fn stop(&self) -> Result<()> {
-        systemctl(["stop", "phoxal.service"])
+        systemctl(["stop", phoxal_cli_project::SYSTEMD_UNIT])
     }
 
     fn start(&self) -> Result<()> {
-        systemctl(["reset-failed", "phoxal.service"])?;
-        systemctl(["start", "--no-block", "phoxal.service"])
+        systemctl(["reset-failed", phoxal_cli_project::SYSTEMD_UNIT])?;
+        systemctl(["start", "--no-block", phoxal_cli_project::SYSTEMD_UNIT])
     }
 
     fn wait_ready<'a>(
         &'a self,
-        paths: &'a RuntimePaths,
+        supervisor_socket: &'a Path,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let deadline = tokio::time::Instant::now() + READINESS_TIMEOUT;
@@ -90,7 +78,7 @@ impl ServiceManager for SystemdService {
                     bail!("phoxal.service failed before readiness: {failure}");
                 }
                 if let Ok(client) =
-                    phoxal_cli_client::SupervisorClient::connect(paths.supervisor_socket()).await
+                    phoxal_cli_client::SupervisorClient::connect(supervisor_socket).await
                 {
                     match crate::run::required_readiness(&client.snapshots().current()) {
                         crate::run::Readiness::Ready => return Ok(()),
@@ -120,7 +108,7 @@ fn systemd_failure() -> Result<Option<String>> {
             "--property=ActiveState",
             "--property=NRestarts",
             "--property=Result",
-            "phoxal.service",
+            phoxal_cli_project::SYSTEMD_UNIT,
         ])
         .output()?;
     anyhow::ensure!(
@@ -159,7 +147,13 @@ impl Install {
         let archive = self.archive.canonicalize().with_context(|| {
             format!("failed to resolve build archive {}", self.archive.display())
         })?;
-        let release = install_archive(&archive, &InstallRoots::system(), &SystemdService).await?;
+        let release = install_archive(
+            &archive,
+            &InstallRoots::system(),
+            &SystemdService,
+            app.offline,
+        )
+        .await?;
         app.ui
             .info(format!("installed runtime release {}", release.display()));
         Ok(())
@@ -183,11 +177,11 @@ fn require_system_installation() -> Result<()> {
         "`phoxal install` and `phoxal rollback` require root"
     );
     anyhow::ensure!(
-        Path::new("/run/systemd/system").is_dir(),
+        Path::new(phoxal_cli_project::SYSTEMD_ACTIVE_ROOT).is_dir(),
         "systemd is not the active service manager on this host"
     );
     anyhow::ensure!(
-        Path::new("/etc/systemd/system/phoxal.service").is_file(),
+        Path::new(phoxal_cli_project::SYSTEMD_UNIT_PATH).is_file(),
         "phoxal.service is not installed; run `sudo phoxal service install` first"
     );
     Ok(())
@@ -197,6 +191,7 @@ async fn install_archive(
     archive: &Path,
     roots: &InstallRoots,
     service: &dyn ServiceManager,
+    offline: bool,
 ) -> Result<PathBuf> {
     require_build_archive(archive)?;
     let digest = sha256_file(archive)?;
@@ -216,19 +211,22 @@ async fn install_archive(
     );
     remove_dir_if_present(&candidate)?;
 
-    let prepared = (|| -> Result<()> {
-        crate::archive::extract_build_archive(archive, &candidate)?;
-        crate::runtime_header::RuntimeHeader::read_and_validate(&candidate)?;
-        crate::loader::validate_layout_plan(
-            &candidate,
-            &phoxal_cli_core::project::layout::PlanOptions::default(),
-            phoxal_cli_core::project::layout::LayoutInspection::Host,
-            RunIdentity::default(),
-        )
-        .context("installed runtime failed dry plan compilation")?;
+    let prepared = async {
+        phoxal_cli_project::validate(phoxal_cli_project::ValidateRequest {
+            source: phoxal_cli_project::ValidationSource::Archive(
+                phoxal_cli_project::ArchiveValidation {
+                    archive: archive.to_path_buf(),
+                    destination: candidate.clone(),
+                },
+            ),
+            offline,
+            reporter: std::sync::Arc::new(phoxal_cli_project::SilentReporter),
+        })
+        .await?;
         fsync_tree(&candidate)?;
-        Ok(())
-    })();
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
     if let Err(error) = prepared {
         remove_dir_if_present(&candidate)?;
         return Err(error);
@@ -271,7 +269,10 @@ async fn install_archive(
         discard_failed_release(&release, &roots.releases)?;
         return Err(error);
     }
-    if let Err(error) = service.wait_ready(&roots.runtime_paths()).await {
+    if let Err(error) = service
+        .wait_ready(&roots.volatile.join("supervisor.sock"))
+        .await
+    {
         restore_after_failed_activation(previous.as_deref(), roots, service).await?;
         discard_failed_release(&release, &roots.releases)?;
         return Err(error).context("new release was rolled back after failed readiness");
@@ -297,7 +298,10 @@ async fn rollback_release(
         restore_after_failed_activation(Some(&active), roots, service).await?;
         return Err(error);
     }
-    if let Err(error) = service.wait_ready(&roots.runtime_paths()).await {
+    if let Err(error) = service
+        .wait_ready(&roots.volatile.join("supervisor.sock"))
+        .await
+    {
         restore_after_failed_activation(Some(&active), roots, service).await?;
         return Err(error).context("rollback target failed readiness; original restored");
     }
@@ -321,7 +325,7 @@ async fn restore_after_failed_activation(
             .start()
             .context("failed to restart the previous release")?;
         service
-            .wait_ready(&roots.runtime_paths())
+            .wait_ready(&roots.volatile.join("supervisor.sock"))
             .await
             .context("previous release did not recover after rollback")?;
     } else {
@@ -544,7 +548,7 @@ mod tests {
 
         fn wait_ready<'a>(
             &'a self,
-            _paths: &'a RuntimePaths,
+            _supervisor_socket: &'a Path,
         ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
             Box::pin(async move {
                 self.operations.lock().unwrap().push("ready");

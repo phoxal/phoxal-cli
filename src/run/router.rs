@@ -2,13 +2,9 @@
 
 use super::ROUTER_READY_TIMEOUT;
 use crate::supervisor::{
-    BoardBackend, ManagedChild, ParticipantSpec, SupervisionStage, SupervisorOptions,
-    supervise_until_shutdown,
+    BoardBackend, ManagedChild, SupervisionStage, SupervisorOptions, supervise_until_shutdown,
 };
 use anyhow::{Context, Result, bail};
-use phoxal::participant::launch::env;
-use phoxal_cli_core::project::launch_plan::LaunchPlan;
-use phoxal_cli_core::project::tooling::resolve_project_path;
 use phoxal_cli_core::session::human;
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -43,9 +39,9 @@ pub(crate) struct RouterRecoveryPolicy {
 impl Default for RouterRecoveryPolicy {
     fn default() -> Self {
         Self {
-            restart_delay: crate::supervisor::RESTART_SEC,
-            start_limit_interval: crate::supervisor::START_LIMIT_INTERVAL,
-            start_limit_burst: crate::supervisor::START_LIMIT_BURST,
+            restart_delay: phoxal_cli_core::runtime::launch::RESTART_DELAY,
+            start_limit_interval: phoxal_cli_core::runtime::launch::START_LIMIT_INTERVAL,
+            start_limit_burst: phoxal_cli_core::runtime::launch::START_LIMIT_BURST,
         }
     }
 }
@@ -287,31 +283,10 @@ fn recovery_rows(
 /// because staging copies `router.config` into the layout under its relative
 /// path (#936, finding 4), so every mode resolves the same staged asset and an
 /// extracted `build.phoxal` carries its own router config.
-pub(crate) fn resolve_router_config(
-    robot: &phoxal::model::robot::v0::Robot,
-    root: &Path,
-) -> Result<Option<PathBuf>> {
-    let config = robot
-        .router
-        .config
-        .as_ref()
-        .map(|config| resolve_project_path(root, config));
-    if let Some(config) = &config {
-        anyhow::ensure!(
-            config.is_file(),
-            "router.config file {} does not exist",
-            config.display()
-        );
-    }
-    Ok(config)
-}
-
 pub(crate) async fn start_infrastructure_router(
-    staged_root: &Path,
-    project_root: &Path,
-    config: Option<PathBuf>,
-) -> Result<(InfrastructureRouter, String)> {
-    let binary = crate::stager::staged_router_binary(staged_root);
+    prepared: &phoxal_cli_project::PreparedRouter,
+) -> Result<InfrastructureRouter> {
+    let binary = prepared.binary.clone();
     anyhow::ensure!(
         binary.is_file(),
         "phoxal-infrastructure-router is not staged at {}; the staged runtime layout is \
@@ -319,30 +294,22 @@ pub(crate) async fn start_infrastructure_router(
          rebuild the bundle with `phoxal build` if you are running from an extracted archive",
         binary.display()
     );
-    let launch = RouterLaunch { binary, config };
-    let endpoint = project_router_endpoint(project_root);
-    std::fs::create_dir_all(
-        crate::runtime_paths::RuntimePaths::for_root(project_root).volatile_root,
-    )?;
+    let launch = RouterLaunch {
+        binary,
+        config: prepared.config.clone(),
+    };
+    let endpoint = prepared.endpoint.clone();
+    let socket = unixsock_stream_path(&endpoint)?;
+    if let Some(parent) = socket.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let process = launch_router_process(&launch, &endpoint).await?;
-    Ok((
-        InfrastructureRouter {
-            process,
-            launch,
-            participant_endpoint: endpoint.clone(),
-            recovery_policy: RouterRecoveryPolicy::default(),
-        },
-        endpoint,
-    ))
-}
-
-pub(crate) fn project_router_endpoint(project_root: &Path) -> String {
-    format!(
-        "unixsock-stream/{}",
-        crate::runtime_paths::RuntimePaths::for_root(project_root)
-            .router_socket()
-            .display()
-    )
+    Ok(InfrastructureRouter {
+        process,
+        launch,
+        participant_endpoint: endpoint,
+        recovery_policy: RouterRecoveryPolicy::default(),
+    })
 }
 
 async fn launch_router_process(launch: &RouterLaunch, endpoint: &str) -> Result<RouterProcess> {
@@ -455,23 +422,6 @@ fn router_start_error(
     }
 }
 
-pub(crate) fn apply_session_connect(
-    plan: &mut LaunchPlan,
-    specs: &mut [ParticipantSpec],
-    endpoint: &str,
-) {
-    for robot in &mut plan.robots {
-        for participant in &mut robot.participants {
-            participant.launch.bus.connect_endpoints = vec![endpoint.to_string()];
-        }
-    }
-    for spec in specs {
-        if let Some((_, value)) = spec.env.iter_mut().find(|(key, _)| key == env::CONNECT) {
-            *value = endpoint.to_string();
-        }
-    }
-}
-
 #[cfg(test)]
 mod readiness_gate_tests {
     use super::*;
@@ -507,9 +457,9 @@ mod readiness_gate_tests {
     /// The critical distinction the bug hinged on: a socket **file existing**
     /// is not the same as something **accepting connections** on it. Binding
     /// then dropping a listener leaves the file on disk with nothing behind
-    /// it (`ECONNREFUSED`) - exactly the "Connection refused" phase from the
-    /// field bug. A probe that only checked `Path::exists()` would pass this
-    /// case; ours must not.
+    /// it. BSD may still connect successfully to that orphaned inode, so replace
+    /// it with a plain stale file to make the portable invariant exact: path
+    /// existence alone never proves that a Unix listener is accepting.
     #[tokio::test]
     async fn probe_fails_when_the_socket_file_exists_but_nothing_is_listening() {
         let dir = scratch_dir("stale");
@@ -519,6 +469,8 @@ mod readiness_gate_tests {
                 std::os::unix::net::UnixListener::bind(&socket_path).expect("bind stale listener");
             drop(listener);
         }
+        std::fs::remove_file(&socket_path).expect("remove orphaned socket inode");
+        std::fs::write(&socket_path, b"stale").expect("write stale non-socket path");
         assert!(
             socket_path.exists(),
             "the socket file must still be on disk once its listener is dropped"
