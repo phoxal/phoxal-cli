@@ -353,10 +353,10 @@ fn handle_key(model: &mut AppModel, key: KeyEvent) -> Vec<Effect> {
         open_modal(model, ModalId::ConfirmStop);
         return Vec::new();
     }
-    if let Key::Char(digit) = key.code {
-        if let Some(page) = page_for_digit(digit) {
-            return enter_page(model, page);
-        }
+    if let Key::Char(digit) = key.code
+        && let Some(page) = page_for_digit(digit)
+    {
+        return enter_page(model, page);
     }
     match model.route.clone() {
         FocusRoute::Tabs { candidate } => match key.code {

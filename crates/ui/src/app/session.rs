@@ -33,17 +33,9 @@ pub struct UiOptions {
     pub theme: Theme,
 }
 
-#[derive(Component)]
+#[derive(Component, Default)]
 struct InputComponent {
     component: Phantom,
-}
-
-impl Default for InputComponent {
-    fn default() -> Self {
-        Self {
-            component: Phantom::default(),
-        }
-    }
 }
 
 impl AppComponent<Msg, UserEvent> for InputComponent {
