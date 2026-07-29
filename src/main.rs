@@ -34,13 +34,19 @@ fn init_tracing() {
     // without this, `SessionAwareWriter`/`SessionWriter` were dead code and a
     // live `tracing::warn!` (e.g. a Zenoh connection retry) wrote straight to
     // stderr underneath an active TUI frame instead of through the renderer.
-    tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
-        .without_time()
         .with_ansi(tracing_ansi_enabled())
-        .with_writer(SessionAwareWriter)
-        .init();
+        .with_writer(SessionAwareWriter);
+    // The private resident's stderr is the supervisor log file, where a line
+    // is read long after the fact - keep wall-clock timestamps there. Every
+    // other invocation writes to a live console and stays time-free.
+    if phoxal_cli_supervisor::resident::has_private_bootstrap() {
+        builder.init();
+    } else {
+        builder.without_time().init();
+    }
 }
 
 async fn run(cli: Cli) -> Result<()> {

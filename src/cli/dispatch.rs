@@ -5,21 +5,16 @@ use std::io::IsTerminal;
 use anyhow::{Result, bail};
 
 use super::args::{Cli, RootCommand};
-use super::commands::simulation;
 use super::{AppContext, Ui};
 
 impl RootCommand {
-    fn enters_interactive_session(&self) -> bool {
-        match self {
-            Self::Run(run) => !run.detach,
-            Self::Attach(_) => true,
-            Self::Simulation(command) => match &command.command {
-                simulation::SimulationSubcommand::Webots(webots) => match &webots.command {
-                    simulation::WebotsSubcommand::Run(run) => !run.detach,
-                },
-            },
-            _ => false,
-        }
+    /// Whether this invocation is a pure attachment client with no headless
+    /// fallback. `run` and foreground `simulation webots run` degrade to an
+    /// in-process headless resident when stderr is not a terminal (see
+    /// `application::run::should_run_resident_in_process`); `attach` has
+    /// nothing to drive but the TUI, so it alone requires a TTY.
+    fn requires_terminal(&self) -> bool {
+        matches!(self, Self::Attach(_))
     }
 
     async fn run(&self, app: &AppContext) -> Result<()> {
@@ -46,18 +41,16 @@ impl RootCommand {
 
 pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
     let terminal = std::io::stderr().is_terminal();
-    if cli.command.enters_interactive_session()
-        && !terminal
-        && !matches!(cli.command, RootCommand::Run(_))
-    {
-        bail!(
-            "interactive `run` and `simulation webots run` sessions require a terminal; run this command in a TTY"
-        );
+    if cli.command.requires_terminal() && !terminal {
+        bail!("interactive `attach` sessions require a terminal; run this command in a TTY");
     }
     let output = crate::cli::output::OutputContext::compute(terminal);
     let app = &AppContext {
         output,
-        ui: Ui::new(output.decorated()),
+        ui: Ui::new(
+            output.decorated(),
+            phoxal_cli_supervisor::resident::has_private_bootstrap(),
+        ),
         ..app.clone()
     };
     cli.command.run(app).await
@@ -69,26 +62,21 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn enters_interactive_session_covers_run_and_live_simulate_only() {
+    fn only_attach_requires_a_terminal() {
+        let attach = Cli::try_parse_from(["phoxal", "attach"]).unwrap();
+        assert!(attach.command.requires_terminal());
+
+        // `run` and foreground `simulation webots run` fall back to a headless
+        // in-process resident without a TTY - the resident child re-executes
+        // them with stderr bound to the supervisor log.
         let run = Cli::try_parse_from(["phoxal", "run"]).unwrap();
-        assert!(run.command.enters_interactive_session());
+        assert!(!run.command.requires_terminal());
 
         let live =
             Cli::try_parse_from(["phoxal", "simulation", "webots", "run", "default"]).unwrap();
-        assert!(live.command.enters_interactive_session());
-
-        let detached = Cli::try_parse_from([
-            "phoxal",
-            "simulation",
-            "webots",
-            "run",
-            "default",
-            "--detach",
-        ])
-        .unwrap();
-        assert!(!detached.command.enters_interactive_session());
+        assert!(!live.command.requires_terminal());
 
         let start = Cli::try_parse_from(["phoxal", "start"]).unwrap();
-        assert!(!start.command.enters_interactive_session());
+        assert!(!start.command.requires_terminal());
     }
 }

@@ -31,7 +31,10 @@ impl AppContext {
         }
         let output = OutputContext::compute(std::io::stderr().is_terminal());
         Ok(Self {
-            ui: Ui::new(output.decorated()),
+            ui: Ui::new(
+                output.decorated(),
+                phoxal_cli_supervisor::resident::has_private_bootstrap(),
+            ),
             project: Project::new(workspace_root)?,
             offline,
             output,

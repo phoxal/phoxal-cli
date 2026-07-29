@@ -6,7 +6,9 @@ use anyhow::{Context, Result};
 const RESIDENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const RESIDENT_LOG_ROTATIONS: usize = 3;
 
-pub(super) fn resident_log_file() -> Result<File> {
+/// Open the supervisor log for appending, returning the handle together with
+/// its path so launch errors can point the operator at the file.
+pub(super) fn resident_log_file() -> Result<(File, PathBuf)> {
     let project = std::env::var_os(phoxal_cli_core::runtime::PROJECT_ROOT_ENV)
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
@@ -32,9 +34,10 @@ pub(super) fn resident_log_file() -> Result<File> {
             }
         }
     }
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .with_context(|| format!("open resident log {}", path.display()))
+        .with_context(|| format!("open resident log {}", path.display()))?;
+    Ok((file, path))
 }

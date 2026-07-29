@@ -31,7 +31,7 @@ pub fn launch_detached(offline: bool) -> Result<LaunchedResident> {
     child_socket.set_write_timeout(Some(Duration::from_secs(30)))?;
     let child_fd = child_socket.as_raw_fd();
     let execution = ExecutionId::mint();
-    let log = resident_log_file()?;
+    let (log, log_path) = resident_log_file()?;
     let stderr = log.try_clone().context("clone resident log descriptor")?;
     let mut command = Command::new(std::env::current_exe()?);
     command
@@ -59,7 +59,12 @@ pub fn launch_detached(offline: bool) -> Result<LaunchedResident> {
     let child = command.spawn().context("spawn resident supervisor")?;
     drop(child_socket);
     let result: BootstrapResult = blocking_io::read_frame(&mut parent, MAX_HANDSHAKE_FRAME_BYTES)
-        .context("resident did not complete private bootstrap")?;
+        .with_context(|| {
+        format!(
+            "resident did not complete private bootstrap; see {}",
+            log_path.display()
+        )
+    })?;
     match &result {
         BootstrapResult::Bound {
             execution: adopted, ..
