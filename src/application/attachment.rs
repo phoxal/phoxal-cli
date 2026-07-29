@@ -96,15 +96,33 @@ async fn drive(
         tokio::select! {
             result = &mut ui => break result,
             _ = interrupts.recv() => {
-                if let Err(error) = send_input(&ingress_tx, SessionInput::Terminate).await {
-                    break Err(error);
+                // A closed ingress channel means the UI worker has already
+                // returned - its receiver lives inside `run_blocking`
+                // (session.rs), dropped only when that function returns.
+                // The send error carries nothing beyond "the UI is
+                // exiting", so award the outcome to whatever the UI future
+                // actually resolved to instead of the send error. Awaiting
+                // it here is also what guarantees the worker's
+                // `TerminalGuard` (declared before the receiver's owning
+                // `Application`, so dropped after it) has already restored
+                // the terminal before this function returns, so anything
+                // printed afterwards lands on the restored screen instead
+                // of racing into the alternate screen.
+                if send_input(&ingress_tx, SessionInput::Terminate)
+                    .await
+                    .is_err()
+                {
+                    break (&mut ui).await;
                 }
             }
             _ = terminates.recv() => {
                 if shutdown_on_terminate {
                     if shutdown_requested {
-                        if let Err(error) = send_input(&ingress_tx, SessionInput::Terminate).await {
-                            break Err(error);
+                        if send_input(&ingress_tx, SessionInput::Terminate)
+                            .await
+                            .is_err()
+                        {
+                            break (&mut ui).await;
                         }
                     } else {
                         request_resident_shutdown(
@@ -116,16 +134,22 @@ async fn drive(
                         );
                     }
                 } else {
-                    if let Err(error) = send_input(&ingress_tx, SessionInput::Terminate).await {
-                        break Err(error);
+                    if send_input(&ingress_tx, SessionInput::Terminate)
+                        .await
+                        .is_err()
+                    {
+                        break (&mut ui).await;
                     }
                 }
             }
             _ = hangups.recv() => {
                 if shutdown_on_terminate {
                     if shutdown_requested {
-                        if let Err(error) = send_input(&ingress_tx, SessionInput::Terminate).await {
-                            break Err(error);
+                        if send_input(&ingress_tx, SessionInput::Terminate)
+                            .await
+                            .is_err()
+                        {
+                            break (&mut ui).await;
                         }
                     } else {
                         request_resident_shutdown(
@@ -137,18 +161,24 @@ async fn drive(
                         );
                     }
                 } else {
-                    if let Err(error) = send_input(&ingress_tx, SessionInput::Terminate).await {
-                        break Err(error);
+                    if send_input(&ingress_tx, SessionInput::Terminate)
+                        .await
+                        .is_err()
+                    {
+                        break (&mut ui).await;
                     }
                 }
             }
             diagnostic = diagnostic_rx.recv(), if diagnostics_open => {
                 if let Some(diagnostic) = diagnostic {
-                    if let Err(error) = send_input(
+                    if send_input(
                         &ingress_tx,
                         SessionInput::Diagnostic(diagnostic_message(diagnostic)),
-                    ).await {
-                        break Err(error);
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break (&mut ui).await;
                     }
                 } else {
                     diagnostics_open = false;
@@ -156,8 +186,11 @@ async fn drive(
             }
             event = events.recv(), if events_open => {
                 if let Some(event) = event {
-                    if let Err(error) = send_input(&ingress_tx, SessionInput::Client(event)).await {
-                        break Err(error);
+                    if send_input(&ingress_tx, SessionInput::Client(event))
+                        .await
+                        .is_err()
+                    {
+                        break (&mut ui).await;
                     }
                 } else {
                     events_open = false;
@@ -167,10 +200,11 @@ async fn drive(
                                 .into(),
                         },
                     );
-                    if let Err(error) =
-                        send_input(&ingress_tx, SessionInput::Client(disconnected)).await
+                    if send_input(&ingress_tx, SessionInput::Client(disconnected))
+                        .await
+                        .is_err()
                     {
-                        break Err(error);
+                        break (&mut ui).await;
                     }
                 }
             }
@@ -344,6 +378,24 @@ fn accepted_reply(reply: phoxal_cli_protocol::CommandReply) -> Result<()> {
     Ok(())
 }
 
+/// The message for a `ResidentFailed` outcome: the supervisor-reported reason
+/// when one reached the client, otherwise a pointer to the resident's own log
+/// (the client never saw a terminal snapshot carrying a reason, e.g. the
+/// connection was lost first).
+pub(crate) fn resident_failure_message(project: &Path, reason: Option<&str>) -> String {
+    match reason {
+        Some(reason) => format!("resident supervisor failed: {reason}"),
+        None => {
+            let log =
+                phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project).supervisor_log();
+            format!(
+                "resident supervisor failed; see {} for the exact error",
+                log.display()
+            )
+        }
+    }
+}
+
 fn terminal_title(project: &Path) -> String {
     let name = project
         .file_name()
@@ -364,7 +416,9 @@ pub(crate) async fn attach_command(app: &AppContext, target: Option<&Path>) -> R
     let target = resolve_target(target, app.project.root())?;
     let (feed, commands) = connect_running(&target).await?;
     match run(app, &target, feed, commands, false).await? {
-        AttachmentOutcome::ResidentFailed => bail!("resident supervisor failed"),
+        AttachmentOutcome::ResidentFailed { reason } => {
+            bail!(resident_failure_message(&target.project, reason.as_deref()))
+        }
         AttachmentOutcome::Detached | AttachmentOutcome::ResidentStopped => Ok(()),
     }
 }
@@ -398,15 +452,23 @@ pub(crate) async fn stop_command(
             return if snapshot.lifecycle == ProjectLifecycle::Stopped {
                 Ok(())
             } else {
-                Err(anyhow::anyhow!(
-                    "resident supervisor failed during shutdown"
-                ))
+                Err(anyhow::anyhow!(resident_failure_message(
+                    &target.project,
+                    snapshot.failure.as_deref()
+                )))
             };
         }
-        snapshots
-            .changed()
-            .await
-            .context("resident disconnected before terminal snapshot")?;
+        // The feed only drops its sender (what `changed()` reports here)
+        // after giving up for good, possibly before a terminal snapshot
+        // ever arrived. `snapshot` is the last one this loop actually
+        // observed, so its reason (if the resident got that far) still
+        // wins over the generic supervisor.log pointer.
+        snapshots.changed().await.map_err(|_| {
+            anyhow::anyhow!(resident_failure_message(
+                &target.project,
+                snapshot.failure.as_deref()
+            ))
+        })?;
     }
 }
 

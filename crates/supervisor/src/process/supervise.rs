@@ -31,12 +31,13 @@ pub async fn supervise_until_shutdown(
         .map(|(key, _)| key.to_string())
         .collect::<Vec<_>>();
     if !failed_required.is_empty() {
-        board.set_lifecycle(ProjectLifecycle::Failed);
-        options.token.cancel();
-        anyhow::bail!(
+        let reason = format!(
             "required process(es) failed before startup: {}",
             failed_required.join(", ")
         );
+        board.fail(&reason);
+        options.token.cancel();
+        anyhow::bail!(reason);
     }
     let mut running = Vec::new();
     let mut stage_queue: VecDeque<SupervisionStage> = stages.into();
@@ -99,7 +100,7 @@ pub async fn supervise_until_shutdown(
                     Err(error) => {
                         let reason = format!("stage '{}' stalled: {error:#}", stage.label);
                         tracing::error!(stage = %stage.label, error = %error, "required startup phase failed");
-                        board.set_lifecycle(ProjectLifecycle::Failed);
+                        board.fail(&reason);
                         supervisor_error = Some(anyhow::anyhow!(reason));
                         token.cancel();
                         break 'supervision;
@@ -121,20 +122,22 @@ pub async fn supervise_until_shutdown(
                                 board.set_lifecycle(ProjectLifecycle::Degraded);
                             }
                             RuntimeFailurePolicy::StopProject => {
-                                supervisor_error = Some(anyhow::anyhow!(
+                                let reason = format!(
                                     "process {} exhausted its restart policy; StopProject",
                                     participant.spec.key
-                                ));
-                                board.set_lifecycle(ProjectLifecycle::Failed);
+                                );
+                                board.fail(&reason);
+                                supervisor_error = Some(anyhow::anyhow!(reason));
                                 token.cancel();
                                 break 'supervision;
                             }
                             RuntimeFailurePolicy::RecreateGraph => {
-                                supervisor_error = Some(anyhow::anyhow!(
+                                let reason = format!(
                                     "process {} requires graph recreation",
                                     participant.spec.key
-                                ));
-                                board.set_lifecycle(ProjectLifecycle::Failed);
+                                );
+                                board.fail(&reason);
+                                supervisor_error = Some(anyhow::anyhow!(reason));
                                 break 'supervision;
                             }
                         }

@@ -329,6 +329,35 @@ impl SupervisorState {
         self.modify(|snapshot| snapshot.lifecycle = lifecycle);
     }
 
+    /// Record the lifecycle as `Failed` together with the reason, in one
+    /// atomic update so a subscriber can never observe `Failed` without the
+    /// reason that caused it. This is the resident-level failure (a
+    /// preparation or supervision error with no single process to blame);
+    /// a single process's own failure is recorded on its `ProcessFailure`
+    /// via [`Self::set_state`] or [`Self::record_failure`] instead.
+    ///
+    /// First cause wins: `lifecycle` is always set to `Failed`, but `failure`
+    /// is only ever set once, from `None` to `Some`. A supervision loop can
+    /// hit several failure sites once it starts unwinding (a stalled stage,
+    /// then every remaining participant's own poll error, ...); only the
+    /// first one is the actual cause, and every call site can call `fail`
+    /// unconditionally without racing a `lifecycle != Failed` guard against
+    /// this method's own writes.
+    pub fn fail(&self, reason: &str) {
+        let reason = BoundedString::with_max_bytes(
+            reason,
+            phoxal_cli_protocol::limits::MAX_SUPERVISOR_FAILURE_REASON_BYTES,
+        )
+        .as_str()
+        .to_string();
+        self.modify(|snapshot| {
+            snapshot.lifecycle = ProjectLifecycle::Failed;
+            if snapshot.failure.is_none() {
+                snapshot.failure = Some(reason);
+            }
+        });
+    }
+
     pub fn configure(
         &self,
         project: impl Into<String>,
@@ -535,6 +564,46 @@ mod tests {
         assert!(
             failure.stderr_tail.unwrap().as_str().len()
                 <= phoxal_cli_protocol::limits::MAX_PROCESS_STDERR_TAIL_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_sets_lifecycle_and_reason_in_one_atomic_update() {
+        let state = SupervisorState::new();
+        let mut consumer = state.subscribe();
+        state.fail("catalog train floor not supported: 0.41.2 < 0.42.0");
+        consumer.changed().await.unwrap();
+        let snapshot = consumer.borrow_and_update().clone();
+        assert_eq!(snapshot.lifecycle, ProjectLifecycle::Failed);
+        assert_eq!(
+            snapshot.failure.as_deref(),
+            Some("catalog train floor not supported: 0.41.2 < 0.42.0")
+        );
+    }
+
+    #[test]
+    fn fail_keeps_the_first_reason_across_repeated_calls() {
+        let state = SupervisorState::new();
+        state.fail("stage 'router' stalled: connection refused");
+        state.fail("participant 'drive' exhausted its restart policy");
+        let snapshot = state.supervisor_snapshot();
+        assert_eq!(snapshot.lifecycle, ProjectLifecycle::Failed);
+        assert_eq!(
+            snapshot.failure.as_deref(),
+            Some("stage 'router' stalled: connection refused"),
+            "the first call's reason must survive every later call"
+        );
+    }
+
+    #[test]
+    fn fail_bounds_an_oversized_reason() {
+        let state = SupervisorState::new();
+        state.fail(&"x".repeat(1_000_000));
+        let snapshot = state.supervisor_snapshot();
+        assert_eq!(snapshot.lifecycle, ProjectLifecycle::Failed);
+        assert!(
+            snapshot.failure.expect("reason recorded").len()
+                <= phoxal_cli_protocol::limits::MAX_SUPERVISOR_FAILURE_REASON_BYTES
         );
     }
 

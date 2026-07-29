@@ -190,7 +190,7 @@ pub(crate) async fn start_command(app: &AppContext, requested_target: Option<&Pa
     }
     let (mut launched, feed, _) =
         connect_to_detached_resident_feed(&target.project, app.offline).await?;
-    wait_for_required_readiness(&feed, &mut launched.child).await?;
+    wait_for_required_readiness(&target.project, &feed, &mut launched.child).await?;
     let display = target.project.display();
     app.ui.info(format!(
         "robot instance ready; attach with `phoxal attach {display}` or stop with `phoxal stop {display}`"
@@ -253,15 +253,18 @@ async fn launch_client(
     if detach {
         let (mut launched, feed, _) =
             connect_to_detached_resident_feed(&target.project, app.offline).await?;
-        return wait_for_required_readiness(&feed, &mut launched.child).await;
+        return wait_for_required_readiness(&target.project, &feed, &mut launched.child).await;
     }
     let (mut launched, feed, commands) =
         connect_to_detached_resident(&target.project, app.offline).await?;
     let result = crate::application::attachment::run(app, &target, feed, commands, true).await;
     match result? {
-        phoxal_cli_ui::AttachmentOutcome::ResidentFailed => {
+        phoxal_cli_ui::AttachmentOutcome::ResidentFailed { reason } => {
             let _status = tokio::task::spawn_blocking(move || launched.child.wait()).await??;
-            anyhow::bail!("resident supervisor failed")
+            anyhow::bail!(crate::application::attachment::resident_failure_message(
+                &target.project,
+                reason.as_deref()
+            ))
         }
         phoxal_cli_ui::AttachmentOutcome::ResidentStopped => {
             let status = tokio::task::spawn_blocking(move || launched.child.wait()).await??;
@@ -285,8 +288,31 @@ pub(crate) async fn connect_to_detached_resident(
     phoxal_cli_client::SupervisorCommands,
 )> {
     let (launched, feed, socket) = connect_to_detached_resident_feed(project, offline).await?;
-    let commands = phoxal_cli_client::SupervisorCommands::connect(socket).await?;
+    let commands = phoxal_cli_client::SupervisorCommands::connect(socket)
+        .await
+        .map_err(|error| resident_connect_failure(project, &feed.current(), error))?;
     Ok((launched, feed, commands))
+}
+
+/// Prefer the resident's own terminal-failure reason (if the feed - which
+/// connects first, see `connect_to_detached_resident_feed` - already
+/// observed one) over a raw transport error from this second, independent
+/// connection attempt, which merely raced the resident's exit and lost.
+fn resident_connect_failure(
+    project: &Path,
+    snapshot: &phoxal_cli_protocol::SupervisorSnapshotV0,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    if snapshot.lifecycle == phoxal_cli_core::runtime::ProjectLifecycle::Failed {
+        anyhow::anyhow!(crate::application::attachment::resident_failure_message(
+            project,
+            snapshot.failure.as_deref()
+        ))
+    } else {
+        error.context(crate::application::attachment::resident_failure_message(
+            project, None,
+        ))
+    }
 }
 
 pub(crate) async fn connect_to_detached_resident_feed(
@@ -308,10 +334,20 @@ pub(crate) async fn connect_to_detached_resident_feed(
         }
     };
     let socket = phoxal_cli_supervisor::resident::supervisor_socket_path(project)?;
-    let feed = phoxal_cli_client::SupervisorFeed::connect(socket.clone()).await?;
+    // This connect races the resident's own startup; if it fails before any
+    // client ever attaches, the fallback shape below (no reason known yet)
+    // is the best a client can do - `resident_failure_message` with
+    // `reason: None` produces exactly that "may have already failed; see
+    // the log" pointer.
+    let feed = phoxal_cli_client::SupervisorFeed::connect(socket.clone())
+        .await
+        .with_context(|| crate::application::attachment::resident_failure_message(project, None))?;
     anyhow::ensure!(
         feed.current().supervisor_generation == generation,
-        "resident generation did not match private bootstrap"
+        "resident generation did not match private bootstrap; see {} for the exact error",
+        phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project)
+            .supervisor_log()
+            .display()
     );
     Ok((launched, feed, socket))
 }
@@ -518,7 +554,7 @@ async fn resident_supervision_inner(
                 socket.close().await;
                 return Ok(());
             }
-            board.set_lifecycle(phoxal_cli_core::runtime::ProjectLifecycle::Failed);
+            board.fail(&format!("{error:#}"));
             socket.close().await;
             return Err(error);
         }
@@ -546,11 +582,12 @@ async fn resident_supervision_inner(
             supervise.await?
         }
     };
-    if outcome.is_err()
-        && board.supervisor_snapshot().lifecycle
-            != phoxal_cli_core::runtime::ProjectLifecycle::Failed
-    {
-        board.set_lifecycle(phoxal_cli_core::runtime::ProjectLifecycle::Failed);
+    // `SupervisorState::fail` is first-cause-wins on its own (it only ever
+    // sets `failure` from `None`), so this unconditionally records the
+    // outcome without checking the current lifecycle first - the store owns
+    // that rule now, not this call site.
+    if let Err(error) = &outcome {
+        board.fail(&format!("{error:#}"));
     }
     drop(background_tasks);
     socket.close().await;
@@ -851,18 +888,25 @@ pub(crate) fn required_readiness(
 }
 
 pub(crate) async fn wait_for_required_readiness(
+    project: &Path,
     feed: &phoxal_cli_client::SupervisorFeed,
     child: &mut std::process::Child,
 ) -> Result<()> {
     let mut snapshots = feed.subscribe();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5 * 60);
     loop {
-        match required_readiness(&snapshots.borrow_and_update().clone()) {
+        let snapshot = snapshots.borrow_and_update().clone();
+        match required_readiness(&snapshot) {
             Readiness::Ready => return Ok(()),
             Readiness::Failed(failures) => {
-                // A failure before any participant launched (e.g. plan
-                // construction rejecting the layout) reaches Failed with an
-                // empty process list; the resident logged the precise error.
+                // A resident-level failure (e.g. the catalog train-floor
+                // check rejecting the project before any participant
+                // launched) carries its own reason on the snapshot and wins
+                // over the per-process failure list, which is empty in that
+                // case.
+                if let Some(reason) = &snapshot.failure {
+                    bail!("resident startup failed: {reason}")
+                }
                 if failures.is_empty() {
                     bail!(
                         "resident startup failed before any participant launched; see the \
@@ -874,10 +918,38 @@ pub(crate) async fn wait_for_required_readiness(
             Readiness::Pending => {}
         }
         if let Some(status) = child.try_wait()? {
-            bail!("resident exited before readiness with {status}");
+            let log =
+                phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project).supervisor_log();
+            bail!(
+                "resident exited before readiness with {status}; see {} for the exact error",
+                log.display()
+            );
         }
         tokio::select! {
-            result = snapshots.changed() => result.context("resident disconnected before readiness")?,
+            result = snapshots.changed() => {
+                if result.is_err() {
+                    // The feed's background task only drops its sender (the
+                    // condition `changed()` reports here) after giving up
+                    // for good - e.g. the permanent-ENOENT classification in
+                    // `SupervisorFeed`'s reconnect loop, which can fire
+                    // before a terminal snapshot ever arrives. `snapshot` is
+                    // the last one this loop actually observed, so surface
+                    // its reason (if the resident got that far) alongside
+                    // the log pointer, matching the child-exit branch above.
+                    let log = phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project)
+                        .supervisor_log();
+                    match &snapshot.failure {
+                        Some(reason) => bail!(
+                            "resident disconnected before readiness: {reason}; see {} for the exact error",
+                            log.display()
+                        ),
+                        None => bail!(
+                            "resident disconnected before readiness; see {} for the exact error",
+                            log.display()
+                        ),
+                    }
+                }
+            }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {},
             _ = tokio::time::sleep_until(deadline) => bail!("timed out waiting for resident startup readiness"),
         }
@@ -958,6 +1030,51 @@ pub(crate) async fn live_run_setup(
         supervisor_options,
         background_tasks,
     })
+}
+
+#[cfg(test)]
+mod resident_connect_failure_tests {
+    use super::resident_connect_failure;
+    use phoxal_cli_core::runtime::ProjectLifecycle;
+    use phoxal_cli_protocol::SupervisorSnapshotV0;
+    use std::path::Path;
+
+    #[test]
+    fn a_failed_snapshot_reason_wins_over_the_raw_transport_error() {
+        let snapshot = SupervisorSnapshotV0 {
+            lifecycle: ProjectLifecycle::Failed,
+            failure: Some("catalog train floor not supported".to_string()),
+            ..SupervisorSnapshotV0::default()
+        };
+        let error = resident_connect_failure(
+            Path::new("/tmp/project"),
+            &snapshot,
+            anyhow::anyhow!("connection refused"),
+        );
+        assert_eq!(
+            error.to_string(),
+            "resident supervisor failed: catalog train floor not supported"
+        );
+    }
+
+    #[test]
+    fn a_non_failed_snapshot_keeps_the_transport_error_as_context() {
+        let snapshot = SupervisorSnapshotV0 {
+            lifecycle: ProjectLifecycle::Starting,
+            ..SupervisorSnapshotV0::default()
+        };
+        let error = resident_connect_failure(
+            Path::new("/tmp/project"),
+            &snapshot,
+            anyhow::anyhow!("connection refused"),
+        );
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("resident supervisor failed; see"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("connection refused"), "{rendered}");
+    }
 }
 
 #[cfg(test)]
@@ -1198,9 +1315,31 @@ mod installation {
                     if let Ok(feed) =
                         phoxal_cli_client::SupervisorFeed::connect(supervisor_socket).await
                     {
-                        match crate::application::run::required_readiness(&feed.current()) {
+                        let snapshot = feed.current();
+                        match crate::application::run::required_readiness(&snapshot) {
                             crate::application::run::Readiness::Ready => return Ok(()),
                             crate::application::run::Readiness::Failed(failures) => {
+                                // Mirrors `wait_for_required_readiness`: a
+                                // resident-level failure (no single process
+                                // to blame) carries its own reason on the
+                                // snapshot and must win over an empty
+                                // per-process failure list, which otherwise
+                                // renders as a dangling, cause-free colon.
+                                if let Some(reason) = &snapshot.failure {
+                                    bail!("installed runtime failed readiness: {reason}")
+                                }
+                                if failures.is_empty() {
+                                    let log =
+                                        phoxal_cli_core::runtime::paths::RuntimePaths::for_root(
+                                            Path::new(phoxal_cli_project::ACTIVE_RUNTIME_ROOT),
+                                        )
+                                        .supervisor_log();
+                                    bail!(
+                                        "installed runtime failed readiness before any participant \
+                                         launched; see {} for the exact error",
+                                        log.display()
+                                    )
+                                }
                                 bail!(
                                     "installed runtime failed readiness: {}",
                                     failures.join(", ")

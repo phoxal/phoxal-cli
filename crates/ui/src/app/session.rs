@@ -95,6 +95,29 @@ pub async fn run(
         .context("attachment UI worker panicked")?
 }
 
+/// Force a full clear and repaint without any DSR (cursor-position)
+/// round-trip.
+///
+/// `Application::init` below starts tui-realm's async crossterm event
+/// listener, which owns the event source for the rest of the session (an
+/// indefinite `event::read`/`poll`). `Terminal::clear()` queries the
+/// backend's cursor position first (a `ESC[6n` device status report and
+/// reply), and that query can never interleave with the listener's active
+/// poll, so it always times out. `Terminal::resize()` performs the same
+/// full clear plus back-buffer reset for a fullscreen viewport with no
+/// cursor query, so it is the only safe way to force a full repaint once
+/// the listener is running - and this is called both before and after the
+/// listener starts, so it is used unconditionally.
+fn force_full_repaint<B>(terminal: &mut Terminal<B>) -> Result<()>
+where
+    B: tuirealm::ratatui::backend::Backend,
+    B::Error: Send + Sync + 'static,
+{
+    let area = terminal.size()?.into();
+    terminal.resize(area)?;
+    Ok(())
+}
+
 fn run_blocking(
     handle: Handle,
     ingress: mpsc::Receiver<SessionInput>,
@@ -105,7 +128,7 @@ fn run_blocking(
     let _guard = TerminalGuard::enter(&title)?;
     let backend = CrosstermBackend::new(io::stderr());
     let mut terminal: Terminal<CrosstermBackend<Stderr>> = Terminal::new(backend)?;
-    terminal.clear()?;
+    force_full_repaint(&mut terminal)?;
     TerminalGuard::set_title(&title)?;
 
     let model = Rc::new(RefCell::new(AppModel::default()));
@@ -150,12 +173,12 @@ fn render_requested(
         (
             state.redraw_requested,
             state.clear_requested,
-            state.exit,
+            state.exit.clone(),
             state.route.page(),
         )
     };
     if clear {
-        terminal.clear()?;
+        force_full_repaint(terminal)?;
         model.borrow_mut().clear_requested = false;
     }
     if redraw {
@@ -263,6 +286,34 @@ const fn component_for_page(page: PageId) -> ComponentId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tuirealm::ratatui::backend::TestBackend;
+    use tuirealm::ratatui::widgets::Paragraph;
+
+    #[test]
+    fn force_full_repaint_clears_the_backend_so_the_next_draw_is_a_full_redraw() {
+        let mut terminal = Terminal::new(TestBackend::new(4, 2)).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("xx"), Rect::new(0, 0, 4, 1));
+            })
+            .expect("first draw");
+        terminal.backend().assert_buffer_lines(["xx  ", "    "]);
+
+        force_full_repaint(&mut terminal).expect("force full repaint");
+        // `resize` clears the fullscreen viewport through the backend's own
+        // clear-region call, proving the previous frame's content - and the
+        // diffing state that would otherwise skip cells already considered
+        // blank - is actually gone before the next draw, not just logically
+        // superseded.
+        terminal.backend().assert_buffer_lines(["    ", "    "]);
+
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("yy"), Rect::new(0, 0, 4, 1));
+            })
+            .expect("second draw");
+        terminal.backend().assert_buffer_lines(["yy  ", "    "]);
+    }
 
     #[test]
     fn confirmed_stop_uses_guaranteed_channel_when_command_queue_is_full() {

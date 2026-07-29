@@ -29,9 +29,15 @@ pub struct EffectSenders {
     pub commands: mpsc::Sender<Effect>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachmentOutcome {
     Detached,
     ResidentStopped,
-    ResidentFailed,
+    /// `reason` is the supervisor-reported failure when one reached the
+    /// client; `None` means the connection was lost with no supervisor
+    /// failure ever observed (see `update_client`'s `ConnectionChanged`
+    /// handling).
+    ResidentFailed {
+        reason: Option<String>,
+    },
 }

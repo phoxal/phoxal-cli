@@ -60,12 +60,20 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
             Vec::new()
         }
         AttachmentEvent::ConnectionChanged(connection) => {
+            // A connection loss never overrides a supervisor-reported failure
+            // or stop that already arrived (see the ordering tests below); it
+            // only fills in an exit when the client never saw a terminal
+            // snapshot at all. `reason` is deliberately `None` here - a
+            // transport loss is not a supervisor-reported cause, so the
+            // caller falls through to its own supervisor.log pointer instead
+            // of surfacing this transport-level text as if the resident had
+            // explained itself.
             if matches!(
                 &connection,
                 phoxal_cli_observation::ConnectionObservation::Lost { .. }
             ) && model.exit.is_none()
             {
-                model.exit = Some(AttachmentOutcome::ResidentFailed);
+                model.exit = Some(AttachmentOutcome::ResidentFailed { reason: None });
             }
             model.overview.connection = Some(connection);
             Vec::new()
@@ -73,8 +81,10 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
         AttachmentEvent::SupervisorChanged(supervisor) => {
             model.exit = match supervisor.lifecycle {
                 ProjectLifecycle::Stopped => Some(AttachmentOutcome::ResidentStopped),
-                ProjectLifecycle::Failed => Some(AttachmentOutcome::ResidentFailed),
-                _ => model.exit,
+                ProjectLifecycle::Failed => Some(AttachmentOutcome::ResidentFailed {
+                    reason: supervisor.failure.clone(),
+                }),
+                _ => model.exit.clone(),
             };
             model.overview.supervisor = Some(supervisor);
             Vec::new()
@@ -1305,11 +1315,63 @@ mod tests {
                 ProjectLifecycle::Failed,
             )))),
         );
-        assert_eq!(model.exit, Some(AttachmentOutcome::ResidentFailed));
+        assert_eq!(
+            model.exit,
+            Some(AttachmentOutcome::ResidentFailed { reason: None })
+        );
     }
 
     #[test]
-    fn permanently_lost_resident_is_a_failed_outcome() {
+    fn supervisor_failure_reason_flows_into_the_exit_outcome() {
+        let mut model = AppModel::default();
+        update(
+            &mut model,
+            Msg::Client(AttachmentEvent::SupervisorChanged(Arc::new(
+                supervisor_with_failure(
+                    ProjectLifecycle::Failed,
+                    Some("catalog train floor not supported: 0.41.2 < 0.42.0"),
+                ),
+            ))),
+        );
+        assert_eq!(
+            model.exit,
+            Some(AttachmentOutcome::ResidentFailed {
+                reason: Some("catalog train floor not supported: 0.41.2 < 0.42.0".to_string())
+            })
+        );
+    }
+
+    #[test]
+    fn a_supervisor_failure_reason_wins_over_a_connection_loss_in_either_ordering() {
+        for lost_first in [false, true] {
+            let mut model = AppModel::default();
+            let lost = Msg::Client(AttachmentEvent::ConnectionChanged(
+                phoxal_cli_observation::ConnectionObservation::Lost {
+                    reason: "stream closed".into(),
+                },
+            ));
+            let failed = Msg::Client(AttachmentEvent::SupervisorChanged(Arc::new(
+                supervisor_with_failure(ProjectLifecycle::Failed, Some("prepare failed")),
+            )));
+            if lost_first {
+                update(&mut model, lost);
+                update(&mut model, failed);
+            } else {
+                update(&mut model, failed);
+                update(&mut model, lost);
+            }
+            assert_eq!(
+                model.exit,
+                Some(AttachmentOutcome::ResidentFailed {
+                    reason: Some("prepare failed".to_string())
+                }),
+                "lost_first={lost_first}"
+            );
+        }
+    }
+
+    #[test]
+    fn permanently_lost_resident_is_a_failed_outcome_with_no_supervisor_reason() {
         let mut model = AppModel::default();
         update(
             &mut model,
@@ -1319,7 +1381,14 @@ mod tests {
                 },
             )),
         );
-        assert_eq!(model.exit, Some(AttachmentOutcome::ResidentFailed));
+        // The transport-level reason ("protocol mismatch") is deliberately
+        // NOT carried into the outcome: a connection loss is never a
+        // supervisor-reported cause, so the caller must fall through to its
+        // own supervisor.log pointer instead.
+        assert_eq!(
+            model.exit,
+            Some(AttachmentOutcome::ResidentFailed { reason: None })
+        );
     }
 
     #[test]
@@ -1740,6 +1809,13 @@ mod tests {
     }
 
     fn supervisor(lifecycle: ProjectLifecycle) -> SupervisorObservation {
+        supervisor_with_failure(lifecycle, None)
+    }
+
+    fn supervisor_with_failure(
+        lifecycle: ProjectLifecycle,
+        failure: Option<&str>,
+    ) -> SupervisorObservation {
         SupervisorObservation {
             supervisor_generation: 1,
             revision: 1,
@@ -1756,6 +1832,7 @@ mod tests {
                 completed_phases: Vec::new(),
                 active_phase: None,
             },
+            failure: failure.map(str::to_string),
         }
     }
 

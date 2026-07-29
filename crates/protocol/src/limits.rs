@@ -8,6 +8,12 @@ pub const MAX_SUPERVISED_PROCESSES: usize = phoxal_cli_core::runtime::MAX_SUPERV
 pub const MAX_PROCESS_FAILURE_DETAIL_BYTES: usize =
     phoxal_cli_core::runtime::BoundedString::FAILURE_MAX_BYTES;
 pub const MAX_PROCESS_STDERR_TAIL_BYTES: usize = phoxal_cli_core::runtime::BoundedString::MAX_BYTES;
+/// The resident-level failure reason (why the whole supervised graph reached
+/// `Failed`, as opposed to one process's failure detail) shares the same
+/// bound as a single process's failure detail: both carry an `anyhow` error
+/// chain rendered with `{:#}`.
+pub const MAX_SUPERVISOR_FAILURE_REASON_BYTES: usize =
+    phoxal_cli_core::runtime::BoundedString::FAILURE_MAX_BYTES;
 pub const MAX_ARTIFACT_ID_BYTES: usize = phoxal_cli_core::runtime::MAX_RUNTIME_ARTIFACT_ID_BYTES;
 pub const MAX_SNAPSHOT_TEXT_BYTES: usize = phoxal_cli_core::runtime::MAX_RUNTIME_TEXT_BYTES;
 pub const MAX_HANDSHAKE_FRAME_BYTES: usize = 4 * 1024;
@@ -27,8 +33,10 @@ pub const MAX_ENCODED_PROCESS_BYTES: usize = 6
         + MAX_PROCESS_STDERR_TAIL_BYTES
         + 5 * MAX_SNAPSHOT_TEXT_BYTES)
     + 8 * 1024;
-pub const MAX_ENCODED_SNAPSHOT_FIXED_BYTES: usize =
-    6 * (10 + MAX_STARTUP_PHASES + 1) * MAX_SNAPSHOT_TEXT_BYTES + 64 * 1024;
+pub const MAX_ENCODED_SNAPSHOT_FIXED_BYTES: usize = 6
+    * ((10 + MAX_STARTUP_PHASES + 1) * MAX_SNAPSHOT_TEXT_BYTES
+        + MAX_SUPERVISOR_FAILURE_REASON_BYTES)
+    + 64 * 1024;
 
 #[must_use]
 pub const fn worst_case_snapshot_bytes(process_count: usize) -> Option<usize> {

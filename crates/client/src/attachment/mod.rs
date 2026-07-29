@@ -392,6 +392,7 @@ fn supervisor_observation(snapshot: &SupervisorSnapshotV0) -> SupervisorObservat
         plan_revision: snapshot.plan_revision,
         graph_generation: snapshot.graph_generation,
         startup: snapshot.startup.clone(),
+        failure: snapshot.failure.clone(),
     }
 }
 

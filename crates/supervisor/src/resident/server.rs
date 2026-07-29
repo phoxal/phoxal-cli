@@ -15,6 +15,7 @@ use phoxal_cli_protocol::{
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::{SupervisorAction, SupervisorState};
 
@@ -26,6 +27,17 @@ pub(super) struct ServerState {
     pub(super) actions: mpsc::Sender<SupervisorAction>,
     pub(super) supervisor_token: CancellationToken,
     pub(super) sessions: Arc<Mutex<CommandSessions>>,
+    /// Every accepted connection is spawned onto this tracker from the
+    /// moment `accept_loop` dequeues it - handshake included - so there is
+    /// no window where an accepted connection is invisible to
+    /// `ResidentSocket::close`. A command connection can stay open
+    /// indefinitely, so once `handle_connection` classifies one it hands
+    /// off to an untracked task and returns, freeing its tracked slot; a
+    /// snapshot connection never hands off, since its own completion (a
+    /// terminal frame written, or a connection error) is exactly the signal
+    /// `close` needs. See `handle_connection` and `ResidentSocket::close`'s
+    /// doc comment.
+    pub(super) connection_tracker: TaskTracker,
 }
 
 impl ServerState {
@@ -33,12 +45,14 @@ impl ServerState {
         board: SupervisorState,
         actions: mpsc::Sender<SupervisorAction>,
         supervisor_token: CancellationToken,
+        connection_tracker: TaskTracker,
     ) -> Self {
         Self {
             board,
             actions,
             supervisor_token,
             sessions: Arc::default(),
+            connection_tracker,
         }
     }
 }
@@ -54,7 +68,13 @@ pub(super) async fn accept_loop(
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
                     let state = state.clone();
-                    tokio::spawn(async move {
+                    // Cloned before `state` moves into the spawned future,
+                    // and spawned on the tracker (not a bare `tokio::spawn`)
+                    // so this connection is tracked synchronously, in the
+                    // same loop iteration as its acceptance - no await
+                    // separates "accepted" from "tracked".
+                    let tracker = state.connection_tracker.clone();
+                    tracker.spawn(async move {
                         if let Err(error) = handle_connection(stream, state).await {
                             tracing::debug!(error = %error, "supervisor client disconnected");
                         }
@@ -106,10 +126,25 @@ async fn handle_connection(mut stream: UnixStream, state: ServerState) -> Result
     )
     .await?;
     match request.role {
+        // Already running on `connection_tracker` (see `accept_loop`), and
+        // stays there for its whole life: `serve_snapshots` only returns
+        // after writing a terminal frame or hitting a connection error, so
+        // the task's exit IS delivery completion (or a definitive reason it
+        // can never complete).
         ConnectionRole::Snapshots => serve_snapshots(stream, state.board).await,
         ConnectionRole::Commands => {
+            // Classified as long-lived: hand off to an untracked task now,
+            // so it can stay open indefinitely without holding
+            // `ResidentSocket::close`'s bounded wait open. The handshake
+            // above already ran on the tracker, so there was no window
+            // where this connection was invisible to `close`.
             let session = session.expect("command role issued a session");
-            serve_commands(stream, state, session).await
+            tokio::spawn(async move {
+                if let Err(error) = serve_commands(stream, state, session).await {
+                    tracing::debug!(error = %error, "supervisor client disconnected");
+                }
+            });
+            Ok(())
         }
     }
 }
@@ -196,6 +231,7 @@ mod tests {
             actions,
             supervisor_token: token,
             sessions: Arc::default(),
+            connection_tracker: TaskTracker::new(),
         };
         let session = issue_or_resume_session(&state.sessions, None);
         let request = |sequence, restart_of| CommandRequest {
@@ -240,6 +276,7 @@ mod tests {
             actions,
             supervisor_token: CancellationToken::new(),
             sessions: Arc::default(),
+            connection_tracker: TaskTracker::new(),
         };
         let request = |session, restart_of| CommandRequest {
             supervisor_generation: board.supervisor_snapshot().supervisor_generation,
@@ -285,6 +322,7 @@ mod tests {
             actions,
             supervisor_token: CancellationToken::new(),
             sessions: Arc::default(),
+            connection_tracker: TaskTracker::new(),
         };
         let session = issue_or_resume_session(&state.sessions, None);
         let generation = board.supervisor_snapshot().supervisor_generation;
@@ -348,6 +386,7 @@ mod tests {
             actions,
             supervisor_token: CancellationToken::new(),
             sessions: Arc::default(),
+            connection_tracker: TaskTracker::new(),
         };
         let healthy_session = issue_or_resume_session(&state.sessions, None);
         let (mut client, server) = UnixStream::pair().unwrap();
