@@ -22,10 +22,10 @@ use std::io::{self, IsTerminal, Stderr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, Once, OnceLock, PoisonError};
 
-use crossterm::cursor::Show;
-use crossterm::execute;
-use crossterm::style::Print;
-use crossterm::terminal::{
+use tuirealm::ratatui::crossterm::cursor::Show;
+use tuirealm::ratatui::crossterm::execute;
+use tuirealm::ratatui::crossterm::style::Print;
+use tuirealm::ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
 };
 

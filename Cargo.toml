@@ -114,14 +114,12 @@ semver = { workspace = true, features = ["serde"] }
 self_replace = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
-pathdiff = { workspace = true }
 tar = { workspace = true }
 
 phoxal = { workspace = true }
 phoxal-api = { workspace = true }
 phoxal-cli-client = { workspace = true }
 phoxal-cli-core = { workspace = true }
-phoxal-cli-observation = { workspace = true }
 phoxal-cli-project = { workspace = true }
 phoxal-cli-protocol = { workspace = true }
 phoxal-cli-supervisor = { workspace = true }
@@ -130,7 +128,6 @@ tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
 dotenvy = "0.15.7"
 tempfile = { workspace = true }
-crossterm = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

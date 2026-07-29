@@ -13,8 +13,6 @@ phoxal-cli-core = { workspace = true }
 phoxal-cli-observation = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 tracing = { workspace = true }
-crossterm = { workspace = true }
-unicode-width = { workspace = true }
 tuirealm = { workspace = true }
 tui-realm-stdlib = { workspace = true }
 

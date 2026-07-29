@@ -3093,17 +3093,14 @@ dependencies = [
  "anyhow",
  "clap",
  "console",
- "crossterm",
  "dotenvy",
  "flate2",
  "hex",
  "libc",
- "pathdiff",
  "phoxal",
  "phoxal-api",
  "phoxal-cli-client",
  "phoxal-cli-core",
- "phoxal-cli-observation",
  "phoxal-cli-project",
  "phoxal-cli-protocol",
  "phoxal-cli-supervisor",
@@ -3227,14 +3224,12 @@ version = "0.28.6"
 dependencies = [
  "anyhow",
  "console",
- "crossterm",
  "phoxal-cli-core",
  "phoxal-cli-observation",
  "tokio",
  "tracing",
  "tui-realm-stdlib",
  "tuirealm",
- "unicode-width",
 ]
 
 [[package]]
