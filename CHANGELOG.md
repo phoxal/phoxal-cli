@@ -4,6 +4,18 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.28.10](https://github.com/phoxal/phoxal-cli/releases/tag/v0.28.10) - 2026-07-29
+
+
+### Fixed
+
+- *(cli)* Let the resident child of a foreground simulation run bootstrap ([#251](https://github.com/phoxal/phoxal-cli/pull/251))
+
+### Other
+
+- Move the installer's canonical home to phoxal/website ([#249](https://github.com/phoxal/phoxal-cli/pull/249))
+
+
 ## [0.28.9](https://github.com/phoxal/phoxal-cli/releases/tag/v0.28.9) - 2026-07-29
 
 
