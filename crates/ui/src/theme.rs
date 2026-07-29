@@ -13,6 +13,8 @@ use std::io::IsTerminal;
 
 use console::Style;
 
+pub(crate) mod role;
+
 /// A brand color in its canonical truecolor form. Every degraded
 /// representation ([`ColorCapability::Ansi256`], [`ColorCapability::Ansi16`])
 /// is derived from this at render time, never hand-picked separately, so the

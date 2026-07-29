@@ -131,8 +131,8 @@ pub enum RootCommand {
 }
 
 impl RootCommand {
-    /// Whether this invocation drives a [`crate::session::controller::SessionController`]-owned
-    /// interactive session (`run` or foreground `simulation webots run`).
+    /// Whether this invocation drives an interactive attachment application
+    /// (`run`, `attach`, or foreground `simulation webots run`).
     fn enters_interactive_session(&self) -> bool {
         match self {
             Self::Run(run) => !run.detach,
@@ -178,7 +178,7 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
             "interactive `run` and `simulation webots run` sessions require a terminal; run this command in a TTY"
         );
     }
-    let output = crate::session::output::OutputContext::compute(terminal);
+    let output = crate::cli::output::OutputContext::compute(terminal);
 
     // Compute terminal presentation once and thread it into every long-running
     // operation through `AppContext::output` and `AppContext::ui`.
@@ -285,7 +285,7 @@ mod tests {
     }
 
     /// `phoxal start` is headless: it never drives the interactive
-    /// `SessionController`/TUI, so it must never be classified as an interactive
+    /// attachment application, so it must never be classified as an interactive
     /// session (that classification is exactly what mounts the TUI for `run`).
     #[test]
     fn start_is_headless_and_never_enters_the_interactive_session() {

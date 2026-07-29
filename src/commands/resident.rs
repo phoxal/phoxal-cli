@@ -29,42 +29,14 @@ impl Attach {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let target = resolve_target(self.target.as_deref(), app.project.root())?;
         let (feed, commands) = connect_running(&target).await?;
-        drive_tui(app, &target, feed, commands, false)
-            .await
-            .map(|_| ())
+        match crate::application::attachment::run(app, &target, feed, commands, false).await? {
+            phoxal_cli_ui::AttachmentOutcome::ResidentFailed => {
+                anyhow::bail!("resident supervisor failed")
+            }
+            phoxal_cli_ui::AttachmentOutcome::Detached
+            | phoxal_cli_ui::AttachmentOutcome::ResidentStopped => Ok(()),
+        }
     }
-}
-
-pub(crate) async fn drive_tui(
-    app: &AppContext,
-    target: &ProjectTarget,
-    feed: phoxal_cli_client::SupervisorFeed,
-    commands: phoxal_cli_client::SupervisorCommands,
-    shutdown_on_quit: bool,
-) -> Result<crate::session::controller::AttachmentOutcome> {
-    let initial = feed.current();
-    let mode = if initial.simulation.is_some() {
-        phoxal_cli_core::session::SessionMode::Simulation
-    } else {
-        phoxal_cli_core::session::SessionMode::Run
-    };
-    let attachment = phoxal_cli_client::attach_with_supervisor(
-        target.runtime_target(),
-        feed,
-        commands,
-        initial.clone(),
-    )
-    .await?;
-    let controller = crate::session::controller::SessionController::new_attachment(
-        app.output,
-        mode,
-        &target.project,
-        &initial,
-    )?;
-    let phoxal_cli_client::Attachment { runtime, ports } = attachment;
-    let result = controller.drive_attachment(ports, shutdown_on_quit).await;
-    runtime.shutdown().await;
-    result
 }
 
 impl Stop {
@@ -115,7 +87,7 @@ pub(crate) struct ProjectTarget {
 }
 
 impl ProjectTarget {
-    fn runtime_target(&self) -> phoxal_cli_core::runtime::RuntimeTarget {
+    pub(crate) fn runtime_target(&self) -> phoxal_cli_core::runtime::RuntimeTarget {
         self.runtime.clone()
     }
 }

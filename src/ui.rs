@@ -1,4 +1,4 @@
-use crate::session::diagnostics::{RouteResult, try_route};
+use crate::cli::output::diagnostics::{RouteResult, try_route};
 use phoxal_cli_core::session::event::{DiagnosticLevel, DiagnosticSource};
 use phoxal_cli_ui::Theme;
 
@@ -16,13 +16,13 @@ impl phoxal_cli_project::Reporter for Ui {
             phoxal_cli_project::PreparationEvent::Error(message) => self.error(message),
             phoxal_cli_project::PreparationEvent::CommandLine(line) => self.dependency(line),
             phoxal_cli_project::PreparationEvent::PhaseStarted { id, label } => {
-                crate::session::diagnostics::phase_started(id, label);
+                crate::cli::output::diagnostics::phase_started(id, label);
             }
             phoxal_cli_project::PreparationEvent::PhaseFinished {
                 id,
                 outcome,
                 elapsed,
-            } => crate::session::diagnostics::phase_finished(id, outcome, elapsed),
+            } => crate::cli::output::diagnostics::phase_finished(id, outcome, elapsed),
         }
     }
 }
@@ -163,9 +163,9 @@ mod tests {
 
     #[test]
     fn captured_command_lines_keep_dependency_diagnostic_ownership() {
-        let _guard = crate::session::diagnostics::DIAGNOSTICS_TEST_LOCK.blocking_lock();
+        let _guard = crate::cli::output::diagnostics::DIAGNOSTICS_TEST_LOCK.blocking_lock();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        crate::session::diagnostics::install(tx);
+        crate::cli::output::diagnostics::install(tx);
 
         phoxal_cli_project::Reporter::report(
             &Ui::new(true),
@@ -173,7 +173,7 @@ mod tests {
                 "cargo: compiling fixture".to_string(),
             ),
         );
-        crate::session::diagnostics::uninstall();
+        crate::cli::output::diagnostics::uninstall();
 
         let event = rx
             .try_recv()

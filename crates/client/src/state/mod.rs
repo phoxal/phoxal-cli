@@ -10,6 +10,17 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+fn contains_ascii_case_insensitive(value: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    value
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 #[derive(Clone)]
 pub(crate) struct Stores {
     pub logs: Arc<RwLock<logs::LogStore>>,

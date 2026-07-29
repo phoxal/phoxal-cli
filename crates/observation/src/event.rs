@@ -14,7 +14,7 @@ pub enum Freshness {
 
 pub type FreshnessSet = BTreeMap<String, Freshness>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AttachmentEvent {
     EpochChanged(AttachmentEpoch),
     SupervisorChanged(Arc<SupervisorObservation>),

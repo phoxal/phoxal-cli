@@ -5,6 +5,8 @@ use phoxal_cli_observation::{
     AttachmentEpoch, BusRead, BusRow, BusWindow, StoreRevision, WindowDirection,
 };
 
+use super::contains_ascii_case_insensitive;
+
 // One maximal 256-topic sample per second for a full minute, plus headroom.
 const CAPACITY: usize = 16_384;
 
@@ -84,11 +86,10 @@ impl BusStore {
             .rows
             .iter()
             .filter(|row| {
-                query
-                    .body
-                    .topic
-                    .as_ref()
-                    .is_none_or(|topic| &row.topic == topic)
+                query.body.topic.as_ref().is_none_or(|filter| {
+                    contains_ascii_case_insensitive(&row.topic, filter)
+                        || contains_ascii_case_insensitive(&row.participant, filter)
+                })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -245,5 +246,29 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+
+    #[test]
+    fn bus_filter_matches_topic_or_producer_case_insensitively() {
+        let epoch = epoch();
+        let scope = RobotScope {
+            namespace: "lab".to_string(),
+            robot_id: "rover".to_string(),
+        };
+        let mut store = BusStore::new(epoch);
+        store.record(epoch, [row(&scope, std::time::Instant::now(), 1)]);
+        for filter in ["DRIVE/STA", "DRI"] {
+            let window = store.read(ObservationQuery {
+                epoch,
+                observed_revision: StoreRevision(0),
+                token: QueryToken(4),
+                body: BusQuery {
+                    topic: Some(filter.to_string()),
+                    direction: WindowDirection::Forward,
+                    limit: 10,
+                },
+            });
+            assert_eq!(window.rows.len(), 1, "{filter} should match");
+        }
     }
 }
