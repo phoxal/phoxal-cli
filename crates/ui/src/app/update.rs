@@ -955,6 +955,34 @@ mod tests {
     }
 
     #[test]
+    fn stop_requires_confirmation_while_q_only_detaches() {
+        let mut model = AppModel::default();
+        let detach = update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char('q').into())),
+        );
+        assert_eq!(detach, vec![Effect::Detach]);
+        assert_eq!(model.exit, Some(AttachmentOutcome::Detached));
+
+        let mut model = AppModel::default();
+        let open = update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char('S').into())),
+        );
+        assert!(open.is_empty());
+        assert_eq!(
+            model.modal.as_ref().map(|modal| modal.id),
+            Some(ModalId::ConfirmStop)
+        );
+        let stop = update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Enter.into())),
+        );
+        assert_eq!(stop, vec![Effect::StopProject]);
+        assert_eq!(model.exit, None);
+    }
+
+    #[test]
     fn runtime_candidate_tracks_identity_and_never_retargets_a_removed_row() {
         let alpha = ProcessKey::project("alpha");
         let beta = ProcessKey::project("beta");
