@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use sha2::{Digest, Sha256};
 
-use crate::supervisor::{ProjectLock, ProjectLockIdentity, ProjectOperation};
+use phoxal_cli_supervisor::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 
 const READINESS_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 

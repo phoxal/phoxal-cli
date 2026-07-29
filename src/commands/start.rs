@@ -30,7 +30,7 @@ use crate::run::{
     DriversMode, RunOptions, connect_to_detached_resident, run_resident_supervision,
     wait_for_required_readiness,
 };
-use crate::sd_notify::SdNotify;
+use phoxal_cli_supervisor::systemd::notify::SdNotify;
 
 #[derive(Debug, Args)]
 pub struct Start {
@@ -60,7 +60,7 @@ impl Start {
         // with the private bootstrap descriptor set: it runs the resident in
         // process and reports the bootstrap result back to the launcher. It owns
         // no notify socket.
-        if crate::resident::has_private_bootstrap() {
+        if phoxal_cli_supervisor::resident::has_private_bootstrap() {
             return run_resident_supervision(app, target.project, options, None).await;
         }
 

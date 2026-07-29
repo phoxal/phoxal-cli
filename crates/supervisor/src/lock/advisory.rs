@@ -1,6 +1,6 @@
 //! Cross-platform advisory file locking.
 //!
-//! Used by [`crate::supervisor::ProjectLock`] for the project-operation lock -
+//! Used by [`crate::ProjectLock`] for the project-operation lock -
 //! Phoxal-owned state (the generated resolve manifest, candidate
 //! publication, bundle/simulation root replacement, Webots staging) that
 //! Cargo's own build-directory locking does not cover.

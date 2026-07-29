@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 
 use crate::AppContext;
-use crate::supervisor::{ProjectLock, ProjectLockIdentity, ProjectOperation};
+use phoxal_cli_supervisor::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum ContainerEngine {

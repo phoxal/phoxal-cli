@@ -7,8 +7,22 @@ license.workspace = true
 publish = false
 
 [dependencies]
+anyhow = { workspace = true }
+getrandom = { workspace = true }
+hex = { workspace = true }
+libc = { workspace = true }
+phoxal = { workspace = true }
 phoxal-cli-core = { workspace = true }
 phoxal-cli-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

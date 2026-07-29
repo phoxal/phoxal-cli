@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use phoxal_cli_core::runtime::{ResidentAuthority, RuntimeTarget};
 
-use crate::supervisor::{ProjectLock, ProjectLockStatus, ProjectOperation};
+use crate::{ProjectLock, ProjectLockStatus, ProjectOperation};
 
 pub const DETACHED_FORCE_STOP_GRACE: Duration = Duration::from_secs(30);
 pub const SYSTEMD_FORCE_STOP_GRACE: Duration = Duration::from_secs(300);
@@ -258,7 +258,7 @@ mod tests {
     use phoxal_cli_core::runtime::ResidentAuthority;
 
     use super::*;
-    use crate::supervisor::ProjectLockIdentity;
+    use crate::ProjectLockIdentity;
 
     struct FakeAuthority {
         identity: ProjectLockIdentity,

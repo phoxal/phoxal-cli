@@ -87,10 +87,10 @@ impl Deploy {
     ) -> Result<phoxal_cli_project::BuiltBundle> {
         let target =
             phoxal_cli_project::resolve_target(self.project.as_deref(), app.project.root())?;
-        let _lock = crate::supervisor::ProjectLock::acquire(
-            crate::supervisor::ProjectLockIdentity::resolve(
+        let _lock = phoxal_cli_supervisor::ProjectLock::acquire(
+            phoxal_cli_supervisor::ProjectLockIdentity::resolve(
                 &target.logical_root,
-                crate::supervisor::ProjectOperation::Build,
+                phoxal_cli_supervisor::ProjectOperation::Build,
             ),
         )
         .context("failed to acquire the project lock for deploy")?;

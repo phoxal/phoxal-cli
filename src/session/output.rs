@@ -6,51 +6,10 @@
 //! that may draw progress. Interactive foreground sessions are admitted only
 //! on a real TTY, so the controller itself has exactly one renderer: the TUI.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+pub use phoxal_cli_supervisor::WaitBudget;
 use phoxal_cli_ui::Theme;
-
-/// A readiness/stage-wait budget for an interactive session (Product decision
-/// 6: "no unconditional 60-second teardown in an interactive session").
-///
-/// Replaces a one-year `Duration` sentinel for "no timeout" (finding D2): a
-/// magic duration still technically times out (`Instant + Duration` would
-/// eventually panic on overflow, and every caller had to remember never to
-/// print it as a real deadline) and obscures the intended semantics. This
-/// type makes "no deadline at all" a distinct, explicit state a caller must
-/// handle, rather than a very large number it might format or compare
-/// incorrectly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WaitBudget {
-    /// No deadline at all: a missing clock/participant is a named
-    /// `waiting`/`degraded` console state for as long as the operator leaves
-    /// the session open, not a kill.
-    Unbounded,
-    Bounded(Duration),
-}
-
-impl Default for WaitBudget {
-    /// `Bounded(Duration::default())` (an already-elapsed deadline) rather
-    /// than `Unbounded` - a derived `Default` (e.g. `SupervisionStage`'s) must
-    /// never silently produce a wait with no deadline at all; every real
-    /// caller sets this explicitly via `OutputContext::wait_budget`.
-    fn default() -> Self {
-        Self::Bounded(Duration::default())
-    }
-}
-
-impl WaitBudget {
-    /// The deadline this budget implies starting from `now`, or `None` if
-    /// [`Self::Unbounded`] - there is no `Instant` a caller should ever
-    /// compare against.
-    #[must_use]
-    pub fn deadline_from(self, now: Instant) -> Option<Instant> {
-        match self {
-            Self::Unbounded => None,
-            Self::Bounded(duration) => Some(now + duration),
-        }
-    }
-}
 
 /// The immutable output contract for one `run`/`simulation webots run` invocation.
 #[derive(Debug, Clone, Copy)]
@@ -104,6 +63,7 @@ impl OutputContext {
 mod tests {
     use super::*;
     use phoxal_cli_ui::ColorCapability;
+    use std::time::Instant;
 
     #[test]
     fn compute_tracks_the_terminal() {

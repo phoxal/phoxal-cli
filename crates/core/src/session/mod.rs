@@ -14,7 +14,10 @@ pub mod supervisor;
 pub mod telemetry;
 
 pub use board::{BoardSnapshot, ParticipantLaunchCommand, ParticipantState, ParticipantStatus};
-pub use log::{LogScope, LogSeverity, LogSource, RoutedLogLine, RoutedLogUpdate};
+pub use log::{
+    LogScope, LogSeverity, LogSource, MAX_ROUTED_LOG_TEXT_CHARS, RoutedLogLine, RoutedLogUpdate,
+    bounded_log_text,
+};
 pub use mode::SessionMode;
 pub use participant_kind::ParticipantKind;
 pub use supervisor::{

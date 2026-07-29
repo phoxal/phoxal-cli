@@ -7,12 +7,12 @@ use phoxal_cli_core::session::ProjectLifecycle;
 use phoxal_cli_protocol::CommandAction;
 
 use crate::AppContext;
-use crate::resident::supervisor_socket_path;
-use crate::run::{RobotFeedTarget, start_telemetry_feeds_at};
-use crate::supervisor::{
-    BoardBackend, ProjectLock, ProjectLockStatus, ProjectOperation, start_bus_log_subscriber,
-    start_liveliness_observer,
+use crate::run::{
+    ClientProjection, RobotFeedTarget, start_bus_log_subscriber, start_clock_feed,
+    start_presence_observer, start_telemetry_feeds_at,
 };
+use phoxal_cli_supervisor::resident::supervisor_socket_path;
+use phoxal_cli_supervisor::{ProjectLock, ProjectLockStatus, ProjectOperation};
 
 #[derive(Debug, Args)]
 pub struct Attach {
@@ -48,8 +48,9 @@ pub(crate) async fn drive_tui(
     // Attaching means observing the *running* execution: the bus root is
     // execution-scoped, so a fresh identity would subscribe an empty root.
     let execution = initial.execution_id;
-    let board = BoardBackend::new();
-    board.replace_from_supervisor(initial.clone());
+    let projection = ClientProjection::default();
+    projection.replace_supervisor(&initial);
+    let (recovery_tx, recovery_rx) = tokio::sync::watch::channel(initial.graph_generation);
     let telemetry = crate::telemetry::TelemetryBackend::new();
     let connect = initial.router.clone();
     let targets = RobotFeedTarget::from_snapshot(&initial);
@@ -60,16 +61,17 @@ pub(crate) async fn drive_tui(
             target.scope.robot_id.clone(),
             connect.clone(),
             execution,
-            board.clone(),
+            projection.clone(),
+            recovery_rx.clone(),
         )
     }));
     tasks.extend(targets.iter().map(|target| {
-        start_liveliness_observer(
+        start_presence_observer(
             target.scope.namespace.clone(),
             target.scope.robot_id.clone(),
             connect.clone(),
             execution,
-            board.clone(),
+            projection.clone(),
         )
     }));
     tasks.extend(start_telemetry_feeds_at(
@@ -77,12 +79,12 @@ pub(crate) async fn drive_tui(
         &telemetry,
         &connect,
         execution,
-        board.recovery_epoch_receiver(),
+        recovery_rx,
     ));
     if initial.simulation.is_some()
         && let Some(first) = targets.first()
     {
-        let (clock_rx, clock_task) = crate::supervisor::start_clock_feed(
+        let (clock_rx, clock_task) = start_clock_feed(
             first.scope.namespace.clone(),
             first.scope.robot_id.clone(),
             connect.clone(),
@@ -103,7 +105,7 @@ pub(crate) async fn drive_tui(
     )?;
     controller.set_bus_endpoint(connect);
     let result = controller
-        .drive_attachment(board, telemetry, client, shutdown_on_quit)
+        .drive_attachment(projection, telemetry, client, recovery_tx, shutdown_on_quit)
         .await;
     for task in tasks {
         task.abort();
@@ -115,7 +117,8 @@ impl Stop {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let target = resolve_target(self.target.as_deref(), app.project.root())?;
         if self.force {
-            let outcome = crate::force_stop::force_stop(&target.runtime_target()).await?;
+            let outcome =
+                phoxal_cli_supervisor::resident::force_stop(&target.runtime_target()).await?;
             app.ui.info(format!("resident stopped ({outcome})"));
             return Ok(());
         }
@@ -256,9 +259,11 @@ mod tests {
             project.path().join("robot.yaml"),
             "schema: robot/v0\nname: test\n",
         )?;
-        let identity =
-            crate::supervisor::ProjectLockIdentity::resolve(project.path(), ProjectOperation::Run)
-                .in_execution(ExecutionId::mint());
+        let identity = phoxal_cli_supervisor::ProjectLockIdentity::resolve(
+            project.path(),
+            ProjectOperation::Run,
+        )
+        .in_execution(ExecutionId::mint());
         let _lock = ProjectLock::acquire(identity)?;
         let path = supervisor_socket_path(project.path())?;
         fs::create_dir_all(path.parent().expect("socket has parent"))?;

@@ -5,14 +5,39 @@ use phoxal_cli_core::project::launch_plan::{PlanRevision, RunIdentity};
 use tokio::sync::mpsc;
 
 use crate::session::output::OutputContext;
-use crate::supervisor::{
-    BoardBackend, RequestedStop, SupervisionStage, SupervisorAction, SupervisorOptions,
-    start_bus_log_subscriber, start_liveliness_observer,
+use phoxal_cli_supervisor::{
+    RequestedStop, SupervisionStage, SupervisorAction, SupervisorOptions, SupervisorState,
+    start_liveliness_observer,
 };
 
+fn process_state(
+    state: phoxal_cli_core::session::ParticipantState,
+) -> phoxal_cli_core::session::ProcessState {
+    match state {
+        phoxal_cli_core::session::ParticipantState::Starting => {
+            phoxal_cli_core::session::ProcessState::Starting
+        }
+        phoxal_cli_core::session::ParticipantState::Ready => {
+            phoxal_cli_core::session::ProcessState::Ready
+        }
+        phoxal_cli_core::session::ParticipantState::Degraded => {
+            phoxal_cli_core::session::ProcessState::Degraded
+        }
+        phoxal_cli_core::session::ParticipantState::Failed => {
+            phoxal_cli_core::session::ProcessState::Failed
+        }
+        phoxal_cli_core::session::ParticipantState::Restarting => {
+            phoxal_cli_core::session::ProcessState::Restarting
+        }
+        phoxal_cli_core::session::ParticipantState::Stopped => {
+            phoxal_cli_core::session::ProcessState::Stopped
+        }
+    }
+}
+
 pub(crate) struct LiveSimSetup {
-    pub(crate) router: crate::run::InfrastructureRouter,
-    pub(crate) board: BoardBackend,
+    pub(crate) router: phoxal_cli_supervisor::InfrastructureRouter,
+    pub(crate) board: SupervisorState,
     pub(crate) stages: Vec<SupervisionStage>,
     pub(crate) supervisor_options: SupervisorOptions,
     pub(crate) background_tasks: crate::run::AbortTasks,
@@ -22,7 +47,7 @@ pub(crate) struct LiveSimSetup {
 pub(crate) async fn live_simulate_setup(
     ui: crate::Ui,
     prepared: phoxal_cli_project::PreparedExecution,
-    board: BoardBackend,
+    board: SupervisorState,
     events: mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>,
     token: tokio_util::sync::CancellationToken,
     output: OutputContext,
@@ -44,47 +69,35 @@ pub(crate) async fn live_simulate_setup(
     );
     board.upsert_process(
         phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
-        crate::supervisor::ParticipantStatus::new(
-            "infrastructure-router",
-            phoxal_cli_core::session::ParticipantKind::Tool,
-            crate::supervisor::ParticipantState::Starting,
-        ),
+        phoxal_cli_core::session::ParticipantKind::Tool,
+        phoxal_cli_core::session::ProcessState::Starting,
         phoxal_cli_core::session::StartupRequirement::Required,
     );
     for participant in &prepared.participants {
-        let mut status = crate::supervisor::ParticipantStatus::new(
-            &participant.id,
-            participant.kind,
-            crate::supervisor::ParticipantState::Starting,
-        )
-        .with_local(participant.local);
-        if let Some(robot) = &participant.robot {
-            status = status.with_scope(phoxal_cli_core::session::stores::telemetry::RobotScope {
-                namespace: robot.namespace.clone(),
-                robot_id: robot.robot_id.clone(),
-            });
-        }
+        let state = process_state(participant.initial_state);
         board.upsert_process(
             participant.key.clone(),
-            status,
+            participant.kind,
+            state,
             participant.startup_requirement,
         );
-        if participant.initial_state != crate::supervisor::ParticipantState::Starting
+        if participant.initial_state != phoxal_cli_core::session::ParticipantState::Starting
             || participant.note.is_some()
         {
-            board.set_state(
-                participant.key.clone(),
-                participant.initial_state,
-                participant.note.clone(),
-            );
+            board.set_state(participant.key.clone(), state, participant.note.clone());
         }
     }
     let connect = prepared.router.endpoint.clone();
-    let router = crate::run::start_infrastructure_router(&prepared.router).await?;
+    let router = phoxal_cli_supervisor::start_infrastructure_router(
+        prepared.router.binary.clone(),
+        prepared.router.config.clone(),
+        prepared.router.endpoint.clone(),
+    )
+    .await?;
     board.set_router_endpoint(connect.clone());
     board.set_state(
         phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
-        crate::supervisor::ParticipantState::Ready,
+        phoxal_cli_core::session::ProcessState::Ready,
         None,
     );
     board.set_simulation_info("webots", simulation.world.display().to_string());
@@ -106,7 +119,11 @@ pub(crate) async fn live_simulate_setup(
     let requested_stop =
         RequestedStop::new(requested_spec.key.clone(), requested_spec.shutdown_grace);
     let revision = PlanRevision::compile(1, prepared.plan.clone())?;
-    crate::supervisor::materialize_plan_binaries(&prepared.project_root, &revision, &mut specs)?;
+    phoxal_cli_supervisor::materialize_plan_binaries(
+        &prepared.project_root,
+        &revision,
+        &mut specs,
+    )?;
     ui.info(format!(
         "simulation launch plan resolved: {} robot(s)",
         prepared.plan.robots.len()
@@ -115,15 +132,6 @@ pub(crate) async fn live_simulate_setup(
     crate::run::report_launch_commands(&prepared.plan, &specs, &ui)?;
 
     let mut background_tasks = crate::run::AbortTasks::default();
-    background_tasks.extend(prepared.plan.robots.iter().map(|robot| {
-        start_bus_log_subscriber(
-            robot.namespace.clone(),
-            robot.id.clone(),
-            connect.clone(),
-            run.execution(),
-            board.clone(),
-        )
-    }));
     background_tasks.extend(prepared.plan.robots.iter().map(|robot| {
         start_liveliness_observer(
             robot.namespace.clone(),
@@ -134,7 +142,10 @@ pub(crate) async fn live_simulate_setup(
         )
     }));
     let (_action_tx, action_rx) = action_channel.unwrap_or_else(|| mpsc::channel(16));
-    let stages = super::stages_for_simulate(specs, output);
+    let stages = phoxal_cli_supervisor::stages_for_simulation(
+        specs,
+        output.wait_budget(super::SIMULATE_READINESS_TIMEOUT),
+    );
     let starting = phoxal_cli_core::session::state::SessionState::Preparing
         .start()
         .expect("the controller begins every session in Preparing");
@@ -146,7 +157,9 @@ pub(crate) async fn live_simulate_setup(
         board,
         stages,
         supervisor_options: SupervisorOptions {
-            action_rx: Some(crate::supervisor::SupervisorActionReceiver::new(action_rx)),
+            action_rx: Some(phoxal_cli_supervisor::SupervisorActionReceiver::new(
+                action_rx,
+            )),
             requested_stop: Some(requested_stop),
             token,
             events: Some(events),

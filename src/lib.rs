@@ -31,17 +31,12 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-pub(crate) mod advisory_lock;
 pub mod commands;
 pub(crate) mod context;
-pub(crate) mod force_stop;
 pub(crate) mod host_doctor;
-pub(crate) mod resident;
 pub mod run;
-pub(crate) mod sd_notify;
 pub(crate) mod session;
 pub mod simulation;
-pub(crate) mod supervisor;
 pub(crate) mod telemetry;
 pub(crate) mod ui;
 
@@ -52,6 +47,6 @@ pub use context::AppContext;
 // (the `phoxal-cli` binary), so this ONE type must stay nameable from there
 // or tracing output can never be routed through an active session's
 // diagnostics again (see `session::diagnostics`'s own module docs).
+pub use phoxal_cli_supervisor::{active_execution, maybe_run_guardian};
 pub use session::diagnostics::SessionAwareWriter;
-pub use supervisor::{active_execution, maybe_run_guardian};
 pub use ui::Ui;

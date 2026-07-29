@@ -2,6 +2,21 @@
 
 use std::time::SystemTime;
 
+pub const MAX_ROUTED_LOG_TEXT_CHARS: usize = 4_096;
+
+#[must_use]
+pub fn bounded_log_text(text: &str) -> String {
+    let mut chars = text.chars();
+    let mut bounded = chars
+        .by_ref()
+        .take(MAX_ROUTED_LOG_TEXT_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
+
 /// Where a routed log line came from; consumers deduplicate on this routing
 /// identity rather than comparing rendered text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

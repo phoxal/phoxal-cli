@@ -9,3 +9,18 @@
 //! parallel incarnation counter.
 
 pub use phoxal::bus::{ExecutionId, ProducerId};
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::ProducerId;
+
+    #[test]
+    fn minted_producer_identities_are_distinct_across_a_process_batch() {
+        let identities = (0..1024)
+            .map(|_| ProducerId::mint())
+            .collect::<HashSet<_>>();
+        assert_eq!(identities.len(), 1024);
+    }
+}

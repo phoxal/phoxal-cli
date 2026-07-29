@@ -12,5 +12,3 @@ pub use command::{
 };
 mod setup;
 pub(crate) use setup::live_simulate_setup;
-mod stages;
-pub(crate) use stages::stages_for_simulate;
