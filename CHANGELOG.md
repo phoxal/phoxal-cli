@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.28.11](https://github.com/phoxal/phoxal-cli/releases/tag/v0.28.11) - 2026-07-29
+
+
+### Fixed
+
+- Carry the resident's real failure reason to the client terminal ([#252](https://github.com/phoxal/phoxal-cli/pull/252))
+
+
 ## [0.28.10](https://github.com/phoxal/phoxal-cli/releases/tag/v0.28.10) - 2026-07-29
 
 
