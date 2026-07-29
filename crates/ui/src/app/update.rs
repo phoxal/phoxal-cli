@@ -771,11 +771,12 @@ mod tests {
 
     use phoxal_cli_core::identity::ExecutionId;
     use phoxal_cli_core::session::{
-        ParticipantKind, ParticipantState, ProcessDescriptor, ProcessEntry, ProcessKey,
-        ProcessStatus, StartupRequirement,
+        JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, ParticipantKind, ParticipantState,
+        ProcessDescriptor, ProcessEntry, ProcessKey, ProcessStatus, StartupRequirement,
     };
     use phoxal_cli_observation::{
-        AttachmentEpoch, AttachmentEvent, LogWindow, ObservationWindow, ProcessObservation,
+        AttachmentEpoch, AttachmentEvent, InputObservation, LogWindow, ObservationWindow,
+        ProcessObservation,
     };
 
     use super::*;
@@ -1013,6 +1014,81 @@ mod tests {
         );
         assert_eq!(model.bus.sort, BusSort::Topic);
         assert_eq!(model.logs.text, "");
+    }
+
+    #[test]
+    fn input_candidate_is_distinct_from_authoritative_selection_and_acknowledgement() {
+        let mut model = AppModel {
+            route: FocusRoute::Content {
+                panel: PanelId::Input(InputPanelId::Devices),
+            },
+            ..AppModel::default()
+        };
+        update(
+            &mut model,
+            Msg::Client(AttachmentEvent::InputChanged(Arc::new(input_observation(
+                Some("pad-a"),
+                true,
+            )))),
+        );
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Down.into())),
+        );
+        assert_eq!(model.input.candidate, Some(DeviceId("pad-b".to_string())));
+        assert_eq!(
+            model
+                .input
+                .observation
+                .as_ref()
+                .and_then(|input| input.joypads.selected.as_deref()),
+            Some("pad-a")
+        );
+
+        let effects = update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Enter.into())),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::InputSelect(DeviceId("pad-b".to_string()))]
+        );
+        assert_eq!(
+            model.input.pending_selection,
+            Some(DeviceId("pad-b".to_string()))
+        );
+
+        update(
+            &mut model,
+            Msg::Client(AttachmentEvent::InputChanged(Arc::new(input_observation(
+                Some("pad-b"),
+                true,
+            )))),
+        );
+        assert_eq!(model.input.pending_selection, None);
+    }
+
+    fn input_observation(selected: Option<&str>, enabled: bool) -> InputObservation {
+        InputObservation {
+            joypads: JoypadDevicesSample {
+                available: Arc::new(vec![
+                    JoypadDevice {
+                        id: "pad-a".to_string(),
+                        name: "A".to_string(),
+                        status: JoypadDeviceStatus::Ready,
+                    },
+                    JoypadDevice {
+                        id: "pad-b".to_string(),
+                        name: "B".to_string(),
+                        status: JoypadDeviceStatus::Ready,
+                    },
+                ]),
+                selected: selected.map(str::to_string),
+                enabled,
+                ..JoypadDevicesSample::default()
+            },
+            motion: None,
+        }
     }
 
     fn process(key: ProcessKey) -> ProcessObservation {
