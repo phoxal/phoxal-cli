@@ -233,10 +233,7 @@ mod tests {
         };
         assert_eq!(build.builder, "local");
         assert!(build.target.is_none());
-        assert_eq!(
-            build.container_engine,
-            build::container::ContainerEngine::Docker
-        );
+        assert_eq!(build.container_engine, build::ContainerEngine::Docker);
 
         let full = Cli::try_parse_from([
             "phoxal",
@@ -267,10 +264,7 @@ mod tests {
             build.output.as_deref(),
             Some(std::path::Path::new("out/bundle.build.phoxal"))
         );
-        assert_eq!(
-            build.container_engine,
-            build::container::ContainerEngine::Podman
-        );
+        assert_eq!(build.container_engine, build::ContainerEngine::Podman);
         assert_eq!(
             build.builder_image.as_deref(),
             Some("ghcr.io/example/custom:latest")

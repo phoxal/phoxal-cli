@@ -63,13 +63,13 @@ impl Service {
     }
 }
 
-const UNIT_PATH: &str = "/etc/systemd/system/phoxal.service";
+const UNIT_PATH: &str = phoxal_cli_project::SYSTEMD_UNIT_PATH;
 const UNIT_MARKER: &str = "# Managed by phoxal";
-const SYSTEMD_UNIT_ROOT: &str = "/etc/systemd/system";
 const LEGACY_INSTALL_ROOT: &str = "/opt/phoxal";
 
-fn unit_contents() -> &'static str {
-    r#"# Managed by phoxal
+fn unit_contents() -> String {
+    format!(
+        r#"# Managed by phoxal
 [Unit]
 Description=Phoxal robot runtime
 After=network-online.target
@@ -81,8 +81,8 @@ NotifyAccess=main
 User=phoxal
 Group=phoxal-engineering
 SupplementaryGroups=phoxal
-WorkingDirectory=/var/phoxal
-ExecStart=/usr/local/bin/phoxal start /var/phoxal
+WorkingDirectory={active}
+ExecStart=/usr/local/bin/phoxal start {active}
 Restart=on-failure
 RestartSec=2s
 WatchdogSec=30s
@@ -94,11 +94,15 @@ RuntimeDirectory=phoxal
 RuntimeDirectoryMode=2775
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/phoxal/state /run/phoxal
+ReadWritePaths={state} {volatile}
 
 [Install]
 WantedBy=multi-user.target
-"#
+"#,
+        active = phoxal_cli_project::ACTIVE_RUNTIME_ROOT,
+        state = phoxal_cli_project::INSTALLED_STATE_ROOT,
+        volatile = phoxal_cli_project::INSTALLED_VOLATILE_ROOT,
+    )
 }
 
 impl ServiceInstall {
@@ -106,7 +110,7 @@ impl ServiceInstall {
         require_root()?;
         require_systemd()?;
         let legacy = sweep_legacy_units(
-            Path::new(SYSTEMD_UNIT_ROOT),
+            Path::new(phoxal_cli_project::SYSTEMD_UNIT_ROOT),
             Path::new(LEGACY_INSTALL_ROOT),
             &HostSystemctl,
         )?;
@@ -129,7 +133,7 @@ impl ServiceInstall {
         ensure_runtime_paths()?;
         write_managed_unit(Path::new(UNIT_PATH))?;
         run_status("systemctl", &["daemon-reload"])?;
-        run_status("systemctl", &["enable", "phoxal.service"])?;
+        run_status("systemctl", &["enable", phoxal_cli_project::SYSTEMD_UNIT])?;
         app.ui
             .info("installed the single phoxal.service; install a build.phoxal before starting it");
         Ok(())
@@ -148,7 +152,10 @@ impl ServiceUninstall {
                 "refusing to remove foreign unit {}",
                 path.display()
             );
-            let _ = run_status("systemctl", &["disable", "--now", "phoxal.service"]);
+            let _ = run_status(
+                "systemctl",
+                &["disable", "--now", phoxal_cli_project::SYSTEMD_UNIT],
+            );
             std::fs::remove_file(path)?;
             sync_parent(path)?;
             run_status("systemctl", &["daemon-reload"])?;
@@ -165,7 +172,12 @@ impl ServiceStatus {
         require_systemd()?;
         run_status(
             "systemctl",
-            &["status", "--no-pager", "--full", "phoxal.service"],
+            &[
+                "status",
+                "--no-pager",
+                "--full",
+                phoxal_cli_project::SYSTEMD_UNIT,
+            ],
         )
     }
 }
@@ -180,7 +192,7 @@ fn require_root() -> Result<()> {
 
 fn require_systemd() -> Result<()> {
     anyhow::ensure!(
-        Path::new("/run/systemd/system").is_dir(),
+        Path::new(phoxal_cli_project::SYSTEMD_ACTIVE_ROOT).is_dir(),
         "systemd is not the active service manager on this host"
     );
     Ok(())
@@ -229,7 +241,7 @@ fn ensure_service_user() -> Result<()> {
             "--groups",
             "phoxal-engineering",
             "--home-dir",
-            crate::runtime_paths::INSTALL_ROOT,
+            phoxal_cli_project::INSTALL_ROOT,
             "--shell",
             "/usr/sbin/nologin",
             "phoxal",
@@ -241,25 +253,25 @@ fn ensure_runtime_paths() -> Result<()> {
     use std::fs::OpenOptions;
     use std::os::unix::fs::PermissionsExt;
     for path in [
-        crate::runtime_paths::RELEASES_ROOT,
-        crate::runtime_paths::INSTALLED_STATE_ROOT,
-        crate::runtime_paths::INSTALLED_VOLATILE_ROOT,
+        phoxal_cli_project::RELEASES_ROOT,
+        phoxal_cli_project::INSTALLED_STATE_ROOT,
+        phoxal_cli_project::INSTALLED_VOLATILE_ROOT,
     ] {
         std::fs::create_dir_all(path)?;
     }
     std::fs::set_permissions(
-        crate::runtime_paths::RELEASES_ROOT,
+        phoxal_cli_project::RELEASES_ROOT,
         std::fs::Permissions::from_mode(0o755),
     )?;
-    run_status("chown", &["root:root", crate::runtime_paths::RELEASES_ROOT])?;
+    run_status("chown", &["root:root", phoxal_cli_project::RELEASES_ROOT])?;
     for path in [
-        crate::runtime_paths::INSTALLED_STATE_ROOT,
-        crate::runtime_paths::INSTALLED_VOLATILE_ROOT,
+        phoxal_cli_project::INSTALLED_STATE_ROOT,
+        phoxal_cli_project::INSTALLED_VOLATILE_ROOT,
     ] {
         run_status("chown", &["phoxal:phoxal-engineering", path])?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o2775))?;
     }
-    let lock = Path::new(crate::runtime_paths::INSTALLED_STATE_ROOT).join("project.lock");
+    let lock = Path::new(phoxal_cli_project::INSTALLED_STATE_ROOT).join("project.lock");
     OpenOptions::new()
         .read(true)
         .write(true)

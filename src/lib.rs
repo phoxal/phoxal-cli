@@ -32,33 +32,18 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub(crate) mod advisory_lock;
-pub mod archive;
-pub mod check;
 pub mod commands;
-pub(crate) mod component_driver;
 pub(crate) mod context;
 pub(crate) mod force_stop;
 pub(crate) mod host_doctor;
-pub mod host_paths;
-pub mod loader;
-pub(crate) mod materialize;
-pub(crate) mod progress;
 pub(crate) mod resident;
-pub mod resolver;
 pub mod run;
-pub mod runtime_header;
-pub mod runtime_paths;
 pub(crate) mod sd_notify;
 pub(crate) mod session;
-pub(crate) mod shell;
-pub(crate) mod simulate_staging;
 pub mod simulation;
-pub(crate) mod stager;
 pub(crate) mod supervisor;
 pub(crate) mod telemetry;
 pub(crate) mod ui;
-pub(crate) mod webots_stage_root;
-pub(crate) mod webots_staging;
 
 pub use context::AppContext;
 // Re-exported so `main`'s tracing-subscriber setup can install this as its

@@ -160,10 +160,10 @@ pub fn report_private_bootstrap(result: &BootstrapResult) -> Result<()> {
 }
 
 fn resident_log_file() -> Result<File> {
-    let project = std::env::var_os(crate::host_paths::PROJECT_ROOT_ENV)
+    let project = std::env::var_os(phoxal_cli_project::PROJECT_ROOT_ENV)
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
-    let path = crate::runtime_paths::RuntimePaths::for_root(&project).supervisor_log();
+    let path = phoxal_cli_core::runtime::paths::RuntimePaths::for_root(&project).supervisor_log();
     let directory = path
         .parent()
         .expect("supervisor log has a parent")
@@ -253,7 +253,7 @@ impl Drop for ResidentSocket {
 }
 
 pub fn supervisor_socket_path(project: &Path) -> Result<PathBuf> {
-    let path = crate::runtime_paths::RuntimePaths::for_root(project).supervisor_socket();
+    let path = phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project).supervisor_socket();
     let absolute = if path.is_absolute() {
         path
     } else {

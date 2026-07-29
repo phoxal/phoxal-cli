@@ -7,7 +7,30 @@ license.workspace = true
 publish = false
 
 [dependencies]
+anyhow = { workspace = true }
+dirs = { workspace = true }
+flate2 = { workspace = true }
+heck = { workspace = true }
+hex = { workspace = true }
+jsonschema = { version = "0.46.6", default-features = false }
+libc = { workspace = true }
+nalgebra = { workspace = true }
+object = { workspace = true }
+pathdiff = { workspace = true }
+phoxal = { workspace = true }
 phoxal-cli-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tar = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+urdf-rs = { workspace = true }
+webots-proto = { workspace = true }
+
+[dev-dependencies]
+clap = { workspace = true }
+object = { workspace = true, features = ["write"] }
 
 [lints]
 workspace = true

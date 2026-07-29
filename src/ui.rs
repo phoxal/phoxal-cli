@@ -1,18 +1,70 @@
-use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-use anyhow::{Context, Result};
-
-use crate::session::diagnostics::{RouteResult, register_child, try_route, unregister_child};
+use crate::session::diagnostics::{RouteResult, try_route};
 use phoxal_cli_core::session::event::{DiagnosticLevel, DiagnosticSource};
 use phoxal_cli_ui::Theme;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ui {
     interactive: bool,
+}
+
+impl phoxal_cli_project::Reporter for Ui {
+    fn report(&self, event: phoxal_cli_project::PreparationEvent) {
+        match event {
+            phoxal_cli_project::PreparationEvent::Info(message) => self.info(message),
+            phoxal_cli_project::PreparationEvent::Success(message) => self.success(message),
+            phoxal_cli_project::PreparationEvent::Warn(message) => self.warn(message),
+            phoxal_cli_project::PreparationEvent::Error(message) => self.error(message),
+            phoxal_cli_project::PreparationEvent::CommandLine(line) => self.dependency(line),
+            phoxal_cli_project::PreparationEvent::PhaseStarted { id, label } => {
+                crate::session::diagnostics::phase_started(id, label);
+            }
+            phoxal_cli_project::PreparationEvent::PhaseFinished {
+                id,
+                outcome,
+                elapsed,
+            } => crate::session::diagnostics::phase_finished(id, outcome, elapsed),
+        }
+    }
+}
+
+pub(crate) struct PreparationReporter {
+    ui: Ui,
+    cancellation: tokio_util::sync::CancellationToken,
+}
+
+impl PreparationReporter {
+    pub(crate) fn new(ui: Ui, cancellation: tokio_util::sync::CancellationToken) -> Self {
+        Self { ui, cancellation }
+    }
+}
+
+pub(crate) fn cancellable_preparation_reporter(
+    ui: Ui,
+) -> (
+    std::sync::Arc<dyn phoxal_cli_project::Reporter>,
+    tokio::task::JoinHandle<()>,
+) {
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let signal = cancellation.clone();
+    let signal_task = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            signal.cancel();
+        }
+    });
+    (
+        std::sync::Arc::new(PreparationReporter::new(ui, cancellation)),
+        signal_task,
+    )
+}
+
+impl phoxal_cli_project::Reporter for PreparationReporter {
+    fn report(&self, event: phoxal_cli_project::PreparationEvent) {
+        self.ui.report(event);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
 }
 
 impl Ui {
@@ -47,6 +99,18 @@ impl Ui {
         let message = message.as_ref();
         if !matches!(
             try_route(DiagnosticSource::Cli, DiagnosticLevel::Info, message),
+            RouteResult::NoSession
+        ) {
+            return;
+        }
+        let theme = self.theme();
+        eprintln!("{} {}", theme.bold(&theme.steel("info")), message);
+    }
+
+    fn dependency(&self, message: impl AsRef<str>) {
+        let message = message.as_ref();
+        if !matches!(
+            try_route(DiagnosticSource::Dependency, DiagnosticLevel::Info, message),
             RouteResult::NoSession
         ) {
             return;
@@ -90,156 +154,37 @@ impl Ui {
         let theme = self.theme();
         eprintln!("{} {}", theme.bold(&theme.error("error")), message);
     }
-
-    /// Run `command` with its stdout/stderr CAPTURED and routed line-by-line
-    /// as `SessionEvent::Diagnostic`s, instead of inherited straight through
-    /// to this process's own stdout/stderr (findings A2/B2). A raw child
-    /// write racing an active TUI redraw can corrupt the alternate-screen
-    /// frame. Falls back to a direct
-    /// `eprintln!`/`println!` for a line that arrives when no session is
-    /// installed (`try_route` returns `false`) - identical to `Ui::info`/
-    /// `warn`'s own fallback, so a caller with no active session (a bare
-    /// `cargo build` outside any `run`/`simulation webots run` session) sees
-    /// unchanged behavior. While a command is running, both streams are
-    /// routine dependency progress and route at `Info`, which keeps successful
-    /// Cargo compiler chatter out of a TUI. Stderr is retained and replayed at
-    /// `Error` only if the command exits unsuccessfully, so the useful failure
-    /// diagnosis remains visible.
-    pub fn command_status_captured(&self, command: &mut Command) -> Result<ExitStatus> {
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        let child = Arc::new(Mutex::new(Some(
-            command.spawn().context("failed to spawn command")?,
-        )));
-        register_child(child.clone());
-        let stdout = {
-            child
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_mut()
-                .context("captured child was already reaped")?
-                .stdout
-                .take()
-                .context("child stdout was not piped")
-        };
-        let stderr = {
-            child
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_mut()
-                .context("captured child was already reaped")?
-                .stderr
-                .take()
-                .context("child stderr was not piped")
-        };
-        let (stdout, stderr) = match (stdout, stderr) {
-            (Ok(stdout), Ok(stderr)) => (stdout, stderr),
-            (Err(error), _) | (_, Err(error)) => {
-                unregister_child(&child);
-                return Err(error);
-            }
-        };
-        let stdout_thread = std::thread::spawn(move || {
-            forward_captured_output(stdout, DiagnosticLevel::Info, false)
-        });
-        let stderr_thread = std::thread::spawn(move || {
-            forward_captured_output(stderr, DiagnosticLevel::Info, true)
-        });
-        let status = wait_for_captured_child(&child);
-        unregister_child(&child);
-        // Best-effort: a panicked reader thread must not fail the build
-        // itself - the command's own exit status is still authoritative.
-        let _ = stdout_thread.join();
-        let stderr_lines = stderr_thread.join().unwrap_or_default();
-        if status.as_ref().is_ok_and(|status| !status.success()) {
-            for line in stderr_lines {
-                let _ = try_route(DiagnosticSource::Dependency, DiagnosticLevel::Error, &line);
-            }
-        }
-        status
-    }
-}
-
-fn wait_for_captured_child(child: &Arc<Mutex<Option<Child>>>) -> Result<ExitStatus> {
-    loop {
-        {
-            let mut child = child
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let running = child
-                .as_mut()
-                .context("captured child was already reaped")?;
-            if let Some(status) = running.try_wait().context("failed to wait for command")? {
-                child.take();
-                return Ok(status);
-            }
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-/// Forward every line from a captured child stream as a `Dependency`
-/// diagnostic, falling back to a direct write when no session is installed.
-fn forward_captured_output(
-    reader: impl Read,
-    level: DiagnosticLevel,
-    is_stderr: bool,
-) -> Vec<String> {
-    const MAX_CAPTURED_ERROR_LINES: usize = 200;
-    let mut captured = VecDeque::new();
-    for line in BufReader::new(reader).lines().map_while(Result::ok) {
-        if line.is_empty() {
-            continue;
-        }
-        if may_write_raw(try_route(DiagnosticSource::Dependency, level, &line)) {
-            if is_stderr {
-                eprintln!("{line}");
-            } else {
-                println!("{line}");
-            }
-        }
-        if is_stderr {
-            if captured.len() == MAX_CAPTURED_ERROR_LINES {
-                captured.pop_front();
-            }
-            captured.push_back(line);
-        }
-    }
-    captured.into()
-}
-
-/// Raw output is only permitted when no session owns the terminal and the
-/// `Dropped` is intentionally not a fallback case.
-fn may_write_raw(route: RouteResult) -> bool {
-    matches!(route, RouteResult::NoSession)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phoxal_cli_core::session::event::SessionEvent;
 
     #[test]
-    fn active_but_full_session_never_falls_back_to_raw_output() {
-        assert!(!may_write_raw(RouteResult::Dropped));
-        assert!(may_write_raw(RouteResult::NoSession));
-    }
+    fn captured_command_lines_keep_dependency_diagnostic_ownership() {
+        let _guard = crate::session::diagnostics::DIAGNOSTICS_TEST_LOCK.blocking_lock();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        crate::session::diagnostics::install(tx);
 
-    #[test]
-    fn captured_output_retains_only_a_bounded_stderr_tail() {
-        let input = (0..250)
-            .map(|index| format!("line-{index}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let stderr = forward_captured_output(input.as_bytes(), DiagnosticLevel::Info, true);
-        assert_eq!(stderr.len(), 200);
-        assert_eq!(stderr.first().map(String::as_str), Some("line-50"));
-        assert_eq!(stderr.last().map(String::as_str), Some("line-249"));
+        phoxal_cli_project::Reporter::report(
+            &Ui::new(true),
+            phoxal_cli_project::PreparationEvent::CommandLine(
+                "cargo: compiling fixture".to_string(),
+            ),
+        );
+        crate::session::diagnostics::uninstall();
 
-        let stdout = forward_captured_output(input.as_bytes(), DiagnosticLevel::Info, false);
-        assert!(stdout.is_empty());
+        let event = rx
+            .try_recv()
+            .expect("captured command output must enter session diagnostics");
+        assert!(matches!(
+            event,
+            SessionEvent::Diagnostic {
+                source: DiagnosticSource::Dependency,
+                level: DiagnosticLevel::Info,
+                ref message,
+            } if message == "cargo: compiling fixture"
+        ));
     }
 }

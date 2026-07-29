@@ -27,7 +27,7 @@ impl AppContext {
         // startup, before workers are spawned. Path helpers use this to keep
         // every mutable artifact under the selected runtime's path policy.
         unsafe {
-            std::env::set_var(crate::host_paths::PROJECT_ROOT_ENV, &workspace_root);
+            std::env::set_var(phoxal_cli_project::PROJECT_ROOT_ENV, &workspace_root);
             if offline {
                 std::env::set_var(OFFLINE_ENV, "1");
             }
