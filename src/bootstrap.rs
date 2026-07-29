@@ -338,7 +338,7 @@ fn replace_current_executable(new_binary_path: &Path) -> Result<()> {
     self_replace::self_replace(new_binary_path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::PermissionDenied {
             anyhow!(
-                "permission denied replacing the current executable; re-run with appropriate permissions or reinstall via the install script"
+                "permission denied replacing the current executable; re-run with appropriate permissions or reinstall via `curl -fsSL https://phoxal.com/install.sh | sh`"
             )
         } else {
             anyhow!(error).context("failed to replace current executable")
