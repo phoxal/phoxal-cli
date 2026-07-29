@@ -7,10 +7,6 @@ use phoxal_cli_core::session::ProjectLifecycle;
 use phoxal_cli_protocol::CommandAction;
 
 use crate::AppContext;
-use crate::run::{
-    ClientProjection, RobotFeedTarget, start_bus_log_subscriber, start_clock_feed,
-    start_presence_observer, start_telemetry_feeds_at,
-};
 use phoxal_cli_supervisor::resident::supervisor_socket_path;
 use phoxal_cli_supervisor::{ProjectLock, ProjectLockStatus, ProjectOperation};
 
@@ -32,84 +28,42 @@ pub struct Stop {
 impl Attach {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let target = resolve_target(self.target.as_deref(), app.project.root())?;
-        let client = connect_running(&target).await?;
-        drive_tui(app, &target, client, false).await.map(|_| ())
+        let (feed, commands) = connect_running(&target).await?;
+        drive_tui(app, &target, feed, commands, false)
+            .await
+            .map(|_| ())
     }
 }
 
 pub(crate) async fn drive_tui(
     app: &AppContext,
     target: &ProjectTarget,
-    client: phoxal_cli_client::SupervisorClient,
+    feed: phoxal_cli_client::SupervisorFeed,
+    commands: phoxal_cli_client::SupervisorCommands,
     shutdown_on_quit: bool,
 ) -> Result<crate::session::controller::AttachmentOutcome> {
-    let initial = client.snapshots().current();
-    validate_entry(target, &initial.entry)?;
-    // Attaching means observing the *running* execution: the bus root is
-    // execution-scoped, so a fresh identity would subscribe an empty root.
-    let execution = initial.execution_id;
-    let projection = ClientProjection::default();
-    projection.replace_supervisor(&initial);
-    let (recovery_tx, recovery_rx) = tokio::sync::watch::channel(initial.graph_generation);
-    let telemetry = crate::telemetry::TelemetryBackend::new();
-    let connect = initial.router.clone();
-    let targets = RobotFeedTarget::from_snapshot(&initial);
-    let mut tasks = Vec::new();
-    tasks.extend(targets.iter().map(|target| {
-        start_bus_log_subscriber(
-            target.scope.namespace.clone(),
-            target.scope.robot_id.clone(),
-            connect.clone(),
-            execution,
-            projection.clone(),
-            recovery_rx.clone(),
-        )
-    }));
-    tasks.extend(targets.iter().map(|target| {
-        start_presence_observer(
-            target.scope.namespace.clone(),
-            target.scope.robot_id.clone(),
-            connect.clone(),
-            execution,
-            projection.clone(),
-        )
-    }));
-    tasks.extend(start_telemetry_feeds_at(
-        &targets,
-        &telemetry,
-        &connect,
-        execution,
-        recovery_rx,
-    ));
-    if initial.simulation.is_some()
-        && let Some(first) = targets.first()
-    {
-        let (clock_rx, clock_task) = start_clock_feed(
-            first.scope.namespace.clone(),
-            first.scope.robot_id.clone(),
-            connect.clone(),
-            execution,
-        );
-        telemetry.set_clock_feed(clock_rx);
-        tasks.push(clock_task);
-    }
-    let mut controller = crate::session::controller::SessionController::new_attachment(
+    let initial = feed.current();
+    let mode = if initial.simulation.is_some() {
+        phoxal_cli_core::session::SessionMode::Simulation
+    } else {
+        phoxal_cli_core::session::SessionMode::Run
+    };
+    let attachment = phoxal_cli_client::attach_with_supervisor(
+        target.runtime_target(),
+        feed,
+        commands,
+        initial.clone(),
+    )
+    .await?;
+    let controller = crate::session::controller::SessionController::new_attachment(
         app.output,
-        if initial.simulation.is_some() {
-            phoxal_cli_core::session::SessionMode::Simulation
-        } else {
-            phoxal_cli_core::session::SessionMode::Run
-        },
+        mode,
         &target.project,
         &initial,
     )?;
-    controller.set_bus_endpoint(connect);
-    let result = controller
-        .drive_attachment(projection, telemetry, client, recovery_tx, shutdown_on_quit)
-        .await;
-    for task in tasks {
-        task.abort();
-    }
+    let phoxal_cli_client::Attachment { runtime, ports } = attachment;
+    let result = controller.drive_attachment(ports, shutdown_on_quit).await;
+    runtime.shutdown().await;
     result
 }
 
@@ -122,15 +76,15 @@ impl Stop {
             app.ui.info(format!("resident stopped ({outcome})"));
             return Ok(());
         }
-        let client = connect_running(&target).await?;
-        validate_entry(&target, &client.snapshots().current().entry)?;
-        let reply = client.command(CommandAction::Shutdown).await?;
+        let (feed, commands) = connect_running(&target).await?;
+        validate_entry(&target, &feed.current().entry)?;
+        let reply = commands.command(CommandAction::Shutdown).await?;
         anyhow::ensure!(
             reply.accepted,
             "supervisor rejected shutdown: {:?}",
             reply.error
         );
-        let mut snapshots = client.snapshots().subscribe();
+        let mut snapshots = feed.subscribe();
         loop {
             let snapshot = snapshots.borrow_and_update().clone();
             if matches!(
@@ -180,7 +134,12 @@ pub(crate) fn resolve_target(explicit: Option<&Path>, fallback: &Path) -> Result
     })
 }
 
-async fn connect_running(target: &ProjectTarget) -> Result<phoxal_cli_client::SupervisorClient> {
+async fn connect_running(
+    target: &ProjectTarget,
+) -> Result<(
+    phoxal_cli_client::SupervisorFeed,
+    phoxal_cli_client::SupervisorCommands,
+)> {
     loop {
         match ProjectLock::inspect(&target.project)? {
             ProjectLockStatus::Free => {
@@ -196,8 +155,11 @@ async fn connect_running(target: &ProjectTarget) -> Result<phoxal_cli_client::Su
             ProjectLockStatus::Held(_) => {}
         }
         let path = supervisor_socket_path(&target.project)?;
-        match phoxal_cli_client::SupervisorClient::connect(&path).await {
-            Ok(client) => return Ok(client),
+        match phoxal_cli_client::SupervisorFeed::connect(&path).await {
+            Ok(feed) => {
+                let commands = phoxal_cli_client::SupervisorCommands::connect(&path).await?;
+                return Ok((feed, commands));
+            }
             Err(error) if phoxal_cli_client::is_connection_unavailable(&error) => {
                 tokio::select! {
                     _ = tokio::signal::ctrl_c() => bail!("cancelled while waiting for the resident supervisor to finish startup"),

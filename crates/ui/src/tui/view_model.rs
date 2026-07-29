@@ -4,13 +4,13 @@
 use std::cmp::Ordering;
 use std::time::Instant;
 
+use crate::tui::log_view::LogView;
+use crate::tui::runtime_view::RuntimeView;
 use crate::tui::visibility::is_visible_runtime;
 use phoxal_cli_core::session::ParticipantKind;
 use phoxal_cli_core::session::RuntimePerformanceSample;
 use phoxal_cli_core::session::TelemetrySnapshot;
-use phoxal_cli_core::session::stores::log::LogStore;
-use phoxal_cli_core::session::stores::runtime::{RuntimeOrigin, RuntimeStore};
-use phoxal_cli_core::session::stores::telemetry::Timestamped;
+use phoxal_cli_core::session::Timestamped;
 use phoxal_cli_core::session::{BoardSnapshot, ParticipantState, ParticipantStatus};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -44,8 +44,8 @@ impl RuntimeGroup {
 
 pub struct SessionViewModel<'a> {
     pub board: &'a BoardSnapshot,
-    pub logs: &'a LogStore,
-    pub runtime: &'a RuntimeStore,
+    pub logs: &'a LogView,
+    pub runtime: &'a RuntimeView,
     pub telemetry: &'a TelemetrySnapshot,
     pub now: Instant,
     pub runtimes: Vec<&'a ParticipantStatus>,
@@ -72,10 +72,7 @@ impl<'a> SessionViewModel<'a> {
             .filter(|status| status.present != Some(false))
             .and_then(|status| self.runtime_performance(status))
             .filter(|sample| {
-                !sample.is_stale(
-                    self.now,
-                    phoxal_cli_core::session::stores::telemetry::DEFAULT_FRESHNESS_TTL,
-                )
+                !sample.is_stale(self.now, phoxal_cli_core::session::DEFAULT_FRESHNESS_TTL)
             })
             .map_or(0, |sample| {
                 sample.value.topics.len() + usize::from(sample.value.overflow.is_some())
@@ -85,8 +82,8 @@ impl<'a> SessionViewModel<'a> {
     #[must_use]
     pub fn new(
         board: &'a BoardSnapshot,
-        logs: &'a LogStore,
-        runtime: &'a RuntimeStore,
+        logs: &'a LogView,
+        runtime: &'a RuntimeView,
         telemetry: &'a TelemetrySnapshot,
         now: Instant,
     ) -> Self {
@@ -107,13 +104,7 @@ impl<'a> SessionViewModel<'a> {
                 }
                 ParticipantState::Stopped => {}
             }
-            summary.restarts = summary.restarts.saturating_add(
-                runtime
-                    .observation(&status.id)
-                    .map_or(status.restart_count, |observation| {
-                        observation.displayed_restarts()
-                    }),
-            );
+            summary.restarts = summary.restarts.saturating_add(status.restart_count);
         }
         Self {
             board,
@@ -138,10 +129,7 @@ impl<'a> SessionViewModel<'a> {
                         | ParticipantState::Degraded
                         | ParticipantState::Starting
                         | ParticipantState::Restarting
-                ) || self
-                    .runtime
-                    .observation(&status.id)
-                    .is_some_and(|observation| observation.displayed_restarts() > 0)
+                ) || status.restart_count > 0
             })
             .collect()
     }
@@ -165,13 +153,7 @@ impl<'a> SessionViewModel<'a> {
                 ParticipantState::Starting | ParticipantState::Restarting => summary.starting += 1,
                 ParticipantState::Stopped => {}
             }
-            summary.restarts = summary.restarts.saturating_add(
-                self.runtime
-                    .observation(&status.id)
-                    .map_or(status.restart_count, |observation| {
-                        observation.displayed_restarts()
-                    }),
-            );
+            summary.restarts = summary.restarts.saturating_add(status.restart_count);
         }
         summary
     }
@@ -194,11 +176,7 @@ impl<'a> SessionViewModel<'a> {
         if status.kind == ParticipantKind::Driver {
             return RuntimeGroup::Drivers;
         }
-        if self
-            .runtime
-            .metadata(&status.id)
-            .is_some_and(|metadata| metadata.origin == RuntimeOrigin::UserService)
-        {
+        if self.runtime.is_user_service(status) {
             RuntimeGroup::UserServices
         } else {
             RuntimeGroup::FrameworkServices
@@ -231,15 +209,12 @@ impl<'a> SessionViewModel<'a> {
 fn runtime_order(
     left: &ParticipantStatus,
     right: &ParticipantStatus,
-    runtime: &RuntimeStore,
+    runtime: &RuntimeView,
 ) -> Ordering {
     let group = |status: &ParticipantStatus| {
         if status.kind == ParticipantKind::Driver {
             RuntimeGroup::Drivers
-        } else if runtime
-            .metadata(&status.id)
-            .is_some_and(|metadata| metadata.origin == RuntimeOrigin::UserService)
-        {
+        } else if runtime.is_user_service(status) {
             RuntimeGroup::UserServices
         } else {
             RuntimeGroup::FrameworkServices
@@ -249,12 +224,7 @@ fn runtime_order(
         ParticipantState::Failed => 0,
         ParticipantState::Degraded => 1,
         ParticipantState::Starting | ParticipantState::Restarting => 2,
-        _ if runtime
-            .observation(&status.id)
-            .is_some_and(|observation| observation.displayed_restarts() > 0) =>
-        {
-            3
-        }
+        _ if status.restart_count > 0 => 3,
         _ => 4,
     };
     group(left).cmp(&group(right)).then_with(|| {
@@ -283,8 +253,8 @@ mod tests {
                 ParticipantStatus::new(id, ParticipantKind::Service, state),
             );
         }
-        let logs = LogStore::new();
-        let runtime = RuntimeStore::new();
+        let logs = LogView::new();
+        let runtime = RuntimeView::new();
         let telemetry = TelemetrySnapshot::default();
         let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
         assert_eq!(
@@ -310,9 +280,13 @@ mod tests {
                 ParticipantStatus::new(id, kind, ParticipantState::Ready),
             );
         }
-        let logs = LogStore::new();
-        let mut runtime = RuntimeStore::new();
-        runtime.set_test_origin("user", RuntimeOrigin::UserService);
+        let logs = LogView::new();
+        board
+            .participants
+            .get_mut("user")
+            .unwrap()
+            .runtime_user_service = true;
+        let runtime = RuntimeView::new();
         let telemetry = TelemetrySnapshot::default();
         let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
         assert_eq!(

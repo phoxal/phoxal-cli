@@ -1,18 +1,18 @@
 //! One terminal visibility policy shared by Overview, Runtimes, Logs, and Bus.
 
+use crate::tui::runtime_view::RuntimeView;
 use phoxal_cli_core::session::ParticipantKind;
-use phoxal_cli_core::session::stores::runtime::RuntimeStore;
 use phoxal_cli_core::session::{BoardSnapshot, ParticipantStatus};
 
 #[must_use]
-pub fn is_visible_runtime(status: &ParticipantStatus, runtime: &RuntimeStore) -> bool {
+pub fn is_visible_runtime(status: &ParticipantStatus, _runtime: &RuntimeView) -> bool {
     if !matches!(
         status.kind,
         ParticipantKind::Service | ParticipantKind::Driver
     ) {
         return false;
     }
-    runtime.metadata(&status.id).is_some() || !is_session_internal_runtime_id(&status.id)
+    status.runtime_user_service || !is_session_internal_runtime_id(&status.id)
 }
 
 fn is_session_internal_runtime_id(id: &str) -> bool {
@@ -20,7 +20,7 @@ fn is_session_internal_runtime_id(id: &str) -> bool {
 }
 
 #[must_use]
-pub fn is_internal_id(id: &str, board: &BoardSnapshot, runtime: &RuntimeStore) -> bool {
+pub fn is_internal_id(id: &str, board: &BoardSnapshot, runtime: &RuntimeView) -> bool {
     if let Some(status) = board.participants.get(id) {
         return !is_visible_runtime(status, runtime);
     }
@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn run_and_webots_share_robot_runtime_visibility() {
-        let runtime = RuntimeStore::new();
+        let runtime = RuntimeView::new();
         let service =
             ParticipantStatus::new("motion", ParticipantKind::Service, ParticipantState::Ready);
         let driver =
@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn a_robot_service_named_controller_is_not_hidden_by_name() {
-        let runtime = RuntimeStore::new();
+        let runtime = RuntimeView::new();
         let status = ParticipantStatus::new(
             "flight-controller",
             ParticipantKind::Service,
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn synthetic_session_rows_are_hidden_without_runtime_metadata() {
-        let runtime = RuntimeStore::new();
+        let runtime = RuntimeView::new();
         for id in ["supervisor", "webots"] {
             let status =
                 ParticipantStatus::new(id, ParticipantKind::Service, ParticipantState::Ready);
@@ -105,9 +105,21 @@ mod tests {
     }
 
     #[test]
+    fn a_real_runtime_with_an_internal_prefix_stays_visible() {
+        let runtime = RuntimeView::new();
+        let mut status = ParticipantStatus::new(
+            "tool-calibration",
+            ParticipantKind::Service,
+            ParticipantState::Ready,
+        );
+        status.runtime_user_service = true;
+        assert!(is_visible_runtime(&status, &runtime));
+    }
+
+    #[test]
     fn cli_diagnostic_sources_are_internal_case_insensitively() {
         let board = BoardSnapshot::default();
-        let runtime = RuntimeStore::new();
+        let runtime = RuntimeView::new();
         for id in ["phoxal-cli", "phoxal-cli/Cli", "phoxal-cli/Supervisor"] {
             assert!(is_internal_id(id, &board, &runtime), "{id}");
         }

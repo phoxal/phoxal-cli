@@ -4,12 +4,12 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use super::*;
+use crate::tui::log_view::LogView;
+use crate::tui::runtime_view::RuntimeView;
 use phoxal_cli_core::session::ParticipantKind;
-use phoxal_cli_core::session::stores::log::LogStore;
-use phoxal_cli_core::session::stores::runtime::RuntimeStore;
-use phoxal_cli_core::session::stores::telemetry::RobotScope;
+use phoxal_cli_core::session::RobotScope;
 use phoxal_cli_core::session::{
-    BoardSnapshot, LogSource, ParticipantState, ParticipantStatus, RoutedLogLine,
+    BoardSnapshot, LogSource, MotionSample, ParticipantState, ParticipantStatus, RoutedLogLine,
 };
 use phoxal_cli_core::session::{DeviceDiskSample, JoypadDevice};
 use phoxal_cli_core::session::{
@@ -64,8 +64,8 @@ fn render_page(page: Page, telemetry: &TelemetrySnapshot) -> String {
 
 fn render_page_at(page: Page, telemetry: &TelemetrySnapshot, width: u16, height: u16) -> String {
     let board = BoardSnapshot::default();
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, telemetry, Instant::now());
     let mut state = AppState::default();
     state.page = page;
@@ -205,8 +205,8 @@ fn responsive_header_and_tabs_cover_compact_expanded_and_too_small_sizes() {
         ..TelemetrySnapshot::default()
     };
     let board = BoardSnapshot::default();
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
     let mut simulation_title = title();
     simulation_title.mode = SessionMode::Simulation;
@@ -229,8 +229,8 @@ fn responsive_header_and_tabs_cover_compact_expanded_and_too_small_sizes() {
 fn help_renders_product_and_issue_links() {
     let telemetry = TelemetrySnapshot::default();
     let board = BoardSnapshot::default();
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
     let mut state = AppState::default();
     state.show_help = true;
@@ -258,8 +258,8 @@ fn help_renders_product_and_issue_links() {
 fn webots_session_information_contains_only_profile_world_and_process_state() {
     let telemetry = TelemetrySnapshot::default();
     let board = BoardSnapshot::default();
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
     let mut state = AppState::default();
     state.show_info = true;
@@ -284,8 +284,8 @@ fn webots_session_information_contains_only_profile_world_and_process_state() {
 fn narrow_pages_keep_selected_controls_and_global_help_visible() {
     let telemetry = TelemetrySnapshot::default();
     let board = BoardSnapshot::default();
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
 
     let mut logs_state = AppState::default();
@@ -311,7 +311,7 @@ fn narrow_pages_keep_selected_controls_and_global_help_visible() {
 #[test]
 fn tools_source_filter_renders_tool_logs() {
     let board = BoardSnapshot::default();
-    let mut logs = LogStore::new();
+    let mut logs = LogView::new();
     logs.record(RoutedLogLine {
         participant: ROBOT_TOOL_JOYPAD.to_string(),
         source: LogSource::Bus,
@@ -328,7 +328,7 @@ fn tools_source_filter_renders_tool_logs() {
         event_time: std::time::SystemTime::UNIX_EPOCH,
         scope: None,
     });
-    let runtime = RuntimeStore::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
     let mut state = AppState::default();
@@ -457,8 +457,8 @@ fn runtime_rows_distinguish_fresh_stalled_and_missing_portable_progress() {
         ]),
         ..TelemetrySnapshot::default()
     };
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
     let wide = runtime_columns(100);
 
@@ -495,8 +495,8 @@ fn runtime_row_never_uses_same_id_telemetry_from_another_robot() {
         runtimes: BTreeMap::from([("drive".to_string(), performance_sample("drive", now))]),
         ..TelemetrySnapshot::default()
     };
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
 
     let row = runtime_row(
@@ -530,8 +530,8 @@ fn runtime_detail_renders_portable_summary_and_topic_pressure() {
         runtimes: BTreeMap::from([("drive".to_string(), performance_sample("drive", now))]),
         ..TelemetrySnapshot::default()
     };
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
     let mut state = AppState::default();
     state.page = Page::Runtimes;
@@ -586,8 +586,8 @@ fn runtime_detail_compacts_extreme_counters_without_clipping_them() {
         runtimes: BTreeMap::from([("drive".to_string(), sample)]),
         ..TelemetrySnapshot::default()
     };
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
     let mut state = AppState::default();
     state.page = Page::Runtimes;
@@ -623,8 +623,8 @@ fn runtime_topic_renderer_clamps_to_the_viewport_before_up_moves() {
         runtimes: BTreeMap::from([("drive".to_string(), sample)]),
         ..TelemetrySnapshot::default()
     };
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
     let mut state = AppState::default();
     state.page = Page::Runtimes;
@@ -665,8 +665,8 @@ fn missing_runtime_detail_hides_cached_metrics_and_topics() {
         runtimes: BTreeMap::from([("drive".to_string(), performance_sample("drive", now))]),
         ..TelemetrySnapshot::default()
     };
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
     let mut state = AppState::default();
     state.page = Page::Runtimes;
@@ -709,8 +709,8 @@ fn clipped_runtime_groups_report_how_many_rows_are_shown() {
             ParticipantStatus::new(id, ParticipantKind::Service, ParticipantState::Ready),
         );
     }
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
     let mut state = AppState::default();
@@ -731,8 +731,8 @@ fn runtime_header_stays_aligned_when_the_row_is_selected() {
         "alpha".to_string(),
         ParticipantStatus::new("alpha", ParticipantKind::Service, ParticipantState::Ready),
     );
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
     let mut state = AppState::default();
@@ -762,8 +762,8 @@ fn simulation_runtime_page_replaces_driver_rows_with_placeholder() {
             ParticipantState::Degraded,
         ),
     );
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
     let mut state = AppState::for_mode(SessionMode::Simulation);
@@ -969,20 +969,9 @@ fn motion_panel_stays_compact_when_input_state_is_stale() {
         }),
         motion: Some(Timestamped {
             received_at: old,
-            value: phoxal_api::v0_1::motion::State {
-                manual_observed_age_ns: None,
-                autonomous_candidate_age_ns: None,
-                safety_constraints_age_ns: None,
-                selected_source: None,
-                final_target: phoxal_api::v0_1::motion::Target {
-                    linear_x_mps: 0.0,
-                    angular_z_radps: 0.0,
-                    curvature_limit_radpm: None,
-                },
-                zero_reason: None,
-                safety_runtime: phoxal_api::v0_1::motion::SafetyRuntime::Absent,
-                component_estop_blocked: false,
-                active_safety_constraints: Vec::new(),
+            value: MotionSample {
+                linear_x_mps: 0.0,
+                angular_z_radps: 0.0,
             },
         }),
         ..TelemetrySnapshot::default()
@@ -996,9 +985,9 @@ fn motion_panel_stays_compact_when_input_state_is_stale() {
             ParticipantState::Ready,
         ),
     );
-    let mut runtime = RuntimeStore::new();
+    let mut runtime = RuntimeView::new();
     runtime.observe_board(&board);
-    let logs = LogStore::new();
+    let logs = LogView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
     let mut state = AppState::default();
     state.page = Page::Input;
@@ -1052,9 +1041,9 @@ fn simulation_pause_does_not_age_joypad_from_logical_clock() {
             ParticipantState::Ready,
         ),
     );
-    let mut runtime = RuntimeStore::new();
+    let mut runtime = RuntimeView::new();
     runtime.observe_board(&board);
-    let logs = LogStore::new();
+    let logs = LogView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
     let mut state = AppState::for_mode(SessionMode::Simulation);
     state.page = Page::Input;
@@ -1080,8 +1069,8 @@ fn stale_simulation_clock_is_presented_as_paused() {
         ..TelemetrySnapshot::default()
     };
     let board = BoardSnapshot::default();
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, now);
     let mut simulation_title = title();
     simulation_title.mode = SessionMode::Simulation;
@@ -1253,8 +1242,8 @@ fn bus_graph_title_matches_the_samples_that_fit_the_panel() {
 fn persistent_header_sanitizes_identity_fields() {
     let telemetry = TelemetrySnapshot::default();
     let board = BoardSnapshot::default();
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
     let mut unsafe_title = title();
     unsafe_title.robot = "rover\u{202e}spoof".to_string();
@@ -1276,8 +1265,8 @@ fn runtime_detail_sanitizes_and_bounds_remote_identity_text() {
             ParticipantState::Ready,
         ),
     );
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
     let mut state = AppState::default();
@@ -1302,8 +1291,8 @@ fn input_page_uses_devices_and_compact_motion_panels() {
 #[test]
 fn small_terminal_degrades_to_resize_message() {
     let board = BoardSnapshot::default();
-    let logs = LogStore::new();
-    let runtime = RuntimeStore::new();
+    let logs = LogView::new();
+    let runtime = RuntimeView::new();
     let telemetry = TelemetrySnapshot::default();
     let model = SessionViewModel::new(&board, &logs, &runtime, &telemetry, Instant::now());
     let backend = TestBackend::new(30, 6);

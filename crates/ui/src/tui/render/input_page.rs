@@ -29,8 +29,8 @@ pub(super) fn draw_input(
         || ("n/a".to_string(), "n/a".to_string(), "n/a".to_string()),
         |motion| {
             (
-                format!("{:.3} m/s", motion.value.final_target.linear_x_mps),
-                format!("{:.3} rad/s", motion.value.final_target.angular_z_radps),
+                format!("{:.3} m/s", motion.value.linear_x_mps),
+                format!("{:.3} rad/s", motion.value.angular_z_radps),
                 format!(
                     "{} ago{}",
                     human::duration(model.now.saturating_duration_since(motion.received_at)),

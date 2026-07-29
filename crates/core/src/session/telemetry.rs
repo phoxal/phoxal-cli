@@ -5,12 +5,33 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
-use phoxal_api::v0_1 as state_api;
+pub const DEFAULT_FRESHNESS_TTL: Duration = Duration::from_secs(3);
 
-use crate::session::stores::telemetry::RobotScope;
-use crate::session::stores::telemetry::Timestamped;
+#[derive(Debug, Clone, Copy)]
+pub struct Timestamped<T> {
+    pub value: T,
+    pub received_at: Instant,
+}
+
+impl<T> Timestamped<T> {
+    pub fn new(value: T, received_at: Instant) -> Self {
+        Self { value, received_at }
+    }
+
+    #[must_use]
+    pub fn is_stale(&self, now: Instant, ttl: Duration) -> bool {
+        now.saturating_duration_since(self.received_at) > ttl
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RobotScope {
+    pub namespace: String,
+    pub robot_id: String,
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeviceSample {
@@ -228,6 +249,12 @@ pub struct ClockObservation {
     pub received_at: Option<Instant>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MotionSample {
+    pub linear_x_mps: f32,
+    pub angular_z_radps: f32,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TelemetrySnapshot {
     pub scope: Option<RobotScope>,
@@ -238,7 +265,7 @@ pub struct TelemetrySnapshot {
     pub runtimes: BTreeMap<String, Timestamped<RuntimePerformanceSample>>,
     pub runtime_status: RuntimeFeedStatus,
     pub joypad: Option<Timestamped<JoypadDevicesSample>>,
-    pub motion: Option<Timestamped<state_api::motion::State>>,
+    pub motion: Option<Timestamped<MotionSample>>,
 }
 
 impl TelemetrySnapshot {
@@ -343,11 +370,11 @@ mod tests {
     #[test]
     fn runtime_lookup_requires_the_exact_robot_scope_even_for_the_same_id() {
         let now = Instant::now();
-        let r1 = crate::session::stores::telemetry::RobotScope {
+        let r1 = crate::session::telemetry::RobotScope {
             namespace: "acme".to_string(),
             robot_id: "r1".to_string(),
         };
-        let r2 = crate::session::stores::telemetry::RobotScope {
+        let r2 = crate::session::telemetry::RobotScope {
             namespace: "acme".to_string(),
             robot_id: "r2".to_string(),
         };

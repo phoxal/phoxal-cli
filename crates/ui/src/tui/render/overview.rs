@@ -29,7 +29,7 @@ pub(super) fn draw_overview(
             attention.len()
         };
         for status in attention.iter().take(shown) {
-            lines.push(runtime_attention_line(theme, status, model));
+            lines.push(runtime_attention_line(theme, status));
         }
         let omitted = attention.len().saturating_sub(shown);
         if omitted > 0 {
@@ -45,17 +45,8 @@ pub(super) fn draw_overview(
     );
 }
 
-pub(super) fn runtime_attention_line(
-    theme: Theme,
-    status: &ParticipantStatus,
-    model: &SessionViewModel<'_>,
-) -> Line<'static> {
-    let restarts = model
-        .runtime
-        .observation(&status.id)
-        .map_or(status.restart_count, |observation| {
-            observation.displayed_restarts()
-        });
+pub(super) fn runtime_attention_line(theme: Theme, status: &ParticipantStatus) -> Line<'static> {
+    let restarts = status.restart_count;
     let note = sanitize_and_ellipsize(status.note.as_deref().unwrap_or(""), 40);
     let id = sanitize_and_fit_cell(&status.id, 18);
     Line::from(vec![

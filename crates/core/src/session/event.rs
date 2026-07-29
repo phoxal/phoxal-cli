@@ -10,7 +10,7 @@
 //! are read from the current observation snapshot (polling, not events - see
 //! the session controller's own docs on why that stays the source of truth)
 //! and live telemetry flows through
-//! `telemetry::TelemetryBackend`/`stores::telemetry_store::TelemetryStore`
+//! the disposable attachment client's observation stores
 //! instead.
 
 use std::time::Duration;

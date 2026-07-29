@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 console = { workspace = true }
-phoxal-api = { workspace = true }
 phoxal-cli-core = { workspace = true }
 ratatui = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }

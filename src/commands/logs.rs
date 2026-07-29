@@ -7,9 +7,7 @@ use std::time::Duration;
 
 use crate::AppContext;
 use crate::commands::bus_target::BusTargetArgs;
-use phoxal_cli_core::session::reconcile::{
-    Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced,
-};
+use phoxal_cli_client::reconcile::{Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced};
 
 #[derive(Debug, Args)]
 pub struct Logs {

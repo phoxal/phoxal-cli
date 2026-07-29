@@ -2978,6 +2978,7 @@ dependencies = [
  "phoxal-api",
  "phoxal-cli-client",
  "phoxal-cli-core",
+ "phoxal-cli-observation",
  "phoxal-cli-project",
  "phoxal-cli-protocol",
  "phoxal-cli-supervisor",
@@ -3001,10 +3002,15 @@ name = "phoxal-cli-client"
 version = "0.28.5"
 dependencies = [
  "anyhow",
+ "phoxal",
+ "phoxal-api",
  "phoxal-cli-core",
+ "phoxal-cli-observation",
  "phoxal-cli-protocol",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -3015,7 +3021,6 @@ dependencies = [
  "hex",
  "object",
  "phoxal",
- "phoxal-api",
  "reqwest",
  "semver",
  "serde",
@@ -3097,7 +3102,6 @@ version = "0.28.5"
 dependencies = [
  "console",
  "crossterm",
- "phoxal-api",
  "phoxal-cli-core",
  "ratatui",
  "tokio",

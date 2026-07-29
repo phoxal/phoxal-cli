@@ -93,12 +93,14 @@ impl SimulationRun {
         if resident_in_process {
             return crate::run::run_webots_resident_supervision(app, target.project, options).await;
         }
-        let (mut launched, client) =
-            crate::run::connect_to_detached_resident(&target.project).await?;
         if self.detach {
-            return crate::run::wait_for_required_readiness(&client, &mut launched.child).await;
+            let (mut launched, feed, _) =
+                crate::run::connect_to_detached_resident_feed(&target.project).await?;
+            return crate::run::wait_for_required_readiness(&feed, &mut launched.child).await;
         }
-        let result = crate::commands::resident::drive_tui(app, &target, client, true).await;
+        let (mut launched, feed, commands) =
+            crate::run::connect_to_detached_resident(&target.project).await?;
+        let result = crate::commands::resident::drive_tui(app, &target, feed, commands, true).await;
         if matches!(
             result,
             Ok(crate::session::controller::AttachmentOutcome::Terminal)

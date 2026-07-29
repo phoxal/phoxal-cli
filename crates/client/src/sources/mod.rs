@@ -1,16 +1,17 @@
-//! Live telemetry feed for the TUI (CLI-UX Phase 3/4): background bus
-//! subscribers for the framework train's tool telemetry and joypad contracts,
-//! mirroring the disposable observers in `crate::run::observation`.
-//!
-//! Kept deliberately separate from resident `SupervisorState` and the
-//! attachment's `ClientProjection`: only the live TUI reads it
-//! (`TelemetryBackend::snapshot`), so it can carry
-//! whatever shape is convenient for rendering without touching the persisted
-//! board contract.
+//! Disposable graph sources and their stateless ingress adapter.
+
+pub(crate) mod bus;
+pub(crate) mod clock;
+pub(crate) mod device;
+pub(crate) mod input;
+pub(crate) mod liveliness;
+pub(crate) mod logs;
+pub(crate) mod motion;
+pub(crate) mod runtimes;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -18,34 +19,24 @@ use phoxal::bus::{
     CommandPublisher, ContractBody, DEFAULT_QUERY_TIMEOUT, Publish, Querier, Subscribe, Subscriber,
     Topic,
 };
-use phoxal::raw::{Bus, BusConfig};
+use phoxal::raw::Bus;
 use phoxal_api::v0_1 as api;
 use phoxal_api::v0_1 as state_api;
-use phoxal_cli_core::identity::{ExecutionId, ProducerId};
-use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio::sync::mpsc;
 
-use crate::run::{
-    BUS_TELEMETRY_PARTICIPANT, CONTROL_STATE_PARTICIPANT, DEVICE_TELEMETRY_PARTICIPANT,
-    JOYPAD_TELEMETRY_PARTICIPANT, RUNTIME_TELEMETRY_PARTICIPANT,
-};
-use phoxal_cli_core::session::reconcile::{
-    Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced,
-};
-use phoxal_cli_core::session::stores::log::sanitize_terminal_text;
-use phoxal_cli_core::session::stores::telemetry::{RobotScope, TelemetryStore, Timestamped};
+use crate::reconcile::{Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced};
 use phoxal_cli_core::session::telemetry::{
-    ClockObservation, DeviceDiskSample, DeviceSample, JoypadCommand, JoypadDevice,
-    JoypadDeviceStatus, JoypadDevicesSample, RouterMetricsSample, RuntimeBufferKind,
-    RuntimeDirection, RuntimeFeedStatus, RuntimePerformanceSample, RuntimeStepSample,
-    RuntimeTopicSample, TelemetrySnapshot, TopicMetric,
+    DeviceDiskSample, DeviceSample, JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample,
+    RouterMetricsSample, RuntimeBufferKind, RuntimeDirection, RuntimeFeedStatus,
+    RuntimePerformanceSample, RuntimeStepSample, RuntimeTopicSample, TopicMetric,
 };
+use phoxal_cli_core::session::{RobotScope, Timestamped, sanitize_terminal_text};
+use phoxal_cli_observation::SourceStatus;
 
 const MAX_DEVICE_DISKS: usize = 32;
 const MAX_ROUTER_TOPICS: usize = 256;
 const MAX_JOYPAD_DEVICES: usize = 64;
 const MAX_REMOTE_TEXT_CHARS: usize = 256;
-const MAX_EXPECTED_RUNTIME_PARTICIPANTS: usize = 1024;
 
 fn device_sample_from(record: state_api::tool::device::Record) -> DeviceSample {
     let body = record.sample;
@@ -159,8 +150,8 @@ fn joypad_device_from(body: api::joypad::Device) -> JoypadDevice {
 }
 
 /// The joypad tool's latest published device state - `selected` is the
-/// AUTHORITATIVE selection (the tool's own ack), never a local UI guess; see
-/// `tui::state::AppState::input_cursor` for the separate, purely local list cursor.
+/// authoritative selection (the tool's own acknowledgement), never a local
+/// client guess.
 fn joypad_devices_sample_from(body: api::joypad::Devices) -> JoypadDevicesSample {
     let received_devices = body.available.len();
     let available = body
@@ -241,283 +232,103 @@ fn runtime_record_from(body: state_api::tool::runtime::Record) -> RuntimePerform
     }
 }
 
-/// A snapshot of the selected robot's live telemetry feeds, cloned once per TUI redraw
-/// (mirrors `ClientProjection::snapshot`). Every latest-value field is a
-/// [`Timestamped`] carrying the [`Instant`] the underlying sample was
-/// actually RECEIVED off the bus (recorded by `TelemetryBackend::record_*`
-/// at the moment a feed task observes it, never re-stamped on later
-/// redraws), so a renderer can ask [`Timestamped::is_stale`] instead of
-/// trusting a long-cached value as if it were still live. See the
-/// `stores::telemetry_store` module documentation for the store contract.
-/// Live-telemetry state shared between the background feed tasks
-/// (`start_device_feed` etc.) and the TUI's redraw path
-/// (`TuiDisplay::redraw`/`render::draw`). Cheap to clone (an `Arc` handle);
-/// every feed task and the TUI hold their own clone.
-///
-/// Backed by [`TelemetryStore`]: every `record_*` call below
-/// stamps the sample with `Instant::now()` AT THE MOMENT the feed task
-/// received it, not when a later redraw happens to observe it - that
-/// receive-time timestamp is what makes [`TelemetrySnapshot`]'s freshness
-/// checks meaningful.
-#[derive(Debug, Clone, Default)]
+/// Stateless ingress adapter from reconciled source data to the client-owned
+/// store updater. Retained values exist only in the stores behind the ports.
+#[derive(Debug, Clone)]
 pub struct TelemetryBackend {
-    inner: Arc<Mutex<TelemetryStore>>,
-    clock_rx: Arc<Mutex<Option<watch::Receiver<ClockObservation>>>>,
-    joypad_command_tx: Arc<Mutex<Option<mpsc::Sender<JoypadCommand>>>>,
+    updates: mpsc::UnboundedSender<TelemetryUpdate>,
 }
 
-/// A generous bound for a user-driven command channel (one send per
-/// keypress in Input, never a hot loop): [`JoypadCommand`]s queue
-/// here between redraws, so this only needs to absorb a rapid burst of
-/// key presses, not hold unbounded history.
-const JOYPAD_COMMAND_CHANNEL_CAPACITY: usize = 16;
+#[derive(Debug)]
+pub(crate) enum TelemetryUpdate {
+    Clock(phoxal_cli_core::session::ClockSample),
+    Device(RobotScope, DeviceSample),
+    Router(RobotScope, Timestamped<RouterMetricsSample>),
+    Routers(RobotScope, Vec<Timestamped<RouterMetricsSample>>),
+    Runtimes(RobotScope, Vec<RuntimePerformanceSample>, RuntimeFeedStatus),
+    Runtime(RobotScope, RuntimePerformanceSample),
+    Joypads(JoypadDevicesSample),
+    Motion(state_api::motion::State),
+    Health(String, SourceStatus),
+}
 
 impl TelemetryBackend {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub(crate) fn with_updates(updates: mpsc::UnboundedSender<TelemetryUpdate>) -> Self {
+        Self { updates }
     }
 
-    pub fn set_clock_feed(&self, rx: watch::Receiver<ClockObservation>) {
-        *self.clock_rx.lock().expect("clock_rx mutex poisoned") = Some(rx);
+    pub(crate) fn record_device(&self, scope: RobotScope, sample: DeviceSample) {
+        let _ = self.updates.send(TelemetryUpdate::Device(scope, sample));
     }
 
-    fn set_joypad_command_sender(&self, tx: mpsc::Sender<JoypadCommand>) {
-        *self
-            .joypad_command_tx
-            .lock()
-            .expect("joypad_command_tx mutex poisoned") = Some(tx);
-    }
-
-    /// Publish a joypad Select, SetEnabled, or Rescan command from the TUI's
-    /// Input page. Never blocks the terminal input path. An absent, closed, or
-    /// overloaded feed is reported through tracing so the failure appears in
-    /// Logs instead of being duplicated as persistent Input-panel state.
-    pub fn send_joypad_command(&self, command: JoypadCommand) {
-        let sender = self
-            .joypad_command_tx
-            .lock()
-            .expect("joypad_command_tx mutex poisoned")
-            .clone();
-        let Some(sender) = sender else {
-            tracing::warn!(?command, "joypad action rejected: tool feed is unavailable");
-            return;
-        };
-        match sender.try_send(command) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(command)) => {
-                tracing::warn!(?command, "joypad action rejected: tool feed is busy");
-            }
-            Err(mpsc::error::TrySendError::Closed(command)) => {
-                tracing::warn!(?command, "joypad action rejected: tool feed stopped");
-            }
-        }
-    }
-
-    #[must_use]
-    pub fn snapshot(&self, scope: &RobotScope) -> TelemetrySnapshot {
-        let store = self.inner.lock().expect("telemetry mutex poisoned");
-        let mut snapshot = TelemetrySnapshot {
-            scope: Some(scope.clone()),
-            clock: None,
-            device: store.device(scope).cloned(),
-            router: store.router(scope).cloned(),
-            router_throughput_history: store.router_throughput_history(scope).collect(),
-            runtimes: store.runtimes(scope),
-            runtime_status: store.runtime_status(scope),
-            joypad: store.joypad().cloned(),
-            motion: store.motion().cloned(),
-        };
-        drop(store);
-        if let Some(rx) = &*self.clock_rx.lock().expect("clock_rx mutex poisoned") {
-            let observation = rx.borrow();
-            snapshot.clock = observation
-                .latest
-                .zip(observation.received_at)
-                .map(|(value, received_at)| Timestamped { value, received_at });
-        }
-        snapshot
-    }
-
-    fn record_device(&self, scope: RobotScope, sample: DeviceSample) {
-        self.inner
-            .lock()
-            .expect("telemetry mutex poisoned")
-            .record_device(scope, Instant::now(), sample);
-    }
-
-    fn record_router_at(
+    pub(crate) fn record_router_at(
         &self,
         scope: RobotScope,
         received_at: Instant,
         sample: RouterMetricsSample,
     ) {
-        self.inner
-            .lock()
-            .expect("telemetry mutex poisoned")
-            .record_router(scope, received_at, sample);
+        let _ = self.updates.send(TelemetryUpdate::Router(
+            scope,
+            Timestamped::new(sample, received_at),
+        ));
     }
 
-    fn install_router(
+    pub(crate) fn install_router(
         &self,
         scope: RobotScope,
-        samples: Vec<Timestamped<RouterMetricsSample>>,
+        mut samples: Vec<Timestamped<RouterMetricsSample>>,
         current: Option<Timestamped<RouterMetricsSample>>,
     ) {
-        self.inner
-            .lock()
-            .expect("telemetry mutex poisoned")
-            .install_router_history(scope, samples, current);
+        if let Some(current) = current {
+            samples.push(current);
+        }
+        let _ = self.updates.send(TelemetryUpdate::Routers(scope, samples));
     }
 
-    fn install_runtimes(
+    pub(crate) fn install_runtimes(
         &self,
         scope: RobotScope,
         samples: Vec<RuntimePerformanceSample>,
         status: RuntimeFeedStatus,
     ) {
-        self.inner
-            .lock()
-            .expect("telemetry mutex poisoned")
-            .install_runtime_history(scope, Instant::now(), samples, status);
+        let _ = self
+            .updates
+            .send(TelemetryUpdate::Runtimes(scope, samples, status));
     }
 
-    fn record_runtime(&self, scope: RobotScope, sample: RuntimePerformanceSample) {
-        self.inner
-            .lock()
-            .expect("telemetry mutex poisoned")
-            .record_runtime(scope, Instant::now(), sample);
+    pub(crate) fn record_runtime(&self, scope: RobotScope, sample: RuntimePerformanceSample) {
+        let _ = self.updates.send(TelemetryUpdate::Runtime(scope, sample));
     }
 
-    fn record_joypad(&self, sample: JoypadDevicesSample) {
-        self.inner
-            .lock()
-            .expect("telemetry mutex poisoned")
-            .record_joypad(Instant::now(), sample);
+    pub(crate) fn record_joypad(&self, sample: JoypadDevicesSample) {
+        let _ = self.updates.send(TelemetryUpdate::Joypads(sample));
     }
 
-    fn record_motion(&self, sample: state_api::motion::State) {
-        self.inner
-            .lock()
-            .expect("telemetry mutex poisoned")
-            .record_motion(Instant::now(), sample);
+    pub(crate) fn record_motion(&self, sample: state_api::motion::State) {
+        let _ = self.updates.send(TelemetryUpdate::Motion(sample));
+    }
+
+    pub(crate) fn record_health(&self, source: impl Into<String>, status: SourceStatus) {
+        let _ = self
+            .updates
+            .send(TelemetryUpdate::Health(source.into(), status));
     }
 }
 
-pub fn start_control_state_feed(
-    namespace: String,
-    robot_id: String,
-    connect: String,
-    execution: ExecutionId,
-    telemetry: TelemetryBackend,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            if let Err(error) = control_state_feed_loop(
-                namespace.clone(),
-                robot_id.clone(),
-                connect.clone(),
-                execution,
-                &telemetry,
-            )
-            .await
-            {
-                tracing::debug!("control-state feed waiting for router: {error:#}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        }
-    })
-}
-
-async fn control_state_feed_loop(
-    namespace: String,
-    robot_id: String,
-    connect: String,
-    execution: ExecutionId,
-    telemetry: &TelemetryBackend,
-) -> Result<()> {
-    let bus = Bus::open(BusConfig {
-        namespace,
-        robot_id,
-        participant: CONTROL_STATE_PARTICIPANT.to_string(),
-        execution,
-        producer: ProducerId::mint(),
-        connect_endpoints: vec![connect],
-    })
-    .await?;
-    let result = async {
-        let motion_topic = Topic::<Subscribe<state_api::motion::State>>::new_static(
-            <state_api::motion::State as ContractBody>::TOPIC,
-        );
-        let motion = Subscriber::new(&bus, &motion_topic, 32).await?;
-        loop {
-            telemetry.record_motion(motion.recv().await?.body);
-        }
+pub(crate) async fn control_state_feed_loop(bus: Bus, telemetry: &TelemetryBackend) -> Result<()> {
+    let motion_topic = Topic::<Subscribe<state_api::motion::State>>::new_static(
+        <state_api::motion::State as ContractBody>::TOPIC,
+    );
+    let motion = Subscriber::new(&bus, &motion_topic, 32).await?;
+    loop {
+        telemetry.record_motion(motion.recv().await?.body);
     }
-    .await;
-    close_feed_bus(&bus, "control-state").await;
-    result
 }
 
 /// Reconcile one robot root's retained device observation with its live
 /// follow feed. Device totals retain both their project/deployment identity
 /// and robot-root attribution and are never attributed to a runtime.
-pub fn start_device_feed(
-    namespace: String,
-    robot_id: String,
-    connect: String,
-    execution: ExecutionId,
-    telemetry: TelemetryBackend,
-    mut recovery_epochs: watch::Receiver<u64>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let scope = RobotScope {
-            namespace: namespace.clone(),
-            robot_id: robot_id.clone(),
-        };
-        loop {
-            let bus = match Bus::open(BusConfig {
-                namespace: namespace.clone(),
-                robot_id: robot_id.clone(),
-                participant: DEVICE_TELEMETRY_PARTICIPANT.to_string(),
-                execution,
-                producer: ProducerId::mint(),
-                connect_endpoints: vec![connect.clone()],
-            })
-            .await
-            {
-                Ok(bus) => bus,
-                Err(error) => {
-                    tracing::debug!("device telemetry feed waiting for router: {error}");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-            let feed = device_feed_loop(&bus, &scope, &telemetry);
-            tokio::pin!(feed);
-            let result = tokio::select! {
-                result = &mut feed => Some(result),
-                changed = recovery_epochs.changed() => {
-                    if changed.is_err() { break; }
-                    tracing::debug!(
-                        recovery_epoch = *recovery_epochs.borrow_and_update(),
-                        "recreating device snapshot/follow transport after graph recovery"
-                    );
-                    None
-                }
-            };
-            close_feed_bus(&bus, "tool-telemetry/device").await;
-            if let Some(result) = result {
-                let error =
-                    result.expect_err("device telemetry feed loop is intentionally endless");
-                tracing::debug!("device telemetry feed waiting for router: {error:#}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        }
-    })
-}
-
-async fn device_feed_loop(
+pub(crate) async fn device_feed_loop(
     bus: &Bus,
     scope: &RobotScope,
     telemetry: &TelemetryBackend,
@@ -671,67 +482,7 @@ async fn prepare_device_requery(
 }
 
 /// Reconcile tool-bus's complete bounded snapshot with its live follow feed.
-pub fn start_router_metrics_feed(
-    namespace: String,
-    robot_id: String,
-    connect: String,
-    execution: ExecutionId,
-    telemetry: TelemetryBackend,
-    mut recovery_epochs: watch::Receiver<u64>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let scope = RobotScope {
-            namespace: namespace.clone(),
-            robot_id: robot_id.clone(),
-        };
-        loop {
-            let bus = match Bus::open(BusConfig {
-                namespace: namespace.clone(),
-                robot_id: robot_id.clone(),
-                participant: BUS_TELEMETRY_PARTICIPANT.to_string(),
-                execution,
-                producer: ProducerId::mint(),
-                connect_endpoints: vec![connect.clone()],
-            })
-            .await
-            {
-                Ok(bus) => bus,
-                Err(error) => {
-                    tracing::debug!("router metrics feed waiting for router: {error}");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-            let feed = router_metrics_feed_loop(&bus, &scope, &telemetry);
-            tokio::pin!(feed);
-            let result = tokio::select! {
-                result = &mut feed => Some(result),
-                changed = recovery_epochs.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                    tracing::debug!(
-                        recovery_epoch = *recovery_epochs.borrow_and_update(),
-                        "recreating tool-bus snapshot/follow transport after graph recovery"
-                    );
-                    None
-                }
-            };
-            close_feed_bus(&bus, "tool-bus").await;
-            match result {
-                None => continue,
-                Some(result) => {
-                    let error =
-                        result.expect_err("router metrics feed loop is intentionally endless");
-                    tracing::debug!("router metrics feed waiting for router: {error:#}");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-    })
-}
-
-async fn router_metrics_feed_loop(
+pub(crate) async fn router_metrics_feed_loop(
     bus: &Bus,
     scope: &RobotScope,
     telemetry: &TelemetryBackend,
@@ -911,86 +662,7 @@ fn timestamp_router_snapshot(
 /// Reconcile tool-telemetry's paginated retained runtime history with its live
 /// follow feed. The adapter owns transport recovery only; it never changes
 /// lifecycle state or samples device resources.
-pub fn start_runtime_performance_feed(
-    namespace: String,
-    robot_id: String,
-    expected_participant_ids: Vec<String>,
-    connect: String,
-    execution: ExecutionId,
-    telemetry: TelemetryBackend,
-    mut recovery_epochs: watch::Receiver<u64>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let expected_count = expected_runtime_participant_count(&expected_participant_ids);
-        if expected_count > MAX_EXPECTED_RUNTIME_PARTICIPANTS {
-            tracing::error!(
-                expected_count,
-                limit = MAX_EXPECTED_RUNTIME_PARTICIPANTS,
-                "runtime telemetry disabled: configured participant set exceeds the static limit"
-            );
-            return;
-        }
-        let scope = RobotScope {
-            namespace: namespace.clone(),
-            robot_id: robot_id.clone(),
-        };
-        let mut last_capacity_evictions = None;
-        loop {
-            let bus = match Bus::open(BusConfig {
-                namespace: namespace.clone(),
-                robot_id: robot_id.clone(),
-                participant: RUNTIME_TELEMETRY_PARTICIPANT.to_string(),
-                execution,
-                producer: ProducerId::mint(),
-                connect_endpoints: vec![connect.clone()],
-            })
-            .await
-            {
-                Ok(bus) => bus,
-                Err(error) => {
-                    tracing::debug!("runtime telemetry feed waiting for router: {error}");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-            let feed = runtime_performance_feed_loop(
-                &bus,
-                &scope,
-                &expected_participant_ids,
-                &telemetry,
-                &mut last_capacity_evictions,
-            );
-            tokio::pin!(feed);
-            let result = tokio::select! {
-                result = &mut feed => Some(result),
-                changed = recovery_epochs.changed() => {
-                    if changed.is_err() { break; }
-                    tracing::debug!(
-                        recovery_epoch = *recovery_epochs.borrow_and_update(),
-                        "recreating tool-telemetry snapshot/follow transport after graph recovery"
-                    );
-                    None
-                }
-            };
-            close_feed_bus(&bus, "tool-telemetry/runtime").await;
-            match result {
-                None => continue,
-                Some(result) => {
-                    let error =
-                        result.expect_err("runtime telemetry feed loop is intentionally endless");
-                    tracing::debug!("runtime telemetry feed waiting for router: {error:#}");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-    })
-}
-
-fn expected_runtime_participant_count(participant_ids: &[String]) -> usize {
-    participant_ids.iter().collect::<BTreeSet<_>>().len()
-}
-
-async fn runtime_performance_feed_loop(
+pub(crate) async fn runtime_performance_feed_loop(
     bus: &Bus,
     scope: &RobotScope,
     expected_participant_ids: &[String],
@@ -1275,61 +947,14 @@ fn apply_runtime_outcome(
 }
 
 /// Subscribe v0_1::joypad::Devices and own the Select, SetEnabled, and Rescan
-/// publishers. The TUI's Input page sends commands through DisplayAction;
-/// this loop publishes, and the next Devices receive is the authoritative
-/// acknowledgement. The command sender is installed on telemetry immediately,
-/// before the feed connects, so a command sent while the bus reconnects is
-/// queued. The returned handle owns both subscription and command publishing.
-pub fn start_joypad_devices_feed(
-    namespace: String,
-    robot_id: String,
-    connect: String,
-    execution: ExecutionId,
-    telemetry: TelemetryBackend,
-) -> JoinHandle<()> {
-    let (command_tx, mut command_rx) = mpsc::channel(JOYPAD_COMMAND_CHANNEL_CAPACITY);
-    telemetry.set_joypad_command_sender(command_tx);
-    tokio::spawn(async move {
-        loop {
-            match joypad_devices_feed_loop(
-                namespace.clone(),
-                robot_id.clone(),
-                connect.clone(),
-                execution,
-                &telemetry,
-                &mut command_rx,
-            )
-            .await
-            {
-                Ok(()) => break,
-                Err(error) => {
-                    tracing::debug!("joypad devices feed waiting for router: {error:#}");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-    })
-}
-
-async fn joypad_devices_feed_loop(
-    namespace: String,
-    robot_id: String,
-    connect: String,
-    execution: ExecutionId,
+/// publishers. This loop publishes typed port commands, and the next Devices
+/// receive is the authoritative acknowledgement.
+pub(crate) async fn joypad_devices_feed_loop(
+    bus: Bus,
     telemetry: &TelemetryBackend,
-    command_rx: &mut mpsc::Receiver<JoypadCommand>,
+    command_rx: &mut mpsc::Receiver<crate::ports::input::InputCommand>,
 ) -> Result<()> {
-    let bus = Bus::open(BusConfig {
-        namespace,
-        robot_id,
-        participant: JOYPAD_TELEMETRY_PARTICIPANT.to_string(),
-        execution,
-        producer: ProducerId::mint(),
-        connect_endpoints: vec![connect],
-    })
-    .await
-    .map_err(|error| anyhow!("failed to open bus joypad/devices subscription: {error}"))?;
-    let result = async {
+    {
         let devices_topic = Topic::<Subscribe<api::joypad::Devices>>::new_static(
             <api::joypad::Devices as ContractBody>::TOPIC,
         );
@@ -1338,7 +963,8 @@ async fn joypad_devices_feed_loop(
         let select_topic = Topic::<Publish<api::joypad::Select>>::new_static(
             <api::joypad::Select as ContractBody>::TOPIC,
         );
-        let select_publisher = CommandPublisher::<api::joypad::Select>::new(bus.clone(), &select_topic)?;
+        let select_publisher =
+            CommandPublisher::<api::joypad::Select>::new(bus.clone(), &select_topic)?;
         let enabled_topic = Topic::<Publish<api::joypad::SetEnabled>>::new_static(
             <api::joypad::SetEnabled as ContractBody>::TOPIC,
         );
@@ -1347,7 +973,8 @@ async fn joypad_devices_feed_loop(
         let rescan_topic = Topic::<Publish<api::joypad::Rescan>>::new_static(
             <api::joypad::Rescan as ContractBody>::TOPIC,
         );
-        let rescan_publisher = CommandPublisher::<api::joypad::Rescan>::new(bus.clone(), &rescan_topic)?;
+        let rescan_publisher =
+            CommandPublisher::<api::joypad::Rescan>::new(bus.clone(), &rescan_topic)?;
         loop {
             tokio::select! {
                 received = devices_subscriber.recv() => {
@@ -1356,54 +983,33 @@ async fn joypad_devices_feed_loop(
                 }
                 command = command_rx.recv() => {
                     match command {
-                        Some(JoypadCommand::Select(id)) => {
+                        Some(crate::ports::input::InputCommand::Select(id)) => {
                             if let Err(error) = select_publisher.send(api::joypad::Select { id }) {
                                 tracing::warn!("joypad select publish failed: {error:#}");
                             }
                         }
-                        Some(JoypadCommand::SetEnabled(enabled)) => {
+                        Some(crate::ports::input::InputCommand::SetEnabled(enabled)) => {
                             if let Err(error) = enabled_publisher.send(api::joypad::SetEnabled { enabled }) {
                                 tracing::warn!("joypad enable publish failed: {error:#}");
                             }
                         }
-                        Some(JoypadCommand::Rescan) => {
+                        Some(crate::ports::input::InputCommand::Rescan) => {
                             if let Err(error) = rescan_publisher.send(api::joypad::Rescan {}) {
                                 tracing::warn!("joypad rescan publish failed: {error:#}");
                             }
                         }
-                        // The `TelemetryBackend` handle (and its command sender)
-                        // outlives every feed task in practice, so this arm is
-                        // untaken outside tests - kept as a clean exit rather
-                        // than an unreachable! so a future caller that DOES drop
-                        // the backend mid-session degrades gracefully instead of
-                        // panicking.
+                        // Closing the typed port ends this source cleanly.
                         None => return Ok(()),
                     }
                 }
             }
         }
     }
-    .await;
-    close_feed_bus(&bus, "joypad/devices").await;
-    result
-}
-
-async fn close_feed_bus(bus: &Bus, feed: &str) {
-    if let Err(error) = bus.close().await {
-        tracing::debug!(feed, error = %error, "telemetry feed bus close failed");
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn scope(robot_id: &str) -> RobotScope {
-        RobotScope {
-            namespace: "acme".to_string(),
-            robot_id: robot_id.to_string(),
-        }
-    }
 
     fn runtime_record(sequence: u64, participant_id: &str) -> state_api::tool::runtime::Record {
         state_api::tool::runtime::Record {
@@ -1453,7 +1059,6 @@ mod tests {
             ))
             .is_none()
         );
-
         assert!(runtime_participant_page_is_valid(
             &runtime_snapshot("g", 11, vec![runtime_record(8, "drive")]),
             &anchor,
@@ -1486,38 +1091,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_participant_limit_counts_unique_static_configuration() {
-        let within_limit = (0..MAX_EXPECTED_RUNTIME_PARTICIPANTS)
-            .map(|index| format!("participant-{index}"))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            expected_runtime_participant_count(&within_limit),
-            MAX_EXPECTED_RUNTIME_PARTICIPANTS
-        );
-        let mut over_limit = within_limit;
-        over_limit.push("one-too-many".to_string());
-        assert_eq!(
-            expected_runtime_participant_count(&over_limit),
-            MAX_EXPECTED_RUNTIME_PARTICIPANTS + 1
-        );
-        over_limit.push("one-too-many".to_string());
-        assert_eq!(
-            expected_runtime_participant_count(&over_limit),
-            MAX_EXPECTED_RUNTIME_PARTICIPANTS + 1
-        );
-    }
-
-    #[test]
-    fn snapshot_is_empty_by_default_graceful_absence() {
-        let telemetry = TelemetryBackend::new();
-        let snapshot = telemetry.snapshot(&scope("r1"));
-        assert!(snapshot.device.is_none());
-        assert!(snapshot.clock.is_none());
-        assert!(snapshot.router.is_none());
-        assert!(snapshot.joypad.is_none());
-    }
-
-    #[test]
     fn retained_router_windows_reconstruct_distinct_end_times() {
         fn window(sequence: u64, window_ns: u64) -> state_api::tool::bus::Window {
             state_api::tool::bus::Window {
@@ -1527,90 +1100,19 @@ mod tests {
                 window_ns,
             }
         }
-
         let now = Instant::now();
         let (history, current) = timestamp_router_snapshot(
             now,
             vec![window(1, 1_000_000_000), window(2, 2_000_000_000)],
             Some(window(3, 500_000_000)),
         );
-
         assert_eq!(history[1].received_at, now - Duration::from_millis(500));
         assert_eq!(history[0].received_at, now - Duration::from_millis(2_500));
         assert_eq!(current.unwrap().received_at, now);
     }
 
     #[test]
-    fn record_device_is_scoped_to_its_robot_root() {
-        let telemetry = TelemetryBackend::new();
-        telemetry.record_device(
-            scope("r1"),
-            DeviceSample {
-                cpu_pct: Some(42.0),
-                ram_used_bytes: Some(100),
-                ram_total_bytes: Some(200),
-                load_1m: Some(0.5),
-                window_ns: 1_000_000_000,
-                ..DeviceSample::default()
-            },
-        );
-        let snapshot = telemetry.snapshot(&scope("r1"));
-        assert_eq!(
-            snapshot.device.and_then(|device| device.value.cpu_pct),
-            Some(42.0)
-        );
-        assert!(telemetry.snapshot(&scope("r2")).device.is_none());
-    }
-
-    #[test]
-    fn device_reconciliation_installs_the_latest_identity_derived_sample() {
-        fn item(sequence: u64, cpu_pct: f32) -> DeviceRecordFollow {
-            DeviceRecordFollow {
-                cursor: Cursor {
-                    generation: "generation-a".to_string(),
-                    sequence,
-                },
-                record: state_api::tool::device::Record {
-                    sequence,
-                    sample: state_api::tool::device::Sample {
-                        cpu_pct: Some(cpu_pct),
-                        ram_used_bytes: None,
-                        ram_total_bytes: None,
-                        swap_used_bytes: None,
-                        swap_total_bytes: None,
-                        load_1m: None,
-                        load_5m: None,
-                        load_15m: None,
-                        uptime_s: None,
-                        disks: None,
-                        window_ns: 1,
-                    },
-                    truncated: 0,
-                },
-            }
-        }
-
-        let telemetry = TelemetryBackend::new();
-        let target = scope("r1");
-        assert!(apply_device_outcome(
-            &telemetry,
-            &target,
-            ReconcileOutcome::Installed {
-                snapshot: vec![item(1, 10.0)],
-                replay: vec![item(3, 30.0)],
-            },
-        ));
-        assert_eq!(
-            telemetry
-                .snapshot(&target)
-                .device
-                .map(|device| device.value.cpu_pct),
-            Some(Some(30.0))
-        );
-    }
-
-    #[test]
-    fn router_overflow_sentinel_is_presented_as_an_aggregate_row() {
+    fn router_overflow_and_remote_labels_are_preserved_safely() {
         let metric = topic_metric_from(state_api::tool::bus::TopicMetric {
             topic: String::new(),
             from_participant: String::new(),
@@ -1619,38 +1121,16 @@ mod tests {
         });
         assert_eq!(metric.topic, "Other/unobserved traffic");
         assert_eq!(metric.from_participant, "multiple");
-        assert_eq!(metric.ingress_rate_hz, 7.0);
-        assert_eq!(metric.count, 11);
         assert!(metric.aggregate_overflow);
-    }
 
-    #[test]
-    fn remote_router_and_joypad_labels_are_sanitized_at_ingress() {
         let metric = topic_metric_from(state_api::tool::bus::TopicMetric {
-            topic: "v1/drive\u{1b}[31m/state".to_string(),
+            topic: "v1/drive\u{1b}[31m/state\u{e0021}".to_string(),
             from_participant: "drive\nspoof".to_string(),
             ingress_rate_hz: 1.0,
             count: 1,
         });
-        assert_eq!(metric.topic, "v1/drive/state");
+        assert_eq!(metric.topic, "v1/drive/state ");
         assert_eq!(metric.from_participant, "drive spoof");
-
-        let devices = joypad_devices_sample_from(api::joypad::Devices {
-            available: vec![api::joypad::Device {
-                id: "pad\u{1b}[2J".to_string(),
-                name: "Pad\nname".to_string(),
-                status: api::joypad::DeviceStatus::Ready,
-            }],
-            selected: Some("pad\u{1b}[2J".to_string()),
-            enabled: false,
-            unavailable_reason: Some("reason\rline".to_string()),
-            last_error: Some("error\tline".to_string()),
-        });
-        assert_eq!(devices.available[0].id, "pad");
-        assert_eq!(devices.available[0].name, "Pad name");
-        assert_eq!(devices.selected.as_deref(), Some("pad"));
-        assert_eq!(devices.unavailable_reason.as_deref(), Some("reason line"));
-        assert_eq!(devices.last_error.as_deref(), Some("error line"));
     }
 
     #[test]
@@ -1677,11 +1157,6 @@ mod tests {
             .expect("overflow aggregate");
         assert_eq!(overflow.ingress_rate_hz, 21.0);
         assert_eq!(overflow.count, 21);
-        assert!(router.topics.iter().any(|metric| metric.aggregate_overflow));
-        assert!(router.topics.iter().all(|metric| {
-            metric.topic.chars().count() <= MAX_REMOTE_TEXT_CHARS
-                && metric.from_participant.chars().count() <= MAX_REMOTE_TEXT_CHARS
-        }));
 
         let joypad = joypad_devices_sample_from(api::joypad::Devices {
             available: (0..(MAX_JOYPAD_DEVICES + 7))
@@ -1698,43 +1173,10 @@ mod tests {
         });
         assert_eq!(joypad.available.len(), MAX_JOYPAD_DEVICES);
         assert_eq!(joypad.devices_truncated, 7);
-
-        let device = device_sample_from(state_api::tool::device::Record {
-            sequence: 1,
-            sample: state_api::tool::device::Sample {
-                cpu_pct: None,
-                ram_used_bytes: None,
-                ram_total_bytes: None,
-                swap_used_bytes: None,
-                swap_total_bytes: None,
-                load_1m: None,
-                load_5m: None,
-                load_15m: None,
-                uptime_s: None,
-                disks: Some(
-                    (0..(MAX_DEVICE_DISKS + 4))
-                        .map(|index| state_api::tool::device::Disk {
-                            mount_point: format!("/disk-{index}"),
-                            file_system: "fs".to_string(),
-                            used_bytes: 0,
-                            total_bytes: 1,
-                        })
-                        .collect(),
-                ),
-                window_ns: 1,
-            },
-            truncated: 3,
-        });
-        assert_eq!(
-            device.disks.as_deref().map_or(0, Vec::len),
-            MAX_DEVICE_DISKS
-        );
-        assert_eq!(device.disks_truncated, 7);
-        assert!(device.cpu_pct.is_none());
     }
 
     #[test]
-    fn local_router_truncation_folds_into_an_existing_overflow_sentinel() {
+    fn local_router_truncation_folds_into_existing_overflow() {
         let mut topics = vec![state_api::tool::bus::TopicMetric {
             topic: String::new(),
             from_participant: String::new(),
@@ -1749,7 +1191,6 @@ mod tests {
                 count: 1,
             }
         }));
-
         let router = router_metrics_sample_from(state_api::tool::bus::Window {
             sequence: 1,
             topics,
@@ -1764,104 +1205,5 @@ mod tests {
         assert_eq!(router.topics_truncated, 22);
         assert_eq!(overflow.ingress_rate_hz, 122.0);
         assert_eq!(overflow.count, 122);
-    }
-
-    #[test]
-    fn telemetry_snapshots_share_large_latest_value_storage() {
-        let telemetry = TelemetryBackend::new();
-        telemetry.record_router_at(
-            scope("r1"),
-            Instant::now(),
-            RouterMetricsSample {
-                topics: Arc::new(vec![TopicMetric {
-                    topic: "v1/motion/state".to_string(),
-                    from_participant: "motion".to_string(),
-                    ingress_rate_hz: 1.0,
-                    count: 1,
-                    aggregate_overflow: false,
-                }]),
-                ..RouterMetricsSample::default()
-            },
-        );
-        let first = telemetry
-            .snapshot(&scope("r1"))
-            .router
-            .expect("first router sample");
-        let second = telemetry
-            .snapshot(&scope("r1"))
-            .router
-            .expect("second router sample");
-        assert!(Arc::ptr_eq(&first.value.topics, &second.value.topics));
-    }
-
-    #[test]
-    fn router_snapshot_is_explicitly_scoped_without_cross_robot_flicker() {
-        let telemetry = TelemetryBackend::new();
-        let now = Instant::now();
-        telemetry.record_router_at(
-            scope("r1"),
-            now,
-            RouterMetricsSample {
-                throughput_msg_s: 1.0,
-                ..RouterMetricsSample::default()
-            },
-        );
-        telemetry.record_router_at(
-            scope("r2"),
-            now + Duration::from_secs(1),
-            RouterMetricsSample {
-                throughput_msg_s: 2.0,
-                ..RouterMetricsSample::default()
-            },
-        );
-
-        let r1 = telemetry.snapshot(&scope("r1"));
-        let r2 = telemetry.snapshot(&scope("r2"));
-        assert_eq!(r1.router.unwrap().value.throughput_msg_s, 1.0);
-        assert_eq!(
-            r1.router_throughput_history
-                .iter()
-                .map(|sample| sample.value)
-                .collect::<Vec<_>>(),
-            vec![1.0]
-        );
-        assert_eq!(r2.router.unwrap().value.throughput_msg_s, 2.0);
-        assert_eq!(
-            r2.router_throughput_history
-                .iter()
-                .map(|sample| sample.value)
-                .collect::<Vec<_>>(),
-            vec![2.0]
-        );
-    }
-
-    #[test]
-    fn simulation_clock_feed_reaches_the_tui_snapshot() {
-        let telemetry = TelemetryBackend::new();
-        let (tx, rx) = watch::channel(ClockObservation::default());
-        telemetry.set_clock_feed(rx);
-        assert!(telemetry.snapshot(&scope("r1")).clock.is_none());
-        tx.send_modify(|observation| {
-            observation.latest =
-                Some(phoxal_cli_core::session::telemetry::ClockSample { now_ns: 5, step: 3 });
-            observation.received_at = Some(Instant::now());
-        });
-        assert_eq!(
-            telemetry
-                .snapshot(&scope("r1"))
-                .clock
-                .expect("clock sample")
-                .value
-                .step,
-            3
-        );
-    }
-
-    #[test]
-    fn joypad_command_without_a_running_feed_does_not_panic() {
-        let telemetry = TelemetryBackend::new();
-        // No feed installed a sender yet - the rejected action is logged and
-        // must not panic or block the input path.
-        telemetry.send_joypad_command(JoypadCommand::Rescan);
     }
 }

@@ -8,9 +8,14 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
+phoxal = { workspace = true }
+phoxal-api = { workspace = true }
 phoxal-cli-core = { workspace = true }
+phoxal-cli-observation = { workspace = true }
 phoxal-cli-protocol = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "net", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
