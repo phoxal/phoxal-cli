@@ -985,6 +985,36 @@ mod tests {
         assert_eq!(model.runtimes.candidate, Some(alpha));
     }
 
+    #[test]
+    fn bus_controls_are_local_and_filter_editing_consumes_keys() {
+        let mut model = AppModel {
+            route: FocusRoute::Content {
+                panel: PanelId::Bus(BusPanelId::Controls),
+            },
+            ..AppModel::default()
+        };
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char('/').into())),
+        );
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char('s').into())),
+        );
+        assert_eq!(model.bus.filter, "s");
+        assert_eq!(model.bus.sort, BusSort::Rate);
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Enter.into())),
+        );
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char('s').into())),
+        );
+        assert_eq!(model.bus.sort, BusSort::Topic);
+        assert_eq!(model.logs.text, "");
+    }
+
     fn process(key: ProcessKey) -> ProcessObservation {
         ProcessObservation {
             key: key.clone(),
