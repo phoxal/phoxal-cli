@@ -1100,7 +1100,8 @@ mod tests {
             restart_policy: Default::default(),
         }];
 
-        let result = super::report_launch_commands(&plan, &specs, &crate::cli::Ui::new(true));
+        let result =
+            super::report_launch_commands(&plan, &specs, &crate::cli::Ui::new(true, false));
         crate::cli::output::diagnostics::uninstall();
         result?;
 
