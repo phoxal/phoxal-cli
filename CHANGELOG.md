@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.28.9](https://github.com/phoxal/phoxal-cli/releases/tag/v0.28.9) - 2026-07-29
+
+
+### Fixed
+
+- Harden attachment lifecycle resilience ([#247](https://github.com/phoxal/phoxal-cli/pull/247))
+
+
 ## [0.28.8](https://github.com/phoxal/phoxal-cli/releases/tag/v0.28.8) - 2026-07-29
 
 
