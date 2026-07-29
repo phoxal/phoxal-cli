@@ -8,9 +8,11 @@
 
 mod build;
 mod bundle;
+pub mod host;
 mod load;
 mod paths;
 mod progress;
+pub mod registry;
 mod resolve;
 mod run;
 mod simulation;
@@ -25,13 +27,13 @@ pub use paths::runtime::{
     RELEASES_ROOT, RuntimePaths, SYSTEMD_ACTIVE_ROOT, SYSTEMD_UNIT, SYSTEMD_UNIT_PATH,
     SYSTEMD_UNIT_ROOT,
 };
-pub use progress::{PreparationEvent, Reporter, SilentReporter};
+pub use progress::{PhaseId, PhaseOutcome, PreparationEvent, Reporter, SilentReporter};
 
 use phoxal_cli_core::project::launch_plan::{LaunchPlan, RunIdentity};
-use phoxal_cli_core::runtime::{ParticipantSpec, RuntimeTarget};
-use phoxal_cli_core::session::{
+use phoxal_cli_core::runtime::{
     ParticipantKind, ParticipantState, ProcessKey, RobotKey, StartupRequirement,
 };
+use phoxal_cli_core::runtime::{ParticipantSpec, RuntimeTarget};
 use std::path::PathBuf;
 use std::sync::Arc;
 

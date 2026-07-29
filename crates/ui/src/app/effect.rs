@@ -1,7 +1,7 @@
 //! Typed commands emitted by the pure UI update function.
 
 use phoxal_cli_core::identity::ProducerId;
-use phoxal_cli_core::session::ProcessKey;
+use phoxal_cli_core::runtime::ProcessKey;
 use phoxal_cli_observation::{BusRead, LogRead, RuntimeRead};
 use tokio::sync::mpsc;
 

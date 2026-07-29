@@ -27,7 +27,7 @@ pub(super) struct CommandSessions {
     pub(super) active: HashMap<CommandSessionId, CommandSessionState>,
     /// Fence accepted restarts across reconnecting command sessions until the
     /// resident advances the producer identity.
-    pending_restarts: HashMap<phoxal_cli_core::session::ProcessKey, ProducerId>,
+    pending_restarts: HashMap<phoxal_cli_core::runtime::ProcessKey, ProducerId>,
 }
 
 pub(super) fn process_command(

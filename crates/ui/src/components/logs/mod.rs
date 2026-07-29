@@ -77,7 +77,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
                 "{seconds:>10} {:<5} {:<20} {}",
                 format!("{:?}", row.severity).to_lowercase(),
                 row.participant,
-                phoxal_cli_core::session::sanitize_terminal_text(&row.text)
+                crate::format::sanitize_terminal_text(&row.text)
             ))
         })
         .collect::<Vec<_>>();

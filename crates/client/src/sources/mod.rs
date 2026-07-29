@@ -25,17 +25,29 @@ use phoxal_api::v0_1 as state_api;
 use tokio::sync::mpsc;
 
 use crate::reconcile::{Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced};
-use phoxal_cli_core::session::telemetry::{
+use phoxal_cli_observation::{
     DeviceDiskSample, DeviceSample, JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample,
     RouterMetricsSample, RuntimeBufferKind, RuntimeDirection, RuntimeFeedStatus,
     RuntimePerformanceSample, RuntimeStepSample, RuntimeTopicSample, TopicMetric,
+    sanitize_terminal_text,
 };
-use phoxal_cli_core::session::{RobotScope, Timestamped, sanitize_terminal_text};
-use phoxal_cli_observation::SourceStatus;
+use phoxal_cli_observation::{RobotScope, SourceStatus};
 
 const MAX_DEVICE_DISKS: usize = 32;
 const MAX_ROUTER_TOPICS: usize = 256;
 const MAX_JOYPAD_DEVICES: usize = 64;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Timestamped<T> {
+    pub(crate) value: T,
+    pub(crate) received_at: Instant,
+}
+
+impl<T> Timestamped<T> {
+    pub(crate) fn new(value: T, received_at: Instant) -> Self {
+        Self { value, received_at }
+    }
+}
 const MAX_REMOTE_TEXT_CHARS: usize = 256;
 
 fn device_sample_from(record: state_api::tool::device::Record) -> DeviceSample {
@@ -241,7 +253,7 @@ pub struct TelemetryBackend {
 
 #[derive(Debug)]
 pub(crate) enum TelemetryUpdate {
-    Clock(phoxal_cli_core::session::ClockSample),
+    Clock(phoxal_cli_observation::ClockSample),
     Device(RobotScope, DeviceSample),
     Router(RobotScope, Timestamped<RouterMetricsSample>),
     Routers(RobotScope, Vec<Timestamped<RouterMetricsSample>>),

@@ -1,7 +1,7 @@
 //! Captured child-output routing and reader task cleanup.
 
 use super::{MAX_CAPTURED_LINE_BYTES, SupervisorState};
-use phoxal_cli_core::session::ProcessKey;
+use phoxal_cli_core::runtime::ProcessKey;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::task::JoinHandle;

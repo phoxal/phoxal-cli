@@ -37,7 +37,7 @@ use super::super::launch_plan::{
 use super::{
     DriverSelection, LayoutInspection, RequiredRuntimeKind, RuntimeLayout, SelectedBinary,
 };
-use crate::session::{RuntimeFailurePolicy, StartupRequirement};
+use crate::runtime::{RuntimeFailurePolicy, StartupRequirement};
 
 /// The non-`(layout, mode)` inputs the plan constructor is parameterized on, so
 /// the derived launch plan stays a pure function of `(layout, mode, options)`

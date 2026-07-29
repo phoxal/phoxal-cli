@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use phoxal_cli_core::session::LogSeverity;
+use phoxal_cli_observation::LogSeverity;
 use phoxal_cli_observation::{AttachmentEpoch, LogRow, QueryToken, StoreRevision};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

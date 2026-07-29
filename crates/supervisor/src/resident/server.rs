@@ -122,8 +122,8 @@ async fn serve_snapshots(mut stream: UnixStream, board: SupervisorState) -> Resu
             .context("supervisor produced an out-of-bounds snapshot")?;
         let terminal = matches!(
             snapshot.lifecycle,
-            phoxal_cli_core::session::ProjectLifecycle::Stopped
-                | phoxal_cli_core::session::ProjectLifecycle::Failed
+            phoxal_cli_core::runtime::ProjectLifecycle::Stopped
+                | phoxal_cli_core::runtime::ProjectLifecycle::Failed
         );
         write_frame(
             &mut stream,
@@ -174,7 +174,7 @@ mod tests {
     use super::super::command_sessions::COMMAND_SESSION_TTL;
     use super::*;
     use phoxal_cli_core::identity::ProducerId;
-    use phoxal_cli_core::session::{ParticipantKind, ProcessKey, ProcessState, StartupRequirement};
+    use phoxal_cli_core::runtime::{ParticipantKind, ProcessKey, ProcessState, StartupRequirement};
     use phoxal_cli_protocol::limits::MAX_RECENT_COMMAND_REPLIES;
     use phoxal_cli_protocol::{CommandAction, CommandError};
 

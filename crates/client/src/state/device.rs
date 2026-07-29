@@ -6,8 +6,8 @@ pub(crate) struct DeviceStore(pub DeviceObservation);
 impl DeviceStore {
     pub fn record(
         &mut self,
-        robot: phoxal_cli_core::session::RobotKey,
-        sample: phoxal_cli_core::session::DeviceSample,
+        robot: phoxal_cli_core::runtime::RobotKey,
+        sample: phoxal_cli_observation::DeviceSample,
     ) -> DeviceObservation {
         self.0.robots.insert(robot, sample);
         self.0.clone()
@@ -15,7 +15,7 @@ impl DeviceStore {
 
     pub fn record_clock(
         &mut self,
-        sample: phoxal_cli_core::session::ClockSample,
+        sample: phoxal_cli_observation::ClockSample,
     ) -> DeviceObservation {
         self.0.clock = Some(sample);
         self.0.clone()

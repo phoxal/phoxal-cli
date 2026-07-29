@@ -47,7 +47,7 @@ pub(crate) fn resolve_project(
     // for their crate-owned model assets. Physical drivers are never launched.
     let resolved = crate::progress::run_phase(
         reporter,
-        phoxal_cli_core::session::event::PhaseId::new("validate"),
+        crate::PhaseId::new("validate"),
         "Validating robot.yaml",
         || resolve(&robot, &project_root, ResolveOptions::default()),
     )?;

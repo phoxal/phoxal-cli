@@ -9,7 +9,9 @@
 
 use std::time::{Duration, Instant};
 
-const MAX_CAPTURED_LINE_BYTES: usize = phoxal_cli_core::session::MAX_ROUTED_LOG_TEXT_CHARS * 4;
+// Four bytes per character preserves the observation crate's 4,096-character
+// routed-log bound even for maximum-width UTF-8 input.
+const MAX_CAPTURED_LINE_BYTES: usize = 16 * 1024;
 const ROUTER_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A readiness/stage-wait budget for one supervised session.
@@ -52,8 +54,10 @@ pub mod systemd;
 mod process;
 mod state;
 
+pub use phoxal_cli_core::runtime::ProcessState;
 pub use phoxal_cli_core::runtime::{ParticipantSpec, RestartPolicy};
-pub use phoxal_cli_core::session::ProcessState;
+
+pub(crate) use phoxal_cli_core::runtime::format_duration;
 
 pub use lock::{
     ProjectLock, ProjectLockIdentity, ProjectLockStatus, ProjectOperation, active_execution,

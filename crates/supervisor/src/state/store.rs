@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use phoxal_cli_core::identity::{ExecutionId, ProducerId};
-use phoxal_cli_core::session::{
+use phoxal_cli_core::runtime::{
     BoundedString, ExitDescription, ParticipantInstanceKey, ParticipantKind, ProcessDescriptor,
     ProcessEntry, ProcessFailure, ProcessFailureKind, ProcessKey, ProcessState, ProjectLifecycle,
     StartupRequirement,
@@ -180,7 +180,7 @@ impl SupervisorState {
                         owner: "phoxal-cli".to_string(),
                         startup_requirement,
                     },
-                    status: phoxal_cli_core::session::supervisor::ProcessStatus {
+                    status: phoxal_cli_core::runtime::ProcessStatus {
                         actual: state,
                         ..Default::default()
                     },
@@ -359,7 +359,7 @@ impl SupervisorState {
 
     pub fn set_simulation_info(&self, profile: impl Into<String>, world: impl Into<String>) {
         self.modify(|snapshot| {
-            snapshot.simulation = Some(phoxal_cli_core::session::SimulationSessionInfo {
+            snapshot.simulation = Some(phoxal_cli_core::runtime::SimulationSessionInfo {
                 profile: bounded_text(&profile.into()),
                 world: bounded_text(&world.into()),
             });
@@ -444,7 +444,7 @@ fn failure_kind(detail: Option<&str>) -> ProcessFailureKind {
 
 #[cfg(test)]
 mod tests {
-    use phoxal_cli_core::session::{ParticipantKind, RobotKey};
+    use phoxal_cli_core::runtime::{ParticipantKind, RobotKey};
 
     use super::*;
 

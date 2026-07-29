@@ -23,6 +23,8 @@ pub use runtime::AttachmentRuntime;
 use source_group::SourceGroup;
 use transport_set::{GraphTransportSet, robot_keys};
 
+pub(crate) const DEFAULT_FRESHNESS_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub struct Attachment {
     pub runtime: AttachmentRuntime,
     pub ports: AttachmentPorts,
@@ -36,30 +38,13 @@ struct AttachmentContext {
     cancellation: CancellationToken,
 }
 
-pub async fn attach(target: RuntimeTarget) -> Result<Attachment> {
-    let feed = SupervisorFeed::connect(target.supervisor_socket.clone()).await?;
-    let commands = SupervisorCommands::connect(target.supervisor_socket.clone()).await?;
-    let initial = feed.current();
-    attach_with_supervisor(target, feed, commands, initial).await
-}
-
 pub async fn attach_with_supervisor(
     target: RuntimeTarget,
     feed: SupervisorFeed,
     commands: SupervisorCommands,
     initial: SupervisorSnapshotV0,
 ) -> Result<Attachment> {
-    if let Some(requested) = &target.requested_entry {
-        let running = std::path::Path::new(&initial.entry)
-            .canonicalize()
-            .unwrap_or_else(|_| initial.entry.clone().into());
-        anyhow::ensure!(
-            &running == requested,
-            "entry mismatch: requested {}, but the running entry is {}",
-            requested.display(),
-            running.display()
-        );
-    }
+    validate_requested_entry(&target, &initial.entry)?;
     let epoch = epoch_from(&initial);
     let stores = Stores::new(epoch);
     let (event_tx, event_rx) = mpsc::channel(256);
@@ -86,6 +71,30 @@ pub async fn attach_with_supervisor(
     })
 }
 
+pub fn validate_requested_entry(target: &RuntimeTarget, running_entry: &str) -> Result<()> {
+    let Some(requested) = &target.requested_entry else {
+        return Ok(());
+    };
+    let running = std::path::Path::new(running_entry)
+        .canonicalize()
+        .unwrap_or_else(|_| running_entry.into());
+    anyhow::ensure!(
+        &running == requested,
+        "entry mismatch: requested {}, but the running entry is {}",
+        requested.display(),
+        running.display()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+async fn attach(target: RuntimeTarget) -> Result<Attachment> {
+    let feed = SupervisorFeed::connect(target.supervisor_socket.clone()).await?;
+    let commands = SupervisorCommands::connect(target.supervisor_socket.clone()).await?;
+    let initial = feed.current();
+    attach_with_supervisor(target, feed, commands, initial).await
+}
+
 async fn run_attachment(
     feed: SupervisorFeed,
     initial: SupervisorSnapshotV0,
@@ -98,7 +107,7 @@ async fn run_attachment(
     freshness::refresh(
         &context.freshness,
         "supervisor",
-        phoxal_cli_core::session::DEFAULT_FRESHNESS_TTL,
+        crate::attachment::DEFAULT_FRESHNESS_TTL,
     );
     let mut source_group = replace_sources(&initial, epoch, input_rx, &context).await;
     if source_group.is_none() {
@@ -116,7 +125,7 @@ async fn run_attachment(
                 freshness::refresh(
                     &context.freshness,
                     "supervisor",
-                    phoxal_cli_core::session::DEFAULT_FRESHNESS_TTL,
+                    crate::attachment::DEFAULT_FRESHNESS_TTL,
                 );
                 let next_epoch = epoch_from(&snapshot);
                 let next_roots = robot_keys(&snapshot);
@@ -222,9 +231,9 @@ fn epoch_from(snapshot: &SupervisorSnapshotV0) -> AttachmentEpoch {
 
 fn attachment_graph_changed(
     current_epoch: AttachmentEpoch,
-    current_roots: &std::collections::BTreeSet<phoxal_cli_core::session::RobotKey>,
+    current_roots: &std::collections::BTreeSet<phoxal_cli_core::runtime::RobotKey>,
     next_epoch: AttachmentEpoch,
-    next_roots: &std::collections::BTreeSet<phoxal_cli_core::session::RobotKey>,
+    next_roots: &std::collections::BTreeSet<phoxal_cli_core::runtime::RobotKey>,
 ) -> bool {
     next_epoch != current_epoch || next_roots != current_roots
 }
@@ -251,8 +260,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    use phoxal_cli_core::runtime::RobotKey;
     use phoxal_cli_core::runtime::{ResidentAuthority, RuntimeTarget};
-    use phoxal_cli_core::session::RobotKey;
     use phoxal_cli_protocol::codec::async_io::{read_frame, write_frame};
     use phoxal_cli_protocol::limits::{
         FRAME_READ_TIMEOUT, FRAME_WRITE_TIMEOUT, MAX_HANDSHAKE_FRAME_BYTES,

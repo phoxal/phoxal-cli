@@ -6,8 +6,8 @@ pub const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_SUPERVISED_PROCESSES: usize = phoxal_cli_core::runtime::MAX_SUPERVISED_PROCESSES;
 pub const MAX_PROCESS_FAILURE_DETAIL_BYTES: usize =
-    phoxal_cli_core::session::BoundedString::FAILURE_MAX_BYTES;
-pub const MAX_PROCESS_STDERR_TAIL_BYTES: usize = phoxal_cli_core::session::BoundedString::MAX_BYTES;
+    phoxal_cli_core::runtime::BoundedString::FAILURE_MAX_BYTES;
+pub const MAX_PROCESS_STDERR_TAIL_BYTES: usize = phoxal_cli_core::runtime::BoundedString::MAX_BYTES;
 pub const MAX_ARTIFACT_ID_BYTES: usize = phoxal_cli_core::runtime::MAX_RUNTIME_ARTIFACT_ID_BYTES;
 pub const MAX_SNAPSHOT_TEXT_BYTES: usize = phoxal_cli_core::runtime::MAX_RUNTIME_TEXT_BYTES;
 pub const MAX_HANDSHAKE_FRAME_BYTES: usize = 4 * 1024;

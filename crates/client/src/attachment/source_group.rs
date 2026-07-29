@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use phoxal_cli_core::session::{ProcessScope, RobotKey};
+use phoxal_cli_core::runtime::{ProcessScope, RobotKey};
 use phoxal_cli_observation::{
     AttachmentEpoch, AttachmentEvent, BusRow, MotionObservation, RuntimeRow, SourceHealth,
     SourceStatus, StoreChanged,
@@ -94,7 +94,7 @@ impl SourceGroup {
                 cancellation.clone(),
             );
             let log_bus = bus.clone();
-            let log_scope = phoxal_cli_core::session::LogScope {
+            let log_scope = phoxal_cli_observation::LogScope {
                 namespace: robot.namespace.clone(),
                 robot_id: robot.robot_id.clone(),
             };
@@ -120,7 +120,7 @@ impl SourceGroup {
                     }
                 }
             });
-            let scope = phoxal_cli_core::session::RobotScope {
+            let scope = phoxal_cli_observation::RobotScope {
                 namespace: robot.namespace.clone(),
                 robot_id: robot.robot_id.clone(),
             };
@@ -227,7 +227,7 @@ fn participants_for(snapshot: &SupervisorSnapshotV0, robot: &RobotKey) -> Vec<St
 fn spawn_device(
     tasks: &mut TaskGroup,
     bus: phoxal::raw::Bus,
-    scope: phoxal_cli_core::session::RobotScope,
+    scope: phoxal_cli_observation::RobotScope,
     telemetry: TelemetryBackend,
     cancellation: CancellationToken,
 ) {
@@ -248,7 +248,7 @@ fn spawn_device(
 fn spawn_bus(
     tasks: &mut TaskGroup,
     bus: phoxal::raw::Bus,
-    scope: phoxal_cli_core::session::RobotScope,
+    scope: phoxal_cli_observation::RobotScope,
     telemetry: TelemetryBackend,
     cancellation: CancellationToken,
 ) {
@@ -269,7 +269,7 @@ fn spawn_bus(
 fn spawn_runtimes(
     tasks: &mut TaskGroup,
     bus: phoxal::raw::Bus,
-    scope: phoxal_cli_core::session::RobotScope,
+    scope: phoxal_cli_observation::RobotScope,
     participants: Vec<String>,
     telemetry: TelemetryBackend,
     cancellation: CancellationToken,
@@ -338,7 +338,7 @@ async fn apply_telemetry_update(
         super::freshness::refresh(
             freshness,
             source.clone(),
-            phoxal_cli_core::session::DEFAULT_FRESHNESS_TTL,
+            crate::attachment::DEFAULT_FRESHNESS_TTL,
         );
     }
     let changed_health = {
@@ -451,10 +451,10 @@ async fn apply_telemetry_update(
 }
 
 fn bus_rows(
-    scope: &phoxal_cli_core::session::RobotScope,
-    sample: &phoxal_cli_core::session::Timestamped<phoxal_cli_core::session::RouterMetricsSample>,
+    scope: &phoxal_cli_observation::RobotScope,
+    sample: &crate::sources::Timestamped<phoxal_cli_observation::RouterMetricsSample>,
 ) -> Vec<BusRow> {
-    let make_row = |topic: Option<&phoxal_cli_core::session::TopicMetric>| BusRow {
+    let make_row = |topic: Option<&phoxal_cli_observation::TopicMetric>| BusRow {
         scope: scope.clone(),
         observed_at: sample.received_at,
         topic: topic.map_or_else(String::new, |topic| topic.topic.clone()),
@@ -482,7 +482,8 @@ fn bus_rows(
 mod tests {
     use std::sync::Arc;
 
-    use phoxal_cli_core::session::{RobotScope, RouterMetricsSample, Timestamped};
+    use crate::sources::Timestamped;
+    use phoxal_cli_observation::{RobotScope, RouterMetricsSample};
 
     use super::bus_rows;
 

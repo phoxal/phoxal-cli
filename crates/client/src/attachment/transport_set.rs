@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Result;
 use phoxal::raw::{Bus, BusConfig};
 use phoxal_cli_core::identity::ProducerId;
-use phoxal_cli_core::session::{ProcessScope, RobotKey};
+use phoxal_cli_core::runtime::{ProcessScope, RobotKey};
 use phoxal_cli_protocol::SupervisorSnapshotV0;
 use tokio_util::sync::CancellationToken;
 
@@ -69,7 +69,7 @@ pub(crate) fn robot_keys(snapshot: &SupervisorSnapshotV0) -> BTreeSet<RobotKey> 
 
 #[cfg(test)]
 mod tests {
-    use phoxal_cli_core::session::{
+    use phoxal_cli_core::runtime::{
         ParticipantKind, ProcessDescriptor, ProcessEntry, ProcessKey, ProcessStatus, RobotKey,
         StartupRequirement,
     };

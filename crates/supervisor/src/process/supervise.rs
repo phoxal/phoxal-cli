@@ -2,13 +2,13 @@
 
 use super::{
     ProcessState, RequestedStop, RunningParticipant, SupervisionStage, SupervisorAction,
-    SupervisorOptions, SupervisorState, await_stage_ready, emit_event, join_reader,
-    maybe_emit_startup_outcome, send_process_group_terminate, send_terminate, spawn_until_pending,
-    stop_child,
+    SupervisorOptions, SupervisorState, await_stage_ready, join_reader,
+    maybe_publish_startup_outcome, send_process_group_terminate, send_terminate,
+    spawn_until_pending, stop_child,
 };
 use crate::WaitBudget;
 use anyhow::Result;
-use phoxal_cli_core::session::{ProjectLifecycle, RuntimeFailurePolicy};
+use phoxal_cli_core::runtime::{ProjectLifecycle, RuntimeFailurePolicy};
 use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
@@ -25,8 +25,8 @@ pub async fn supervise_until_shutdown(
         .into_iter()
         .filter(|(_, entry)| {
             entry.descriptor.startup_requirement
-                == phoxal_cli_core::session::StartupRequirement::Required
-                && entry.status.actual == phoxal_cli_core::session::ProcessState::Failed
+                == phoxal_cli_core::runtime::StartupRequirement::Required
+                && entry.status.actual == phoxal_cli_core::runtime::ProcessState::Failed
         })
         .map(|(key, _)| key.to_string())
         .collect::<Vec<_>>();
@@ -41,16 +41,14 @@ pub async fn supervise_until_shutdown(
     let mut running = Vec::new();
     let mut stage_queue: VecDeque<SupervisionStage> = stages.into();
     let token = options.token.clone();
-    let events_tx = options.events.take();
 
     // Spawn every leading stage that has nothing to wait for back-to-back
     // (uncommon in practice - every real stage waits on at least the router
     // or Liveliness - but keeps a zero-wait stage from stalling a whole
     // startup on an empty `select!` branch), then park on the first stage
     // that actually gates the next one.
-    let mut pending_stage =
-        spawn_until_pending(&mut running, &board, events_tx.as_ref(), &mut stage_queue).await;
-    maybe_emit_startup_outcome(&board, &options, events_tx.as_ref(), &pending_stage).await;
+    let mut pending_stage = spawn_until_pending(&mut running, &board, &mut stage_queue).await;
+    maybe_publish_startup_outcome(&board, &options, &pending_stage).await;
 
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -91,27 +89,16 @@ pub async fn supervise_until_shutdown(
                     Ok(()) => {
                         tracing::info!(stage = %stage.label, "supervisor startup phase ready");
                         board.complete_phase(&stage.label);
-                        emit_event(events_tx.as_ref(), phoxal_cli_core::session::event::SessionEvent::PhaseFinished {
-                            id: phoxal_cli_core::session::event::PhaseId::new(stage.label.clone()),
-                            outcome: phoxal_cli_core::session::event::PhaseOutcome::Succeeded,
-                            elapsed: stage.started.elapsed(),
-                        }).await;
                         pending_stage = spawn_until_pending(
                             &mut running,
                             &board,
-                            events_tx.as_ref(),
                             &mut stage_queue,
                         ).await;
-                        maybe_emit_startup_outcome(&board, &options, events_tx.as_ref(), &pending_stage).await;
+                        maybe_publish_startup_outcome(&board, &options, &pending_stage).await;
                     }
                     Err(error) => {
                         let reason = format!("stage '{}' stalled: {error:#}", stage.label);
                         tracing::error!(stage = %stage.label, error = %error, "required startup phase failed");
-                        emit_event(events_tx.as_ref(), phoxal_cli_core::session::event::SessionEvent::PhaseFinished {
-                            id: phoxal_cli_core::session::event::PhaseId::new(stage.label.clone()),
-                            outcome: phoxal_cli_core::session::event::PhaseOutcome::Failed { error: format!("{error:#}") },
-                            elapsed: stage.started.elapsed(),
-                        }).await;
                         board.set_lifecycle(ProjectLifecycle::Failed);
                         supervisor_error = Some(anyhow::anyhow!(reason));
                         token.cancel();
@@ -328,7 +315,7 @@ fn phase_rank(phase: &str) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use phoxal_cli_core::session::ProjectLifecycle;
+    use phoxal_cli_core::runtime::ProjectLifecycle;
 
     use super::*;
 

@@ -214,7 +214,7 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
         mission.launch.config,
         Some(serde_json::json!({"message": "line\nquoted \"value\""}))
     );
-    let encoded = phoxal_cli_core::session::launch_env::encode_participant_env(&mission.launch)?;
+    let encoded = phoxal_cli_core::runtime::launch::encode_participant_env(&mission.launch)?;
     assert_eq!(
         encoded
             .variables()

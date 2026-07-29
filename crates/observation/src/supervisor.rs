@@ -1,5 +1,5 @@
 use phoxal_cli_core::identity::ExecutionId;
-use phoxal_cli_core::session::{ProjectLifecycle, SimulationSessionInfo, StartupStatus};
+use phoxal_cli_core::runtime::{ProjectLifecycle, SimulationSessionInfo, StartupStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupervisorObservation {

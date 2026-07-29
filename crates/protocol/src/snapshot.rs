@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use phoxal_cli_core::identity::ExecutionId;
-use phoxal_cli_core::session::{
+use phoxal_cli_core::runtime::{
     ProcessEntry, ProcessKey, ProcessScope, ProjectLifecycle, SimulationSessionInfo, StartupStatus,
 };
 use serde::{Deserialize, Serialize};

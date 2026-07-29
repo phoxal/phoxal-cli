@@ -115,5 +115,5 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
 }
 
 fn sanitize(value: &str) -> String {
-    phoxal_cli_core::session::sanitize_terminal_text(value)
+    crate::format::sanitize_terminal_text(value)
 }

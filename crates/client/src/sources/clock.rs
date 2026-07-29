@@ -2,7 +2,7 @@ use anyhow::Result;
 use phoxal::bus::{ContractBody, Subscribe, Subscriber, Topic};
 use phoxal::raw::Bus;
 use phoxal_api::v0_1 as api;
-use phoxal_cli_core::session::ClockSample;
+use phoxal_cli_observation::ClockSample;
 use tokio::sync::mpsc;
 
 use super::TelemetryUpdate;

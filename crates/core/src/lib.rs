@@ -10,7 +10,6 @@ pub mod identity;
 pub mod project;
 pub mod runtime;
 pub mod schema;
-pub mod session;
 pub mod simulation;
 
 pub use project::Project;

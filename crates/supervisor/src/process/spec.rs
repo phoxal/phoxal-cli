@@ -1,6 +1,6 @@
 //! Supervisor control values.
 
-use phoxal_cli_core::session::ProcessKey;
+use phoxal_cli_core::runtime::ProcessKey;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -25,18 +25,11 @@ pub struct SupervisorOptions {
     /// token so a caller that does not care about cancellation (every test in
     /// this module) does not have to construct one.
     pub token: tokio_util::sync::CancellationToken,
-    /// Where this loop emits `SessionEvent`s (stage started/finished) for a
-    /// live attachment application to render - see `phoxal_cli_core::session::event`.
-    /// `None` for a caller with no renderer to feed (every test in this
-    /// module).
-    pub events: Option<mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>>,
-    /// Whether staged startup completion should transition the session to
-    /// `SessionState::Running`. When `true`, once
-    /// every stage has spawned and been observed ready with nothing left
-    /// pending, the state owner derives and publishes Ready or Degraded and
-    /// emits the corresponding session lifecycle change. Simulation clock
-    /// telemetry is not a lifecycle authority.
-    pub emits_running_on_startup_complete: bool,
+    /// Whether staged startup completion should publish the state owner's
+    /// derived Ready or Degraded lifecycle once every stage has spawned and
+    /// been observed ready. Simulation clock observation is not a lifecycle
+    /// authority.
+    pub publishes_running_on_startup_complete: bool,
 }
 
 impl Default for SupervisorOptions {
@@ -45,8 +38,7 @@ impl Default for SupervisorOptions {
             action_rx: None,
             requested_stop: None,
             token: tokio_util::sync::CancellationToken::new(),
-            events: None,
-            emits_running_on_startup_complete: false,
+            publishes_running_on_startup_complete: false,
         }
     }
 }

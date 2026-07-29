@@ -1,7 +1,7 @@
 //! Command and private-bootstrap wire DTOs.
 
 use phoxal_cli_core::identity::{ExecutionId, ProducerId};
-use phoxal_cli_core::session::ProcessKey;
+use phoxal_cli_core::runtime::ProcessKey;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

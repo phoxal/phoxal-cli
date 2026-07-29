@@ -383,7 +383,7 @@ impl Worker {
         )?;
         let resolved = crate::progress::run_phase(
             ui,
-            phoxal_cli_core::session::event::PhaseId::new("validate"),
+            crate::PhaseId::new("validate"),
             "Validating robot.yaml",
             || {
                 crate::resolve::project::resolve(

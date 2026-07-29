@@ -24,7 +24,7 @@ mod tests {
     use std::time::Duration;
 
     use phoxal_cli_core::identity::{ExecutionId, ProducerId};
-    use phoxal_cli_core::session::{
+    use phoxal_cli_core::runtime::{
         BoundedString, DesiredProcessState, ParticipantKind, ProcessDescriptor, ProcessEntry,
         ProcessFailure, ProcessFailureKind, ProcessKey, ProcessState, ProcessStatus,
         ProjectLifecycle, RobotKey, SimulationSessionInfo, StartupRequirement, StartupStatus,
@@ -45,7 +45,7 @@ mod tests {
             router: "unixsock-stream//tmp/router.sock".to_string(),
             plan_revision: 1,
             graph_generation: 0,
-            startup: phoxal_cli_core::session::StartupStatus {
+            startup: phoxal_cli_core::runtime::StartupStatus {
                 completed_phases: Vec::new(),
                 active_phase: None,
             },

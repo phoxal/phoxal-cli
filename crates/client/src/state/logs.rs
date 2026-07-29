@@ -16,7 +16,7 @@ pub(crate) struct LogStore {
     rows: VecDeque<LogRow>,
     seen: BTreeSet<(
         std::time::SystemTime,
-        Option<phoxal_cli_core::session::LogScope>,
+        Option<phoxal_cli_observation::LogScope>,
         String,
         String,
     )>,
@@ -77,7 +77,7 @@ impl LogStore {
     pub fn install_snapshot(
         &mut self,
         epoch: AttachmentEpoch,
-        scope: &phoxal_cli_core::session::LogScope,
+        scope: &phoxal_cli_observation::LogScope,
         rows: impl IntoIterator<Item = LogRow>,
     ) -> Option<StoreRevision> {
         if epoch != self.epoch {
@@ -165,10 +165,10 @@ impl LogStore {
 #[cfg(test)]
 mod tests {
     use phoxal_cli_core::identity::ExecutionId;
-    use phoxal_cli_core::session::{LogSeverity, LogSource};
     use phoxal_cli_observation::{
         LogFilters, LogQuery, ObservationQuery, QueryToken, StoreRevision,
     };
+    use phoxal_cli_observation::{LogSeverity, LogSource};
 
     use super::*;
 

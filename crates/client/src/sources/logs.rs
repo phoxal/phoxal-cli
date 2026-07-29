@@ -6,8 +6,10 @@ use anyhow::{Result, anyhow};
 use phoxal::bus::{DEFAULT_QUERY_TIMEOUT, Querier, Subscriber};
 use phoxal::raw::Bus;
 use phoxal_api::v0_1 as api;
-use phoxal_cli_core::session::{LogScope, LogSeverity, LogSource, bounded_log_text};
-use phoxal_cli_observation::{AttachmentEpoch, AttachmentEvent, LogRow, StoreChanged};
+use phoxal_cli_observation::{
+    AttachmentEpoch, AttachmentEvent, LogRow, LogScope, LogSeverity, LogSource, StoreChanged,
+    bounded_log_text,
+};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::reconcile::{Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced};

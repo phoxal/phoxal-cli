@@ -1,4 +1,4 @@
-use phoxal_cli_core::session::JoypadDevicesSample;
+use phoxal_cli_observation::JoypadDevicesSample;
 use phoxal_cli_observation::{InputObservation, MotionObservation};
 
 #[derive(Default)]

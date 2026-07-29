@@ -11,7 +11,7 @@ pub(crate) struct RuntimeStore {
     epoch: AttachmentEpoch,
     revision: StoreRevision,
     invalidation_pending: bool,
-    capacity_evictions: std::collections::BTreeMap<phoxal_cli_core::session::RobotScope, u64>,
+    capacity_evictions: std::collections::BTreeMap<phoxal_cli_observation::RobotScope, u64>,
     rows: VecDeque<RuntimeRow>,
 }
 
@@ -37,7 +37,7 @@ impl RuntimeStore {
     pub fn install(
         &mut self,
         epoch: AttachmentEpoch,
-        scope: &phoxal_cli_core::session::RobotScope,
+        scope: &phoxal_cli_observation::RobotScope,
         rows: impl IntoIterator<Item = RuntimeRow>,
     ) -> Option<StoreRevision> {
         if epoch != self.epoch {
@@ -115,8 +115,8 @@ impl RuntimeStore {
 #[cfg(test)]
 mod tests {
     use phoxal_cli_core::identity::ExecutionId;
-    use phoxal_cli_core::session::{RobotScope, RuntimePerformanceSample};
     use phoxal_cli_observation::{ObservationQuery, QueryToken, RuntimeQuery, StoreRevision};
+    use phoxal_cli_observation::{RobotScope, RuntimePerformanceSample};
 
     use super::*;
 
