@@ -1,7 +1,7 @@
 //! Tests for this module.
 
-use ratatui::Terminal;
-use ratatui::backend::TestBackend;
+use tuirealm::ratatui::Terminal;
+use tuirealm::ratatui::backend::TestBackend;
 
 use super::*;
 use crate::tui::log_view::LogView;

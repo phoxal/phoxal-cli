@@ -8,11 +8,11 @@ use crate::ColorCapability;
 use crate::ratatui as color;
 use crate::{Role, Theme};
 use phoxal_cli_core::session::human;
-use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::Modifier;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{
+use tuirealm::ratatui::Frame;
+use tuirealm::ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use tuirealm::ratatui::style::Modifier;
+use tuirealm::ratatui::text::{Line, Span};
+use tuirealm::ratatui::widgets::{
     Block, BorderType, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph,
     Sparkline, Wrap,
 };

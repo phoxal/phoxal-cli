@@ -4,7 +4,7 @@
 //! picked directly here; every call site asks for a [`Role`] and this module
 //! is the only place that turns one into a ratatui `Color`.
 
-use ratatui::style::{Color, Modifier, Style};
+use tuirealm::ratatui::style::{Color, Modifier, Style};
 
 use crate::theme::{ColorCapability, Rgb, Role, Theme, rgb_to_ansi16, rgb_to_ansi256};
 

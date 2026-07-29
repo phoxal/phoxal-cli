@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 
 use crate::Theme;
 use crossterm::event::{Event, KeyEventKind};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
+use tuirealm::ratatui::Terminal;
+use tuirealm::ratatui::backend::CrosstermBackend;
 
 use crate::tui::log_view::LogView;
 use crate::tui::render::TitleInfo;
