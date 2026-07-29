@@ -97,3 +97,41 @@ pub fn cycle_panel(page: PageId, current: Option<PanelId>, delta: isize) -> Opti
     let len = panels.len() as isize;
     Some(panels[((index as isize + delta).rem_euclid(len)) as usize])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panel_identifiers_cannot_cross_page_boundaries() {
+        for panel in [
+            PanelId::Runtimes(RuntimesPanelId::Processes),
+            PanelId::Logs(LogsPanelId::Stream),
+            PanelId::Bus(BusPanelId::Topics),
+            PanelId::Input(InputPanelId::Devices),
+        ] {
+            let route = FocusRoute::Content { panel };
+            assert_eq!(route.page(), panel.page());
+        }
+    }
+
+    #[test]
+    fn modal_carries_the_exact_return_route() {
+        let return_to = FocusRoute::Content {
+            panel: PanelId::Logs(LogsPanelId::Stream),
+        };
+        assert_eq!(
+            return_to.clone().open_modal(ModalId::Help),
+            FocusRoute::Modal {
+                modal: ModalId::Help,
+                return_to: Box::new(return_to),
+            }
+        );
+    }
+
+    #[test]
+    fn overview_has_no_fake_focusable_panel() {
+        assert_eq!(first_panel(PageId::Overview), None);
+        assert_eq!(cycle_panel(PageId::Overview, None, 1), None);
+    }
+}
