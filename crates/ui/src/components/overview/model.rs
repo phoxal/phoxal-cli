@@ -26,3 +26,19 @@ impl OverviewModel {
         self.diagnostics.push(message);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostics_are_a_finite_presentation_window() {
+        let mut model = OverviewModel::default();
+        for index in 0..300 {
+            model.push_diagnostic(index.to_string());
+        }
+        assert_eq!(model.diagnostics.len(), 256);
+        assert_eq!(model.diagnostics.first().map(String::as_str), Some("44"));
+        assert_eq!(model.diagnostics.last().map(String::as_str), Some("299"));
+    }
+}
