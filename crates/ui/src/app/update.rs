@@ -765,10 +765,18 @@ fn update_modal(model: &mut AppModel, message: ModalMsg) -> Vec<Effect> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
+    use std::time::Instant;
 
     use phoxal_cli_core::identity::ExecutionId;
-    use phoxal_cli_observation::{AttachmentEpoch, AttachmentEvent, LogWindow, ObservationWindow};
+    use phoxal_cli_core::session::{
+        ParticipantKind, ParticipantState, ProcessDescriptor, ProcessEntry, ProcessKey,
+        ProcessStatus, StartupRequirement,
+    };
+    use phoxal_cli_observation::{
+        AttachmentEpoch, AttachmentEvent, LogWindow, ObservationWindow, ProcessObservation,
+    };
 
     use super::*;
 
@@ -943,5 +951,61 @@ mod tests {
             Msg::Navigate(NavigationMsg::Key(Key::Esc.into())),
         );
         assert_eq!(model.route, return_to);
+    }
+
+    #[test]
+    fn runtime_candidate_tracks_identity_and_never_retargets_a_removed_row() {
+        let alpha = ProcessKey::project("alpha");
+        let beta = ProcessKey::project("beta");
+        let mut processes = BTreeMap::from([
+            (alpha.clone(), process(alpha.clone())),
+            (beta.clone(), process(beta.clone())),
+        ]);
+        let mut model = AppModel::default();
+        update(
+            &mut model,
+            Msg::Client(AttachmentEvent::ProcessesChanged(Arc::new(
+                processes.clone(),
+            ))),
+        );
+        model.runtimes.candidate = Some(beta.clone());
+        update(
+            &mut model,
+            Msg::Client(AttachmentEvent::ProcessesChanged(Arc::new(
+                processes.clone(),
+            ))),
+        );
+        assert_eq!(model.runtimes.candidate, Some(beta.clone()));
+
+        processes.remove(&beta);
+        update(
+            &mut model,
+            Msg::Client(AttachmentEvent::ProcessesChanged(Arc::new(processes))),
+        );
+        assert_eq!(model.runtimes.candidate, Some(alpha));
+    }
+
+    fn process(key: ProcessKey) -> ProcessObservation {
+        ProcessObservation {
+            key: key.clone(),
+            entry: ProcessEntry {
+                descriptor: ProcessDescriptor {
+                    key,
+                    kind: ParticipantKind::Service,
+                    artifact: "service".to_string(),
+                    owner: "test".to_string(),
+                    startup_requirement: StartupRequirement::Required,
+                },
+                status: ProcessStatus::default(),
+            },
+            kind: ParticipantKind::Service,
+            state: ParticipantState::Ready,
+            present: Some(true),
+            robot: None,
+            started_at: Instant::now(),
+            ended_at: None,
+            first_ready_at: Some(Instant::now()),
+            user_service: true,
+        }
     }
 }
