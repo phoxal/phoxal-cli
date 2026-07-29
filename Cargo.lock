@@ -2971,7 +2971,6 @@ dependencies = [
  "crossterm",
  "dotenvy",
  "flate2",
- "getrandom 0.3.4",
  "hex",
  "libc",
  "pathdiff",
@@ -2981,6 +2980,7 @@ dependencies = [
  "phoxal-cli-core",
  "phoxal-cli-project",
  "phoxal-cli-protocol",
+ "phoxal-cli-supervisor",
  "phoxal-cli-ui",
  "reqwest",
  "self-replace",
@@ -3075,8 +3075,20 @@ dependencies = [
 name = "phoxal-cli-supervisor"
 version = "0.28.4"
 dependencies = [
+ "anyhow",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "phoxal",
  "phoxal-cli-core",
  "phoxal-cli-protocol",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

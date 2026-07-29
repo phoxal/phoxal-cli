@@ -1,11 +1,11 @@
 //! Supervised child-process lifecycle and restart handling.
 
 use super::{
-    BoardBackend, ParticipantSpec, ParticipantState, RestartPolicy, ensure_process_group_stopped,
+    ParticipantSpec, ProcessState, RestartPolicy, SupervisorState, ensure_process_group_stopped,
     join_reader, kill_child_process_group, requested_stop_exit_is_clean, send_process_group_signal,
     send_process_signal, spawn_output_reader, stop_child,
 };
-use crate::supervisor::ManagedChild;
+use crate::ManagedChild;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
@@ -13,7 +13,6 @@ use phoxal_cli_core::identity::ProducerId;
 use phoxal_cli_core::session::human;
 use phoxal_cli_core::session::{ExitDescription, ProcessFailureKind, ReadinessPolicy};
 use std::collections::VecDeque;
-use std::fs;
 use std::process::Stdio;
 use std::time::Duration;
 use std::time::Instant;
@@ -76,7 +75,7 @@ impl Drop for RunningParticipant {
 impl RunningParticipant {
     pub(crate) async fn spawn_in_phase(
         spec: ParticipantSpec,
-        board: &BoardBackend,
+        board: &SupervisorState,
         phase: impl Into<String>,
     ) -> Result<Self> {
         let mut running = Self {
@@ -94,13 +93,17 @@ impl RunningParticipant {
         Ok(running)
     }
 
-    pub(crate) async fn spawn_child(&mut self, board: &BoardBackend) -> Result<()> {
+    pub(crate) async fn spawn_child(&mut self, board: &SupervisorState) -> Result<()> {
+        // Failure evidence belongs to one concrete child incarnation. A later
+        // restart must never attribute the previous process's stderr to a new
+        // failure.
+        board.clear_captured_stderr(&self.spec.key);
         // Every (re)spawn returns to `Starting`. A first appearance promotes
         // the stable participant identity to `Ready`; an identity that is
         // continuously present across replacement remains `Ready` below.
         board.set_state(
             &self.spec.key,
-            ParticipantState::Starting,
+            ProcessState::Starting,
             self.spec.note.clone(),
         );
         if let ReadinessPolicy::ExactLiveliness(instance) = &mut self.spec.readiness {
@@ -136,14 +139,9 @@ impl RunningParticipant {
         let mut child = ManagedChild::spawn(&mut command, self.spec.process_group, &self.spec.env)
             .with_context(|| format!("failed to spawn {}", self.spec.command_line()))?;
         let pid = child.id();
-        let artifact_size_bytes = fs::metadata(&self.spec.executable)
-            .ok()
-            .filter(|metadata| metadata.is_file())
-            .map(|metadata| metadata.len());
-        board.set_process_details(&self.spec.key, pid, artifact_size_bytes);
+        board.set_pid(&self.spec.key, pid);
         let pid = pid.unwrap_or_default();
-        board.append_log(&self.spec.key, format!("supervisor: spawned pid {pid}"));
-        board.set_launch_command_for(&self.spec.key, self.spec.launch_command());
+        tracing::debug!(process = %self.spec.key, pid, "spawned supervised process");
         if let Some(stdout) = child.stdout.take() {
             self.stdout_task = Some(spawn_output_reader(
                 board.clone(),
@@ -165,7 +163,7 @@ impl RunningParticipant {
             // OBSERVED readiness (not spawn-is-ready): a bus participant stays
             // `Starting` (set at the top of this function) until the
             // supervisor's history-enabled observer sees its Liveliness key -
-            // see `BoardBackend::record_presence`. A
+            // see `SupervisorState::record_instance_presence`. A
             // process that spawned successfully but never gets that far
             // (crashed before `#[setup]` completed, hung, or was silently
             // never launched by Webots) must never be reported ready. If a
@@ -174,43 +172,35 @@ impl RunningParticipant {
             // preserve that known binary state instead of inventing an
             // producer signal or waiting for a duplicate event.
             if board.is_exact_present(instance) {
-                board.set_state(
-                    &self.spec.key,
-                    ParticipantState::Ready,
-                    self.spec.note.clone(),
-                );
+                board.set_state(&self.spec.key, ProcessState::Ready, self.spec.note.clone());
             }
         } else {
             // No bus identity to observe (e.g. the Webots application itself,
             // see `ParticipantSpec::bus_participant`) - readiness is
             // necessarily process-lifecycle only.
-            board.set_state(
-                &self.spec.key,
-                ParticipantState::Ready,
-                self.spec.note.clone(),
-            );
+            board.set_state(&self.spec.key, ProcessState::Ready, self.spec.note.clone());
         }
         Ok(())
     }
 
     fn record_spawn_failure(
         &mut self,
-        board: &BoardBackend,
+        board: &SupervisorState,
         operation: &str,
         error: &anyhow::Error,
     ) {
         self.child = None;
         self.restart_at = None;
         self.failed = true;
-        board.set_process_details(&self.spec.key, None, None);
+        board.set_pid(&self.spec.key, None);
         let detail = format!("{operation} failed: {error:#}");
-        board.append_log(&self.spec.key, format!("supervisor: {detail}"));
+        tracing::warn!(process = %self.spec.key, %detail, "supervised process spawn failed");
         board.record_failure(&self.spec.key, ProcessFailureKind::Spawn, None, detail);
     }
 
     pub(crate) async fn wait_for_requested_stop(
         &mut self,
-        board: &BoardBackend,
+        board: &SupervisorState,
         budget: Duration,
         terminate_sent: bool,
     ) -> Result<bool> {
@@ -226,7 +216,7 @@ impl RunningParticipant {
         // descendant cleanup so forced-shutdown code can never signal a
         // recycled process-group id.
         self.child = None;
-        board.set_process_details(&self.spec.key, None, None);
+        board.set_pid(&self.spec.key, None);
         let group_stop = async {
             if self.spec.process_group
                 && let Some(pid) = pid
@@ -243,13 +233,13 @@ impl RunningParticipant {
         if requested_stop_exit_is_clean(&status, terminate_sent) {
             board.set_state(
                 &self.spec.key,
-                ParticipantState::Stopped,
+                ProcessState::Stopped,
                 Some(format!("stopped after requested SIGTERM ({status})")),
             );
         } else {
             board.set_state(
                 &self.spec.key,
-                ParticipantState::Failed,
+                ProcessState::Failed,
                 Some(format!(
                     "exited independently during requested stop ({status})"
                 )),
@@ -260,7 +250,7 @@ impl RunningParticipant {
 
     pub(crate) async fn kill_process_group_after_timeout(
         &mut self,
-        board: &BoardBackend,
+        board: &SupervisorState,
     ) -> Result<()> {
         if !self.spec.process_group {
             bail!(
@@ -271,10 +261,7 @@ impl RunningParticipant {
         let Some(mut child) = self.child.take() else {
             return Ok(());
         };
-        board.append_log(
-            &self.spec.key,
-            "supervisor: SIGTERM grace expired; killing process group",
-        );
+        tracing::warn!(process = %self.spec.key, "SIGTERM grace expired; killing process group");
         if let Err(error) = kill_child_process_group(&mut child).await {
             self.child = Some(child);
             return Err(error);
@@ -284,7 +271,7 @@ impl RunningParticipant {
         self.failed = true;
         board.set_state(
             &self.spec.key,
-            ParticipantState::Failed,
+            ProcessState::Failed,
             Some("SIGTERM grace expired; SIGKILL fallback used".to_string()),
         );
         Ok(())
@@ -292,7 +279,7 @@ impl RunningParticipant {
 
     pub(crate) async fn poll(
         &mut self,
-        board: &BoardBackend,
+        board: &SupervisorState,
         policy: &RestartPolicy,
     ) -> Result<()> {
         if self.failed {
@@ -320,7 +307,7 @@ impl RunningParticipant {
         };
 
         self.child = None;
-        board.set_process_details(&self.spec.key, None, None);
+        board.set_pid(&self.spec.key, None);
         let group_stop = async {
             if self.spec.process_group
                 && let Some(pid) = pid
@@ -368,7 +355,7 @@ impl RunningParticipant {
         board.set_restart_count(&self.spec.key, self.restart_count);
         board.set_state(
             &self.spec.key,
-            ParticipantState::Restarting,
+            ProcessState::Restarting,
             Some(format!(
                 "exited with {status}; restarting in {}",
                 human::duration(policy.restart_delay)
@@ -378,16 +365,16 @@ impl RunningParticipant {
         Ok(())
     }
 
-    pub(crate) async fn stop_current(&mut self, board: &BoardBackend) -> Result<()> {
+    pub(crate) async fn stop_current(&mut self, board: &SupervisorState) -> Result<()> {
         if let Some(mut child) = self.child.take() {
-            board.append_log(&self.spec.key, "supervisor: stopping");
+            tracing::debug!(process = %self.spec.key, "stopping supervised process");
             stop_child(
                 &mut child,
                 self.spec.shutdown_grace,
                 self.spec.process_group,
             )
             .await?;
-            board.set_process_details(&self.spec.key, None, None);
+            board.set_pid(&self.spec.key, None);
         }
         join_reader(self.stdout_task.take()).await;
         join_reader(self.stderr_task.take()).await;
@@ -397,7 +384,7 @@ impl RunningParticipant {
     pub(crate) async fn swap(
         &mut self,
         spec: ParticipantSpec,
-        board: &BoardBackend,
+        board: &SupervisorState,
         note: String,
     ) -> Result<()> {
         self.stop_current(board).await?;
@@ -408,11 +395,7 @@ impl RunningParticipant {
             self.record_spawn_failure(board, "swap spawn", &error);
             return Ok(());
         }
-        // `spawn_child` already applied the observed-readiness state: a bus
-        // participant is `Starting`, or remains `Ready` when its stable
-        // identity is continuously present across replacement; a process-only
-        // participant is `Ready`. Attach the swap note without overriding it.
-        board.set_note(&self.spec.key, note);
+        tracing::info!(process = %self.spec.key, %note, "replaced supervised process");
         Ok(())
     }
 }

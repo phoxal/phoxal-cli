@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub const PROJECT_ROOT_ENV: &str = "PHOXAL_PROJECT_ROOT";
+pub use phoxal_cli_core::runtime::PROJECT_ROOT_ENV;
 
 pub fn project_root() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os(PROJECT_ROOT_ENV) {

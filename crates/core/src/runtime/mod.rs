@@ -7,6 +7,8 @@ mod target;
 pub use launch::{ParticipantSpec, RestartPolicy};
 pub use target::{ResidentAuthority, RuntimeTarget};
 
+pub const PROJECT_ROOT_ENV: &str = "PHOXAL_PROJECT_ROOT";
+
 /// Domain bounds shared by launch-plan construction and its wire projection.
 ///
 /// These belong to the runtime model because plans must be rejected before a

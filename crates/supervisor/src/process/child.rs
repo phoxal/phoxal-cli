@@ -427,10 +427,10 @@ pub(crate) fn scrub_environment(command: &mut Command) {
     scrub_std_environment(command.as_std_mut());
 }
 
-pub(crate) fn materialize_plan_binaries(
+pub fn materialize_plan_binaries(
     project_root: &std::path::Path,
     revision: &phoxal_cli_core::project::launch_plan::PlanRevision,
-    specs: &mut [crate::supervisor::ParticipantSpec],
+    specs: &mut [crate::ParticipantSpec],
 ) -> Result<()> {
     let content_root =
         phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project_root).plan_content_root();

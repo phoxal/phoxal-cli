@@ -1,12 +1,12 @@
 //! Main supervision loop, actions, and orderly shutdown.
 
 use super::{
-    BoardBackend, ParticipantState, RequestedStop, RunningParticipant, SupervisionStage,
-    SupervisorAction, SupervisorOptions, await_stage_ready, emit_event, join_reader,
+    ProcessState, RequestedStop, RunningParticipant, SupervisionStage, SupervisorAction,
+    SupervisorOptions, SupervisorState, await_stage_ready, emit_event, join_reader,
     maybe_emit_startup_outcome, send_process_group_terminate, send_terminate, spawn_until_pending,
     stop_child,
 };
-use crate::session::output::WaitBudget;
+use crate::WaitBudget;
 use anyhow::Result;
 use phoxal_cli_core::session::{ProjectLifecycle, RuntimeFailurePolicy};
 use std::collections::VecDeque;
@@ -16,7 +16,7 @@ use tokio::time::MissedTickBehavior;
 
 pub async fn supervise_until_shutdown(
     stages: Vec<SupervisionStage>,
-    board: BoardBackend,
+    board: SupervisorState,
     mut options: SupervisorOptions,
 ) -> Result<()> {
     let failed_required = board
@@ -173,7 +173,7 @@ pub async fn supervise_until_shutdown(
 
 pub(crate) async fn request_participant_stop(
     running: &mut [RunningParticipant],
-    board: &BoardBackend,
+    board: &SupervisorState,
     requested_stop: RequestedStop,
 ) {
     let Some(participant) = running
@@ -187,21 +187,18 @@ pub(crate) async fn request_participant_stop(
             participant.failed = true;
             board.set_state(
                 &participant.spec.key,
-                ParticipantState::Failed,
+                ProcessState::Failed,
                 Some("crashed before requested stop while restart was pending".to_string()),
             );
         }
         return;
     }
 
-    board.append_log(
-        &participant.spec.key,
-        "supervisor: sending SIGTERM for requested stop",
-    );
+    tracing::debug!(process = %participant.spec.key, "sending SIGTERM for requested stop");
     let Some(pid) = participant.child.as_ref().and_then(|child| child.id()) else {
         board.set_state(
             &participant.spec.key,
-            ParticipantState::Failed,
+            ProcessState::Failed,
             Some("requested-stop child has no pid".to_string()),
         );
         return;
@@ -212,17 +209,11 @@ pub(crate) async fn request_participant_stop(
         send_terminate(pid)
     } {
         Ok(()) => {
-            board.append_log(
-                &participant.spec.key,
-                "supervisor: SIGTERM sent; waiting for child exit",
-            );
+            tracing::debug!(process = %participant.spec.key, "SIGTERM sent; waiting for child exit");
             true
         }
         Err(error) => {
-            board.append_log(
-                &participant.spec.key,
-                format!("supervisor: failed to send SIGTERM; waiting before fallback: {error:#}"),
-            );
+            tracing::warn!(process = %participant.spec.key, %error, "failed to send SIGTERM; waiting before fallback");
             false
         }
     };
@@ -236,7 +227,7 @@ pub(crate) async fn request_participant_stop(
             if let Err(error) = participant.kill_process_group_after_timeout(board).await {
                 board.set_state(
                     &participant.spec.key,
-                    ParticipantState::Failed,
+                    ProcessState::Failed,
                     Some(format!("process-group SIGKILL failed: {error:#}")),
                 );
             }
@@ -244,7 +235,7 @@ pub(crate) async fn request_participant_stop(
         Err(error) => {
             board.set_state(
                 &participant.spec.key,
-                ParticipantState::Failed,
+                ProcessState::Failed,
                 Some(format!("requested-stop wait failed: {error:#}")),
             );
         }
@@ -262,7 +253,7 @@ pub(crate) async fn recv_action(
 
 pub(crate) async fn handle_action(
     running: &mut [RunningParticipant],
-    board: &BoardBackend,
+    board: &SupervisorState,
     action: SupervisorAction,
 ) -> Result<()> {
     match action {
@@ -282,7 +273,7 @@ pub(crate) async fn handle_action(
     }
 }
 
-pub(crate) async fn shutdown_all(running: &mut [RunningParticipant], board: &BoardBackend) {
+pub(crate) async fn shutdown_all(running: &mut [RunningParticipant], board: &SupervisorState) {
     // Reverse exact startup phase order, concurrency within each phase.
     let mut phases = running
         .iter()
@@ -303,17 +294,17 @@ pub(crate) async fn shutdown_all(running: &mut [RunningParticipant], board: &Boa
             let board = board.clone();
             joins.spawn(async move {
                 if let Some(child) = child.as_mut() {
-                    board.append_log(&spec.key, "supervisor: stopping");
+                    tracing::debug!(process = %spec.key, "stopping supervised process");
                     if let Err(error) =
                         stop_child(child, spec.shutdown_grace, spec.process_group).await
                     {
                         board.set_state(
                             &spec.key,
-                            ParticipantState::Failed,
+                            ProcessState::Failed,
                             Some(format!("failed to stop: {error:#}")),
                         );
                     }
-                    board.set_process_details(&spec.key, None, None);
+                    board.set_pid(&spec.key, None);
                 }
                 join_reader(stdout).await;
                 join_reader(stderr).await;
@@ -332,5 +323,33 @@ fn phase_rank(phase: &str) -> u8 {
         "starting project infrastructure" => 0,
         "starting robot graph" => 1,
         _ => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use phoxal_cli_core::session::ProjectLifecycle;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_publishes_orderly_terminal_state() {
+        let state = SupervisorState::new();
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        supervise_until_shutdown(
+            Vec::new(),
+            state.clone(),
+            SupervisorOptions {
+                token,
+                ..SupervisorOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state.supervisor_snapshot().lifecycle,
+            ProjectLifecycle::Stopped
+        );
     }
 }

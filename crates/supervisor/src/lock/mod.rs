@@ -3,6 +3,8 @@
 use anyhow::{Context, Result, bail};
 use phoxal_cli_core::identity::ExecutionId;
 use serde::{Deserialize, Serialize};
+
+mod advisory;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -128,9 +130,9 @@ impl ProjectLock {
                 return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
             }
         };
-        match crate::advisory_lock::try_advisory_lock(&file, true) {
+        match advisory::try_advisory_lock(&file, true) {
             Ok(()) => {
-                crate::advisory_lock::unlock_advisory(&file)?;
+                advisory::unlock_advisory(&file)?;
                 Ok(ProjectLockStatus::Free)
             }
             Err(_) => Ok(ProjectLockStatus::Held(
@@ -158,7 +160,7 @@ impl ProjectLock {
             .truncate(false)
             .open(path)
             .with_context(|| format!("failed to open project-operation lock {}", path.display()))?;
-        if let Err(error) = crate::advisory_lock::try_advisory_lock(&file, true) {
+        if let Err(error) = advisory::try_advisory_lock(&file, true) {
             let active = read_identity(&mut file).ok();
             if let Some(active) = active {
                 bail!(
@@ -197,7 +199,7 @@ impl Drop for ProjectLock {
     fn drop(&mut self) {
         // The inode is intentionally permanent. Unlinking a locked file lets a
         // competing process create and lock a different inode at the same path.
-        let _ = crate::advisory_lock::unlock_advisory(&self.file);
+        let _ = advisory::unlock_advisory(&self.file);
     }
 }
 

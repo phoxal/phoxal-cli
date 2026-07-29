@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail};
 /// socket and the resolved destination address; `Send` so the resident can move
 /// it into the background readiness/watchdog task.
 #[derive(Debug)]
-pub(crate) struct SdNotify {
+pub struct SdNotify {
     fd: OwnedFd,
     addr: libc::sockaddr_un,
     addr_len: libc::socklen_t,
@@ -33,7 +33,7 @@ impl SdNotify {
     /// Build a notify channel from the systemd environment, or `None` when
     /// `NOTIFY_SOCKET` is unset (an interactive, non-systemd invocation). The
     /// watchdog interval is read from `WATCHDOG_USEC`/`WATCHDOG_PID`.
-    pub(crate) fn from_env() -> Result<Option<Self>> {
+    pub fn from_env() -> Result<Option<Self>> {
         let Some(socket) = std::env::var_os("NOTIFY_SOCKET") else {
             return Ok(None);
         };
@@ -106,17 +106,17 @@ impl SdNotify {
 
     /// The watchdog ping interval (half of `WATCHDOG_USEC`), or `None` when no
     /// watchdog applies to this process.
-    pub(crate) fn watchdog_interval(&self) -> Option<Duration> {
+    pub fn watchdog_interval(&self) -> Option<Duration> {
         self.watchdog
     }
 
     /// Announce the supervised graph is up (`READY=1`).
-    pub(crate) fn notify_ready(&self) -> Result<()> {
+    pub fn notify_ready(&self) -> Result<()> {
         self.send(b"READY=1\n")
     }
 
     /// Keep the systemd watchdog satisfied (`WATCHDOG=1`).
-    pub(crate) fn notify_watchdog(&self) -> Result<()> {
+    pub fn notify_watchdog(&self) -> Result<()> {
         self.send(b"WATCHDOG=1\n")
     }
 

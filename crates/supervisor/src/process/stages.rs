@@ -1,8 +1,6 @@
 //! Ordered participant startup and readiness barriers.
 
-use super::{
-    BoardBackend, ParticipantSpec, ParticipantState, RunningParticipant, SupervisorOptions,
-};
+use super::{ParticipantSpec, RunningParticipant, SupervisorOptions, SupervisorState};
 use anyhow::Result;
 use anyhow::bail;
 use phoxal_cli_core::session::human;
@@ -12,6 +10,51 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
+
+/// Build the ordered resident startup stages for a physical run.
+pub fn stages_for_run(
+    specs: Vec<ParticipantSpec>,
+    timeout: crate::WaitBudget,
+) -> Vec<SupervisionStage> {
+    let mut infrastructure = Vec::new();
+    let mut graph = Vec::new();
+    for spec in specs {
+        match spec.kind {
+            phoxal_cli_core::session::ParticipantKind::Tool => infrastructure.push(spec),
+            phoxal_cli_core::session::ParticipantKind::Driver
+            | phoxal_cli_core::session::ParticipantKind::Service
+            | phoxal_cli_core::session::ParticipantKind::Simulator => graph.push(spec),
+        }
+    }
+    vec![
+        SupervisionStage::new("starting project infrastructure", infrastructure, timeout)
+            .with_extra_ready_ids([ProcessKey::project("infrastructure-router")]),
+        SupervisionStage::new("starting robot graph", graph, timeout),
+    ]
+}
+
+/// Build the ordered resident startup stages for a Webots run.
+pub fn stages_for_simulation(
+    specs: Vec<ParticipantSpec>,
+    timeout: crate::WaitBudget,
+) -> Vec<SupervisionStage> {
+    let mut infrastructure = Vec::new();
+    let mut graph = Vec::new();
+    for spec in specs {
+        if spec.id == phoxal_cli_core::session::WEBOTS_PROCESS_ID
+            || spec.kind == phoxal_cli_core::session::ParticipantKind::Tool
+        {
+            infrastructure.push(spec);
+        } else {
+            graph.push(spec);
+        }
+    }
+    vec![
+        SupervisionStage::new("starting project infrastructure", infrastructure, timeout)
+            .with_extra_ready_ids([ProcessKey::project("infrastructure-router")]),
+        SupervisionStage::new("starting robot graph", graph, timeout),
+    ]
+}
 
 /// A startup barrier containing process specs and board ids that must become
 /// ready before the next stage begins. Simulation clock is not a stage.
@@ -30,7 +73,7 @@ pub struct SupervisionStage {
     /// Spawned processes whose terminal failure aborts this stage.
     pub failure_ids: Vec<ProcessKey>,
     pub optional_ids: Vec<ProcessKey>,
-    pub timeout: crate::session::output::WaitBudget,
+    pub timeout: crate::WaitBudget,
 }
 
 impl SupervisionStage {
@@ -38,7 +81,7 @@ impl SupervisionStage {
     pub fn new(
         label: impl Into<String>,
         specs: Vec<ParticipantSpec>,
-        timeout: crate::session::output::WaitBudget,
+        timeout: crate::WaitBudget,
     ) -> Self {
         let ready_ids = specs
             .iter()
@@ -76,7 +119,7 @@ impl SupervisionStage {
 
 pub(crate) async fn spawn_stage(
     running: &mut Vec<RunningParticipant>,
-    board: &BoardBackend,
+    board: &SupervisorState,
     phase: &str,
     specs: Vec<ParticipantSpec>,
 ) {
@@ -92,7 +135,7 @@ pub(crate) async fn spawn_stage(
             Err(error) => {
                 board.set_state(
                     &key,
-                    ParticipantState::Failed,
+                    ProcessState::Failed,
                     Some(format!("spawn failed: {error:#}")),
                 );
             }
@@ -144,7 +187,7 @@ pub(crate) async fn emit_event(
 /// once `await_participants_ready` resolves.
 pub(crate) async fn spawn_stage_emitting(
     running: &mut Vec<RunningParticipant>,
-    board: &BoardBackend,
+    board: &SupervisorState,
     events: Option<&mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>>,
     stage: SupervisionStage,
 ) -> Option<PendingStage> {
@@ -194,7 +237,7 @@ pub(crate) async fn spawn_stage_emitting(
 
 pub(crate) async fn spawn_until_pending(
     running: &mut Vec<RunningParticipant>,
-    board: &BoardBackend,
+    board: &SupervisorState,
     events: Option<&mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>>,
     stage_queue: &mut VecDeque<SupervisionStage>,
 ) -> Option<PendingStage> {
@@ -207,11 +250,11 @@ pub(crate) async fn spawn_until_pending(
 }
 
 pub(crate) async fn await_stage_ready(
-    board: &BoardBackend,
+    board: &SupervisorState,
     ready_ids: &[ProcessKey],
     failure_ids: &[ProcessKey],
     optional_ids: &[ProcessKey],
-    budget: crate::session::output::WaitBudget,
+    budget: crate::WaitBudget,
     poll_interval: Duration,
 ) -> Result<()> {
     if ready_ids.is_empty() {
@@ -255,7 +298,7 @@ pub(crate) async fn await_stage_ready(
             for key in &missing {
                 board.set_state(
                     key,
-                    ParticipantState::Failed,
+                    ProcessState::Failed,
                     Some(format!(
                         "stage readiness timed out after {waited}: never observed ready"
                     )),
@@ -279,7 +322,7 @@ pub(crate) async fn await_stage_ready(
 /// Publish the state owner's derived Ready/Degraded startup outcome exactly
 /// when no phase remains to spawn or await.
 pub(crate) async fn maybe_emit_startup_outcome(
-    board: &BoardBackend,
+    board: &SupervisorState,
     options: &SupervisorOptions,
     events: Option<&mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>>,
     pending_stage: &Option<PendingStage>,

@@ -88,8 +88,8 @@ impl SimulationRun {
             world: self.world.clone(),
             offline: app.offline,
         };
-        let resident_in_process =
-            crate::resident::has_private_bootstrap() || (!app.output.interactive && !self.detach);
+        let resident_in_process = phoxal_cli_supervisor::resident::has_private_bootstrap()
+            || (!app.output.interactive && !self.detach);
         if resident_in_process {
             return crate::run::run_webots_resident_supervision(app, target.project, options).await;
         }

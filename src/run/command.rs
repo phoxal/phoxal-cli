@@ -1,17 +1,7 @@
 //! Command responsibilities for run.
 
 use super::RobotFeedTarget;
-use super::{InfrastructureRouter, stages_for_run, start_infrastructure_router};
 use crate::AppContext;
-use crate::supervisor::BoardBackend;
-use crate::supervisor::ParticipantSpec;
-use crate::supervisor::ProjectLock;
-use crate::supervisor::ProjectLockIdentity;
-use crate::supervisor::ProjectOperation;
-use crate::supervisor::SupervisionStage;
-use crate::supervisor::SupervisorOptions;
-use crate::supervisor::start_bus_log_subscriber;
-use crate::supervisor::start_liveliness_observer;
 use anyhow::bail;
 use anyhow::{Context, Result};
 use clap::Args;
@@ -19,6 +9,15 @@ use clap::ValueEnum;
 use phoxal_cli_core::identity::ExecutionId;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
+use phoxal_cli_supervisor::ParticipantSpec;
+use phoxal_cli_supervisor::ProjectLock;
+use phoxal_cli_supervisor::ProjectLockIdentity;
+use phoxal_cli_supervisor::ProjectOperation;
+use phoxal_cli_supervisor::SupervisionStage;
+use phoxal_cli_supervisor::SupervisorOptions;
+use phoxal_cli_supervisor::SupervisorState;
+use phoxal_cli_supervisor::start_liveliness_observer;
+use phoxal_cli_supervisor::{InfrastructureRouter, start_infrastructure_router};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -31,6 +30,31 @@ const PREPARATION_CANCEL_TIMEOUT: Duration = if cfg!(test) {
 } else {
     Duration::from_secs(5)
 };
+
+fn process_state(
+    state: phoxal_cli_core::session::ParticipantState,
+) -> phoxal_cli_core::session::ProcessState {
+    match state {
+        phoxal_cli_core::session::ParticipantState::Starting => {
+            phoxal_cli_core::session::ProcessState::Starting
+        }
+        phoxal_cli_core::session::ParticipantState::Ready => {
+            phoxal_cli_core::session::ProcessState::Ready
+        }
+        phoxal_cli_core::session::ParticipantState::Degraded => {
+            phoxal_cli_core::session::ProcessState::Degraded
+        }
+        phoxal_cli_core::session::ParticipantState::Failed => {
+            phoxal_cli_core::session::ProcessState::Failed
+        }
+        phoxal_cli_core::session::ParticipantState::Restarting => {
+            phoxal_cli_core::session::ProcessState::Restarting
+        }
+        phoxal_cli_core::session::ParticipantState::Stopped => {
+            phoxal_cli_core::session::ProcessState::Stopped
+        }
+    }
+}
 
 #[derive(Debug, Args)]
 pub struct Run {
@@ -74,7 +98,7 @@ pub struct RunOptions {
 pub(crate) struct PreparedRun {
     pub(crate) project_root: PathBuf,
     pub(crate) plan: LaunchPlan,
-    pub(crate) board: BoardBackend,
+    pub(crate) board: SupervisorState,
     pub(crate) specs: Vec<ParticipantSpec>,
     pub(crate) robot_targets: Vec<RobotFeedTarget>,
     pub(crate) router: phoxal_cli_project::PreparedRouter,
@@ -85,7 +109,7 @@ pub(crate) struct PreparedRun {
 /// Ctrl-C remains polled until the supervisor loop takes ownership.
 pub(crate) struct LiveRunSetup {
     pub(crate) router: InfrastructureRouter,
-    pub(crate) board: BoardBackend,
+    pub(crate) board: SupervisorState,
     pub(crate) stages: Vec<SupervisionStage>,
     pub(crate) supervisor_options: SupervisorOptions,
     pub(crate) background_tasks: AbortTasks,
@@ -137,7 +161,7 @@ impl Run {
         if should_run_resident_in_process(
             app.output.interactive,
             self.detach,
-            crate::resident::has_private_bootstrap(),
+            phoxal_cli_supervisor::resident::has_private_bootstrap(),
         ) {
             // `run` never owns the systemd notify socket; that is `start`'s job.
             return run_resident_supervision(app, target.project, options, None).await;
@@ -173,10 +197,10 @@ impl Run {
 pub(crate) async fn connect_to_detached_resident(
     project: &Path,
 ) -> Result<(
-    crate::resident::LaunchedResident,
+    phoxal_cli_supervisor::resident::LaunchedResident,
     phoxal_cli_client::SupervisorClient,
 )> {
-    let launched = crate::resident::launch_detached()?;
+    let launched = phoxal_cli_supervisor::resident::launch_detached()?;
     let generation = match &launched.result {
         phoxal_cli_protocol::BootstrapResult::Bound {
             supervisor_generation,
@@ -186,7 +210,7 @@ pub(crate) async fn connect_to_detached_resident(
             bail!("{error}; use `phoxal attach` or `phoxal stop` if another run owns the project")
         }
     };
-    let socket = crate::resident::supervisor_socket_path(project)?;
+    let socket = phoxal_cli_supervisor::resident::supervisor_socket_path(project)?;
     let client = phoxal_cli_client::SupervisorClient::connect(socket).await?;
     anyhow::ensure!(
         client.snapshots().current().supervisor_generation == generation,
@@ -206,7 +230,7 @@ pub(crate) async fn run_resident_supervision(
     app: &AppContext,
     project_root: PathBuf,
     options: RunOptions,
-    notify: Option<crate::sd_notify::SdNotify>,
+    notify: Option<phoxal_cli_supervisor::systemd::notify::SdNotify>,
 ) -> Result<()> {
     run_resident_supervision_mode(app, project_root, ResidentMode::Run(options), notify).await
 }
@@ -228,14 +252,14 @@ async fn run_resident_supervision_mode(
     app: &AppContext,
     project_root: PathBuf,
     mode: ResidentMode,
-    notify: Option<crate::sd_notify::SdNotify>,
+    notify: Option<phoxal_cli_supervisor::systemd::notify::SdNotify>,
 ) -> Result<()> {
-    let execution = crate::resident::private_bootstrap_execution()?;
+    let execution = phoxal_cli_supervisor::resident::private_bootstrap_execution()?;
     match resident_supervision_inner(app, project_root, mode, execution, notify).await {
         Ok(()) => Ok(()),
         Err(error) => {
             if execution.is_some() {
-                let _ = crate::resident::report_private_bootstrap(
+                let _ = phoxal_cli_supervisor::resident::report_private_bootstrap(
                     &phoxal_cli_protocol::BootstrapResult::Rejected {
                         error: format!("{error:#}"),
                     },
@@ -251,7 +275,7 @@ async fn resident_supervision_inner(
     project_root: PathBuf,
     mode: ResidentMode,
     bootstrap_execution: Option<ExecutionId>,
-    notify: Option<crate::sd_notify::SdNotify>,
+    notify: Option<phoxal_cli_supervisor::systemd::notify::SdNotify>,
 ) -> Result<()> {
     // One supervised run, one execution identity (#952 section B). A privately
     // launched resident adopts the one its launcher minted; a foreground run
@@ -263,7 +287,7 @@ async fn resident_supervision_inner(
         .in_execution(run.execution());
     let _lock = ProjectLock::acquire(identity)?;
     let runtime_target = phoxal_cli_project::resolve_target(Some(&project_root), &project_root)?;
-    let board = BoardBackend::new();
+    let board = SupervisorState::new();
     board.configure(
         project_root.display().to_string(),
         "resolving",
@@ -273,17 +297,19 @@ async fn resident_supervision_inner(
     board.begin_phase("prepare");
     let token = tokio_util::sync::CancellationToken::new();
     let (action_tx, action_rx) = mpsc::channel(16);
-    let socket = crate::resident::ResidentSocket::bind(
+    let socket = phoxal_cli_supervisor::resident::ResidentSocket::bind(
         &project_root,
         board.clone(),
         action_tx.clone(),
         token.clone(),
     )?;
     if bootstrap_execution.is_some() {
-        crate::resident::report_private_bootstrap(&phoxal_cli_protocol::BootstrapResult::Bound {
-            supervisor_generation: board.supervisor_snapshot().supervisor_generation,
-            execution: run.execution(),
-        })?;
+        phoxal_cli_supervisor::resident::report_private_bootstrap(
+            &phoxal_cli_protocol::BootstrapResult::Bound {
+                supervisor_generation: board.supervisor_snapshot().supervisor_generation,
+                execution: run.execution(),
+            },
+        )?;
     }
 
     let (events, events_rx) = mpsc::channel(16);
@@ -449,7 +475,7 @@ async fn drain_session_events(
 }
 
 async fn finish_cancelled_preparation<T>(
-    board: &BoardBackend,
+    board: &SupervisorState,
     preparation: &mut tokio::task::JoinHandle<T>,
 ) {
     if tokio::time::timeout(PREPARATION_CANCEL_TIMEOUT, &mut *preparation)
@@ -464,7 +490,7 @@ async fn finish_cancelled_preparation<T>(
 
 struct ResidentSetup {
     router: InfrastructureRouter,
-    board: BoardBackend,
+    board: SupervisorState,
     stages: Vec<SupervisionStage>,
     supervisor_options: SupervisorOptions,
     background_tasks: AbortTasks,
@@ -475,8 +501,8 @@ struct ResidentSetup {
 /// the task is aborted. A graph that fails startup never signals ready - systemd
 /// times the start out and marks the unit failed, which is the correct outcome.
 fn spawn_readiness_notify(
-    notify: crate::sd_notify::SdNotify,
-    board: BoardBackend,
+    notify: phoxal_cli_supervisor::systemd::notify::SdNotify,
+    board: SupervisorState,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut snapshots = board.subscribe();
@@ -516,7 +542,7 @@ async fn prepare_run(
     target: phoxal_cli_core::runtime::RuntimeTarget,
     options: RunOptions,
     ui: crate::Ui,
-    board: BoardBackend,
+    board: SupervisorState,
     run: RunIdentity,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<PreparedRun> {
@@ -542,39 +568,22 @@ async fn prepare_run(
     );
     board.upsert_process(
         phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
-        crate::supervisor::ParticipantStatus::new(
-            "infrastructure-router",
-            phoxal_cli_core::session::ParticipantKind::Tool,
-            crate::supervisor::ParticipantState::Starting,
-        ),
+        phoxal_cli_core::session::ParticipantKind::Tool,
+        phoxal_cli_core::session::ProcessState::Starting,
         phoxal_cli_core::session::StartupRequirement::Required,
     );
     for participant in &prepared.participants {
-        let mut status = crate::supervisor::ParticipantStatus::new(
-            &participant.id,
-            participant.kind,
-            crate::supervisor::ParticipantState::Starting,
-        )
-        .with_local(participant.local);
-        if let Some(robot) = &participant.robot {
-            status = status.with_scope(phoxal_cli_core::session::stores::telemetry::RobotScope {
-                namespace: robot.namespace.clone(),
-                robot_id: robot.robot_id.clone(),
-            });
-        }
+        let state = process_state(participant.initial_state);
         board.upsert_process(
             participant.key.clone(),
-            status,
+            participant.kind,
+            state,
             participant.startup_requirement,
         );
-        if participant.initial_state != crate::supervisor::ParticipantState::Starting
+        if participant.initial_state != phoxal_cli_core::session::ParticipantState::Starting
             || participant.note.is_some()
         {
-            board.set_state(
-                participant.key.clone(),
-                participant.initial_state,
-                participant.note.clone(),
-            );
+            board.set_state(participant.key.clone(), state, participant.note.clone());
         }
     }
     let specs = prepared
@@ -797,16 +806,21 @@ pub(crate) async fn live_run_setup(
     token: tokio_util::sync::CancellationToken,
     events: mpsc::Sender<phoxal_cli_core::session::event::SessionEvent>,
     action_channel: Option<(
-        mpsc::Sender<crate::supervisor::SupervisorAction>,
-        mpsc::Receiver<crate::supervisor::SupervisorAction>,
+        mpsc::Sender<phoxal_cli_supervisor::SupervisorAction>,
+        mpsc::Receiver<phoxal_cli_supervisor::SupervisorAction>,
     )>,
     run: RunIdentity,
 ) -> Result<LiveRunSetup> {
     let connect = prepared.router.endpoint.clone();
-    let router = start_infrastructure_router(&prepared.router).await?;
+    let router = start_infrastructure_router(
+        prepared.router.binary.clone(),
+        prepared.router.config.clone(),
+        prepared.router.endpoint.clone(),
+    )
+    .await?;
     let revision =
         phoxal_cli_core::project::launch_plan::PlanRevision::compile(1, prepared.plan.clone())?;
-    crate::supervisor::materialize_plan_binaries(
+    phoxal_cli_supervisor::materialize_plan_binaries(
         &prepared.project_root,
         &revision,
         &mut prepared.specs,
@@ -814,7 +828,7 @@ pub(crate) async fn live_run_setup(
     prepared.board.set_router_endpoint(connect.clone());
     prepared.board.set_state(
         phoxal_cli_core::session::ProcessKey::project("infrastructure-router"),
-        crate::supervisor::ParticipantState::Ready,
+        phoxal_cli_core::session::ProcessState::Ready,
         None,
     );
     ui.info(format!(
@@ -826,21 +840,6 @@ pub(crate) async fn live_run_setup(
 
     let execution = run.execution();
     let mut background_tasks = AbortTasks::default();
-    background_tasks.extend(
-        prepared
-            .robot_targets
-            .iter()
-            .map(|target| {
-                start_bus_log_subscriber(
-                    target.scope.namespace.clone(),
-                    target.scope.robot_id.clone(),
-                    connect.clone(),
-                    execution,
-                    prepared.board.clone(),
-                )
-            })
-            .collect::<Vec<_>>(),
-    );
     background_tasks.extend(prepared.robot_targets.iter().map(|target| {
         start_liveliness_observer(
             target.scope.namespace.clone(),
@@ -853,7 +852,10 @@ pub(crate) async fn live_run_setup(
 
     let (_action_tx, action_rx) = action_channel.unwrap_or_else(|| mpsc::channel(16));
 
-    let stages = stages_for_run(prepared.specs, output);
+    let stages = phoxal_cli_supervisor::stages_for_run(
+        prepared.specs,
+        output.wait_budget(super::RUN_STAGE_READY_TIMEOUT),
+    );
     let starting = phoxal_cli_core::session::state::SessionState::Preparing
         .start()
         .expect("the controller begins every session in Preparing");
@@ -863,7 +865,9 @@ pub(crate) async fn live_run_setup(
 
     let board = prepared.board;
     let supervisor_options = SupervisorOptions {
-        action_rx: Some(crate::supervisor::SupervisorActionReceiver::new(action_rx)),
+        action_rx: Some(phoxal_cli_supervisor::SupervisorActionReceiver::new(
+            action_rx,
+        )),
         token,
         events: Some(events),
         emits_running_on_startup_complete: true,
@@ -898,14 +902,14 @@ mod resident_role_tests {
 #[cfg(test)]
 mod readiness_tests {
     use super::{Readiness, required_readiness};
-    use crate::supervisor::{BoardBackend, ParticipantState};
     use phoxal_cli_core::session::{
-        ParticipantKind, ParticipantStatus, ProcessKey, ProjectLifecycle, StartupRequirement,
+        ParticipantKind, ProcessKey, ProcessState, ProjectLifecycle, StartupRequirement,
     };
+    use phoxal_cli_supervisor::SupervisorState;
 
     #[test]
     fn readiness_tracks_lifecycle_and_required_failures() {
-        let board = BoardBackend::new();
+        let board = SupervisorState::new();
         board.configure(
             "/tmp/project".to_string(),
             "v0.test",
@@ -937,14 +941,11 @@ mod readiness_tests {
         let key = ProcessKey::project("drive");
         board.upsert_process(
             key.clone(),
-            ParticipantStatus::new(
-                "drive",
-                ParticipantKind::Service,
-                ParticipantState::Starting,
-            ),
+            ParticipantKind::Service,
+            ProcessState::Starting,
             StartupRequirement::Required,
         );
-        board.set_state(&key, ParticipantState::Failed, Some("boom".to_string()));
+        board.set_state(&key, ProcessState::Failed, Some("boom".to_string()));
         board.set_lifecycle(ProjectLifecycle::Degraded);
         assert_eq!(
             required_readiness(&board.supervisor_snapshot()),
@@ -964,13 +965,13 @@ mod readiness_tests {
 
 #[cfg(test)]
 mod preparation_cancellation_tests {
-    use super::{BoardBackend, drain_session_events, finish_cancelled_preparation};
+    use super::{SupervisorState, drain_session_events, finish_cancelled_preparation};
     use phoxal_cli_core::session::ProjectLifecycle;
     use phoxal_cli_core::session::event::{DiagnosticLevel, DiagnosticSource, SessionEvent};
 
     #[tokio::test]
     async fn cancellation_during_preparation_finishes_stopped_not_failed() {
-        let board = BoardBackend::new();
+        let board = SupervisorState::new();
         board.set_lifecycle(ProjectLifecycle::Starting);
         let mut preparation = tokio::spawn(std::future::pending::<()>());
         // Other unit tests may be building fixtures concurrently in this

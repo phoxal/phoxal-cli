@@ -15,7 +15,7 @@ use phoxal_cli_core::session::event::{
 };
 use phoxal_cli_core::session::state::{FailReason, SessionState};
 use phoxal_cli_core::session::stores::telemetry::RobotScope;
-use phoxal_cli_core::session::{JoypadCommand, ProjectLifecycle, SessionMode};
+use phoxal_cli_core::session::{BoardSnapshot, JoypadCommand, ProjectLifecycle, SessionMode};
 use phoxal_cli_protocol::{CommandAction, CommandError};
 use phoxal_cli_ui::tui::{
     DisplayAction, TerminalGuard, TuiDisplay, install_panic_hook, render::TitleInfo,
@@ -24,8 +24,8 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
+use crate::run::ClientProjection;
 use crate::session::output::OutputContext;
-use crate::supervisor::{BoardBackend, BoardSnapshot};
 use crate::telemetry::TelemetryBackend;
 
 fn session_title(project_root: &Path, mode: SessionMode) -> TitleInfo {
@@ -67,7 +67,7 @@ fn unknown_session_title(mode: SessionMode) -> TitleInfo {
         train: "unknown".to_string(),
         manifest: "n/a".to_string(),
         mode,
-        bus_endpoint: crate::supervisor::default_connect_endpoint(),
+        bus_endpoint: phoxal_cli_supervisor::default_connect_endpoint(),
         simulation_profile: None,
         simulation_world: None,
         started_at: std::time::SystemTime::now(),
@@ -139,23 +139,25 @@ impl SessionController {
 
     pub async fn drive_attachment(
         mut self,
-        board: BoardBackend,
+        projection: ClientProjection,
         telemetry: TelemetryBackend,
         client: phoxal_cli_client::SupervisorClient,
+        recovery_tx: tokio::sync::watch::Sender<u64>,
         shutdown_on_quit: bool,
     ) -> Result<AttachmentOutcome> {
-        board.set_log_sink(self.tui.log_sender());
+        projection.set_log_sink(self.tui.log_sender());
         let store = client.snapshots();
-        board.replace_from_supervisor(store.current());
+        projection.replace_supervisor(&store.current());
         let mut snapshots = store.subscribe();
         let mut connection = store.connection();
         let current = store.current();
+        let mut graph_generation = current.graph_generation;
         self.reflect_resident_lifecycle(current.lifecycle);
         let mut last_phase = None;
         self.reflect_resident_phase(current.startup.active_phase.as_deref(), &mut last_phase);
         let mut ticker = tokio::time::interval(Duration::from_millis(100));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        self.redraw_live(&board, &telemetry)?;
+        self.redraw_live(&projection, &telemetry)?;
 
         loop {
             tokio::select! {
@@ -177,22 +179,26 @@ impl SessionController {
                 _ = self.hangups.recv() => return Ok(AttachmentOutcome::Disconnected),
                 Some(event) = self.diagnostics.recv() => {
                     self.forward_to_renderer(&event);
-                    self.redraw_live(&board, &telemetry)?;
+                    self.redraw_live(&projection, &telemetry)?;
                 }
                 Ok(()) = snapshots.changed() => {
                     let snapshot = snapshots.borrow_and_update().clone();
+                    if snapshot.graph_generation != graph_generation {
+                        graph_generation = snapshot.graph_generation;
+                        recovery_tx.send_replace(graph_generation);
+                    }
                     let terminal = matches!(
                         snapshot.lifecycle,
                         ProjectLifecycle::Stopped | ProjectLifecycle::Failed
                     );
-                    board.replace_from_supervisor(snapshot.clone());
+                    projection.replace_supervisor(&snapshot);
                     self.tui.set_simulation_info(snapshot.simulation.as_ref());
                     self.reflect_resident_lifecycle(snapshot.lifecycle);
                     self.reflect_resident_phase(
                         snapshot.startup.active_phase.as_deref(),
                         &mut last_phase,
                     );
-                    self.redraw_live(&board, &telemetry)?;
+                    self.redraw_live(&projection, &telemetry)?;
                     if terminal {
                         return if snapshot.lifecycle == ProjectLifecycle::Failed {
                             Err(anyhow!("resident supervisor failed"))
@@ -212,14 +218,14 @@ impl SessionController {
                 }
                 Some(input) = poll_next_input(&mut self.tui) => {
                     let event = input.context("terminal input reader failed")?;
-                    match handle_input(&mut self.tui, event, &board.snapshot()) {
+                    match handle_input(&mut self.tui, event, &projection.snapshot()) {
                         DisplayAction::None => {}
                         DisplayAction::Quit if !shutdown_on_quit => {
                             return Ok(AttachmentOutcome::Disconnected);
                         }
                         DisplayAction::Quit => self.request_resident_shutdown(&client).await?,
                         DisplayAction::Restart(id) => {
-                            self.request_restart(&client, &board, &id).await;
+                            self.request_restart(&client, &id).await;
                         }
                         DisplayAction::JoypadSelect(id) => {
                             telemetry.send_joypad_command(JoypadCommand::Select(id));
@@ -231,19 +237,14 @@ impl SessionController {
                             telemetry.send_joypad_command(JoypadCommand::Rescan);
                         }
                     }
-                    self.redraw_live(&board, &telemetry)?;
+                    self.redraw_live(&projection, &telemetry)?;
                 }
-                _ = ticker.tick() => self.redraw_live(&board, &telemetry)?,
+                _ = ticker.tick() => self.redraw_live(&projection, &telemetry)?,
             }
         }
     }
 
-    async fn request_restart(
-        &mut self,
-        client: &phoxal_cli_client::SupervisorClient,
-        board: &BoardBackend,
-        id: &str,
-    ) {
+    async fn request_restart(&mut self, client: &phoxal_cli_client::SupervisorClient, id: &str) {
         let key = match id.parse() {
             Ok(key) => key,
             Err(error) => {
@@ -253,8 +254,9 @@ impl SessionController {
                 return;
             }
         };
-        let Some(expected_producer) = board
-            .supervisor_snapshot()
+        let Some(expected_producer) = client
+            .snapshots()
+            .current()
             .processes
             .get(&key)
             .and_then(|entry| entry.status.producer)
@@ -361,9 +363,16 @@ impl SessionController {
         self.tui.apply_session_event(event);
     }
 
-    fn redraw_live(&mut self, board: &BoardBackend, telemetry: &TelemetryBackend) -> Result<()> {
+    fn redraw_live(
+        &mut self,
+        projection: &ClientProjection,
+        telemetry: &TelemetryBackend,
+    ) -> Result<()> {
         self.tui
-            .redraw(&board.snapshot(), telemetry.snapshot(&self.telemetry_scope))
+            .redraw(
+                &projection.snapshot(),
+                telemetry.snapshot(&self.telemetry_scope),
+            )
             .context("failed to draw the interactive session frame")
     }
 }

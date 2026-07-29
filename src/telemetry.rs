@@ -1,12 +1,9 @@
 //! Live telemetry feed for the TUI (CLI-UX Phase 3/4): background bus
 //! subscribers for the framework train's tool telemetry and joypad contracts,
-//! mirroring `supervisor::start_bus_log_subscriber`/
-//! `start_liveliness_observer`'s "observe, update shared
-//! snapshot" pattern.
+//! mirroring the disposable observers in `crate::run::observation`.
 //!
-//! Kept deliberately separate from `supervisor::BoardBackend`/`BoardSnapshot`
-//! (participant board state, persisted to the state file): telemetry never
-//! reaches either of those, only the live TUI reads it
+//! Kept deliberately separate from resident `SupervisorState` and the
+//! attachment's `ClientProjection`: only the live TUI reads it
 //! (`TelemetryBackend::snapshot`), so it can carry
 //! whatever shape is convenient for rendering without touching the persisted
 //! board contract.
@@ -28,6 +25,10 @@ use phoxal_cli_core::identity::{ExecutionId, ProducerId};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::run::{
+    BUS_TELEMETRY_PARTICIPANT, CONTROL_STATE_PARTICIPANT, DEVICE_TELEMETRY_PARTICIPANT,
+    JOYPAD_TELEMETRY_PARTICIPANT, RUNTIME_TELEMETRY_PARTICIPANT,
+};
 use phoxal_cli_core::session::reconcile::{
     Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced,
 };
@@ -241,7 +242,7 @@ fn runtime_record_from(body: state_api::tool::runtime::Record) -> RuntimePerform
 }
 
 /// A snapshot of the selected robot's live telemetry feeds, cloned once per TUI redraw
-/// (mirrors `BoardBackend::snapshot`). Every latest-value field is a
+/// (mirrors `ClientProjection::snapshot`). Every latest-value field is a
 /// [`Timestamped`] carrying the [`Instant`] the underlying sample was
 /// actually RECEIVED off the bus (recorded by `TelemetryBackend::record_*`
 /// at the moment a feed task observes it, never re-stamped on later
@@ -438,7 +439,7 @@ async fn control_state_feed_loop(
     let bus = Bus::open(BusConfig {
         namespace,
         robot_id,
-        participant: "phoxal-cli-control-state".to_string(),
+        participant: CONTROL_STATE_PARTICIPANT.to_string(),
         execution,
         producer: ProducerId::mint(),
         connect_endpoints: vec![connect],
@@ -478,7 +479,7 @@ pub fn start_device_feed(
             let bus = match Bus::open(BusConfig {
                 namespace: namespace.clone(),
                 robot_id: robot_id.clone(),
-                participant: "phoxal-cli-tool-device-consumer".to_string(),
+                participant: DEVICE_TELEMETRY_PARTICIPANT.to_string(),
                 execution,
                 producer: ProducerId::mint(),
                 connect_endpoints: vec![connect.clone()],
@@ -687,7 +688,7 @@ pub fn start_router_metrics_feed(
             let bus = match Bus::open(BusConfig {
                 namespace: namespace.clone(),
                 robot_id: robot_id.clone(),
-                participant: "phoxal-cli-tool-bus-consumer".to_string(),
+                participant: BUS_TELEMETRY_PARTICIPANT.to_string(),
                 execution,
                 producer: ProducerId::mint(),
                 connect_endpoints: vec![connect.clone()],
@@ -938,7 +939,7 @@ pub fn start_runtime_performance_feed(
             let bus = match Bus::open(BusConfig {
                 namespace: namespace.clone(),
                 robot_id: robot_id.clone(),
-                participant: "phoxal-cli-tool-telemetry-consumer".to_string(),
+                participant: RUNTIME_TELEMETRY_PARTICIPANT.to_string(),
                 execution,
                 producer: ProducerId::mint(),
                 connect_endpoints: vec![connect.clone()],
@@ -1321,7 +1322,7 @@ async fn joypad_devices_feed_loop(
     let bus = Bus::open(BusConfig {
         namespace,
         robot_id,
-        participant: "phoxal-cli-telemetry-joypad".to_string(),
+        participant: JOYPAD_TELEMETRY_PARTICIPANT.to_string(),
         execution,
         producer: ProducerId::mint(),
         connect_endpoints: vec![connect],

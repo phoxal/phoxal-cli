@@ -7,8 +7,7 @@
 //! without pulling in the terminal/process/runtime machinery.
 //!
 //! This vocabulary carries only events with real producers. Participant rows
-//! are read straight off
-//! `supervisor::BoardSnapshot` (board polling, not events - see
+//! are read from the current observation snapshot (polling, not events - see
 //! the session controller's own docs on why that stays the source of truth)
 //! and live telemetry flows through
 //! `telemetry::TelemetryBackend`/`stores::telemetry_store::TelemetryStore`

@@ -70,7 +70,7 @@ impl BusTargetArgs {
         let (namespace, robot_id) = self.identity(app)?;
         let execution = match self.execution {
             Some(execution) => execution,
-            None => crate::supervisor::active_execution(app.project.root())?.context(
+            None => phoxal_cli_supervisor::active_execution(app.project.root())?.context(
                 "no phoxal run is active in this project; start one, or name the run with \
                  --execution",
             )?,

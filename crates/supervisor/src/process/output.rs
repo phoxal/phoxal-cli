@@ -1,6 +1,6 @@
 //! Captured child-output routing and reader task cleanup.
 
-use super::{BoardBackend, MAX_CAPTURED_LINE_BYTES};
+use super::{MAX_CAPTURED_LINE_BYTES, SupervisorState};
 use phoxal_cli_core::session::ProcessKey;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -29,7 +29,7 @@ pub(crate) fn requested_stop_exit_is_clean(
 }
 
 pub(crate) fn spawn_output_reader<R>(
-    board: BoardBackend,
+    board: SupervisorState,
     id: impl Into<ProcessKey>,
     stream: &'static str,
     reader: R,
@@ -68,7 +68,7 @@ where
                     }
                 }
                 Err(error) => {
-                    board.append_log(&id, format!("supervisor: failed to read {stream}: {error}"));
+                    tracing::warn!(process = %id, stream, %error, "failed to read captured child output");
                     break;
                 }
             }
@@ -77,7 +77,7 @@ where
 }
 
 pub(crate) fn route_captured_line(
-    board: &BoardBackend,
+    board: &SupervisorState,
     id: &ProcessKey,
     stream: &str,
     bytes: &[u8],
@@ -87,7 +87,10 @@ pub(crate) fn route_captured_line(
     if truncated {
         text.push('…');
     }
-    board.route_log(id, format!("{stream}: {text}"));
+    if stream == "stderr" {
+        board.record_captured_stderr(id, &text);
+    }
+    tracing::info!(process = %id, stream, message = %text, "captured child output");
 }
 
 pub(crate) const READER_JOIN_BUDGET: Duration = Duration::from_millis(250);
