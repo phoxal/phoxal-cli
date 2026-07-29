@@ -14,7 +14,6 @@ phoxal-cli-observation = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 tracing = { workspace = true }
 tuirealm = { workspace = true }
-tui-realm-stdlib = { workspace = true }
 
 [lints]
 workspace = true

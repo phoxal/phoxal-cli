@@ -5,7 +5,6 @@ use phoxal_cli_observation::AttachmentEpoch;
 use crate::components::bus::BusModel;
 use crate::components::input::InputModel;
 use crate::components::logs::LogsModel;
-use crate::components::modal::ModalModel;
 use crate::components::overview::OverviewModel;
 use crate::components::runtimes::RuntimesModel;
 
@@ -21,10 +20,8 @@ pub struct AppModel {
     pub logs: LogsModel,
     pub bus: BusModel,
     pub input: InputModel,
-    pub modal: Option<ModalModel>,
-    pub viewport: (u16, u16),
     pub redraw_requested: bool,
-    pub redraws: u64,
+    pub clear_requested: bool,
     pub exit: Option<AttachmentOutcome>,
 }
 
@@ -38,10 +35,8 @@ impl Default for AppModel {
             logs: LogsModel::default(),
             bus: BusModel::default(),
             input: InputModel::default(),
-            modal: None,
-            viewport: (0, 0),
             redraw_requested: true,
-            redraws: 0,
+            clear_requested: true,
             exit: None,
         }
     }

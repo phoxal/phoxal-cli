@@ -3,20 +3,10 @@
 use phoxal_cli_observation::{AttachmentEvent, BusWindow, LogWindow, RuntimeWindow};
 use tuirealm::event::KeyEvent;
 
-use super::id::{ModalId, PageId};
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NavigationMsg {
     Key(KeyEvent),
-    Resize { width: u16, height: u16 },
-    Page(PageId),
-    OpenModal(ModalId),
-    CloseModal,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OverviewMsg {
-    Acknowledge,
+    Refresh { clear: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,17 +24,6 @@ pub enum BusMsg {
     Window(BusWindow),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InputMsg {
-    Acknowledge,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModalMsg {
-    Confirm,
-    Cancel,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionInput {
     Client(AttachmentEvent),
@@ -59,16 +38,12 @@ pub enum SessionInput {
 pub enum Msg {
     Client(AttachmentEvent),
     Navigate(NavigationMsg),
-    Overview(OverviewMsg),
     Runtimes(RuntimesMsg),
     Logs(LogsMsg),
     Bus(BusMsg),
-    Input(InputMsg),
-    Modal(ModalMsg),
     Diagnostic(String),
     Wake,
     Terminate,
-    Quit,
 }
 
 impl From<SessionInput> for Msg {

@@ -5,6 +5,7 @@ use super::id::{BusPanelId, InputPanelId, LogsPanelId, ModalId, PageId, PanelId,
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FocusRoute {
     Tabs {
+        page: PageId,
         candidate: PageId,
     },
     Panels {
@@ -23,6 +24,7 @@ pub enum FocusRoute {
 impl Default for FocusRoute {
     fn default() -> Self {
         Self::Tabs {
+            page: PageId::Overview,
             candidate: PageId::Overview,
         }
     }
@@ -32,7 +34,7 @@ impl FocusRoute {
     #[must_use]
     pub const fn page(&self) -> PageId {
         match self {
-            Self::Tabs { candidate } => *candidate,
+            Self::Tabs { page, .. } => *page,
             Self::Panels { page, .. } => *page,
             Self::Content { panel } => panel.page(),
             Self::Modal { return_to, .. } => return_to.page(),

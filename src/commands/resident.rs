@@ -29,9 +29,13 @@ impl Attach {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         let target = resolve_target(self.target.as_deref(), app.project.root())?;
         let (feed, commands) = connect_running(&target).await?;
-        crate::application::attachment::run(app, &target, feed, commands)
-            .await
-            .map(|_| ())
+        match crate::application::attachment::run(app, &target, feed, commands, false).await? {
+            phoxal_cli_ui::AttachmentOutcome::ResidentFailed => {
+                anyhow::bail!("resident supervisor failed")
+            }
+            phoxal_cli_ui::AttachmentOutcome::Detached
+            | phoxal_cli_ui::AttachmentOutcome::ResidentStopped => Ok(()),
+        }
     }
 }
 

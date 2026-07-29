@@ -198,7 +198,7 @@ impl Run {
             return wait_for_required_readiness(&feed, &mut launched.child).await;
         }
         let (mut launched, feed, commands) = connect_to_detached_resident(&target.project).await?;
-        let result = crate::application::attachment::run(app, &target, feed, commands).await;
+        let result = crate::application::attachment::run(app, &target, feed, commands, true).await;
         if matches!(
             result,
             Ok(phoxal_cli_ui::AttachmentOutcome::ResidentStopped)
@@ -206,7 +206,13 @@ impl Run {
             let status = tokio::task::spawn_blocking(move || launched.child.wait()).await??;
             anyhow::ensure!(status.success(), "resident supervisor exited with {status}");
         }
-        result.map(|_| ())
+        match result? {
+            phoxal_cli_ui::AttachmentOutcome::ResidentFailed => {
+                anyhow::bail!("resident supervisor failed")
+            }
+            phoxal_cli_ui::AttachmentOutcome::Detached
+            | phoxal_cli_ui::AttachmentOutcome::ResidentStopped => Ok(()),
+        }
     }
 }
 

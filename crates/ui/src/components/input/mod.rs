@@ -16,6 +16,8 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
         .areas(area);
     let observation = model.input.observation.as_ref();
+    let input_stale =
+        model.overview.freshness.get("input") == Some(&phoxal_cli_observation::Freshness::Stale);
     let rows = observation
         .into_iter()
         .flat_map(|observation| observation.joypads.available.iter())
@@ -46,7 +48,17 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
                 Constraint::Length(12),
             ],
         )
-        .header(Row::new(["", "", "device", "id", "status"]))
+        .header(Row::new([
+            "",
+            "",
+            "device",
+            "id",
+            if input_stale {
+                "status (stale)"
+            } else {
+                "status"
+            },
+        ]))
         .block(panel_block(
             model,
             PanelId::Input(InputPanelId::Devices),

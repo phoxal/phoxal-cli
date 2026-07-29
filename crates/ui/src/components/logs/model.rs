@@ -78,7 +78,6 @@ pub struct LogsModel {
     pub dirty_revision: Option<StoreRevision>,
     pub in_flight: Option<(AttachmentEpoch, StoreRevision, QueryToken)>,
     pub next_token: u64,
-    pub accepted_windows: u64,
 }
 
 impl Default for LogsModel {
@@ -98,7 +97,6 @@ impl Default for LogsModel {
             dirty_revision: None,
             in_flight: None,
             next_token: 0,
-            accepted_windows: 0,
         }
     }
 }

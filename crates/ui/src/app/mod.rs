@@ -9,10 +9,9 @@ mod update;
 
 pub use effect::{AttachmentOutcome, DeviceId, Effect};
 pub use id::{BusPanelId, InputPanelId, LogsPanelId, ModalId, PageId, PanelId, RuntimesPanelId};
-pub use message::{
-    BusMsg, InputMsg, LogsMsg, ModalMsg, Msg, NavigationMsg, OverviewMsg, RuntimesMsg, SessionInput,
-};
+pub use message::{BusMsg, LogsMsg, Msg, NavigationMsg, RuntimesMsg, SessionInput};
 pub use model::AppModel;
 pub use route::FocusRoute;
 pub use session::{UiOptions, run};
+pub(crate) use update::process_is_runtime;
 pub use update::update;

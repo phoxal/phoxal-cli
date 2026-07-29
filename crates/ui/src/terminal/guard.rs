@@ -1,7 +1,7 @@
 //! Terminal ownership for entering/leaving raw mode and the alternate screen,
 //! restoring the terminal on every exit path - normal quit, Ctrl-C (as a key
-//! event, since raw mode disables the terminal's own SIGINT generation - see
-//! [`crate::tui::input`]), and panic.
+//! event, since raw mode disables the terminal's own SIGINT generation), an
+//! externally delivered signal routed by the binary, and panic.
 //!
 //! The panic case is the one that needs care: by the time a `Drop` impl would
 //! run during unwinding, Rust's default panic handler has *already* printed

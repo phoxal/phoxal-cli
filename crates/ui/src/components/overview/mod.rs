@@ -10,19 +10,41 @@ use crate::Theme;
 use crate::app::AppModel;
 
 pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
+    let [summary, diagnostics] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .areas(area);
     let [status, health] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .areas(area);
+        .areas(summary);
     let status_text = model.overview.supervisor.as_ref().map_or_else(
         || "Waiting for attachment snapshot".to_string(),
         |snapshot| {
+            let mode = snapshot.simulation.as_ref().map_or_else(
+                || "native".to_string(),
+                |simulation| {
+                    format!(
+                        "simulation {} / {}",
+                        sanitize(&simulation.profile),
+                        sanitize(&simulation.world)
+                    )
+                },
+            );
+            let startup = snapshot
+                .startup
+                .active_phase
+                .as_deref()
+                .map_or_else(
+                    || format!("{} phases complete", snapshot.startup.completed_phases.len()),
+                    |phase| format!("active: {}", sanitize(phase)),
+                );
             format!(
-                "Project: {}\nLifecycle: {:?}\nFramework: {}\nRouter: {}\nProcesses: {}",
-                snapshot.project,
+                "Project: {}\nMode: {mode}\nLifecycle: {:?}\nStartup: {startup}\nFramework: {}\nRouter: {}\nProcesses: {}",
+                sanitize(&snapshot.project),
                 snapshot.lifecycle,
-                snapshot.framework_train,
-                snapshot.router,
+                sanitize(&snapshot.framework_train),
+                sanitize(&snapshot.router),
                 model.overview.processes.len()
             )
         },
@@ -39,10 +61,27 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         .filter(|(_, freshness)| matches!(freshness, phoxal_cli_observation::Freshness::Stale))
         .map(|(source, _)| source.as_str())
         .collect::<Vec<_>>();
-    let health_text = if stale.is_empty() {
-        "All observed sources are fresh".to_string()
+    let source_states = model
+        .overview
+        .source_health
+        .as_ref()
+        .into_iter()
+        .flat_map(|health| health.sources.iter())
+        .map(|(source, status)| format!("{}: {status:?}", sanitize(source)))
+        .collect::<Vec<_>>();
+    let devices = model
+        .overview
+        .devices
+        .as_ref()
+        .map_or(0, |devices| devices.robots.len());
+    let health_text = if stale.is_empty() && source_states.is_empty() {
+        format!("All observed sources are fresh\nRobot devices: {devices}")
     } else {
-        format!("Stale sources:\n{}", stale.join("\n"))
+        format!(
+            "Stale: {}\nRobot devices: {devices}\n{}",
+            stale.join(", "),
+            source_states.join("\n")
+        )
     };
     frame.render_widget(
         Paragraph::new(health_text)
@@ -50,4 +89,31 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
             .block(Block::default().title(" Health ").borders(Borders::ALL)),
         health,
     );
+    let diagnostic_text = model
+        .overview
+        .diagnostics
+        .iter()
+        .rev()
+        .take(diagnostics.height.saturating_sub(2) as usize)
+        .rev()
+        .map(|message| sanitize(message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    frame.render_widget(
+        Paragraph::new(if diagnostic_text.is_empty() {
+            "No diagnostics".to_string()
+        } else {
+            diagnostic_text
+        })
+        .block(
+            Block::default()
+                .title(" Diagnostics ")
+                .borders(Borders::ALL),
+        ),
+        diagnostics,
+    );
+}
+
+fn sanitize(value: &str) -> String {
+    phoxal_cli_core::session::sanitize_terminal_text(value)
 }

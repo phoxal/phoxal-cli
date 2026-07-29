@@ -1,16 +1,12 @@
-mod model;
-
-pub use model::ModalModel;
-
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use tuirealm::ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::Theme;
-use crate::app::{AppModel, ModalId};
+use crate::app::{AppModel, FocusRoute, ModalId};
 
 pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
-    let Some(modal) = &model.modal else {
+    let FocusRoute::Modal { modal, .. } = &model.route else {
         return;
     };
     let [horizontal] = Layout::horizontal([Constraint::Percentage(70)])
@@ -19,7 +15,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
     let [popup] = Layout::vertical([Constraint::Percentage(60)])
         .flex(Flex::Center)
         .areas(horizontal);
-    let (title, body): (&str, String) = match modal.id {
+    let (title, body): (&str, String) = match modal {
         ModalId::Help => (
             " Help ",
             "Enter descends from tabs to panels to content. Esc restores the previous depth. Panel-local shortcuts work only after entering that panel.\n\nRuntimes: arrows, Enter detail, r restart, l logs\nLogs: filters / f s, stream arrows/End/Space\nBus: / s a and arrows\nInput: arrows, Enter select, e enable, x disable, r rescan\nS: explicit stop confirmation; q: detach only".to_string(),
@@ -30,10 +26,10 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
                 |snapshot| {
                     format!(
                         "project: {}\nentry: {}\nframework: {}\nrouter: {}\nexecution: {}\ngraph generation: {}",
-                        snapshot.project,
-                        snapshot.entry,
-                        snapshot.framework_train,
-                        snapshot.router,
+                        sanitize(&snapshot.project),
+                        sanitize(&snapshot.entry),
+                        sanitize(&snapshot.framework_train),
+                        sanitize(&snapshot.router),
                         snapshot.execution_id,
                         snapshot.graph_generation
                     )
@@ -59,4 +55,8 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
             ),
         popup,
     );
+}
+
+fn sanitize(value: &str) -> String {
+    phoxal_cli_core::session::sanitize_terminal_text(value)
 }

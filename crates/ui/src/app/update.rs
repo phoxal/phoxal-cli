@@ -1,23 +1,24 @@
 //! Pure Elm-style update function.
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::time::SystemTime;
 
-use phoxal_cli_core::session::{ParticipantKind, ProjectLifecycle};
+use phoxal_cli_core::session::{ParticipantKind, ProcessScope, ProjectLifecycle, RobotScope};
 use phoxal_cli_observation::{
-    AttachmentEvent, BusQuery, BusRead, LogAnchor, LogFilters, LogQuery, LogRead, LogRow,
-    ProcessTable, QueryToken, RuntimeQuery, RuntimeRead, StoreChanged, StoreRevision,
-    WindowDirection,
+    AttachmentEvent, BusQuery, BusRead, BusRow, LogAnchor, LogFilters, LogQuery, LogRead, LogRow,
+    ProcessObservation, ProcessTable, QueryToken, RuntimeQuery, RuntimeRead, RuntimeRow,
+    StoreChanged, StoreRevision, WindowDirection,
 };
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 
 use crate::components::bus::BusSort;
 use crate::components::input::InputModel;
 use crate::components::logs::{Editing, LogSourceFilter};
-use crate::components::modal::ModalModel;
 
 use super::effect::{AttachmentOutcome, DeviceId, Effect};
 use super::id::{BusPanelId, InputPanelId, LogsPanelId, ModalId, PageId, PanelId, RuntimesPanelId};
-use super::message::{BusMsg, LogsMsg, ModalMsg, Msg, NavigationMsg, RuntimesMsg};
+use super::message::{BusMsg, LogsMsg, Msg, NavigationMsg, RuntimesMsg};
 use super::model::AppModel;
 use super::route::{FocusRoute, cycle_panel};
 
@@ -29,7 +30,7 @@ pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
     let wake = matches!(message, Msg::Wake);
     let effects = match message {
         Msg::Wake => Vec::new(),
-        Msg::Quit | Msg::Terminate => detach(model),
+        Msg::Terminate => detach(model),
         Msg::Diagnostic(message) => {
             model.overview.push_diagnostic(message);
             Vec::new()
@@ -39,8 +40,6 @@ pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
         Msg::Logs(LogsMsg::Window(window)) => accept_logs(model, window),
         Msg::Bus(BusMsg::Window(window)) => accept_bus(model, window),
         Msg::Runtimes(RuntimesMsg::Window(window)) => accept_runtimes(model, window),
-        Msg::Modal(message) => update_modal(model, message),
-        Msg::Overview(_) | Msg::Input(_) => Vec::new(),
     };
     if !wake {
         model.redraw_requested = true;
@@ -61,12 +60,11 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
             Vec::new()
         }
         AttachmentEvent::SupervisorChanged(supervisor) => {
-            if matches!(
-                supervisor.lifecycle,
-                ProjectLifecycle::Stopped | ProjectLifecycle::Failed
-            ) {
-                model.exit = Some(AttachmentOutcome::ResidentStopped);
-            }
+            model.exit = match supervisor.lifecycle {
+                ProjectLifecycle::Stopped => Some(AttachmentOutcome::ResidentStopped),
+                ProjectLifecycle::Failed => Some(AttachmentOutcome::ResidentFailed),
+                _ => model.exit,
+            };
             model.overview.supervisor = Some(supervisor);
             Vec::new()
         }
@@ -121,9 +119,12 @@ fn preserve_process_candidate(
         .runtimes
         .candidate
         .as_ref()
-        .is_none_or(|candidate| !processes.contains_key(candidate))
+        .is_none_or(|candidate| !processes.get(candidate).is_some_and(process_is_runtime))
     {
-        model.runtimes.candidate = processes.keys().next().cloned();
+        model.runtimes.candidate = processes
+            .iter()
+            .find(|(_, process)| process_is_runtime(process))
+            .map(|(key, _)| key.clone());
     }
     if model
         .runtimes
@@ -133,6 +134,40 @@ fn preserve_process_candidate(
     {
         model.runtimes.detail = None;
     }
+}
+
+pub(crate) fn process_is_runtime(process: &ProcessObservation) -> bool {
+    matches!(
+        process.kind,
+        ParticipantKind::Service | ParticipantKind::Driver
+    ) && (process.user_service || !is_known_internal_id(&process.key.id))
+}
+
+fn participant_is_internal(participant: &str, processes: &ProcessTable) -> bool {
+    processes
+        .iter()
+        .find(|(key, _)| key.id == participant || key.to_string() == participant)
+        .map_or_else(
+            || is_known_internal_id(participant),
+            |(_, process)| !process_is_runtime(process),
+        )
+}
+
+fn is_known_internal_id(id: &str) -> bool {
+    id.eq_ignore_ascii_case("phoxal-cli")
+        || starts_with_ignore_ascii_case(id, "phoxal-cli/")
+        || starts_with_ignore_ascii_case(id, "tool-")
+        || id.eq_ignore_ascii_case("supervisor")
+        || id.eq_ignore_ascii_case(phoxal_cli_core::session::WEBOTS_PROCESS_ID)
+        || starts_with_ignore_ascii_case(id, "webots-")
+        || starts_with_ignore_ascii_case(id, "simulator-")
+}
+
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 fn newest(current: Option<StoreRevision>, incoming: StoreRevision) -> StoreRevision {
@@ -170,7 +205,7 @@ fn issue_logs_if_idle(model: &mut AppModel) -> Option<Effect> {
                 .logs
                 .pause_anchor
                 .map_or(LogAnchor::Latest, LogAnchor::Before),
-            direction: WindowDirection::Backward,
+            direction: WindowDirection::Forward,
             limit: LOG_WINDOW_LIMIT,
         },
     }))
@@ -181,7 +216,9 @@ fn accept_logs(model: &mut AppModel, window: phoxal_cli_observation::LogWindow) 
         return Vec::new();
     };
     if window.epoch != epoch || window.revision < observed_revision || window.token != token {
-        return Vec::new();
+        model.logs.in_flight = None;
+        model.logs.dirty_revision = Some(newest(model.logs.dirty_revision, observed_revision));
+        return issue_logs_if_idle(model).into_iter().collect();
     }
     model.logs.rows = window
         .rows
@@ -198,7 +235,6 @@ fn accept_logs(model: &mut AppModel, window: phoxal_cli_observation::LogWindow) 
     }
     model.logs.known_revision = window.revision;
     model.logs.in_flight = None;
-    model.logs.accepted_windows = model.logs.accepted_windows.saturating_add(1);
     issue_logs_if_idle(model).into_iter().collect()
 }
 
@@ -208,10 +244,7 @@ fn log_matches_source(source: LogSourceFilter, row: &LogRow, processes: &Process
     }
     let runtime = processes.iter().any(|(key, process)| {
         (key.id == row.participant || key.to_string() == row.participant)
-            && matches!(
-                process.kind,
-                ParticipantKind::Service | ParticipantKind::Driver
-            )
+            && process_is_runtime(process)
     });
     match source {
         LogSourceFilter::All => true,
@@ -254,9 +287,30 @@ fn accept_bus(model: &mut AppModel, window: phoxal_cli_observation::BusWindow) -
         return Vec::new();
     };
     if window.epoch != epoch || window.revision < observed_revision || window.token != token {
-        return Vec::new();
+        model.bus.in_flight = None;
+        model.bus.dirty_revision = Some(newest(model.bus.dirty_revision, observed_revision));
+        return issue_bus_if_idle(model).into_iter().collect();
     }
-    model.bus.rows = window.rows.iter().cloned().collect();
+    let mut newest_rows = BTreeMap::<(RobotScope, String, String), BusRow>::new();
+    for row in window.rows.iter().filter(|row| {
+        (row.aggregate_overflow || !row.topic.is_empty())
+            && (model.bus.show_internal
+                || row.aggregate_overflow
+                || !participant_is_internal(&row.participant, &model.overview.processes))
+    }) {
+        let key = (
+            row.scope.clone(),
+            row.topic.clone(),
+            row.participant.clone(),
+        );
+        if newest_rows
+            .get(&key)
+            .is_none_or(|current| row.observed_at >= current.observed_at)
+        {
+            newest_rows.insert(key, row.clone());
+        }
+    }
+    model.bus.rows = newest_rows.into_values().collect();
     sort_bus(model);
     model.bus.known_revision = window.revision;
     model.bus.in_flight = None;
@@ -304,7 +358,7 @@ fn issue_runtimes_if_idle(model: &mut AppModel) -> Option<Effect> {
         observed_revision: revision,
         token,
         body: RuntimeQuery {
-            participant: model.runtimes.detail.as_ref().map(ToString::to_string),
+            participant: model.runtimes.detail.as_ref().map(|key| key.id.clone()),
             direction: WindowDirection::Forward,
             limit: RUNTIME_WINDOW_LIMIT,
         },
@@ -319,9 +373,34 @@ fn accept_runtimes(
         return Vec::new();
     };
     if window.epoch != epoch || window.revision < observed_revision || window.token != token {
-        return Vec::new();
+        model.runtimes.in_flight = None;
+        model.runtimes.dirty_revision =
+            Some(newest(model.runtimes.dirty_revision, observed_revision));
+        return issue_runtimes_if_idle(model).into_iter().collect();
     }
-    model.runtimes.rows = window.rows.iter().cloned().collect();
+    let detail_scope = model
+        .runtimes
+        .detail
+        .as_ref()
+        .and_then(|key| match &key.scope {
+            ProcessScope::Robot(robot) => Some(robot),
+            ProcessScope::Project => None,
+        });
+    let mut newest_rows = BTreeMap::<(RobotScope, String), RuntimeRow>::new();
+    for row in window.rows.iter().filter(|row| {
+        detail_scope.is_none_or(|scope| {
+            row.scope.namespace == scope.namespace && row.scope.robot_id == scope.robot_id
+        })
+    }) {
+        let key = (row.scope.clone(), row.sample.participant_id.clone());
+        if newest_rows
+            .get(&key)
+            .is_none_or(|current| row.sample.sequence >= current.sample.sequence)
+        {
+            newest_rows.insert(key, row.clone());
+        }
+    }
+    model.runtimes.rows = newest_rows.into_values().collect();
     model.runtimes.known_revision = window.revision;
     model.runtimes.in_flight = None;
     issue_runtimes_if_idle(model).into_iter().collect()
@@ -333,17 +412,8 @@ fn non_empty(value: &str) -> Option<String> {
 
 fn update_navigation(model: &mut AppModel, message: NavigationMsg) -> Vec<Effect> {
     match message {
-        NavigationMsg::Resize { width, height } => {
-            model.viewport = (width, height);
-            Vec::new()
-        }
-        NavigationMsg::Page(page) => enter_page(model, page),
-        NavigationMsg::OpenModal(modal) => {
-            open_modal(model, modal);
-            Vec::new()
-        }
-        NavigationMsg::CloseModal => {
-            close_modal(model);
+        NavigationMsg::Refresh { clear } => {
+            model.clear_requested |= clear;
             Vec::new()
         }
         NavigationMsg::Key(key) => handle_key(model, key),
@@ -383,15 +453,17 @@ fn handle_key(model: &mut AppModel, key: KeyEvent) -> Vec<Effect> {
         return enter_page(model, page);
     }
     match model.route.clone() {
-        FocusRoute::Tabs { candidate } => match key.code {
+        FocusRoute::Tabs { page, candidate } => match key.code {
             Key::Left | Key::Up | Key::BackTab => {
                 model.route = FocusRoute::Tabs {
+                    page,
                     candidate: candidate.offset(-1),
                 };
                 Vec::new()
             }
             Key::Right | Key::Down | Key::Tab => {
                 model.route = FocusRoute::Tabs {
+                    page,
                     candidate: candidate.offset(1),
                 };
                 Vec::new()
@@ -421,13 +493,19 @@ fn handle_key(model: &mut AppModel, key: KeyEvent) -> Vec<Effect> {
                 Vec::new()
             }
             Key::Esc => {
-                model.route = FocusRoute::Tabs { candidate: page };
+                model.route = FocusRoute::Tabs {
+                    page,
+                    candidate: page,
+                };
                 Vec::new()
             }
             _ => Vec::new(),
         },
         FocusRoute::Content { panel } => {
             if key.code == Key::Esc {
+                if matches!(panel, PanelId::Runtimes(_)) {
+                    model.runtimes.detail = None;
+                }
                 model.route = FocusRoute::Panels {
                     page: panel.page(),
                     candidate: Some(panel),
@@ -452,7 +530,7 @@ fn page_for_digit(digit: char) -> Option<PageId> {
 }
 
 fn enter_page(model: &mut AppModel, page: PageId) -> Vec<Effect> {
-    model.modal = None;
+    model.runtimes.detail = None;
     model.route = FocusRoute::panels(page);
     if page == PageId::Input {
         vec![Effect::InputRescan]
@@ -475,16 +553,26 @@ fn handle_runtimes_key(model: &mut AppModel, panel: RuntimesPanelId, key: KeyEve
         RuntimesPanelId::Processes => match key.code {
             Key::Up => move_process_candidate(model, -1),
             Key::Down => move_process_candidate(model, 1),
-            Key::Enter => model.runtimes.detail.clone_from(&model.runtimes.candidate),
-            Key::Char('r') => {
-                if let Some(effect) = restart_effect(model) {
-                    return vec![effect];
-                }
+            Key::Enter => {
+                model.runtimes.detail.clone_from(&model.runtimes.candidate);
+                model.route = FocusRoute::Content {
+                    panel: PanelId::Runtimes(RuntimesPanelId::Performance),
+                };
+                return refresh_runtimes(model);
             }
+            Key::Char('r') => match restart_effect(model) {
+                Ok(effect) => return vec![effect],
+                Err(message) => model.overview.push_diagnostic(message),
+            },
             Key::Char('l') => {
                 if let Some(process) = &model.runtimes.candidate {
                     model.logs.participant = process.to_string();
                     model.logs.source = LogSourceFilter::Runtimes;
+                    model.logs.severity = crate::components::logs::SeverityFilter::All;
+                    model.logs.text.clear();
+                    model.logs.scroll = 0;
+                    model.logs.follow = true;
+                    model.logs.pause_anchor = None;
                     model.route = FocusRoute::Content {
                         panel: PanelId::Logs(LogsPanelId::Stream),
                     };
@@ -503,7 +591,13 @@ fn handle_runtimes_key(model: &mut AppModel, panel: RuntimesPanelId, key: KeyEve
 }
 
 fn move_process_candidate(model: &mut AppModel, delta: isize) {
-    let keys: Vec<_> = model.overview.processes.keys().cloned().collect();
+    let keys: Vec<_> = model
+        .overview
+        .processes
+        .iter()
+        .filter(|(_, process)| process_is_runtime(process))
+        .map(|(key, _)| key.clone())
+        .collect();
     if keys.is_empty() {
         model.runtimes.candidate = None;
         return;
@@ -519,16 +613,22 @@ fn move_process_candidate(model: &mut AppModel, delta: isize) {
         .cloned();
 }
 
-fn restart_effect(model: &AppModel) -> Option<Effect> {
-    let process = model.runtimes.candidate.clone()?;
+fn restart_effect(model: &AppModel) -> Result<Effect, String> {
+    let process = model
+        .runtimes
+        .candidate
+        .clone()
+        .ok_or_else(|| "no runtime is selected for restart".to_string())?;
     let expected_producer = model
         .overview
         .processes
-        .get(&process)?
+        .get(&process)
+        .ok_or_else(|| format!("selected process `{process}` is no longer present"))?
         .entry
         .status
-        .producer?;
-    Some(Effect::Restart {
+        .producer
+        .ok_or_else(|| format!("process `{process}` has no restartable producer"))?;
+    Ok(Effect::Restart {
         process,
         expected_producer,
     })
@@ -600,7 +700,7 @@ fn handle_logs_key(model: &mut AppModel, panel: LogsPanelId, key: KeyEvent) -> V
         LogsPanelId::Stream => match key.code {
             Key::Up => {
                 model.logs.follow = false;
-                model.logs.pause_anchor = model.logs.rows.last().map(|row| row.event_time);
+                model.logs.pause_anchor = Some(newest_log_time(&model.logs.rows));
                 model.logs.scroll = model.logs.scroll.saturating_add(1);
             }
             Key::Down => model.logs.scroll = model.logs.scroll.saturating_sub(1),
@@ -622,8 +722,21 @@ fn toggle_follow(model: &mut AppModel) {
         model.logs.scroll = 0;
         model.logs.pause_anchor = None;
     } else {
-        model.logs.pause_anchor = model.logs.rows.last().map(|row| row.event_time);
+        model.logs.pause_anchor = Some(newest_log_time(&model.logs.rows));
     }
+}
+
+fn newest_log_time(rows: &[LogRow]) -> SystemTime {
+    rows.iter()
+        .map(|row| row.event_time)
+        .max()
+        .and_then(|time| time.checked_add(std::time::Duration::from_nanos(1)))
+        .unwrap_or_else(SystemTime::now)
+}
+
+fn refresh_runtimes(model: &mut AppModel) -> Vec<Effect> {
+    model.runtimes.dirty_revision = Some(model.runtimes.known_revision);
+    issue_runtimes_if_idle(model).into_iter().collect()
 }
 
 fn refresh_logs(model: &mut AppModel) -> Vec<Effect> {
@@ -665,14 +778,20 @@ fn handle_bus_key(model: &mut AppModel, panel: BusPanelId, key: KeyEvent) -> Vec
                 model.bus.sort = model.bus.sort.cycle();
                 sort_bus(model);
             }
-            Key::Char('a') => model.bus.show_internal = !model.bus.show_internal,
+            Key::Char('a') => {
+                model.bus.show_internal = !model.bus.show_internal;
+                return refresh_bus(model);
+            }
             Key::Enter => match model.bus.control_candidate {
                 0 => model.bus.editing = true,
                 1 => {
                     model.bus.sort = model.bus.sort.cycle();
                     sort_bus(model);
                 }
-                2 => model.bus.show_internal = !model.bus.show_internal,
+                2 => {
+                    model.bus.show_internal = !model.bus.show_internal;
+                    return refresh_bus(model);
+                }
                 _ => {}
             },
             _ => {}
@@ -701,20 +820,25 @@ fn handle_input_key(model: &mut AppModel, panel: InputPanelId, key: KeyEvent) ->
         .as_ref()
         .map(|observation| observation.joypads.available.clone())
         .unwrap_or_default();
+    let input_fresh = model
+        .overview
+        .freshness
+        .get("input")
+        .is_none_or(|freshness| *freshness == phoxal_cli_observation::Freshness::Fresh);
     match key.code {
         Key::Up => move_device_candidate(&mut model.input, &devices, -1),
         Key::Down => move_device_candidate(&mut model.input, &devices, 1),
         Key::Enter => {
-            if let Some(candidate) = model.input.candidate.clone() {
+            if input_fresh && let Some(candidate) = model.input.candidate.clone() {
                 model.input.pending_selection = Some(candidate.clone());
                 return vec![Effect::InputSelect(candidate)];
             }
         }
-        Key::Char('e') => {
+        Key::Char('e') if input_fresh => {
             model.input.pending_enabled = Some(true);
             return vec![Effect::InputEnable(true)];
         }
-        Key::Char('x') => {
+        Key::Char('x') if input_fresh => {
             model.input.pending_enabled = Some(false);
             return vec![Effect::InputEnable(false)];
         }
@@ -744,46 +868,45 @@ fn move_device_candidate(
 }
 
 fn open_modal(model: &mut AppModel, id: ModalId) {
-    let route = std::mem::take(&mut model.route);
-    model.route = route.open_modal(id);
-    model.modal = Some(ModalModel { id });
+    match &mut model.route {
+        FocusRoute::Modal { modal, .. } if *modal == id => close_modal(model),
+        FocusRoute::Modal { modal, .. } => *modal = id,
+        _ => {
+            let route = std::mem::take(&mut model.route);
+            model.route = route.open_modal(id);
+        }
+    }
 }
 
 fn close_modal(model: &mut AppModel) {
     if let FocusRoute::Modal { return_to, .. } = std::mem::take(&mut model.route) {
         model.route = *return_to;
     }
-    model.modal = None;
 }
 
 fn handle_modal_key(model: &mut AppModel, key: KeyEvent) -> Vec<Effect> {
-    let modal = model.modal.as_ref().map(|modal| modal.id);
+    let modal = match model.route {
+        FocusRoute::Modal { modal, .. } => modal,
+        _ => return Vec::new(),
+    };
     match key.code {
+        Key::Char('?') => {
+            open_modal(model, ModalId::Help);
+            Vec::new()
+        }
+        Key::Char('i') => {
+            open_modal(model, ModalId::SessionInfo);
+            Vec::new()
+        }
         Key::Esc => {
             close_modal(model);
             Vec::new()
         }
-        Key::Enter if modal == Some(ModalId::ConfirmStop) => {
+        Key::Enter if modal == ModalId::ConfirmStop => {
             close_modal(model);
             vec![Effect::StopProject]
         }
         _ => Vec::new(),
-    }
-}
-
-fn update_modal(model: &mut AppModel, message: ModalMsg) -> Vec<Effect> {
-    match message {
-        ModalMsg::Cancel => {
-            close_modal(model);
-            Vec::new()
-        }
-        ModalMsg::Confirm
-            if model.modal.as_ref().map(|modal| modal.id) == Some(ModalId::ConfirmStop) =>
-        {
-            close_modal(model);
-            vec![Effect::StopProject]
-        }
-        ModalMsg::Confirm => Vec::new(),
     }
 }
 
@@ -797,11 +920,13 @@ mod tests {
     use phoxal_cli_core::session::{
         JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, LogSeverity, LogSource,
         ParticipantKind, ParticipantState, ProcessDescriptor, ProcessEntry, ProcessKey,
-        ProcessStatus, StartupRequirement,
+        ProcessStatus, RobotKey, RobotScope, RuntimePerformanceSample, StartupRequirement,
+        StartupStatus,
     };
     use phoxal_cli_observation::{
-        AttachmentEpoch, AttachmentEvent, InputObservation, LogWindow, ObservationWindow,
-        ProcessObservation,
+        AttachmentEpoch, AttachmentEvent, BusRow, BusWindow, Freshness, InputObservation,
+        LogWindow, ObservationWindow, ProcessObservation, RuntimeRow, RuntimeWindow,
+        SupervisorObservation,
     };
 
     use super::*;
@@ -837,6 +962,7 @@ mod tests {
             panic!("expected log read");
         };
         assert_eq!(first.body.limit, LOG_WINDOW_LIMIT);
+        assert_eq!(first.body.direction, WindowDirection::Forward);
 
         let follow_up = update(
             &mut model,
@@ -852,7 +978,7 @@ mod tests {
             panic!("expected coalesced follow-up read");
         };
         assert_eq!(next.observed_revision, StoreRevision(1_000));
-        assert_eq!(model.logs.accepted_windows, 1);
+        assert_eq!(model.logs.known_revision, StoreRevision(1));
     }
 
     #[test]
@@ -895,8 +1021,8 @@ mod tests {
                 rows: Arc::from([]),
             },
         ] {
-            update(&mut model, Msg::Logs(LogsMsg::Window(window)));
-            assert_eq!(model.logs.accepted_windows, 0);
+            let recovery = update(&mut model, Msg::Logs(LogsMsg::Window(window)));
+            assert_eq!(recovery.len(), 1);
             assert!(model.logs.in_flight.is_some());
         }
     }
@@ -960,6 +1086,22 @@ mod tests {
     }
 
     #[test]
+    fn pausing_an_empty_log_view_anchors_before_future_lines() {
+        let mut model = AppModel {
+            route: FocusRoute::Content {
+                panel: PanelId::Logs(LogsPanelId::Stream),
+            },
+            ..AppModel::default()
+        };
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char(' ').into())),
+        );
+        assert!(!model.logs.follow);
+        assert!(model.logs.pause_anchor.is_some());
+    }
+
+    #[test]
     fn log_source_filter_separates_runtime_participants_from_tools() {
         let runtime_key = ProcessKey::project("drive");
         let tool_key = ProcessKey::project("infrastructure-router");
@@ -1001,6 +1143,15 @@ mod tests {
             log_matches_source(LogSourceFilter::Tools, &row("phoxal-cli"), &processes),
             "unmatched local diagnostics belong to the tools stream"
         );
+        let internal_key = ProcessKey::project("supervisor");
+        let mut internal = process_with_kind(internal_key.clone(), ParticipantKind::Service);
+        internal.user_service = false;
+        let processes = BTreeMap::from([(internal_key, internal)]);
+        assert!(log_matches_source(
+            LogSourceFilter::Tools,
+            &row("supervisor"),
+            &processes
+        ));
     }
 
     #[test]
@@ -1014,13 +1165,38 @@ mod tests {
         };
         update(
             &mut model,
-            Msg::Navigate(NavigationMsg::OpenModal(ModalId::Help)),
+            Msg::Navigate(NavigationMsg::Key(Key::Char('?').into())),
         );
         update(
             &mut model,
             Msg::Navigate(NavigationMsg::Key(Key::Esc.into())),
         );
         assert_eq!(model.route, return_to);
+    }
+
+    #[test]
+    fn help_and_session_shortcuts_toggle_or_replace_the_active_modal() {
+        let mut model = AppModel::default();
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char('?').into())),
+        );
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char('i').into())),
+        );
+        assert!(matches!(
+            model.route,
+            FocusRoute::Modal {
+                modal: ModalId::SessionInfo,
+                ..
+            }
+        ));
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char('i').into())),
+        );
+        assert!(!matches!(model.route, FocusRoute::Modal { .. }));
     }
 
     #[test]
@@ -1039,16 +1215,31 @@ mod tests {
             Msg::Navigate(NavigationMsg::Key(Key::Char('S').into())),
         );
         assert!(open.is_empty());
-        assert_eq!(
-            model.modal.as_ref().map(|modal| modal.id),
-            Some(ModalId::ConfirmStop)
-        );
+        assert!(matches!(
+            model.route,
+            FocusRoute::Modal {
+                modal: ModalId::ConfirmStop,
+                ..
+            }
+        ));
         let stop = update(
             &mut model,
             Msg::Navigate(NavigationMsg::Key(Key::Enter.into())),
         );
         assert_eq!(stop, vec![Effect::StopProject]);
         assert_eq!(model.exit, None);
+    }
+
+    #[test]
+    fn failed_resident_is_distinct_from_a_clean_stop() {
+        let mut model = AppModel::default();
+        update(
+            &mut model,
+            Msg::Client(AttachmentEvent::SupervisorChanged(Arc::new(supervisor(
+                ProjectLifecycle::Failed,
+            )))),
+        );
+        assert_eq!(model.exit, Some(AttachmentOutcome::ResidentFailed));
     }
 
     #[test]
@@ -1081,6 +1272,152 @@ mod tests {
             Msg::Client(AttachmentEvent::ProcessesChanged(Arc::new(processes))),
         );
         assert_eq!(model.runtimes.candidate, Some(alpha));
+    }
+
+    #[test]
+    fn restart_without_a_live_producer_is_a_visible_diagnostic() {
+        let key = ProcessKey::project("drive");
+        let mut process = process(key.clone());
+        process.entry.status.producer = None;
+        let mut model = AppModel {
+            route: FocusRoute::Content {
+                panel: PanelId::Runtimes(RuntimesPanelId::Processes),
+            },
+            ..AppModel::default()
+        };
+        model.overview.processes = Arc::new(BTreeMap::from([(key.clone(), process)]));
+        model.runtimes.candidate = Some(key);
+        let effects = update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char('r').into())),
+        );
+        assert!(effects.is_empty());
+        assert!(model.overview.diagnostics[0].contains("no restartable producer"));
+    }
+
+    #[test]
+    fn runtime_log_jump_resets_every_stale_filter_and_pause() {
+        let key = ProcessKey::project("drive");
+        let mut model = AppModel {
+            route: FocusRoute::Content {
+                panel: PanelId::Runtimes(RuntimesPanelId::Processes),
+            },
+            ..AppModel::default()
+        };
+        model.runtimes.candidate = Some(key);
+        model.logs.text = "old".to_string();
+        model.logs.severity = crate::components::logs::SeverityFilter::Error;
+        model.logs.follow = false;
+        model.logs.pause_anchor = Some(SystemTime::UNIX_EPOCH);
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char('l').into())),
+        );
+        assert!(model.logs.text.is_empty());
+        assert_eq!(
+            model.logs.severity,
+            crate::components::logs::SeverityFilter::All
+        );
+        assert!(model.logs.follow);
+        assert_eq!(model.logs.pause_anchor, None);
+    }
+
+    #[test]
+    fn bus_and_runtime_windows_keep_only_the_latest_scoped_row() {
+        let scope = RobotScope {
+            namespace: "lab".to_string(),
+            robot_id: "rover".to_string(),
+        };
+        let mut model = AppModel {
+            epoch: Some(epoch()),
+            ..AppModel::default()
+        };
+        model.bus.in_flight = Some((epoch(), StoreRevision(2), QueryToken(1)));
+        let now = Instant::now();
+        update(
+            &mut model,
+            Msg::Bus(BusMsg::Window(BusWindow {
+                epoch: epoch(),
+                revision: StoreRevision(2),
+                token: QueryToken(1),
+                rows: Arc::from([
+                    bus_row(&scope, now, "drive", "v1/state", 1),
+                    bus_row(
+                        &scope,
+                        now + std::time::Duration::from_secs(1),
+                        "drive",
+                        "v1/state",
+                        2,
+                    ),
+                ]),
+            })),
+        );
+        assert_eq!(model.bus.rows.len(), 1);
+        assert_eq!(model.bus.rows[0].count, 2);
+
+        model.bus.in_flight = Some((epoch(), StoreRevision(3), QueryToken(3)));
+        let mut overflow = bus_row(
+            &scope,
+            now + std::time::Duration::from_secs(2),
+            "supervisor",
+            "",
+            3,
+        );
+        overflow.aggregate_overflow = true;
+        update(
+            &mut model,
+            Msg::Bus(BusMsg::Window(BusWindow {
+                epoch: epoch(),
+                revision: StoreRevision(3),
+                token: QueryToken(3),
+                rows: Arc::from([overflow]),
+            })),
+        );
+        assert_eq!(model.bus.rows.len(), 1);
+        assert!(model.bus.rows[0].aggregate_overflow);
+
+        model.runtimes.in_flight = Some((epoch(), StoreRevision(2), QueryToken(2)));
+        update(
+            &mut model,
+            Msg::Runtimes(RuntimesMsg::Window(RuntimeWindow {
+                epoch: epoch(),
+                revision: StoreRevision(2),
+                token: QueryToken(2),
+                rows: Arc::from([
+                    runtime_row(&scope, "drive", 1),
+                    runtime_row(&scope, "drive", 2),
+                ]),
+            })),
+        );
+        assert_eq!(model.runtimes.rows.len(), 1);
+        assert_eq!(model.runtimes.rows[0].sample.sequence, 2);
+    }
+
+    #[test]
+    fn runtime_detail_queries_use_bare_id_and_clear_on_escape() {
+        let key = ProcessKey::robot(RobotKey::new("lab", "rover"), "drive");
+        let mut model = AppModel {
+            epoch: Some(epoch()),
+            route: FocusRoute::Content {
+                panel: PanelId::Runtimes(RuntimesPanelId::Processes),
+            },
+            ..AppModel::default()
+        };
+        model.runtimes.candidate = Some(key.clone());
+        let effects = update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Enter.into())),
+        );
+        let Effect::ReadRuntimes(read) = &effects[0] else {
+            panic!("expected runtime read");
+        };
+        assert_eq!(read.body.participant.as_deref(), Some("drive"));
+        assert_eq!(model.runtimes.detail, Some(key));
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Esc.into())),
+        );
+        assert_eq!(model.runtimes.detail, None);
     }
 
     #[test]
@@ -1163,6 +1500,116 @@ mod tests {
             )))),
         );
         assert_eq!(model.input.pending_selection, None);
+    }
+
+    #[test]
+    fn stale_input_cannot_be_selected() {
+        let mut model = AppModel {
+            route: FocusRoute::Content {
+                panel: PanelId::Input(InputPanelId::Devices),
+            },
+            ..AppModel::default()
+        };
+        model
+            .overview
+            .freshness
+            .insert("input".to_string(), Freshness::Stale);
+        model
+            .input
+            .reconcile_authoritative(input_observation(Some("pad-a"), true));
+        let effects = update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Enter.into())),
+        );
+        assert!(effects.is_empty());
+        assert_eq!(model.input.pending_selection, None);
+    }
+
+    #[test]
+    fn tab_candidate_does_not_switch_page_before_enter() {
+        let mut model = AppModel::default();
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Right.into())),
+        );
+        assert_eq!(model.route.page(), PageId::Overview);
+        assert!(matches!(
+            model.route,
+            FocusRoute::Tabs {
+                page: PageId::Overview,
+                candidate: PageId::Runtimes
+            }
+        ));
+    }
+
+    #[test]
+    fn resize_and_focus_refresh_request_a_full_clear() {
+        let mut model = AppModel {
+            clear_requested: false,
+            ..AppModel::default()
+        };
+        update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Refresh { clear: true }),
+        );
+        assert!(model.clear_requested);
+    }
+
+    fn bus_row(
+        scope: &RobotScope,
+        observed_at: Instant,
+        participant: &str,
+        topic: &str,
+        count: u64,
+    ) -> BusRow {
+        BusRow {
+            scope: scope.clone(),
+            observed_at,
+            topic: topic.to_string(),
+            participant: participant.to_string(),
+            rate_hz: count as f32,
+            count,
+            aggregate_overflow: false,
+            topics_truncated: 0,
+            throughput_msg_s: count as f32,
+            window_ns: 1,
+        }
+    }
+
+    fn runtime_row(scope: &RobotScope, participant: &str, sequence: u64) -> RuntimeRow {
+        RuntimeRow {
+            scope: scope.clone(),
+            sample: RuntimePerformanceSample {
+                sequence,
+                participant_id: participant.to_string(),
+                truncated: 0,
+                window_ns: 1,
+                step: None,
+                topics: Arc::new(Vec::new()),
+                overflow: None,
+            },
+            capacity_evictions: 0,
+        }
+    }
+
+    fn supervisor(lifecycle: ProjectLifecycle) -> SupervisorObservation {
+        SupervisorObservation {
+            supervisor_generation: 1,
+            revision: 1,
+            execution_id: epoch().execution_id,
+            project: "/tmp/robot".to_string(),
+            entry: "/tmp/robot/robot.yaml".to_string(),
+            framework_train: "0.43.2".to_string(),
+            simulation: None,
+            lifecycle,
+            router: "unixsock-stream/test".to_string(),
+            plan_revision: 1,
+            graph_generation: 1,
+            startup: StartupStatus {
+                completed_phases: Vec::new(),
+                active_phase: None,
+            },
+        }
     }
 
     fn input_observation(selected: Option<&str>, enabled: bool) -> InputObservation {

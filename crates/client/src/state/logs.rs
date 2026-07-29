@@ -125,7 +125,9 @@ impl LogStore {
                     .filters
                     .participant
                     .as_ref()
-                    .is_none_or(|participant| &row.participant == participant)
+                    .is_none_or(|participant| {
+                        contains_ignore_ascii_case(&row.participant, participant)
+                    })
                     && query
                         .body
                         .filters
@@ -156,6 +158,10 @@ impl LogStore {
             rows: Arc::from(rows),
         }
     }
+}
+
+fn contains_ignore_ascii_case(value: &str, needle: &str) -> bool {
+    value.to_lowercase().contains(&needle.to_lowercase())
 }
 
 #[cfg(test)]
@@ -221,5 +227,27 @@ mod tests {
         store.replace_epoch(new);
         assert_eq!(store.record(old, row(1)), None);
         assert!(store.record(new, row(2)).is_some());
+    }
+
+    #[test]
+    fn participant_filter_is_case_insensitive_and_incremental() {
+        let epoch = epoch(0);
+        let mut store = LogStore::new(epoch);
+        store.record(epoch, row(1));
+        let window = store.read(ObservationQuery {
+            epoch,
+            observed_revision: StoreRevision(0),
+            token: QueryToken(8),
+            body: LogQuery {
+                filters: LogFilters {
+                    participant: Some("DRI".to_string()),
+                    ..LogFilters::default()
+                },
+                anchor: LogAnchor::Latest,
+                direction: WindowDirection::Forward,
+                limit: 10,
+            },
+        });
+        assert_eq!(window.rows.len(), 1);
     }
 }

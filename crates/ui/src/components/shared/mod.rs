@@ -1,4 +1,6 @@
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
@@ -9,68 +11,37 @@ use tuirealm::ratatui::layout::Rect;
 use tuirealm::state::State;
 
 use crate::Theme;
+use crate::app::AppModel;
 use crate::app::Msg;
 use crate::app::subscriptions::UserEvent;
-use crate::app::{AppModel, PageId};
 
-#[derive(Debug, Clone, Copy)]
-pub enum Region {
-    Header,
-    Tabs,
-    Page(PageId),
-    Modal,
-    Footer,
+pub trait RenderRegion {
+    fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme);
 }
 
 /// A component holds a typed model handle; tui-realm's stringly property bag is
 /// deliberately unused for Phoxal state.
-pub struct RenderComponent {
-    model: Arc<Mutex<AppModel>>,
+pub struct RenderComponent<R> {
+    model: Rc<RefCell<AppModel>>,
     theme: Theme,
-    region: Region,
+    region: PhantomData<R>,
 }
 
-impl RenderComponent {
+impl<R> RenderComponent<R> {
     #[must_use]
-    pub fn new(model: Arc<Mutex<AppModel>>, theme: Theme, region: Region) -> Self {
+    pub fn new(model: Rc<RefCell<AppModel>>, theme: Theme) -> Self {
         Self {
             model,
             theme,
-            region,
+            region: PhantomData,
         }
     }
 }
 
-impl Component for RenderComponent {
+impl<R: RenderRegion> Component for RenderComponent<R> {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
-        let Ok(model) = self.model.lock() else {
-            return;
-        };
-        match self.region {
-            Region::Header => {
-                crate::components::chrome::render_header(frame, area, &model, self.theme)
-            }
-            Region::Tabs => crate::components::chrome::render_tabs(frame, area, &model, self.theme),
-            Region::Page(PageId::Overview) => {
-                crate::components::overview::render(frame, area, &model, self.theme);
-            }
-            Region::Page(PageId::Runtimes) => {
-                crate::components::runtimes::render(frame, area, &model, self.theme);
-            }
-            Region::Page(PageId::Logs) => {
-                crate::components::logs::render(frame, area, &model, self.theme);
-            }
-            Region::Page(PageId::Bus) => {
-                crate::components::bus::render(frame, area, &model, self.theme);
-            }
-            Region::Page(PageId::Input) => {
-                crate::components::input::render(frame, area, &model, self.theme);
-            }
-            Region::Modal => crate::components::modal::render(frame, area, &model, self.theme),
-            Region::Footer => {
-                crate::components::chrome::render_footer(frame, area, &model, self.theme)
-            }
-        }
+        let model = self.model.borrow();
+        R::render(frame, area, &model, self.theme);
     }
 
     fn query(&self, _attr: Attribute) -> Option<QueryResult<'_>> {
@@ -88,11 +59,33 @@ impl Component for RenderComponent {
     }
 }
 
-impl AppComponent<Msg, UserEvent> for RenderComponent {
+impl<R: RenderRegion + 'static> AppComponent<Msg, UserEvent> for RenderComponent<R> {
     fn on(&mut self, _event: &Event<UserEvent>) -> Option<Msg> {
         None
     }
 }
+
+macro_rules! render_region {
+    ($name:ident, $render:path) => {
+        pub struct $name;
+
+        impl RenderRegion for $name {
+            fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
+                $render(frame, area, model, theme);
+            }
+        }
+    };
+}
+
+render_region!(HeaderRegion, crate::components::chrome::render_header);
+render_region!(TabsRegion, crate::components::chrome::render_tabs);
+render_region!(OverviewRegion, crate::components::overview::render);
+render_region!(RuntimesRegion, crate::components::runtimes::render);
+render_region!(LogsRegion, crate::components::logs::render);
+render_region!(BusRegion, crate::components::bus::render);
+render_region!(InputRegion, crate::components::input::render);
+render_region!(ModalRegion, crate::components::modal::render);
+render_region!(FooterRegion, crate::components::chrome::render_footer);
 
 #[must_use]
 pub fn panel_marker(model: &AppModel, panel: crate::app::PanelId) -> &'static str {

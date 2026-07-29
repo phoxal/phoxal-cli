@@ -1,23 +1,32 @@
 //! One tui-realm terminal loop for an attached Phoxal resident.
 
+use std::cell::RefCell;
 use std::io::{self, Stderr};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
-use tui_realm_stdlib::components::Phantom;
 use tuirealm::application::{Application, PollStrategy};
+use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::Event;
 use tuirealm::listener::EventListenerCfg;
+use tuirealm::props::{AttrValue, Attribute, QueryResult};
+use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::Terminal;
 use tuirealm::ratatui::backend::CrosstermBackend;
+use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::layout::{Constraint, Direction, Layout};
+use tuirealm::state::State;
 
 use crate::Theme;
-use crate::components::shared::{Region, RenderComponent};
+use crate::components::shared::{
+    BusRegion, FooterRegion, HeaderRegion, InputRegion, LogsRegion, ModalRegion, OverviewRegion,
+    RenderComponent, RenderRegion, RuntimesRegion, TabsRegion,
+};
 use crate::terminal::{TerminalGuard, install_panic_hook};
 
 use super::effect::{AttachmentOutcome, Effect};
@@ -33,23 +42,35 @@ pub struct UiOptions {
     pub theme: Theme,
 }
 
-#[derive(Component, Default)]
-struct InputComponent {
-    component: Phantom,
+struct InputComponent;
+
+impl Component for InputComponent {
+    fn view(&mut self, _frame: &mut Frame, _area: Rect) {}
+
+    fn query(&self, _attr: Attribute) -> Option<QueryResult<'_>> {
+        None
+    }
+
+    fn attr(&mut self, _attr: Attribute, _value: AttrValue) {}
+
+    fn state(&self) -> State {
+        State::None
+    }
+
+    fn perform(&mut self, cmd: Cmd) -> CmdResult {
+        CmdResult::Invalid(cmd)
+    }
 }
 
 impl AppComponent<Msg, UserEvent> for InputComponent {
     fn on(&mut self, event: &Event<UserEvent>) -> Option<Msg> {
         match event {
+            // tui-realm's crossterm adapter normalizes terminal input into this
+            // key vocabulary; no release/repeat variants reach the application.
             Event::Keyboard(key) => Some(Msg::Navigate(NavigationMsg::Key(*key))),
-            Event::WindowResize(width, height) => Some(Msg::Navigate(NavigationMsg::Resize {
-                width: *width,
-                height: *height,
-            })),
-            Event::FocusGained => Some(Msg::Navigate(NavigationMsg::Resize {
-                width: 0,
-                height: 0,
-            })),
+            Event::WindowResize(_, _) | Event::FocusGained => {
+                Some(Msg::Navigate(NavigationMsg::Refresh { clear: true }))
+            }
             Event::User(UserEvent::Wake) => Some(Msg::Wake),
             _ => None,
         }
@@ -86,7 +107,7 @@ fn run_blocking(
     terminal.clear()?;
     TerminalGuard::set_title(&title)?;
 
-    let model = Arc::new(Mutex::new(AppModel::default()));
+    let model = Rc::new(RefCell::new(AppModel::default()));
     let pending = Arc::new(PendingInputs::default());
     let listener = EventListenerCfg::default()
         .with_handle(handle)
@@ -100,6 +121,9 @@ fn run_blocking(
     mount_components(&mut application, &model, options.theme)?;
 
     loop {
+        if let Some(exit) = render_requested(&mut terminal, &mut application, &model)? {
+            return Ok(exit);
+        }
         let messages = application
             .tick(PollStrategy::BlockCollectUpTo(64))
             .context("tui-realm event listener failed")?;
@@ -112,83 +136,106 @@ fn run_blocking(
                 dispatch(&model, &effects, message)?;
             }
         }
-
-        let (redraw, exit, page) = {
-            let state = model.lock().unwrap_or_else(PoisonError::into_inner);
-            (state.redraw_requested, state.exit, state.route.page())
-        };
-        if redraw {
-            terminal.draw(|frame| {
-                let [header, tabs, body, footer] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(2),
-                        Constraint::Length(2),
-                        Constraint::Min(5),
-                        Constraint::Length(2),
-                    ])
-                    .areas(frame.area());
-                application.view(&ComponentId::Header, frame, header);
-                application.view(&ComponentId::Tabs, frame, tabs);
-                application.view(&component_for_page(page), frame, body);
-                application.view(&ComponentId::Modal, frame, frame.area());
-                application.view(&ComponentId::Footer, frame, footer);
-            })?;
-            let mut state = model.lock().unwrap_or_else(PoisonError::into_inner);
-            state.redraw_requested = false;
-            state.redraws = state.redraws.saturating_add(1);
-        }
-        if let Some(exit) = exit {
-            return Ok(exit);
-        }
     }
 }
 
+fn render_requested(
+    terminal: &mut Terminal<CrosstermBackend<Stderr>>,
+    application: &mut Application<ComponentId, Msg, UserEvent>,
+    model: &Rc<RefCell<AppModel>>,
+) -> Result<Option<AttachmentOutcome>> {
+    let (redraw, clear, exit, page) = {
+        let state = model.borrow();
+        (
+            state.redraw_requested,
+            state.clear_requested,
+            state.exit,
+            state.route.page(),
+        )
+    };
+    if clear {
+        terminal.clear()?;
+    }
+    if redraw {
+        terminal.draw(|frame| {
+            let [header, tabs, body, footer] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Length(2),
+                    Constraint::Min(5),
+                    Constraint::Length(2),
+                ])
+                .areas(frame.area());
+            application.view(&ComponentId::Header, frame, header);
+            application.view(&ComponentId::Tabs, frame, tabs);
+            application.view(&component_for_page(page), frame, body);
+            application.view(&ComponentId::Modal, frame, frame.area());
+            application.view(&ComponentId::Footer, frame, footer);
+        })?;
+        let mut state = model.borrow_mut();
+        state.redraw_requested = false;
+        state.clear_requested = false;
+    }
+    Ok(exit)
+}
+
 fn dispatch(
-    model: &Arc<Mutex<AppModel>>,
+    model: &Rc<RefCell<AppModel>>,
     effects: &mpsc::Sender<Effect>,
     message: Msg,
 ) -> Result<()> {
     let emitted = {
-        let mut model = model.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut model = model.borrow_mut();
         update(&mut model, message)
     };
     for effect in emitted {
-        effects
-            .blocking_send(effect)
-            .context("attachment effect router stopped")?;
+        match effects.try_send(effect) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                anyhow::bail!("attachment effect router stopped");
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                model
+                    .borrow_mut()
+                    .overview
+                    .push_diagnostic("attachment command queue is full; retry".to_string());
+            }
+        }
     }
     Ok(())
 }
 
 fn mount_components(
     application: &mut Application<ComponentId, Msg, UserEvent>,
-    model: &Arc<Mutex<AppModel>>,
+    model: &Rc<RefCell<AppModel>>,
+    theme: Theme,
+) -> Result<()> {
+    application.mount(ComponentId::Input, Box::new(InputComponent), Vec::new())?;
+    application.active(&ComponentId::Input)?;
+    mount_region::<HeaderRegion>(application, ComponentId::Header, model, theme)?;
+    mount_region::<TabsRegion>(application, ComponentId::Tabs, model, theme)?;
+    mount_region::<OverviewRegion>(application, ComponentId::Overview, model, theme)?;
+    mount_region::<RuntimesRegion>(application, ComponentId::Runtimes, model, theme)?;
+    mount_region::<LogsRegion>(application, ComponentId::Logs, model, theme)?;
+    mount_region::<BusRegion>(application, ComponentId::Bus, model, theme)?;
+    mount_region::<InputRegion>(application, ComponentId::InputPage, model, theme)?;
+    mount_region::<ModalRegion>(application, ComponentId::Modal, model, theme)?;
+    mount_region::<FooterRegion>(application, ComponentId::Footer, model, theme)?;
+    Ok(())
+}
+
+fn mount_region<R: RenderRegion + 'static>(
+    application: &mut Application<ComponentId, Msg, UserEvent>,
+    id: ComponentId,
+    model: &Rc<RefCell<AppModel>>,
     theme: Theme,
 ) -> Result<()> {
     application.mount(
-        ComponentId::Input,
-        Box::new(InputComponent::default()),
+        id,
+        Box::new(RenderComponent::<R>::new(Rc::clone(model), theme)),
         Vec::new(),
     )?;
-    application.active(&ComponentId::Input)?;
-    for (id, region) in [
-        (ComponentId::Header, Region::Header),
-        (ComponentId::Tabs, Region::Tabs),
-        (ComponentId::Overview, Region::Page(PageId::Overview)),
-        (ComponentId::Runtimes, Region::Page(PageId::Runtimes)),
-        (ComponentId::Logs, Region::Page(PageId::Logs)),
-        (ComponentId::Bus, Region::Page(PageId::Bus)),
-        (ComponentId::InputPage, Region::Page(PageId::Input)),
-        (ComponentId::Modal, Region::Modal),
-        (ComponentId::Footer, Region::Footer),
-    ] {
-        application.mount(
-            id,
-            Box::new(RenderComponent::new(Arc::clone(model), theme, region)),
-            Vec::new(),
-        )?;
-    }
     Ok(())
 }
 

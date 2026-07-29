@@ -11,7 +11,7 @@ pub fn render_header(frame: &mut Frame, area: Rect, model: &AppModel, theme: The
         ("waiting for resident".to_string(), "connecting".to_string()),
         |snapshot| {
             (
-                snapshot.project.clone(),
+                phoxal_cli_core::session::sanitize_terminal_text(&snapshot.project),
                 format!("{:?}", snapshot.lifecycle).to_lowercase(),
             )
         },
@@ -69,9 +69,19 @@ pub fn render_footer(frame: &mut Frame, area: Rect, model: &AppModel, theme: The
         FocusRoute::Content { .. } => "content",
         FocusRoute::Modal { .. } => "modal",
     };
+    let diagnostic = model
+        .overview
+        .diagnostics
+        .last()
+        .map_or_else(String::new, |message| {
+            format!(
+                "  ! {}",
+                phoxal_cli_core::session::sanitize_terminal_text(message)
+            )
+        });
     frame.render_widget(
         Paragraph::new(format!(
-            " {depth}  Enter descend  Esc ascend  ? help  i session  S stop  q detach"
+            " {depth}  Enter descend  Esc ascend  ? help  i session  S stop  q detach{diagnostic}"
         ))
         .style(crate::theme::role::muted(theme))
         .block(Block::default().borders(Borders::TOP)),

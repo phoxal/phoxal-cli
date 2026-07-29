@@ -27,4 +27,5 @@ pub enum Effect {
 pub enum AttachmentOutcome {
     Detached,
     ResidentStopped,
+    ResidentFailed,
 }

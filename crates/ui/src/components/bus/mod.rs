@@ -45,11 +45,14 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         .bus
         .rows
         .iter()
-        .filter(|row| model.bus.show_internal || !row.topic.contains("/_"))
         .skip(model.bus.scroll)
+        .take(topics.height.saturating_sub(2) as usize)
         .map(|row| {
             Row::new(vec![
-                row.topic.clone(),
+                format!(
+                    "{}/{} {}",
+                    row.scope.namespace, row.scope.robot_id, row.topic
+                ),
                 row.participant.clone(),
                 format!("{:.1}", row.rate_hz),
                 row.count.to_string(),
@@ -65,7 +68,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
                 Constraint::Length(10),
             ],
         )
-        .header(Row::new(["topic", "producer", "msg/s", "count"]))
+        .header(Row::new(["robot / topic", "producer", "msg/s", "count"]))
         .block(panel_block(
             model,
             PanelId::Bus(BusPanelId::Topics),
