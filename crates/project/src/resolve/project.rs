@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use phoxal::model::robot::RobotV0 as Robot;
+use phoxal::model::source::robot::v0::Manifest as Robot;
 use phoxal_cli_core::project::catalog::{self, ArtifactKind};
 pub use phoxal_cli_core::project::host_target_triple;
 use phoxal_cli_core::project::resolve_manifest::{
@@ -535,7 +535,7 @@ pub fn resolve_target_triple(selector: &str) -> Result<String> {
     })
 }
 
-fn join_errors(errors: Vec<phoxal::model::robot::ValidationError>) -> String {
+fn join_errors(errors: Vec<phoxal::model::source::robot::v0::ValidationError>) -> String {
     errors
         .iter()
         .map(ToString::to_string)

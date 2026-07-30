@@ -961,7 +961,7 @@ robot:
   components: {}
 "#;
         ResolvedRobot {
-            robot: phoxal::model::robot::v0::Robot::parse_from_string(yaml)
+            robot: phoxal::model::source::robot::parse_from_string(yaml)
                 .expect("minimal fixture robot.yaml parses"),
             train: "0.36.0".to_string(),
             target: "aarch64-unknown-linux-gnu".to_string(),

@@ -1,5 +1,5 @@
 use phoxal::check as graph_check;
-use phoxal::model::robot::RobotV0;
+use phoxal::model::source::robot::v0::Manifest as RobotManifest;
 use serde_json::Value;
 
 /// The CLI's own participant-report shape: `artifact.id` IS self-reported -
@@ -35,7 +35,7 @@ pub struct CheckOutcome {
 
 #[derive(Debug, Clone, Copy)]
 pub struct CheckGraphContext<'a> {
-    pub robot: Option<&'a RobotV0>,
+    pub robot: Option<&'a RobotManifest>,
 }
 
 impl CheckOutcome {

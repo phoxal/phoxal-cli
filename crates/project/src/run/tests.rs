@@ -3,7 +3,7 @@
 use super::*;
 use crate::build::cargo::missing_device_path;
 use anyhow::Result;
-use phoxal::model::robot::v0::ConnectionConfig;
+use phoxal::model::source::robot::v0::ConnectionConfig;
 use phoxal::participant::launch::env;
 use phoxal::participant::launch::{
     BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,

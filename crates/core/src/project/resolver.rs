@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use phoxal::model::robot::RobotV0 as Robot;
+use phoxal::model::source::robot::v0::Manifest as Robot;
 
 use super::catalog::ArtifactKind;
 
@@ -313,9 +313,8 @@ pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
 
 pub fn load_robot(path: &Path) -> Result<Robot> {
     crate::schema::ensure_supported_revision(path, crate::schema::DocumentKind::Robot)?;
-    let robot = phoxal::model::robot::Robot::read_from_path(path)
-        .with_context(|| format!("failed to read robot file {}", path.display()))?
-        .into_v0();
+    let robot = phoxal::model::source::robot::read_from_path(path)
+        .with_context(|| format!("failed to read robot file {}", path.display()))?;
     validate_launch_participant_ids(&robot, path)?;
     Ok(robot)
 }

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, anyhow, bail};
-use phoxal::model::robot::RobotV0 as Robot;
+use phoxal::model::source::robot::v0::Manifest as Robot;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::project::catalog::{self, ArtifactKind};
 use phoxal_cli_core::project::train::{LockedProject, WorkspaceRuntimeKind};
@@ -273,7 +273,7 @@ fn check_declared_configs(
     )
 }
 
-fn join_errors(errors: Vec<phoxal::model::robot::ValidationError>) -> String {
+fn join_errors(errors: Vec<phoxal::model::source::robot::v0::ValidationError>) -> String {
     errors
         .iter()
         .map(ToString::to_string)
@@ -333,7 +333,8 @@ tools:
 "#;
 
     fn minimal_robot() -> Robot {
-        Robot::parse_from_string(MINIMAL_ROBOT).expect("minimal fixture robot.yaml parses")
+        phoxal::model::source::robot::parse_from_string(MINIMAL_ROBOT)
+            .expect("minimal fixture robot.yaml parses")
     }
 
     fn robot_with_service_config(config: serde_json::Value) -> Robot {

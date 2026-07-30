@@ -396,7 +396,7 @@ mod tests {
                 execution_id: ExecutionId::mint(),
                 project: "project".into(),
                 entry: "robot.yaml".into(),
-                framework_train: "0.43".into(),
+                framework_train: "0.44".into(),
                 simulation: None,
                 lifecycle: ProjectLifecycle::Stopped,
                 router: "tcp/127.0.0.1:7447".into(),

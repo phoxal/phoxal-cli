@@ -840,7 +840,7 @@ mod tests {
         });
         resolved.robot.services.insert(
             "mission".to_string(),
-            phoxal::model::robot::v0::UserService {
+            phoxal::model::source::robot::v0::UserService {
                 config: Some(serde_json::json!({"message": "line\nquoted \"value\""})),
             },
         );
@@ -913,7 +913,7 @@ mod tests {
         });
         resolved.robot.tools.insert(
             "console".to_string(),
-            phoxal::model::robot::v0::UserTool {
+            phoxal::model::source::robot::v0::UserTool {
                 config: Some(serde_json::json!({"rate": 20})),
             },
         );
@@ -1189,7 +1189,7 @@ robot:
   components: {{}}
 "#
         );
-        let robot = phoxal::model::robot::v0::Robot::parse_from_string(&yaml)?;
+        let robot = phoxal::model::source::robot::parse_from_string(&yaml)?;
         Ok(ResolvedRobot {
             robot,
             train: "0.36.0".to_string(),

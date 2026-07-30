@@ -483,7 +483,7 @@ services:
     /// its official set is exactly the CLI catalog the loader derives from - the
     /// only way the two legs can produce the same robot's plan.
     fn resolved_full_catalog(project_root: &Path, layout_root: &Path) -> Result<ResolvedRobot> {
-        let robot = phoxal::model::robot::v0::Robot::parse_from_string(ROBOT_YAML)?;
+        let robot = phoxal::model::source::robot::parse_from_string(ROBOT_YAML)?;
         let _ = project_root;
         let platform_runtimes = catalog::NATIVE
             .iter()

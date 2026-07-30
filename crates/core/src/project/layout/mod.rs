@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use phoxal::model::robot::{Robot as RobotDocument, v0::Robot as RobotModel};
+use phoxal::model::source::robot::{self as robot_source, v0::Manifest as RobotModel};
 
 use super::catalog::{self, ArtifactKind, OfficialRuntime};
 use super::resolver::official_binary_name;
@@ -170,14 +170,12 @@ impl RuntimeLayout {
         // resolution: an extracted bundle is untrusted input, and a hand-edited
         // `tools:`/`services:` map naming an official identity or a dual name
         // must fail before the required set is derived (#950).
-        let robot = RobotDocument::parse_from_dir(root)
-            .with_context(|| {
-                format!(
-                    "failed to parse compiled robot.yaml in staged runtime layout {}",
-                    root.display()
-                )
-            })?
-            .into_v0();
+        let robot = robot_source::parse_from_dir(root).with_context(|| {
+            format!(
+                "failed to parse compiled robot.yaml in staged runtime layout {}",
+                root.display()
+            )
+        })?;
         validate_runtime_declarations(&robot).with_context(|| {
             format!(
                 "compiled robot.yaml in staged runtime layout {} declares an invalid runtime set",
@@ -398,7 +396,9 @@ fn official_short_name(official: &OfficialRuntime) -> String {
 ///   catalog-owned, always run, and take no configuration from robot.yaml. A
 ///   workspace crate overriding an official identity does so WITHOUT a
 ///   declaration.
-pub fn validate_runtime_declarations(robot: &phoxal::model::robot::v0::Robot) -> Result<()> {
+pub fn validate_runtime_declarations(
+    robot: &phoxal::model::source::robot::v0::Manifest,
+) -> Result<()> {
     // Officials share ONE binary namespace across services and tools, so a
     // declared name is checked against the WHOLE reserved catalog set, not just
     // the map it appears in - `tools.drive` (drive is an official service) and
@@ -470,10 +470,10 @@ fn official_service_short_names() -> BTreeSet<&'static str> {
 mod tests {
     #[test]
     fn official_identities_are_rejected_in_either_map_across_namespaces() -> anyhow::Result<()> {
-        use phoxal::model::robot::v0::{Robot as RobotV0, UserService, UserTool};
+        use phoxal::model::source::robot::v0::{Manifest as RobotManifest, UserService, UserTool};
 
-        let base = || -> RobotV0 {
-            RobotDocument::parse_from_string(
+        let base = || -> RobotManifest {
+            robot_source::parse_from_string(
                 r#"schema: robot/v0
 robot:
   id: bot
@@ -489,7 +489,6 @@ robot:
 "#,
             )
             .expect("minimal robot parses")
-            .into_v0()
         };
 
         // `tools.drive` - drive is an official SERVICE, rejected in the tools map.

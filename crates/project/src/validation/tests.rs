@@ -7,7 +7,7 @@ use super::participants::{
 use super::*;
 use anyhow::{Result, anyhow, bail};
 use graph_check::{ParticipantClass, Problem};
-use phoxal::model::robot::v0::Robot;
+use phoxal::model::source::robot::v0::Manifest as Robot;
 use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind, ToolParticipant};
 use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
@@ -81,7 +81,7 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
         temp.path().join("Cargo.lock"),
         "version = 4\n\n[[package]]\nname = \"ddsm115\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"mission\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"phoxal\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"robot\"\nversion = \"0.1.0\"\ndependencies = [\"phoxal\"]\n",
     )?;
-    let mut robot = Robot::parse_from_string(LAUNCH_PLAN_FIXTURE_ROBOT)?;
+    let mut robot = phoxal::model::source::robot::parse_from_string(LAUNCH_PLAN_FIXTURE_ROBOT)?;
     robot
         .services
         .get_mut("mission")
@@ -241,7 +241,7 @@ fn a_user_tool_is_checked_and_its_config_is_validated() -> Result<()> {
     // A declared user tool is an ordinary checked participant (#950): its
     // embedded metadata must be kind `tool`, and its `tools.<id>.config` is
     // validated against the emitted schema exactly like a user service.
-    let robot = Robot::parse_from_string(
+    let robot = phoxal::model::source::robot::parse_from_string(
         r#"schema: robot/v0
 robot:
   id: bot
@@ -367,8 +367,9 @@ services:
 "#;
 
 fn robot_with_service_config(service_id: &str, config: Value) -> Result<Robot> {
-    let mut robot =
-        Robot::parse_from_string(&LAUNCH_PLAN_FIXTURE_ROBOT.replace("mission", service_id))?;
+    let mut robot = phoxal::model::source::robot::parse_from_string(
+        &LAUNCH_PLAN_FIXTURE_ROBOT.replace("mission", service_id),
+    )?;
     robot
         .services
         .get_mut(service_id)
@@ -1664,7 +1665,7 @@ fn raw_kind_class(kind: &str, id: &str, participant_class: &str) -> RawParticipa
 
 fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<ResolvedRobot> {
     Ok(ResolvedRobot {
-        robot: Robot::parse_from_string(MINIMAL_ROBOT)?,
+        robot: phoxal::model::source::robot::parse_from_string(MINIMAL_ROBOT)?,
         train: "0.36.0".to_string(),
         target: crate::resolve::project::host_target_triple(),
         platform_runtimes: Vec::new(),

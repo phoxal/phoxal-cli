@@ -19,9 +19,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use phoxal::model::simulation::Simulation as SimulationModel;
+use phoxal::model::Robot as RobotBundle;
 use phoxal::model::structure::Structure;
-use phoxal::model::v0::Robot as RobotBundle;
 
 use crate::simulation::webots::proto::{
     self, RobotInstance, WebotsController, externproto_for_generated_proto, generate_robot_proto,
@@ -131,7 +130,7 @@ pub fn stage_simulation_world(
     })?;
 
     for robot in robots {
-        let proto_name = proto_name_for_robot(&robot.bundle.manifest.robot.id)?;
+        let proto_name = proto_name_for_robot(robot.bundle.robot_id())?;
         let proto_path = staged_protos_dir.join(format!("{proto_name}.proto"));
         let mesh_url_prefix = relative_mesh_url_prefix(mesh_root, &proto_path)?;
         let component_solid_links = stage_component_protos(
@@ -149,7 +148,7 @@ pub fn stage_simulation_world(
 
         let proto_text = generate_robot_proto(
             robot.bundle,
-            &robot.bundle.structure,
+            robot.bundle.structure(),
             &component_solid_links,
             &proto_name,
             &mesh_url_prefix,
@@ -181,7 +180,7 @@ pub fn stage_simulation_world(
         };
         let instance_node = render_robot_instance_node(
             robot.bundle,
-            &robot.bundle.structure,
+            robot.bundle.structure(),
             &component_solid_links,
             &instance,
         )
@@ -232,7 +231,7 @@ fn controller_args(launch: &ControllerLaunch) -> Result<Vec<String>> {
 /// path). Returns the `component_solid_links` map
 /// `generate_robot_proto`/`render_robot_instance_node` need, keyed by
 /// component type (matching `WebotsSceneDescription::from_robot`'s
-/// `component_solid_links.get(&model_component.component)` lookup).
+/// `component_solid_links.get(&model_component.component_type)` lookup).
 fn stage_component_protos(
     component_protos_dir: &Path,
     mesh_root: &Path,
@@ -242,15 +241,20 @@ fn stage_component_protos(
     let mut component_solid_links = BTreeMap::new();
 
     for component_type in component_types {
-        let component_model = bundle
-            .components
-            .get(component_type.component_type)
+        let component_id = bundle
+            .components()
+            .iter()
+            .find_map(|(component_id, instance)| {
+                (instance.component_type == component_type.component_type)
+                    .then_some(component_id.as_str())
+            })
             .ok_or_else(|| {
                 anyhow!(
                     "component type '{}' is not loaded in the robot bundle",
                     component_type.component_type
                 )
             })?;
+        let component_model = bundle.component_for_instance(component_id)?;
 
         let comp_structure =
             Structure::read_from_dir(component_type.source_dir).with_context(|| {
@@ -260,17 +264,15 @@ fn stage_component_protos(
                     component_type.source_dir.display()
                 )
             })?;
-        let comp_simulation = SimulationModel::read_from_dir(component_type.source_dir)
-            .with_context(|| {
-                format!(
-                    "failed to read simulation.yaml for component type '{}' from {}",
+        let comp_simulation = bundle
+            .simulation_for_component_type(component_type.component_type)
+            .ok_or_else(|| {
+                anyhow!(
+                    "simulation.yaml for component type '{}' from {} was not loaded into the canonical robot",
                     component_type.component_type,
                     component_type.source_dir.display()
                 )
-            })?
-            .as_v0()
-            .context("Webots staging only supports simulation.yaml version v0")?
-            .clone();
+            })?;
 
         let comp_proto_name = proto_name_for_robot(component_type.component_type)?;
         let comp_proto_path = component_protos_dir.join(format!("{comp_proto_name}.proto"));
@@ -280,7 +282,7 @@ fn stage_component_protos(
             component_type.component_type,
             component_model,
             &comp_structure,
-            &comp_simulation,
+            comp_simulation,
             &comp_mesh_url_prefix,
         )
         .with_context(|| {
@@ -312,8 +314,20 @@ mod tests {
 
     const BASE_WORLD: &str = "#VRML_SIM R2025a utf8\nWorldInfo {}\n";
 
-    fn fixture_bundle() -> RobotBundle {
-        let manifest = phoxal::model::robot::v0::Robot::parse_from_string(
+    fn fixture_bundle(component_source_dir: &Path) -> Result<RobotBundle> {
+        std::fs::create_dir_all(component_source_dir)?;
+        std::fs::write(
+            component_source_dir.join("structure.urdf"),
+            r#"<robot name="drive">
+  <link name="axle" />
+  <link name="wheel" />
+  <joint name="wheel_joint" type="continuous">
+    <parent link="axle" />
+    <child link="wheel" />
+  </joint>
+</robot>"#,
+        )?;
+        let manifest = phoxal::model::source::robot::parse_from_string(
             r#"schema: robot/v0
 robot:
   id: testbot
@@ -323,26 +337,52 @@ robot:
     max_angular_speed_radps: 2.0
   kinematic:
     kind: omnidirectional
-    actuators: []
+    actuators:
+      - drive.motor
     encoders: []
-  components: {}
+  components:
+    drive:
+      component: drive
+      mount_link: base_link
 "#,
-        )
-        .expect("fixture robot should parse");
-        let structure =
-            Structure::from_urdf_str(r#"<robot name="testbot"><link name="base_link"/></robot>"#)
-                .expect("fixture structure should parse");
-        RobotBundle {
+        )?;
+        let component = phoxal::model::source::component::read_from_string(
+            r#"schema: component/v0
+capabilities:
+  motor:
+    kind: motor
+    command: velocity
+    target:
+      kind: joint
+      id: wheel_joint
+"#,
+        )?;
+        let simulation = phoxal::model::source::simulation::read_from_string(
+            "schema: simulation/v0\ncapabilities: {}\nlinks: {}\n",
+        )?;
+        let structure = Structure::from_urdf_str(
+            r#"<robot name="testbot">
+  <link name="base_footprint" />
+  <link name="base_link" />
+  <joint name="root" type="fixed">
+    <parent link="base_footprint" />
+    <child link="base_link" />
+  </joint>
+</robot>"#,
+        )?;
+        RobotBundle::try_from_sources(
             manifest,
-            components: BTreeMap::new(),
+            BTreeMap::from([("drive".to_string(), component)]),
+            BTreeMap::from([("drive".to_string(), simulation)]),
             structure,
-        }
+        )
     }
 
     #[test]
     fn stages_exactly_one_static_controller_robot_without_lifecycle_arguments() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let bundle = fixture_bundle();
+        let component_source_dir = temp.path().join("source-components/drive");
+        let bundle = fixture_bundle(&component_source_dir)?;
         let launch = ControllerLaunch {
             namespace: "dev".to_string(),
             robot_id: "testbot".to_string(),
@@ -361,7 +401,10 @@ robot:
             &[RobotToStage {
                 robot_id: "testbot".to_string(),
                 bundle: &bundle,
-                component_types: Vec::new(),
+                component_types: vec![ComponentTypeToStage {
+                    component_type: "drive",
+                    source_dir: &component_source_dir,
+                }],
                 controller_launch: launch,
             }],
         )?;
@@ -378,6 +421,7 @@ robot:
         assert!(text.contains("--robot-root"));
         assert!(text.contains("../../runtime"));
         assert!(text.contains("unixsock-stream/a,tcp/localhost:7447"));
+        assert!(temp.path().join("protos/components/Drive.proto").is_file());
         Ok(())
     }
 
@@ -391,7 +435,9 @@ robot:
     /// content once controllers are installed packages (#951).
     #[test]
     fn the_staged_world_is_a_function_of_the_robot_model_not_of_the_run() -> Result<()> {
-        let bundle = fixture_bundle();
+        let fixture = tempfile::tempdir()?;
+        let component_source_dir = fixture.path().join("components/drive");
+        let bundle = fixture_bundle(&component_source_dir)?;
         let launch = ControllerLaunch {
             namespace: "dev".to_string(),
             robot_id: "testbot".to_string(),
@@ -412,7 +458,10 @@ robot:
                 &[RobotToStage {
                     robot_id: "testbot".to_string(),
                     bundle: &bundle,
-                    component_types: Vec::new(),
+                    component_types: vec![ComponentTypeToStage {
+                        component_type: "drive",
+                        source_dir: &component_source_dir,
+                    }],
                     controller_launch: launch.clone(),
                 }],
             )?;
@@ -472,8 +521,6 @@ robot:
 
     #[test]
     fn stages_a_mounted_component_proto_and_relative_world_reference() -> Result<()> {
-        use phoxal::model::component::v0::Component as ComponentSpec;
-
         let temp = tempfile::tempdir()?;
         let protos_dir = temp.path().join("protos");
         let mesh_root = temp.path().join("meshes");
@@ -482,13 +529,16 @@ robot:
         std::fs::create_dir_all(&component_source_dir)?;
         std::fs::write(
             component_source_dir.join("structure.urdf"),
-            r#"<robot name="ddsm115"><link name="wheel" /></robot>"#,
+            r#"<robot name="ddsm115">
+  <link name="axle" />
+  <link name="wheel" />
+  <joint name="wheel_joint" type="continuous">
+    <parent link="axle" />
+    <child link="wheel" />
+  </joint>
+</robot>"#,
         )?;
-        std::fs::write(
-            component_source_dir.join("simulation.yaml"),
-            "schema: simulation/v0\ncapabilities: {}\nlinks: {}\n",
-        )?;
-        let manifest = phoxal::model::robot::v0::Robot::parse_from_string(
+        let manifest = phoxal::model::source::robot::parse_from_string(
             r#"schema: robot/v0
 robot:
   id: testbot
@@ -498,15 +548,13 @@ robot:
     max_angular_speed_radps: 2.0
   kinematic:
     kind: omnidirectional
-    actuators: [left_drive.motor]
+    actuators:
+      - left_drive.motor
     encoders: []
   components:
     left_drive:
       component: ddsm115
       mount_link: base_link
-      parameters:
-        motor:
-          kind: motor
 "#,
         )?;
         let structure = Structure::from_urdf_str(
@@ -519,17 +567,26 @@ robot:
   </joint>
 </robot>"#,
         )?;
-        let bundle = RobotBundle {
+        let component = phoxal::model::source::component::read_from_string(
+            r#"schema: component/v0
+capabilities:
+  motor:
+    kind: motor
+    command: velocity
+    target:
+      kind: joint
+      id: wheel_joint
+"#,
+        )?;
+        let simulation = phoxal::model::source::simulation::read_from_string(
+            "schema: simulation/v0\ncapabilities: {}\nlinks: {}\n",
+        )?;
+        let bundle = RobotBundle::try_from_sources(
             manifest,
-            components: BTreeMap::from([(
-                "ddsm115".to_string(),
-                ComponentSpec {
-                    gtin: None,
-                    capabilities: BTreeMap::new(),
-                },
-            )]),
+            BTreeMap::from([("ddsm115".to_string(), component)]),
+            BTreeMap::from([("ddsm115".to_string(), simulation)]),
             structure,
-        };
+        )?;
         let staged = stage_simulation_world(
             BASE_WORLD,
             &protos_dir,

@@ -1,13 +1,13 @@
 //! Config responsibilities for check.
 
 use phoxal::check as graph_check;
-use phoxal::model::robot::RobotV0;
+use phoxal::model::source::robot::v0::Manifest as RobotManifest;
 use serde_json::Value;
 
 pub(crate) fn validate_user_service_config(
     service_id: &str,
     schema: Option<&Value>,
-    robot: Option<&RobotV0>,
+    robot: Option<&RobotManifest>,
 ) -> Option<graph_check::Problem> {
     // An absent manifest config is `null`, not `{}`: a no-config service's
     // emitted schema requires null (so absent passes), while a service with a
