@@ -21,8 +21,6 @@
 //!   `participant_metadata`) and validate it with the shared framework graph
 //!   checker before launching; Cargo.lock resolves all
 //!   project source.
-//! - `service suite` - print official services from the catalog at the
-//!   project's locked train.
 //! - `doctor` - check host prerequisites; `self upgrade` - update the CLI.
 //!
 //! `validate` remains the lower-level structural/dependency predecessor of

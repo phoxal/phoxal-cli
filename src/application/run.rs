@@ -2188,25 +2188,12 @@ mod service {
     use std::process::Command;
 
     use anyhow::{Context, Result};
-    use serde::Serialize;
 
     use crate::cli::AppContext;
-    use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot};
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-    pub struct ServiceSuiteSummary {
-        pub entries: Vec<ServiceSuiteEntry>,
-    }
 
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-    pub struct ServiceSuiteEntry {
-        pub id: String,
-        pub version: String,
-        pub participant_kind: &'static str,
-    }
     struct ServiceInstall;
     struct ServiceUninstall;
     struct ServiceStatus;
-    struct Suite;
 
     const UNIT_PATH: &str = phoxal_cli_project::SYSTEMD_UNIT_PATH;
     const UNIT_MARKER: &str = "# Managed by phoxal";
@@ -2600,24 +2587,6 @@ WantedBy=multi-user.target
             .is_ok_and(|target| target.starts_with(legacy_root))
     }
 
-    impl Suite {
-        pub async fn run(&self, app: &AppContext) -> Result<()> {
-            let root = app.project.root().to_path_buf();
-            let offline = app.offline;
-            let summary =
-                tokio::task::spawn_blocking(move || service_suite_summary(&root, offline))
-                    .await
-                    .context("service suite worker failed")??;
-            for entry in &summary.entries {
-                println!(
-                    "{} -> version {} ({})",
-                    entry.id, entry.version, entry.participant_kind
-                );
-            }
-            Ok(())
-        }
-    }
-
     pub(super) async fn install(app: &AppContext) -> Result<()> {
         ServiceInstall.run(app).await
     }
@@ -2628,10 +2597,6 @@ WantedBy=multi-user.target
 
     pub(super) async fn status(app: &AppContext) -> Result<()> {
         ServiceStatus.run(app).await
-    }
-
-    pub(super) async fn suite(app: &AppContext) -> Result<()> {
-        Suite.run(app).await
     }
 
     #[cfg(test)]
@@ -2747,105 +2712,6 @@ WantedBy=multi-user.target
             assert!(!is_legacy_unit_name("phoxal-participant-drive.timer"));
         }
     }
-
-    pub fn service_suite_summary(
-        project_start: &Path,
-        offline: bool,
-    ) -> Result<ServiceSuiteSummary> {
-        let robot_path = discover_robot_yaml(project_start).with_context(|| {
-            format!("failed to find robot.yaml from {}", project_start.display())
-        })?;
-        let project_root = robot_path
-            .parent()
-            .context("robot.yaml did not have a parent directory")?;
-        // Keep `service suite` project-bound: malformed robot intent must fail
-        // before presenting an inventory for that project.
-        let _ = load_robot(&robot_path)?;
-        let train =
-            phoxal_cli_core::project::train::resolve_locked_train(project_root, offline)?.version;
-        Ok(ServiceSuiteSummary {
-            entries: phoxal_cli_core::project::catalog::NATIVE
-                .iter()
-                .filter(|official| {
-                    official.kind == phoxal_cli_core::project::catalog::ArtifactKind::Service
-                })
-                .map(|official| ServiceSuiteEntry {
-                    id: official.package.to_string(),
-                    version: train.clone(),
-                    participant_kind: "service",
-                })
-                .collect(),
-        })
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use std::fs;
-
-        use super::*;
-
-        #[test]
-        fn service_suite_summary_lists_official_services() -> Result<()> {
-            let temp = tempfile::tempdir()?;
-            fs::write(temp.path().join("robot.yaml"), minimal_robot_yaml())?;
-            write_locked_project(temp.path())?;
-
-            let summary = service_suite_summary(temp.path(), false)?;
-
-            let entry = summary
-                .entries
-                .iter()
-                .find(|entry| entry.id == "phoxal/service-drive")
-                .expect("drive is part of the catalog");
-            assert_eq!(entry.id, "phoxal/service-drive");
-            assert_eq!(entry.version, "0.1.0");
-            assert_eq!(entry.participant_kind, "service");
-
-            Ok(())
-        }
-
-        fn minimal_robot_yaml() -> &'static str {
-            r#"schema: robot/v0
-robot:
-  id: testbot
-  namespace: test
-  motion_limits:
-    max_linear_speed_mps: 0.6
-    max_angular_speed_radps: 2.0
-  kinematic:
-    kind: differential
-    left_actuators: [left_drive.motor]
-    right_actuators: [right_drive.motor]
-    left_encoders: [left_drive.encoder]
-    right_encoders: [right_drive.encoder]
-    wheel_radius_m: 0.1
-    wheel_base_m: 0.5
-  components: {}
-"#
-        }
-
-        /// A minimal locked Cargo project resolving to train `0.1.0` via a local
-        /// path dependency, so `resolve_locked_train` needs no network.
-        fn write_locked_project(root: &Path) -> Result<()> {
-            fs::create_dir_all(root.join("src"))?;
-            fs::create_dir_all(root.join("train/phoxal/src"))?;
-            fs::write(
-                root.join("Cargo.toml"),
-                "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nphoxal = { path = \"train/phoxal\" }\n",
-            )?;
-            fs::write(root.join("src/lib.rs"), "")?;
-            fs::write(
-                root.join("train/phoxal/Cargo.toml"),
-                "[package]\nname = \"phoxal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-            )?;
-            fs::write(root.join("train/phoxal/src/lib.rs"), "")?;
-            fs::write(
-                root.join("Cargo.lock"),
-                "version = 4\n\n[[package]]\nname = \"phoxal\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"robot\"\nversion = \"0.1.0\"\ndependencies = [\"phoxal\"]\n",
-            )?;
-            Ok(())
-        }
-    }
 }
 
 pub(crate) async fn service_install_command(app: &AppContext) -> Result<()> {
@@ -2858,10 +2724,6 @@ pub(crate) async fn service_uninstall_command(app: &AppContext) -> Result<()> {
 
 pub(crate) async fn service_status_command(app: &AppContext) -> Result<()> {
     service::status(app).await
-}
-
-pub(crate) async fn service_suite_command(app: &AppContext) -> Result<()> {
-    service::suite(app).await
 }
 
 mod doctor {
