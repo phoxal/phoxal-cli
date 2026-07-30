@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.28.12](https://github.com/phoxal/phoxal-cli/releases/tag/v0.28.12) - 2026-07-30
+
+
+### Refactored
+
+- Consume canonical framework model ([#254](https://github.com/phoxal/phoxal-cli/pull/254))
+
+
 ## [0.28.11](https://github.com/phoxal/phoxal-cli/releases/tag/v0.28.11) - 2026-07-29
 
 
