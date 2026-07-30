@@ -82,7 +82,7 @@ pub enum RootCommand {
     Status(status::Status),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),
-    #[command(about = "Manage the systemd phoxal.service and inspect the official catalog.")]
+    #[command(about = "Manage the systemd phoxal.service.")]
     Service(service::Service),
     #[command(about = "Print the phoxal version and the official registry it installs from.")]
     Version(version::VersionArgs),
@@ -218,7 +218,6 @@ mod tests {
             ],
             vec!["phoxal", "update", "--message-format", "json"],
             vec!["phoxal", "status", "--message-format", "json", "safety"],
-            vec!["phoxal", "service", "suite", "--message-format", "json"],
             vec!["phoxal", "version", "--message-format", "json"],
             vec!["phoxal", "self", "upgrade", "--message-format", "json"],
             vec!["phoxal", "behavior", "validate", "--message-format", "json"],
@@ -235,6 +234,9 @@ mod tests {
         for args in [
             vec!["phoxal", "service", "add", "avoid_obstacles"],
             vec!["phoxal", "service", "run", "avoid_obstacles"],
+            // `service suite` is deleted: the suite descriptor it printed is
+            // gone, and the catalog is no longer a per-project inventory.
+            vec!["phoxal", "service", "suite"],
             vec!["phoxal", "runtime", "add", "avoid_obstacles"],
             vec!["phoxal", "check", "avoid_obstacles"],
             vec!["phoxal", "simulate", "default"],

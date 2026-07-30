@@ -19,8 +19,6 @@ pub enum ServiceSubcommand {
     Uninstall(ServiceUninstall),
     #[command(about = "Show the live systemd state for phoxal.service.")]
     Status(ServiceStatus),
-    #[command(about = "Print official services from the catalog at the project's locked train.")]
-    Suite(Suite),
 }
 
 #[derive(Debug, Args)]
@@ -31,9 +29,6 @@ pub struct ServiceUninstall {}
 
 #[derive(Debug, Args)]
 pub struct ServiceStatus {}
-
-#[derive(Debug, Args)]
-pub struct Suite {}
 
 impl Service {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
@@ -46,9 +41,6 @@ impl Service {
             }
             ServiceSubcommand::Status(_) => {
                 crate::application::run::service_status_command(app).await
-            }
-            ServiceSubcommand::Suite(_) => {
-                crate::application::run::service_suite_command(app).await
             }
         }
     }
