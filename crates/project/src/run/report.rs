@@ -140,7 +140,9 @@ pub(crate) fn report_undeclared_runtimes(
 /// The full set of driven component-instance ids from a compiled robot model.
 /// A `--driver` subset is validated against this - not the constructed plan,
 /// which already drops the drivers the policy excludes (#936).
-pub(crate) fn driven_instances(robot: &phoxal::model::robot::v0::Robot) -> BTreeSet<String> {
+pub(crate) fn driven_instances(
+    robot: &phoxal::model::source::robot::v0::Manifest,
+) -> BTreeSet<String> {
     robot
         .robot
         .components

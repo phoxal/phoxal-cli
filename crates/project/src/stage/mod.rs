@@ -104,7 +104,7 @@ robot:
   components: {}
 "#;
         Ok(ResolvedRobot {
-            robot: phoxal::model::robot::v0::Robot::parse_from_string(yaml)?,
+            robot: phoxal::model::source::robot::parse_from_string(yaml)?,
             train: "0.36.0".to_string(),
             target: host_target_triple(),
             platform_runtimes: Vec::new(),
@@ -207,13 +207,13 @@ robot:
         // document.
         resolved.robot.services.insert(
             "mission".to_string(),
-            phoxal::model::robot::v0::UserService {
+            phoxal::model::source::robot::v0::UserService {
                 config: Some(serde_json::json!({"speed": 1})),
             },
         );
         resolved.robot.tools.insert(
             "lidar-viz".to_string(),
-            phoxal::model::robot::v0::UserTool {
+            phoxal::model::source::robot::v0::UserTool {
                 config: Some(serde_json::json!({"port": 9000})),
             },
         );
@@ -235,9 +235,7 @@ robot:
             });
 
         let staged = stage_runtime_layout(project.path(), &resolved)?;
-        let compiled = phoxal::model::robot::Robot::parse_from_dir(&staged)?
-            .as_v0()
-            .clone();
+        let compiled = phoxal::model::source::robot::parse_from_dir(&staged)?;
         // The compiled document is the authored declarations verbatim: the
         // undeclared discovered crate is absent, nothing is injected.
         assert_eq!(

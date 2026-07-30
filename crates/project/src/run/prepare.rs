@@ -480,7 +480,7 @@ pub(crate) fn apply_session_connect(
 }
 
 pub(crate) fn resolve_router_config(
-    robot: &phoxal::model::robot::v0::Robot,
+    robot: &phoxal::model::source::robot::v0::Manifest,
     root: &Path,
 ) -> Result<Option<PathBuf>> {
     let config = robot
@@ -568,7 +568,7 @@ mod root_classification_tests {
 /// re-validates config over the staged layout.
 fn run_source_check(
     staged_root: &Path,
-    robot: &phoxal::model::robot::v0::Robot,
+    robot: &phoxal::model::source::robot::v0::Manifest,
     resolved: &ResolvedRobot,
     source_participants: &[phoxal_cli_core::check::source::SourceParticipant],
     offline: bool,

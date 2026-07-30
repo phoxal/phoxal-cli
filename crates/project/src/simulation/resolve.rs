@@ -206,7 +206,6 @@ pub(crate) fn build_checked_sim_launch_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal::model::robot::v0::Robot;
     use phoxal_cli_core::project::catalog::ArtifactKind;
     use phoxal_cli_core::project::launch_plan::RunIdentity;
     use phoxal_cli_core::project::launch_plan::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
@@ -337,7 +336,7 @@ services:
         crate_dir: PathBuf,
         simulator_dir: PathBuf,
     ) -> Result<ResolvedRobot> {
-        let mut robot = Robot::parse_from_string(FIXTURE_ROBOT)?;
+        let mut robot = phoxal::model::source::robot::parse_from_string(FIXTURE_ROBOT)?;
         robot
             .services
             .get_mut("avoid")

@@ -5,7 +5,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use phoxal::model::robot::v0::ConnectionConfig;
+use phoxal::model::source::robot::v0::ConnectionConfig;
 use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::tooling::{cargo_binary_name, cargo_package_name};
 use serde_json::Value;

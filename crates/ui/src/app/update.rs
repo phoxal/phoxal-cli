@@ -1822,7 +1822,7 @@ mod tests {
             execution_id: epoch().execution_id,
             project: "/tmp/robot".to_string(),
             entry: "/tmp/robot/robot.yaml".to_string(),
-            framework_train: "0.43.2".to_string(),
+            framework_train: "0.44.0".to_string(),
             simulation: None,
             lifecycle,
             router: "unixsock-stream/test".to_string(),

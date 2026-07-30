@@ -92,7 +92,7 @@ pub(crate) fn begin_runtime_layout(
 /// to the robot - so compilation carries them verbatim (the `extends:` chain
 /// was already flattened by the framework loader); nothing is injected from
 /// discovery.
-fn compile_manifest(resolved: &ResolvedRobot) -> phoxal::model::robot::v0::Robot {
+fn compile_manifest(resolved: &ResolvedRobot) -> phoxal::model::source::robot::v0::Manifest {
     resolved.robot.clone()
 }
 
@@ -100,10 +100,9 @@ fn stage_candidate(
     project_root: &Path,
     candidate: &Path,
     resolved: &ResolvedRobot,
-    compiled: &phoxal::model::robot::v0::Robot,
+    compiled: &phoxal::model::source::robot::v0::Manifest,
 ) -> Result<()> {
-    phoxal::model::robot::Robot::V0(compiled.clone())
-        .write_to_dir(candidate)
+    phoxal::model::source::robot::write_to_dir(compiled, candidate)
         .context("failed to write compiled runtime robot.yaml")?;
     crate::load::header::RuntimeHeader::for_phoxal_version(&resolved.train)
         .write_to(candidate)
@@ -170,7 +169,7 @@ fn gate_component_document(source_dir: &Path, component_id: &str) -> Result<()> 
         &component_file,
         phoxal_cli_core::schema::DocumentKind::Component,
     )?;
-    phoxal::model::component::Component::read_from_dir(source_dir).with_context(|| {
+    phoxal::model::source::component::read_from_dir(source_dir).with_context(|| {
         format!(
             "component '{component_id}' failed strict parsing of {}",
             component_file.display()
@@ -228,15 +227,15 @@ fn ensure_safe_relative_path(path: &Path, label: &str) -> Result<()> {
 fn validate_candidate(
     candidate: &Path,
     resolved: &ResolvedRobot,
-    compiled: &phoxal::model::robot::v0::Robot,
+    compiled: &phoxal::model::source::robot::v0::Manifest,
 ) -> Result<()> {
     // Resolution already ran the model's semantic validation. Reparse the
     // serialized candidate here to prove the on-disk manifest is complete
     // and strict without losing that owner-specific validation context.
-    let staged = phoxal::model::robot::Robot::parse_from_dir(candidate)
+    let staged = phoxal::model::source::robot::parse_from_dir(candidate)
         .context("compiled runtime robot.yaml failed strict parsing")?;
     ensure!(
-        staged.as_v0() == compiled,
+        &staged == compiled,
         "compiled runtime robot.yaml differs from the resolved manifest"
     );
     ensure!(

@@ -61,6 +61,7 @@ pub(crate) fn stage_simulation_for_robot(
         .context("robot structure failed validation")?;
 
     let mut components = BTreeMap::new();
+    let mut simulations = BTreeMap::new();
     let mut component_type_dirs = BTreeMap::new();
     for component in &resolved.components {
         if component_type_dirs.contains_key(&component.source_name) {
@@ -71,35 +72,42 @@ pub(crate) fn stage_simulation_for_robot(
             &crate_dir.join("component.yaml"),
             phoxal_cli_core::schema::DocumentKind::Component,
         )?;
-        let component_model = phoxal::model::component::Component::read_from_dir(&crate_dir)
+        let component_model = phoxal::model::source::component::read_from_dir(&crate_dir)
             .with_context(|| {
                 format!(
                     "failed to read component.yaml for component type '{}' from {}",
                     component.source_name,
                     crate_dir.display()
                 )
-            })?
-            .as_v0()
-            .context("Webots staging only supports component.yaml version v0")?
-            .clone();
+            })?;
+        if crate_dir.join("simulation.yaml").is_file() {
+            let simulation = phoxal::model::source::simulation::read_from_dir(&crate_dir)
+                .with_context(|| {
+                    format!(
+                        "failed to read simulation.yaml for component type '{}' from {}",
+                        component.source_name,
+                        crate_dir.display()
+                    )
+                })?;
+            simulations.insert(component.source_name.clone(), simulation);
+        }
         components.insert(component.source_name.clone(), component_model);
         component_type_dirs.insert(component.source_name.clone(), crate_dir);
     }
 
-    let bundle = phoxal::model::v0::Robot {
-        manifest: resolved.robot.clone(),
+    let bundle = phoxal::model::Robot::try_from_sources(
+        resolved.robot.clone(),
         components,
+        simulations,
         structure,
-    };
+    )
+    .context("failed to build the canonical robot for Webots staging")?;
     // Only stage a PROTO for component types that actually carry Webots
     // simulation data - a component with no `simulation.yaml` has nothing for
     // `generate_component_proto` to render and is not expected to be staged.
     let component_types = component_type_dirs
         .iter()
-        .filter(|(_, source_dir)| {
-            source_dir.join("simulation.yaml").is_file()
-                || source_dir.join("simulation.yml").is_file()
-        })
+        .filter(|(_, source_dir)| source_dir.join("simulation.yaml").is_file())
         .map(|(component_type, source_dir)| ComponentTypeToStage {
             component_type,
             source_dir,

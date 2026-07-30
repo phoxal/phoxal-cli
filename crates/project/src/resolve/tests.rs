@@ -65,7 +65,7 @@ fn minimal_robot(extra: &str) -> anyhow::Result<Robot> {
 }
 
 fn minimal_robot_with_components(components: &str, extra: &str) -> anyhow::Result<Robot> {
-    Robot::parse_from_string(&format!(
+    phoxal::model::source::robot::parse_from_string(&format!(
         r#"schema: robot/v0
 robot:
   id: testbot

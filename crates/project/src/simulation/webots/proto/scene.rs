@@ -1,13 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use phoxal::model::component::v0::capability::{
-    Capability as PhysicalCapability, StructuralTarget,
-};
+use phoxal::model::Robot;
+use phoxal::model::component::capability::{Capability as PhysicalCapability, StructuralTarget};
+use phoxal::model::simulation::Simulation;
 use phoxal::model::simulation::capability::Capability as SimulationCapability;
-use phoxal::model::simulation::v0::Simulation;
 use phoxal::model::structure::Structure;
-use phoxal::model::v0::Robot;
 
 use crate::simulation::webots::proto::support::urdf::convert_joint_type;
 use crate::simulation::webots::proto::{metadata, proto_name_for_robot};
@@ -49,9 +47,7 @@ impl WebotsSceneDescription {
             .collect::<Result<BTreeMap<_, _>>>()?;
 
         let mounted_components_for_link = configuration
-            .manifest
-            .robot
-            .components
+            .components()
             .iter()
             .map(|(component_id, model_component)| {
                 let component = configuration.component_for_instance(component_id)?;
@@ -77,10 +73,10 @@ impl WebotsSceneDescription {
                 Ok((
                     model_component.mount_link.clone(),
                     ComponentProtoInstance {
-                        proto_name: proto_name_for_robot(&model_component.component)?,
+                        proto_name: proto_name_for_robot(&model_component.component_type)?,
                         capability_names,
                         solid_names: component_solid_links
-                            .get(&model_component.component)
+                            .get(&model_component.component_type)
                             .into_iter()
                             .flat_map(|link_ids| link_ids.iter())
                             .map(|link_id| (link_id.clone(), format!("{component_id}__{link_id}")))
@@ -99,7 +95,7 @@ impl WebotsSceneDescription {
             );
 
         Ok(Self {
-            robot_name: configuration.manifest.robot.id.clone(),
+            robot_name: configuration.robot_id().to_string(),
             root_link_id,
             links,
             contact_materials: BTreeMap::new(),
@@ -114,7 +110,7 @@ impl WebotsSceneDescription {
     pub fn from_component(
         component_type: &str,
         structure: &Structure,
-        component: &phoxal::model::component::v0::Component,
+        component: &phoxal::model::component::Component,
         simulation: &Simulation,
     ) -> Result<Self> {
         let root_link_id = structure.root_link_name()?.to_string();
@@ -273,7 +269,7 @@ impl WebotsSceneDescription {
 #[derive(Debug, Clone)]
 pub struct RuntimeComponentBinding {
     pub capability_id: String,
-    pub physical: phoxal::model::component::v0::capability::Capability,
+    pub physical: phoxal::model::component::capability::Capability,
     pub simulation: Option<SimulationCapability>,
 }
 
