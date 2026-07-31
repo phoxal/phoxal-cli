@@ -1,3 +1,5 @@
+#![deny(clippy::print_stdout)]
+
 use std::collections::HashSet;
 use std::io;
 use std::path::Path;

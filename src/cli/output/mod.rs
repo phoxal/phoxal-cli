@@ -90,16 +90,6 @@ mod tests {
     }
 
     #[test]
-    fn welcome_and_dashboard_are_stderr_only() {
-        let welcome = include_str!("welcome.rs");
-        let dashboard = include_str!("../../../crates/ui/src/app/session.rs");
-        assert!(welcome.contains("Term::stderr()"));
-        assert!(dashboard.contains("CrosstermBackend::new(io::stderr())"));
-        assert!(!welcome.contains("stdout"));
-        assert!(!dashboard.contains("stdout"));
-    }
-
-    #[test]
     fn new_is_an_immutable_constructor() {
         let ctx = OutputContext::new(false, Theme::new(ColorCapability::None));
         assert!(!ctx.interactive);

@@ -1,5 +1,7 @@
 //! One tui-realm terminal loop for an attached Phoxal resident.
 
+#![deny(clippy::print_stdout)]
+
 use std::cell::RefCell;
 use std::io::{self, Stderr};
 use std::rc::Rc;
