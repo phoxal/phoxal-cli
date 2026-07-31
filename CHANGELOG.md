@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.29.5](https://github.com/phoxal/phoxal-cli/releases/tag/v0.29.5) - 2026-07-31
+
+
+### Added
+
+- *(build)* Derive managed builder images from runtimes ([#267](https://github.com/phoxal/phoxal-cli/pull/267))
+
+
 ## [0.29.4](https://github.com/phoxal/phoxal-cli/releases/tag/v0.29.4) - 2026-07-31
 
 
