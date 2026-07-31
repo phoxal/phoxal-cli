@@ -1,10 +1,10 @@
 //! `phoxal build` - stage a runtime layout for a target and archive it as a
 //! deterministic `build.phoxal` (#936).
 //!
-//! `build` refreshes staging exactly as `run` would - through the one shared
-//! `refresh_staging` entry - but for the selected
-//! target rather than the host, validates the staged layout through the shared
-//! loader (against the declared target architecture, no execution), and archives
+//! `build` resolves once and converges with `run` at the shared
+//! `refresh_staging_resolved` materialization entry, but for the selected target
+//! rather than the host. It validates the staged layout through the shared
+//! loader (against the declared target architecture, no execution) and archives
 //! the staged layout deterministically. The bundle matches the staged layout
 //! byte for byte; it is not a second format.
 //!
@@ -109,6 +109,13 @@ struct Worker {
     request: BuildBundleRequest,
     engine: ContainerEngine,
     image: Option<String>,
+}
+
+/// A live source that must still resolve under the Build lock, or a frozen
+/// resolution produced before an external container build.
+enum BuildStagingInput {
+    Source(StagingBuild),
+    Resolved(Box<crate::run::prepare::ResolvedStagingInput>),
 }
 
 pub(crate) fn build_bundle(request: BuildBundleRequest) -> Result<BuiltBundle> {
@@ -235,12 +242,12 @@ impl Worker {
     ) -> Result<(PathBuf, String, Option<PathBuf>)> {
         let staging = StagingBuild::native_bundle(target.to_string());
         // Local builds and stages the live project tree under the lock.
-        self.stage_validate_archive(project_root, project_root, target, &staging)
+        self.stage_validate_archive(project_root, target, BuildStagingInput::Source(staging))
     }
 
     /// Build inside a toolchain image, then reuse the identical host-side
     /// staging, validation, and archive with the container-built binaries. The
-    /// The command adapter already holds the Build lock, so the snapshot, the
+    /// command adapter already holds the Build lock, so the snapshot, the
     /// compile, and the staging that reads that same frozen snapshot all happen
     /// under one lock (#936, finding B).
     fn build_container(
@@ -248,8 +255,10 @@ impl Worker {
         project_root: &Path,
         target: &str,
     ) -> Result<(PathBuf, String, Option<PathBuf>)> {
-        let (snapshot, officials_root, cargo_target) =
+        let (_snapshot, officials_root, cargo_target, resolved) =
             self.compile_in_container(project_root, target, self.request.reporter.as_ref())?;
+        // `_snapshot` is an intentional lifetime guard for paths carried by
+        // `resolved`; it must remain alive until staging consumes that value.
 
         // Stage manifests, assets, AND binaries from the SAME frozen snapshot the
         // container compiled, never the live tree (#936, finding B): the container
@@ -268,11 +277,17 @@ impl Worker {
             cargo_target,
             Some(officials_root.path().to_path_buf()),
         );
-        self.stage_validate_archive(project_root, snapshot.path(), target, &staging)
+        let mut resolved = resolved;
+        resolved.set_materialization_build(staging)?;
+        self.stage_validate_archive(
+            project_root,
+            target,
+            BuildStagingInput::Resolved(Box::new(resolved)),
+        )
     }
 
-    /// Snapshot the source, validate its Cargo.lock, resolve the robot graph
-    /// to learn its component driver packages, and compile the workspace for
+    /// Snapshot the source, validate its Cargo.lock, compile the authored
+    /// documents once, and compile the workspace for
     /// `target` inside the toolchain image - which also materializes the
     /// COMPLETE official set (every catalog service/tool/router plus every
     /// registry-sourced component driver this robot declares) via `cargo
@@ -281,15 +296,22 @@ impl Worker {
     /// host-side, cross-compiled" gap) - returning the snapshot directory,
     /// persistent project Cargo target directory, and the officials root (with
     /// its `bin/` populated the identical way, so
-    /// host-side staging never needs to cross-compile anything). Assumes the
-    /// The command adapter already holds the Build lock; the rendered engine
-    /// invocation remains unit-testable without starting a container.
+    /// host-side staging never needs to cross-compile anything). The command
+    /// adapter already holds the Build lock; the rendered engine
+    /// invocation remains unit-testable without starting a container. The
+    /// frozen snapshot is the complete authored input: build-script side
+    /// effects created later inside the container never become bundle assets.
     fn compile_in_container(
         &self,
         project_root: &Path,
         target: &str,
         ui: &dyn crate::Reporter,
-    ) -> Result<(tempfile::TempDir, tempfile::TempDir, PathBuf)> {
+    ) -> Result<(
+        tempfile::TempDir,
+        tempfile::TempDir,
+        PathBuf,
+        crate::run::prepare::ResolvedStagingInput,
+    )> {
         let snapshot = tempfile::Builder::new()
             .prefix("phoxal-build-snapshot-")
             .tempdir()
@@ -335,16 +357,20 @@ impl Worker {
             ),
         };
         let (cargo_registry, cargo_git) = host_cargo_caches();
+
+        // Resolve the frozen snapshot once. The container needs this result to
+        // select the complete official package train and discover registry
+        // component-driver packages. Host-side staging consumes the same value
+        // after compilation instead of compiling the authored project again.
+        let resolved = resolve_container_staging(snapshot.path(), target, self.request.offline, ui)
+            .context("failed to resolve and compile the frozen project snapshot")?;
+
         // The deterministic, robot-independent official set - every catalog
         // service, tool, and the router ("every official always runs" per
-        // #945) - is known from the catalog alone; no `resolve()` (and no
-        // robot.yaml) is needed to compute it.
-        let train = phoxal_cli_core::project::train::resolve_locked_train(
-            project_root,
-            self.request.offline,
-        )
-        .context("failed to resolve the locked framework train for the container build")?
-        .version;
+        // #945) - is known from the catalog alone. Its train comes from the
+        // same frozen resolution as robot-specific drivers, so a live-tree edit
+        // cannot split one container install batch across two trains.
+        let train = resolved.resolved().train.clone();
         let mut officials = phoxal_cli_core::project::catalog::for_webots(false)
             .map(|official| ContainerOfficial {
                 package: phoxal_cli_core::project::catalog::cargo_package_name(official.package),
@@ -352,55 +378,7 @@ impl Worker {
             })
             .collect::<Vec<_>>();
 
-        // Robot-specific component driver packages are NOT in the static
-        // catalog - the container cannot know them without resolving the
-        // robot graph, exactly as `refresh_staging` later will (organization
-        // #951 WS4 review, blocker 2). Resolve it here, from the SAME frozen
-        // snapshot the container compiles, with the same target/driver
-        // options `phoxal build` uses (`DriverSelection::All`, no
-        // simulators), and add every REGISTRY-sourced driver it finds so the
-        // container materializes them too; a workspace/path-overridden
-        // driver never reaches `cargo install` and is correctly left out
-        // (see `stager::materialize_component_driver`).
-        let robot_path = phoxal_cli_core::project::resolver::discover_robot_yaml(snapshot.path())
-            .with_context(|| {
-            format!(
-                "failed to find robot.yaml in the source snapshot {}",
-                snapshot.path().display()
-            )
-        })?;
-        let snapshot_root = robot_path
-            .parent()
-            .context("robot.yaml did not have a parent directory")?;
-        let robot = phoxal_cli_core::project::resolver::load_robot(&robot_path)?;
-        let driver_policy = crate::run::report::DriverPolicy::from_options(
-            &RunOptions {
-                drivers: crate::run::DriversMode::On,
-                drivers_subset: Vec::new(),
-                offline: self.request.offline,
-            },
-            &crate::run::report::driven_instances(&robot),
-        )?;
-        let resolved = crate::progress::run_phase(
-            ui,
-            crate::PhaseId::new("validate"),
-            "Validating robot.yaml",
-            || {
-                crate::resolve::project::resolve(
-                    &robot,
-                    snapshot_root,
-                    phoxal_cli_core::project::resolver::ResolveOptions {
-                        official_target_triple: Some(target.to_string()),
-                        tool_target_triple: Some(target.to_string()),
-                        drivers: driver_policy.selection(),
-                        include_simulators: false,
-                        offline: self.request.offline,
-                    },
-                )
-            },
-        )
-        .context("failed to resolve the robot graph to learn its component driver packages")?;
-        officials.extend(component_driver_officials(&resolved));
+        officials.extend(component_driver_officials(resolved.resolved()));
         let spec = ContainerBuildSpec {
             engine: self.engine,
             image,
@@ -424,44 +402,51 @@ impl Worker {
                 .unwrap_or_default(),
         ));
         crate::build::container::run_engine(ui, &spec.invocation())?;
-        Ok((snapshot, officials_root, cargo_target))
+        Ok((snapshot, officials_root, cargo_target, resolved))
     }
 
-    /// The shared tail every backend runs: refresh staging for the target from
-    /// `staging_source` (the live project for `local`, the frozen snapshot for
-    /// `container`), validate the staged layout through the loader against the
-    /// declared target signature, and archive it deterministically as a sibling
-    /// of `project_root`'s staged directory. The command adapter holds the Build
-    /// lock for the whole operation.
+    /// The shared tail every backend runs: resolve a live source input or
+    /// consume an already-resolved frozen snapshot, validate the staged layout
+    /// against the declared target signature, and archive it deterministically
+    /// as a sibling of `project_root`'s staged directory. The command adapter
+    /// holds the Build lock for the whole operation.
     fn stage_validate_archive(
         &self,
         project_root: &Path,
-        staging_source: &Path,
         target: &str,
-        staging: &StagingBuild,
+        input: BuildStagingInput,
     ) -> Result<(PathBuf, String, Option<PathBuf>)> {
-        let options = RunOptions {
-            drivers: crate::run::DriversMode::On,
-            drivers_subset: Vec::new(),
-            offline: self.request.offline,
-        };
         // A shippable bundle contains everything, so staging validates against
         // the full driver set (DriverSelection::All), never a `--drivers`
         // subset. `build` skips the host-native source check (`false`): the
         // loader's target-aware validation over the staged binaries is
-        // authoritative, and a cross target's Linux-only crates need not compile
-        // on the build host. `refresh_staging` already validates the compiled
-        // layout against the DECLARED target signature (via `staging.target()`)
-        // and publishes only after that succeeds (organization#951 WS4
-        // review) - there is no separate validation left to do here.
-        let staged = crate::run::prepare::refresh_staging(
-            staging_source,
-            &options,
-            staging,
-            false,
-            RunIdentity::default(),
-            self.request.reporter.as_ref(),
-        )?;
+        // authoritative, and a cross target's Linux-only crates need not
+        // compile on the build host. Shared staging validates the compiled
+        // layout against its declared target signature and publishes only
+        // after that succeeds (organization#951 WS4 review).
+        let staged = match input {
+            BuildStagingInput::Resolved(resolved) => crate::run::prepare::refresh_staging_resolved(
+                *resolved,
+                false,
+                RunIdentity::default(),
+                self.request.reporter.as_ref(),
+            ),
+            BuildStagingInput::Source(build) => {
+                let options = RunOptions {
+                    drivers: crate::run::DriversMode::On,
+                    drivers_subset: Vec::new(),
+                    offline: self.request.offline,
+                };
+                crate::run::prepare::refresh_staging(
+                    project_root,
+                    &options,
+                    &build,
+                    false,
+                    RunIdentity::default(),
+                    self.request.reporter.as_ref(),
+                )
+            }
+        }?;
 
         // The container path staged under the frozen snapshot, which is
         // deleted when the snapshot guard drops. Publish the validated staged
@@ -485,6 +470,26 @@ impl Worker {
 
         Ok((output, digest, Some(staged_root)))
     }
+}
+
+/// Build the single resolution input shared by container package selection and
+/// post-container staging.
+pub(crate) fn resolve_container_staging(
+    snapshot_root: &Path,
+    target: &str,
+    offline: bool,
+    ui: &dyn crate::Reporter,
+) -> Result<crate::run::prepare::ResolvedStagingInput> {
+    crate::run::prepare::resolve_staging(
+        snapshot_root,
+        RunOptions {
+            drivers: crate::run::DriversMode::On,
+            drivers_subset: Vec::new(),
+            offline,
+        },
+        StagingBuild::native_bundle(target.to_string()),
+        ui,
+    )
 }
 
 /// Every distinct registry-sourced component driver package a resolved robot

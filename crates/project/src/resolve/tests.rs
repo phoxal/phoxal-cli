@@ -144,6 +144,71 @@ fn resolve_fixture(
     resolve(robot, root, options)
 }
 
+#[derive(Default)]
+struct RecordingReporter(std::sync::Mutex<Vec<crate::PreparationEvent>>);
+
+impl crate::Reporter for RecordingReporter {
+    fn report(&self, event: crate::PreparationEvent) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(event);
+    }
+}
+
+#[test]
+fn container_resolution_compiles_once_and_rejects_profile_drift() -> anyhow::Result<()> {
+    let _phoxal_home = ScratchPhoxalHome::new()?;
+    let robot = minimal_robot("")?;
+    let project = locked_project_root()?;
+    write_compiler_sources(project.path(), &robot)?;
+    let reporter = RecordingReporter::default();
+
+    let mut resolved = crate::build::resolve_container_staging(
+        project.path(),
+        "aarch64-unknown-linux-gnu",
+        false,
+        &reporter,
+    )?;
+    assert!(
+        resolved
+            .set_materialization_build(crate::build::profile::StagingBuild::host_runtime())
+            .is_err(),
+        "a host-runtime profile must not replace a native-bundle resolution"
+    );
+    let target_dir = tempfile::tempdir()?;
+    resolved.set_materialization_build(
+        crate::build::profile::StagingBuild::prebuilt_native_bundle(
+            "aarch64-unknown-linux-gnu".to_string(),
+            target_dir.path().to_path_buf(),
+            None,
+        ),
+    )?;
+
+    // Later staging consumes `ResolvedStagingInput` directly and has no path
+    // back to `resolve_staging`; this count pins the production container
+    // helper that creates the sole compiler phase.
+    let events = reporter
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let compile_phases = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                crate::PreparationEvent::PhaseStarted { id, .. }
+                    if id.to_string() == "validate"
+            )
+        })
+        .count();
+    assert_eq!(
+        compile_phases, 1,
+        "container package selection must produce one manifest compilation"
+    );
+    Ok(())
+}
+
 #[test]
 fn an_invalid_declaration_fails_before_locked_project_resolution() -> anyhow::Result<()> {
     // The declaration validator is the first operation in `resolve` (#950):

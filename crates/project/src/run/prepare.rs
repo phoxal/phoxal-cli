@@ -64,34 +64,51 @@ pub(crate) struct StagedProject {
     pub(crate) plan: LaunchPlan,
 }
 
-/// Refresh the host-triple staging for a buildable source project and return the
-/// staged layout plus the staging-side inputs (#936). This is the one staging
-/// entry `run`, `start`, and `phoxal build` all share, so they build and
-/// stage identically before diverging on what they do with the staged layout:
-/// resolve the locked graph, materialize officials, resolve the driver policy,
-/// stage the runtime layout, run the source-time check, complete the flat
-/// `bin/` store, and validate the whole compiled layout through the loader -
-/// ALL of it against an unpublished candidate directory, exactly once, and
-/// ONLY THEN publish it as the live `.phoxal/bundle/` (organization#951 WS4
-/// review: the previous ordering published first and materialized/validated
-/// after, so any failure left the robot with its previous working bundle
-/// deleted and the live one empty or half-populated). A failure anywhere in
-/// this function therefore never touches the previous live bundle at all.
+/// One source/package resolution plus the exact options and staging profile
+/// that produced it, ready to be materialized into a runtime layout.
 ///
-/// `build` reuses this per target triple: `build` is a
-/// native-bundle [`StagingBuild`] carrying the requested `--target`,
-/// which threads through the resolve/stage/`bin/`-completion steps so the same
-/// code cross-compiles (or reuses container-built) workspace crates and links
-/// the official set for that target. `run`,
-/// and `start` pass `StagingBuild::host_runtime()`.
-pub(crate) fn refresh_staging(
+/// Container builds resolve before entering the container so they can include
+/// registry component drivers, then pass this exact value into staging instead
+/// of compiling the authored project a second time. `project_root` and compiled
+/// asset paths may point into a temporary source snapshot, so that snapshot must
+/// outlive this value and the staging operation that consumes it. The resolved
+/// driver policy remains attached so materialization and launch-plan
+/// construction cannot select a different driver set.
+pub(crate) struct ResolvedStagingInput {
+    project_root: PathBuf,
+    resolved: BundlePlan,
+    driver_policy: DriverPolicy,
+    options: RunOptions,
+    build: StagingBuild,
+}
+
+impl ResolvedStagingInput {
+    pub(crate) fn resolved(&self) -> &BundlePlan {
+        &self.resolved
+    }
+
+    /// Replace only the materialization half of a staging profile after an
+    /// external builder has produced its binaries. Resolution-visible target
+    /// and simulator choices must remain identical.
+    pub(crate) fn set_materialization_build(&mut self, build: StagingBuild) -> Result<()> {
+        anyhow::ensure!(
+            self.build.target() == build.target()
+                && self.build.include_simulators() == build.include_simulators(),
+            "prebuilt staging profile does not match the resolved target and simulator selection"
+        );
+        self.build = build;
+        Ok(())
+    }
+}
+
+/// Resolve and compile the source documents exactly once, preserving the
+/// options and resolution-visible staging profile for later materialization.
+pub(crate) fn resolve_staging(
     project_start: &Path,
-    options: &RunOptions,
-    build: &StagingBuild,
-    check_source: bool,
-    run: RunIdentity,
+    options: RunOptions,
+    build: StagingBuild,
     ui: &dyn crate::Reporter,
-) -> Result<StagedProject> {
+) -> Result<ResolvedStagingInput> {
     crate::progress::ensure_active(ui)?;
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
@@ -101,15 +118,13 @@ pub(crate) fn refresh_staging(
     let robot = load_robot(&robot_path)?;
 
     // The driver policy is resolved from the parsed robot BEFORE resolution
-    // (#936, finding 2): it must gate resolution itself, so an excluded
-    // driver is never resolved, materialized, staged, required, inspected,
-    // or planned. It threads through both staging and plan construction from
-    // here.
-    let driver_policy = DriverPolicy::from_options(options, &driven_instances(&robot))?;
+    // (#936, finding 2): it must gate resolution itself, so an excluded driver
+    // is never resolved, materialized, staged, required, inspected, or planned.
+    let driver_policy = DriverPolicy::from_options(&options, &driven_instances(&robot))?;
 
-    // A cross `--target` resolves official packages for that target (the
-    // same per-target resolution `phoxal build --target` performs); a host
-    // pass leaves both `None` so resolution targets the host triple.
+    // A cross `--target` resolves official packages for that target (the same
+    // per-target resolution `phoxal build --target` performs); a host pass
+    // leaves both targets unset so resolution uses the host triple.
     let official_target = build.target().map(str::to_string);
     let resolved = crate::progress::run_phase(
         ui,
@@ -130,14 +145,59 @@ pub(crate) fn refresh_staging(
         },
     )?;
 
+    Ok(ResolvedStagingInput {
+        project_root: project_root.to_path_buf(),
+        resolved,
+        driver_policy,
+        options,
+        build,
+    })
+}
+
+/// Resolve a buildable source project once, then materialize and validate that
+/// exact result through [`refresh_staging_resolved`].
+pub(crate) fn refresh_staging(
+    project_start: &Path,
+    options: &RunOptions,
+    build: &StagingBuild,
+    check_source: bool,
+    run: RunIdentity,
+    ui: &dyn crate::Reporter,
+) -> Result<StagedProject> {
+    let input = resolve_staging(project_start, options.clone(), build.clone(), ui)?;
+    refresh_staging_resolved(input, check_source, run, ui)
+}
+
+/// Materialize one resolved source graph, validate the whole compiled layout
+/// through the loader, and publish only a complete candidate.
+///
+/// `run`, `start`, and every local/container build backend converge here after
+/// resolution. All materialization, source validation, flat `bin/` completion,
+/// and loader validation happens against an unpublished candidate exactly once;
+/// only then is it published as `.phoxal/bundle/` (organization#951 WS4).
+/// A failure anywhere therefore leaves the previous live bundle untouched.
+pub(crate) fn refresh_staging_resolved(
+    input: ResolvedStagingInput,
+    check_source: bool,
+    run: RunIdentity,
+    ui: &dyn crate::Reporter,
+) -> Result<StagedProject> {
+    crate::progress::ensure_active(ui)?;
+    let ResolvedStagingInput {
+        project_root,
+        resolved,
+        driver_policy,
+        options,
+        build,
+    } = input;
     // Stage into an UNPUBLISHED candidate. Every install, source build,
     // metadata read, and loader validation below runs against
     // `candidate.path()`; only the final `publish_runtime_layout` call at the
     // bottom of this function ever touches the live `.phoxal/bundle/`.
-    let candidate = crate::stage::begin_runtime_layout(project_root, &resolved)
+    let candidate = crate::stage::begin_runtime_layout(&project_root, &resolved)
         .context("failed to stage the runtime layout")?;
     crate::progress::ensure_active(ui)?;
-    let materialize_settings = build.materialize_settings(project_root, options.offline)?;
+    let materialize_settings = build.materialize_settings(&project_root, options.offline)?;
 
     // Materialize every official service, tool, and the infrastructure
     // router into the candidate `bin/` up front, via `cargo install`
@@ -157,7 +217,7 @@ pub(crate) fn refresh_staging(
     crate::progress::ensure_active(ui)?;
 
     let source_participants =
-        source_participants_from_resolved(project_root, &resolved, component_driver_crate_dir)?;
+        source_participants_from_resolved(&project_root, &resolved, component_driver_crate_dir)?;
 
     // Source/staging-time validation: build every source participant (for its
     // embedded metadata) and check the source graph before we stage and run.
@@ -171,7 +231,7 @@ pub(crate) fn refresh_staging(
     if check_source {
         run_source_check(
             candidate.path(),
-            &robot,
+            &resolved.source_manifest,
             &resolved,
             &source_participants,
             options.offline,
@@ -188,7 +248,7 @@ pub(crate) fn refresh_staging(
         &source_participants,
         &driver_policy.selection(),
         options.offline,
-        build,
+        &build,
         &materialize_settings,
         ui,
     )?;
@@ -240,8 +300,7 @@ pub(crate) fn refresh_staging(
     repoint_plan_bundle_roots(&mut plan, &candidate_path, &staged_root);
 
     Ok(StagedProject {
-        // `project_root` borrows `robot_path`, so clone rather than move it.
-        project_root: project_root.to_path_buf(),
+        project_root,
         resolved,
         source_participants,
         driver_policy,
