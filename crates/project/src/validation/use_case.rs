@@ -83,8 +83,7 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
             ..Default::default()
         },
         &project,
-    )
-    .context("failed to compile the resolved project")?;
+    )?;
     let train = resolved.train;
     let workspace = workspace_runtime_report(&robot, &project);
     for success in &workspace.successes {

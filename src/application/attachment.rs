@@ -384,7 +384,7 @@ fn accepted_reply(reply: phoxal_cli_protocol::CommandReply) -> Result<()> {
 /// connection was lost first).
 pub(crate) fn resident_failure_message(project: &Path, reason: Option<&str>) -> String {
     match reason {
-        Some(reason) => format!("resident supervisor failed: {reason}"),
+        Some(reason) => reason.to_string(),
         None => {
             let log =
                 phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project).supervisor_log();

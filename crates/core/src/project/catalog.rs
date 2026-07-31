@@ -26,13 +26,16 @@ use anyhow::{Context, Result, ensure};
 
 use crate::project::train::{LockedTrain, TrainSource};
 
-/// The oldest locked framework train this catalog snapshot is known to
-/// faithfully represent - the exact `phoxal` version phoxal-cli itself is
-/// pinned to (see the workspace `Cargo.toml`). Bump this alongside any
-/// change to [`NATIVE`]/[`WEBOTS`] (an official package added, removed, or
-/// renamed) and alongside every `phoxal` dependency bump, so it always
-/// names the true floor rather than lagging it.
-pub const CATALOG_FLOOR_TRAIN: &str = "0.42.0";
+/// The oldest locked framework train this catalog snapshot can represent.
+///
+/// The floor is definitionally the framework train this phoxal-cli release is
+/// built against. `crates/core/build.rs` reads every split `phoxal-*` library
+/// pin from the workspace manifest, requires exact identical versions, and
+/// emits `PHOXAL_FRAMEWORK_TRAIN`. The whole framework shares one workspace
+/// SemVer, so those pins name the same train as the `phoxal` facade a robot
+/// project locks while keeping that authoring facade out of the CLI dependency
+/// graph. Drift is therefore impossible rather than policed by a second literal.
+pub const CATALOG_FLOOR_TRAIN: &str = env!("PHOXAL_FRAMEWORK_TRAIN");
 
 /// Reject a locked framework train this catalog cannot faithfully represent:
 /// anything older than [`CATALOG_FLOOR_TRAIN`]. Every resolution entry point
@@ -59,11 +62,8 @@ pub fn ensure_train_supported(train: &LockedTrain) -> Result<()> {
         .expect("CATALOG_FLOOR_TRAIN is a valid semantic version constant");
     ensure!(
         locked >= floor,
-        "the locked framework train {version} is older than this phoxal-cli release's official \
-         catalog supports (floor: {CATALOG_FLOOR_TRAIN}); resolving today's official package \
-         set against it would not faithfully represent what train {version} actually shipped. \
-         Upgrade the project's locked framework train to {CATALOG_FLOOR_TRAIN} or newer, or \
-         use a phoxal-cli release published for train {version}."
+        "framework {version} is too old for this phoxal-cli (needs {CATALOG_FLOOR_TRAIN}+)\n\
+         fix: run `cargo update -p phoxal`, then run again"
     );
     Ok(())
 }
@@ -258,12 +258,50 @@ mod tests {
     }
 
     #[test]
+    fn catalog_floor_is_the_pinned_framework_version() {
+        let manifest = toml::from_str::<toml::Value>(include_str!("../../../../Cargo.toml"))
+            .expect("workspace Cargo.toml parses");
+        let dependencies = manifest["workspace"]["dependencies"]
+            .as_table()
+            .expect("workspace dependencies are a table");
+        let framework_libraries: Vec<_> = dependencies
+            .iter()
+            .filter(|(package, _)| {
+                package.starts_with("phoxal-") && !package.starts_with("phoxal-cli-")
+            })
+            .collect();
+        assert!(
+            !framework_libraries.is_empty(),
+            "workspace manifest pins at least one split framework library"
+        );
+        let expected = format!("={CATALOG_FLOOR_TRAIN}");
+        for (package, dependency) in framework_libraries {
+            let requirement = dependency.as_str().or_else(|| {
+                dependency
+                    .as_table()
+                    .and_then(|table| table.get("version"))
+                    .and_then(toml::Value::as_str)
+            });
+            assert_eq!(
+                requirement,
+                Some(expected.as_str()),
+                "{package} must share the catalog floor train"
+            );
+        }
+    }
+
+    #[test]
     fn ensure_train_supported_rejects_a_train_older_than_the_floor() {
         let error = ensure_train_supported(&registry_train("0.23.0"))
             .expect_err("a train older than the floor must be rejected");
         let message = error.to_string();
-        assert!(message.contains("0.23.0"), "{message}");
-        assert!(message.contains(CATALOG_FLOOR_TRAIN), "{message}");
+        assert_eq!(
+            message,
+            format!(
+                "framework 0.23.0 is too old for this phoxal-cli (needs {CATALOG_FLOOR_TRAIN}+)\n\
+                 fix: run `cargo update -p phoxal`, then run again"
+            )
+        );
     }
 
     #[test]
