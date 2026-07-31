@@ -9,6 +9,7 @@ use std::path::Path;
 pub(crate) struct SimulateOptions {
     pub world: String,
     pub offline: bool,
+    pub train: String,
 }
 
 pub(crate) async fn run_command(
@@ -18,7 +19,7 @@ pub(crate) async fn run_command(
     detach: bool,
 ) -> Result<()> {
     let target = crate::application::attachment::resolve_target(project, app.project.root())?;
-    phoxal_cli_core::project::train::resolve_locked_train(&target.project, app.offline)
+    let train = phoxal_cli_core::project::train::resolve_locked_train(&target.project, app.offline)
         .with_context(|| {
             format!(
                 "simulation requires a buildable source project; {} is not a source project",
@@ -33,6 +34,7 @@ pub(crate) async fn run_command(
     let options = SimulateOptions {
         world,
         offline: app.offline,
+        train: train.version,
     };
     let resident_in_process = crate::application::run::should_run_resident_in_process(
         app.output.interactive,

@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -453,7 +454,6 @@ async fn resident_supervision_inner(
         } else {
             None
         };
-    let console_reports_errors = console_task.is_some();
     let token = tokio_util::sync::CancellationToken::new();
     let (action_tx, action_rx) = mpsc::channel(16);
     let socket = phoxal_cli_supervisor::resident::ResidentSocket::bind(
@@ -507,13 +507,9 @@ async fn resident_supervision_inner(
                 })
             }
             ResidentMode::Webots(options) => {
-                let train = phoxal_cli_core::project::train::resolve_locked_train(
-                    &project_root,
-                    options.offline,
-                )?;
                 prepare_board.step_detail(
                     phoxal_cli_core::runtime::StartupStepKind::Project,
-                    format!("robot.yaml · framework {}", train.version),
+                    format!("robot.yaml · framework {}", options.train),
                 );
                 prepare_board.step_done(phoxal_cli_core::runtime::StartupStepKind::Project);
                 prepare_board
@@ -599,7 +595,7 @@ async fn resident_supervision_inner(
     let Some(prepared_result) = prepared_result else {
         finish_cancelled_preparation(&board, &mut preparation).await;
         socket.close().await;
-        join_board_console(&mut console_task).await;
+        let _ = join_board_console(&mut console_task).await;
         return Ok(());
     };
     let prepared = match prepared_result {
@@ -608,14 +604,14 @@ async fn resident_supervision_inner(
             if token.is_cancelled() {
                 board.set_lifecycle(phoxal_cli_core::runtime::ProjectLifecycle::Stopped);
                 socket.close().await;
-                join_board_console(&mut console_task).await;
+                let _ = join_board_console(&mut console_task).await;
                 return Ok(());
             }
             board.fail_active_step(format!("{error:#}"));
             board.fail(&format!("{error:#}"));
             socket.close().await;
-            join_board_console(&mut console_task).await;
-            if console_reports_errors {
+            let console_reported_failure = join_board_console(&mut console_task).await;
+            if console_reported_failure {
                 return Err(crate::cli::ReportedExit(1).into());
             }
             return Err(error);
@@ -653,22 +649,25 @@ async fn resident_supervision_inner(
     }
     drop(background_tasks);
     socket.close().await;
-    join_board_console(&mut console_task).await;
+    let console_reported_failure = join_board_console(&mut console_task).await;
     match outcome {
-        Err(_) if console_reports_errors => Err(crate::cli::ReportedExit(1).into()),
+        Err(_) if console_reported_failure => Err(crate::cli::ReportedExit(1).into()),
         outcome => outcome,
     }
 }
 
-fn spawn_board_console(
-    app: &AppContext,
-    project: &Path,
-    board: SupervisorState,
-) -> tokio::task::JoinHandle<()> {
+struct BoardConsole {
+    task: tokio::task::JoinHandle<()>,
+    reported_failure: Arc<AtomicBool>,
+}
+
+fn spawn_board_console(app: &AppContext, project: &Path, board: SupervisorState) -> BoardConsole {
     let mut presenter =
         crate::cli::output::welcome::presenter(false, app.output.theme, app.ui, project);
     let project = project.to_path_buf();
-    tokio::spawn(async move {
+    let reported_failure = Arc::new(AtomicBool::new(false));
+    let task_reported_failure = Arc::clone(&reported_failure);
+    let task = tokio::spawn(async move {
         let mut snapshots = board.subscribe();
         loop {
             let snapshot = snapshots.borrow_and_update().clone();
@@ -683,6 +682,7 @@ fn spawn_board_console(
                         .supervisor_log();
                     let reason = crate::application::readiness::failure_reason(&snapshot);
                     presenter.failed(reason.as_deref(), &log);
+                    task_reported_failure.store(true, Ordering::Release);
                     return;
                 }
                 Readiness::Pending
@@ -697,18 +697,25 @@ fn spawn_board_console(
                 return;
             }
         }
-    })
+    });
+    BoardConsole {
+        task,
+        reported_failure,
+    }
 }
 
-async fn join_board_console(task: &mut Option<tokio::task::JoinHandle<()>>) {
-    if let Some(mut task) = task.take()
-        && tokio::time::timeout(Duration::from_secs(1), &mut task)
-            .await
-            .is_err()
+async fn join_board_console(console: &mut Option<BoardConsole>) -> bool {
+    let Some(mut console) = console.take() else {
+        return false;
+    };
+    if tokio::time::timeout(Duration::from_secs(1), &mut console.task)
+        .await
+        .is_err()
     {
-        task.abort();
-        let _ = task.await;
+        console.task.abort();
+        let _ = console.task.await;
     }
+    console.reported_failure.load(Ordering::Acquire)
 }
 
 async fn finish_cancelled_preparation<T>(
@@ -1047,7 +1054,9 @@ pub(crate) async fn wait_for_startup(
             return Err(crate::cli::ReportedExit(1).into());
         }
         StartupWait::Cancelled => {
-            presenter.cancelled();
+            if !mode.leaves_resident_on_cancel() {
+                presenter.cancelled();
+            }
             drop(presenter);
             return cancel_startup_wait(app, target, child, mode).await;
         }
@@ -1355,7 +1364,7 @@ mod preparation_cancellation_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::AbortTasks;
+    use super::{AbortTasks, BoardConsole, join_board_console};
     use anyhow::Result;
     use phoxal_cli_core::project::launch_plan::{LaunchMode, LaunchPlan};
     use phoxal_cli_core::runtime::ParticipantSpec;
@@ -1363,6 +1372,8 @@ mod tests {
         ParticipantKind, ProcessKey, ReadinessPolicy, RuntimeFailurePolicy, StartupRequirement,
     };
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     #[test]
@@ -1419,6 +1430,20 @@ mod tests {
         drop(tasks);
         tokio::task::yield_now().await;
         assert!(abort.is_finished());
+    }
+
+    #[tokio::test]
+    async fn console_error_suppression_requires_observed_report_evidence() {
+        for expected in [false, true] {
+            let reported_failure = Arc::new(AtomicBool::new(expected));
+            let mut console = Some(BoardConsole {
+                task: tokio::spawn(async {}),
+                reported_failure: Arc::clone(&reported_failure),
+            });
+            assert_eq!(join_board_console(&mut console).await, expected);
+            assert!(console.is_none());
+            assert_eq!(reported_failure.load(Ordering::Acquire), expected);
+        }
     }
 }
 
