@@ -905,7 +905,10 @@ pub(crate) async fn wait_for_required_readiness(
                 // over the per-process failure list, which is empty in that
                 // case.
                 if let Some(reason) = &snapshot.failure {
-                    bail!("resident startup failed: {reason}")
+                    bail!(crate::application::attachment::resident_failure_message(
+                        project,
+                        Some(reason)
+                    ))
                 }
                 if failures.is_empty() {
                     bail!(
@@ -1051,10 +1054,7 @@ mod resident_connect_failure_tests {
             &snapshot,
             anyhow::anyhow!("connection refused"),
         );
-        assert_eq!(
-            error.to_string(),
-            "resident supervisor failed: catalog train floor not supported"
-        );
+        assert_eq!(error.to_string(), "catalog train floor not supported");
     }
 
     #[test]
@@ -1324,9 +1324,15 @@ mod installation {
                                 // to blame) carries its own reason on the
                                 // snapshot and must win over an empty
                                 // per-process failure list, which otherwise
-                                // renders as a dangling, cause-free colon.
+                                // renders as a dangling, cause-free colon. A
+                                // relayed reason already describes its cause,
+                                // while the reason-less branches below must
+                                // frame the failure themselves.
                                 if let Some(reason) = &snapshot.failure {
-                                    bail!("installed runtime failed readiness: {reason}")
+                                    bail!(crate::application::attachment::resident_failure_message(
+                                        Path::new(phoxal_cli_project::ACTIVE_RUNTIME_ROOT),
+                                        Some(reason)
+                                    ))
                                 }
                                 if failures.is_empty() {
                                     let log =
