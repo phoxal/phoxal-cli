@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.29.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.29.1) - 2026-07-31
+
+
+### Fixed
+
+- *(build)* Compile container source once ([#259](https://github.com/phoxal/phoxal-cli/pull/259))
+
+
 ## [0.29.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.29.0) - 2026-07-31
 
 
