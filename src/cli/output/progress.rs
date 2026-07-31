@@ -87,12 +87,23 @@ impl phoxal_cli_project::Reporter for BoardReporter {
             phoxal_cli_project::PreparationEvent::PhaseStarted { id, label } => {
                 let id = id.to_string();
                 if id == "validate" {
-                    self.board
-                        .step_detail(StartupStepKind::Project, "resolving robot.yaml");
+                    let project_done =
+                        self.board
+                            .supervisor_snapshot()
+                            .startup
+                            .steps
+                            .iter()
+                            .any(|step| {
+                                step.kind == StartupStepKind::Project
+                                    && step.state
+                                        == phoxal_cli_core::runtime::StartupStepState::Done
+                            });
+                    if !project_done {
+                        self.board
+                            .step_detail(StartupStepKind::Project, "resolving robot.yaml");
+                    }
                 }
-                if id != "validate"
-                    && let Some(detail) = Self::preparation_detail(&id, label)
-                {
+                if let Some(detail) = Self::preparation_detail(&id, label) {
                     self.board
                         .step_detail(StartupStepKind::PrepareRuntime, detail);
                 }
@@ -264,5 +275,33 @@ mod tests {
             Some("robot.yaml · framework 0.41.2")
         );
         assert_eq!(prepare(&snapshot).state, StartupStepState::Failed);
+    }
+
+    #[test]
+    fn staged_layout_carries_opening_detail_into_active_prepare_step() {
+        let board = SupervisorState::new();
+        board.plan_startup_steps();
+        let reporter = BoardReporter::new(
+            super::Ui::new(false, false),
+            tokio_util::sync::CancellationToken::new(),
+            board.clone(),
+        );
+        reporter.report(PreparationEvent::PhaseStarted {
+            id: PhaseId::new("validate"),
+            label: "Opening staged layout".to_string(),
+        });
+        assert_eq!(
+            prepare(&board.supervisor_snapshot()).detail.as_deref(),
+            Some("opening staged layout")
+        );
+        reporter.report(PreparationEvent::ProjectResolved {
+            train: "staged".to_string(),
+        });
+        let snapshot = board.supervisor_snapshot();
+        assert_eq!(prepare(&snapshot).state, StartupStepState::Active);
+        assert_eq!(
+            prepare(&snapshot).detail.as_deref(),
+            Some("opening staged layout")
+        );
     }
 }
