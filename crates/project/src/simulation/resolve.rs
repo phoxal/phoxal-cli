@@ -5,7 +5,7 @@ use super::{
     official_simulator_participants, remap_simulator_participant_ids, sim_checked_participants,
     sim_source_participants,
 };
-use crate::resolve::project::resolve;
+use crate::resolve::project::resolve_with_train;
 use crate::validation::CheckGraphContext;
 use crate::validation::build_participant_report_from_source;
 use crate::validation::check_artifact_refs_from_resolved;
@@ -49,7 +49,13 @@ pub(crate) fn resolve_project(
         reporter,
         crate::PhaseId::new("validate"),
         "Validating robot.yaml",
-        || resolve(&robot, &project_root, ResolveOptions::default()),
+        || {
+            resolve_with_train(&robot, &project_root, ResolveOptions::default(), |train| {
+                reporter.report(crate::PreparationEvent::ProjectResolved {
+                    train: train.to_string(),
+                });
+            })
+        },
     )?;
     Ok(ResolvedSimulation {
         project_root,

@@ -29,6 +29,16 @@ pub(crate) async fn run(
     shutdown_on_terminate: bool,
 ) -> Result<AttachmentOutcome> {
     let initial = feed.current();
+    phoxal_cli_client::validate_requested_entry(&target.runtime_target(), &initial.entry)?;
+    match initial.lifecycle {
+        ProjectLifecycle::Failed => {
+            return Ok(AttachmentOutcome::ResidentFailed {
+                reason: initial.failure.clone(),
+            });
+        }
+        ProjectLifecycle::Stopped => return Ok(AttachmentOutcome::ResidentStopped),
+        _ => {}
+    }
     let attachment =
         phoxal_cli_client::attach_with_supervisor(target.runtime_target(), feed, commands, initial)
             .await?;
@@ -61,6 +71,10 @@ async fn drive(
     let (diagnostic_tx, mut diagnostic_rx) = mpsc::channel(DIAGNOSTIC_CAPACITY);
     crate::cli::output::diagnostics::install(diagnostic_tx);
     let _diagnostics = DiagnosticGuard;
+    let mut initial_inputs = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        initial_inputs.push(SessionInput::Client(event));
+    }
     let options = UiOptions {
         title: terminal_title(project),
         theme: app.output.theme,
@@ -72,6 +86,7 @@ async fn drive(
             commands: command_tx,
         },
         options,
+        initial_inputs,
     );
     tokio::pin!(ui);
     let mut interrupts = signal(SignalKind::interrupt())?;

@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::limits::{
     MAX_ARTIFACT_ID_BYTES, MAX_PROCESS_FAILURE_DETAIL_BYTES, MAX_PROCESS_STDERR_TAIL_BYTES,
-    MAX_SNAPSHOT_TEXT_BYTES, MAX_STARTUP_PHASES, MAX_SUPERVISOR_FAILURE_REASON_BYTES,
-    validate_snapshot_capacity,
+    MAX_SNAPSHOT_TEXT_BYTES, MAX_STARTUP_STEPS, MAX_STEP_DETAIL_BYTES,
+    MAX_SUPERVISOR_FAILURE_REASON_BYTES, validate_snapshot_capacity,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,10 +74,7 @@ impl Default for SupervisorSnapshotV0 {
             router: String::new(),
             plan_revision: 0,
             graph_generation: 0,
-            startup: StartupStatus {
-                completed_phases: Vec::new(),
-                active_phase: None,
-            },
+            startup: StartupStatus::default(),
             processes: BTreeMap::new(),
             failure: None,
         }
@@ -118,21 +115,18 @@ pub fn validate_snapshot_bounds(snapshot: &SupervisorSnapshotV0) -> anyhow::Resu
         }
     }
     anyhow::ensure!(
-        snapshot.startup.completed_phases.len() <= MAX_STARTUP_PHASES,
-        "supervisor snapshot has {} completed startup phases; limit is {MAX_STARTUP_PHASES}",
-        snapshot.startup.completed_phases.len()
+        snapshot.startup.steps.len() <= MAX_STARTUP_STEPS,
+        "supervisor snapshot has {} startup steps; limit is {MAX_STARTUP_STEPS}",
+        snapshot.startup.steps.len()
     );
-    for phase in snapshot
-        .startup
-        .completed_phases
-        .iter()
-        .chain(snapshot.startup.active_phase.iter())
-    {
-        anyhow::ensure!(
-            phase.len() <= MAX_SNAPSHOT_TEXT_BYTES,
-            "supervisor startup phase is {} bytes; limit is {MAX_SNAPSHOT_TEXT_BYTES}",
-            phase.len()
-        );
+    for step in &snapshot.startup.steps {
+        if let Some(detail) = &step.detail {
+            anyhow::ensure!(
+                detail.len() <= MAX_STEP_DETAIL_BYTES,
+                "supervisor startup step detail is {} bytes; limit is {MAX_STEP_DETAIL_BYTES}",
+                detail.len()
+            );
+        }
     }
     for (key, entry) in &snapshot.processes {
         validate_process_key(key)?;

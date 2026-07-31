@@ -395,7 +395,7 @@ mod tests {
         write_frame(
             &mut client,
             &HandshakeRequest {
-                protocol_version: 0,
+                protocol_version: 1,
                 role: ConnectionRole::Commands,
                 resume_command_session: None,
             },
@@ -420,7 +420,7 @@ mod tests {
                 .unwrap()
                 .unwrap_err()
                 .to_string()
-                .contains("unsupported supervisor protocol version 0")
+                .contains("unsupported supervisor protocol version 1")
         );
         let sessions = state
             .sessions

@@ -402,10 +402,7 @@ mod tests {
                 router: "tcp/127.0.0.1:7447".into(),
                 plan_revision: 1,
                 graph_generation: 1,
-                startup: StartupStatus {
-                    completed_phases: Vec::new(),
-                    active_phase: None,
-                },
+                startup: StartupStatus::default(),
                 failure: None,
             }),
         )));

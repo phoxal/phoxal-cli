@@ -28,9 +28,15 @@ mod tests {
         BoundedString, DesiredProcessState, ParticipantKind, ProcessDescriptor, ProcessEntry,
         ProcessFailure, ProcessFailureKind, ProcessKey, ProcessState, ProcessStatus,
         ProjectLifecycle, RobotKey, SimulationSessionInfo, StartupRequirement, StartupStatus,
+        StartupStep, StartupStepKind, StartupStepState,
     };
 
     use super::*;
+
+    #[test]
+    fn supervisor_handshake_remains_protocol_zero() {
+        assert_eq!(SUPERVISOR_PROTOCOL_VERSION, 0);
+    }
 
     fn sample_snapshot() -> SupervisorSnapshot {
         SupervisorSnapshot::V0(SupervisorSnapshotV0 {
@@ -45,9 +51,13 @@ mod tests {
             router: "unixsock-stream//tmp/router.sock".to_string(),
             plan_revision: 1,
             graph_generation: 0,
-            startup: phoxal_cli_core::runtime::StartupStatus {
-                completed_phases: Vec::new(),
-                active_phase: None,
+            startup: StartupStatus {
+                steps: vec![StartupStep {
+                    kind: StartupStepKind::Project,
+                    state: StartupStepState::Active,
+                    detail: Some("robot.yaml · framework 0.42.0".to_string()),
+                    elapsed_ms: None,
+                }],
             },
             processes: std::collections::BTreeMap::new(),
             failure: None,
@@ -73,10 +83,12 @@ mod tests {
                 "router": "unixsock-stream//tmp/router.sock",
                 "plan_revision": 1,
                 "graph_generation": 0,
-                "startup": {
-                    "completed_phases": [],
-                    "active_phase": null
-                },
+                "startup": {"steps": [{
+                    "kind": "project",
+                    "state": "active",
+                    "detail": "robot.yaml · framework 0.42.0",
+                    "elapsed_ms": null
+                }]},
                 "processes": {},
                 "failure": null
             })
@@ -123,7 +135,7 @@ mod tests {
     #[test]
     fn pure_codec_enforces_payload_and_frame_bounds() {
         let reply = HandshakeReply {
-            protocol_version: 1,
+            protocol_version: 0,
             supervisor_generation: 9,
             command_session: None,
         };
@@ -216,10 +228,18 @@ mod tests {
             plan_revision: u64::MAX,
             graph_generation: u64::MAX,
             startup: StartupStatus {
-                completed_phases: (0..limits::MAX_STARTUP_PHASES)
-                    .map(|_| "s".repeat(limits::MAX_SNAPSHOT_TEXT_BYTES))
+                steps: (0..limits::MAX_STARTUP_STEPS)
+                    .map(|index| StartupStep {
+                        kind: if index % 2 == 0 {
+                            StartupStepKind::Project
+                        } else {
+                            StartupStepKind::PrepareRuntime
+                        },
+                        state: StartupStepState::Failed,
+                        detail: Some("s".repeat(limits::MAX_STEP_DETAIL_BYTES)),
+                        elapsed_ms: Some(u64::MAX),
+                    })
                     .collect(),
-                active_phase: Some("s".repeat(limits::MAX_SNAPSHOT_TEXT_BYTES)),
             },
             processes,
             failure: Some("f".repeat(limits::MAX_SUPERVISOR_FAILURE_REASON_BYTES)),

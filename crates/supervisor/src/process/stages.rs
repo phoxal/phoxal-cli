@@ -3,7 +3,9 @@
 use super::{ParticipantSpec, RunningParticipant, SupervisorOptions, SupervisorState};
 use anyhow::Result;
 use anyhow::bail;
-use phoxal_cli_core::runtime::{ProcessKey, ProcessState, ProjectLifecycle, StartupRequirement};
+use phoxal_cli_core::runtime::{
+    ProcessKey, ProcessState, ProjectLifecycle, StartupRequirement, StartupStepKind,
+};
 use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
@@ -25,9 +27,19 @@ pub fn stages_for_run(
         }
     }
     vec![
-        SupervisionStage::new("starting project infrastructure", infrastructure, timeout)
-            .with_extra_ready_ids([ProcessKey::project("infrastructure-router")]),
-        SupervisionStage::new("starting robot graph", graph, timeout),
+        SupervisionStage::new(
+            "starting project infrastructure",
+            StartupStepKind::Infrastructure,
+            infrastructure,
+            timeout,
+        )
+        .with_extra_ready_ids([ProcessKey::project("infrastructure-router")]),
+        SupervisionStage::new(
+            "starting robot graph",
+            StartupStepKind::Graph,
+            graph,
+            timeout,
+        ),
     ]
 }
 
@@ -48,20 +60,30 @@ pub fn stages_for_simulation(
         }
     }
     vec![
-        SupervisionStage::new("starting project infrastructure", infrastructure, timeout)
-            .with_extra_ready_ids([ProcessKey::project("infrastructure-router")]),
-        SupervisionStage::new("starting robot graph", graph, timeout),
+        SupervisionStage::new(
+            "starting project infrastructure",
+            StartupStepKind::Infrastructure,
+            infrastructure,
+            timeout,
+        )
+        .with_extra_ready_ids([ProcessKey::project("infrastructure-router")]),
+        SupervisionStage::new(
+            "starting robot graph",
+            StartupStepKind::Graph,
+            graph,
+            timeout,
+        ),
     ]
 }
 
 /// A startup barrier containing process specs and board ids that must become
 /// ready before the next stage begins. Simulation clock is not a stage.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SupervisionStage {
-    /// Human-readable name for this stage, used in the stalled-stage error
-    /// message and as the `PhaseId` stored in the authoritative startup
-    /// snapshot while this stage runs.
+    /// Human-readable name for this stage, used in stalled-stage errors and
+    /// process spawn diagnostics. The typed startup step stays separate.
     pub label: String,
+    pub step: StartupStepKind,
     pub specs: Vec<ParticipantSpec>,
     /// Board ids that must be observed `Ready` before the next stage spawns.
     /// Defaults to every spawned spec's own id that is a bus participant
@@ -78,6 +100,7 @@ impl SupervisionStage {
     #[must_use]
     pub fn new(
         label: impl Into<String>,
+        step: StartupStepKind,
         specs: Vec<ParticipantSpec>,
         timeout: crate::WaitBudget,
     ) -> Self {
@@ -98,6 +121,7 @@ impl SupervisionStage {
             .collect();
         Self {
             label: label.into(),
+            step,
             specs,
             ready_ids,
             failure_ids,
@@ -145,6 +169,7 @@ pub(crate) async fn spawn_participants_in_stage(
 /// and when it started.
 pub(crate) struct PendingStage {
     pub(crate) label: String,
+    pub(crate) step: StartupStepKind,
     pub(crate) ready_ids: Vec<ProcessKey>,
     pub(crate) failure_ids: Vec<ProcessKey>,
     pub(crate) optional_ids: Vec<ProcessKey>,
@@ -162,22 +187,26 @@ pub(crate) async fn spawn_stage(
 ) -> Option<PendingStage> {
     let SupervisionStage {
         label,
+        step,
         specs,
         ready_ids,
         failure_ids,
         optional_ids,
         timeout: stage_timeout,
     } = stage;
+    board.step_active(step);
     if specs.is_empty() && ready_ids.is_empty() {
+        board.step_done(step);
         return None;
     }
-    board.begin_phase(&label);
     spawn_participants_in_stage(running, board, &label, specs).await;
     if ready_ids.is_empty() {
+        board.step_done(step);
         return None;
     }
     Some(PendingStage {
         label,
+        step,
         ready_ids,
         failure_ids,
         optional_ids,
@@ -288,5 +317,65 @@ pub(crate) async fn maybe_publish_startup_outcome(
         } else {
             ProjectLifecycle::Ready
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phoxal_cli_core::runtime::{
+        ParticipantKind, ReadinessPolicy, RuntimeFailurePolicy, StartupRequirement,
+        WEBOTS_PROCESS_ID,
+    };
+    use std::path::PathBuf;
+
+    fn spec(id: &str, kind: ParticipantKind) -> ParticipantSpec {
+        ParticipantSpec {
+            key: ProcessKey::project(id),
+            id: id.to_string(),
+            kind,
+            executable: PathBuf::from(id),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            shutdown_grace: Duration::from_secs(1),
+            process_group: false,
+            note: None,
+            bus_participant: true,
+            readiness: ReadinessPolicy::ProcessSpawned,
+            startup_requirement: StartupRequirement::Required,
+            runtime_failure: RuntimeFailurePolicy::StopProject,
+            restart_policy: Default::default(),
+        }
+    }
+
+    #[test]
+    fn run_assigns_tools_to_infrastructure_and_robot_processes_to_graph() {
+        let stages = stages_for_run(
+            vec![
+                spec("tool", ParticipantKind::Tool),
+                spec("service", ParticipantKind::Service),
+            ],
+            crate::WaitBudget::Unbounded,
+        );
+        assert_eq!(stages[0].step, StartupStepKind::Infrastructure);
+        assert_eq!(stages[0].specs[0].id, "tool");
+        assert_eq!(stages[1].step, StartupStepKind::Graph);
+        assert_eq!(stages[1].specs[0].id, "service");
+    }
+
+    #[test]
+    fn simulation_assigns_webots_to_infrastructure_and_robot_to_graph() {
+        let stages = stages_for_simulation(
+            vec![
+                spec(WEBOTS_PROCESS_ID, ParticipantKind::Simulator),
+                spec("service", ParticipantKind::Service),
+            ],
+            crate::WaitBudget::Unbounded,
+        );
+        assert_eq!(stages[0].step, StartupStepKind::Infrastructure);
+        assert_eq!(stages[0].specs[0].id, WEBOTS_PROCESS_ID);
+        assert_eq!(stages[1].step, StartupStepKind::Graph);
+        assert_eq!(stages[1].specs[0].id, "service");
     }
 }

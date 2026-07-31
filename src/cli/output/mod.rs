@@ -12,9 +12,11 @@ use std::time::Duration;
 pub use phoxal_cli_supervisor::WaitBudget;
 use phoxal_cli_ui::Theme;
 
+pub(crate) mod brand;
 pub mod diagnostics;
 pub(crate) mod plain;
 pub(crate) mod progress;
+pub(crate) mod welcome;
 
 pub use diagnostics::SessionAwareWriter;
 pub use plain::Ui;
@@ -80,11 +82,21 @@ mod tests {
     use std::time::Instant;
 
     #[test]
-    fn compute_tracks_the_terminal() {
-        let ctx = OutputContext::compute(true);
-        assert!(ctx.interactive);
-
+    fn presentation_mode_depends_only_on_stderr_terminal_state() {
+        // stdout is intentionally absent from this API: redirecting it cannot
+        // change the mode selected from stderr.
+        assert!(OutputContext::compute(true).interactive);
         assert!(!OutputContext::compute(false).interactive);
+    }
+
+    #[test]
+    fn welcome_and_dashboard_are_stderr_only() {
+        let welcome = include_str!("welcome.rs");
+        let dashboard = include_str!("../../../crates/ui/src/app/session.rs");
+        assert!(welcome.contains("Term::stderr()"));
+        assert!(dashboard.contains("CrosstermBackend::new(io::stderr())"));
+        assert!(!welcome.contains("stdout"));
+        assert!(!dashboard.contains("stdout"));
     }
 
     #[test]

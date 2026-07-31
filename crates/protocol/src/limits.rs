@@ -20,7 +20,8 @@ pub const MAX_HANDSHAKE_FRAME_BYTES: usize = 4 * 1024;
 pub const MAX_COMMAND_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_SNAPSHOT_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_RECENT_COMMAND_REPLIES: usize = 128;
-pub const MAX_STARTUP_PHASES: usize = 64;
+pub const MAX_STARTUP_STEPS: usize = 8;
+pub const MAX_STEP_DETAIL_BYTES: usize = 256;
 
 /// Conservative encoded upper bound for one maximum-size process entry.
 ///
@@ -34,8 +35,9 @@ pub const MAX_ENCODED_PROCESS_BYTES: usize = 6
         + 5 * MAX_SNAPSHOT_TEXT_BYTES)
     + 8 * 1024;
 pub const MAX_ENCODED_SNAPSHOT_FIXED_BYTES: usize = 6
-    * ((10 + MAX_STARTUP_PHASES + 1) * MAX_SNAPSHOT_TEXT_BYTES
-        + MAX_SUPERVISOR_FAILURE_REASON_BYTES)
+    * (10 * MAX_SNAPSHOT_TEXT_BYTES
+        + MAX_SUPERVISOR_FAILURE_REASON_BYTES
+        + MAX_STARTUP_STEPS * (MAX_STEP_DETAIL_BYTES + 64))
     + 64 * 1024;
 
 #[must_use]

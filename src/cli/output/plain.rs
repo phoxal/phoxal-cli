@@ -29,6 +29,7 @@ impl phoxal_cli_project::Reporter for Ui {
             } => {
                 crate::cli::output::diagnostics::phase_finished(id.to_string(), outcome, elapsed);
             }
+            phoxal_cli_project::PreparationEvent::ProjectResolved { .. } => {}
         }
     }
 }

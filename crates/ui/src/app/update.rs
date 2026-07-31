@@ -1828,10 +1828,7 @@ mod tests {
             router: "unixsock-stream/test".to_string(),
             plan_revision: 1,
             graph_generation: 1,
-            startup: StartupStatus {
-                completed_phases: Vec::new(),
-                active_phase: None,
-            },
+            startup: StartupStatus::default(),
             failure: failure.map(str::to_string),
         }
     }

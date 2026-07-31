@@ -53,31 +53,16 @@ pub(crate) async fn run_command(
             app.offline,
         )
         .await?;
-        return crate::application::run::wait_for_required_readiness(
-            &target.project,
+        return crate::application::run::wait_for_startup(
+            app,
+            &target,
             &feed,
             &mut launched.child,
+            crate::application::run::StartupWaitMode::Detached,
         )
         .await;
     }
-    let (mut launched, feed, commands) =
-        crate::application::run::connect_to_detached_resident(&target.project, app.offline).await?;
-    let result = crate::application::attachment::run(app, &target, feed, commands, true).await;
-    match result? {
-        phoxal_cli_ui::AttachmentOutcome::ResidentFailed { reason } => {
-            let _status = tokio::task::spawn_blocking(move || launched.child.wait()).await??;
-            anyhow::bail!(crate::application::attachment::resident_failure_message(
-                &target.project,
-                reason.as_deref()
-            ))
-        }
-        phoxal_cli_ui::AttachmentOutcome::ResidentStopped => {
-            let status = tokio::task::spawn_blocking(move || launched.child.wait()).await??;
-            anyhow::ensure!(status.success(), "resident supervisor exited with {status}");
-            Ok(())
-        }
-        phoxal_cli_ui::AttachmentOutcome::Detached => Ok(()),
-    }
+    crate::application::run::launch_foreground_client(app, target).await
 }
 
 mod setup {
@@ -144,12 +129,31 @@ mod setup {
             }
         }
         let connect = prepared.router.endpoint.clone();
-        let router = phoxal_cli_supervisor::start_infrastructure_router(
+        board.step_active(phoxal_cli_core::runtime::StartupStepKind::Infrastructure);
+        board.step_detail(
+            phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
+            "starting router",
+        );
+        let router = match phoxal_cli_supervisor::start_infrastructure_router(
             prepared.router.binary.clone(),
             prepared.router.config.clone(),
             prepared.router.endpoint.clone(),
         )
-        .await?;
+        .await
+        {
+            Ok(router) => router,
+            Err(error) => {
+                board.step_failed(
+                    phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
+                    format!("{error:#}"),
+                );
+                return Err(error);
+            }
+        };
+        board.step_detail(
+            phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
+            format!("router {connect}"),
+        );
         board.set_router_endpoint(connect.clone());
         board.set_state(
             phoxal_cli_core::runtime::ProcessKey::project("infrastructure-router"),

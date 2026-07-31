@@ -28,12 +28,23 @@ use phoxal_cli_core::project::resolver::{
 /// on-disk directory via the generated `.phoxal/resolve/Cargo.toml` and
 /// `cargo metadata` here, so the manifest compiler receives the exact component
 /// source root without learning Cargo or registry policy.
+#[cfg(test)]
 pub fn resolve(robot: &Robot, project_root: &Path, options: ResolveOptions) -> Result<BundlePlan> {
+    resolve_with_train(robot, project_root, options, |_| {})
+}
+
+pub(crate) fn resolve_with_train(
+    robot: &Robot,
+    project_root: &Path,
+    options: ResolveOptions,
+    resolved_train: impl FnOnce(&str),
+) -> Result<BundlePlan> {
     // Declaration invariants are the very first check (#950): an invalid
     // workspace lock must not mask a dual/official declaration error.
     phoxal_cli_core::project::layout::validate_runtime_declarations(robot)?;
     let project =
         phoxal_cli_core::project::train::resolve_locked_project(project_root, options.offline)?;
+    resolved_train(&project.train.version);
     resolve_with_locked_project(robot, project_root, options, &project)
 }
 

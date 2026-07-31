@@ -12,7 +12,7 @@
 use super::{DriverPolicy, PreparedRun, RunOptions};
 use crate::build::profile::StagingBuild;
 use crate::resolve::component_driver::component_driver_crate_dir;
-use crate::resolve::project::resolve;
+use crate::resolve::project::resolve_with_train;
 use crate::run::participants::{
     build_layout_specs, source_cwd, source_dirs_by_participant, stage_complete_bin_store,
 };
@@ -131,7 +131,7 @@ pub(crate) fn resolve_staging(
         crate::PhaseId::new("validate"),
         "Validating robot.yaml",
         || {
-            resolve(
+            resolve_with_train(
                 &robot,
                 project_root,
                 ResolveOptions {
@@ -140,6 +140,11 @@ pub(crate) fn resolve_staging(
                     drivers: driver_policy.selection(),
                     include_simulators: build.include_simulators(),
                     offline: options.offline,
+                },
+                |train| {
+                    ui.report(crate::PreparationEvent::ProjectResolved {
+                        train: train.to_string(),
+                    });
                 },
             )
         },
@@ -229,13 +234,20 @@ pub(crate) fn refresh_staging_resolved(
     // build host, and the loader's target-aware validation over the staged
     // (cross-built) binaries is the authoritative check for a bundle (#936).
     if check_source {
-        run_source_check(
-            candidate.path(),
-            &resolved.source_manifest,
-            &resolved,
-            &source_participants,
-            options.offline,
+        crate::progress::run_phase(
             ui,
+            crate::PhaseId::new("check"),
+            "Checking source graph",
+            || {
+                run_source_check(
+                    candidate.path(),
+                    &resolved.source_manifest,
+                    &resolved,
+                    &source_participants,
+                    options.offline,
+                    ui,
+                )
+            },
         )?;
     }
 
@@ -284,8 +296,15 @@ pub(crate) fn refresh_staging_resolved(
     // Every install, build, check, and validation above succeeded against the
     // candidate alone - publish it as the live layout now, and only now.
     let candidate_path = candidate.path().to_path_buf();
-    let staged_root = crate::stage::publish_runtime_layout(candidate, &resolved)
-        .context("failed to publish the staged runtime layout")?;
+    let staged_root = crate::progress::run_phase(
+        ui,
+        crate::PhaseId::new("publish"),
+        "Publishing runtime layout",
+        || {
+            crate::stage::publish_runtime_layout(candidate, &resolved)
+                .context("failed to publish the staged runtime layout")
+        },
+    )?;
 
     // The plan above was constructed and validated against the unpublished
     // candidate - `validate_layout_plan` opened the layout at
@@ -404,6 +423,7 @@ pub(crate) fn prepare_layout_run(
     layout_root: &Path,
     options: RunOptions,
     run: RunIdentity,
+    reporter: &dyn crate::Reporter,
 ) -> Result<PreparedRun> {
     // A compiled root declares its whole typed-document contract before any
     // robot or participant metadata is interpreted.
@@ -428,13 +448,23 @@ pub(crate) fn prepare_layout_run(
     let plan_options = phoxal_cli_core::project::layout::PlanOptions {
         drivers: driver_policy.selection(),
     };
-    let plan = crate::load::layout::validate_layout_plan(
-        layout_root,
-        &plan_options,
-        phoxal_cli_core::project::layout::LayoutInspection::Host,
-        run,
-    )
-    .context("failed to construct the launch plan from the staged runtime layout")?;
+    let plan = crate::progress::run_phase(
+        reporter,
+        crate::PhaseId::new("validate"),
+        "Opening staged layout",
+        || {
+            crate::load::layout::validate_layout_plan(
+                layout_root,
+                &plan_options,
+                phoxal_cli_core::project::layout::LayoutInspection::Host,
+                run,
+            )
+            .context("failed to construct the launch plan from the staged runtime layout")
+        },
+    )?;
+    reporter.report(crate::PreparationEvent::ProjectResolved {
+        train: "staged".to_string(),
+    });
     phoxal_cli_core::project::launch_plan::validate_runtime_bounds(&plan)?;
 
     // An extracted bundle / staged layout has no source, so no participant has a
@@ -469,7 +499,12 @@ pub(crate) fn prepare_run(request: PrepareRunRequest) -> Result<PreparedExecutio
             request.reporter.as_ref(),
             request.run,
         )?,
-        RunRootKind::Layout => prepare_layout_run(&execution_root, options, request.run)?,
+        RunRootKind::Layout => prepare_layout_run(
+            &execution_root,
+            options,
+            request.run,
+            request.reporter.as_ref(),
+        )?,
     };
     let router = PreparedRouter {
         binary: crate::stage::staged_router_binary(&prepared.staged_root),
