@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.29.3](https://github.com/phoxal/phoxal-cli/releases/tag/v0.29.3) - 2026-07-31
+
+
+### Fixed
+
+- Make catalog floor follow framework train ([#263](https://github.com/phoxal/phoxal-cli/pull/263))
+
+
 ## [0.29.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.29.2) - 2026-07-31
 
 
